@@ -436,6 +436,15 @@ for tool in curl tar git python3; do
         pkg_install "$tool"
     fi
 done
+
+# setfacl — used by the media-dir setup below to grant aurora user
+# read access without resorting to chmod o+rX (which exposes media
+# to every other system user). Bundled on most distros but not
+# always on minimal images.
+if ! command -v setfacl &>/dev/null; then
+    info "Installing acl (setfacl)..."
+    pkg_install acl 2>/dev/null || warn "Could not install acl package; media-dir setup will fall back to chmod o+rX"
+fi
 # ca-certificates has no single binary to test for; install it
 # unconditionally on first run. apt/dnf/etc. are idempotent when
 # the package is already installed.
@@ -988,14 +997,166 @@ chmod 640 "$CONFIG_DIR/aurora.env"
 chown root:"$AURORA_GROUP" "$CONFIG_DIR/aurora.env"
 ok "Configuration written"
 
-# Optional media directory grant.
-if [ -n "${AURORA_MEDIA_DIR:-}" ] && [ -d "$AURORA_MEDIA_DIR" ]; then
-    info "Granting aurora read access to $AURORA_MEDIA_DIR..."
-    if setfacl -R -m "u:${AURORA_USER}:rX" "$AURORA_MEDIA_DIR" 2>/dev/null || chmod -R o+rX "$AURORA_MEDIA_DIR" 2>/dev/null; then
-        ok "Permissions set on $AURORA_MEDIA_DIR"
-    else
-        warn "Could not set permissions on $AURORA_MEDIA_DIR — fix manually if scans fail."
+# ── Media directory access ────────────────────────────────────────
+# Aurora runs as the unprivileged `aurora` system user. When the
+# operator's media lives under their home dir (e.g.
+# /home/ronnie/medialibrary), the default mode-0700 on /home/ronnie
+# blocks aurora from even traversing INTO that directory, let alone
+# reading files. The library-create API then returns "path does not
+# exist" because EvalSymlinks fails with permission-denied.
+#
+# This block walks the directory chain from the media root up to /,
+# granting aurora a `u:aurora:x` ACL on every ancestor it can't
+# currently traverse, then `u:aurora:rX` (read+traverse, no exec
+# bit on regular files) recursively on the media tree itself. The
+# `-d` (default) ACL ensures new files dropped in later inherit
+# aurora access without re-running the installer.
+#
+# We verify the result with `sudo -u aurora test -r/-x` rather than
+# just trusting the setfacl exit code — that catches edge cases
+# where setfacl "succeeds" but the underlying filesystem ignores
+# the ACL (e.g. some older NFS mounts, certain CIFS configurations).
+
+# Walk from $1 up to /, granting aurora traversal where missing.
+ensure_aurora_traversal() {
+    local current="$1"
+    while [ "$current" != "/" ] && [ -n "$current" ] && [ "$current" != "." ]; do
+        # If aurora already has execute (= traverse) bit, skip.
+        if sudo -u "$AURORA_USER" test -x "$current" 2>/dev/null; then
+            current="$(dirname "$current")"
+            continue
+        fi
+        if command -v setfacl &>/dev/null; then
+            if setfacl -m "u:${AURORA_USER}:x" "$current" 2>/dev/null; then
+                info "  Granted traverse on $current"
+            else
+                warn "  setfacl failed on $current — fallback to chmod o+x (broader access)"
+                # Audit H4 — chmod o+x grants traversal to EVERY
+                # local user on the system. On /home/* this means
+                # every user can `cd` into someone else's home dir
+                # (read-protected files are still safe, but they
+                # can see filenames in the path). Acceptable on a
+                # single-user self-hosted box, but call it out so
+                # operators on shared systems can make an informed
+                # choice.
+                case "$current" in
+                    /home/*)
+                        warn "    ⚠ NOTE: $current is now traversable by all local users."
+                        warn "    On a multi-user system, consider moving media to /srv/media instead."
+                        ;;
+                esac
+                chmod o+x "$current" 2>/dev/null || warn "  chmod o+x also failed on $current"
+            fi
+        else
+            # No ACL support — only option is world-traversable, which
+            # is a privacy loss but unblocks the install.
+            case "$current" in
+                /home/*) warn "  chmod o+x on $current — traversable by all local users (no ACL support detected)." ;;
+            esac
+            chmod o+x "$current" 2>/dev/null || warn "  chmod o+x failed on $current"
+        fi
+        current="$(dirname "$current")"
+    done
+}
+
+setup_media_access() {
+    local media_path="$1"
+    [ -z "$media_path" ] && return
+    if [ ! -d "$media_path" ]; then
+        warn "Media directory '$media_path' does not exist — skipping ACL setup. Create it and re-run install.sh, or use the in-app library form once aurora is running."
+        return
     fi
+
+    info "Granting aurora read access to $media_path..."
+
+    # Step 1: traverse ACLs on all parent directories. Critical for
+    # any path under /home/<user>/ where the home dir is mode 0700.
+    ensure_aurora_traversal "$(dirname "$media_path")"
+
+    # Step 2: read+traverse on the media tree itself. `X` (uppercase)
+    # is the smart variant — adds execute to dirs but NOT to regular
+    # files. Without it, every video file would get the +x bit.
+    if command -v setfacl &>/dev/null; then
+        if ! setfacl -R -m "u:${AURORA_USER}:rX" "$media_path" 2>/dev/null; then
+            warn "  setfacl -R on $media_path failed — falling back to chmod"
+            chmod -R o+rX "$media_path" 2>/dev/null || warn "  chmod -R also failed"
+        fi
+        # Default ACL — new files inherit aurora access automatically.
+        # Without this, every newly-added video would need a fresh
+        # setfacl pass.
+        #
+        # Audit M1 — don't redirect stderr. If setfacl -dR fails on
+        # one or more descendants (e.g. a symlinked subdir that
+        # crosses to a filesystem without ACL support), the
+        # operator should see WHICH paths failed, not just a
+        # generic "default ACL set failed."
+        setfacl -dR -m "u:${AURORA_USER}:rX" "$media_path" \
+            || warn "  default ACL set failed on one or more paths (see setfacl errors above; filesystem may not support default ACLs)"
+    else
+        warn "  setfacl not installed — using chmod o+rX (broader access). Install the 'acl' package for tighter perms."
+        chmod -R o+rX "$media_path" 2>/dev/null || warn "  chmod -R failed"
+    fi
+
+    # Step 3: verify aurora can actually see it. catches NFS / CIFS
+    # ACL-ignoring edge cases that setfacl returns 0 on but don't
+    # actually grant access. Audit H1 — verify the DEEPEST visible
+    # subdirectory, not just the top-level. The Library form's
+    # Go-side EvalSymlinks runs against the full library path the
+    # user types (typically a subdirectory like .../medialibrary/movies),
+    # so a partial setfacl -R failure mid-walk would leave the top-
+    # level test passing while EvalSymlinks still permission-denies
+    # the descendant.
+    local deepest="$media_path"
+    # Find the first subdirectory under $media_path (depth 1) to
+    # exercise traversal + read on a descendant. If $media_path has
+    # no subdirs (empty library), the top-level test alone is fine.
+    local sub
+    sub="$(find "$media_path" -mindepth 1 -maxdepth 2 -type d 2>/dev/null | head -1 || true)"
+    [ -n "$sub" ] && deepest="$sub"
+    if sudo -u "$AURORA_USER" test -r "$media_path" \
+        && sudo -u "$AURORA_USER" test -x "$media_path" \
+        && sudo -u "$AURORA_USER" test -r "$deepest" \
+        && sudo -u "$AURORA_USER" test -x "$deepest"; then
+        if [ "$deepest" != "$media_path" ]; then
+            ok "Aurora can read $media_path (verified down to $deepest)"
+        else
+            ok "Aurora can read $media_path"
+        fi
+    else
+        warn "═══════════════════════════════════════════════════════════════════"
+        warn " Aurora STILL cannot read $media_path after ACL setup."
+        warn " The Library form in the admin UI will fail with 'path does not"
+        warn " exist'. Possible causes:"
+        warn "  • Filesystem doesn't support POSIX ACLs (NFS noacl, ntfs-3g)"
+        warn "  • SELinux is enforcing and blocking aurora's access"
+        warn "  • A parent directory's mode is more restrictive than 0700"
+        warn ""
+        warn " Workarounds:"
+        warn "  • Move media to /srv/media (aurora-friendly, no ACL gymnastics)"
+        warn "  • chmod -R o+rX $media_path (less secure but always works)"
+        warn "  • Run aurora as a different user (edit /etc/systemd/system/aurora.service)"
+        warn "═══════════════════════════════════════════════════════════════════"
+    fi
+}
+
+# Resolve media directory: env var override > interactive prompt > skip.
+MEDIA_DIR="${AURORA_MEDIA_DIR:-}"
+if [ -z "$MEDIA_DIR" ] && [ -t 0 ]; then
+    echo ""
+    info "Optional: configure read access for a media directory now."
+    # Audit H2 — $SUDO_USER is set unconditionally by sudo and is the
+    # reliable way to get the invoking user. `logname` is unreliable
+    # under sudo on systems where /dev/tty isn't owned by the
+    # invoker; it can return "no login name" → fallback printed
+    # `/home/you/media` which was misleading.
+    EXAMPLE_USER="${SUDO_USER:-$(logname 2>/dev/null || echo you)}"
+    echo "  Examples: /srv/media, /mnt/storage/media, /home/${EXAMPLE_USER}/media"
+    echo "  Leave empty to skip (you can configure libraries from the admin UI later)."
+    printf '\033[1;36m[?]\033[0m Media directory path (or empty to skip): '
+    read -r MEDIA_DIR || true
+fi
+if [ -n "$MEDIA_DIR" ]; then
+    setup_media_access "$MEDIA_DIR"
 fi
 
 # Ownership of the installed tree.
