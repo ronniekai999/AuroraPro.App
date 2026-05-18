@@ -2703,7 +2703,23 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
       const body = ct.includes('application/json')
         ? await res.json().catch(() => ({}))
         : { error: await res.text().catch(() => '') }
-      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+      if (!res.ok) {
+        // Extract the actual error message. Aurora's WriteError emits
+        // a NESTED shape { error: { code, message } }; legacy paths
+        // use a flat string { error: "..." }. Without this extraction,
+        // `new Error(body.error)` on the nested shape stringifies the
+        // object to literally "[object Object]" — masking the real
+        // diagnostic (e.g. "permission denied to create extension").
+        let errMsg = `HTTP ${res.status}`
+        const errField = (body as Record<string, unknown>).error
+        if (typeof errField === 'string') {
+          errMsg = errField
+        } else if (errField && typeof errField === 'object' && 'message' in errField) {
+          const nested = (errField as Record<string, unknown>).message
+          if (typeof nested === 'string') errMsg = nested
+        }
+        throw new Error(errMsg)
+      }
       // Audit MED-4 — if the user navigated away mid-restore, still
       // alert() so they know the outcome. alert() is the only
       // surface that survives an unmounted React component.

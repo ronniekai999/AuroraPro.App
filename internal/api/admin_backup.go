@@ -353,13 +353,74 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 1 — wipe the existing schema. Without this, the restore
 	// would fail on "relation already exists" for every table.
-	// `DROP SCHEMA public CASCADE` removes all tables, indexes, types,
-	// functions, sequences. `CREATE SCHEMA public` reinstates an empty
-	// namespace for the dump to populate.
+	//
+	// Audit (production restore 2026-05-18) — the previous wipe used
+	// `DROP SCHEMA public CASCADE` which ALSO drops every extension
+	// installed in `public` (pg_trgm, vector). The dump then tries to
+	// recreate those extensions, but Aurora connects as the unprivileged
+	// `aurora` role which cannot `CREATE EXTENSION vector` (non-trusted).
+	// The whole restore rolled back with "permission denied to create
+	// extension vector. Must be superuser."
+	//
+	// The new wipe loops through objects in the public schema and drops
+	// only those NOT owned by an extension. Extensions stay intact,
+	// the dump's `CREATE EXTENSION IF NOT EXISTS` becomes a no-op
+	// (which doesn't require superuser when the extension is already
+	// present), and the restore proceeds.
+	wipeSQL := `
+DO $do$
+DECLARE r record;
+BEGIN
+    -- Tables: CASCADE drops dependent indexes, constraints, and
+    -- table-owned sequences. We filter out extension-owned tables
+    -- (none today but defense-in-depth for future extensions).
+    FOR r IN
+        SELECT c.relname AS tablename
+        FROM pg_class c
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
+    END LOOP;
+    -- Views.
+    FOR r IN
+        SELECT c.relname AS viewname
+        FROM pg_class c
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public' AND c.relkind IN ('v', 'm')
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP VIEW IF EXISTS public.%I CASCADE', r.viewname);
+    END LOOP;
+    -- Stand-alone sequences (table-owned ones got dropped by table CASCADE).
+    FOR r IN
+        SELECT c.relname AS seqname
+        FROM pg_class c
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'public' AND c.relkind = 'S'
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP SEQUENCE IF EXISTS public.%I CASCADE', r.seqname);
+    END LOOP;
+    -- User-defined types (enums, composites). Excludes extension-owned
+    -- types like 'vector' itself.
+    FOR r IN
+        SELECT t.typname
+        FROM pg_type t
+        JOIN pg_namespace n ON t.typnamespace = n.oid
+        WHERE n.nspname = 'public' AND t.typtype IN ('e', 'c', 'd')
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP TYPE IF EXISTS public.%I CASCADE', r.typname);
+    END LOOP;
+END
+$do$;
+`
 	wipeCmd := exec.CommandContext(ctx, "psql",
 		"--quiet",
 		"--set", "ON_ERROR_STOP=on",
-		"-c", "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;",
+		"-c", wipeSQL,
 		h.databaseURL,
 	)
 	var wipeStderr strings.Builder
