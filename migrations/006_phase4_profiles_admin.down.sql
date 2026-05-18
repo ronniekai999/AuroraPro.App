@@ -1,0 +1,10 @@
+DROP TRIGGER IF EXISTS trg_watchlists_updated_at ON watchlists;
+DROP TRIGGER IF EXISTS trg_user_profiles_updated_at ON user_profiles;
+DROP INDEX IF EXISTS idx_watch_progress_profile;
+ALTER TABLE watch_progress DROP COLUMN IF EXISTS profile_id;
+DELETE FROM server_settings WHERE key IN ('completion_threshold', 'max_profiles_per_user', 'now_playing_enabled');
+DROP TABLE IF EXISTS watchlist_items;
+DROP TABLE IF EXISTS watchlists;
+DROP TABLE IF EXISTS server_settings;
+DROP TABLE IF EXISTS activity_log;
+DROP TABLE IF EXISTS user_profiles;

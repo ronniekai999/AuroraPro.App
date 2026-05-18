@@ -1,0 +1,1180 @@
+package db
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/aurora-media/aurora/internal/models"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func marshalTracks(audio []models.AudioTrack, subtitle []models.SubtitleTrack) ([]byte, []byte) {
+	aj, _ := json.Marshal(audio)
+	sj, _ := json.Marshal(subtitle)
+	if aj == nil {
+		aj = []byte("[]")
+	}
+	if sj == nil {
+		sj = []byte("[]")
+	}
+	return aj, sj
+}
+
+type Queries struct {
+	pool *pgxpool.Pool
+}
+
+func NewQueries(pool *pgxpool.Pool) *Queries {
+	return &Queries{pool: pool}
+}
+
+// hashToken produces a hex-encoded SHA-256 of a raw token for safe storage.
+func hashToken(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
+// ============================================================
+// Users
+// ============================================================
+
+func (q *Queries) CreateUser(ctx context.Context, username, email, passwordHash string, role models.UserRole) (*models.User, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`INSERT INTO users (username, email, password_hash, role)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at`,
+		username, email, passwordHash, role,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("create user: %w", err)
+	}
+	return user, nil
+}
+
+func (q *Queries) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	user := &models.User{}
+	// Case-insensitive lookup so "admin"/"Admin"/"ADMIN" all resolve to the
+	// same row. Paired with migration 017's LOWER(username) unique index
+	// which prevents registering homoglyphs of an existing username.
+	//
+	// Loads oauth_provider/oauth_subject (migration 020). Both are nullable;
+	// scanned as *string. Used by the login handler to detect "OAuth-only
+	// users" (empty password_hash + non-nil oauth_provider) and reject
+	// password attempts against them.
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
+			created_at, updated_at, token_version, oauth_provider, oauth_subject
+		 FROM users WHERE LOWER(username) = LOWER($1)`,
+		username,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by username: %w", err)
+	}
+	return user, nil
+}
+
+func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
+			created_at, updated_at, token_version, oauth_provider, oauth_subject
+		 FROM users WHERE email = $1`,
+		email,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by email: %w", err)
+	}
+	return user, nil
+}
+
+func (q *Queries) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
+			created_at, updated_at, token_version, oauth_provider, oauth_subject
+		 FROM users WHERE id = $1`,
+		id,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by id: %w", err)
+	}
+	return user, nil
+}
+
+// GetUserByOAuth resolves a (provider, subject) pair to a user. Returns
+// nil if no user has linked that OAuth identity. Used by the OAuth
+// callback handler for return visits — once a user has linked their
+// Google account, every subsequent sign-in hits this fast-path instead
+// of the linking-by-email flow.
+func (q *Queries) GetUserByOAuth(ctx context.Context, provider, subject string) (*models.User, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
+			created_at, updated_at, token_version, oauth_provider, oauth_subject
+		 FROM users
+		 WHERE oauth_provider = $1 AND oauth_subject = $2`,
+		provider, subject,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by oauth: %w", err)
+	}
+	return user, nil
+}
+
+// LinkOAuthToUser writes (provider, subject) onto an existing user row,
+// either because they signed in via OAuth using an email that matches
+// their local account (auto-link) or because they explicitly linked via
+// the settings UI. Returns error if the (provider, subject) pair would
+// collide with another user — protected by idx_users_oauth_identity.
+func (q *Queries) LinkOAuthToUser(ctx context.Context, userID int64, provider, subject string) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE users SET oauth_provider = $1, oauth_subject = $2, updated_at = NOW()
+		 WHERE id = $3`,
+		provider, subject, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("link oauth to user: %w", err)
+	}
+	return nil
+}
+
+// CreateOAuthUser creates a new user with an OAuth identity attached and
+// NO local password (password_hash = empty string). The login flow gates
+// against empty password_hash so these users can only authenticate via
+// OAuth until they explicitly set a password via the change-password
+// flow. Username/email come from the OAuth provider's profile claims.
+//
+// Role is always "user" for OAuth-created accounts — first-admin
+// bootstrapping still requires the password-based register flow, so the
+// operator chooses who admin is rather than the first random Google user
+// to discover the OAuth callback.
+func (q *Queries) CreateOAuthUser(ctx context.Context, username, email, avatarURL, provider, subject string) (*models.User, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`INSERT INTO users (username, email, password_hash, role, avatar_url, oauth_provider, oauth_subject)
+		 VALUES ($1, $2, '', 'user', $3, $4, $5)
+		 RETURNING id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, token_version,
+			oauth_provider, oauth_subject`,
+		username, email, avatarURL, provider, subject,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AvatarURL,
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)
+	if err != nil {
+		return nil, fmt.Errorf("create oauth user: %w", err)
+	}
+	return user, nil
+}
+
+// GetUsernamesByIDs returns a map of id → username for the given user IDs in
+// a single round-trip. Replaces a per-id loop of GetUserByID in admin views;
+// for 50 unique users it drops 50 sequential queries to 1.
+func (q *Queries) GetUsernamesByIDs(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, username FROM users WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get usernames by ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at
+		 FROM users ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("get all users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*models.User
+	for rows.Next() {
+		u := &models.User{}
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate users: %w", err)
+	}
+	return users, nil
+}
+
+// DeleteUser removes a user row. All foreign-key references to users(id) in
+// the schema use an explicit ON DELETE policy, so this single DELETE
+// cascades correctly and never leaves orphan rows.
+//
+// CASCADE (data deleted with the user):
+//   refresh_tokens, watch_progress, requests, profiles, libraries.owner_id,
+//   user_preferences, invite_codes.created_by, watch_party hosts,
+//   party_participants
+//
+// SET NULL (data preserved, attribution cleared):
+//   invite_codes.used_by, server_settings.updated_by, activity_log.user_id
+//
+// Audited 2026-05. If a new table is added that references users(id), it
+// MUST declare an explicit ON DELETE policy and be added to this comment.
+func (q *Queries) DeleteUser(ctx context.Context, id int64) (bool, error) {
+	result, err := q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// GetUserTokenVersion returns the current token_version for a user. Used by
+// the auth middleware to validate access tokens against post-password-change
+// invalidations. Cached in-memory; this is the slow-path on cache miss.
+func (q *Queries) GetUserTokenVersion(ctx context.Context, id int64) (int, error) {
+	var v int
+	err := q.pool.QueryRow(ctx,
+		`SELECT token_version FROM users WHERE id = $1`, id,
+	).Scan(&v)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return 0, nil // user deleted — version 0 ensures tokens fail downstream comparison
+		}
+		return 0, fmt.Errorf("get user token_version: %w", err)
+	}
+	return v, nil
+}
+
+// BumpUserTokenVersion atomically increments token_version, immediately
+// invalidating every access token previously issued for this user. Called
+// from ChangePassword (and any future "log out everywhere" admin action).
+// Returns the new version so the caller can also update its in-memory cache
+// without an extra read.
+func (q *Queries) BumpUserTokenVersion(ctx context.Context, id int64) (int, error) {
+	var v int
+	err := q.pool.QueryRow(ctx,
+		`UPDATE users SET token_version = token_version + 1 WHERE id = $1
+		 RETURNING token_version`, id,
+	).Scan(&v)
+	if err != nil {
+		return 0, fmt.Errorf("bump user token_version: %w", err)
+	}
+	return v, nil
+}
+
+func (q *Queries) CountUsers(ctx context.Context) (int64, error) {
+	var count int64
+	err := q.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&count)
+	return count, err
+}
+
+// CreateFirstAdmin atomically inserts a new admin user ONLY if the users table
+// is empty. This prevents the TOCTOU race where two concurrent registrations
+// both see CountUsers==0 and both become admin. Uses a CTE with a subquery
+// guard so the INSERT is a no-op when users already exist.
+// Returns (user, true, nil) on success, (nil, false, nil) when users already
+// exist (the caller should fall back to the invite-code path), or
+// (nil, false, err) on a real DB error.
+func (q *Queries) CreateFirstAdmin(ctx context.Context, username, email, passwordHash string) (*models.User, bool, error) {
+	user := &models.User{}
+	err := q.pool.QueryRow(ctx,
+		`INSERT INTO users (username, email, password_hash, role)
+		 SELECT $1, $2, $3, 'admin'
+		 WHERE NOT EXISTS (SELECT 1 FROM users)
+		 RETURNING id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at`,
+		username, email, passwordHash,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			// Users already exist — someone else registered first
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("create first admin: %w", err)
+	}
+	return user, true, nil
+}
+
+// ============================================================
+// Refresh Tokens
+// ============================================================
+
+func (q *Queries) CreateRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
+	hashed := hashToken(rt.Token)
+	return q.pool.QueryRow(ctx,
+		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info)
+		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
+		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo,
+	).Scan(&rt.ID, &rt.CreatedAt)
+}
+
+func (q *Queries) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
+	hashed := hashToken(token)
+	rt := &models.RefreshToken{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')
+		 FROM refresh_tokens WHERE token = $1 AND NOT revoked AND expires_at > NOW()`,
+		hashed,
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get refresh token: %w", err)
+	}
+	return rt, nil
+}
+
+func (q *Queries) RevokeRefreshToken(ctx context.Context, token string) error {
+	hashed := hashToken(token)
+	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1`, hashed)
+	return err
+}
+
+// RevokeAndGetRefreshToken atomically revokes a refresh token and returns its data.
+// Prevents TOCTOU race where two concurrent refresh requests both succeed.
+func (q *Queries) RevokeAndGetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
+	hashed := hashToken(token)
+	rt := &models.RefreshToken{}
+	err := q.pool.QueryRow(ctx,
+		`UPDATE refresh_tokens SET revoked = TRUE
+		 WHERE token = $1 AND NOT revoked AND expires_at > NOW()
+		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')`,
+		hashed,
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("revoke and get refresh token: %w", err)
+	}
+	return rt, nil
+}
+
+func (q *Queries) RevokeAllUserTokens(ctx context.Context, userID int64) error {
+	_, err := q.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, userID)
+	return err
+}
+
+// PurgeExpiredTokens deletes tokens that are either revoked or expired.
+// Should be called periodically (e.g. every hour) to keep the table bounded.
+func (q *Queries) PurgeExpiredTokens(ctx context.Context) (int64, error) {
+	result, err := q.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE revoked = TRUE OR expires_at < NOW()`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+// ============================================================
+// Invite Codes
+// ============================================================
+
+func (q *Queries) CreateInviteCode(ctx context.Context, ic *models.InviteCode) error {
+	return q.pool.QueryRow(ctx,
+		`INSERT INTO invite_codes (code, created_by, expires_at)
+		 VALUES ($1, $2, $3) RETURNING id, created_at`,
+		ic.Code, ic.CreatedBy, ic.ExpiresAt,
+	).Scan(&ic.ID, &ic.CreatedAt)
+}
+
+// ClaimInviteCode atomically claims an invite code by setting used_at to NOW(),
+// preventing concurrent registrations from reusing it.
+// The claim uses used_at (not used_by) as the lock because used_by has a FK
+// constraint to users(id) — setting it to a sentinel like -1 violates the FK
+// and silently fails the UPDATE.
+// Returns the invite code's DB ID for later finalization or unclaiming.
+func (q *Queries) ClaimInviteCode(ctx context.Context, code string) (int64, error) {
+	var id int64
+	err := q.pool.QueryRow(ctx,
+		`UPDATE invite_codes SET used_at = NOW()
+		 WHERE code = $1 AND used_by IS NULL AND used_at IS NULL AND expires_at > NOW()
+		 RETURNING id`,
+		code,
+	).Scan(&id)
+	if err != nil {
+		// Log diagnostic info to help debug invite code failures.
+		// Check if the code exists at all, and if so, why the claim failed.
+		var diagID int64
+		var usedBy *int64
+		var usedAt *time.Time
+		var expiresAt time.Time
+		diagErr := q.pool.QueryRow(ctx,
+			`SELECT id, used_by, used_at, expires_at FROM invite_codes WHERE code = $1`,
+			code,
+		).Scan(&diagID, &usedBy, &usedAt, &expiresAt)
+		if diagErr != nil {
+			slog.Warn("invite code claim failed: code not found in database",
+				"code_length", len(code),
+				"code_prefix", safePrefix(code, 4))
+		} else if usedBy != nil {
+			slog.Warn("invite code claim failed: already used",
+				"invite_id", diagID,
+				"used_by", *usedBy)
+		} else if usedAt != nil {
+			slog.Warn("invite code claim failed: already claimed (pending registration)",
+				"invite_id", diagID)
+		} else if !expiresAt.After(time.Now()) {
+			slog.Warn("invite code claim failed: expired",
+				"invite_id", diagID,
+				"expires_at", expiresAt)
+		} else {
+			slog.Warn("invite code claim failed: unknown reason (possible race)",
+				"invite_id", diagID)
+		}
+		return 0, fmt.Errorf("invite code already used or expired")
+	}
+	return id, nil
+}
+
+// safePrefix returns the first n characters of s for logging, without
+// revealing the full code. Returns "(empty)" for empty strings.
+func safePrefix(s string, n int) string {
+	if s == "" {
+		return "(empty)"
+	}
+	// Never reveal the full code — always truncate to at most n chars,
+	// and ensure at least 1 char is hidden.
+	end := n
+	if end >= len(s) {
+		end = len(s) - 1
+	}
+	if end < 1 {
+		end = 1
+	}
+	return s[:end] + "..."
+}
+
+// FinalizeInviteCode sets the real user ID on a previously claimed invite code.
+func (q *Queries) FinalizeInviteCode(ctx context.Context, inviteID, userID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE invite_codes SET used_by = $1 WHERE id = $2`,
+		userID, inviteID,
+	)
+	return err
+}
+
+// UnclaimInviteCode releases a previously claimed invite code so it can be used again.
+func (q *Queries) UnclaimInviteCode(ctx context.Context, inviteID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE id = $1`,
+		inviteID,
+	)
+	return err
+}
+
+// ============================================================
+// Libraries
+// ============================================================
+
+func (q *Queries) CreateLibrary(ctx context.Context, lib *models.Library) error {
+	return q.pool.QueryRow(ctx,
+		`INSERT INTO libraries (name, type, paths, scan_interval_min, owner_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at, updated_at`,
+		lib.Name, lib.Type, lib.Paths, lib.ScanInterval, lib.OwnerID,
+	).Scan(&lib.ID, &lib.CreatedAt, &lib.UpdatedAt)
+}
+
+func (q *Queries) GetLibraries(ctx context.Context) ([]*models.Library, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, name, type, paths, scan_interval_min, owner_id, created_at, updated_at
+		 FROM libraries ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("get libraries: %w", err)
+	}
+	defer rows.Close()
+
+	var libs []*models.Library
+	for rows.Next() {
+		l := &models.Library{}
+		if err := rows.Scan(&l.ID, &l.Name, &l.Type, &l.Paths, &l.ScanInterval, &l.OwnerID, &l.CreatedAt, &l.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan library: %w", err)
+		}
+		libs = append(libs, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate libraries: %w", err)
+	}
+	return libs, nil
+}
+
+func (q *Queries) GetLibrary(ctx context.Context, id int64) (*models.Library, error) {
+	l := &models.Library{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, name, type, paths, scan_interval_min, owner_id, created_at, updated_at
+		 FROM libraries WHERE id = $1`, id,
+	).Scan(&l.ID, &l.Name, &l.Type, &l.Paths, &l.ScanInterval, &l.OwnerID, &l.CreatedAt, &l.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get library: %w", err)
+	}
+	return l, nil
+}
+
+func (q *Queries) UpdateLibrary(ctx context.Context, id int64, name string) (*models.Library, error) {
+	l := &models.Library{}
+	err := q.pool.QueryRow(ctx,
+		`UPDATE libraries SET name = $2, updated_at = NOW()
+		 WHERE id = $1
+		 RETURNING id, name, type, paths, scan_interval_min, owner_id, created_at, updated_at`,
+		id, name,
+	).Scan(&l.ID, &l.Name, &l.Type, &l.Paths, &l.ScanInterval, &l.OwnerID, &l.CreatedAt, &l.UpdatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("update library: %w", err)
+	}
+	return l, nil
+}
+
+func (q *Queries) DeleteLibrary(ctx context.Context, id int64) (bool, error) {
+	result, err := q.pool.Exec(ctx, `DELETE FROM libraries WHERE id = $1`, id)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// ============================================================
+// Media Items
+// ============================================================
+
+func (q *Queries) UpsertMediaItem(ctx context.Context, item *models.MediaItem) error {
+	// Uses the unique index uq_media_items_lib_type_title_year which handles NULL years via COALESCE
+	return q.pool.QueryRow(ctx,
+		`INSERT INTO media_items (library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (library_id, type, title, COALESCE(year, 0)) DO UPDATE SET
+		   sort_title = EXCLUDED.sort_title,
+		   updated_at = NOW()
+		 RETURNING id, added_at, updated_at`,
+		item.LibraryID, item.Type, item.Title, item.SortTitle, item.Year,
+		item.Overview, item.Rating, item.RuntimeMin, item.ContentRating,
+	).Scan(&item.ID, &item.AddedAt, &item.UpdatedAt)
+}
+
+func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, page models.PaginationParams) ([]*models.MediaItem, int64, error) {
+	// Build dynamic query
+	where := []string{"1=1"}
+	args := []interface{}{}
+	argIdx := 1
+
+	if filter.Type != "" {
+		where = append(where, fmt.Sprintf("m.type = $%d", argIdx))
+		args = append(args, filter.Type)
+		argIdx++
+	}
+	if filter.Genre != "" {
+		where = append(where, fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM media_genres mg JOIN genres g ON g.id = mg.genre_id
+			 WHERE mg.media_item_id = m.id AND g.name ILIKE $%d)`, argIdx))
+		args = append(args, filter.Genre)
+		argIdx++
+	}
+	if filter.Year > 0 {
+		where = append(where, fmt.Sprintf("m.year = $%d", argIdx))
+		args = append(args, filter.Year)
+		argIdx++
+	}
+	if filter.Query != "" {
+		where = append(where, fmt.Sprintf("m.title ILIKE '%%%%' || $%d || '%%%%'", argIdx))
+		args = append(args, filter.Query)
+		argIdx++
+	}
+	if len(filter.AllowedRatings) > 0 {
+		where = append(where, fmt.Sprintf("m.content_rating = ANY($%d)", argIdx))
+		args = append(args, filter.AllowedRatings)
+		argIdx++
+	}
+
+	whereClause := strings.Join(where, " AND ")
+
+	// Cross-library deduplication: items in multiple libraries (e.g. "Movies"
+	// and "4K Movies") share a tmdb_id. We use DISTINCT ON inside a CTE to
+	// pick the best item per unique tmdb_id once, then both COUNT and the
+	// paginated SELECT read from the materialized CTE result.
+	// Items without a tmdb_id (or tmdb_id=0) use -id as a unique key so
+	// they are never merged with each other.
+	//
+	// Among duplicates, we pick the item with the richest metadata via a
+	// scoring expression that mirrors Go's metadataRichness(), including
+	// a Genres check via EXISTS subquery.
+	dedupCTE := fmt.Sprintf(
+		`WITH deduped AS (
+		   SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
+		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		          COALESCE(m.poster_path,'') AS poster_path,
+		          COALESCE(m.backdrop_path,'') AS backdrop_path,
+		          m.added_at, m.updated_at
+		   FROM media_items m
+		   WHERE %s
+		   ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
+		            (CASE WHEN m.overview IS NOT NULL AND m.overview <> '' THEN 3 ELSE 0 END
+		           + CASE WHEN m.poster_path IS NOT NULL AND m.poster_path <> '' THEN 3 ELSE 0 END
+		           + CASE WHEN m.backdrop_path IS NOT NULL AND m.backdrop_path <> '' THEN 2 ELSE 0 END
+		           + CASE WHEN m.rating > 0 THEN 2 ELSE 0 END
+		           + CASE WHEN m.runtime_minutes > 0 THEN 1 ELSE 0 END
+		           + CASE WHEN m.content_rating IS NOT NULL AND m.content_rating <> '' THEN 1 ELSE 0 END
+		           + CASE WHEN m.year > 0 THEN 1 ELSE 0 END
+		           + CASE WHEN EXISTS (SELECT 1 FROM media_genres WHERE media_item_id = m.id) THEN 1 ELSE 0 END) DESC,
+		            m.id ASC
+		 )`,
+		whereClause,
+	)
+
+	// Count total unique items (after dedup)
+	var total int64
+	countQuery := dedupCTE + ` SELECT COUNT(*) FROM deduped`
+	if err := q.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count media items: %w", err)
+	}
+
+	// Determine sort
+	orderBy := "d.added_at DESC"
+	switch filter.SortBy {
+	case "title":
+		orderBy = "d.sort_title ASC"
+	case "rating":
+		orderBy = "d.rating DESC NULLS LAST"
+	case "year":
+		orderBy = "d.year DESC NULLS LAST"
+	}
+
+	// Paginate
+	if page.PerPage <= 0 {
+		page.PerPage = 20
+	}
+	if page.Page <= 0 {
+		page.Page = 1
+	}
+	offset := (page.Page - 1) * page.PerPage
+
+	dataQuery := dedupCTE + fmt.Sprintf(
+		` SELECT d.id, d.library_id, d.type, d.title, d.sort_title, d.year,
+		        d.overview, d.rating, d.runtime_minutes, d.content_rating,
+		        d.poster_path, d.backdrop_path, d.added_at, d.updated_at
+		 FROM deduped d
+		 ORDER BY %s LIMIT $%d OFFSET $%d`,
+		orderBy, argIdx, argIdx+1,
+	)
+	args = append(args, page.PerPage, offset)
+
+	rows, err := q.pool.Query(ctx, dataQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query media items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+			&item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan media item: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate media items: %w", err)
+	}
+
+	return items, total, nil
+}
+
+// FindMediaItemByTitle finds an existing media item by (library_id, type, title)
+// regardless of year. Used by the scanner under the per-show lock to resolve the
+// canonical item even after enrichment has changed its year (which breaks the
+// UpsertMediaItem ON CONFLICT path that includes COALESCE(year, 0)).
+// Returns nil, nil if no matching item exists.
+func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, mediaType, title string) (*models.MediaItem, error) {
+	item := &models.MediaItem{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		 FROM media_items WHERE library_id = $1 AND type = $2 AND title = $3
+		 ORDER BY id ASC LIMIT 1`,
+		libraryID, mediaType, title,
+	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+		&item.PosterPath, &item.BackdropPath,
+		&item.AddedAt, &item.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find media item by title: %w", err)
+	}
+	return item, nil
+}
+
+func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem, error) {
+	item := &models.MediaItem{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		 FROM media_items WHERE id = $1`, id,
+	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+		&item.PosterPath, &item.BackdropPath,
+		&item.AddedAt, &item.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get media item: %w", err)
+	}
+	return item, nil
+}
+
+func (q *Queries) SearchMedia(ctx context.Context, query string, limit int) ([]*models.MediaItem, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		 FROM media_items
+		 WHERE title % $1 OR title ILIKE '%' || $1 || '%'
+		    OR overview % $1 OR overview ILIKE '%' || $1 || '%'
+		 ORDER BY similarity(title, $1) DESC
+		 LIMIT $2`,
+		query, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search media: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+			&item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate search results: %w", err)
+	}
+	return items, nil
+}
+
+// ============================================================
+// Match Status (flag for review)
+// ============================================================
+
+func (q *Queries) SetMatchStatus(ctx context.Context, itemID int64, status string) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE media_items SET match_status = $2, updated_at = NOW() WHERE id = $1`,
+		itemID, status)
+	return err
+}
+
+func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaItem, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
+		        m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		        COALESCE(m.poster_path,''), COALESCE(m.backdrop_path,''),
+		        m.added_at, m.updated_at,
+		        COALESCE(
+		            (SELECT mf.path FROM media_files mf WHERE mf.media_item_id = m.id ORDER BY mf.id LIMIT 1),
+		            (SELECT ef.path FROM episode_files ef
+		             JOIN tv_episodes ep ON ep.id = ef.episode_id
+		             WHERE ep.media_item_id = m.id
+		             ORDER BY ep.season_id, ep.episode_number, ef.id LIMIT 1),
+		            ''
+		        ) AS file_path
+		 FROM media_items m
+		 WHERE m.match_status = 'needs_review'
+		 ORDER BY m.added_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("get items needing review: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+			&item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+			&item.FilePath,
+		); err != nil {
+			return nil, fmt.Errorf("scan review item: %w", err)
+		}
+		item.MatchStatus = "needs_review"
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate review items: %w", err)
+	}
+	return items, nil
+}
+
+// ============================================================
+// Media Files
+// ============================================================
+
+func (q *Queries) UpsertMediaFile(ctx context.Context, f *models.MediaFile) error {
+	aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
+	return q.pool.QueryRow(ctx,
+		`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		 ON CONFLICT (path) DO UPDATE SET
+		   size_bytes = EXCLUDED.size_bytes, container = EXCLUDED.container,
+		   video_codec = EXCLUDED.video_codec, audio_codec = EXCLUDED.audio_codec,
+		   resolution = EXCLUDED.resolution, bitrate = EXCLUDED.bitrate,
+		   duration_ms = EXCLUDED.duration_ms, file_hash = EXCLUDED.file_hash,
+		   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
+		   version_tag = EXCLUDED.version_tag,
+		   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
+		   scanned_at = NOW()
+		 RETURNING id, scanned_at`,
+		f.MediaItemID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
+		f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
+		f.VideoProfile, f.VideoPixFmt,
+	).Scan(&f.ID, &f.ScannedAt)
+}
+
+func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.MediaFile, error) {
+	f := &models.MediaFile{}
+	var audioJSON, subtitleJSON []byte
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt
+		 FROM media_files WHERE path = $1`, path,
+	).Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
+		&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
+		&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get media file: %w", err)
+	}
+	if audioJSON != nil {
+		json.Unmarshal(audioJSON, &f.AudioTracks)
+	}
+	if subtitleJSON != nil {
+		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
+	}
+	return f, nil
+}
+
+func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*models.MediaFile, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt
+		 FROM media_files WHERE media_item_id = $1
+		 ORDER BY CASE version_tag WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4 END, id`, mediaItemID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get media files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []*models.MediaFile
+	for rows.Next() {
+		f := &models.MediaFile{}
+		var audioJSON, subtitleJSON []byte
+		if err := rows.Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
+			&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
+			&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt,
+		); err != nil {
+			return nil, fmt.Errorf("scan media file: %w", err)
+		}
+		if audioJSON != nil {
+			json.Unmarshal(audioJSON, &f.AudioTracks)
+		}
+		if subtitleJSON != nil {
+			json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
+		}
+		files = append(files, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate media files: %w", err)
+	}
+	return files, nil
+}
+
+// GetAnyFilePath returns a representative file path for a media item,
+// checking media_files (movies) then episode_files (TV shows).
+func (q *Queries) GetAnyFilePath(ctx context.Context, mediaItemID int64) string {
+	var path string
+	err := q.pool.QueryRow(ctx,
+		`SELECT COALESCE(
+			(SELECT mf.path FROM media_files mf WHERE mf.media_item_id = $1 ORDER BY mf.id LIMIT 1),
+			(SELECT ef.path FROM episode_files ef
+			 JOIN tv_episodes ep ON ep.id = ef.episode_id
+			 JOIN tv_seasons s ON s.id = ep.season_id
+			 WHERE s.media_item_id = $1
+			 ORDER BY s.season_number, ep.episode_number, ef.id LIMIT 1),
+			''
+		)`, mediaItemID).Scan(&path)
+	if err != nil {
+		return ""
+	}
+	return path
+}
+
+func (q *Queries) GetRecentMedia(ctx context.Context, limit int) ([]*models.MediaItem, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	// Cross-library deduplication: same DISTINCT ON pattern as GetMediaItems.
+	// Among duplicates sharing a tmdb_id, pick the item with the richest
+	// metadata, then order the deduped set by added_at DESC.
+	rows, err := q.pool.Query(ctx,
+		`WITH deduped AS (
+		   SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		          m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
+		          m.overview, m.rating, m.runtime_minutes, m.content_rating,
+		          COALESCE(m.poster_path,'') AS poster_path,
+		          COALESCE(m.backdrop_path,'') AS backdrop_path,
+		          m.added_at, m.updated_at
+		   FROM media_items m
+		   ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id),
+		            (CASE WHEN m.overview IS NOT NULL AND m.overview <> '' THEN 3 ELSE 0 END
+		           + CASE WHEN m.poster_path IS NOT NULL AND m.poster_path <> '' THEN 3 ELSE 0 END
+		           + CASE WHEN m.backdrop_path IS NOT NULL AND m.backdrop_path <> '' THEN 2 ELSE 0 END
+		           + CASE WHEN m.rating > 0 THEN 2 ELSE 0 END
+		           + CASE WHEN m.runtime_minutes > 0 THEN 1 ELSE 0 END
+		           + CASE WHEN m.content_rating IS NOT NULL AND m.content_rating <> '' THEN 1 ELSE 0 END
+		           + CASE WHEN m.year > 0 THEN 1 ELSE 0 END
+		           + CASE WHEN EXISTS (SELECT 1 FROM media_genres WHERE media_item_id = m.id) THEN 1 ELSE 0 END) DESC,
+		            m.id ASC
+		 )
+		 SELECT id, library_id, type, title, sort_title, year,
+		        overview, rating, runtime_minutes, content_rating,
+		        poster_path, backdrop_path, added_at, updated_at
+		 FROM deduped
+		 ORDER BY added_at DESC LIMIT $1`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get recent media: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+			&item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan recent media: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recent media: %w", err)
+	}
+	return items, nil
+}
+
+// ============================================================
+// Batch Operations (for scanner performance)
+// ============================================================
+
+func (q *Queries) BatchInsertMediaFiles(ctx context.Context, files []*models.MediaFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, f := range files {
+		aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
+		batch.Queue(
+			`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			 ON CONFLICT (path) DO UPDATE SET
+			   size_bytes = EXCLUDED.size_bytes, file_hash = EXCLUDED.file_hash,
+			   container = EXCLUDED.container, video_codec = EXCLUDED.video_codec,
+			   audio_codec = EXCLUDED.audio_codec, resolution = EXCLUDED.resolution,
+			   bitrate = EXCLUDED.bitrate, duration_ms = EXCLUDED.duration_ms,
+			   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
+			   version_tag = EXCLUDED.version_tag,
+			   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
+			   scanned_at = NOW()`,
+			f.MediaItemID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
+			f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
+			f.VideoProfile, f.VideoPixFmt,
+		)
+	}
+
+	br := q.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for range files {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("batch insert media file: %w", err)
+		}
+	}
+	return nil
+}
+
+func (q *Queries) BatchInsertEpisodeFiles(ctx context.Context, files []*models.EpisodeFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	for _, f := range files {
+		aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
+		batch.Queue(
+			`INSERT INTO episode_files (episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			 ON CONFLICT (path) DO UPDATE SET
+			   episode_id = EXCLUDED.episode_id,
+			   size_bytes = EXCLUDED.size_bytes, file_hash = EXCLUDED.file_hash,
+			   container = EXCLUDED.container, video_codec = EXCLUDED.video_codec,
+			   audio_codec = EXCLUDED.audio_codec, resolution = EXCLUDED.resolution,
+			   bitrate = EXCLUDED.bitrate, duration_ms = EXCLUDED.duration_ms,
+			   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
+			   version_tag = EXCLUDED.version_tag,
+			   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
+			   scanned_at = NOW()`,
+			f.EpisodeID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
+			f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
+			f.VideoProfile, f.VideoPixFmt,
+		)
+	}
+
+	br := q.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for range files {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("batch insert episode file: %w", err)
+		}
+	}
+	return nil
+}
+
+// UpdateUserPassword sets a new password hash for a user.
+func (q *Queries) UpdateUserPassword(ctx context.Context, userID int64, passwordHash string) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`,
+		userID, passwordHash)
+	return err
+}
+
+// GetMediaFilePathsForLibrary returns all media_file (id, path) pairs for a library.
+func (q *Queries) GetMediaFilePathsForLibrary(ctx context.Context, libraryID int64) (map[string]int64, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT mf.id, mf.path
+		 FROM media_files mf
+		 JOIN media_items mi ON mi.id = mf.media_item_id
+		 WHERE mi.library_id = $1`, libraryID)
+	if err != nil {
+		return nil, fmt.Errorf("get media file paths: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var id int64
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, fmt.Errorf("scan media file path: %w", err)
+		}
+		result[path] = id
+	}
+	return result, rows.Err()
+}
+
+// GetEpisodeFilePathsForLibrary returns all episode_file (id, path) pairs for a library.
+func (q *Queries) GetEpisodeFilePathsForLibrary(ctx context.Context, libraryID int64) (map[string]int64, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT ef.id, ef.path
+		 FROM episode_files ef
+		 JOIN tv_episodes te ON te.id = ef.episode_id
+		 JOIN tv_seasons ts ON ts.id = te.season_id
+		 JOIN media_items mi ON mi.id = ts.media_item_id
+		 WHERE mi.library_id = $1`, libraryID)
+	if err != nil {
+		return nil, fmt.Errorf("get episode file paths: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]int64)
+	for rows.Next() {
+		var id int64
+		var path string
+		if err := rows.Scan(&id, &path); err != nil {
+			return nil, fmt.Errorf("scan episode file path: %w", err)
+		}
+		result[path] = id
+	}
+	return result, rows.Err()
+}
+
+// DeleteMediaFilesByIDs deletes media_files by their IDs.
+func (q *Queries) DeleteMediaFilesByIDs(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tag, err := q.pool.Exec(ctx,
+		`DELETE FROM media_files WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return 0, fmt.Errorf("delete media files: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteEpisodeFilesByIDs deletes episode_files by their IDs.
+func (q *Queries) DeleteEpisodeFilesByIDs(ctx context.Context, ids []int64) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tag, err := q.pool.Exec(ctx,
+		`DELETE FROM episode_files WHERE id = ANY($1)`, ids)
+	if err != nil {
+		return 0, fmt.Errorf("delete episode files: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

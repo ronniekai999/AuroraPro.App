@@ -1,0 +1,17 @@
+# Aurora Media Server - Caddy Reverse Proxy Configuration
+#
+# Usage:
+#   1. Update the domain below to your actual domain
+#   2. Copy to /etc/caddy/Caddyfile (or include from your main Caddyfile)
+#   3. systemctl reload caddy
+#
+# Caddy automatically provisions and renews TLS certificates via Let's Encrypt.
+
+aurora.example.com {
+    reverse_proxy localhost:8484 {
+        # Disable response buffering for streaming and WebSocket support.
+        # flush_interval -1 streams responses immediately to the client,
+        # which is critical for HLS segments and Server-Sent Events.
+        flush_interval -1
+    }
+}

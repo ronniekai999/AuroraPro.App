@@ -1,0 +1,70 @@
+# Aurora Media Server Configuration
+# Environment variables override any value set here.
+# See docs for the corresponding env var names.
+
+server:
+  host: "0.0.0.0"
+  port: 8484
+  allowed_origins:
+    - "http://localhost:*"
+    - "https://localhost:*"
+
+database:
+  url: "postgres://aurora:aurora@localhost:5432/aurora?sslmode=disable"
+  max_conns: 10
+  min_conns: 2
+
+auth:
+  # REQUIRED — generate with: openssl rand -hex 32
+  jwt_secret: ""
+  access_token_minutes: 5
+  refresh_token_days: 30
+
+scanner:
+  workers: 8
+  ffprobe_path: "ffprobe"
+  watch_debounce_ms: 2000
+
+tmdb:
+  # REQUIRED — get one at https://www.themoviedb.org/settings/api
+  api_key: ""
+  metadata_refresh_hours: 168   # 7 days
+  language: "en"                # ISO 639-1 code
+
+tvdb:
+  # OPTIONAL — get one at https://thetvdb.com/api-information
+  # When provided, TVDB is used as a fallback for TV shows with low TMDB confidence.
+  api_key: ""
+  pin: ""                       # Optional subscriber PIN
+  enabled: false                # Set true or provide api_key to enable
+  language: "eng"               # ISO 639-3 code (eng, deu, jpn, etc.)
+
+cache:
+  image_dir: "/var/cache/aurora/images"
+  transcode_dir: "/var/cache/aurora/transcode"
+  subtitle_dir: "/var/cache/aurora/subtitles"
+
+transcode:
+  max_sessions: 0               # 0 = unlimited
+  hw_accel: "auto"              # auto, nvenc, qsv, vaapi, amf, none
+  session_timeout_sec: 120
+  segment_duration: 6
+  profiles:
+    - "1080p"
+    - "720p"
+    - "480p"
+
+watchparty:
+  # Sync protocol tuning (inspired by Jellyfin SyncPlay + mpv-shim defaults).
+  # Clients send a client→server TimeSync ping to establish a shared clock,
+  # then report position + buffering state at heartbeat_interval_ms.
+  heartbeat_interval_ms: 500    # client position-report cadence (250–1000 sensible)
+  time_sync_interval_ms: 30000  # client re-runs NTP-style handshake this often
+  buffer_hysteresis_ms: 750     # must be buffering at least this long before group pauses
+  play_schedule_delay_ms: 300   # lead time added to play commands so all clients can start together
+  # Client-side tiered drift correction (server does not seek-correct):
+  drift_ignore_ms: 50           # below this, no action
+  drift_rate_adjust_ms: 300     # 50–300: nudge playback rate
+  drift_hard_seek_ms: 2000      # 300–2000: hard seek
+  # Above drift_hard_seek_ms for drift_max_attempts in a row → drop client from group.
+  drift_max_attempts: 5

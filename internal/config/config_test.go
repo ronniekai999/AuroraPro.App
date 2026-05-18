@@ -1,0 +1,479 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestDefaults(t *testing.T) {
+	// Load with required env vars set to pass validation
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	// Prevent picking up any real config file
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	// Server defaults
+	if cfg.Server.Host != "0.0.0.0" {
+		t.Errorf("Server.Host = %q, want %q", cfg.Server.Host, "0.0.0.0")
+	}
+	if cfg.Server.Port != 8484 {
+		t.Errorf("Server.Port = %d, want %d", cfg.Server.Port, 8484)
+	}
+
+	// Database defaults
+	if cfg.Database.MaxConns != 10 {
+		t.Errorf("Database.MaxConns = %d, want %d", cfg.Database.MaxConns, 10)
+	}
+	if cfg.Database.MinConns != 2 {
+		t.Errorf("Database.MinConns = %d, want %d", cfg.Database.MinConns, 2)
+	}
+
+	// Auth defaults
+	if cfg.Auth.AccessTokenExpiry != 15*time.Minute {
+		t.Errorf("Auth.AccessTokenExpiry = %v, want %v", cfg.Auth.AccessTokenExpiry, 15*time.Minute)
+	}
+	if cfg.Auth.RefreshTokenExpiry != 30*24*time.Hour {
+		t.Errorf("Auth.RefreshTokenExpiry = %v, want %v", cfg.Auth.RefreshTokenExpiry, 30*24*time.Hour)
+	}
+	if cfg.Auth.Argon2Memory != 64*1024 {
+		t.Errorf("Auth.Argon2Memory = %d, want %d", cfg.Auth.Argon2Memory, 64*1024)
+	}
+	if cfg.Auth.InviteCodeLength != 16 {
+		t.Errorf("Auth.InviteCodeLength = %d, want %d", cfg.Auth.InviteCodeLength, 16)
+	}
+
+	// Scanner defaults
+	if cfg.Scanner.Workers != 8 {
+		t.Errorf("Scanner.Workers = %d, want %d", cfg.Scanner.Workers, 8)
+	}
+	if cfg.Scanner.FFprobePath != "ffprobe" {
+		t.Errorf("Scanner.FFprobePath = %q, want %q", cfg.Scanner.FFprobePath, "ffprobe")
+	}
+
+	// TMDB defaults
+	if cfg.TMDB.Language != "en" {
+		t.Errorf("TMDB.Language = %q, want %q", cfg.TMDB.Language, "en")
+	}
+
+	// Transcode defaults
+	if cfg.Transcode.HWAccel != "auto" {
+		t.Errorf("Transcode.HWAccel = %q, want %q", cfg.Transcode.HWAccel, "auto")
+	}
+	if cfg.Transcode.SegmentDuration != 6 {
+		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 6)
+	}
+	if cfg.Transcode.SessionTimeout != 120*time.Second {
+		t.Errorf("Transcode.SessionTimeout = %v, want %v", cfg.Transcode.SessionTimeout, 120*time.Second)
+	}
+}
+
+func TestEnvOverrides(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	// Set overrides
+	t.Setenv("AURORA_HOST", "127.0.0.1")
+	t.Setenv("AURORA_PORT", "9090")
+	t.Setenv("DATABASE_URL", "postgres://test:test@db:5432/test")
+	t.Setenv("DB_MAX_CONNS", "20")
+	t.Setenv("DB_MIN_CONNS", "5")
+	t.Setenv("ACCESS_TOKEN_MINUTES", "30")
+	t.Setenv("REFRESH_TOKEN_DAYS", "14")
+	t.Setenv("SCANNER_WORKERS", "4")
+	t.Setenv("FFPROBE_PATH", "/usr/bin/ffprobe")
+	t.Setenv("WATCH_DEBOUNCE_MS", "5000")
+	t.Setenv("METADATA_REFRESH_HOURS", "48")
+	t.Setenv("TMDB_LANGUAGE", "de")
+	t.Setenv("TRANSCODE_MAX_SESSIONS", "5")
+	t.Setenv("TRANSCODE_HW_ACCEL", "nvenc")
+	t.Setenv("TRANSCODE_SESSION_TIMEOUT_SEC", "300")
+	t.Setenv("TRANSCODE_SEGMENT_DURATION", "10")
+	t.Setenv("TRANSCODE_PROFILES", "1080p,720p")
+	t.Setenv("CACHE_IMAGE_DIR", "/custom/images")
+	t.Setenv("CACHE_TRANSCODE_DIR", "/custom/transcode")
+	t.Setenv("CACHE_SUBTITLE_DIR", "/custom/subtitles")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.Host != "127.0.0.1" {
+		t.Errorf("Server.Host = %q, want %q", cfg.Server.Host, "127.0.0.1")
+	}
+	if cfg.Server.Port != 9090 {
+		t.Errorf("Server.Port = %d, want %d", cfg.Server.Port, 9090)
+	}
+	if cfg.Database.URL != "postgres://test:test@db:5432/test" {
+		t.Errorf("Database.URL = %q, want postgres URL", cfg.Database.URL)
+	}
+	if cfg.Database.MaxConns != 20 {
+		t.Errorf("Database.MaxConns = %d, want %d", cfg.Database.MaxConns, 20)
+	}
+	if cfg.Database.MinConns != 5 {
+		t.Errorf("Database.MinConns = %d, want %d", cfg.Database.MinConns, 5)
+	}
+	if cfg.Auth.AccessTokenExpiry != 30*time.Minute {
+		t.Errorf("Auth.AccessTokenExpiry = %v, want %v", cfg.Auth.AccessTokenExpiry, 30*time.Minute)
+	}
+	if cfg.Auth.RefreshTokenExpiry != 14*24*time.Hour {
+		t.Errorf("Auth.RefreshTokenExpiry = %v, want %v", cfg.Auth.RefreshTokenExpiry, 14*24*time.Hour)
+	}
+	if cfg.Scanner.Workers != 4 {
+		t.Errorf("Scanner.Workers = %d, want %d", cfg.Scanner.Workers, 4)
+	}
+	if cfg.Scanner.FFprobePath != "/usr/bin/ffprobe" {
+		t.Errorf("Scanner.FFprobePath = %q, want %q", cfg.Scanner.FFprobePath, "/usr/bin/ffprobe")
+	}
+	if cfg.Scanner.WatchDebounce != 5000*time.Millisecond {
+		t.Errorf("Scanner.WatchDebounce = %v, want %v", cfg.Scanner.WatchDebounce, 5000*time.Millisecond)
+	}
+	if cfg.TMDB.MetadataRefresh != 48*time.Hour {
+		t.Errorf("TMDB.MetadataRefresh = %v, want %v", cfg.TMDB.MetadataRefresh, 48*time.Hour)
+	}
+	if cfg.TMDB.Language != "de" {
+		t.Errorf("TMDB.Language = %q, want %q", cfg.TMDB.Language, "de")
+	}
+	if cfg.Transcode.MaxSessions != 5 {
+		t.Errorf("Transcode.MaxSessions = %d, want %d", cfg.Transcode.MaxSessions, 5)
+	}
+	if cfg.Transcode.HWAccel != "nvenc" {
+		t.Errorf("Transcode.HWAccel = %q, want %q", cfg.Transcode.HWAccel, "nvenc")
+	}
+	if cfg.Transcode.SessionTimeout != 300*time.Second {
+		t.Errorf("Transcode.SessionTimeout = %v, want %v", cfg.Transcode.SessionTimeout, 300*time.Second)
+	}
+	if cfg.Transcode.SegmentDuration != 10 {
+		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 10)
+	}
+	if len(cfg.Transcode.Profiles) != 2 || cfg.Transcode.Profiles[0] != "1080p" || cfg.Transcode.Profiles[1] != "720p" {
+		t.Errorf("Transcode.Profiles = %v, want [1080p, 720p]", cfg.Transcode.Profiles)
+	}
+	if cfg.Cache.ImageDir != "/custom/images" {
+		t.Errorf("Cache.ImageDir = %q, want %q", cfg.Cache.ImageDir, "/custom/images")
+	}
+	if cfg.Cache.TranscodeDir != "/custom/transcode" {
+		t.Errorf("Cache.TranscodeDir = %q, want %q", cfg.Cache.TranscodeDir, "/custom/transcode")
+	}
+	if cfg.Cache.SubtitleDir != "/custom/subtitles" {
+		t.Errorf("Cache.SubtitleDir = %q, want %q", cfg.Cache.SubtitleDir, "/custom/subtitles")
+	}
+}
+
+func TestLoad_MissingJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("TMDB_API_KEY", "fake-key")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	_, err := Load()
+	if err == nil {
+		t.Error("Load() should error when JWT_SECRET is missing")
+	}
+}
+
+func TestLoad_ShortJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "too-short")
+	t.Setenv("TMDB_API_KEY", "fake-key")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	_, err := Load()
+	if err == nil {
+		t.Error("Load() should error when JWT_SECRET is too short")
+	}
+}
+
+func TestLoad_PlaceholderJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "change-me-to-a-random-64-char-string-in-production")
+	t.Setenv("TMDB_API_KEY", "fake-key")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	_, err := Load()
+	if err == nil {
+		t.Error("Load() should error when JWT_SECRET is a known placeholder")
+	}
+}
+
+func TestLoad_MissingTMDBKey(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	_, err := Load()
+	if err == nil {
+		t.Error("Load() should error when TMDB_API_KEY is missing")
+	}
+}
+
+func TestServerAddr(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Host: "0.0.0.0", Port: 8484},
+	}
+	got := cfg.ServerAddr()
+	want := "0.0.0.0:8484"
+	if got != want {
+		t.Errorf("ServerAddr() = %q, want %q", got, want)
+	}
+}
+
+func TestOriginAllowed(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			AllowedOrigins: []string{"http://localhost:*", "https://example.com"},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		{name: "localhost with port", origin: "http://localhost:3000", want: true},
+		{name: "localhost with another port", origin: "http://localhost:8080", want: true},
+		{name: "exact match", origin: "https://example.com", want: true},
+		{name: "not allowed", origin: "https://evil.com", want: false},
+		{name: "empty origin", origin: "", want: false},
+		{name: "wildcard suffix abuse", origin: "http://localhost:evil.com", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cfg.OriginAllowed(tt.origin)
+			if got != tt.want {
+				t.Errorf("OriginAllowed(%q) = %v, want %v", tt.origin, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOriginAllowed_Wildcard(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{AllowedOrigins: []string{"*"}},
+	}
+
+	if !cfg.OriginAllowed("https://anything.com") {
+		t.Error("wildcard * should allow any origin")
+	}
+}
+
+func TestParseOrigins(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{name: "comma separated", input: "http://a.com,http://b.com", want: 2},
+		{name: "with spaces", input: " http://a.com , http://b.com ", want: 2},
+		{name: "empty", input: "", want: 0},
+		{name: "single", input: "http://localhost:3000", want: 1},
+		{name: "trailing comma", input: "http://a.com,", want: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseOrigins(tt.input)
+			if len(got) != tt.want {
+				t.Errorf("parseOrigins(%q) returned %d items, want %d", tt.input, len(got), tt.want)
+			}
+		})
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "basic", input: "a,b,c", want: []string{"a", "b", "c"}},
+		{name: "with spaces", input: " a , b , c ", want: []string{"a", "b", "c"}},
+		{name: "empty", input: "", want: nil},
+		{name: "trailing comma", input: "a,b,", want: []string{"a", "b"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := splitCSV(tt.input)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("splitCSV(%q) = %v, want nil", tt.input, got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("splitCSV(%q) len = %d, want %d", tt.input, len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("splitCSV(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestTLSEnvOverrides(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("TLS_ENABLED", "true")
+	t.Setenv("TLS_CERT_FILE", "/path/to/cert.pem")
+	t.Setenv("TLS_KEY_FILE", "/path/to/key.pem")
+	t.Setenv("TLS_AUTO_CERT", "true")
+	t.Setenv("TLS_DOMAIN", "media.example.com")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if !cfg.TLS.Enabled {
+		t.Error("TLS.Enabled = false, want true")
+	}
+	if cfg.TLS.CertFile != "/path/to/cert.pem" {
+		t.Errorf("TLS.CertFile = %q, want %q", cfg.TLS.CertFile, "/path/to/cert.pem")
+	}
+	if cfg.TLS.KeyFile != "/path/to/key.pem" {
+		t.Errorf("TLS.KeyFile = %q, want %q", cfg.TLS.KeyFile, "/path/to/key.pem")
+	}
+	if !cfg.TLS.AutoCert {
+		t.Error("TLS.AutoCert = false, want true")
+	}
+	if cfg.TLS.Domain != "media.example.com" {
+		t.Errorf("TLS.Domain = %q, want %q", cfg.TLS.Domain, "media.example.com")
+	}
+}
+
+func TestTVDB_AutoEnable(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("TVDB_API_KEY", "some-tvdb-key")
+	// Do NOT set TVDB_ENABLED, it should auto-enable
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if !cfg.TVDB.Enabled {
+		t.Error("TVDB.Enabled should be auto-enabled when API key is set")
+	}
+}
+
+func TestTVDB_ExplicitDisable(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("TVDB_API_KEY", "some-tvdb-key")
+	t.Setenv("TVDB_ENABLED", "false")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.TVDB.Enabled {
+		t.Error("TVDB.Enabled should be false when explicitly disabled")
+	}
+}
+
+func TestYAMLLoading(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `
+server:
+  host: "192.168.1.100"
+  port: 9999
+  allowed_origins:
+    - "https://custom.example.com"
+database:
+  url: "postgres://yaml:yaml@db:5432/yamldb"
+  max_conns: 50
+auth:
+  jwt_secret: "yaml-jwt-secret-that-is-long-enough-for-validation-1234567890"
+  access_token_minutes: 60
+  refresh_token_days: 7
+scanner:
+  workers: 16
+  ffprobe_path: "/opt/ffmpeg/ffprobe"
+tmdb:
+  api_key: "yaml-tmdb-key"
+  language: "ja"
+transcode:
+  max_sessions: 10
+  hw_accel: "qsv"
+  session_timeout_sec: 600
+  segment_duration: 4
+  profiles:
+    - "720p"
+    - "480p"
+`
+	yamlPath := filepath.Join(dir, "aurora.yaml")
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("AURORA_CONFIG_FILE", yamlPath)
+	// Clear env overrides so YAML values take effect
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("TMDB_API_KEY", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Server.Host != "192.168.1.100" {
+		t.Errorf("Server.Host = %q, want %q", cfg.Server.Host, "192.168.1.100")
+	}
+	if cfg.Server.Port != 9999 {
+		t.Errorf("Server.Port = %d, want %d", cfg.Server.Port, 9999)
+	}
+	if cfg.Database.MaxConns != 50 {
+		t.Errorf("Database.MaxConns = %d, want %d", cfg.Database.MaxConns, 50)
+	}
+	if cfg.Scanner.Workers != 16 {
+		t.Errorf("Scanner.Workers = %d, want %d", cfg.Scanner.Workers, 16)
+	}
+	if cfg.TMDB.Language != "ja" {
+		t.Errorf("TMDB.Language = %q, want %q", cfg.TMDB.Language, "ja")
+	}
+	if cfg.Transcode.MaxSessions != 10 {
+		t.Errorf("Transcode.MaxSessions = %d, want %d", cfg.Transcode.MaxSessions, 10)
+	}
+	if cfg.Transcode.SegmentDuration != 4 {
+		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 4)
+	}
+	if cfg.Auth.AccessTokenExpiry != 60*time.Minute {
+		t.Errorf("Auth.AccessTokenExpiry = %v, want %v", cfg.Auth.AccessTokenExpiry, 60*time.Minute)
+	}
+}
+
+func TestAllowedOrigins_Override(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("AURORA_ALLOWED_ORIGINS", "https://app.example.com,https://admin.example.com")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if len(cfg.Server.AllowedOrigins) != 2 {
+		t.Fatalf("AllowedOrigins count = %d, want 2", len(cfg.Server.AllowedOrigins))
+	}
+	if cfg.Server.AllowedOrigins[0] != "https://app.example.com" {
+		t.Errorf("AllowedOrigins[0] = %q", cfg.Server.AllowedOrigins[0])
+	}
+	if cfg.Server.AllowedOrigins[1] != "https://admin.example.com" {
+		t.Errorf("AllowedOrigins[1] = %q", cfg.Server.AllowedOrigins[1])
+	}
+}

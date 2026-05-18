@@ -1,0 +1,17 @@
+DROP TRIGGER IF EXISTS trg_media_items_updated_at ON media_items;
+DROP TRIGGER IF EXISTS trg_libraries_updated_at ON libraries;
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
+DROP FUNCTION IF EXISTS update_updated_at();
+DROP TABLE IF EXISTS external_ids;
+DROP TABLE IF EXISTS media_genres;
+DROP TABLE IF EXISTS genres;
+DROP TABLE IF EXISTS episode_files;
+DROP TABLE IF EXISTS tv_episodes;
+DROP TABLE IF EXISTS tv_seasons;
+DROP TABLE IF EXISTS media_files;
+DROP TABLE IF EXISTS media_items;
+DROP TABLE IF EXISTS libraries;
+DROP TABLE IF EXISTS invite_codes;
+DROP TABLE IF EXISTS refresh_tokens;
+DROP TABLE IF EXISTS users;
+DROP EXTENSION IF EXISTS pg_trgm;

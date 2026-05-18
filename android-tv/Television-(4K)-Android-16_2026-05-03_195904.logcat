@@ -1,0 +1,1369 @@
+{
+  "metadata": {
+    "device": {
+      "emulatorDevice": {
+        "serialNumber": "emulator-5554",
+        "isOnline": true,
+        "release": "16",
+        "apiLevel": {
+          "majorVersion": 36,
+          "minorVersion": 0
+        },
+        "featureLevel": 36,
+        "avdName": "Television (4K)",
+        "avdPath": "/Users/ronniewhite/.android/avd/Television_4K.avd",
+        "type": "TV"
+      }
+    },
+    "filter": "",
+    "projectApplicationIds": [
+      "io.aurora.tv.core.media.test",
+      "io.aurora.tv.core.network.test",
+      "io.aurora.tv.core.ui.test",
+      "io.aurora.tv.core.design.test",
+      "io.aurora.tv.core.database.test",
+      "io.aurora.tv.core.auth.test",
+      "io.aurora.tv.debug",
+      "io.aurora.tv.debug.test",
+      "io.aurora.tv",
+      "io.aurora.tv.feature.profiles.test"
+    ]
+  },
+  "logcatMessages": [
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 244,
+        "tid": 8852,
+        "applicationId": "keystore2",
+        "processName": "keystore2",
+        "tag": "keystore2",
+        "timestamp": {
+          "seconds": 1777840390,
+          "nanos": 815532107
+        }
+      },
+      "message": "system/security/keystore2/watchdog/src/lib.rs:377 - Watchdog thread idle -\u003e terminating. Have a great day."
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 659,
+        "tid": 781,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "ImeTracker",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 127078191
+        }
+      },
+      "message": "io.aurora.tv.debug:df700d37: setFinished at PHASE_CLIENT_ANIMATION_CANCEL with STATUS_TIMEOUT"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 341096150
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 341683983
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET6, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 341759775
+        }
+      },
+      "message": "Destroyed live tcp sockets for uids\u003d{10092} in 2ms"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 342017191
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 342279066
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET6, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840392,
+          "nanos": 342292816
+        }
+      },
+      "message": "Destroyed live tcp sockets for uids\u003d{20092} in 1ms"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8806,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "aurora.tv.debug",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 352170359
+        }
+      },
+      "message": "Waiting for a blocking GC ProfileSaver"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8806,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "aurora.tv.debug",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 403638067
+        }
+      },
+      "message": "WaitForGcToComplete blocked ProfileSaver on NativeAlloc for 51.446ms"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8847,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 480575692
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 482472275
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8873,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 485235400
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8874,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 531655442
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 568510484
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8848,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 569775775
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8871,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 570487317
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8871,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 789860651
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8847,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 980202692
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840393,
+          "nanos": 981663401
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8874,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 4988276
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8871,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 5064942
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 643274318
+        }
+      },
+      "message": "--\u003e GET https://aurorapro.app/api/media/8171"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 643321026
+        }
+      },
+      "message": "--\u003e END GET"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686393734
+        }
+      },
+      "message": "\u003c-- 200 OK https://aurorapro.app/api/media/8171 (43ms)"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686426068
+        }
+      },
+      "message": "Server: nginx/1.24.0 (Ubuntu)"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686431651
+        }
+      },
+      "message": "Date: Sun, 03 May 2026 23:58:53 GMT"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686435776
+        }
+      },
+      "message": "Content-Type: application/json"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686439734
+        }
+      },
+      "message": "Transfer-Encoding: chunked"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686443693
+        }
+      },
+      "message": "Connection: keep-alive"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686447901
+        }
+      },
+      "message": "Content-Security-Policy: default-src \u0027none\u0027; frame-ancestors \u0027none\u0027"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686452026
+        }
+      },
+      "message": "Permissions-Policy: camera\u003d(), microphone\u003d(), geolocation\u003d()"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686455901
+        }
+      },
+      "message": "Referrer-Policy: strict-origin-when-cross-origin"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686459901
+        }
+      },
+      "message": "Strict-Transport-Security: max-age\u003d63072000; includeSubDomains"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686463859
+        }
+      },
+      "message": "Vary: Origin"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686469359
+        }
+      },
+      "message": "X-Content-Type-Options: nosniff"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 686473318
+        }
+      },
+      "message": "X-Frame-Options: DENY"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 687277484
+        }
+      },
+      "message": "{\"id\":8171,\"library_id\":2,\"type\":\"movie\",\"title\":\"The Rocky Horror Picture Show\",\"sort_title\":\"Rocky Horror Picture Show\",\"year\":1975,\"overview\":\"After getting a flat tire in the middle of nowhere, newly engaged couple Brad and Janet encounter the eerie mansion of the flamboyant, seductive Dr Frank-N-Furter and a variety of eccentric characters. Through elaborate dance and rock music, the mad scientist unveils his latest creation: a perfect, muscular man.\",\"rating\":7.4,\"runtime_minutes\":100,\"content_rating\":\"R\",\"poster_path\":\"/3pyE6ZqDbuJi7zrNzzQzcKTWdmN.jpg\",\"backdrop_path\":\"/a53EGF0NzHRGKuRItsrtXBM8FCD.jpg\",\"added_at\":\"2026-04-29T22:44:04.923303Z\",\"updated_at\":\"2026-04-29T22:44:06.140531Z\",\"genres\":[\"Comedy\",\"Fantasy\",\"Horror\",\"Science Fiction\"],\"files\":[{\"id\":7425,\"media_item_id\":8171,\"size_bytes\":19480877374,\"container\":\"mkv\",\"video_codec\":\"hevc\",\"audio_codec\":\"truehd\",\"resolution\":\"3584x2160\",\"version_tag\":\"4K\",\"bitrate\":25955538,\"duration_ms\":6004384,\"video_profile\":\"Main 10\",\"video_pix_fmt\":\"yuv420p10le\",\"file_hash\":\"128b8e8c46126f5db56f4c280b3cbb0e\",\"scanned_at\":\"2026-04-29T22:44:05.77167Z\",\"audio_tracks\":[{\"index\":0,\"codec\":\"truehd\",\"channels\":8,\"language\":\"eng\",\"is_default\":true},{\"index\":1,\"codec\":\"ac3\",\"channels\":6,\"language\":\"eng\",\"is_default\":true},{\"index\":2,\"codec\":\"ac3\",\"channels\":2,\"language\":\"eng\",\"title\":\"Commentary\",\"is_default\":false}],\"subtitle_tracks\":[{\"index\":0,\"language\":\"eng\",\"title\":\"English SDH\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":1,\"language\":\"fre\",\"title\":\"French\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":2,\"language\":\"spa\",\"title\":\"Spanish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":3,\"language\":\"spa\",\"title\":\"Spanish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":4,\"language\":\"ger\",\"title\":\"German\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":5,\"language\":\"ita\",\"title\":\"Italian\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":6,\"language\":\"pol\",\"title\":\"Polish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":7,\"language\":\"dut\",\"title\":\"Dutch\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":8,\"language\":\"dan\",\"title\":\"Danish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":9,\"language\":\"fin\",\"title\":\"Finnish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":10,\"language\":\"nor\",\"title\":\"Norwegian\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":11,\"language\":\"swe\",\"title\":\"Swedish\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":12,\"language\":\"eng\",\"title\":\"English Sing Along\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":13,\"language\":\"eng\",\"title\":\"English\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":14,\"language\":\"eng\",\"title\":\"English\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false},{\"index\":15,\"language\":\"eng\",\"title\":\"Commentary\",\"codec\":\"hdmv_pgs_subtitle\",\"forced\":false,\"default\":false}],\"library_name\":\"4K Movies\"},{\"id\":7426,\"media_item_id\":8172,\"size_bytes\":4803152474,\"container\":\"mkv\",\"video_codec\":\"h264\",\"audio_codec\":\"ac3\",\"resolution\":\"1920x1080\",\"version_tag\":\"1080p\",\"bitrate\":6399356,\"duration_ms\":6004544,\"video_profile\":\"High\",\"video_pix_fmt\":\"yuv420p\",\"file_hash\":\"e7ada9a3885168501fc99087cc8d41ec\",\"scanned_at\":\"2026-04-29T22:49:02.120058Z\",\"audio_tracks\":[{\"index\":0,\"codec\":\"ac3\",\"channels\":6,\"language\":\"eng\",\"title\":\"Surround AC3 5.1\",\"is_default\":true},{\"index\":1,\"codec\":\"ac3\",\"channels\":2,\"language\":\"eng\",\"title\":\"Commentary\",\"is_default\":false}],\"subtitle_tracks\":[{\"index\":0,\"language\":\"eng\",\"title\":\"English\",\"codec\":\"subrip\",\"forced\":false,\"default\":false}],\"library_name\":\"Movies\"}],\"has_4k\":true,\"file_path\":\"\",\"tmdb_id\":36685,\"imdb_id\":\"tt0073629\",\"tagline\":\"A different set of jaws.\",\"poster_url\":\"https://image.tmdb.org/t/p/w500/3pyE6ZqDbu"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 687435734
+        }
+      },
+      "message": "Ji7zrNzzQzcKTWdmN.jpg\",\"backdrop_url\":\"https://image.tmdb.org/t/p/w1280/a53EGF0NzHRGKuRItsrtXBM8FCD.jpg\",\"cast\":[{\"id\":7638,\"name\":\"Tim Curry\",\"profile_path\":\"/8ZsGg3N3OZgxshqLOtA2kl5ckOP.jpg\",\"role_type\":\"cast\",\"character\":\"Dr. Frank-N-Furter\",\"display_order\":0},{\"id\":8987,\"name\":\"Susan Sarandon\",\"profile_path\":\"/jR6l2EfvvGA8qCzZ7MB5FT9ZLkq.jpg\",\"role_type\":\"cast\",\"character\":\"Janet Weiss\",\"display_order\":1},{\"id\":2927,\"name\":\"Barry Bostwick\",\"profile_path\":\"/z2jlL5g5PMxelSHMXFF03fTSsLl.jpg\",\"role_type\":\"cast\",\"character\":\"Brad Majors\",\"display_order\":2},{\"id\":32884,\"name\":\"Richard O\u0027Brien\",\"profile_path\":\"/9FMfj8IcXuwKrfBvdNRBKv6WPC1.jpg\",\"role_type\":\"cast\",\"character\":\"Riff Raff\",\"display_order\":3},{\"id\":179002,\"name\":\"Patricia Quinn\",\"profile_path\":\"/hi7k5zEI6iXBki1E1jsPrE28n5H.jpg\",\"role_type\":\"cast\",\"character\":\"Magenta\",\"display_order\":4},{\"id\":179003,\"name\":\"Nell Campbell\",\"profile_path\":\"/bkqXLnmaQNsDgOpsb1P1182k4Rv.jpg\",\"role_type\":\"cast\",\"character\":\"Columbia\",\"display_order\":5},{\"id\":179004,\"name\":\"Jonathan Adams\",\"role_type\":\"cast\",\"character\":\"Dr. Everett V. Scott\",\"display_order\":6},{\"id\":179005,\"name\":\"Peter Hinwood\",\"role_type\":\"cast\",\"character\":\"Rocky Horror\",\"display_order\":7},{\"id\":16640,\"name\":\"Meat Loaf\",\"profile_path\":\"/1zkohpaG3my4qQAZGVgzgPuXwZ6.jpg\",\"role_type\":\"cast\",\"character\":\"Eddie\",\"display_order\":8},{\"id\":13953,\"name\":\"Charles Gray\",\"profile_path\":\"/3H5YbhDgZq9fUk12aKm82wgDFsk.jpg\",\"role_type\":\"cast\",\"character\":\"The Criminologist\",\"display_order\":9},{\"id\":179008,\"name\":\"Jeremy Newson\",\"role_type\":\"cast\",\"character\":\"Ralph Hapschatt\",\"display_order\":10},{\"id\":179009,\"name\":\"Hilary Farr\",\"profile_path\":\"/jzO9hJX9VzAifFdzBulupxCErQn.jpg\",\"role_type\":\"cast\",\"character\":\"Betty Munroe\",\"display_order\":11},{\"id\":179010,\"name\":\"Pierre Bedenes\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":12},{\"id\":179011,\"name\":\"Christopher Biggins\",\"profile_path\":\"/vXSB66jWLWjy3DXoHTa9zeg7sLb.jpg\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":13},{\"id\":179012,\"name\":\"Gaye Brown\",\"profile_path\":\"/t9kuvUmCbBYlZd2V8KPPNYSica6.jpg\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":14},{\"id\":179013,\"name\":\"Ishaq Bux\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":15},{\"id\":179014,\"name\":\"Stephen Calcutt\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":16},{\"id\":179015,\"name\":\"Hugh Cecil\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":17},{\"id\":179016,\"name\":\"Imogen Claire\",\"profile_path\":\"/esXgYz2Qlh5zi36wwab29nYxeDu.jpg\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":18},{\"id\":179017,\"name\":\"Tony Cowan\",\"role_type\":\"cast\",\"character\":\"The Transylvanians\",\"display_order\":19},{\"id\":179018,\"name\":\"Jim Sharman\",\"profile_path\":\"/Av2m8wJkKOZnlpedE4YXteTXjLE.jpg\",\"role_type\":\"director\",\"character\":\"Director\",\"display_order\":0},{\"id\":179021,\"name\":\"Lou Adler\",\"role_type\":\"producer\",\"character\":\"Executive Producer\",\"display_order\":0},{\"id\":179018,\"name\":\"Jim Sharman\",\"profile_path\":\"/Av2m8wJkKOZnlpedE4YXteTXjLE.jpg\",\"role_type\":\"writer\",\"character\":\"Screenplay\",\"display_order\":0},{\"id\":32884,\"name\":\"Richard O\u0027Brien\",\"profile_path\":\"/9FMfj8IcXuwKrfBvdNRBKv6WPC1.jpg\",\"role_type\":\"writer\",\"character\":\"Screenplay\",\"display_order\":0}],\"artwork\":[{\"id\":87629,\"media_item_id\":8171,\"art_type\":\"backdrop\",\"source\":\"tmdb\",\"remote_path\":\"/ArCg0OfpzfWuHNSBdxiDA8adVno.jpg\",\"width\":3840,\"height\":2160,\"lang\":\"en\",\"vote_average\":3.3340001106262207,\"is_primary\":true,\"blurhash\":\"LlP%05RO.8.8?vt7WBof_NtRIUV@\",\"created_at\":\"2026-04-29T22:44:06.035322Z\"},{\"id\":87630,\"media_item_id\":8171,\"art_type\":\"backdrop\",\"source\":\"tmdb\",\"remote_path\":\"/a53EGF0NzHRGKuRItsrtXBM8FCD.jpg\",\"width\":1920,\"height\":1080,\"vote_average\":2.2780001163482666,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.035655Z\"},{\"id\":87631,\"media_item_id\":8171,\"art_type\":\"backdrop\",\"source\":\"tmdb\",\"remote_path\":\"/idGAfZk98uBkiY4R1qO5fnacanW.j"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 687439318
+        }
+      },
+      "message": "pg\",\"width\":1920,\"height\":1080,\"vote_average\":1.75,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.035904Z\"},{\"id\":87632,\"media_item_id\":8171,\"art_type\":\"backdrop\",\"source\":\"tmdb\",\"remote_path\":\"/xPGiAPvneeicUxvJJfBpdnO99s.jpg\",\"width\":3840,\"height\":2160,\"vote_average\":1.75,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.036245Z\"},{\"id\":87633,\"media_item_id\":8171,\"art_type\":\"backdrop\",\"source\":\"tmdb\",\"remote_path\":\"/cuBWaK5Y1QUcQVapm44YNH5rrhg.jpg\",\"width\":1920,\"height\":1080,\"lang\":\"en\",\"vote_average\":1.75,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.036608Z\"},{\"id\":87634,\"media_item_id\":8171,\"art_type\":\"logo\",\"source\":\"tmdb\",\"remote_path\":\"/1GEdwlz6EGCVmAvXBF36OB7bMo7.png\",\"width\":599,\"height\":298,\"lang\":\"en\",\"vote_average\":3.3340001106262207,\"is_primary\":true,\"blurhash\":\"LJGF5uxG1bsA\u003dKxGE}n%FcW;$Pso\",\"created_at\":\"2026-04-29T22:44:06.03685Z\"},{\"id\":87635,\"media_item_id\":8171,\"art_type\":\"logo\",\"source\":\"tmdb\",\"remote_path\":\"/l52z5fMh6yHJwncD7J20seXQOTN.png\",\"width\":2393,\"height\":374,\"lang\":\"en\",\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.037097Z\"},{\"id\":87624,\"media_item_id\":8171,\"art_type\":\"poster\",\"source\":\"tmdb\",\"remote_path\":\"/3pyE6ZqDbuJi7zrNzzQzcKTWdmN.jpg\",\"width\":1000,\"height\":1500,\"lang\":\"en\",\"vote_average\":6.113999843597412,\"is_primary\":true,\"blurhash\":\"LID7p*Rk1Hxa,?s:WVWB5kxa,@Rk\",\"created_at\":\"2026-04-29T22:44:06.033325Z\"},{\"id\":87625,\"media_item_id\":8171,\"art_type\":\"poster\",\"source\":\"tmdb\",\"remote_path\":\"/tqzSvxTPnhclbzQOT9ojyCRX8u4.jpg\",\"width\":2000,\"height\":3000,\"lang\":\"en\",\"vote_average\":5.25,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.033879Z\"},{\"id\":87626,\"media_item_id\":8171,\"art_type\":\"poster\",\"source\":\"tmdb\",\"remote_path\":\"/3lBv4MRr2XsZnI3I1Xvi3jbAmGf.jpg\",\"width\":2000,\"height\":2963,\"lang\":\"en\",\"vote_average\":4.458000183105469,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.03423Z\"},{\"id\":87627,\"media_item_id\":8171,\"art_type\":\"poster\",\"source\":\"tmdb\",\"remote_path\":\"/3rHJLiPUnH9W4EUJvp1NXc7mEaA.jpg\",\"width\":1000,\"height\":1500,\"lang\":\"en\",\"vote_average\":4.458000183105469,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.034618Z\"},{\"id\":87628,\"media_item_id\":8171,\"art_type\":\"poster\",\"source\":\"tmdb\",\"remote_path\":\"/8QCNX4oxfO7xyASvJ0fnTFrqXsC.jpg\",\"width\":1400,\"height\":2100,\"lang\":\"en\",\"vote_average\":4.300000190734863,\"is_primary\":false,\"created_at\":\"2026-04-29T22:44:06.034965Z\"}],\"user_progress\":{\"id\":2682,\"user_id\":1,\"profile_id\":1,\"media_item_id\":8171,\"position_ms\":2178095,\"duration_ms\":3243178,\"completed\":false,\"updated_at\":\"2026-04-29T23:20:53.643233Z\"}}"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 687449109
+        }
+      },
+      "message": "\u003c-- END HTTP (10567-byte body)"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 827330568
+        }
+      },
+      "message": "--\u003e GET https://aurorapro.app/api/media?type\u003dmovie\u0026genre\u003dComedy\u0026page\u003d1\u0026per_page\u003d20"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 827364526
+        }
+      },
+      "message": "--\u003e END GET"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902147193
+        }
+      },
+      "message": "\u003c-- 200 OK https://aurorapro.app/api/media?type\u003dmovie\u0026genre\u003dComedy\u0026page\u003d1\u0026per_page\u003d20 (74ms)"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902176151
+        }
+      },
+      "message": "Server: nginx/1.24.0 (Ubuntu)"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902181818
+        }
+      },
+      "message": "Date: Sun, 03 May 2026 23:58:53 GMT"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902186276
+        }
+      },
+      "message": "Content-Type: application/json"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902197734
+        }
+      },
+      "message": "Transfer-Encoding: chunked"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902203109
+        }
+      },
+      "message": "Connection: keep-alive"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902207484
+        }
+      },
+      "message": "Content-Security-Policy: default-src \u0027none\u0027; frame-ancestors \u0027none\u0027"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902211651
+        }
+      },
+      "message": "Permissions-Policy: camera\u003d(), microphone\u003d(), geolocation\u003d()"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902217359
+        }
+      },
+      "message": "Referrer-Policy: strict-origin-when-cross-origin"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902221401
+        }
+      },
+      "message": "Strict-Transport-Security: max-age\u003d63072000; includeSubDomains"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902225401
+        }
+      },
+      "message": "Vary: Origin"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902229318
+        }
+      },
+      "message": "X-Content-Type-Options: nosniff"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902233276
+        }
+      },
+      "message": "X-Frame-Options: DENY"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 902912151
+        }
+      },
+      "message": "{\"data\":[{\"id\":8183,\"library_id\":1,\"type\":\"movie\",\"title\":\"The Wizard of the Kremlin\",\"sort_title\":\"Wizard of the Kremlin\",\"year\":2026,\"overview\":\"In early 1990s Russia, amid post-Soviet chaos, brilliant young Vadim Baranov charts his path. First an artist, then a reality television producer, he becomes the spin doctor to rising KGB agent Vladimir Putin. At the heart of power, Baranov shapes the new Russia, blurring the boundaries between truth and lies, belief and manipulation. Only the magnetic Ksenia is beyond his control, tempting him away from this dangerous game. Years later, after retreating into silence and shrouded in mystery, Baranov finally reveals the dark secrets of the regime he helped build.\",\"rating\":6.5,\"runtime_minutes\":136,\"content_rating\":\"R\",\"poster_path\":\"/l8eEJ6iQPGLala7Oo43LTYb31fM.jpg\",\"backdrop_path\":\"/ArlN8C4VnVbDkwD7qLj9YAob1G4.jpg\",\"added_at\":\"2026-05-02T04:08:16.018779Z\",\"updated_at\":\"2026-05-02T04:08:16.607501Z\",\"genres\":[\"Comedy\",\"Drama\",\"Thriller\"],\"file_path\":\"\"},{\"id\":8182,\"library_id\":1,\"type\":\"movie\",\"title\":\"The Pout-Pout Fish\",\"sort_title\":\"Pout Pout Fish\",\"year\":2026,\"overview\":\"Living on a rundown shipwreck, Mr. Fish one day discovers a hyperactive young sea dragon Pip – who had mistaken his home for a junkyard – pilfering his belongings. The heated argument that ensues leaves both their houses in ruin. But there is hope! Embarking on a seemingly impossible quest in search of the mythical \u0027Shimmer\u0027 to grant them a wish, there’s only one problem: someone else is on the hunt...\",\"rating\":6.1,\"runtime_minutes\":92,\"content_rating\":\"PG\",\"poster_path\":\"/fcDXgGL14qL46It1XOozEjX5Jws.jpg\",\"backdrop_path\":\"/6qQQhhF87Rm1z2TYhXAmoPiEHME.jpg\",\"added_at\":\"2026-05-02T04:08:14.597594Z\",\"updated_at\":\"2026-05-02T04:08:15.538362Z\",\"genres\":[\"Adventure\",\"Animation\",\"Comedy\",\"Family\"],\"file_path\":\"\"},{\"id\":8181,\"library_id\":1,\"type\":\"movie\",\"title\":\"Swapped\",\"sort_title\":\"Swapped\",\"year\":2026,\"overview\":\"A tiny woodland creature and a majestic bird suddenly swap bodies, forcing them to team up to survive the wildest adventure of their lives.\",\"rating\":8.8,\"runtime_minutes\":102,\"content_rating\":\"PG\",\"poster_path\":\"/tHhxWxge06goXU6ZQH1hj7vK8Hd.jpg\",\"backdrop_path\":\"/r4Tfw8CPeeI4EIHI3wH9qNkycZd.jpg\",\"added_at\":\"2026-05-02T04:08:10.730053Z\",\"updated_at\":\"2026-05-02T04:08:11.642322Z\",\"genres\":[\"Adventure\",\"Animation\",\"Comedy\",\"Family\",\"Fantasy\"],\"file_path\":\"\"},{\"id\":8171,\"library_id\":2,\"type\":\"movie\",\"title\":\"The Rocky Horror Picture Show\",\"sort_title\":\"Rocky Horror Picture Show\",\"year\":1975,\"overview\":\"After getting a flat tire in the middle of nowhere, newly engaged couple Brad and Janet encounter the eerie mansion of the flamboyant, seductive Dr Frank-N-Furter and a variety of eccentric characters. Through elaborate dance and rock music, the mad scientist unveils his latest creation: a perfect, muscular man.\",\"rating\":7.4,\"runtime_minutes\":100,\"content_rating\":\"R\",\"poster_path\":\"/3pyE6ZqDbuJi7zrNzzQzcKTWdmN.jpg\",\"backdrop_path\":\"/a53EGF0NzHRGKuRItsrtXBM8FCD.jpg\",\"added_at\":\"2026-04-29T22:44:04.923303Z\",\"updated_at\":\"2026-04-29T22:44:06.140531Z\",\"genres\":[\"Comedy\",\"Fantasy\",\"Horror\",\"Science Fiction\"],\"has_4k\":true,\"file_path\":\"\"},{\"id\":8167,\"library_id\":1,\"type\":\"movie\",\"title\":\"Forbidden Fruits\",\"sort_title\":\"Forbidden Fruits\",\"year\":2026,\"overview\":\"Free Eden employee Apple secretly runs a witchy femme cult in the basement of the mall store after hours - with fellow fruits Cherry and Fig. But when new hire Pumpkin challenges their performative sisterhood, the women are forced to face their own poisons or succumb to a bloody fate.\",\"rating\":6.8,\"runtime_minutes\":104,\"content_rating\":\"R\",\"poster_path\":\"/t3hvrrrqvRoURz4y1A1aCys6WD9.jpg\",\"backdrop_path\":\"/6xEdQND18WFuKeRNwfzMfKHoK5N.jpg\",\"added_at\":\"2026-04-29T04:09:03.175997Z\",\"updated_at\":\"2026-04-29T04:09:04.05973Z\",\"genres\":[\"Comedy\",\"Horror\"],\"file_path\":\"\"},{\"id\":8166,\"library_id\":1,\"type\":\"movie\",\"title\":\"They Will Kill You\",\"sort_title\":\"They Will Kill"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 903003484
+        }
+      },
+      "message": " You\",\"year\":2026,\"overview\":\"A woman answers a help wanted ad to be a housekeeper in a mysterious New York City high-rise, unaware that she is entering a community that has seen a number of disappearances over the years and may be under the grip of a Satanic cult.\",\"rating\":6.4,\"runtime_minutes\":94,\"content_rating\":\"R\",\"poster_path\":\"/6oI4oQKTWMVUlr8Ivqydp28Ruu6.jpg\",\"backdrop_path\":\"/qnTdOizsXBzYu3uIbfhHSfE29TE.jpg\",\"added_at\":\"2026-04-28T10:09:24.353577Z\",\"updated_at\":\"2026-04-28T10:09:25.005149Z\",\"genres\":[\"Action\",\"Comedy\",\"Horror\"],\"file_path\":\"\"},{\"id\":8165,\"library_id\":1,\"type\":\"movie\",\"title\":\"Hoppers\",\"sort_title\":\"Hoppers\",\"year\":2026,\"overview\":\"Scientists have discovered how to \u0027hop\u0027 human consciousness into lifelike robotic animals, allowing people to communicate with animals as animals. Animal lover Mabel seizes an opportunity to use the technology, uncovering mysteries within the animal world beyond anything she could have imagined.\",\"rating\":7.6,\"runtime_minutes\":105,\"content_rating\":\"PG\",\"poster_path\":\"/xjtWQ2CL1mpmMNwuU5HeS4Iuwuu.jpg\",\"backdrop_path\":\"/u53UYu5XG2hNgWGvs3xGhAVzypl.jpg\",\"added_at\":\"2026-04-28T10:09:06.052912Z\",\"updated_at\":\"2026-04-28T10:09:06.829643Z\",\"genres\":[\"Adventure\",\"Animation\",\"Comedy\",\"Family\",\"Science Fiction\"],\"file_path\":\"\"},{\"id\":8164,\"library_id\":1,\"type\":\"movie\",\"title\":\"Slanted\",\"sort_title\":\"Slanted\",\"year\":2026,\"overview\":\"An insecure Chinese-American teenager undergoes experimental surgery to appear white, hoping to secure the prom queen title and peer acceptance.\",\"rating\":6.5,\"runtime_minutes\":102,\"content_rating\":\"R\",\"poster_path\":\"/cr2SfN854IlEoZQBtIfpyC0zXR5.jpg\",\"backdrop_path\":\"/35coF6nTlCHZoBdmH7AJX47RwY9.jpg\",\"added_at\":\"2026-04-27T22:09:16.085202Z\",\"updated_at\":\"2026-04-27T22:09:16.987919Z\",\"genres\":[\"Comedy\",\"Horror\",\"Science Fiction\"],\"file_path\":\"\"},{\"id\":8161,\"library_id\":1,\"type\":\"movie\",\"title\":\"60 Dates in 6 Months\",\"sort_title\":\"60 Dates in 6 Months ()\",\"year\":2026,\"overview\":\"A widowed woman in her 50s, recovering from a neck injury, sets out to go on 60 dates in six months-facing bad matches, worse advice, and unexpected healing in her hilariously messy comeback to modern love.\",\"rating\":5,\"runtime_minutes\":94,\"poster_path\":\"/tbi8zwZjGh9CxT6R15xWEjvhxKP.jpg\",\"backdrop_path\":\"/3XPFa7nbpqumbkFAp6vE4ycMyRH.jpg\",\"added_at\":\"2026-04-25T22:08:55.03182Z\",\"updated_at\":\"2026-04-25T22:09:01.689217Z\",\"genres\":[\"Comedy\",\"Romance\"],\"file_path\":\"\"},{\"id\":8146,\"library_id\":1,\"type\":\"movie\",\"title\":\"Bibleman: Jesus Our Savior\",\"sort_title\":\"Bibleman Jesus Our Savior\",\"year\":2002,\"overview\":\"In this combined feature of Jesus, Our Savior Parts 1 and 2, we are introduced to the most sinister, most evil villain, Primordious Drool. Drool knows he cannot win against Bibleman on is own and has a plan to fight our favorite superhero. He intends to make Bibleman fight against himself. Drool drives the citizens of Andersonville to trust in Bibleman instead of God. Bibleman faces is toughest challenge ever as he has to explain to the townspeople that they cannot look to him as a superhero to save them. They must look to God, for only God can answer their prayers.\",\"rating\":10,\"runtime_minutes\":75,\"content_rating\":\"PG\",\"poster_path\":\"/qNDdFHeRySSxdGPckD719lAkgmD.jpg\",\"backdrop_path\":\"/wwonZYonQVLnJSbk3ls9t6lkazl.jpg\",\"added_at\":\"2026-04-19T01:59:08.70292Z\",\"updated_at\":\"2026-04-19T18:04:14.349162Z\",\"genres\":[\"Adventure\",\"Comedy\"],\"file_path\":\"\"},{\"id\":8140,\"library_id\":1,\"type\":\"movie\",\"title\":\"Cocaine Bear\",\"sort_title\":\"Cocaine Bear\",\"year\":2023,\"overview\":\"Inspired by a true story, an oddball group of cops, criminals, tourists and teens converge in a Georgia forest where a 500-pound black bear goes on a murderous rampage after unintentionally ingesting cocaine.\",\"rating\":6,\"runtime_minutes\":95,\"content_rating\":\"R\",\"poster_path\":\"/gOnmaxHo0412UVr1QM5Nekv1xPi.jpg\",\"backdrop_path\":\"/a2tys4sD7xzVaogPntGsT1ypVoT.jpg\",\"added_at\":\"2026-04-18T23:40:21.594036Z\",\"updated_at\":\"2026-04-18T2"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 903040276
+        }
+      },
+      "message": "3:40:22.322773Z\",\"genres\":[\"Comedy\",\"Crime\",\"Thriller\"],\"file_path\":\"\"},{\"id\":6029,\"library_id\":1,\"type\":\"movie\",\"title\":\"Charlie the Wonderdog\",\"sort_title\":\"Charlie the Wonderdog\",\"year\":2025,\"overview\":\"Timid 9-year-old Danny teams up with his beloved family dog Charlie, who gets abducted by aliens and returns with superpowers, to thwart a plan by the neighbor\u0027s sinister cat Puddy to destroy humanity.\",\"rating\":6.2,\"runtime_minutes\":92,\"content_rating\":\"PG\",\"poster_path\":\"/whvkL0wzxgKmVbaPontq9NlVd5z.jpg\",\"backdrop_path\":\"/2skPNvhiF3B0pUigNm1L5KLWvrk.jpg\",\"added_at\":\"2026-04-18T16:49:50.768389Z\",\"updated_at\":\"2026-04-18T16:49:59.865409Z\",\"genres\":[\"Action\",\"Adventure\",\"Animation\",\"Comedy\",\"Family\"],\"file_path\":\"\"},{\"id\":5549,\"library_id\":1,\"type\":\"movie\",\"title\":\"Roommates\",\"sort_title\":\"Roommates\",\"year\":2026,\"overview\":\"When college freshman Devon asks cool, confident Celeste to be her roommate, a blossoming friendship quickly spirals into a war of passive aggression.\",\"rating\":6,\"content_rating\":\"R\",\"poster_path\":\"/eW1s6omXIfVkTlmKVe9y9Dwwt4u.jpg\",\"backdrop_path\":\"/uw9tk5NfyvQm9lX35dxsQh15NSL.jpg\",\"added_at\":\"2026-04-17T22:09:53.653282Z\",\"updated_at\":\"2026-04-18T16:59:21.371747Z\",\"genres\":[\"Comedy\"],\"file_path\":\"\"},{\"id\":4266,\"library_id\":1,\"type\":\"movie\",\"title\":\"Outcome\",\"sort_title\":\"Outcome\",\"year\":2026,\"overview\":\"Reef Hawk, Hollywood\u0027s poster child since age six, is not okay. When he learns about an extortion plot tied to a mysterious video, Reef preemptively sets out on a redemption tour to make amends, confront his demons, and avoid getting canceled.\",\"rating\":5.4,\"runtime_minutes\":84,\"content_rating\":\"R\",\"poster_path\":\"/kSzcpfbTy2pXHGvrVU2WhQTo6oU.jpg\",\"backdrop_path\":\"/avwIERZtWiWa34qShf5biDzAVaF.jpg\",\"added_at\":\"2026-04-17T03:00:57.018278Z\",\"updated_at\":\"2026-04-18T16:57:59.90239Z\",\"genres\":[\"Comedy\",\"Drama\"],\"file_path\":\"\"},{\"id\":3976,\"library_id\":1,\"type\":\"movie\",\"title\":\"Jumanji: The Next Level\",\"sort_title\":\"Jumanji The Next Level\",\"year\":2019,\"overview\":\"As the gang return to Jumanji to rescue one of their own, they discover that nothing is as they expect. The players will have to brave parts unknown and unexplored in order to escape the world’s most dangerous game.\",\"rating\":6.9,\"runtime_minutes\":123,\"content_rating\":\"PG-13\",\"poster_path\":\"/jyw8VKYEiM1UDzPB7NsisUgBeJ8.jpg\",\"backdrop_path\":\"/qgch2rFskIxDMgwrD5lWTaB4nBl.jpg\",\"added_at\":\"2026-04-17T02:58:07.488476Z\",\"updated_at\":\"2026-04-25T16:05:05.452033Z\",\"genres\":[\"Adventure\",\"Comedy\",\"Fantasy\"],\"file_path\":\"\"},{\"id\":3274,\"library_id\":1,\"type\":\"movie\",\"title\":\"Balls Up\",\"sort_title\":\"Balls Up\",\"year\":2026,\"overview\":\"Two marketing executives go \\\"balls out\\\" and pitch a bold full‑coverage condom sponsorship with the World Cup. After their drunken celebration in Brazil sparks a global scandal, they must outrun furious fans, criminals, and power-hungry officials to salvage their careers and make it home alive.\",\"rating\":5.4,\"runtime_minutes\":104,\"content_rating\":\"R\",\"poster_path\":\"/xwvJ3WzdJ1OCuDoY8LAxBUlQyig.jpg\",\"backdrop_path\":\"/jRsjWwZzI39bTm44FNhRtiICd9k.jpg\",\"added_at\":\"2026-04-17T02:51:28.79129Z\",\"updated_at\":\"2026-04-18T16:48:30.495845Z\",\"genres\":[\"Action\",\"Adventure\",\"Comedy\"],\"file_path\":\"\"},{\"id\":2333,\"library_id\":1,\"type\":\"movie\",\"title\":\"Zootopia\",\"sort_title\":\"Zootopia\",\"year\":2016,\"overview\":\"Determined to prove herself, Officer Judy Hopps, the first bunny on Zootopia\u0027s police force, jumps at the chance to crack her first case - even if it means partnering with scam-artist fox Nick Wilde to solve the mystery.\",\"rating\":7.8,\"runtime_minutes\":109,\"content_rating\":\"PG\",\"poster_path\":\"/hlK0e0wAQ3VLuJcsfIYPvb4JVud.jpg\",\"backdrop_path\":\"/9tOkjBEiiGcaClgJFtwocStZvIT.jpg\",\"added_at\":\"2026-04-08T03:56:37.54852Z\",\"updated_at\":\"2026-04-18T17:07:51.941586Z\",\"genres\":[\"Adventure\",\"Animation\",\"Comedy\",\"Family\"],\"file_path\":\"\"},{\"id\":2332,\"library_id\":1,\"type\":\"movie\",\"title\":\"Zoolander 2\",\"sort_title\":\"Zoolander 2\",\"year\":2016,\"overview\":\"Derek and Hanse"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 903058151
+        }
+      },
+      "message": "l are modelling again when an opposing company attempts to take them out from the business.\",\"rating\":4.9,\"runtime_minutes\":100,\"content_rating\":\"PG-13\",\"poster_path\":\"/n8AJzALlTPBwe9Tkv3tdxbiAr9i.jpg\",\"backdrop_path\":\"/4ANhwN1jr5EGwHS0M13AH5Fs3NH.jpg\",\"added_at\":\"2026-04-08T03:56:37.519827Z\",\"updated_at\":\"2026-04-18T17:07:51.728089Z\",\"genres\":[\"Action\",\"Adventure\",\"Comedy\"],\"file_path\":\"\"},{\"id\":2331,\"library_id\":1,\"type\":\"movie\",\"title\":\"Zoolander\",\"sort_title\":\"Zoolander\",\"year\":2001,\"overview\":\"Clear the runway for Derek Zoolander, VH1\u0027s three-time male model of the year. His face falls when hippie-chic Hansel scooters in to steal this year\u0027s award. The evil fashion guru Mugatu seizes the opportunity to turn Derek into a killing machine. It\u0027s a well-designed conspiracy and only with the help of Hansel and a few well-chosen accessories like Matilda can Derek make the world safe for male models everywhere.\",\"rating\":6.2,\"runtime_minutes\":89,\"content_rating\":\"PG-13\",\"poster_path\":\"/qdrbSneHZjJG2Dj0hhBxzzAo4HB.jpg\",\"backdrop_path\":\"/lIyyiBOuyokL82rPEDcZaMKleA3.jpg\",\"added_at\":\"2026-04-08T03:56:37.519695Z\",\"updated_at\":\"2026-04-18T17:07:51.644782Z\",\"genres\":[\"Comedy\"],\"file_path\":\"\"},{\"id\":2330,\"library_id\":1,\"type\":\"movie\",\"title\":\"Zookeeper\",\"sort_title\":\"Zookeeper\",\"year\":2011,\"overview\":\"Kindhearted Griffin Keyes is one of the best-loved caretakers at the Franklin Park Zoo, but he\u0027s more comfortable with the animals than with females of his own species as proven by his failed marriage proposal to the self-absorbed Stephanie several years ago. The animals have listened to Griffin pine over her for years and, after she reappears in his life, they decide to help Griffin rekindle the relationship and become the alpha male she wants him to be. They inadvertently reveal their secret ability to talk and, after Griffin\u0027s initial shock, teach him the rules of courtship, animal-style. Surprisingly, the animals\u0027 advice really works and Griffin is about to get everything he\u0027s ever dreamed of--or is he?\",\"rating\":5.4,\"runtime_minutes\":102,\"content_rating\":\"PG\",\"poster_path\":\"/y3b4AYw8dr4hIKTfEAjxUxx0z8G.jpg\",\"backdrop_path\":\"/rzTw6K1TbmF8qCUHWFrGhgXkBp5.jpg\",\"added_at\":\"2026-04-08T03:56:37.32553Z\",\"updated_at\":\"2026-04-18T17:07:51.462475Z\",\"genres\":[\"Comedy\",\"Family\",\"Romance\"],\"file_path\":\"\"}],\"page\":1,\"per_page\":20,\"total_items\":893,\"total_pages\":45}"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 8759,
+        "tid": 8862,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "okhttp.OkHttpClient",
+        "timestamp": {
+          "seconds": 1777840394,
+          "nanos": 903099943
+        }
+      },
+      "message": "\u003c-- END HTTP (14395-byte body)"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8871,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 214753401
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8874,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 216548151
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8847,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 216893318
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 217161610
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 240063818
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840395,
+          "nanos": 418553860
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8847,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840396,
+          "nanos": 426906610
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8874,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840396,
+          "nanos": 483241193
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8848,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840396,
+          "nanos": 484249485
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 8759,
+        "tid": 8878,
+        "applicationId": "io.aurora.tv.debug",
+        "processName": "io.aurora.tv.debug",
+        "tag": "HWUI",
+        "timestamp": {
+          "seconds": 1777840396,
+          "nanos": 547937610
+        }
+      },
+      "message": "Image decoding logging dropped!"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 767,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "ActivityManager",
+        "timestamp": {
+          "seconds": 1777840397,
+          "nanos": 348796402
+        }
+      },
+      "message": "freezing 1671 com.google.android.gms"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 767,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "ActivityManager",
+        "timestamp": {
+          "seconds": 1777840397,
+          "nanos": 350159194
+        }
+      },
+      "message": "freezing 2411 com.google.android.adservices.api"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840397,
+          "nanos": 373248069
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840397,
+          "nanos": 373401861
+        }
+      },
+      "message": "Destroyed 0 sockets, proto\u003dIPPROTO_TCP, family\u003dAF_INET6, states\u003d14"
+    },
+    {
+      "header": {
+        "logLevel": "DEBUG",
+        "pid": 659,
+        "tid": 1001,
+        "applicationId": "system_server",
+        "processName": "system_server",
+        "tag": "InetDiagMessage",
+        "timestamp": {
+          "seconds": 1777840397,
+          "nanos": 373418152
+        }
+      },
+      "message": "Destroyed live tcp sockets for uids\u003d{10092} in 1ms"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840402,
+          "nanos": 744345071
+        }
+      },
+      "message": "[0503/163322.744086:INFO:grpc_manager_impl.cc(881)] GRPC[uri\u003dlocalhost:10042]: num_pending_calls\u003d0, num_active_handlers\u003d1, num_free_handlers\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840402,
+          "nanos": 744654780
+        }
+      },
+      "message": "[0503/163322.744647:INFO:grpc_manager_impl.cc(881)] GRPC[uri\u003dlocalhost:10042]: num_pending_calls\u003d0, num_active_handlers\u003d1, num_free_handlers\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840402,
+          "nanos": 744701113
+        }
+      },
+      "message": "[0503/163322.744677:INFO:grpc_manager_impl.cc(881)] GRPC[uri\u003d]: num_pending_calls\u003d0, num_active_handlers\u003d0, num_free_handlers\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840402,
+          "nanos": 744736071
+        }
+      },
+      "message": "[0503/163322.744716:INFO:grpc_manager_impl.cc(881)] GRPC[uri\u003d]: num_pending_calls\u003d0, num_active_handlers\u003d0, num_free_handlers\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840402,
+          "nanos": 781183780
+        }
+      },
+      "message": "[0503/163322.781158:INFO:grpc_manager_impl.cc(881)] GRPC[uri\u003d[::]:0]: num_pending_calls\u003d0, num_active_handlers\u003d4, num_free_handlers\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840403,
+          "nanos": 592875697
+        }
+      },
+      "message": "[0503/163323.592791:INFO:service_base.h(78)] Size of the map for type AuthTokenResponse is 0"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840403,
+          "nanos": 593065405
+        }
+      },
+      "message": "[0503/163323.593013:INFO:service_base.h(246)] Container sizes for type CloudSetting are (session_info_map: 0), (topic_info_map: 21), (pending_events: 0)."
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2635,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_shell",
+        "timestamp": {
+          "seconds": 1777840403,
+          "nanos": 777988614
+        }
+      },
+      "message": "[0503/163323.777900:INFO:metrics_stat_logger.cc(38)] Metrics stat for the past 60 secs : total\u003d0"
+    },
+    {
+      "header": {
+        "logLevel": "WARN",
+        "pid": 5550,
+        "tid": 5679,
+        "applicationId": "com.google.android.katniss:interactor",
+        "processName": "com.google.android.katniss:interactor",
+        "tag": "native",
+        "timestamp": {
+          "seconds": 1777840407,
+          "nanos": 98835324
+        }
+      },
+      "message": "W0000 00:00:1777840407.098731    5679 publisher.cc:35] [FTL] No subscribers for event \"assistant.api.events.MetricEvent\" from publisher \"UmaMetricsForwarder\""
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2901,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_ClientAuthCredsProvisioning",
+        "timestamp": {
+          "seconds": 1777840408,
+          "nanos": 104656991
+        }
+      },
+      "message": "Loading factory credentials for 1P device."
+    },
+    {
+      "header": {
+        "logLevel": "ERROR",
+        "pid": 2635,
+        "tid": 2901,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "ActivityThread",
+        "timestamp": {
+          "seconds": 1777840408,
+          "nanos": 108158949
+        }
+      },
+      "message": "Failed to find provider info for com.google.android.tvsetup.app.machine.services.castsetup.castsetupinfo.CastInfoProvider"
+    },
+    {
+      "header": {
+        "logLevel": "ERROR",
+        "pid": 2635,
+        "tid": 2901,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_ClientAuthCredsFactoryProvisioned",
+        "timestamp": {
+          "seconds": 1777840408,
+          "nanos": 108276366
+        }
+      },
+      "message": "Cannot get device credentials"
+    },
+    {
+      "header": {
+        "logLevel": "INFO",
+        "pid": 2635,
+        "tid": 2901,
+        "applicationId": "com.google.android.apps.mediashell",
+        "processName": "com.google.android.apps.mediashell",
+        "tag": "cast_ClientAuthCredsProvisioning",
+        "timestamp": {
+          "seconds": 1777840408,
+          "nanos": 108288157
+        }
+      },
+      "message": "Retry loading factory credentials"
+    }
+  ]
+}

@@ -1,0 +1,910 @@
+// Package recommender produces a personalized "hero pool" — the rotating
+// featured items at the top of the home view — by blending each profile's
+// taste vector with optional LLM-written one-line reasons.
+//
+// The pipeline (per profile, cached for 24h on success):
+//
+//	taste vector ──► nearest-unwatched (DB) ──► candidates (10–20)
+//	                                              │
+//	                                              ▼
+//	                                      LLM rerank + blurb
+//	                                              │
+//	                                              ▼
+//	                                      hero pool (top 5)
+//
+// On insufficient watch history we skip the vector and serve a "popular
+// unwatched" pool with no blurbs. On LLM failure we keep the vector-ordered
+// candidates and skip blurbs. Either way the user sees a hero.
+//
+// Cache TTLs vary by quality: a fully-reranked pool is cached 24h; a
+// fallback pool (no LLM, no anchors) is cached only 30m so we retry sooner.
+package recommender
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/llm"
+	"github.com/aurora-media/aurora/internal/llmjson"
+	"github.com/aurora-media/aurora/internal/models"
+	"golang.org/x/sync/singleflight"
+)
+
+// poolQuality reflects how good a pool is, which drives its cache TTL.
+type poolQuality int
+
+const (
+	qualityFallback poolQuality = iota // vector order, no blurbs (LLM unavailable / no anchors)
+	qualityFinal                       // LLM-reranked with reasons
+)
+
+const (
+	cacheTTLFallback = 30 * time.Minute
+	cacheTTLFinal    = 24 * time.Hour
+	// heroRerankBudget caps the LLM rerank wall-clock. Originally 30s on the
+	// theory that hero's small prompt (~12 items) would land in 4–10s and
+	// 30s left margin. Production logs disproved that assumption — under
+	// concurrent load on a shared LLM provider (hero + discover + rail
+	// reasons firing simultaneously on home load), the hero call routinely
+	// pegged the 30s ceiling while discover and rail reasons completed
+	// at 21s and 38s respectively. The variance is provider-side queueing,
+	// not prompt-size-driven, so the right ceiling matches the rail
+	// reasons / search rerank budget at 45s. The /api/me route timeout
+	// is 90s, which keeps comfortable headroom for vector build + anchor
+	// fetch + annotation around this LLM call.
+	heroRerankBudget = 45 * time.Second
+
+	// mmrLambda is the relevance-vs-diversity knob for the rail.
+	//   1.0 = pure relevance (no diversification, same as plain kNN order)
+	//   0.0 = pure diversity (most distant items win)
+	// 0.7 keeps the rail mostly relevance-driven but breaks up "5 near-
+	// duplicates in a row" clusters (different seasons of the same show,
+	// sibling films from a franchise). Tunable — A/B by setting via env
+	// if we ever want to evaluate other points on the curve.
+	mmrLambda = 0.7
+
+	// anchorPoolSize is how many recent watched items we consider when
+	// attaching a "Because you watched X" caption. 10 is enough to cover
+	// the items that pulled the centroid (BuildProfileVector uses top 20,
+	// but the top 10 dominate signal-wise) without over-paying for embedding
+	// fetches that probably won't beat the top few on cosine similarity.
+	anchorPoolSize = 10
+)
+
+// HeroPick is one slot in the personalized hero pool. Item is a *snapshot*
+// — the caller MUST treat it as immutable. The recommender's 24h cache holds
+// HeroPick values, so mutating Item.Genres or Item.Has4K post-build would
+// race with concurrent reads AND leak across profiles (the same media item
+// shows up in multiple users' hero pools).
+//
+// To annotate a hero pool with per-request fields (e.g. Has4K freshness),
+// build a parallel view DTO in the API layer rather than touching Item.
+type HeroPick struct {
+	Item   *models.MediaItem `json:"item"`
+	Reason string            `json:"reason,omitempty"`
+}
+
+// Hero is the per-profile recommender. Construct once at startup and reuse;
+// the in-process cache is keyed per profile so concurrent calls are safe.
+//
+// Two cache surfaces:
+//   - cache + buildGroup: hero POOL (top-of-home 5-item rotator, 24h TTL,
+//     LLM-reranked with reasons)
+//   - discoverCache + discoverGroup: DISCOVER rails (LLM-curated themed
+//     sections, 24h TTL, much bigger LLM payload)
+//
+// Invalidate() clears both so a watch-progress-driven invalidation
+// refreshes everything at once.
+type Hero struct {
+	q             *db.Queries
+	llm           *llm.Client
+	cache         sync.Map // key: profileID (int64), val: cacheEntry
+	candidatePool int
+	poolSize      int
+	// buildGroup deduplicates concurrent build() calls for the same profile.
+	// Without it, a cache expiry plus N parallel requests for the same
+	// profile produced N parallel LLM rerank calls — wasted Ollama budget
+	// at best, Cloud-model 500s at worst. With singleflight, the first
+	// caller does the work and the rest receive the same result.
+	buildGroup singleflight.Group
+	// Discover-specific cache + singleflight. Separate from `cache` so a
+	// hero-pool refresh doesn't blow away the Discover rails (and vice
+	// versa) — they're independently expensive to rebuild.
+	discoverCache sync.Map // key: profileID (int64), val: discoverCacheEntry
+	discoverGroup singleflight.Group
+	// Phase 4: per-(profile, item) LLM-generated reason cache for the
+	// flat rail. Keyed by railReasonKey; values are railReasonEntry.
+	// Populated by a single inflight background goroutine per profile —
+	// see rail_reasons.go for the async-fill pattern.
+	reasonCache    sync.Map
+	reasonInflight sync.Map // key: profileID (int64), val: struct{} — single-flight marker
+	// invalEpoch holds a per-profile *atomic.Int64 bumped on each
+	// Invalidate. Builds capture the epoch at start and check it before
+	// writing to cache/discoverCache. Without this check there's a
+	// TOCTOU window where:
+	//   t=0 build() running for profile P inside buildGroup.Do
+	//   t=1 Invalidate(P) → cache.Delete(P)
+	//   t=2 build() finishes → cache.Store(P, stale pool)
+	// The stale pool would then live for the full 24h TTL. The epoch
+	// check makes the Store conditional on "no Invalidate happened
+	// since I started" — if there has been, we drop the result on the
+	// floor and the next request triggers a fresh build. Same gen-
+	// counter shape as the modal-system fix shipped earlier.
+	invalEpoch sync.Map // key: profileID (int64), val: *atomic.Int64
+}
+
+// New constructs a Hero recommender. Pass nil for llmClient to disable blurb
+// generation — the recommender will still personalize via the taste vector.
+func New(q *db.Queries, llmClient *llm.Client) *Hero {
+	return &Hero{
+		q:             q,
+		llm:           llmClient,
+		candidatePool: 12,
+		poolSize:      5,
+	}
+}
+
+// PoolFor returns the hero pool for a profile, using the cache when fresh.
+// Cache TTL depends on pool quality (see poolQuality).
+//
+// Build deduplication: when the cache is cold for profile P and N parallel
+// requests arrive, only the first caller actually runs build(). The rest
+// block on singleflight and receive the same result. This prevents a
+// stampede on cache expiry (or `?refresh=1` rapid-click) from multiplying
+// LLM round-trips.
+func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error) {
+	if cached, ok := h.cache.Load(profileID); ok {
+		e := cached.(cacheEntry)
+		ttl := cacheTTLFinal
+		if e.quality == qualityFallback {
+			ttl = cacheTTLFallback
+		}
+		if time.Since(e.builtAt) < ttl {
+			return e.picks, nil
+		}
+	}
+
+	// singleflight key is the profile ID; concurrent calls collapse to one.
+	key := strconv.FormatInt(profileID, 10)
+	// Capture the epoch BEFORE entering the singleflight. If Invalidate
+	// fires between now and when we Store the result, the epoch will
+	// have advanced and we'll skip the Store — preventing a stale build
+	// from resurrecting cache contents the user just asked to refresh.
+	startEpoch := h.epochFor(profileID).Load()
+	result, err, _ := h.buildGroup.Do(key, func() (any, error) {
+		// Inside the singleflight, re-check the cache: the first caller
+		// may have just populated it and a second waiter shouldn't re-build.
+		if cached, ok := h.cache.Load(profileID); ok {
+			e := cached.(cacheEntry)
+			ttl := cacheTTLFinal
+			if e.quality == qualityFallback {
+				ttl = cacheTTLFallback
+			}
+			if time.Since(e.builtAt) < ttl {
+				return e.picks, nil
+			}
+		}
+		picks, quality, err := h.build(ctx, profileID)
+		if err != nil {
+			return nil, err
+		}
+		// Only Store if no Invalidate happened during the build. The
+		// caller still gets the freshly-built picks (it's not wrong
+		// data — it's just data that Invalidate told us to drop on the
+		// floor going forward). The next request will trigger a clean
+		// rebuild from a now-cleared cache.
+		if len(picks) > 0 && h.epochFor(profileID).Load() == startEpoch {
+			h.cache.Store(profileID, cacheEntry{
+				picks:   picks,
+				builtAt: time.Now(),
+				quality: quality,
+			})
+		}
+		return picks, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.([]HeroPick), nil
+}
+
+// RailFor returns a longer list of personalized picks suitable for a
+// "More like what you watched" rail under the hero. No LLM, no cache —
+// pure vector retrieval, so a freshly-watched item disappears immediately.
+//
+// Pipeline (Phase 1 evolution):
+//  1. Build taste centroid from the top-20-by-recency slice via
+//     BuildProfileVector. See its doc for why this is unweighted-over-a-
+//     recency-cut rather than a smooth EXP-weighted average (pgvector
+//     version constraints on the deployed install).
+//  2. Vector recall: fetch ~1.5x the requested limit, with embeddings, so
+//     we have headroom for diversification.
+//  3. MMR diversify: re-rank to balance similarity-to-centroid against
+//     similarity-to-already-picked. Without this, a rail can stack five
+//     near-duplicates (different cuts of the same series, sibling films).
+//  4. Anchor match: for each surviving item, find which of the user's
+//     recent watched items pulled it in. Surfaces as "Because you watched X".
+//  5. Annotate (Genres + Has4K) + shallow-copy guard.
+//
+// Cold start (no embedded history) falls back to PopularUnwatched, which
+// skips MMR/anchor steps (no anchors to match against). Annotation still
+// runs so badges render.
+func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*models.MediaItem, error) {
+	if limit <= 0 {
+		limit = 24
+	}
+
+	var items []*models.MediaItem
+	vec, err := h.q.BuildProfileVector(ctx, profileID)
+	if err == nil {
+		// Overfetch by 50% so MMR has room to diversify. Past ~2x the
+		// payload cost outweighs the quality gain — items get less
+		// relevant as we go further down the kNN tail.
+		poolSize := (limit * 3) / 2
+		if poolSize < limit {
+			poolSize = limit
+		}
+		cands, fetchErr := h.q.NearestUnwatchedRich(ctx, profileID, vec, poolSize)
+		if fetchErr != nil {
+			slog.Warn("rail: nearest-unwatched-rich failed, falling back to popular",
+				"profile", profileID, "error", fetchErr)
+		} else if len(cands) > 0 {
+			queryVec, perr := llm.ParseVector(vec)
+			if perr != nil {
+				// Centroid unparseable — should never happen, but fall through
+				// to plain ordering instead of erroring the whole rail.
+				slog.Warn("rail: centroid parse failed, skipping MMR",
+					"profile", profileID, "error", perr)
+				items = candsToItems(cands, limit)
+			} else {
+				selected := mmrDiversify(cands, queryVec, mmrLambda, limit)
+				// Anchor match against recent watch history. Failure non-fatal:
+				// rail renders without "Because you watched X" captions.
+				anchors, aerr := h.q.RecentAnchorsWithEmbeddings(ctx, profileID, anchorPoolSize)
+				if aerr != nil {
+					slog.Warn("rail: anchor fetch failed", "error", aerr)
+				}
+				attachNearestAnchor(selected, anchors)
+				items = candsToItems(selected, limit)
+			}
+		}
+	} else if err != db.ErrInsufficientHistory {
+		slog.Warn("rail: profile vector failed, falling back to popular",
+			"profile", profileID, "error", err)
+	}
+
+	if len(items) == 0 {
+		popular, err := h.q.PopularUnwatched(ctx, profileID, limit)
+		if err != nil {
+			return nil, err
+		}
+		items = popular
+	}
+
+	h.annotateItems(ctx, items)
+
+	// Phase 4: attach any cached LLM reasons (per-profile, per-item) to
+	// the rail items. Items without a cached reason keep their existing
+	// NearestAnchor caption (set by attachNearestAnchor above) — the
+	// frontend's card-reason fallback chain renders one or the other.
+	//
+	// If reasons are missing for any items, kick off a single background
+	// goroutine per profile to generate them via the LLM. The fill runs
+	// detached from the request ctx so a slow LLM call doesn't block
+	// the rail response. Subsequent rail requests (after the fill
+	// completes) pick up the cached reasons and the captions become
+	// LLM-grounded rather than anchor-grounded.
+	h.attachCachedReasons(profileID, items)
+	h.maybeFillReasonsAsync(profileID, items)
+
+	return items, nil
+}
+
+// candsToItems unwraps RailCandidates to bare MediaItems, capping at `limit`.
+// Pure shape conversion — no annotation, no mutation. The annotation pass
+// runs separately so the same helper works for MMR-selected items and the
+// popular-fallback path that doesn't have RailCandidates.
+func candsToItems(cands []*db.RailCandidate, limit int) []*models.MediaItem {
+	if limit > len(cands) {
+		limit = len(cands)
+	}
+	out := make([]*models.MediaItem, limit)
+	for i := 0; i < limit; i++ {
+		out[i] = cands[i].Item
+	}
+	return out
+}
+
+// annotateItems fills Genres + Has4K on a bare MediaItem slice.
+//
+// IMPORTANT: items is replaced in place with shallow copies before
+// annotation. The DB queries we ride on (NearestUnwatched / PopularUnwatched)
+// fresh-allocate rows, BUT PopularUnwatched returns items shared across
+// profiles (no per-call dedup) — two parallel /api/me/recommendations
+// requests for different libraries could race on the same *MediaItem.
+// Copying defangs that completely at the cost of a few-dozen-row allocation.
+func (h *Hero) annotateItems(ctx context.Context, items []*models.MediaItem) {
+	if len(items) == 0 {
+		return
+	}
+	// Shallow-copy each pointer's target so mutations don't leak across
+	// concurrent callers. We swap the pointer in the input slice so the
+	// caller's view is the annotated copy, not the shared original.
+	for i, it := range items {
+		if it == nil {
+			continue
+		}
+		cp := *it
+		items[i] = &cp
+	}
+
+	ids := make([]int64, len(items))
+	for i, it := range items {
+		ids[i] = it.ID
+	}
+	if fourK, err := h.q.GetMediaItemsWith4KCrossLibrary(ctx, ids); err == nil {
+		for _, it := range items {
+			it.Has4K = fourK[it.ID]
+		}
+	} else {
+		slog.Warn("rail: 4K annotate failed", "error", err)
+	}
+	if genres, err := h.q.GetMediaGenresBatch(ctx, ids); err == nil {
+		for _, it := range items {
+			it.Genres = genres[it.ID]
+		}
+	} else {
+		slog.Warn("rail: genres annotate failed", "error", err)
+	}
+}
+
+// Invalidate clears the hero pool, Discover rails, the rail reason cache,
+// AND the in-flight-reason-fill marker for the given profile. Called from
+// the progress handler on watch completion so tomorrow's personalization
+// reflects the new taste without waiting for the 24h TTL on any surface.
+//
+// The reason cache is keyed by (profileID, itemID), so we walk it and
+// delete any entry matching this profile. Cost is O(N items the user has
+// reasons for) but only on watch-completion events, which are infrequent.
+//
+// The reasonInflight marker MUST also be cleared. Without this, a
+// fillReasonsBackground goroutine that was running when Invalidate fired
+// would write its (now-stale) reasons into the freshly-cleared reasonCache
+// — the next page load would see "fresh-looking" reasons computed against
+// pre-watch taste signal, persisting for up to 24h. Bug bash (May 14)
+// surfaced this race; the fix mirrors the modal-generation-counter
+// approach: any subsequent maybeFillReasonsAsync can claim the inflight
+// slot immediately rather than colliding with a stale-data writer.
+//
+// Note: AnchorRailsFor has NO cache (pure vector recall) so nothing to
+// clear there. Hero pool, Discover, and reason cache are the only three
+// caches in the recommender that hold per-profile state.
+func (h *Hero) Invalidate(profileID int64) {
+	// Bump the epoch FIRST so any in-flight build whose Store happens
+	// to interleave with our cache.Delete sees the new value and skips
+	// its write. The order matters: bump-then-delete means even the
+	// shortest "build finishes between bump and delete" race still has
+	// the build's pre-captured epoch mismatch the new value.
+	h.epochFor(profileID).Add(1)
+	h.cache.Delete(profileID)
+	h.discoverCache.Delete(profileID)
+	// Walk reasonCache and drop any entry for this profile. sync.Map's
+	// Range is safe for concurrent Delete during iteration.
+	h.reasonCache.Range(func(k, _ any) bool {
+		if rk, ok := k.(railReasonKey); ok && rk.profileID == profileID {
+			h.reasonCache.Delete(k)
+		}
+		return true
+	})
+	h.reasonInflight.Delete(profileID)
+}
+
+// epochFor returns the per-profile epoch counter, creating it on first
+// access. The returned *atomic.Int64 is safe for concurrent reads
+// (Load) and writes (Add, Store). All callers — builds AND
+// invalidations — go through this so they share the same backing value
+// for the same profileID.
+func (h *Hero) epochFor(profileID int64) *atomic.Int64 {
+	if v, ok := h.invalEpoch.Load(profileID); ok {
+		return v.(*atomic.Int64)
+	}
+	fresh := &atomic.Int64{}
+	actual, _ := h.invalEpoch.LoadOrStore(profileID, fresh)
+	return actual.(*atomic.Int64)
+}
+
+// build produces a fresh pool for a profile and reports its quality so the
+// caller can choose a cache TTL.
+//
+// Items are annotated with Genres + Has4K *here*, before the result is
+// cached. This makes the cached HeroPick snapshot fully self-contained —
+// callers must NOT mutate Item.Genres or Item.Has4K after build returns,
+// because the same pointer is served to every concurrent reader for up to
+// 24h and to multiple profiles (popular-pool items are shared).
+func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQuality, error) {
+	var picks []HeroPick
+	var quality poolQuality
+
+	// Tier 1: personalized via taste vector.
+	vec, err := h.q.BuildProfileVector(ctx, profileID)
+	if err == nil {
+		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.candidatePool)
+		if err != nil {
+			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
+				"profile", profileID, "error", err)
+		} else if len(candidates) > 0 {
+			picks, quality = h.rerankWithBlurbs(ctx, profileID, candidates)
+		}
+	} else if err != db.ErrInsufficientHistory {
+		slog.Warn("hero: profile vector failed, falling back to popular",
+			"profile", profileID, "error", err)
+	}
+
+	// Tier 2: cold-start popular pool, no blurbs.
+	if picks == nil {
+		popular, err := h.q.PopularUnwatched(ctx, profileID, h.poolSize*2)
+		if err != nil {
+			return nil, qualityFallback, fmt.Errorf("hero popular fallback: %w", err)
+		}
+		picks = make([]HeroPick, 0, h.poolSize)
+		for i, item := range popular {
+			if i >= h.poolSize {
+				break
+			}
+			picks = append(picks, HeroPick{Item: item})
+		}
+		quality = qualityFallback
+	}
+
+	h.annotatePicks(ctx, picks)
+	return picks, quality, nil
+}
+
+// annotatePicks fills Genres + Has4K on each pick's Item, in place, before
+// the result is cached. Failure is non-fatal: a card without Genres still
+// renders, just without the chip; without Has4K it shows the standard badge
+// set. Called from build() exactly once per pool — never from the API layer.
+func (h *Hero) annotatePicks(ctx context.Context, picks []HeroPick) {
+	if len(picks) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(picks))
+	for _, p := range picks {
+		if p.Item != nil {
+			ids = append(ids, p.Item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	if fourK, err := h.q.GetMediaItemsWith4KCrossLibrary(ctx, ids); err == nil {
+		for _, p := range picks {
+			if p.Item != nil {
+				p.Item.Has4K = fourK[p.Item.ID]
+			}
+		}
+	} else {
+		slog.Warn("hero: 4K annotate failed", "error", err)
+	}
+	if genres, err := h.q.GetMediaGenresBatch(ctx, ids); err == nil {
+		for _, p := range picks {
+			if p.Item != nil {
+				p.Item.Genres = genres[p.Item.ID]
+			}
+		}
+	} else {
+		slog.Warn("hero: genres annotate failed", "error", err)
+	}
+}
+
+// rerankWithBlurbs asks the LLM to pick the best 5 of N candidates given the
+// user's recent watch anchors. Returns the picks AND a quality grade so the
+// caller picks a cache TTL appropriate for fallback vs full pools.
+func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates []*models.MediaItem) ([]HeroPick, poolQuality) {
+	if h.llm == nil {
+		return topN(candidates, h.poolSize), qualityFallback
+	}
+
+	anchors, err := h.q.RecentTasteAnchors(ctx, profileID, 5)
+	if err != nil {
+		slog.Warn("hero: anchors lookup failed, skipping blurbs", "error", err)
+		return topN(candidates, h.poolSize), qualityFallback
+	}
+	if len(anchors) == 0 {
+		return topN(candidates, h.poolSize), qualityFallback
+	}
+
+	user := buildRerankPrompt(anchors, candidates)
+
+	llmCtx, cancel := context.WithTimeout(ctx, heroRerankBudget)
+	defer cancel()
+
+	raw, err := h.llm.ChatJSON(llmCtx, heroRerankSystem, user, heroRerankSchema)
+	if err != nil {
+		slog.Warn("hero: LLM rerank failed, returning vector order", "error", err)
+		return topN(candidates, h.poolSize), qualityFallback
+	}
+
+	parsedPicks, err := parseRerankResponse(raw)
+	if err != nil {
+		slog.Warn("hero: LLM output parse failed", "error", err, "raw", raw)
+		return topN(candidates, h.poolSize), qualityFallback
+	}
+
+	// Title-fallback lookup via the shared helper. Seeds bare Title +
+	// "Title (YEAR)" + their lowercase forms so a gemma3:12b "title-only"
+	// pick resolves back to a candidate index. See internal/llmjson/
+	// title_resolver.go for the consolidated implementation — same
+	// helper drives search/semantic.go and recommender/discover.go.
+	titleIdx := llmjson.BuildCandidateTitleIndex(candidates, func(c *models.MediaItem) (string, int) {
+		return c.Title, c.Year
+	})
+
+	picks := make([]HeroPick, 0, h.poolSize)
+	used := make(map[int]bool)
+	for _, p := range parsedPicks {
+		idx := p.Index - 1
+		// Title-fallback when the LLM dropped the index.
+		if (idx < 0 || idx >= len(candidates)) && p.Title != "" {
+			if i, ok := llmjson.ResolveByTitle(titleIdx, p.Title); ok {
+				idx = i
+			}
+		}
+		if idx < 0 || idx >= len(candidates) || used[idx] {
+			continue
+		}
+		used[idx] = true
+		picks = append(picks, HeroPick{
+			Item:   candidates[idx],
+			Reason: strings.TrimSpace(p.Reason),
+		})
+		if len(picks) >= h.poolSize {
+			break
+		}
+	}
+
+	// If the LLM returned fewer than poolSize, fill from the unused candidates
+	// in vector order so the hero is never short.
+	if len(picks) < h.poolSize {
+		for i, item := range candidates {
+			if used[i] {
+				continue
+			}
+			picks = append(picks, HeroPick{Item: item})
+			if len(picks) >= h.poolSize {
+				break
+			}
+		}
+	}
+	return picks, qualityFinal
+}
+
+func topN(items []*models.MediaItem, n int) []HeroPick {
+	if n > len(items) {
+		n = len(items)
+	}
+	out := make([]HeroPick, n)
+	for i := 0; i < n; i++ {
+		out[i] = HeroPick{Item: items[i]}
+	}
+	return out
+}
+
+const heroRerankSystem = `You curate a personalized "Featured" hero rail for a media server.
+
+You will receive:
+1. A short list of titles the user recently watched (their taste anchors).
+2. A numbered list of candidate titles (already pre-filtered by similarity to their taste).
+
+Your job: pick exactly 5 candidates that best match the user's taste, and write a one-sentence "reason" for each — grounded in a specific anchor when possible (e.g. "Because you finished Severance" or "Slow-burn sci-fi like your weekend pick"). Reasons must be ≤ 80 characters, no emojis, no quotes.
+
+Respond with ONLY the JSON object. No preamble.`
+
+var heroRerankSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"picks": map[string]any{
+			"type":     "array",
+			"minItems": 1,
+			"maxItems": 5,
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"index":  map[string]any{"type": "integer"},
+					"reason": map[string]any{"type": "string"},
+				},
+				"required": []string{"index", "reason"},
+			},
+		},
+	},
+	"required": []string{"picks"},
+}
+
+// heroArrayKeyAliases lists every wrapper key we've seen Cloud chat models
+// invent instead of "picks". Includes "selected" — gpt-oss:20b emits that
+// despite the schema saying "picks".
+var heroArrayKeyAliases = []string{
+	"picks", "featured", "selected", "selected_candidates",
+	"results", "selection", "recommendations", "items", "matches",
+}
+
+// heroRerankPick is one entry from the LLM's chosen results.
+//
+// Title is a fallback when the LLM emits picks WITHOUT an index/id field —
+// gemma3:12b does this consistently for the hero rail (returns
+// `{"title": "The Conjuring (2013)", "reason": "..."}`). Without title
+// capture, every pick gets dropped and the rail silently falls back to
+// vector order with no reasons. Same pattern as search rerank and discover
+// — captured here too so the hero behavior matches.
+type heroRerankPick struct {
+	Index  int
+	Reason string
+	Title  string
+}
+
+// parseRerankResponse decodes the hero rerank output. Tolerates the same
+// three shapes as the search rerank parser:
+//
+//  1. Bare top-level array
+//  2. Object wrapped under any known alias key (incl. "selected")
+//  3. Markdown-fenced JSON
+//
+// Within each pick, accepts "id" as a fallback for "index" — gpt-oss:20b
+// emits `{"id": 6, ...}` instead of the schema's `{"index": 6, ...}`.
+func parseRerankResponse(raw string) ([]heroRerankPick, error) {
+	rawArr, err := llmjson.ExtractArray(raw, heroArrayKeyAliases)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]heroRerankPick, 0, len(rawArr))
+	for _, item := range rawArr {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		// Try "index" then "id". If neither is present we KEEP the pick
+		// (with Index=0) provided it has a Title — the caller will
+		// title-match against the original candidate list. Previously we
+		// dropped these picks, which produced the "rail renders without
+		// reasons" symptom in production when gemma3:12b consistently
+		// emitted title-only picks. Same recovery strategy as search and
+		// discover parsers.
+		idx, hasIdx := llmjson.PickInt(obj, "index")
+		if !hasIdx {
+			idx, hasIdx = llmjson.PickInt(obj, "id")
+		}
+		title, _ := obj["title"].(string)
+		title = strings.TrimSpace(title)
+		if !hasIdx && title == "" {
+			continue
+		}
+		reason, _ := obj["reason"].(string)
+		out = append(out, heroRerankPick{
+			Index:  idx,
+			Reason: strings.TrimSpace(reason),
+			Title:  title,
+		})
+	}
+	return out, nil
+}
+
+func buildRerankPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem) string {
+	var b strings.Builder
+	b.WriteString("Recently watched:\n")
+	for _, a := range anchors {
+		fmt.Fprintf(&b, "- %s", sanitizePromptText(a.Title, 120))
+		if a.Year > 0 {
+			fmt.Fprintf(&b, " (%d)", a.Year)
+		}
+		fmt.Fprintf(&b, " [%s]\n", a.Type)
+	}
+	b.WriteString("\nCandidates:\n")
+	for i, c := range candidates {
+		fmt.Fprintf(&b, "%d. %s", i+1, sanitizePromptText(c.Title, 120))
+		if c.Year > 0 {
+			fmt.Fprintf(&b, " (%d)", c.Year)
+		}
+		fmt.Fprintf(&b, " [%s]", c.Type)
+		if c.Overview != "" {
+			fmt.Fprintf(&b, " — %s", sanitizePromptText(c.Overview, 200))
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// sanitizePromptText strips prompt-injection break-out characters and caps
+// length. Mirrors the search package helper; duplicated rather than
+// imported so the recommender doesn't depend on internal/search.
+func sanitizePromptText(s string, maxLen int) string {
+	r := strings.NewReplacer("\n", " ", "\r", " ", "```", "")
+	s = r.Replace(s)
+	if maxLen > 0 && len(s) > maxLen {
+		s = s[:maxLen] + "..."
+	}
+	return s
+}
+
+// --- rail diversification + anchor matching ---
+
+// mmrDiversify selects `k` items from `cands` using Maximal Marginal
+// Relevance: each pick maximizes `λ · sim(item, query) − (1−λ) · max_sim(item, picked)`.
+// Result is a re-ordered subset that balances relevance to the user's taste
+// centroid against diversity from items we've already chosen — so the rail
+// doesn't show five near-duplicates in a row.
+//
+// `cands` MUST be pre-sorted by similarity to the query (most similar first);
+// the first pick is taken from the top without recomputation. Each subsequent
+// pick is O(N·k) cosine ops over the remaining pool — fine at our sizes
+// (N≈36, k≈24 → ~864 cosines, sub-millisecond).
+//
+// Embeddings that fail to parse are silently dropped from consideration —
+// better to lose one item from the pool than to fail the whole rail. The
+// caller should observe `len(out) < k` and decide whether to top up.
+func mmrDiversify(cands []*db.RailCandidate, queryVec []float32, lambda float64, k int) []*db.RailCandidate {
+	if len(cands) <= k {
+		return cands
+	}
+
+	// Pre-parse embeddings once; cands without a parseable embedding are
+	// excluded from MMR (no way to score them) but kept in a fallback list
+	// in case we end up short of k.
+	type parsed struct {
+		cand *db.RailCandidate
+		vec  []float32
+		simQ float64
+	}
+	pool := make([]*parsed, 0, len(cands))
+	var fallback []*db.RailCandidate
+	for _, c := range cands {
+		v, err := llm.ParseVector(c.EmbeddingText)
+		// ParseVector errors on empty literal "[]" and other malformed
+		// inputs (see pgvector_test.go contract), so we only need to
+		// gate on err — len(v)==0 with err==nil is unreachable under
+		// the tightened contract.
+		if err != nil {
+			fallback = append(fallback, c)
+			continue
+		}
+		pool = append(pool, &parsed{
+			cand: c,
+			vec:  v,
+			simQ: cosineSimilarity(v, queryVec),
+		})
+	}
+
+	out := make([]*db.RailCandidate, 0, k)
+	if len(pool) == 0 {
+		// Everything failed to parse — return fallback as-is, capped.
+		if k > len(fallback) {
+			k = len(fallback)
+		}
+		return fallback[:k]
+	}
+
+	// First pick: most similar to query (highest simQ).
+	bestIdx := 0
+	for i, p := range pool {
+		if p.simQ > pool[bestIdx].simQ {
+			bestIdx = i
+		}
+	}
+	out = append(out, pool[bestIdx].cand)
+	pickedVecs := [][]float32{pool[bestIdx].vec}
+	pool = append(pool[:bestIdx], pool[bestIdx+1:]...)
+
+	// Subsequent picks: MMR scoring against already-picked.
+	for len(out) < k && len(pool) > 0 {
+		bestIdx = -1
+		bestScore := -math.MaxFloat64
+		for i, p := range pool {
+			var maxSim float64
+			for _, pv := range pickedVecs {
+				if s := cosineSimilarity(p.vec, pv); s > maxSim {
+					maxSim = s
+				}
+			}
+			score := lambda*p.simQ - (1.0-lambda)*maxSim
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+		if bestIdx < 0 {
+			break
+		}
+		out = append(out, pool[bestIdx].cand)
+		pickedVecs = append(pickedVecs, pool[bestIdx].vec)
+		pool = append(pool[:bestIdx], pool[bestIdx+1:]...)
+	}
+
+	// If MMR plus fallback can't reach k, return what we have. Caller will
+	// log if it cares; the rail still renders.
+	for len(out) < k && len(fallback) > 0 {
+		out = append(out, fallback[0])
+		fallback = fallback[1:]
+	}
+	return out
+}
+
+// attachNearestAnchor populates each candidate's MediaItem.NearestAnchor with
+// the recent watch that's closest to it (by cosine similarity in embedding
+// space). Failure to parse any individual embedding is silent — that item
+// just has no anchor caption rather than the whole rail breaking.
+//
+// Anchors with unparseable embeddings are pre-filtered once; per-candidate
+// the work is O(|anchors|) cosines. With anchorPoolSize=10 and limit=24
+// that's 240 cosines total, well under a millisecond.
+func attachNearestAnchor(cands []*db.RailCandidate, anchors []*db.WatchAnchor) {
+	if len(cands) == 0 || len(anchors) == 0 {
+		return
+	}
+	type parsedAnchor struct {
+		ref *models.AnchorRef
+		vec []float32
+	}
+	parsed := make([]parsedAnchor, 0, len(anchors))
+	for _, a := range anchors {
+		v, err := llm.ParseVector(a.EmbeddingText)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, parsedAnchor{
+			ref: &models.AnchorRef{Title: a.Title, Year: a.Year, Type: a.Type},
+			vec: v,
+		})
+	}
+	if len(parsed) == 0 {
+		return
+	}
+	for _, c := range cands {
+		cv, err := llm.ParseVector(c.EmbeddingText)
+		if err != nil {
+			continue
+		}
+		bestIdx := 0
+		bestSim := -math.MaxFloat64
+		for i, p := range parsed {
+			if s := cosineSimilarity(cv, p.vec); s > bestSim {
+				bestSim = s
+				bestIdx = i
+			}
+		}
+		// Shallow-copy the AnchorRef so two cands referencing the same
+		// anchor don't share a mutable struct downstream.
+		ref := *parsed[bestIdx].ref
+		c.Item.NearestAnchor = &ref
+	}
+}
+
+// cosineSimilarity returns the dot product of two same-length unit vectors,
+// which equals cosine similarity for L2-normalized inputs. Embeddings stored
+// in media_items.embedding are normalized at insert time (see
+// internal/llm/client.go `normalize`), so we can skip the renormalization.
+// Mismatched lengths return 0 — defensive against future model-dim changes.
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var sum float64
+	for i := range a {
+		sum += float64(a[i]) * float64(b[i])
+	}
+	return sum
+}
+
+// --- cache plumbing ---
+
+type cacheEntry struct {
+	picks   []HeroPick
+	builtAt time.Time
+	quality poolQuality
+}

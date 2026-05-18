@@ -1,0 +1,18 @@
+.git
+.claude
+.env
+*.md
+static/*.bak
+scripts/
+docs/
+**/*_test.go
+**/testdata/
+
+# M10 — keep Docker build context lean. node_modules is reinstalled
+# fresh inside the v2builder stage via `npm ci`, and committed
+# static/v2/ is overwritten by the v2builder's output before the Go
+# build stage uses it — so neither needs to ride along in the
+# context.
+**/node_modules
+static/redesign/app/dist
+static/v2

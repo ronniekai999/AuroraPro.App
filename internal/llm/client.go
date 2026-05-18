@@ -1,0 +1,432 @@
+// Package llm wraps a local Ollama runtime (or Ollama Cloud) for embedding
+// generation and natural-language chat. Splitting these concerns into one
+// package keeps the HTTP wiring, retry logic, and request shaping in a single
+// place — the rest of the codebase only sees Embed / EmbedBatch / ChatJSON.
+package llm
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"math"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+// maxLoggedBody caps the bytes we capture for debug logging. Some chat
+// responses (especially gpt-oss with thinking traces) can be tens of KB — we
+// don't want to OOM journald or blow up our slog handler. 8 MiB is generous
+// enough to capture everything we've seen in practice.
+const maxLoggedBody = 8 * 1024 * 1024
+
+// Config controls how the client talks to Ollama. All fields have sensible
+// defaults applied by NewClient when zero — callers only set what they want.
+type Config struct {
+	BaseURL     string        // e.g. "http://ollama:11434" or "https://ollama.com"
+	EmbedURL    string        // optional; override for embeddings only (used when chat is on Cloud but embed is local)
+	APIKey      string        // optional bearer token for Ollama Cloud
+	EmbedModel  string        // e.g. "nomic-embed-text"
+	ChatModel   string        // e.g. "gemma3:12b", "gpt-oss:20b", "qwen2.5:1.5b-instruct"
+	Dims        int           // target embedding dimensionality (truncated if model is wider)
+	HTTPTimeout time.Duration // per-request budget; embedding is fast, chat is not
+	Debug       bool          // initial debug-logging state; hot-swap later via SetDebug
+}
+
+// Client is safe for concurrent use; the underlying http.Client handles pooling
+// and the debug toggle is an atomic.Bool so admin-UI flips don't tear.
+type Client struct {
+	cfg   Config
+	http  *http.Client
+	debug atomic.Bool
+}
+
+// NewClient applies defaults and returns a ready-to-use client. It does NOT
+// dial Ollama — call Ping if you want a startup-time liveness check.
+func NewClient(cfg Config) *Client {
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "http://ollama:11434"
+	}
+	if cfg.EmbedModel == "" {
+		cfg.EmbedModel = "nomic-embed-text"
+	}
+	if cfg.ChatModel == "" {
+		cfg.ChatModel = "qwen2.5:1.5b-instruct"
+	}
+	if cfg.Dims == 0 {
+		cfg.Dims = 384
+	}
+	if cfg.HTTPTimeout == 0 {
+		// 70s default = 10s margin over the longest per-call ctx budget
+		// in the recommender stack (discoverBudget = 60s). Keeping
+		// HTTPTimeout strictly larger ensures the per-call ctx is
+		// always the deterministic cancellation source — at HTTPTimeout
+		// == discoverBudget exactly, a slow body at t=59.9 could trip
+		// either timer first. Bug-bash May 14 flagged the equal-timeout
+		// sharp edge.
+		cfg.HTTPTimeout = 70 * time.Second
+	}
+	c := &Client{
+		cfg:  cfg,
+		http: &http.Client{Timeout: cfg.HTTPTimeout},
+	}
+	c.debug.Store(cfg.Debug)
+	return c
+}
+
+// SetDebug toggles request/response logging at runtime. Safe to call from any
+// goroutine — the admin handler flips this when the operator toggles the
+// Diagnostics switch in the UI, no restart needed.
+func (c *Client) SetDebug(on bool) { c.debug.Store(on) }
+
+// Debug reports the current debug-logging state. Exposed so the admin UI can
+// show a "live" indicator distinct from the persisted DB setting.
+func (c *Client) Debug() bool { return c.debug.Load() }
+
+// ChatModel returns the currently configured chat model name. Admin UI reads
+// this to display which model is in use without exposing the full Config.
+func (c *Client) ChatModel() string { return c.cfg.ChatModel }
+
+// EmbedModel returns the currently configured embedding model name.
+func (c *Client) EmbedModel() string { return c.cfg.EmbedModel }
+
+// Dims reports the target embedding dimensionality — used by callers (e.g. the
+// pgvector formatter) to validate they're inserting the right shape.
+func (c *Client) Dims() int { return c.cfg.Dims }
+
+// Ping verifies Ollama is reachable. Use this from main.go to fail fast or to
+// degrade gracefully (skip embedding init) if the sidecar is down. We use
+// /api/tags on the embed URL (local Ollama) so a Cloud-only chat config still
+// pings the local box where embeddings actually live.
+func (c *Client) Ping(ctx context.Context) error {
+	url := c.embedURL() + "/api/tags"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("ollama ping: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("ollama ping: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// embedURL returns the URL to hit for /api/embed. When EmbedURL is set
+// (hybrid Cloud-chat + local-embed setup) we route embeddings there; otherwise
+// we use BaseURL.
+func (c *Client) embedURL() string {
+	if c.cfg.EmbedURL != "" {
+		return c.cfg.EmbedURL
+	}
+	return c.cfg.BaseURL
+}
+
+// embedRequest matches Ollama's /api/embed schema. `input` accepts a single
+// string or an array of strings; we always send an array for uniform parsing.
+type embedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type embedResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
+}
+
+// EmbedBatch returns one vector per input text, in the same order. Each vector
+// is truncated to c.cfg.Dims and L2-normalized so pgvector's cosine distance
+// reduces to a dot product.
+//
+// Empty inputs are returned as nil vectors at the corresponding index — the
+// caller decides whether that's an error.
+func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+
+	cleaned := make([]string, len(texts))
+	for i, t := range texts {
+		if t == "" {
+			cleaned[i] = " "
+		} else {
+			cleaned[i] = t
+		}
+	}
+
+	body, err := json.Marshal(embedRequest{Model: c.cfg.EmbedModel, Input: cleaned})
+	if err != nil {
+		return nil, err
+	}
+	url := c.embedURL() + "/api/embed"
+	reqID := c.newReqID()
+	c.logRequest(reqID, url, c.cfg.EmbedModel, body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Embeddings always hit the local URL; no bearer needed even on hybrid setups.
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollama embed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, capErr := readCappedBody(resp.Body)
+	c.logResponseEmbed(reqID, resp.StatusCode, raw)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama embed: status %d: %s", resp.StatusCode, snippet(raw, 512))
+	}
+	if capErr != nil {
+		// Surface truncation explicitly so the operator sees "body exceeds cap"
+		// instead of a confusing JSON decode error downstream.
+		return nil, fmt.Errorf("ollama embed: %w", capErr)
+	}
+
+	var out embedResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("ollama embed: decode: %w", err)
+	}
+	if len(out.Embeddings) != len(texts) {
+		return nil, fmt.Errorf("ollama embed: got %d vectors for %d inputs", len(out.Embeddings), len(texts))
+	}
+
+	result := make([][]float32, len(out.Embeddings))
+	for i, v := range out.Embeddings {
+		if texts[i] == "" {
+			result[i] = nil
+			continue
+		}
+		result[i] = normalize(truncate(v, c.cfg.Dims))
+	}
+	return result, nil
+}
+
+// Embed is a single-input convenience wrapper around EmbedBatch.
+func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+	out, err := c.EmbedBatch(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out[0], nil
+}
+
+// ChatMessage is one turn in a /api/chat conversation. Use Role "system" for
+// instructions, "user" for the query, and (for few-shot prompting) "assistant"
+// for prior model responses.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatRequest struct {
+	Model    string         `json:"model"`
+	Messages []ChatMessage  `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Format   any            `json:"format,omitempty"`
+	Think    bool           `json:"think"` // gpt-oss / cloud models default to true; force off
+	Options  map[string]any `json:"options,omitempty"`
+}
+
+type chatResponse struct {
+	Message ChatMessage `json:"message"`
+}
+
+// ChatJSON sends a structured-output chat request. `schema` is a JSON Schema
+// describing the expected output shape; Ollama enforces it on local models —
+// but hosted Cloud models often ignore the schema, so callers MUST use a
+// tolerant parser on the returned string.
+//
+// Temperature is fixed low (0.1) — query parsing should be deterministic, not
+// creative. Bump it via Options if a future caller needs variety.
+func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) (string, error) {
+	body, err := json.Marshal(chatRequest{
+		Model: c.cfg.ChatModel,
+		Messages: []ChatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+		Stream:  false,
+		Format:  schema,
+		Think:   false,
+		Options: map[string]any{"temperature": 0.1},
+	})
+	if err != nil {
+		return "", err
+	}
+	url := c.cfg.BaseURL + "/api/chat"
+	reqID := c.newReqID()
+	start := time.Now()
+	c.logRequest(reqID, url, c.cfg.ChatModel, body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama chat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, capErr := readCappedBody(resp.Body)
+	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama chat: status %d: %s", resp.StatusCode, snippet(raw, 512))
+	}
+	if capErr != nil {
+		return "", fmt.Errorf("ollama chat: %w", capErr)
+	}
+
+	var out chatResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("ollama chat: decode: %w", err)
+	}
+	return out.Message.Content, nil
+}
+
+// newReqID returns a short correlation ID for matching → / ← log lines.
+// Short-circuits when debug is off so we don't pay 4 bytes of crypto/rand
+// per LLM call in production.
+func (c *Client) newReqID() string {
+	if !c.debug.Load() {
+		return ""
+	}
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+func (c *Client) logRequest(reqID, url, model string, body []byte) {
+	if !c.debug.Load() {
+		return
+	}
+	slog.Info("ollama →", "req_id", reqID, "endpoint", url, "model", model,
+		"body", string(body))
+}
+
+func (c *Client) logResponseChat(reqID string, status int, elapsed time.Duration, body []byte) {
+	if !c.debug.Load() {
+		return
+	}
+	slog.Info("ollama ←", "req_id", reqID, "status", status,
+		"latency_ms", elapsed.Milliseconds(), "body", string(body))
+}
+
+// logResponseEmbed redacts the vector dump to a short prefix/suffix so debug
+// logs don't balloon — a 768-dim float32 array prints to ~10 KB and we'd be
+// scrolling for an hour. The model echoes the request shape, so seeing dims +
+// first/last values is enough to confirm "the embedding came back."
+func (c *Client) logResponseEmbed(reqID string, status int, body []byte) {
+	if !c.debug.Load() {
+		return
+	}
+	slog.Info("ollama ←", "req_id", reqID, "status", status,
+		"body", redactEmbeddings(body))
+}
+
+// redactEmbeddings rewrites the inner `[[...]]` array to a one-line summary.
+// Best-effort: on parse failure we just return the raw bytes so debug logs
+// don't disappear silently.
+func redactEmbeddings(body []byte) string {
+	var parsed struct {
+		Embeddings [][]float32 `json:"embeddings"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Embeddings) == 0 {
+		return snippet(body, 512)
+	}
+	var b strings.Builder
+	b.WriteString(`{"embeddings":[`)
+	for i, v := range parsed.Embeddings {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		dim := len(v)
+		first := v
+		last := v
+		if dim > 5 {
+			first = v[:5]
+			last = v[dim-5:]
+		}
+		fmt.Fprintf(&b, "<dims=%d first=%v last=%v>", dim, first, last)
+	}
+	b.WriteString("]}")
+	return b.String()
+}
+
+// readCappedBody is io.ReadAll with a hard ceiling. If the upstream body
+// exceeds the cap we return a clear error rather than silently truncating —
+// without this, oversized Cloud chat responses (gpt-oss with long thinking
+// traces) produced a misleading "unexpected end of JSON input" downstream
+// with no hint that the real cause was a giant body. Reading cap+1 bytes
+// and detecting the over-cap byte is the canonical idiom.
+func readCappedBody(r io.Reader) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(r, maxLoggedBody+1))
+	if err != nil {
+		return buf, err
+	}
+	if len(buf) > maxLoggedBody {
+		return buf[:maxLoggedBody], fmt.Errorf("response body exceeds %d-byte cap", maxLoggedBody)
+	}
+	return buf, nil
+}
+
+// snippet returns at most n bytes of body for error messages. Avoids dumping
+// a 4 MiB HTML error page into a Go error string.
+func snippet(body []byte, n int) string {
+	if len(body) <= n {
+		return string(body)
+	}
+	return string(body[:n]) + "...(truncated)"
+}
+
+// truncate keeps the leading n dimensions of a Matryoshka-trained embedding.
+// nomic-embed-text and bge are both trained this way; the leading dims carry
+// the most signal, so 768 → 384 loses very little retrieval quality at half
+// the storage cost.
+func truncate(v []float32, n int) []float32 {
+	if n <= 0 || n >= len(v) {
+		return v
+	}
+	return v[:n:n]
+}
+
+// normalize scales v to unit length so cosine distance == 1 - dot(v1, v2).
+// pgvector still computes cosine correctly without normalization, but
+// pre-normalizing once on insert avoids an extra sqrt per query.
+func normalize(v []float32) []float32 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	if sum == 0 {
+		return v
+	}
+	inv := float32(1.0 / math.Sqrt(sum))
+	out := make([]float32, len(v))
+	for i, x := range v {
+		out[i] = x * inv
+	}
+	return out
+}

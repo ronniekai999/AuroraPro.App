@@ -1,0 +1,20 @@
+-- Phase 8 follow-up: hnsw.ef_search tuning has moved to application code.
+--
+-- History of this migration file:
+--   v1: tried ALTER DATABASE current_database() SET hnsw.ef_search = 100
+--       → permission denied (custom GUC needs superuser for ALTER DATABASE
+--       on at least some PG/pgvector combinations).
+--   v2: tried ALTER ROLE current_user IN DATABASE current_database() SET ...
+--       → still permission denied because pgvector's library hasn't been
+--       loaded into the migration runner's backend, so Postgres can't
+--       confirm hnsw.ef_search is USERSET and falls back to superuser.
+--   v3 (current): no-op. Tuning is now done by pool.AfterConnect, which
+--       does `SELECT '[0]'::vector(1)` to force pgvector load and THEN
+--       runs the session-level SET. Session SET requires no special
+--       privileges and works on every backend.
+--
+-- The file stays as a record of the journey so a future operator who
+-- tries to "fix" the missing migration knows why it's empty. A bare
+-- `SELECT 1` keeps the migration runner happy (it expects every .up.sql
+-- file to execute successfully).
+SELECT 1;

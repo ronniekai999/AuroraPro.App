@@ -1,0 +1,8 @@
+<resources>
+    <!-- Aurora violet tokens mirrored from static/aurora_pro.html so the
+         Android system can use them for pre-Compose splash/window bg. -->
+    <color name="bg_primary">#0A0E17</color>
+    <color name="bg_secondary">#111827</color>
+    <color name="bg_card">#1A1F2E</color>
+    <color name="accent">#A78BFA</color>
+</resources>

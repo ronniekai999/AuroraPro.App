@@ -1,0 +1,954 @@
+package config
+
+import (
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type Config struct {
+	Server    ServerConfig
+	Database  DatabaseConfig
+	Auth      AuthConfig
+	Scanner   ScannerConfig
+	TMDB      TMDBConfig
+	TVDB      TVDBConfig
+	Cache     CacheConfig
+	Transcode TranscodeConfig
+	TLS       TLSConfig
+	Logging   LogConfig
+	Requests  RequestsConfig
+	WatchParty WatchPartyConfig
+	LLM       LLMConfig
+}
+
+// LLMConfig governs the local-LLM sidecar used for semantic search and
+// natural-language query parsing. When Enabled is false the rest of the
+// system falls back to the existing trigram path; nothing else needs to know.
+type LLMConfig struct {
+	Enabled         bool
+	OllamaURL       string        // e.g. http://ollama:11434
+	EmbedModel      string        // Ollama tag for the embedding model
+	ChatModel       string        // Ollama tag for the query-parser / reranker
+	EmbedDims       int           // target vector dimensionality (must match migration)
+	BackfillWorkers int           // parallel backfill goroutines
+	BackfillBatch   int           // items per Ollama batch
+	HTTPTimeout     time.Duration // per-request budget
+}
+
+// WatchPartyConfig controls the group-watch sync protocol. Exposing these
+// thresholds makes the system tunable per-deployment without recompiling;
+// defaults match Jellyfin SyncPlay / mpv-shim values that are known to work.
+type WatchPartyConfig struct {
+	HeartbeatInterval    time.Duration // client position-report cadence
+	TimeSyncInterval     time.Duration // client NTP-style handshake cadence
+	BufferHysteresis     time.Duration // min buffering duration before group pauses
+	PlayScheduleDelay    time.Duration // lead time added to play-at-server-time commands
+	DriftIgnoreMs        int64         // <= this ms of drift → no action
+	DriftRateAdjustMs    int64         // <= this ms → rate-nudge (else hard seek)
+	DriftHardSeekMs      int64         // <= this ms → hard seek (else counts as failed attempt)
+	DriftMaxAttempts     int           // consecutive failed-seek attempts before dropping client
+
+	// M8 — voice (WebRTC) ICE configuration. The defaults work for
+	// same-network and most home-NAT setups (Google's public STUN).
+	// For cross-NAT calls (friends behind symmetric or carrier-grade
+	// NAT), operators must deploy a TURN server (recommended: coturn,
+	// BSD-3) and set the URL/credential env vars. The frontend
+	// fetches this config via /api/voice/ice-servers on join so we
+	// can rotate credentials without redeploying the SPA.
+	VoiceSTUNServers   []string // STUN URLs (e.g. "stun:stun.l.google.com:19302")
+	VoiceTURNURL       string   // TURN URL (e.g. "turn:turn.aurora.example:3478") — empty disables TURN
+	VoiceTURNUsername  string   // TURN long-term credential username
+	VoiceTURNCredential string  // TURN long-term credential secret
+}
+
+// RequestsConfig holds configuration for the media Requests feature,
+// including Radarr/Sonarr integration for automated downloading.
+type RequestsConfig struct {
+	Enabled  bool              // Master toggle for the requests feature
+	Radarr   ArrInstanceConfig // Standard quality Radarr instance
+	Radarr4K ArrInstanceConfig // 4K quality Radarr instance (optional)
+	Sonarr   ArrInstanceConfig // Standard quality Sonarr instance
+	Sonarr4K ArrInstanceConfig // 4K quality Sonarr instance (optional)
+}
+
+// ArrInstanceConfig holds the connection info for a single Radarr or Sonarr instance.
+type ArrInstanceConfig struct {
+	URL    string // Base URL (e.g. http://localhost:7878)
+	APIKey string // API key for authentication
+}
+
+type LogConfig struct {
+	Dir        string // Directory for log files
+	Level      string // Log level: debug, info, warn, error
+	MaxSizeMB  int    // Max size in MB before rotation
+	MaxBackups int    // Max number of old log files to retain
+	MaxAgeDays int    // Max number of days to retain old log files
+	Compress   bool   // Whether to gzip rotated log files
+}
+
+type TLSConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	AutoCert bool   `yaml:"auto_cert"`
+	Domain   string `yaml:"domain"`
+	CacheDir string `yaml:"cache_dir"`
+}
+
+type ServerConfig struct {
+	Host           string
+	Port           int
+	AllowedOrigins []string
+	// TrustedProxies is an allowlist of CIDR ranges (e.g. "10.0.0.0/8",
+	// "192.168.1.5/32") whose X-Forwarded-For / X-Real-IP headers we'll
+	// honor. Empty (default) means "no proxy trust" — RemoteAddr is the
+	// source of truth, which is the secure-by-default posture. Set this
+	// ONLY for the IPs of reverse proxies you control; misconfiguration
+	// here lets external clients forge their apparent IP and bypass the
+	// auth rate limiter.
+	TrustedProxies []string
+}
+
+type DatabaseConfig struct {
+	URL             string
+	MaxConns        int32
+	MinConns        int32
+	MaxConnLifetime time.Duration
+}
+
+type AuthConfig struct {
+	JWTSecret          string
+	AccessTokenExpiry  time.Duration
+	RefreshTokenExpiry time.Duration
+	Argon2Memory       uint32
+	Argon2Iterations   uint32
+	Argon2Parallelism  uint8
+	Argon2SaltLength   uint32
+	Argon2KeyLength    uint32
+	InviteCodeLength   int
+}
+
+type ScannerConfig struct {
+	Workers       int
+	FFprobePath   string
+	WatchDebounce time.Duration
+}
+
+type TMDBConfig struct {
+	APIKey             string
+	MetadataRefresh    time.Duration
+	Language           string
+	AutoMatchThreshold int // confidence >= this → auto-matched (env: MATCH_AUTO_THRESHOLD)
+	ReviewThreshold    int // confidence >= this → needs_review (env: MATCH_REVIEW_THRESHOLD)
+}
+
+type TVDBConfig struct {
+	APIKey   string // TVDB V4 API key
+	PIN      string // Optional subscriber PIN
+	Enabled  bool   // Feature flag — false by default
+	Language string // 3-letter language code (e.g. "eng", "deu", "jpn")
+}
+
+type CacheConfig struct {
+	ImageDir     string
+	TranscodeDir string
+	SubtitleDir  string
+}
+
+type TranscodeConfig struct {
+	MaxSessions     int
+	HWAccel         string
+	SessionTimeout  time.Duration
+	SegmentDuration int
+	Profiles        []string
+}
+
+// --- YAML schema ---
+
+type yamlConfig struct {
+	Server struct {
+		Host           string   `yaml:"host"`
+		Port           int      `yaml:"port"`
+		AllowedOrigins []string `yaml:"allowed_origins"`
+		TrustedProxies []string `yaml:"trusted_proxies"`
+	} `yaml:"server"`
+	Database struct {
+		URL      string `yaml:"url"`
+		MaxConns int    `yaml:"max_conns"`
+		MinConns int    `yaml:"min_conns"`
+	} `yaml:"database"`
+	Auth struct {
+		JWTSecret          string `yaml:"jwt_secret"`
+		AccessTokenMinutes int    `yaml:"access_token_minutes"`
+		RefreshTokenDays   int    `yaml:"refresh_token_days"`
+	} `yaml:"auth"`
+	Scanner struct {
+		Workers         int    `yaml:"workers"`
+		FFprobePath     string `yaml:"ffprobe_path"`
+		WatchDebounceMs int    `yaml:"watch_debounce_ms"`
+	} `yaml:"scanner"`
+	TMDB struct {
+		APIKey               string `yaml:"api_key"`
+		MetadataRefreshHours int    `yaml:"metadata_refresh_hours"`
+		Language             string `yaml:"language"`
+		AutoMatchThreshold   int    `yaml:"auto_match_threshold"`
+		ReviewThreshold      int    `yaml:"review_threshold"`
+	} `yaml:"tmdb"`
+	TVDB struct {
+		APIKey   string `yaml:"api_key"`
+		PIN      string `yaml:"pin"`
+		Enabled  bool   `yaml:"enabled"`
+		Language string `yaml:"language"`
+	} `yaml:"tvdb"`
+	Cache struct {
+		ImageDir     string `yaml:"image_dir"`
+		TranscodeDir string `yaml:"transcode_dir"`
+		SubtitleDir  string `yaml:"subtitle_dir"`
+	} `yaml:"cache"`
+	Transcode struct {
+		MaxSessions       int      `yaml:"max_sessions"`
+		HWAccel           string   `yaml:"hw_accel"`
+		SessionTimeoutSec int      `yaml:"session_timeout_sec"`
+		SegmentDuration   int      `yaml:"segment_duration"`
+		Profiles          []string `yaml:"profiles"`
+	} `yaml:"transcode"`
+	TLS struct {
+		Enabled  bool   `yaml:"enabled"`
+		CertFile string `yaml:"cert_file"`
+		KeyFile  string `yaml:"key_file"`
+		AutoCert bool   `yaml:"auto_cert"`
+		Domain   string `yaml:"domain"`
+		CacheDir string `yaml:"cache_dir"`
+	} `yaml:"tls"`
+	Logging struct {
+		Dir        string `yaml:"dir"`
+		Level      string `yaml:"level"`
+		MaxSizeMB  int    `yaml:"max_size_mb"`
+		MaxBackups int    `yaml:"max_backups"`
+		MaxAgeDays int    `yaml:"max_age_days"`
+		Compress   bool   `yaml:"compress"`
+	} `yaml:"logging"`
+	Requests struct {
+		Enabled bool `yaml:"enabled"`
+		Radarr  struct {
+			URL    string `yaml:"url"`
+			APIKey string `yaml:"api_key"`
+		} `yaml:"radarr"`
+		Radarr4K struct {
+			URL    string `yaml:"url"`
+			APIKey string `yaml:"api_key"`
+		} `yaml:"radarr_4k"`
+		Sonarr struct {
+			URL    string `yaml:"url"`
+			APIKey string `yaml:"api_key"`
+		} `yaml:"sonarr"`
+		Sonarr4K struct {
+			URL    string `yaml:"url"`
+			APIKey string `yaml:"api_key"`
+		} `yaml:"sonarr_4k"`
+	} `yaml:"requests"`
+	WatchParty struct {
+		HeartbeatIntervalMs int   `yaml:"heartbeat_interval_ms"`
+		TimeSyncIntervalMs  int   `yaml:"time_sync_interval_ms"`
+		BufferHysteresisMs  int   `yaml:"buffer_hysteresis_ms"`
+		PlayScheduleDelayMs int   `yaml:"play_schedule_delay_ms"`
+		DriftIgnoreMs       int64 `yaml:"drift_ignore_ms"`
+		DriftRateAdjustMs   int64 `yaml:"drift_rate_adjust_ms"`
+		DriftHardSeekMs     int64 `yaml:"drift_hard_seek_ms"`
+		DriftMaxAttempts    int   `yaml:"drift_max_attempts"`
+	} `yaml:"watchparty"`
+}
+
+// Load reads configuration from YAML file (if present) then overlays environment variables.
+// Environment variables always take precedence over the YAML file.
+func Load() (*Config, error) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Host:           "0.0.0.0",
+			Port:           8484,
+			AllowedOrigins: parseOrigins("http://localhost:*,https://localhost:*"),
+		},
+		Database: DatabaseConfig{
+			URL:             "postgres://aurora:aurora@localhost:5432/aurora?sslmode=disable",
+			MaxConns:        10,
+			MinConns:        2,
+			MaxConnLifetime: time.Hour,
+		},
+		Auth: AuthConfig{
+			AccessTokenExpiry:  15 * time.Minute,
+			RefreshTokenExpiry: 30 * 24 * time.Hour,
+			Argon2Memory:       64 * 1024,
+			Argon2Iterations:   3,
+			Argon2Parallelism:  4,
+			Argon2SaltLength:   16,
+			Argon2KeyLength:    32,
+			InviteCodeLength:   16,
+		},
+		Scanner: ScannerConfig{
+			Workers:       8,
+			FFprobePath:   "ffprobe",
+			WatchDebounce: 2000 * time.Millisecond,
+		},
+		TMDB: TMDBConfig{
+			MetadataRefresh:    168 * time.Hour,
+			Language:           "en",
+			AutoMatchThreshold: 85,
+			ReviewThreshold:    50,
+		},
+		TVDB: TVDBConfig{
+			Enabled:  false,
+			Language: "eng",
+		},
+		Cache: CacheConfig{
+			ImageDir:     "/var/cache/aurora/images",
+			TranscodeDir: "/tmp/aurora-transcode",
+			SubtitleDir:  "/var/cache/aurora/subtitles",
+		},
+		Transcode: TranscodeConfig{
+			MaxSessions:     0,
+			HWAccel:         "auto",
+			SessionTimeout:  120 * time.Second,
+			SegmentDuration: 6,
+			Profiles:        []string{"1080p", "720p", "480p"},
+		},
+		Logging: LogConfig{
+			Dir:        "/var/log/aurora",
+			Level:      "info",
+			MaxSizeMB:  100,
+			MaxBackups: 5,
+			MaxAgeDays: 30,
+			Compress:   true,
+		},
+		LLM: LLMConfig{
+			Enabled:         true,
+			OllamaURL:       "http://ollama:11434",
+			EmbedModel:      "nomic-embed-text",
+			ChatModel:       "qwen2.5:3b-instruct",
+			EmbedDims:       384,
+			BackfillWorkers: 2,
+			BackfillBatch:   16,
+			// 70s = 10s margin over the longest recommender per-call
+			// ctx (discoverBudget = 60s). See llm/client.go for the
+			// rationale; keep this in sync with that default.
+			HTTPTimeout:     70 * time.Second,
+		},
+		WatchParty: WatchPartyConfig{
+			HeartbeatInterval: 500 * time.Millisecond,
+			TimeSyncInterval:  30 * time.Second,
+			BufferHysteresis:  750 * time.Millisecond,
+			PlayScheduleDelay: 300 * time.Millisecond,
+			DriftIgnoreMs:     50,
+			DriftRateAdjustMs: 300,
+			DriftHardSeekMs:   2000,
+			DriftMaxAttempts:  5,
+			// M8 — voice defaults. Public STUN works for most home-NAT
+			// setups; TURN is empty by default (no relay). Operators
+			// deploying coturn populate the TURN_* env vars at boot.
+			VoiceSTUNServers: []string{"stun:stun.l.google.com:19302"},
+		},
+	}
+
+	// Phase 1: Load from YAML config file if it exists
+	if err := loadYAML(cfg); err != nil {
+		slog.Warn("failed to load yaml config (continuing with defaults + env)", "error", err)
+	}
+
+	// Phase 2: Environment variables override everything
+	applyEnvOverrides(cfg)
+
+	// Validation
+	if cfg.Auth.JWTSecret == "" {
+		return nil, fmt.Errorf("JWT_SECRET environment variable is required")
+	}
+
+	blockedSecrets := []string{
+		"change-me-to-a-random-64-char-string-in-production",
+		"change-me-to-something-random-and-at-least-64-characters-long-please",
+	}
+	for _, blocked := range blockedSecrets {
+		if cfg.Auth.JWTSecret == blocked {
+			return nil, fmt.Errorf("JWT_SECRET is set to a known placeholder — generate a real secret (e.g. `openssl rand -hex 32`)")
+		}
+	}
+	if len(cfg.Auth.JWTSecret) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters long")
+	}
+
+	if cfg.TMDB.APIKey == "" {
+		return nil, fmt.Errorf("TMDB_API_KEY environment variable is required (get one at https://www.themoviedb.org/settings/api)")
+	}
+
+	// Auto-enable TVDB if API key is provided
+	if cfg.TVDB.APIKey != "" {
+		explicitDisable := os.Getenv("TVDB_ENABLED")
+		if explicitDisable != "false" && explicitDisable != "0" && explicitDisable != "no" {
+			cfg.TVDB.Enabled = true
+		}
+	}
+
+	return cfg, nil
+}
+
+func loadYAML(cfg *Config) error {
+	configPath := os.Getenv("AURORA_CONFIG_FILE")
+	if configPath == "" {
+		candidates := []string{
+			"configs/aurora.yaml",
+			"configs/aurora.yml",
+			"aurora.yaml",
+			"aurora.yml",
+		}
+		if exe, err := os.Executable(); err == nil {
+			dir := filepath.Dir(exe)
+			candidates = append(candidates,
+				filepath.Join(dir, "configs", "aurora.yaml"),
+				filepath.Join(dir, "aurora.yaml"),
+			)
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				configPath = c
+				break
+			}
+		}
+	}
+
+	if configPath == "" {
+		return nil
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", configPath, err)
+	}
+
+	var yc yamlConfig
+	if err := yaml.Unmarshal(data, &yc); err != nil {
+		return fmt.Errorf("parse %s: %w", configPath, err)
+	}
+
+	slog.Info("loaded yaml config", "path", configPath)
+
+	if yc.Server.Host != "" {
+		cfg.Server.Host = yc.Server.Host
+	}
+	if yc.Server.Port > 0 {
+		cfg.Server.Port = yc.Server.Port
+	}
+	if len(yc.Server.AllowedOrigins) > 0 {
+		cfg.Server.AllowedOrigins = yc.Server.AllowedOrigins
+	}
+	if len(yc.Server.TrustedProxies) > 0 {
+		cfg.Server.TrustedProxies = yc.Server.TrustedProxies
+	}
+	if yc.Database.URL != "" {
+		cfg.Database.URL = yc.Database.URL
+	}
+	if yc.Database.MaxConns > 0 {
+		cfg.Database.MaxConns = int32(yc.Database.MaxConns)
+	}
+	if yc.Database.MinConns > 0 {
+		cfg.Database.MinConns = int32(yc.Database.MinConns)
+	}
+	if yc.Auth.JWTSecret != "" {
+		cfg.Auth.JWTSecret = yc.Auth.JWTSecret
+	}
+	if yc.Auth.AccessTokenMinutes > 0 {
+		cfg.Auth.AccessTokenExpiry = time.Duration(yc.Auth.AccessTokenMinutes) * time.Minute
+	}
+	if yc.Auth.RefreshTokenDays > 0 {
+		cfg.Auth.RefreshTokenExpiry = time.Duration(yc.Auth.RefreshTokenDays) * 24 * time.Hour
+	}
+	if yc.Scanner.Workers > 0 {
+		cfg.Scanner.Workers = yc.Scanner.Workers
+	}
+	if yc.Scanner.FFprobePath != "" {
+		cfg.Scanner.FFprobePath = yc.Scanner.FFprobePath
+	}
+	if yc.Scanner.WatchDebounceMs > 0 {
+		cfg.Scanner.WatchDebounce = time.Duration(yc.Scanner.WatchDebounceMs) * time.Millisecond
+	}
+	if yc.TMDB.APIKey != "" {
+		cfg.TMDB.APIKey = yc.TMDB.APIKey
+	}
+	if yc.TMDB.MetadataRefreshHours > 0 {
+		cfg.TMDB.MetadataRefresh = time.Duration(yc.TMDB.MetadataRefreshHours) * time.Hour
+	}
+	if yc.TMDB.Language != "" {
+		cfg.TMDB.Language = yc.TMDB.Language
+	}
+	if yc.TMDB.AutoMatchThreshold > 0 {
+		cfg.TMDB.AutoMatchThreshold = yc.TMDB.AutoMatchThreshold
+	}
+	if yc.TMDB.ReviewThreshold > 0 {
+		cfg.TMDB.ReviewThreshold = yc.TMDB.ReviewThreshold
+	}
+	if yc.TVDB.APIKey != "" {
+		cfg.TVDB.APIKey = yc.TVDB.APIKey
+	}
+	if yc.TVDB.PIN != "" {
+		cfg.TVDB.PIN = yc.TVDB.PIN
+	}
+	if yc.TVDB.Enabled {
+		cfg.TVDB.Enabled = true
+	}
+	if yc.TVDB.Language != "" {
+		cfg.TVDB.Language = yc.TVDB.Language
+	}
+	if yc.Cache.ImageDir != "" {
+		cfg.Cache.ImageDir = yc.Cache.ImageDir
+	}
+	if yc.Cache.TranscodeDir != "" {
+		cfg.Cache.TranscodeDir = yc.Cache.TranscodeDir
+	}
+	if yc.Cache.SubtitleDir != "" {
+		cfg.Cache.SubtitleDir = yc.Cache.SubtitleDir
+	}
+	if yc.Transcode.MaxSessions > 0 {
+		cfg.Transcode.MaxSessions = yc.Transcode.MaxSessions
+	}
+	if yc.Transcode.HWAccel != "" {
+		cfg.Transcode.HWAccel = yc.Transcode.HWAccel
+	}
+	if yc.Transcode.SessionTimeoutSec > 0 {
+		cfg.Transcode.SessionTimeout = time.Duration(yc.Transcode.SessionTimeoutSec) * time.Second
+	}
+	if yc.Transcode.SegmentDuration > 0 {
+		cfg.Transcode.SegmentDuration = yc.Transcode.SegmentDuration
+	}
+	if len(yc.Transcode.Profiles) > 0 {
+		cfg.Transcode.Profiles = yc.Transcode.Profiles
+	}
+	if yc.TLS.Enabled {
+		cfg.TLS.Enabled = true
+	}
+	if yc.TLS.CertFile != "" {
+		cfg.TLS.CertFile = yc.TLS.CertFile
+	}
+	if yc.TLS.KeyFile != "" {
+		cfg.TLS.KeyFile = yc.TLS.KeyFile
+	}
+	if yc.TLS.AutoCert {
+		cfg.TLS.AutoCert = true
+	}
+	if yc.TLS.Domain != "" {
+		cfg.TLS.Domain = yc.TLS.Domain
+	}
+	if yc.TLS.CacheDir != "" {
+		cfg.TLS.CacheDir = yc.TLS.CacheDir
+	}
+	if yc.Logging.Dir != "" {
+		cfg.Logging.Dir = filepath.Clean(yc.Logging.Dir)
+	}
+	if yc.Logging.Level != "" {
+		cfg.Logging.Level = yc.Logging.Level
+	}
+	if yc.Logging.MaxSizeMB > 0 {
+		cfg.Logging.MaxSizeMB = yc.Logging.MaxSizeMB
+	}
+	if yc.Logging.MaxBackups > 0 {
+		cfg.Logging.MaxBackups = yc.Logging.MaxBackups
+	}
+	if yc.Logging.MaxAgeDays > 0 {
+		cfg.Logging.MaxAgeDays = yc.Logging.MaxAgeDays
+	}
+	// Note: Compress cannot use the `if yc.X { cfg.X = true }` pattern
+	// because the default is true, and we need to allow YAML to set it to false.
+	// However, Go's YAML unmarshalling sets bool fields to false by default,
+	// making it impossible to distinguish "not specified" from "explicitly false".
+	// We accept this trade-off: if the logging section is present in YAML at all,
+	// the compress field will apply (defaulting to false if omitted from YAML).
+	// The env var LOG_COMPRESS=true/false provides full control regardless.
+	if yc.Logging.Dir != "" || yc.Logging.Level != "" || yc.Logging.MaxSizeMB > 0 ||
+		yc.Logging.MaxBackups > 0 || yc.Logging.MaxAgeDays > 0 {
+		// Logging section was specified in YAML, apply compress value
+		cfg.Logging.Compress = yc.Logging.Compress
+	}
+
+	// Requests / ARR integration
+	if yc.Requests.Enabled {
+		cfg.Requests.Enabled = true
+	}
+	if yc.Requests.Radarr.URL != "" {
+		cfg.Requests.Radarr.URL = yc.Requests.Radarr.URL
+	}
+	if yc.Requests.Radarr.APIKey != "" {
+		cfg.Requests.Radarr.APIKey = yc.Requests.Radarr.APIKey
+	}
+	if yc.Requests.Radarr4K.URL != "" {
+		cfg.Requests.Radarr4K.URL = yc.Requests.Radarr4K.URL
+	}
+	if yc.Requests.Radarr4K.APIKey != "" {
+		cfg.Requests.Radarr4K.APIKey = yc.Requests.Radarr4K.APIKey
+	}
+	if yc.Requests.Sonarr.URL != "" {
+		cfg.Requests.Sonarr.URL = yc.Requests.Sonarr.URL
+	}
+	if yc.Requests.Sonarr.APIKey != "" {
+		cfg.Requests.Sonarr.APIKey = yc.Requests.Sonarr.APIKey
+	}
+	if yc.Requests.Sonarr4K.URL != "" {
+		cfg.Requests.Sonarr4K.URL = yc.Requests.Sonarr4K.URL
+	}
+	if yc.Requests.Sonarr4K.APIKey != "" {
+		cfg.Requests.Sonarr4K.APIKey = yc.Requests.Sonarr4K.APIKey
+	}
+
+	if yc.WatchParty.HeartbeatIntervalMs > 0 {
+		cfg.WatchParty.HeartbeatInterval = time.Duration(yc.WatchParty.HeartbeatIntervalMs) * time.Millisecond
+	}
+	if yc.WatchParty.TimeSyncIntervalMs > 0 {
+		cfg.WatchParty.TimeSyncInterval = time.Duration(yc.WatchParty.TimeSyncIntervalMs) * time.Millisecond
+	}
+	if yc.WatchParty.BufferHysteresisMs > 0 {
+		cfg.WatchParty.BufferHysteresis = time.Duration(yc.WatchParty.BufferHysteresisMs) * time.Millisecond
+	}
+	if yc.WatchParty.PlayScheduleDelayMs > 0 {
+		cfg.WatchParty.PlayScheduleDelay = time.Duration(yc.WatchParty.PlayScheduleDelayMs) * time.Millisecond
+	}
+	if yc.WatchParty.DriftIgnoreMs > 0 {
+		cfg.WatchParty.DriftIgnoreMs = yc.WatchParty.DriftIgnoreMs
+	}
+	if yc.WatchParty.DriftRateAdjustMs > 0 {
+		cfg.WatchParty.DriftRateAdjustMs = yc.WatchParty.DriftRateAdjustMs
+	}
+	if yc.WatchParty.DriftHardSeekMs > 0 {
+		cfg.WatchParty.DriftHardSeekMs = yc.WatchParty.DriftHardSeekMs
+	}
+	if yc.WatchParty.DriftMaxAttempts > 0 {
+		cfg.WatchParty.DriftMaxAttempts = yc.WatchParty.DriftMaxAttempts
+	}
+
+	return nil
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("AURORA_HOST"); v != "" {
+		cfg.Server.Host = v
+	}
+	if v := os.Getenv("AURORA_PORT"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Server.Port = i
+		}
+	}
+	if v := os.Getenv("AURORA_ALLOWED_ORIGINS"); v != "" {
+		cfg.Server.AllowedOrigins = parseOrigins(v)
+	}
+	if v := os.Getenv("DATABASE_URL"); v != "" {
+		cfg.Database.URL = v
+	}
+	if v := os.Getenv("DB_MAX_CONNS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Database.MaxConns = int32(i)
+		}
+	}
+	if v := os.Getenv("DB_MIN_CONNS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Database.MinConns = int32(i)
+		}
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		cfg.Auth.JWTSecret = v
+	}
+	if v := os.Getenv("ACCESS_TOKEN_MINUTES"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.AccessTokenExpiry = time.Duration(i) * time.Minute
+		}
+	}
+	if v := os.Getenv("REFRESH_TOKEN_DAYS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Auth.RefreshTokenExpiry = time.Duration(i) * 24 * time.Hour
+		}
+	}
+	if v := os.Getenv("SCANNER_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Scanner.Workers = i
+		}
+	}
+	if v := os.Getenv("FFPROBE_PATH"); v != "" {
+		cfg.Scanner.FFprobePath = v
+	}
+	if v := os.Getenv("WATCH_DEBOUNCE_MS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Scanner.WatchDebounce = time.Duration(i) * time.Millisecond
+		}
+	}
+	if v := os.Getenv("TMDB_API_KEY"); v != "" {
+		cfg.TMDB.APIKey = v
+	}
+	if v := os.Getenv("METADATA_REFRESH_HOURS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.TMDB.MetadataRefresh = time.Duration(i) * time.Hour
+		}
+	}
+	if v := os.Getenv("TMDB_LANGUAGE"); v != "" {
+		cfg.TMDB.Language = v
+	}
+	if v := os.Getenv("MATCH_AUTO_THRESHOLD"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.TMDB.AutoMatchThreshold = i
+		}
+	}
+	if v := os.Getenv("MATCH_REVIEW_THRESHOLD"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.TMDB.ReviewThreshold = i
+		}
+	}
+	if v := os.Getenv("TVDB_API_KEY"); v != "" {
+		cfg.TVDB.APIKey = v
+	}
+	if v := os.Getenv("TVDB_PIN"); v != "" {
+		cfg.TVDB.PIN = v
+	}
+	if v := os.Getenv("TVDB_ENABLED"); v != "" {
+		cfg.TVDB.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("TVDB_LANGUAGE"); v != "" {
+		cfg.TVDB.Language = v
+	}
+	if v := os.Getenv("CACHE_IMAGE_DIR"); v != "" {
+		cfg.Cache.ImageDir = v
+	}
+	if v := os.Getenv("CACHE_TRANSCODE_DIR"); v != "" {
+		cfg.Cache.TranscodeDir = v
+	}
+	if v := os.Getenv("CACHE_SUBTITLE_DIR"); v != "" {
+		cfg.Cache.SubtitleDir = v
+	}
+	if v := os.Getenv("TRANSCODE_MAX_SESSIONS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Transcode.MaxSessions = i
+		}
+	}
+	if v := os.Getenv("TRANSCODE_HW_ACCEL"); v != "" {
+		cfg.Transcode.HWAccel = v
+	}
+	if v := os.Getenv("TRANSCODE_SESSION_TIMEOUT_SEC"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Transcode.SessionTimeout = time.Duration(i) * time.Second
+		}
+	}
+	if v := os.Getenv("TRANSCODE_SEGMENT_DURATION"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Transcode.SegmentDuration = i
+		}
+	}
+	if v := os.Getenv("TRANSCODE_PROFILES"); v != "" {
+		cfg.Transcode.Profiles = splitCSV(v)
+	}
+	if v := os.Getenv("TLS_ENABLED"); v != "" {
+		cfg.TLS.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
+		cfg.TLS.CertFile = v
+	}
+	if v := os.Getenv("TLS_KEY_FILE"); v != "" {
+		cfg.TLS.KeyFile = v
+	}
+	if v := os.Getenv("TLS_AUTO_CERT"); v != "" {
+		cfg.TLS.AutoCert = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("TLS_DOMAIN"); v != "" {
+		cfg.TLS.Domain = v
+	}
+	if v := os.Getenv("TLS_CACHE_DIR"); v != "" {
+		cfg.TLS.CacheDir = v
+	}
+	if v := os.Getenv("LOG_DIR"); v != "" {
+		cfg.Logging.Dir = filepath.Clean(v)
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.Logging.Level = v
+	}
+	if v := os.Getenv("LOG_MAX_SIZE_MB"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.Logging.MaxSizeMB = i
+		}
+	}
+	if v := os.Getenv("LOG_MAX_BACKUPS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i >= 0 {
+			cfg.Logging.MaxBackups = i
+		}
+	}
+	if v := os.Getenv("LOG_MAX_AGE_DAYS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i >= 0 {
+			cfg.Logging.MaxAgeDays = i
+		}
+	}
+	if v := os.Getenv("LOG_COMPRESS"); v != "" {
+		cfg.Logging.Compress = v == "true" || v == "1" || v == "yes"
+	}
+
+	// Requests / ARR integration
+	if v := os.Getenv("REQUESTS_ENABLED"); v != "" {
+		cfg.Requests.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("RADARR_URL"); v != "" {
+		cfg.Requests.Radarr.URL = v
+	}
+	if v := os.Getenv("RADARR_API_KEY"); v != "" {
+		cfg.Requests.Radarr.APIKey = v
+	}
+	if v := os.Getenv("RADARR_4K_URL"); v != "" {
+		cfg.Requests.Radarr4K.URL = v
+	}
+	if v := os.Getenv("RADARR_4K_API_KEY"); v != "" {
+		cfg.Requests.Radarr4K.APIKey = v
+	}
+	if v := os.Getenv("SONARR_URL"); v != "" {
+		cfg.Requests.Sonarr.URL = v
+	}
+	if v := os.Getenv("SONARR_API_KEY"); v != "" {
+		cfg.Requests.Sonarr.APIKey = v
+	}
+	if v := os.Getenv("SONARR_4K_URL"); v != "" {
+		cfg.Requests.Sonarr4K.URL = v
+	}
+	if v := os.Getenv("SONARR_4K_API_KEY"); v != "" {
+		cfg.Requests.Sonarr4K.APIKey = v
+	}
+
+	// LLM / semantic search — see internal/llm and internal/embedding.
+	if v := os.Getenv("LLM_ENABLED"); v != "" {
+		cfg.LLM.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("LLM_OLLAMA_URL"); v != "" {
+		cfg.LLM.OllamaURL = v
+	}
+	if v := os.Getenv("LLM_EMBED_MODEL"); v != "" {
+		cfg.LLM.EmbedModel = v
+	}
+	if v := os.Getenv("LLM_CHAT_MODEL"); v != "" {
+		cfg.LLM.ChatModel = v
+	}
+	if v := os.Getenv("LLM_EMBED_DIMS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.LLM.EmbedDims = i
+		}
+	}
+	if v := os.Getenv("LLM_BACKFILL_WORKERS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.LLM.BackfillWorkers = i
+		}
+	}
+	if v := os.Getenv("LLM_BACKFILL_BATCH"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.LLM.BackfillBatch = i
+		}
+	}
+	if v := os.Getenv("LLM_HTTP_TIMEOUT_SEC"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.LLM.HTTPTimeout = time.Duration(i) * time.Second
+		}
+	}
+
+	// M8 — voice ICE servers. STUN list is comma-separated. TURN URL is
+	// a single string (coturn typically). All four are optional; defaults
+	// already have Google's public STUN. Operators deploying coturn
+	// populate AURORA_TURN_URL + AURORA_TURN_USERNAME + AURORA_TURN_CREDENTIAL
+	// to enable cross-NAT calls. See docs/watchparty-progress.md M8.
+	if v := os.Getenv("AURORA_VOICE_STUN_SERVERS"); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if t := strings.TrimSpace(p); t != "" {
+				out = append(out, t)
+			}
+		}
+		if len(out) > 0 {
+			cfg.WatchParty.VoiceSTUNServers = out
+		}
+	}
+	if v := os.Getenv("AURORA_TURN_URL"); v != "" {
+		cfg.WatchParty.VoiceTURNURL = v
+	}
+	if v := os.Getenv("AURORA_TURN_USERNAME"); v != "" {
+		cfg.WatchParty.VoiceTURNUsername = v
+	}
+	if v := os.Getenv("AURORA_TURN_CREDENTIAL"); v != "" {
+		cfg.WatchParty.VoiceTURNCredential = v
+	}
+}
+
+func (c *Config) ServerAddr() string {
+	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
+}
+
+func parseOrigins(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	origins := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			origins = append(origins, p)
+		}
+	}
+	return origins
+}
+
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// ParseLogLevel converts a log level string (debug, info, warn, error) to a slog.Level.
+// Defaults to slog.LevelInfo for unrecognized values.
+func ParseLogLevel(level string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func (c *Config) OriginAllowed(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	for _, allowed := range c.Server.AllowedOrigins {
+		if allowed == "*" {
+			return true
+		}
+		if strings.HasSuffix(allowed, ":*") {
+			prefix := strings.TrimSuffix(allowed, "*")
+			if strings.HasPrefix(origin, prefix) {
+				// Validate that the remainder after the prefix is purely numeric
+				// (a port number), not an arbitrary hostname like "localhost:evil.com".
+				portPart := origin[len(prefix):]
+				if _, err := strconv.Atoi(portPart); err == nil {
+					return true
+				}
+			}
+		}
+		if allowed == origin {
+			return true
+		}
+	}
+	return false
+}

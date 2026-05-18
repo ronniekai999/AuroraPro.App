@@ -1,0 +1,161 @@
+// Aurora V2 — streaming session management.
+//
+// Wraps Aurora's /api/stream/* endpoints. The streaming flow is:
+//
+//   1. GET /api/stream/info/{fileId} — server inspects the file's
+//      codecs against client capabilities + admin profile config and
+//      returns a "decision": direct_play | direct_stream | transcode.
+//
+//   2. POST /api/stream/sessions — creates an HLS session (FFmpeg
+//      process for transcode/remux, NOP for direct_play). Returns
+//      { session_id, master_playlist }.
+//
+//   3. The player loads master_playlist via hls.js. hls.js XHRs for
+//      level + segment playlists hit /api/stream/hls/{sid}/...
+//
+//   4. POST /api/stream/sessions/{sid}/keepalive every ~10s so the
+//      server-side TranscodeManager doesn't garbage-collect the
+//      session.
+//
+//   5. DELETE /api/stream/sessions/{sid} on player close (best-
+//      effort — server eventually GCs idle sessions, but explicit
+//      cleanup releases ffmpeg + disk faster).
+//
+// This module is intentionally I/O only — the React player component
+// owns the hls.js lifecycle and orchestrates calls in here.
+
+import { apiFetch } from './api'
+
+// /api/stream/info response — sparse subset of what the server returns,
+// covering only the fields the V2 player consumes today. Phase 2.5
+// will surface audio_passthrough, hdr_tonemap, etc. for the codec
+// settings panel.
+export interface StreamInfo {
+  stream: StreamDecision
+  audio_tracks?: AudioTrack[]
+  subtitles?: SubtitleTrack[]
+}
+
+export interface StreamDecision {
+  decision: 'direct_play' | 'direct_stream' | 'transcode'
+  // Set by server when decision === 'direct_play'. The browser-native
+  // <video> element loads this URL directly (no hls.js).
+  stream_url?: string
+  container?: string
+  video_codec?: string
+  audio_codec?: string
+  resolution?: string
+  // Real source-file duration in milliseconds, from the ffprobe
+  // metadata captured at scan time. CRITICAL for the custom
+  // controls overlay — `vid.duration` reports HLS-playlist length
+  // (which GROWS as the transcoder produces segments), so the
+  // user-visible time "12:34 / 1:42:30" needs THIS value as the
+  // total for sync-with-friends parity. Optional only because some
+  // old/edge-case files may scan without a duration.
+  duration_ms?: number
+  // direct_stream === remux. Set so the session-create payload echoes
+  // it back; the server uses it to short-circuit transcode parameter
+  // selection.
+  remux?: boolean
+  audio_passthrough?: boolean
+  audio_track_index?: number
+  audio_channels?: number
+  hdr_tonemap?: boolean
+}
+
+export interface AudioTrack {
+  index: number
+  language?: string
+  title?: string
+  codec?: string
+  channels?: number
+  default?: boolean
+}
+
+export interface SubtitleTrack {
+  index: number
+  language?: string
+  title?: string
+  codec?: string
+  forced?: boolean
+}
+
+export interface CreateSessionRequest {
+  file_id: number
+  // V1 uses 'media' for movies and 'episode' for episode files.
+  // The shape of stream URLs is identical; this is just a routing
+  // hint for the backend's file-lookup table.
+  file_type: 'media' | 'episode'
+  remux?: boolean
+  audio_passthrough?: boolean
+  audio_track_index?: number
+  audio_channels?: number
+  hdr_tonemap?: boolean
+  video_codec?: string
+  // FFmpeg -ss seek offset in WHOLE SECONDS (V1's playMedia floors
+  // resumeMs/1000 before sending). The server starts transcoding
+  // from this position, so hls.js's currentTime 0 maps to this
+  // offset in the source file. The session response echoes back
+  // the actual start_sec the server used (it may round-snap to a
+  // GOP boundary), which the client adds back when reporting
+  // progress.
+  start_sec?: number
+}
+
+export interface SessionResponse {
+  session_id: string
+  master_playlist: string
+  start_sec?: number
+}
+
+// /api/stream/info call. caps is a base64-encoded JSON of client
+// capabilities (codecs, hwdecode flags). The detection logic lives
+// in V1's CLIENT_CAPS probe; Phase 2 ships without caps (server
+// falls back to a conservative profile) and Phase 2.5 will port the
+// probe — once ported, this signature accepts a `caps` string.
+export async function getStreamInfo(
+  fileId: number,
+  fileType: 'media' | 'episode' = 'media',
+  signal?: AbortSignal,
+): Promise<StreamInfo> {
+  return apiFetch<StreamInfo>(
+    `/api/stream/info/${fileId}?type=${fileType}`,
+    { signal },
+  )
+}
+
+export async function createSession(
+  req: CreateSessionRequest,
+  signal?: AbortSignal,
+): Promise<SessionResponse> {
+  return apiFetch<SessionResponse>('/api/stream/sessions', {
+    method: 'POST',
+    body: req,
+    signal,
+  })
+}
+
+// Best-effort. Returns void even on error — the server GCs idle
+// sessions eventually, so a failed DELETE just delays cleanup, it
+// doesn't strand resources.
+export async function deleteSession(sessionId: string): Promise<void> {
+  try {
+    await apiFetch(`/api/stream/sessions/${sessionId}`, { method: 'DELETE' })
+  } catch {
+    // intentionally swallowed — best-effort cleanup
+  }
+}
+
+export async function keepalive(sessionId: string, signal?: AbortSignal): Promise<void> {
+  try {
+    await apiFetch(`/api/stream/sessions/${sessionId}/keepalive`, {
+      method: 'POST',
+      signal,
+    })
+  } catch {
+    // Keepalive failures are silent — if the session is gone, the
+    // next segment fetch will 404 and HLS.js's error handler will
+    // surface the real failure (and trigger session recovery in
+    // Phase 2.5).
+  }
+}

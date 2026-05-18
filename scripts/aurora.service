@@ -1,0 +1,29 @@
+[Unit]
+Description=Aurora Media Server
+Documentation=https://github.com/aurora-media/aurora
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aurora
+Group=aurora
+
+WorkingDirectory=/opt/aurora
+ExecStart=/usr/local/bin/aurora
+EnvironmentFile=-/etc/aurora/aurora.env
+
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+# read-only allows scanning media libraries stored under /home/
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths=/var/cache/aurora /opt/aurora /var/log/aurora
+
+[Install]
+WantedBy=multi-user.target

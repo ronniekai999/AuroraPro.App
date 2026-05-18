@@ -1,0 +1,892 @@
+package models
+
+import (
+	"time"
+)
+
+// --- Users & Auth ---
+
+type UserRole string
+
+const (
+	RoleAdmin UserRole = "admin"
+	RoleUser  UserRole = "user"
+)
+
+type User struct {
+	ID           int64     `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	Role         UserRole  `json:"role"`
+	AvatarURL    string    `json:"avatar_url,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	// TokenVersion is stamped into the JWT at issue time so a password change
+	// (which bumps this column) immediately invalidates all outstanding
+	// access tokens via the auth middleware's TokenVersionStore.
+	TokenVersion int `json:"-"`
+	// OAuth identity (migration 020). Non-nil pair when the user has linked
+	// (or signed up via) an OAuth provider — e.g. ("google", "118123456").
+	// Nil for password-only users. Used by GetUserByOAuth for return visits
+	// and by the login flow to gate password attempts against OAuth-only
+	// users (those with empty password_hash).
+	OAuthProvider *string `json:"oauth_provider,omitempty"`
+	OAuthSubject  *string `json:"-"`
+}
+
+type RefreshToken struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+	CreatedAt time.Time `json:"created_at"`
+	Revoked   bool      `json:"revoked"`
+	DeviceInfo string   `json:"device_info,omitempty"`
+}
+
+type InviteCode struct {
+	ID        int64      `json:"id"`
+	Code      string     `json:"code"`
+	CreatedBy int64      `json:"created_by"`
+	UsedBy    *int64     `json:"used_by,omitempty"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// --- Libraries ---
+
+type LibraryType string
+
+const (
+	LibraryMovies LibraryType = "movie"
+	LibraryShows  LibraryType = "show"
+)
+
+type Library struct {
+	ID           int64       `json:"id"`
+	Name         string      `json:"name"`
+	Type         LibraryType `json:"type"`
+	Paths        []string    `json:"paths"`
+	ScanInterval int         `json:"scan_interval_minutes"`
+	OwnerID      int64       `json:"owner_id"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+}
+
+// --- Media Items ---
+
+type MediaType string
+
+const (
+	MediaMovie MediaType = "movie"
+	MediaShow  MediaType = "show"
+)
+
+type MediaItem struct {
+	ID            int64     `json:"id"`
+	LibraryID     int64     `json:"library_id"`
+	Type          MediaType `json:"type"`
+	Title         string    `json:"title"`
+	SortTitle     string    `json:"sort_title"`
+	Year          int       `json:"year,omitempty"`
+	Overview      string    `json:"overview,omitempty"`
+	Rating        float64   `json:"rating,omitempty"`
+	RuntimeMin    int       `json:"runtime_minutes,omitempty"`
+	ContentRating string    `json:"content_rating,omitempty"`
+	PosterPath    string    `json:"poster_path,omitempty"`
+	BackdropPath  string    `json:"backdrop_path,omitempty"`
+	MatchStatus   string    `json:"match_status,omitempty"`
+	AddedAt       time.Time `json:"added_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+
+	// Eager-loaded relations (populated by API layer)
+	Genres   []string     `json:"genres,omitempty"`
+	Files    []*MediaFile `json:"files,omitempty"`
+	Has4K    bool         `json:"has_4k,omitempty"`
+	FilePath string       `json:"file_path"` // representative file path (flagged items only)
+	// Reason is a transient one-line LLM-generated explanation ("Because you finished
+	// Severance"). Populated at the API layer by semantic search / hero rerank and
+	// emitted to the frontend as italic caption text. Never stored in the database.
+	Reason string `json:"reason,omitempty"`
+	// NearestAnchor is a transient pointer to the user's recently-watched item
+	// whose embedding sits closest to this item. Populated by the rail
+	// recommender via cosine-similarity match against the profile's recent
+	// watch history. Used by the frontend to render a "Because you watched X"
+	// caption when no LLM-generated Reason is available. Never persisted.
+	NearestAnchor *AnchorRef `json:"nearest_anchor,omitempty"`
+}
+
+// AnchorRef is a lightweight reference to a watched anchor item — just
+// enough to render "Because you watched <title> (<year>)" in the UI. Kept
+// minimal so the rail JSON payload doesn't balloon when every item carries
+// an anchor reference.
+type AnchorRef struct {
+	Title string `json:"title"`
+	Year  int    `json:"year,omitempty"`
+	Type  string `json:"type"`
+}
+
+type MediaFile struct {
+	ID          int64     `json:"id"`
+	MediaItemID int64     `json:"media_item_id"`
+	Path        string    `json:"-"`
+	SizeBytes   int64     `json:"size_bytes"`
+	Container   string    `json:"container"`
+	VideoCodec  string    `json:"video_codec,omitempty"`
+	AudioCodec  string    `json:"audio_codec,omitempty"`
+	Resolution  string    `json:"resolution,omitempty"`
+	VersionTag  string    `json:"version_tag,omitempty"`
+	Bitrate     int64     `json:"bitrate,omitempty"`
+	DurationMs  int64     `json:"duration_ms,omitempty"`
+	VideoProfile   string          `json:"video_profile,omitempty"`
+	VideoPixFmt    string          `json:"video_pix_fmt,omitempty"`
+	FileHash       string          `json:"file_hash"`
+	ScannedAt      time.Time       `json:"scanned_at"`
+	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
+	SubtitleTracks []SubtitleTrack `json:"subtitle_tracks,omitempty"`
+	// LibraryName is populated at the API layer for cross-library version display.
+	// Not stored in the database.
+	LibraryName string `json:"library_name,omitempty"`
+}
+
+// --- TV ---
+
+type Season struct {
+	ID           int64  `json:"id"`
+	MediaItemID  int64  `json:"media_item_id"`
+	Number       int    `json:"season_number"`
+	Title        string `json:"title,omitempty"`
+	Overview     string `json:"overview,omitempty"`
+	EpisodeCount int    `json:"episode_count,omitempty"`
+}
+
+type Episode struct {
+	ID          int64      `json:"id"`
+	SeasonID    int64      `json:"season_id"`
+	MediaItemID int64      `json:"media_item_id"`
+	Number      int        `json:"episode_number"`
+	Title       string     `json:"title,omitempty"`
+	Overview    string     `json:"overview,omitempty"`
+	RuntimeMin  int        `json:"runtime_minutes,omitempty"`
+	AirDate     *time.Time `json:"air_date,omitempty"`
+}
+
+type EpisodeFile struct {
+	ID         int64     `json:"id"`
+	EpisodeID  int64     `json:"episode_id"`
+	Path       string    `json:"-"`
+	SizeBytes  int64     `json:"size_bytes"`
+	Container  string    `json:"container"`
+	VideoCodec string    `json:"video_codec,omitempty"`
+	AudioCodec string    `json:"audio_codec,omitempty"`
+	Resolution string    `json:"resolution,omitempty"`
+	VersionTag string    `json:"version_tag,omitempty"`
+	Bitrate    int64     `json:"bitrate,omitempty"`
+	DurationMs int64     `json:"duration_ms,omitempty"`
+	VideoProfile   string          `json:"video_profile,omitempty"`
+	VideoPixFmt    string          `json:"video_pix_fmt,omitempty"`
+	FileHash       string          `json:"file_hash"`
+	ScannedAt      time.Time       `json:"scanned_at"`
+	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
+	SubtitleTracks []SubtitleTrack `json:"subtitle_tracks,omitempty"`
+	// LibraryName is populated at the API layer for cross-library version display.
+	LibraryName string `json:"library_name,omitempty"`
+}
+
+// --- FFprobe Multi-Track ---
+
+// AudioTrack represents a single audio stream discovered by ffprobe.
+type AudioTrack struct {
+	Index     int    `json:"index"`
+	Codec     string `json:"codec"`
+	Channels  int    `json:"channels"`
+	Language  string `json:"language,omitempty"`
+	Title     string `json:"title,omitempty"`
+	IsDefault bool   `json:"is_default"`
+}
+
+// --- Metadata ---
+
+type ExternalID struct {
+	MediaItemID int64  `json:"media_item_id"`
+	Provider    string `json:"provider"` // tmdb, tvdb, imdb
+	ExternalID  string `json:"external_id"`
+}
+
+// --- Scanner ---
+
+type ScanStatus string
+
+const (
+	ScanIdle     ScanStatus = "idle"
+	ScanRunning  ScanStatus = "running"
+	ScanComplete ScanStatus = "complete"
+	ScanFailed   ScanStatus = "failed"
+)
+
+type ScanProgress struct {
+	LibraryID    int64      `json:"library_id"`
+	Status       ScanStatus `json:"status"`
+	TotalFiles   int        `json:"total_files"`
+	ScannedFiles int        `json:"scanned_files"`
+	NewFiles     int        `json:"new_files"`
+	CurrentFile  string     `json:"current_file,omitempty"`
+	StartedAt    *time.Time `json:"started_at,omitempty"`
+	Error        string     `json:"error,omitempty"`
+}
+
+// --- API Request/Response ---
+
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type RegisterRequest struct {
+	Username   string `json:"username"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	InviteCode string `json:"invite_code"`
+}
+
+type TokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	User         *User  `json:"user"`
+}
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+type CreateLibraryRequest struct {
+	Name  string      `json:"name"`
+	Type  LibraryType `json:"type"`
+	Paths []string    `json:"paths"`
+}
+
+type UpdateLibraryRequest struct {
+	Name *string `json:"name,omitempty"`
+}
+
+type InviteRequest struct {
+	ExpiresInHours int `json:"expires_in_hours"`
+}
+
+type PaginationParams struct {
+	Page    int `json:"page"`
+	PerPage int `json:"per_page"`
+}
+
+type PaginatedResponse struct {
+	Data       interface{} `json:"data"`
+	Page       int         `json:"page"`
+	PerPage    int         `json:"per_page"`
+	TotalItems int64       `json:"total_items"`
+	TotalPages int         `json:"total_pages"`
+}
+
+type MediaFilter struct {
+	Type           MediaType `json:"type,omitempty"`
+	Genre          string    `json:"genre,omitempty"`
+	Year           int       `json:"year,omitempty"`
+	SortBy         string    `json:"sort_by,omitempty"` // title, rating, year, added
+	Query          string    `json:"query,omitempty"`
+	MaxRating      string    `json:"max_rating,omitempty"`       // e.g. "PG-13", "TV-14"
+	AllowedRatings []string  `json:"allowed_ratings,omitempty"`  // computed from MaxRating
+}
+
+// --- Phase 2: TMDB Metadata ---
+
+// MetadataUpdate carries fields to patch on a media_item after TMDB lookup.
+// nil pointer = don't update this field.
+type MetadataUpdate struct {
+	MediaItemID   int64
+	TMDBID        *int
+	IMDbID        *string
+	Title         *string
+	Overview      *string
+	Tagline       *string
+	Status        *string
+	OriginalLang  *string
+	ContentRating *string
+	PosterPath    *string
+	BackdropPath  *string
+	Popularity    *float64
+	VoteAverage   *float64
+	VoteCount     *int
+	RuntimeMin    *int
+	Year          *int
+	SortTitle     *string
+	MetadataSrc   *string
+}
+
+type EpisodeMetadataUpdate struct {
+	MediaItemID   int64
+	SeasonNumber  int
+	EpisodeNumber int
+	TMDBID        *int
+	Title         *string
+	Overview      *string
+	StillPath     *string
+	VoteAverage   *float64
+	VoteCount     *int
+	RuntimeMin    *int
+	AirDate       *string // "2024-01-15" format
+}
+
+// Artwork represents a poster, backdrop, still, or logo image.
+type Artwork struct {
+	ID          int64     `json:"id"`
+	MediaItemID int64     `json:"media_item_id"`
+	ArtType     string    `json:"art_type"`
+	Source      string    `json:"source"`
+	RemotePath  string    `json:"remote_path"`
+	LocalPath   string    `json:"local_path,omitempty"`
+	Width       int       `json:"width,omitempty"`
+	Height      int       `json:"height,omitempty"`
+	Lang        string    `json:"lang,omitempty"`
+	VoteAverage float64   `json:"vote_average,omitempty"`
+	IsPrimary   bool      `json:"is_primary"`
+	Blurhash    string    `json:"blurhash,omitempty"`
+	CachedAt    *time.Time `json:"cached_at,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CastEntry is used to upsert cast/crew to the DB.
+type CastEntry struct {
+	MediaItemID  int64
+	TMDBPersonID int
+	Name         string
+	ProfilePath  *string
+	RoleType     string // cast, director, writer, producer, creator
+	Character    string
+	DisplayOrder int
+	KnownFor     string
+}
+
+// CastMember is the API response format for a cast/crew member.
+type CastMember struct {
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	ProfilePath  string `json:"profile_path,omitempty"`
+	RoleType     string `json:"role_type"`
+	Character    string `json:"character,omitempty"`
+	DisplayOrder int    `json:"display_order"`
+}
+
+// --- Phase 2: Watch Progress ---
+
+// StaleMediaItem extends MediaItem with fields needed for smart metadata refresh.
+type StaleMediaItem struct {
+	MediaItem
+	TMDBID       *int       `json:"tmdb_id,omitempty"`
+	LastMetadata *time.Time `json:"last_metadata,omitempty"`
+}
+
+type WatchProgress struct {
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	ProfileID   int64     `json:"profile_id"`
+	MediaItemID int64     `json:"media_item_id"`
+	EpisodeID   *int64    `json:"episode_id,omitempty"`
+	PositionMs  int64     `json:"position_ms"`
+	DurationMs  int64     `json:"duration_ms"`
+	Completed   bool      `json:"completed"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type UpdateProgressRequest struct {
+	EpisodeID  *int64 `json:"episode_id,omitempty"`
+	ProfileID  *int64 `json:"profile_id,omitempty"`
+	PositionMs int64  `json:"position_ms"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+// ContinueWatchingItem is an enriched progress entry for the "Continue Watching" row.
+type ContinueWatchingItem struct {
+	WatchProgress
+	Title        string  `json:"title"`
+	PosterPath   string  `json:"poster_path,omitempty"`
+	BackdropPath string  `json:"backdrop_path,omitempty"`
+	Type         string  `json:"type"`
+	Year         int     `json:"year,omitempty"`
+	EpisodeTitle string  `json:"episode_title,omitempty"`
+	SeasonNum    *int    `json:"season_number,omitempty"`
+	EpisodeNum   *int    `json:"episode_number,omitempty"`
+	Percent      float64 `json:"percent_complete"`
+}
+
+// --- Phase 2: Streaming ---
+
+// StreamInfo describes how to stream a particular file.
+type StreamInfo struct {
+	FileID       int64  `json:"file_id"`
+	DirectPlay   bool   `json:"direct_play"`
+	DirectStream bool   `json:"direct_stream"`  // Remux needed (copy codecs, repackage container)
+	Decision     string `json:"decision"`        // "direct_play", "direct_stream", "transcode"
+	StreamURL    string `json:"stream_url"`
+	Container    string `json:"container"`
+	VideoCodec   string `json:"video_codec"`
+	AudioCodec   string `json:"audio_codec"`
+	Resolution   string `json:"resolution"`
+	DurationMs   int64  `json:"duration_ms"`
+	// Client-aware decision fields (populated when client sends capabilities)
+	TranscodeReason  string `json:"transcode_reason,omitempty"`  // Why not direct_play
+	AudioTrackIndex  int    `json:"audio_track_index"`           // Recommended audio track (0-based, -1=default)
+	Remux            bool   `json:"remux,omitempty"`             // Frontend should send remux:true to session
+	AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // Frontend should send audio_passthrough:true
+	AudioChannels    int    `json:"audio_channels,omitempty"`    // Source audio channel count for bitrate scaling
+	HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // Frontend should send hdr_tonemap:true to session
+}
+
+type TranscodeSession struct {
+	ID         string    `json:"id"`
+	UserID     int64     `json:"user_id"`
+	FileID     int64     `json:"file_id"`
+	FileType   string    `json:"file_type"`
+	PID        int       `json:"pid,omitempty"`
+	Status     string    `json:"status"`
+	Preset     string    `json:"preset"`
+	Resolution string    `json:"resolution,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	LastActive time.Time `json:"last_active"`
+}
+
+// SubtitleTrack represents an available subtitle for a media file.
+type SubtitleTrack struct {
+	Index    int    `json:"index"`
+	Language string `json:"language"`
+	Title    string `json:"title,omitempty"`
+	Codec    string `json:"codec"`
+	Forced   bool   `json:"forced"`
+	Default  bool   `json:"default"`
+	Bitmap   bool   `json:"bitmap,omitempty"` // true for PGS/VOBSUB/DVB — cannot be extracted as text
+}
+
+// Expanded MediaItem fields for API response (Phase 2 additions)
+// These are populated by the API layer, not stored directly.
+type MediaItemEnriched struct {
+	*MediaItem
+	TMDBID       *int           `json:"tmdb_id,omitempty"`
+	IMDbID       string         `json:"imdb_id,omitempty"`
+	Tagline      string         `json:"tagline,omitempty"`
+	PosterURL    string         `json:"poster_url,omitempty"`
+	BackdropURL  string         `json:"backdrop_url,omitempty"`
+	Cast         []CastMember   `json:"cast,omitempty"`
+	Artwork      []Artwork      `json:"artwork,omitempty"`
+	SeasonCount  int            `json:"season_count,omitempty"`
+	EpisodeCount int            `json:"episode_count,omitempty"`
+	UserProgress *WatchProgress `json:"user_progress,omitempty"`
+}
+
+// SeasonDetail is the API response for a single season.
+type SeasonDetail struct {
+	Season
+	Episodes   []EpisodeDetail `json:"episodes"`
+	PosterPath string          `json:"poster_path,omitempty"`
+}
+
+// EpisodeDetail is the API response for a single episode with file info.
+type EpisodeDetail struct {
+	Episode
+	StillPath string         `json:"still_path,omitempty"`
+	StillURL  string         `json:"still_url,omitempty"`
+	Files     []*EpisodeFile `json:"files,omitempty"`
+	Progress  *WatchProgress `json:"progress,omitempty"`
+}
+
+// ============================================================
+// Phase 4: User Profiles
+// ============================================================
+
+type UserProfile struct {
+	ID           int64     `json:"id"`
+	UserID       int64     `json:"user_id"`
+	Name         string    `json:"name"`
+	AvatarURL    string    `json:"avatar_url,omitempty"`
+	IsDefault    bool      `json:"is_default"`
+	MaxAgeRating string    `json:"max_age_rating,omitempty"`
+	Language     string    `json:"language"`
+	SubtitleLang string    `json:"subtitle_lang,omitempty"`
+	SubtitleMode string    `json:"subtitle_mode"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type CreateProfileRequest struct {
+	Name         string `json:"name"`
+	AvatarURL    string `json:"avatar_url,omitempty"`
+	MaxAgeRating string `json:"max_age_rating,omitempty"`
+	Language     string `json:"language,omitempty"`
+	SubtitleLang string `json:"subtitle_lang,omitempty"`
+	SubtitleMode string `json:"subtitle_mode,omitempty"`
+}
+
+type UpdateProfileRequest struct {
+	Name         *string `json:"name,omitempty"`
+	AvatarURL    *string `json:"avatar_url,omitempty"`
+	MaxAgeRating *string `json:"max_age_rating,omitempty"`
+	Language     *string `json:"language,omitempty"`
+	SubtitleLang *string `json:"subtitle_lang,omitempty"`
+	SubtitleMode *string `json:"subtitle_mode,omitempty"`
+}
+
+// ============================================================
+// Phase 4: Watchlists
+// ============================================================
+
+type Watchlist struct {
+	ID        int64     `json:"id"`
+	ProfileID int64     `json:"profile_id"`
+	Name      string    `json:"name"`
+	ListType  string    `json:"list_type"`
+	ItemCount int       `json:"item_count,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type WatchlistItem struct {
+	ID          int64     `json:"id"`
+	WatchlistID int64     `json:"watchlist_id"`
+	MediaItemID int64     `json:"media_item_id"`
+	AddedAt     time.Time `json:"added_at"`
+	SortOrder   int       `json:"sort_order"`
+	Title       string    `json:"title,omitempty"`
+	PosterPath  string    `json:"poster_path,omitempty"`
+	Year        int       `json:"year,omitempty"`
+	Type        string    `json:"type,omitempty"`
+}
+
+type CreateWatchlistRequest struct {
+	Name     string `json:"name"`
+	ListType string `json:"list_type,omitempty"`
+}
+
+type AddToWatchlistRequest struct {
+	MediaItemID int64 `json:"media_item_id"`
+}
+
+// ============================================================
+// Phase 6: Collections
+// ============================================================
+//
+// Collections are admin/user-curated groupings of media items —
+// "Marvel Cinematic Universe", "A24 Slow-burn Horror", etc. Two
+// flavors: manually-curated (admin builds the list one item at a
+// time) and AI-generated (LLM picks items from a natural-language
+// prompt). is_public exposes a collection on other users' home
+// rails — typically set by admin for franchise-level groupings.
+
+type Collection struct {
+	ID            int64     `json:"id"`
+	OwnerUserID   int64     `json:"owner_user_id"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description,omitempty"`
+	Kind          string    `json:"kind"` // 'manual' | 'ai'
+	Prompt        string    `json:"prompt,omitempty"`
+	IsPublic      bool      `json:"is_public"`
+	CoverPath     string    `json:"cover_path,omitempty"`
+	ItemCount     int       `json:"item_count,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type CollectionItem struct {
+	ID           int64     `json:"id"`
+	CollectionID int64     `json:"collection_id"`
+	MediaItemID  int64     `json:"media_item_id"`
+	Position     int       `json:"position"`
+	AddedAt      time.Time `json:"added_at"`
+}
+
+type CreateCollectionRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Kind        string `json:"kind,omitempty"`        // defaults to 'manual'
+	Prompt      string `json:"prompt,omitempty"`      // required when kind=='ai'
+	IsPublic    bool   `json:"is_public,omitempty"`
+}
+
+type AddToCollectionRequest struct {
+	MediaItemID int64 `json:"media_item_id"`
+}
+
+// ============================================================
+// Phase 6: Gamification — XP, levels, streaks, achievements
+// ============================================================
+//
+// UserXP is one row per user. XP grows on completed watches; level
+// is derived from XP via the leveling table in
+// `internal/gamification/levels.go`. Streak counts distinct watch
+// days; missing a day resets to 0.
+
+type UserXP struct {
+	UserID         int64      `json:"user_id"`
+	XP             int        `json:"xp"`
+	Level          int        `json:"level"`
+	CurrentStreak  int        `json:"current_streak"`
+	LongestStreak  int        `json:"longest_streak"`
+	LastWatchDate  *time.Time `json:"last_watch_date,omitempty"`
+	TotalWatches   int        `json:"total_watches"`
+	// Audit H1 — the progress bar needs BOTH endpoints to render
+	// correctly. PrevLevelTotal is the absolute XP at the start of
+	// the current level; NextLevelTotal is the absolute XP at the
+	// next. Client computes pct = (xp - prev) / (next - prev). The
+	// older code emitted only Next, which produced misleading bars.
+	XPToNextLevel  int        `json:"xp_to_next_level,omitempty"`  // derived
+	NextLevelTotal int        `json:"next_level_total,omitempty"`  // derived
+	PrevLevelTotal int        `json:"prev_level_total,omitempty"`  // derived
+}
+
+// UserAchievement is one unlock row. `Key` is an opaque app-level
+// identifier — display name/icon/XP-reward live in code.
+type UserAchievement struct {
+	ID             int64     `json:"id"`
+	UserID         int64     `json:"user_id"`
+	AchievementKey string    `json:"achievement_key"`
+	UnlockedAt     time.Time `json:"unlocked_at"`
+}
+
+// ============================================================
+// Phase 4: Activity Log & Admin
+// ============================================================
+
+type ActivityEntry struct {
+	ID        int64                  `json:"id"`
+	UserID    *int64                 `json:"user_id,omitempty"`
+	ProfileID *int64                 `json:"profile_id,omitempty"`
+	EventType string                 `json:"event_type"`
+	Details   map[string]interface{} `json:"details,omitempty"`
+	IPAddress string                 `json:"ip_address,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+	Username  string                 `json:"username,omitempty"`
+}
+
+type ServerStats struct {
+	Version            string  `json:"version"`
+	Uptime             string  `json:"uptime"`
+	MemoryAllocMB      int64   `json:"memory_alloc_mb"`
+	Goroutines         int     `json:"goroutines"`
+	CPUCores           float64 `json:"cpu_cores"`
+	DiskFreeGB         float64 `json:"disk_free_gb"`
+	ActiveStreams      int     `json:"active_streams"`
+	WebSocketClients   int     `json:"websocket_clients"`
+	LibraryCount       int     `json:"library_count"`
+	MovieCount         int64   `json:"movie_count"`
+	ShowCount          int64   `json:"show_count"`
+	EpisodeCount       int64   `json:"episode_count"`
+	UserCount          int64   `json:"user_count"`
+	TotalFileSizeBytes int64   `json:"total_file_size_bytes"`
+	PendingRequests    int64   `json:"pending_requests"`
+	ActiveParties      int64   `json:"active_parties"`
+}
+
+type ServerSetting struct {
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy *int64    `json:"updated_by,omitempty"`
+}
+
+type UpdateSettingsRequest struct {
+	Settings map[string]string `json:"settings"`
+}
+
+type HealthStatus struct {
+	Status      string  `json:"status"`
+	Service     string  `json:"service"`
+	DBConnected bool    `json:"db_connected"`
+	FFmpegAvail bool    `json:"ffmpeg_available"`
+	DiskFreeGB  float64 `json:"disk_free_gb,omitempty"`
+	Uptime      string  `json:"uptime"`
+	Version     string  `json:"version"`
+}
+
+type NowPlayingEntry struct {
+	UserID      int64  `json:"user_id"`
+	Username    string `json:"username"`
+	ProfileName string `json:"profile_name,omitempty"`
+	MediaTitle  string `json:"media_title"`
+	MediaType   string `json:"media_type"`
+	EpisodeInfo string `json:"episode_info,omitempty"`
+	Progress    int    `json:"progress_percent"`
+	Decision    string `json:"decision"`
+}
+
+type LogEntry struct {
+	Time    time.Time              `json:"time"`
+	Level   string                 `json:"level"`
+	Message string                 `json:"message"`
+	Attrs   map[string]interface{} `json:"attrs,omitempty"`
+}
+
+// ============================================================
+// Requests
+// ============================================================
+
+// RequestStatus constants for the media request lifecycle.
+const (
+	RequestPending    = "pending"
+	RequestProcessing = "processing"
+	RequestAvailable  = "available"
+	RequestFailed     = "failed"
+)
+
+// Request represents a user's media request submitted through the Requests feature.
+// Tracks TMDB metadata, quality preferences, ARR integration status, and lifecycle timestamps.
+type Request struct {
+	ID           int64      `json:"id"`
+	UserID       int64      `json:"user_id"`
+	MediaType    string     `json:"media_type"`    // "movie" or "tv"
+	TMDBID       int        `json:"tmdb_id"`       // TMDB ID from frontend search
+	Title        string     `json:"title"`
+	PosterPath   string     `json:"poster_path"`
+	Overview     string     `json:"overview"`
+	Year         int        `json:"year"`
+	Status       string     `json:"status"`        // pending, processing, available, failed
+	Quality1080p bool       `json:"quality_1080p"`
+	Quality4K    bool       `json:"quality_4k"`
+	ArrJobIDs    string     `json:"arr_job_ids"`   // JSON or comma-sep IDs from Radarr/Sonarr (e.g. TVDB ID for TV)
+	ErrorMessage string     `json:"error_message,omitempty"`
+	RequestedAt  time.Time  `json:"requested_at"`
+	ProcessedAt  *time.Time `json:"processed_at,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	// Username is populated at the API layer for admin list views.
+	Username string `json:"username,omitempty"`
+}
+
+// CreateRequestPayload is the JSON body for POST /api/requests.
+type CreateRequestPayload struct {
+	MediaType    string `json:"media_type"`
+	TMDBID       int    `json:"tmdb_id"`
+	Title        string `json:"title"`
+	PosterPath   string `json:"poster_path"`
+	Overview     string `json:"overview"`
+	Year         int    `json:"year"`
+	Quality1080p bool   `json:"quality_1080p"`
+	Quality4K    bool   `json:"quality_4k"`
+}
+
+// RequestsConfigResponse is the JSON response for GET /api/requests/config.
+// Tells the frontend which ARR services are available.
+type RequestsConfigResponse struct {
+	Enabled    bool `json:"enabled"`
+	HasRadarr  bool `json:"has_radarr"`
+	HasSonarr  bool `json:"has_sonarr"`
+	Has4K      bool `json:"has_4k"`
+}
+
+// ============================================================
+// Watch Parties
+// ============================================================
+
+// WatchPartyRoom is the long-lived join identity. A "quick party" creates
+// a room with IsPersistent=false that gets soft-deleted when its session
+// ends. A "persistent room" survives session ends — friends can bookmark
+// its code and rejoin whenever a new party starts. Added in migration 021
+// as part of M3 of the watch-party rewrite.
+type WatchPartyRoom struct {
+	ID            int64      `json:"id"`
+	Code          string     `json:"code"`
+	Name          string     `json:"name"`
+	OwnerUserID   int64      `json:"owner_user_id"`
+	IsPersistent  bool       `json:"is_persistent"`
+	SettingsJSON  string     `json:"settings_json,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	LastActiveAt  time.Time  `json:"last_active_at"`
+	// Soft-delete tombstone. NULL = live (code is reserved). Quick-party
+	// rooms get tombstoned on session end; persistent rooms only when the
+	// owner explicitly deletes them.
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+}
+
+// WatchParty represents a synchronized viewing session.
+type WatchParty struct {
+	ID              int64      `json:"id"`
+	PartyCode       string     `json:"party_code"`
+	HostUserID      int64      `json:"host_user_id"`
+	MediaItemID     int64      `json:"media_item_id"`
+	EpisodeID       *int64     `json:"episode_id,omitempty"`
+	PartyName       string     `json:"party_name"`
+	MediaTitle      string     `json:"media_title"`
+	MediaPoster     string     `json:"media_poster"`
+	MaxParticipants int        `json:"max_participants"`
+	IsActive        bool       `json:"is_active"`
+	SettingsJSON    string     `json:"settings_json,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	EndedAt         *time.Time `json:"ended_at,omitempty"`
+
+	// RoomID links this session to its long-lived room (M3, migration 021).
+	// Nullable for backwards-compat with rows created pre-migration; all
+	// new parties post-021 will have a non-nil RoomID. The room owns the
+	// stable join code; party.PartyCode is preserved as a mirror for the
+	// existing share-image URL space.
+	RoomID *int64 `json:"room_id,omitempty"`
+
+	// ScheduledStartAt is the host's planned start time. When non-nil, the
+	// server runs a per-party timer that fires at this moment and broadcasts
+	// a "party-starting" event, auto-triggering play across all connected
+	// clients. NULL = no schedule, host plays manually. Added in migration 019.
+	ScheduledStartAt *time.Time `json:"scheduled_start_at,omitempty"`
+
+	// StartedAt is the actual moment playback began. Filled either when the
+	// scheduled timer fires or when the host manually plays an unscheduled
+	// party. Lets late joiners compute "we're X seconds into the movie".
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
+// WatchPartyParticipant represents a user's participation in a watch party.
+type WatchPartyParticipant struct {
+	ID       int64      `json:"id"`
+	PartyID  int64      `json:"party_id"`
+	UserID   int64      `json:"user_id"`
+	JoinedAt time.Time  `json:"joined_at"`
+	LeftAt   *time.Time `json:"left_at,omitempty"`
+	// Username is populated at the DB/API layer via JOIN.
+	Username string `json:"username,omitempty"`
+}
+
+// CreatePartyRequest is the JSON body for POST /api/parties.
+type CreatePartyRequest struct {
+	MediaItemID     int64                  `json:"media_item_id"`
+	EpisodeID       *int64                 `json:"episode_id,omitempty"`
+	PartyName       string                 `json:"party_name"`
+	MaxParticipants int                    `json:"max_participants,omitempty"`
+	Settings        map[string]interface{} `json:"settings,omitempty"`
+	// ScheduledStartAt is optional. When provided, the party doesn't auto-play
+	// on join — instead, the server fires "party-starting" at this exact moment
+	// across all connected clients. RFC 3339 timestamp (ISO 8601 with timezone).
+	// Must be in the future; the API rejects past timestamps with 400.
+	ScheduledStartAt *time.Time `json:"scheduled_start_at,omitempty"`
+}
+
+// SchedulePartyRequest is the JSON body for POST /api/parties/{code}/schedule,
+// which lets the host change the scheduled start time after party creation
+// (or clear it entirely by passing null). Host-only via the auth middleware.
+type SchedulePartyRequest struct {
+	// ScheduledStartAt = null clears the schedule (party reverts to "host
+	// plays manually"). A non-nil value must be in the future.
+	ScheduledStartAt *time.Time `json:"scheduled_start_at"`
+}
+
+// PartyInfo is the enriched response for a watch party, including live state.
+type PartyInfo struct {
+	Code             string `json:"code"`
+	HostUsername     string `json:"host_username"`
+	MediaTitle       string `json:"media_title"`
+	MediaPoster      string `json:"media_poster"`
+	ParticipantCount int    `json:"participant_count"`
+	MaxParticipants  int    `json:"max_participants"`
+	IsPlaying        bool   `json:"is_playing"`
+	CurrentTimeMs    int64  `json:"current_time_ms"`
+}

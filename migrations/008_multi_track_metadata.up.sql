@@ -1,0 +1,7 @@
+ALTER TABLE media_files
+    ADD COLUMN IF NOT EXISTS audio_tracks    JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS subtitle_tracks JSONB NOT NULL DEFAULT '[]';
+
+ALTER TABLE episode_files
+    ADD COLUMN IF NOT EXISTS audio_tracks    JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS subtitle_tracks JSONB NOT NULL DEFAULT '[]';
