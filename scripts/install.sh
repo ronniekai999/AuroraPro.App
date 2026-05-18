@@ -264,6 +264,123 @@ detect_pg_service() {
     done
 }
 
+# pgvector — required by migration 014 (semantic_search) and every
+# migration after it. Without it installed at the OS level, Aurora's
+# first-run migrations halt at 014, the binary exits 1, and the
+# admin UI is unreachable. The fresh-install ran into this gap on
+# 2026-05-18 — production audit response.
+#
+# The package name differs by distro AND postgres major version:
+#   Debian/Ubuntu: postgresql-${PG_MAJOR}-pgvector
+#   RHEL/Fedora:   pgvector_${PG_MAJOR}
+#   Arch:          pgvector  (single-version package)
+#   openSUSE:      pgvector
+#
+# Idempotent: bails early if the extension is already visible in
+# `pg_available_extensions`. Non-fatal: if the package can't be
+# installed (exotic distro, repo gaps), we warn and continue — the
+# user will see migration 014 fail explicitly and can hand-install
+# from https://github.com/pgvector/pgvector#installation-notes.
+install_pgvector() {
+    if ! pg_isready &>/dev/null; then
+        warn "pgvector install requires a running Postgres — skipping."
+        return
+    fi
+
+    # Already available system-wide? Skip the package install.
+    local has_vector
+    has_vector="$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || echo "")"
+    if [ "$has_vector" = "1" ]; then
+        ok "pgvector already installed (extension available)"
+        return
+    fi
+
+    # Detect PG major version. server_version_num is like "160001"
+    # for PG 16.1 — divide by 10000 to get the major.
+    local pg_major
+    pg_major="$(sudo -u postgres psql -tAc 'SHOW server_version_num' 2>/dev/null | awk '{print int($1/10000)}')"
+    if [ -z "$pg_major" ] || [ "$pg_major" = "0" ]; then
+        warn "Could not detect Postgres major version — pgvector NOT installed. Aurora's semantic search migration will fail."
+        warn "Install manually after fixing: https://github.com/pgvector/pgvector#installation-notes"
+        return
+    fi
+    info "Installing pgvector for Postgres $pg_major..."
+
+    case "$PKG_MGR" in
+        apt)
+            # Debian/Ubuntu: postgresql-NN-pgvector matches the
+            # major version of the installed server. The package is
+            # in the main repos for Ubuntu 24.04+ / Debian 12+.
+            pkg_install "postgresql-${pg_major}-pgvector"
+            ;;
+        dnf|yum)
+            # RHEL family: pgvector_NN, from the PostgreSQL community
+            # repository (postgresql.org/yum). Operators with only
+            # the base AppStream repo may not have this — warn rather
+            # than error.
+            if ! pkg_install "pgvector_${pg_major}" 2>&1; then
+                warn "pgvector_${pg_major} not in your $PKG_MGR repos. Enable PGDG: https://www.postgresql.org/download/linux/redhat/"
+                return
+            fi
+            ;;
+        pacman)
+            # Arch's pgvector is built against the system-default PG.
+            # The version-coupling Debian/RHEL have isn't a thing here.
+            pkg_install pgvector
+            ;;
+        zypper)
+            # openSUSE's pgvector is in the OBS server:database
+            # repository — may need explicit enablement.
+            if ! pkg_install "pgvector" 2>&1; then
+                warn "pgvector not available via zypper. Enable OBS server:database repo or build from source."
+                return
+            fi
+            ;;
+        *)
+            warn "Unknown pgvector package name for $PKG_MGR. Install manually."
+            return
+            ;;
+    esac
+
+    # Verify the install actually surfaced the extension to PG.
+    # On apt-based systems no Postgres restart is needed (the
+    # extension files are read at CREATE EXTENSION time). RHEL
+    # behaves identically. Skip the restart unless the next probe
+    # fails.
+    has_vector="$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || echo "")"
+    if [ "$has_vector" != "1" ]; then
+        warn "pgvector package installed but Postgres can't see it yet. Trying a service restart..."
+        if [ -n "$PG_SERVICE" ]; then
+            systemctl restart "$PG_SERVICE" 2>/dev/null || true
+            # Wait briefly for PG to be ready again
+            for _ in $(seq 1 10); do
+                if pg_isready &>/dev/null; then break; fi
+                sleep 1
+            done
+        fi
+        has_vector="$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || echo "")"
+    fi
+
+    if [ "$has_vector" != "1" ]; then
+        warn "pgvector install incomplete — Aurora migration 014 will fail. Check 'pg_config --pkglibdir' for the vector.so file."
+        return
+    fi
+
+    # Audit M3 (deep-debug 2026-05-18) — `pg_available_extensions`
+    # showing `vector` only means the control file is on disk. The
+    # .so library could still be ABI-incompatible with this PG
+    # version (e.g. installed a pg16 build against pg15). Catch
+    # that NOW by smoke-testing CREATE EXTENSION in a throwaway DB
+    # rather than letting the user discover it when migration 014
+    # tries the same against the aurora DB and crashes the binary.
+    if sudo -u postgres psql -d postgres -c "CREATE EXTENSION vector; DROP EXTENSION vector;" &>/dev/null; then
+        ok "pgvector available and load-tested"
+    else
+        warn "pgvector control file is present but CREATE EXTENSION failed — likely an ABI mismatch with this Postgres version. Migration 014 will fail."
+        warn "Inspect: sudo -u postgres psql -d postgres -c 'CREATE EXTENSION vector;'"
+    fi
+}
+
 # ── Preflight ─────────────────────────────────────────────────────
 if [ "$(id -u)" -ne 0 ]; then
     error "This script must be run as root (use sudo)."
@@ -307,8 +424,14 @@ step "Step 1/5: Installing system prerequisites"
 
 # Tools we need for the rest of the script itself + the Go download.
 # Installed first so the Go bootstrap works on minimal base images.
-for tool in curl tar ca-certificates; do
-    if ! command -v "$tool" &>/dev/null && [ "$tool" != "ca-certificates" ]; then
+#
+# Audit H2 — python3 + git are required by the auto-updater
+# (aurora-update.sh uses python3 for JSON-safe status writes, git
+# for the source mirror). Installing them up front means a minimal
+# base image (Alpine, RHEL-minimal) won't surface the missing
+# dependency only when the timer first fires 5 minutes after boot.
+for tool in curl tar git python3; do
+    if ! command -v "$tool" &>/dev/null; then
         info "Installing $tool..."
         pkg_install "$tool"
     fi
@@ -350,6 +473,42 @@ fi
 if ! $PG_INSTALLED; then
     info "Installing PostgreSQL..."
     ensure_pkg postgresql-server
+    # Audit (production install 2026-05-18) — explicitly install
+    # postgresql-contrib (RHEL family ships it separately; Debian
+    # bundles pg_trgm into the main package but contrib provides
+    # other extensions Aurora may grow into) and postgresql-client
+    # so pg_dump / psql are always available (Aurora's admin backup
+    # endpoint shells out to pg_dump; install.sh's own SQL uses psql).
+    # Both are no-ops if already pulled in transitively.
+    #
+    # Audit H3 (deep-debug 2026-05-18) — DON'T silence stderr or
+    # `|| true` these. apt/dnf treat "already installed" as success
+    # (exit 0), so the only way these fail is a REAL error (broken
+    # sources.list, repo down, dependency conflict). Letting them
+    # surface beats the "looks-OK then explodes 30 min later" mode.
+    case "$PKG_MGR" in
+        apt)
+            # On modern Debian/Ubuntu the "postgresql" meta-package
+            # pulls postgresql-NN + postgresql-client-NN + contrib
+            # automatically. The explicit install here is defensive
+            # against minimal Debian images where only postgresql-NN
+            # is brought in.
+            pkg_install postgresql-contrib
+            pkg_install postgresql-client
+            ;;
+        dnf|yum)
+            # RHEL/Fedora: postgresql-contrib is a real separate
+            # package and is NOT pulled in by postgresql-server.
+            pkg_install postgresql-contrib
+            ;;
+        pacman)
+            # Arch's postgresql package bundles contrib + client.
+            :
+            ;;
+        zypper)
+            pkg_install postgresql-contrib
+            ;;
+    esac
     # RHEL/Fedora needs explicit initdb on a fresh install.
     # Audit M4 — only initdb if the data directory looks empty.
     # On a half-initialized run (e.g. an earlier installer crash),
@@ -357,8 +516,15 @@ if ! $PG_INSTALLED; then
     # `|| true` suppressed that and let us proceed into a broken
     # state. Better to surface the error so the operator can fix
     # the data dir.
+    # Audit M-3 (deep-debug 2026-05-18) — try the modern flag form
+    # first; only fall back to the legacy subcommand if the binary
+    # rejects the flag (e.g. RHEL 7-era postgresql-setup). Don't
+    # silence stderr on either path — the same anti-pattern H3
+    # removed elsewhere.
     if command -v postgresql-setup &>/dev/null && [ ! -d /var/lib/pgsql/data/base ]; then
-        postgresql-setup --initdb 2>/dev/null || postgresql-setup initdb
+        if ! postgresql-setup --initdb; then
+            postgresql-setup initdb
+        fi
     fi
     # Arch needs explicit initdb too.
     if [ "$PKG_MGR" = "pacman" ] && [ ! -d /var/lib/postgres/data/base ]; then
@@ -387,6 +553,11 @@ if pg_isready &>/dev/null; then
 else
     error "PostgreSQL failed to start. Debug with: journalctl -u $PG_SERVICE -n 50"
 fi
+
+# pgvector — Aurora's migration 014 (semantic_search) requires it.
+# Installed AFTER Postgres is running so we can probe pg_available_extensions.
+# Idempotent; safe to call on re-runs.
+install_pgvector
 
 # Go — the headline fix. Install if missing or older than GO_VERSION.
 # Also probe a couple of common install locations sudo's PATH may
@@ -491,6 +662,36 @@ else
         sudo -u postgres createdb -O "$DB_USER" "$DB_NAME"
     else
         ok "Database '${DB_NAME}' already exists — keeping data"
+    fi
+
+    # Audit C1 (2026-05-18 production-install audit) — pre-create
+    # the extensions Aurora's migrations depend on, AS THE POSTGRES
+    # SUPERUSER, before the binary's first-boot migration runner
+    # tries to do it as the unprivileged `aurora` role.
+    #
+    # `vector` (pgvector) was NOT marked TRUSTED in pgvector 0.7,
+    # so even with the package installed system-wide, a non-superuser
+    # role gets "permission denied to create extension 'vector'".
+    # `pg_trgm` IS trusted in PG ≥ 13, but pre-creating it is harmless
+    # belt-and-suspenders against any future un-trust.
+    #
+    # `CREATE EXTENSION IF NOT EXISTS` is idempotent — safe on re-runs
+    # against an existing DB. Aurora's migrations 001 and 014 then
+    # no-op the same statements.
+    info "Enabling required PostgreSQL extensions in '${DB_NAME}'..."
+    if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" &>/dev/null; then
+        ok "pg_trgm enabled in '${DB_NAME}'"
+    else
+        warn "Failed to enable pg_trgm in '${DB_NAME}'. Migration 001 will fail. Check that postgresql-contrib is installed."
+    fi
+    if sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null | grep -q 1; then
+        if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null; then
+            ok "pgvector (vector) enabled in '${DB_NAME}'"
+        else
+            warn "pgvector is available system-wide but CREATE EXTENSION failed in '${DB_NAME}'. Migration 014 will fail."
+        fi
+    else
+        warn "pgvector NOT available — Aurora's semantic search migration (014) will fail. See the earlier install_pgvector step for diagnostics."
     fi
 
     # Ensure pg_hba.conf permits scram-sha-256 for the aurora user.
@@ -601,6 +802,107 @@ if [ "$PG_SERVICE" != "postgresql" ]; then
 fi
 ok "systemd unit installed"
 
+# ── Auto-updater: script + service + timer + sudoers grant ────────
+# Installs the "pull origin → rebuild → restart" pipeline. The
+# timer fires every 5 min and is a fast no-op when origin has no
+# new commits. The sudoers fragment lets the aurora user trigger
+# the same pipeline from the in-app "Update Now" admin button
+# without requiring the binary itself to run as root.
+#
+# AUDIT C1 + C2 — privilege isolation of the build source.
+#
+# The updater runs as root via systemd, and it does `git fetch +
+# git merge + go build` against whatever `AURORA_SOURCE_DIR` points
+# at. If that directory is owned by an unprivileged user, ANY user
+# with write access to it (the aurora process itself if compromised,
+# or any other local user) gets to inject code that root will then
+# compile and install as /usr/local/bin/aurora. That's a root
+# escalation primitive, and "the dev cloned to their home directory"
+# is the common case.
+#
+# Defense: install.sh maintains a SEPARATE root-owned clone at
+# /var/lib/aurora/source — created by `git clone <origin>` here on
+# first run, and refreshed each install. The user's $PROJECT_DIR
+# clone (often /home/foo/aurora-codebase-2) is never touched by the
+# updater. We also stash the origin URL in aurora.env as
+# AURORA_EXPECTED_REMOTE so the updater can verify nothing has
+# rewritten .git/config behind its back.
+UPDATER_SOURCE_DIR="/var/lib/aurora/source"
+UPDATER_ORIGIN_URL=""
+SKIP_UPDATER=false
+
+if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ]; then
+    # Determine origin URL from the user's clone. We need it both
+    # to set up the root-owned mirror and to write AURORA_EXPECTED_REMOTE.
+    if UPDATER_ORIGIN_URL="$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null)" && [ -n "$UPDATER_ORIGIN_URL" ]; then
+        :
+    else
+        warn "No 'origin' remote configured in $PROJECT_DIR — auto-updater requires a git remote to pull from. Skipping updater install."
+        SKIP_UPDATER=true
+    fi
+fi
+
+if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
+    info "Installing auto-updater..."
+
+    # Set up the root-owned source mirror. Clone fresh if absent;
+    # otherwise refresh `git fetch` so the updater starts from a
+    # current state. We also force-set the origin URL in case a
+    # prior install pointed it elsewhere.
+    if [ ! -d "$UPDATER_SOURCE_DIR/.git" ]; then
+        info "Cloning $UPDATER_ORIGIN_URL to $UPDATER_SOURCE_DIR (root-owned)..."
+        # Clone shallowly to keep disk use modest; `git fetch` later
+        # will deepen if needed for tag-describe.
+        if ! git clone --quiet "$UPDATER_ORIGIN_URL" "$UPDATER_SOURCE_DIR"; then
+            warn "git clone of $UPDATER_ORIGIN_URL into $UPDATER_SOURCE_DIR failed. Auto-updater disabled — fix the remote and re-run."
+            SKIP_UPDATER=true
+        fi
+    else
+        info "Refreshing existing source mirror at $UPDATER_SOURCE_DIR..."
+        git -C "$UPDATER_SOURCE_DIR" remote set-url origin "$UPDATER_ORIGIN_URL"
+        git -C "$UPDATER_SOURCE_DIR" fetch --quiet origin || warn "git fetch in $UPDATER_SOURCE_DIR failed — updater will retry on next tick."
+    fi
+
+    if ! $SKIP_UPDATER; then
+        # Lock down ownership and permissions. root:root + 0755
+        # means the aurora user can READ the tree (useful for
+        # debugging) but cannot write to it, which is exactly the
+        # privilege boundary we need.
+        chown -R root:root "$UPDATER_SOURCE_DIR"
+        chmod -R go-w "$UPDATER_SOURCE_DIR"
+
+        install -m 755 "$PROJECT_DIR/scripts/aurora-update.sh" /usr/local/bin/aurora-update
+        cp "$PROJECT_DIR/scripts/aurora-update.service" /etc/systemd/system/aurora-update.service
+        cp "$PROJECT_DIR/scripts/aurora-update.timer"   /etc/systemd/system/aurora-update.timer
+
+        # Validate the sudoers fragment BEFORE installing it. A broken
+        # /etc/sudoers.d/ file locks every sudo invocation on the box
+        # (including the one you'd need to fix it), so we use
+        # `visudo -cf` to syntax-check the snippet against the live
+        # sudoers grammar first.
+        if visudo -cf "$PROJECT_DIR/scripts/aurora-update.sudoers" >/dev/null 2>&1; then
+            install -m 440 "$PROJECT_DIR/scripts/aurora-update.sudoers" /etc/sudoers.d/aurora-update
+            ok "Sudoers grant installed (aurora user can trigger updates)"
+        else
+            warn "═══════════════════════════════════════════════════════"
+            warn "Sudoers fragment FAILED visudo -cf check — NOT installed."
+            warn "The 5-min auto-update timer will still run as root via"
+            warn "systemd, but the in-app 'Update Now' button will be"
+            warn "INERT (the Go process can't call systemctl without it)."
+            warn "Fix scripts/aurora-update.sudoers and re-run install.sh."
+            warn "═══════════════════════════════════════════════════════"
+        fi
+
+        # Status JSON lives here. World-readable so the aurora-user
+        # Go process can read it; root-writable so only the updater
+        # (which runs as root via systemd) can mutate it.
+        install -d -m 0755 -o root -g root /var/lib/aurora
+        ok "Auto-updater installed: root-owned source at $UPDATER_SOURCE_DIR"
+    fi
+elif [ ! -f "$PROJECT_DIR/scripts/aurora-update.sh" ]; then
+    warn "aurora-update.sh not found in scripts/ — skipping auto-updater install."
+fi
+
 # Env file. Preserve JWT_SECRET across re-runs so existing user
 # sessions don't get invalidated.
 EXISTING_JWT=""
@@ -623,6 +925,26 @@ info "Writing $CONFIG_DIR/aurora.env..."
     printf 'JWT_SECRET=%s\n\n' "$JWT_SECRET"
     printf '# TheMovieDB API key\n'
     printf 'TMDB_API_KEY=%s\n' "$TMDB_KEY"
+    # Auto-updater source dir — where the cloned repo lives. The
+    # 5-min timer + admin "Update Now" button both `cd` here and
+    # `git pull` before rebuilding. We point at the root-owned
+    # mirror at /var/lib/aurora/source (set up above) rather than
+    # the user's $PROJECT_DIR — see Audit C1 in the install block.
+    # If the updater was skipped, this still gets written so a
+    # later install.sh run can complete the setup.
+    printf '\n# Auto-updater source directory (root-owned)\n'
+    printf 'AURORA_SOURCE_DIR=%s\n' "$UPDATER_SOURCE_DIR"
+    printf 'AURORA_UPDATE_BRANCH=%s\n' "${AURORA_UPDATE_BRANCH:-main}"
+    # Audit C2 — pin the expected origin URL. The updater asserts
+    # this matches `git config remote.origin.url` before fetching,
+    # so a tampered .git/config can't redirect the pull to a
+    # malicious mirror. Empty when there was no origin to detect
+    # (skipped-updater path); the updater treats empty as "no
+    # verification" but also won't run because AURORA_SOURCE_DIR
+    # won't exist.
+    if [ -n "$UPDATER_ORIGIN_URL" ]; then
+        printf 'AURORA_EXPECTED_REMOTE=%s\n' "$UPDATER_ORIGIN_URL"
+    fi
     # Optional TVDB via env override.
     if [ -n "${AURORA_TVDB_API_KEY:-}" ]; then
         printf '\n# TheTVDB credentials\n'
@@ -669,6 +991,15 @@ ok "File ownership set"
 systemctl daemon-reload
 systemctl enable aurora &>/dev/null
 
+# Enable + start the auto-update timer. The timer is what fires
+# the update service every 5 minutes; enabling alone would have it
+# fire only on next boot. `systemctl start` arms it immediately.
+if [ -f /etc/systemd/system/aurora-update.timer ]; then
+    systemctl enable aurora-update.timer &>/dev/null
+    systemctl start aurora-update.timer &>/dev/null || warn "Failed to start aurora-update.timer — check 'systemctl status aurora-update.timer'"
+    ok "Auto-update timer armed (next check in ~2 min, every 5 min after)"
+fi
+
 # Port-conflict pre-check (best effort).
 if command -v ss &>/dev/null && ! systemctl is-active aurora &>/dev/null; then
     if ss -tlnp 2>/dev/null | grep -q ":8484 "; then
@@ -684,29 +1015,111 @@ else
 fi
 sleep 2
 
+# Health-check loop with crash detection. Critical for production
+# diagnostics: a failed migration causes aurora.service to exit 1
+# during the migration phase, but the old loop just waited 30s for
+# /api/health and reported an ambiguous "didn't respond yet."
+# Production audit on 2026-05-18 — that ambiguity hid a hard
+# migration failure (pgvector missing) and made the install look
+# successful when the service was actually crashed.
+#
+# New flow: every second, check BOTH the systemd state AND
+# /api/health. Break early on either (a) service entered failed/
+# inactive state — fetch journalctl and show the operator WHY, or
+# (b) health endpoint responds — success.
 SERVICE_OK=false
-if systemctl is-active aurora &>/dev/null; then
-    ok "Aurora service is active"
-
-    # Wait for /api/health to respond. 30s grace period for first-run
-    # migrations.
-    HEALTHY=false
-    for _ in $(seq 1 30); do
-        if curl -sf http://localhost:8484/api/health &>/dev/null; then
-            HEALTHY=true
-            break
-        fi
-        sleep 1
-    done
-    if $HEALTHY; then
-        ok "Health endpoint responding"
-        SERVICE_OK=true
-    else
-        warn "Service is active but /api/health didn't respond within 30s. Tail logs: journalctl -u aurora -f"
-        SERVICE_OK=true   # service is running; health may catch up on next refresh
+SERVICE_FAILED=false
+HEALTHY=false
+for _ in $(seq 1 30); do
+    # is-failed catches the "exited 1" state (e.g., migration crash).
+    # is-active=inactive (without going to failed) shouldn't happen
+    # for a Type=simple unit, but defensive-cover it.
+    if systemctl is-failed aurora &>/dev/null; then
+        SERVICE_FAILED=true
+        break
     fi
+    if ! systemctl is-active aurora &>/dev/null; then
+        # "activating" is fine (still booting). "inactive" without
+        # is-failed=yes is also defensive-fine — the next loop
+        # iteration will catch a transition.
+        :
+    fi
+    if curl -sf http://localhost:8484/api/health &>/dev/null; then
+        HEALTHY=true
+        break
+    fi
+    sleep 1
+done
+
+if $SERVICE_FAILED; then
+    echo ""
+    warn "═══════════════════════════════════════════════════════════════════"
+    warn " AURORA SERVICE FAILED TO START. Last 40 log lines below."
+    warn "═══════════════════════════════════════════════════════════════════"
+    # --no-pager: don't open less; -n 40 plenty of context for
+    # migration errors (single line) or panics (~10 line trace).
+    journalctl -u aurora -n 40 --no-pager 2>/dev/null | sed 's/^/  /'
+    warn "═══════════════════════════════════════════════════════════════════"
+    warn ""
+    warn "Most common causes:"
+    warn "  • Migration error: a Postgres extension is missing (pg_trgm, vector)."
+    warn "    Fix: re-run this installer; it now installs pgvector and"
+    warn "    pre-creates the required extensions in the aurora database."
+    warn "    If a partial migration left a stale row, delete just that"
+    warn "    filename and aurora will replay it on restart:"
+    warn "      sudo -u postgres psql aurora -c \\"
+    warn "        \"DELETE FROM schema_migrations WHERE version='014_semantic_search.up.sql';\""
+    warn "  • Port 8484 in use by another process: sudo ss -tlnp | grep 8484"
+    warn "  • DATABASE_URL is wrong / DB role lacks login: check $CONFIG_DIR/aurora.env"
+    warn ""
+    warn "Full log: sudo journalctl -u aurora --since '5 minutes ago'"
+elif $HEALTHY; then
+    ok "Aurora service is healthy (responding at /api/health)"
+    SERVICE_OK=true
+
+    # Verify the schema is fully migrated. Aurora uses a custom
+    # migration runner (NOT golang-migrate), so the schema_migrations
+    # table is `(version VARCHAR PRIMARY KEY, applied_at TIMESTAMPTZ)`
+    # — one row per applied migration filename. The "dirty" column
+    # that golang-migrate uses does NOT exist here; Aurora's runner
+    # uses a per-migration transaction so half-applied state is
+    # impossible.
+    #
+    # Audit C2 (deep-debug 2026-05-18) — count comparison is the
+    # right shape: applied row count should equal the number of
+    # .up.sql files in the migrations directory. The prior version
+    # of this block queried golang-migrate columns and produced
+    # false-positive warnings on every install.
+    # Audit M-1 (deep-debug 2026-05-18) — compare against the
+    # migration directory the BINARY actually loaded from
+    # ($INSTALL_DIR/migrations), not the source repo. Project dirs
+    # are user-mutable; the installed migrations directory is the
+    # source of truth for what aurora.service ran.
+    # Audit M-2 — explicit `-d` flag for psql DB selection.
+    APPLIED_COUNT="$(sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT COUNT(*) FROM schema_migrations" 2>/dev/null | tr -d '[:space:]' || echo "")"
+    EXPECTED_COUNT="$(ls -1 "$INSTALL_DIR/migrations"/*.up.sql 2>/dev/null | wc -l | tr -d '[:space:]')"
+    if [ -z "$APPLIED_COUNT" ]; then
+        warn "schema_migrations table not found — Aurora hasn't run its first-boot migrations yet. This is OK if the service just started; check 'sudo systemctl status aurora'."
+    elif [ "$APPLIED_COUNT" -eq "$EXPECTED_COUNT" ] 2>/dev/null; then
+        ok "All $EXPECTED_COUNT migrations applied successfully"
+    else
+        warn "Applied $APPLIED_COUNT of $EXPECTED_COUNT migrations — schema is incomplete."
+        warn "Tail the log to see which migration failed: sudo journalctl -u aurora -n 50"
+    fi
+elif systemctl is-active aurora &>/dev/null; then
+    # Service is still running, just slow to come up. Show the user
+    # the last journal output so they can see whether migrations are
+    # progressing or something's hung.
+    warn "Service is active but /api/health didn't respond within 30s."
+    warn "Showing last 20 journal lines for context:"
+    journalctl -u aurora -n 20 --no-pager 2>/dev/null | sed 's/^/  /'
+    warn ""
+    warn "Likely just a slow first boot (large migrations on a big DB)."
+    warn "Tail with: sudo journalctl -u aurora -f"
+    SERVICE_OK=true   # don't block install — service IS running
 else
-    warn "Service failed to start. Check: journalctl -u aurora -n 80"
+    warn "Aurora service unexpectedly stopped during start. journalctl:"
+    journalctl -u aurora -n 40 --no-pager 2>/dev/null | sed 's/^/  /'
 fi
 
 # ══════════════════════════════════════════════════════════════════
@@ -880,3 +1293,12 @@ echo "    journalctl -u aurora -f      # follow logs"
 echo "    systemctl restart aurora     # restart"
 echo "    \$EDITOR $CONFIG_DIR/aurora.env  # edit config"
 echo ""
+
+# Audit M2 (deep-debug 2026-05-18) — exit non-zero when the service
+# never came up. Previously the script always exit 0, so CI / Ansible
+# / a curl-pipe-bash install couldn't detect a failed install. The
+# install IS partially complete (files on disk, env file written) —
+# but "the server isn't reachable" is the user's actual concern.
+if ! $SERVICE_OK; then
+    exit 1
+fi
