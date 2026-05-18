@@ -1076,22 +1076,34 @@ setup_media_access() {
     # Step 2: read+traverse on the media tree itself. `X` (uppercase)
     # is the smart variant — adds execute to dirs but NOT to regular
     # files. Without it, every video file would get the +x bit.
+    #
+    # `acl_supported` tracks whether the filesystem actually accepts
+    # ACL ops. We probe it by reading setfacl's exit code on the
+    # recursive set. If the filesystem rejects ACLs ("Operation not
+    # supported" on NFS without `acl` mount option, ntfs-3g, etc),
+    # we skip the subsequent default-ACL call entirely instead of
+    # re-spamming stderr with the same errors. The chmod fallback
+    # is what actually grants access in that case.
+    local acl_supported=true
     if command -v setfacl &>/dev/null; then
         if ! setfacl -R -m "u:${AURORA_USER}:rX" "$media_path" 2>/dev/null; then
-            warn "  setfacl -R on $media_path failed — falling back to chmod"
+            warn "  setfacl -R on $media_path failed (filesystem may not support ACLs) — falling back to chmod o+rX"
             chmod -R o+rX "$media_path" 2>/dev/null || warn "  chmod -R also failed"
+            acl_supported=false
         fi
         # Default ACL — new files inherit aurora access automatically.
         # Without this, every newly-added video would need a fresh
-        # setfacl pass.
-        #
-        # Audit M1 — don't redirect stderr. If setfacl -dR fails on
-        # one or more descendants (e.g. a symlinked subdir that
-        # crosses to a filesystem without ACL support), the
-        # operator should see WHICH paths failed, not just a
-        # generic "default ACL set failed."
-        setfacl -dR -m "u:${AURORA_USER}:rX" "$media_path" \
-            || warn "  default ACL set failed on one or more paths (see setfacl errors above; filesystem may not support default ACLs)"
+        # setfacl pass. SKIPPED when the filesystem already rejected
+        # the recursive ACL (would just re-emit the same error for
+        # every path).
+        if $acl_supported; then
+            setfacl -dR -m "u:${AURORA_USER}:rX" "$media_path" 2>/dev/null \
+                || warn "  default ACL set failed (filesystem may not support default ACLs)"
+        else
+            warn "  Skipping default-ACL inheritance (filesystem doesn't support ACLs)."
+            warn "  New media added to $media_path after install will need 'chmod o+rX' re-applied."
+            warn "  Tip: add a cron job, or remount with the 'acl' option if your filesystem supports it."
+        fi
     else
         warn "  setfacl not installed — using chmod o+rX (broader access). Install the 'acl' package for tighter perms."
         chmod -R o+rX "$media_path" 2>/dev/null || warn "  chmod -R failed"
