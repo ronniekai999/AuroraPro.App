@@ -292,6 +292,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	profileH := NewProfileHandler(deps.Queries)
 	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
+	// Auto-updater endpoints. Handler is stateless beyond the
+	// status-file path and unit name, both fixed by install.sh.
+	systemH := NewSystemHandler()
 	// 2026-05-16 — wire the DB connection string for the pg_dump backup
 	// endpoint. Empty string is a clean disable (Backup returns 500 with
 	// "not configured" — no panic).
@@ -624,6 +627,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/oauth", adminH.UpdateOAuthSettings)
 				r.Post("/cache/images/purge", adminH.PurgeImageCache)
 				r.Post("/arr/test", adminH.TestARRConnection)
+				// Auto-updater. Manual trigger + status polling. The
+				// trigger shells out to sudo+systemctl (gated by the
+				// /etc/sudoers.d/aurora-update fragment installed by
+				// install.sh); the status read is plain-file I/O.
+				r.Post("/system/update", systemH.TriggerUpdate)
+				r.Get("/system/update/status", systemH.GetUpdateStatus)
 			})
 			// 2026-05-16 — admin backup endpoint. Separate route because
 			// pg_dump can run for several minutes on a large catalog and

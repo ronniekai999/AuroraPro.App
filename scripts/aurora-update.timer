@@ -1,0 +1,28 @@
+[Unit]
+Description=Aurora Media Server — Auto-update timer (5 min)
+Documentation=https://github.com/aurora-media/aurora
+
+[Timer]
+# Fire 2 minutes after boot, then every 5 minutes thereafter.
+# OnBootSec gives the system time to settle before we start
+# pulling — Aurora itself is still finishing its first-run
+# migrations during the first ~30s.
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+# AccuracySec=30s relaxes systemd's wakeup-coalescing requirement
+# so the timer can sleep alongside other system timers (kernel
+# power-save). 30s of jitter is fine for a 5-min auto-update.
+AccuracySec=30s
+
+# Persistent=true makes systemd "catch up" missed runs after the
+# system was suspended/off. Without it, suspending a laptop for
+# 6 hours would skip ~72 timer firings and immediately try to fire
+# all of them on resume — Persistent collapses that to a single
+# catch-up run, which is exactly what we want.
+Persistent=true
+
+Unit=aurora-update.service
+
+[Install]
+WantedBy=timers.target
