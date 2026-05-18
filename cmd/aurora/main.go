@@ -634,19 +634,29 @@ func main() {
 		}
 	}()
 
-	// Print startup info
+	// Print startup info. URLs printed here are intended to be
+	// clickable / pastable into a browser, so we use DisplayAddr
+	// (which rewrites the 0.0.0.0 bind to "localhost" since
+	// browsers refuse 0.0.0.0 as a destination). When TLS is
+	// configured with an explicit domain, that domain takes
+	// precedence — operators behind autocert reach the server via
+	// its public hostname, not localhost.
 	scheme := "http"
 	wsScheme := "ws"
 	if (cfg.TLS.AutoCert && cfg.TLS.Domain != "") || (cfg.TLS.CertFile != "" && cfg.TLS.KeyFile != "") {
 		scheme = "https"
 		wsScheme = "wss"
 	}
+	displayAddr := cfg.DisplayAddr()
+	if cfg.TLS.Domain != "" {
+		displayAddr = cfg.TLS.Domain
+	}
 	fmt.Printf("\n  Aurora Media Server %s\n", version)
 	if staticDir != "" {
-		fmt.Printf("  ├─ Frontend:    %s://%s/\n", scheme, cfg.ServerAddr())
+		fmt.Printf("  ├─ Frontend:    %s://%s/\n", scheme, displayAddr)
 	}
-	fmt.Printf("  ├─ API:         %s://%s/api/health\n", scheme, cfg.ServerAddr())
-	fmt.Printf("  ├─ WebSocket:   %s://%s/ws\n", wsScheme, cfg.ServerAddr())
+	fmt.Printf("  ├─ API:         %s://%s/api/health\n", scheme, displayAddr)
+	fmt.Printf("  ├─ WebSocket:   %s://%s/ws\n", wsScheme, displayAddr)
 	fmt.Printf("  ├─ TMDB:        enabled\n")
 	fmt.Printf("  ├─ Streaming:   direct play + HLS transcode\n")
 	fmt.Printf("  └─ Ready.\n\n")
