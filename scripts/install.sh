@@ -1139,24 +1139,47 @@ setup_media_access() {
     fi
 }
 
-# Resolve media directory: env var override > interactive prompt > skip.
+# Resolve media directories: env var override > interactive prompt > skip.
+#
+# Multi-path support — Aurora's library model supports multiple paths
+# per library (typical use: local disk + NFS mount). The prompt and
+# env var both accept comma-separated input; we loop setup_media_access
+# over each. Whitespace around the commas is stripped so users can
+# paste from a comma+space list (the input field placeholder in the
+# admin UI hints at this format).
 MEDIA_DIR="${AURORA_MEDIA_DIR:-}"
 if [ -z "$MEDIA_DIR" ] && [ -t 0 ]; then
     echo ""
-    info "Optional: configure read access for a media directory now."
+    info "Optional: configure read access for media directories now."
     # Audit H2 — $SUDO_USER is set unconditionally by sudo and is the
     # reliable way to get the invoking user. `logname` is unreliable
     # under sudo on systems where /dev/tty isn't owned by the
     # invoker; it can return "no login name" → fallback printed
     # `/home/you/media` which was misleading.
     EXAMPLE_USER="${SUDO_USER:-$(logname 2>/dev/null || echo you)}"
-    echo "  Examples: /srv/media, /mnt/storage/media, /home/${EXAMPLE_USER}/media"
+    echo "  Examples:"
+    echo "    /srv/media"
+    echo "    /home/${EXAMPLE_USER}/media"
+    echo "    /home/${EXAMPLE_USER}/media, /nfs/${EXAMPLE_USER}/media   (comma-separated for multiple)"
     echo "  Leave empty to skip (you can configure libraries from the admin UI later)."
-    printf '\033[1;36m[?]\033[0m Media directory path (or empty to skip): '
+    printf '\033[1;36m[?]\033[0m Media directory path(s) (or empty to skip): '
     read -r MEDIA_DIR || true
 fi
+
+# Iterate each comma-separated path. The IFS swap localizes the
+# splitting so it doesn't leak into the rest of the script. xargs
+# trims surrounding whitespace from each token (handles both
+# "a,b" and "a , b" cleanly).
 if [ -n "$MEDIA_DIR" ]; then
-    setup_media_access "$MEDIA_DIR"
+    OLD_IFS="$IFS"
+    IFS=','
+    for raw_path in $MEDIA_DIR; do
+        # shellcheck disable=SC2086
+        trimmed_path="$(echo $raw_path | xargs)"
+        [ -z "$trimmed_path" ] && continue
+        setup_media_access "$trimmed_path"
+    done
+    IFS="$OLD_IFS"
 fi
 
 # Ownership of the installed tree.
