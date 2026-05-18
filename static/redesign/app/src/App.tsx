@@ -90,6 +90,12 @@ import {
   type Watchlist,
   type Episode as ApiEpisode,
   type User as ApiUser,
+  // Auto-updater (Phase 8) — surfaces the systemd-driven updater
+  // status + manual trigger in the admin dashboard.
+  getUpdateStatus,
+  triggerUpdate,
+  type UpdateStatus,
+  type UpdateState,
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
@@ -2844,6 +2850,200 @@ function NowPlayingWidget() {
   )
 }
 
+// ─────────────────────── UpdatePanel ───────────────────────
+//
+// Self-contained dashboard widget that surfaces the auto-updater
+// state and exposes a manual "Check now" trigger.
+//
+// Backend wiring:
+//   - GET  /api/admin/system/update/status — returns the JSON written
+//     by scripts/aurora-update.sh into /var/lib/aurora/update-status.json
+//   - POST /api/admin/system/update — shells out to
+//     `sudo -n systemctl start aurora-update.service`; the actual
+//     update runs asynchronously
+//
+// Polling cadence:
+//   - 10 s when in a TERMINAL state (idle / success / failed / unknown)
+//   - 2 s while the updater is ACTIVE (checking / updating / building /
+//     installing / restarting) so the user sees phase transitions live
+// The cadence flips automatically as the state changes.
+const ACTIVE_STATES = new Set<UpdateState>(['checking', 'updating', 'building', 'installing', 'restarting'])
+
+function updateStateMeta(state: UpdateState): { label: string; color: string; spinning: boolean } {
+  switch (state) {
+    case 'checking':      return { label: 'Checking',     color: 'bg-blue-500/10 text-blue-300 border-blue-500/20', spinning: true }
+    case 'updating':      return { label: 'Pulling',      color: 'bg-blue-500/10 text-blue-300 border-blue-500/20', spinning: true }
+    case 'building':      return { label: 'Building',     color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
+    case 'installing':    return { label: 'Installing',   color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
+    case 'restarting':    return { label: 'Restarting',   color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: true }
+    case 'success':       return { label: 'Up to date',   color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20', spinning: false }
+    case 'failed':        return { label: 'Failed',       color: 'bg-red-500/10 text-red-300 border-red-500/20', spinning: false }
+    case 'misconfigured': return { label: 'Misconfigured', color: 'bg-amber-500/10 text-amber-300 border-amber-500/20', spinning: false }
+    case 'idle':          return { label: 'Up to date',   color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20', spinning: false }
+    case 'unknown':       return { label: 'Not run yet',  color: 'bg-white/5 text-white/50 border-white/10', spinning: false }
+  }
+}
+
+// Render an RFC3339 timestamp as "5 minutes ago" / "just now".
+// Kept local instead of importing date-fns because the admin
+// dashboard already avoids that dep — keeps the bundle small.
+function timeAgo(rfc3339: string): string {
+  const then = new Date(rfc3339).getTime()
+  if (Number.isNaN(then)) return 'never'
+  const diffSec = Math.max(0, Math.floor((Date.now() - then) / 1000))
+  if (diffSec < 5)   return 'just now'
+  if (diffSec < 60)  return `${diffSec}s ago`
+  const m = Math.floor(diffSec / 60)
+  if (m < 60)        return `${m} min ago`
+  const h = Math.floor(m / 60)
+  if (h < 24)        return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
+}
+
+function UpdatePanel() {
+  const [status, setStatus] = useState<UpdateStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [triggering, setTriggering] = useState(false)
+  // Tick is a render-counter for "x ago" so the elapsed string
+  // updates without having to refetch. Driven by its OWN
+  // interval — decoupled from the polling cadence (Audit M2).
+  const [, setTick] = useState(0)
+
+  // stateRef mirrors the current update state so the poll
+  // interval's tick callback can read the LATEST state without
+  // its closure capturing a stale value. Updated whenever status
+  // changes.
+  const stateRef = useRef<UpdateState>('unknown')
+  useEffect(() => {
+    if (status) stateRef.current = status.state
+  }, [status])
+
+  // Polling cadence: 2 s while an update is actively running
+  // (so the UI shows phase transitions live), 10 s otherwise.
+  // Audit M1 — uses a ref-counter for the slow-cadence skip rather
+  // than `Date.now() % 5` arithmetic, which oscillated between
+  // bursts and stalls because the tick phase drifted vs. real time.
+  useEffect(() => {
+    let cancelled = false
+    const tickRef = { count: 0 }
+    const fetchStatus = async () => {
+      try {
+        const s = await getUpdateStatus()
+        if (!cancelled) setStatus(s)
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to read update status')
+      }
+    }
+    void fetchStatus()
+    const id = window.setInterval(() => {
+      tickRef.count = (tickRef.count + 1) % 5
+      const active = ACTIVE_STATES.has(stateRef.current)
+      // Active: fetch every 2 s tick. Idle: fetch only when the
+      // tick counter wraps back to 0, so every 5th tick = 10 s.
+      if (!active && tickRef.count !== 0) return
+      void fetchStatus()
+    }, 2000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [])
+
+  // Separate, low-rate interval whose sole job is to invalidate
+  // the "5 min ago" / "just now" string. Audit M2 — formerly
+  // coupled to the polling loop, which made the cadence muddled.
+  useEffect(() => {
+    const id = window.setInterval(() => setTick(t => (t + 1) % 1000), 30_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const handleTrigger = useCallback(async () => {
+    setError(null)
+    setTriggering(true)
+    try {
+      await triggerUpdate()
+      // Audit M3 — optimistically set state to `checking` IMMEDIATELY
+      // so the button locks out and the spinner appears, without
+      // racing the script's first write_status (typically 100-500 ms
+      // after sudo returns). The next poll converges on the real
+      // state. Without this, fast double-clicks would re-fire the
+      // trigger because isActive lingered false briefly.
+      setStatus(prev => ({
+        state: 'checking',
+        at: new Date().toISOString(),
+        message: 'Update requested — pulling latest…',
+        old_sha: prev?.new_sha ?? prev?.old_sha ?? null,
+        new_sha: null,
+      }))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to trigger update')
+    } finally {
+      setTriggering(false)
+    }
+  }, [])
+
+  if (!status) {
+    return (
+      <div className="glass-panel rounded-xl p-6">
+        <h3 className="text-white font-semibold mb-2">Updates</h3>
+        <p className="text-white/40 text-sm">{error ?? 'Loading update status…'}</p>
+      </div>
+    )
+  }
+
+  const meta = updateStateMeta(status.state)
+  const isActive = ACTIVE_STATES.has(status.state)
+  const shortSha = (s?: string | null) => (s ? s.slice(0, 7) : null)
+
+  return (
+    <div className="glass-panel rounded-xl p-6">
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="flex items-center gap-3">
+          <h3 className="text-white font-semibold">Updates</h3>
+          <span className={`badge-glass text-xs ${meta.color}`}>
+            {meta.spinning && (
+              <span className="inline-block w-2 h-2 rounded-full bg-current mr-1.5 animate-pulse" />
+            )}
+            {meta.label}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={handleTrigger}
+          disabled={triggering || isActive}
+          className="px-4 py-2 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-200 text-sm font-medium border border-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          title={isActive ? 'An update is already in progress' : 'Pull, rebuild, restart now'}
+        >
+          {triggering ? 'Starting…' : isActive ? 'Updating…' : 'Update now'}
+        </button>
+      </div>
+
+      <div className="space-y-2 text-sm">
+        <p className="text-white/85">{status.message}</p>
+
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/50">
+          <span>Last check: {timeAgo(status.at)}</span>
+          {shortSha(status.new_sha) && (
+            <span className="font-mono">
+              {status.state === 'success' ? 'Now at' : 'Target'}: {shortSha(status.new_sha)}
+            </span>
+          )}
+          {shortSha(status.old_sha) && status.old_sha !== status.new_sha && (
+            <span className="font-mono">From: {shortSha(status.old_sha)}</span>
+          )}
+        </div>
+
+        {status.state === 'unknown' && (
+          <p className="text-white/40 text-xs">
+            The auto-update timer fires every 5 minutes. If this never populates, run <code className="text-purple-300 bg-white/[0.04] px-1 rounded">systemctl status aurora-update.timer</code> on the server.
+          </p>
+        )}
+
+        {error && (
+          <p className="text-red-300 text-xs">{error}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function AdminLibrariesTab() {
   const [items, setItems] = useState<Library[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -3817,6 +4017,16 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                     <p className="text-white/90">{stats.active_parties}</p>
                   </div>
                 </div>
+              </div>
+
+              {/* Phase 8 — Update panel. Surfaces the auto-updater
+                  status (5-min timer) and exposes a manual "Update
+                  now" trigger for quick patching. Self-contained
+                  polling — slows to 10s when idle, accelerates to
+                  2s during an active update so the user sees phase
+                  transitions live. */}
+              <div className="mb-6">
+                <UpdatePanel />
               </div>
 
               {/* Phase 5 — Now Playing widget. Uses listAdminSessions
