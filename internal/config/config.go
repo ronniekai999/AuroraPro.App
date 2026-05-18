@@ -881,6 +881,34 @@ func (c *Config) ServerAddr() string {
 	return fmt.Sprintf("%s:%d", c.Server.Host, c.Server.Port)
 }
 
+// DisplayHost returns a host string suitable for showing to humans
+// in startup banners — i.e. something they can paste into a browser
+// address bar. When the server is bound to a wildcard (0.0.0.0 or
+// ::), browsers refuse those as DESTINATION addresses (Chrome ≥128
+// blocks 0.0.0.0 entirely under the Private Network Access
+// mitigations; Safari/Firefox treat it as invalid). Substitute
+// "localhost" so the banner URL is clickable on the same machine.
+// Operators on other machines reach the server via its LAN IP /
+// hostname / configured TLS domain — none of which this affects,
+// since DisplayHost only rewrites the wildcard cases.
+//
+// The actual bind address (returned by ServerAddr) is unchanged:
+// the listener still accepts on all interfaces.
+func (c *Config) DisplayHost() string {
+	h := c.Server.Host
+	switch h {
+	case "", "0.0.0.0", "::", "[::]":
+		return "localhost"
+	}
+	return h
+}
+
+// DisplayAddr is the host:port form of DisplayHost, suitable for
+// composing user-facing URLs printed at startup.
+func (c *Config) DisplayAddr() string {
+	return fmt.Sprintf("%s:%d", c.DisplayHost(), c.Server.Port)
+}
+
 func parseOrigins(raw string) []string {
 	if raw == "" {
 		return nil
