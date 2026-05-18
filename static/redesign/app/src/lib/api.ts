@@ -283,10 +283,24 @@ export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}):
 
   if (!res.ok) {
     const body = await parseBody()
-    const message =
-      (body && typeof body === 'object' && 'error' in body && typeof body.error === 'string'
-        ? body.error
-        : `HTTP ${res.status}`)
+    // Aurora's server WriteError emits a NESTED shape:
+    //   { error: { code: 400, message: "path does not exist: ..." } }
+    // Earlier handlers used the FLAT shape:
+    //   { error: "path does not exist: ..." }
+    // Support both — without this, the nested shape falls through
+    // to a generic "HTTP 400" alert and the user never sees the
+    // actual diagnostic (which is what just happened on the
+    // library-create form during a 2026-05-18 install).
+    let message = `HTTP ${res.status}`
+    if (body && typeof body === 'object' && 'error' in body) {
+      const errField = (body as Record<string, unknown>).error
+      if (typeof errField === 'string') {
+        message = errField
+      } else if (errField && typeof errField === 'object' && 'message' in errField) {
+        const nested = (errField as Record<string, unknown>).message
+        if (typeof nested === 'string') message = nested
+      }
+    }
     throw new APIError(res.status, message, body)
   }
   return (await parseBody()) as T
