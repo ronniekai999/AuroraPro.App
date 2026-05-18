@@ -664,36 +664,6 @@ else
         ok "Database '${DB_NAME}' already exists — keeping data"
     fi
 
-    # Audit C1 (2026-05-18 production-install audit) — pre-create
-    # the extensions Aurora's migrations depend on, AS THE POSTGRES
-    # SUPERUSER, before the binary's first-boot migration runner
-    # tries to do it as the unprivileged `aurora` role.
-    #
-    # `vector` (pgvector) was NOT marked TRUSTED in pgvector 0.7,
-    # so even with the package installed system-wide, a non-superuser
-    # role gets "permission denied to create extension 'vector'".
-    # `pg_trgm` IS trusted in PG ≥ 13, but pre-creating it is harmless
-    # belt-and-suspenders against any future un-trust.
-    #
-    # `CREATE EXTENSION IF NOT EXISTS` is idempotent — safe on re-runs
-    # against an existing DB. Aurora's migrations 001 and 014 then
-    # no-op the same statements.
-    info "Enabling required PostgreSQL extensions in '${DB_NAME}'..."
-    if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" &>/dev/null; then
-        ok "pg_trgm enabled in '${DB_NAME}'"
-    else
-        warn "Failed to enable pg_trgm in '${DB_NAME}'. Migration 001 will fail. Check that postgresql-contrib is installed."
-    fi
-    if sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null | grep -q 1; then
-        if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null; then
-            ok "pgvector (vector) enabled in '${DB_NAME}'"
-        else
-            warn "pgvector is available system-wide but CREATE EXTENSION failed in '${DB_NAME}'. Migration 014 will fail."
-        fi
-    else
-        warn "pgvector NOT available — Aurora's semantic search migration (014) will fail. See the earlier install_pgvector step for diagnostics."
-    fi
-
     # Ensure pg_hba.conf permits scram-sha-256 for the aurora user.
     PG_HBA=$(sudo -u postgres psql -tAc "SHOW hba_file" 2>/dev/null || echo "")
     if [ -n "$PG_HBA" ] && [ -f "$PG_HBA" ]; then
@@ -718,6 +688,50 @@ else
     ENCODED_PW="$(urlencode_password "$DB_PASSWORD")"
     DB_URL="postgres://${DB_USER}:${ENCODED_PW}@localhost:5432/${DB_NAME}?sslmode=disable"
     ok "Database configured"
+fi
+
+# ── Pre-create required PostgreSQL extensions ─────────────────────
+# Audit C1 (2026-05-18) + production-install bug 2026-05-18:
+# the extension pre-create MUST run unconditionally — on fresh
+# create AND on existing-DB reuse paths. Migration 014's
+# `CREATE EXTENSION vector` fails for the unprivileged aurora role
+# because vector is not TRUSTED; pre-creating it as the postgres
+# superuser turns the migration line into a clean no-op.
+#
+# Idempotent (CREATE EXTENSION IF NOT EXISTS), so safe on every
+# run regardless of DB state. Only skipped when Aurora is pointed
+# at an EXTERNAL Postgres that this script can't `sudo -u postgres`
+# into (the local Postgres isn't running or isn't on this host).
+if pg_isready &>/dev/null && sudo -u postgres psql -tAc "SELECT 1" &>/dev/null; then
+    info "Ensuring required PostgreSQL extensions in '${DB_NAME}'..."
+
+    # pg_trgm — used by migration 001 for fast LIKE/ILIKE/fuzzy
+    # matching. TRUSTED in PG ≥ 13, so technically aurora could
+    # create it — but pre-creating as superuser keeps the model
+    # uniform and survives any future un-trust.
+    if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" &>/dev/null; then
+        ok "pg_trgm enabled in '${DB_NAME}'"
+    else
+        warn "Failed to enable pg_trgm in '${DB_NAME}'. Migration 001 will fail. Check that postgresql-contrib is installed."
+    fi
+
+    # vector — used by migration 014 for semantic search.
+    # NOT trusted in pgvector 0.7+, so aurora cannot CREATE this
+    # without the pre-create. The biggest single cause of fresh-
+    # install failures before this block became unconditional.
+    if sudo -u postgres psql -d "$DB_NAME" -tAc "SELECT 1 FROM pg_available_extensions WHERE name='vector'" 2>/dev/null | grep -q 1; then
+        if sudo -u postgres psql -d "$DB_NAME" -c "CREATE EXTENSION IF NOT EXISTS vector;" &>/dev/null; then
+            ok "pgvector (vector) enabled in '${DB_NAME}'"
+        else
+            warn "pgvector is available system-wide but CREATE EXTENSION failed in '${DB_NAME}'. Migration 014 will fail."
+        fi
+    else
+        warn "pgvector NOT available — Aurora's semantic search migration (014) will fail. See the install_pgvector step output above."
+    fi
+else
+    warn "Cannot pre-create extensions — local Postgres isn't reachable as superuser. If using an external Postgres, ensure pg_trgm + vector are pre-created in the database manually:"
+    warn "  CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+    warn "  CREATE EXTENSION IF NOT EXISTS vector;"
 fi
 
 # ══════════════════════════════════════════════════════════════════
@@ -1030,19 +1044,32 @@ sleep 2
 SERVICE_OK=false
 SERVICE_FAILED=false
 HEALTHY=false
+
+# Capture the unit's NRestarts at loop start. Aurora's systemd unit
+# has `Restart=on-failure` + `RestartSec=5`, so a crash-loop
+# bounces between activating → failed → activating in <1 s — too
+# fast for `is-failed` to catch reliably during our 1 s polling.
+# NRestarts is a monotonic counter that increments on every
+# restart; if it grows during our window, the service is in a
+# crash loop. That's a more robust signal than the instantaneous
+# state.
+INITIAL_RESTARTS="$(systemctl show aurora -p NRestarts --value 2>/dev/null || echo 0)"
+INITIAL_RESTARTS="${INITIAL_RESTARTS:-0}"
+
 for _ in $(seq 1 30); do
-    # is-failed catches the "exited 1" state (e.g., migration crash).
-    # is-active=inactive (without going to failed) shouldn't happen
-    # for a Type=simple unit, but defensive-cover it.
+    # is-failed catches the steady-state "exited 1" state.
     if systemctl is-failed aurora &>/dev/null; then
         SERVICE_FAILED=true
         break
     fi
-    if ! systemctl is-active aurora &>/dev/null; then
-        # "activating" is fine (still booting). "inactive" without
-        # is-failed=yes is also defensive-fine — the next loop
-        # iteration will catch a transition.
-        :
+    # NRestarts incremented = the unit crashed at least once since
+    # we started this loop. Treat that as failed even if systemd
+    # is currently mid-restart.
+    CURRENT_RESTARTS="$(systemctl show aurora -p NRestarts --value 2>/dev/null || echo 0)"
+    CURRENT_RESTARTS="${CURRENT_RESTARTS:-0}"
+    if [ "$CURRENT_RESTARTS" -gt "$INITIAL_RESTARTS" ] 2>/dev/null; then
+        SERVICE_FAILED=true
+        break
     fi
     if curl -sf http://localhost:8484/api/health &>/dev/null; then
         HEALTHY=true
