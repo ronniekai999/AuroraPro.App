@@ -1337,6 +1337,43 @@ export async function getAllSettings(signal?: AbortSignal): Promise<ServerSettin
 export async function updateSettings(patch: ServerSettingsMap): Promise<void> {
   await apiFetch('/api/admin/settings', { method: 'PUT', body: { settings: patch } })
 }
+
+// ── Auto-updater (admin) ──────────────────────────────────────────
+// The shape mirrors what scripts/aurora-update.sh writes to
+// /var/lib/aurora/update-status.json and the Go SystemHandler
+// forwards verbatim. Keep the union of `state` values in sync with
+// the script's write_status calls — drift here means the UI
+// renders an empty "" badge for new states.
+export type UpdateState =
+  | 'idle'           // last check found no upstream commits
+  | 'checking'       // git-fetching origin
+  | 'updating'       // pulling commits
+  | 'building'       // running go build
+  | 'installing'     // copying binary + assets
+  | 'restarting'     // systemctl restart aurora
+  | 'success'        // last run completed cleanly
+  | 'failed'         // last run errored AFTER attempting an update — message has detail
+  | 'misconfigured'  // preflight rejected (no source, wrong origin, etc) — operator action needed
+  | 'unknown'        // no status file yet (first install, timer hasn't fired)
+export interface UpdateStatus {
+  state: UpdateState
+  at: string              // RFC3339 timestamp of the last write
+  message: string         // human-readable detail (commit subject on success, error text on failure)
+  old_sha?: string | null // commit SHA before the update started
+  new_sha?: string | null // target / installed commit SHA
+}
+
+export async function getUpdateStatus(signal?: AbortSignal): Promise<UpdateStatus> {
+  return apiFetch<UpdateStatus>('/api/admin/system/update/status', { signal })
+}
+
+// Kicks off the updater service. Returns 202 with {started: true}
+// when the systemctl trigger succeeds; the actual update runs
+// asynchronously. Callers should poll getUpdateStatus to render
+// progress and the final result.
+export async function triggerUpdate(): Promise<{ started: boolean; message: string }> {
+  return apiFetch('/api/admin/system/update', { method: 'POST' })
+}
 // Setup-status: tells the auth screen whether ANY users exist. When
 // the database is empty (fresh install), the first registrant
 // becomes admin with no invite required.

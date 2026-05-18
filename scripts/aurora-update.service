@@ -1,0 +1,37 @@
+[Unit]
+Description=Aurora Media Server — Auto-updater (one-shot)
+Documentation=https://github.com/aurora-media/aurora
+# Make sure the network's up before we git-fetch.
+After=network-online.target
+Wants=network-online.target
+# Avoid racing the aurora service's own first-run migrations.
+After=aurora.service
+
+[Service]
+# oneshot = run to completion, then exit. systemd treats the next
+# invocation as a fresh start, so the timer's 5-min cadence works
+# naturally without the unit being in a "running" loop state.
+Type=oneshot
+ExecStart=/usr/local/bin/aurora-update
+# 10-minute cap. A clean build on modest hardware is ~30s; even a
+# slow VM with the entire Go module cache cold should finish well
+# under this. The cap exists so a hung git fetch or runaway build
+# can't camp on the system.
+TimeoutStartSec=10min
+
+# Logging: stdout/stderr go to journalctl (per-invocation), and
+# the script also tees to /var/log/aurora/update.log for the
+# human-readable rolling log the admin UI links to.
+StandardOutput=journal
+StandardError=journal
+
+# This service legitimately needs full root: it writes
+# /usr/local/bin/aurora (a system-wide binary) and calls
+# `systemctl restart aurora`. Don't apply hardening sandboxes
+# here — they'd just block the legitimate writes.
+
+[Install]
+# Not auto-started on boot — the timer is. WantedBy here is just
+# so `systemctl enable aurora-update.service` doesn't error out
+# if an operator runs it manually for some reason.
+WantedBy=multi-user.target
