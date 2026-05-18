@@ -222,6 +222,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // seeing controls auto-hide because the keydown effect's deps were
   // `[target]` (capturing the initial playing=false on bind).
   const playingRef = useRef(false)
+  // Phase 8 follow-up — tracks whether the cursor is currently in
+  // the player's bottom intent zone (where the seek bar + button
+  // row live). Updated on every mousemove against the overlay's
+  // own bounding rect (so the zone math survives any future
+  // wrapping/margins around the player). Read by
+  // `showControlsTemporarily` to decide whether to schedule the
+  // auto-hide timer. Stays false on touch-only sessions (no
+  // mousemove events ever fire), which preserves tap-to-reveal +
+  // 3s-fade UX on mobile.
+  const lastInBottomZoneRef = useRef(false)
   // Audit H2 fix — track whether the server supplied a real
   // duration. When false (some files scan without ffprobe duration),
   // the `durationchange` listener takes the LATEST vid.duration
@@ -895,13 +905,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // (not the captured `playing` value). The useCallback has empty
   // deps so its identity is stable across renders; effects and
   // handlers that reference it never see a stale closure.
+  //
+  // Pin state (Phase 8 follow-up) — `lastInBottomZoneRef` tracks
+  // whether the cursor was last seen in the bottom intent zone of
+  // the player (the "I'm reaching for the seek bar" region). When
+  // true, controls show but the auto-hide timer is NOT scheduled.
+  // Reading the ref inside this function means every caller
+  // (mousemove, keyboard shortcut, touch, play/pause effect) gets
+  // pin behavior consistent with the user's actual cursor
+  // position — without having to remember to pass a flag. Matches
+  // Netflix/YouTube/Plex behavior; fixes "older resolution videos
+  // hide the controls" complaint from passive viewers.
   const showControlsTemporarily = useCallback(() => {
     setControlsVisible(true)
     if (hideTimerRef.current) {
       window.clearTimeout(hideTimerRef.current)
       hideTimerRef.current = null
     }
-    if (playingRef.current) {
+    if (playingRef.current && !lastInBottomZoneRef.current) {
       hideTimerRef.current = window.setTimeout(() => {
         setControlsVisible(false)
         hideTimerRef.current = null
@@ -1054,8 +1075,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // letterbox doesn't trigger native controls" Chrome+Mac bug
       // since OUR overlay renders independently of cursor-over-
       // video state.
-      onMouseMove={showControlsTemporarily}
-      onTouchStart={showControlsTemporarily}
+      //
+      // Phase 8 follow-up — intent-zone pin. When the cursor is in
+      // the bottom ~22% of the PLAYER (where the seek bar + button
+      // row live), treat it as "user is reaching for controls" and
+      // keep them visible indefinitely. Without this, passive
+      // viewers (esp. older shows where the watcher rarely touches
+      // the mouse mid-episode) lose controls after 3s and have no
+      // affordance to find them — which is why the bug surfaced as
+      // "older resolution videos hide the controls."
+      //
+      // Audit M1 (deep-debug round 2) — math is relative to the
+      // overlay's own bounding rect (NOT `window.innerHeight`) so
+      // it survives any future wrapping/margins around the player.
+      // For today's `fixed inset-0` overlay the two are equal, but
+      // tying the threshold to the actual element is more robust.
+      onMouseMove={(e) => {
+        const rect = e.currentTarget.getBoundingClientRect()
+        const bottomZoneThreshold = rect.top + rect.height * 0.78
+        lastInBottomZoneRef.current = e.clientY >= bottomZoneThreshold
+        showControlsTemporarily()
+      }}
+      onTouchStart={() => showControlsTemporarily()}
       // Hide the cursor when the controls auto-hide so the screen
       // is fully chrome-less while watching. Reappears on the next
       // mousemove (which also un-hides the controls via the handler

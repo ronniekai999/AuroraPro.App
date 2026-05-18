@@ -317,9 +317,16 @@ function firstDayOfWeek(): number {
     }
   } catch { /* fall through to country-list fallback */ }
   // Hardcoded fallback for browsers without getWeekInfo. List
-  // covers the major Sun-first locales; everywhere else gets Mon-
-  // first (ISO default, used by 90%+ of countries).
-  const sundayFirst = ['US', 'CA', 'JP', 'IL', 'MX', 'PH', 'BR']
+  // covers the major Sun-first locales per CLDR; everywhere else
+  // gets Mon-first (ISO default). Extended for L2 round 2 to
+  // include Latin-America-major, South-Africa, Kenya, and the
+  // Oceania pair so the fallback doesn't mis-render for those
+  // users on Chrome <130 / Safari <17. The modern API path is
+  // still the source of truth — this is just the safety net.
+  const sundayFirst = [
+    'US', 'CA', 'JP', 'IL', 'MX', 'PH', 'BR',
+    'AR', 'AU', 'NZ', 'ZA', 'KE', 'CO', 'VE', 'CL', 'PE', 'HN', 'GT',
+  ]
   try {
     const region = new Intl.Locale(navigator.language).region
     if (region && sundayFirst.includes(region)) return 0
