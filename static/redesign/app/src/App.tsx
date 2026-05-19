@@ -535,6 +535,39 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
 }
 
 /* ─────────────────────── AUTH VIEW ─────────────────────── */
+// filterAuthError maps server-side auth-failure messages to a small
+// set of user-safe strings. Any message that doesn't match a known
+// pattern falls back to the generic "Login failed. Please try again."
+//
+// 2026-05-19 audit (FE-H5) — previously the raw err.message from
+// apiFetch was shown verbatim. Today Aurora's auth endpoints return
+// safe strings, but a future endpoint that leaks stack-trace or
+// internal schema detail in the body would surface through this UI
+// unchanged. The whitelist makes the safe path the default and
+// requires deliberate addition for new categories.
+function filterAuthError(msg: string): string {
+  const lower = msg.toLowerCase()
+  const knownPatterns: Array<{ match: string; safe: string }> = [
+    { match: 'invalid credentials', safe: 'Invalid username or password.' },
+    { match: 'rate limit', safe: 'Too many attempts — please wait a moment and try again.' },
+    { match: 'rate-limited', safe: 'Too many attempts — please wait a moment and try again.' },
+    { match: 'too many requests', safe: 'Too many attempts — please wait a moment and try again.' },
+    { match: 'invite', safe: 'Invite code required or invalid.' },
+    { match: 'already exists', safe: 'That username or email is already in use.' },
+    { match: 'username', safe: 'Username is invalid or unavailable.' },
+    { match: 'email', safe: 'Email address is invalid or unavailable.' },
+    { match: 'password', safe: 'Password does not meet requirements.' },
+    { match: 'unauthorized', safe: 'Authentication required.' },
+    { match: 'forbidden', safe: 'You do not have permission to do that.' },
+    { match: 'network', safe: 'Network error — check your connection and try again.' },
+    { match: 'failed to fetch', safe: 'Network error — check your connection and try again.' },
+  ]
+  for (const p of knownPatterns) {
+    if (lower.includes(p.match)) return p.safe
+  }
+  return 'Login failed. Please try again.'
+}
+
 // AuthView — M10 Phase 1.
 //
 // Real /api/auth/login wired. Registration is intentionally a no-op in
@@ -599,9 +632,14 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
       onLogin(user)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Login failed'
-      // Aurora returns "invalid credentials" with a 401 — pass that
-      // through verbatim. Other errors get a friendlier preamble.
-      setError(msg)
+      // 2026-05-19 audit (FE-H5) — bucket unknown error strings into
+      // a generic "Login failed" rather than surfacing raw server
+      // text verbatim. Aurora's auth endpoints return safe strings
+      // today ("invalid credentials", "rate limited", etc.), but a
+      // future endpoint that surfaces stack-trace-ish detail or
+      // internal schema names would leak through this UI without
+      // the whitelist. Patterns are matched as substrings (lowercase).
+      setError(filterAuthError(msg))
     } finally {
       setSubmitting(false)
     }
@@ -4430,7 +4468,7 @@ export default function App() {
     const items: MediaContextItem[] = [
       { label: 'Mark as Watched', onClick: () => {
         void markWatched(m.id).then((res) => {
-          const id = Math.random().toString(36).slice(2)
+          const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
           // Phase 6 — surface achievement unlocks from the server's
           // gamification engine. Each unlock gets its own toast so
@@ -4439,7 +4477,7 @@ export default function App() {
           // title + xp_reward), not just raw keys.
           if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
             for (const def of res.achievements_unlocked) {
-              const tid = Math.random().toString(36).slice(2)
+              const tid = nextToastId()
               setToasts(prev => [...prev, { id: tid, message: `${def.icon} Achievement unlocked: ${def.title} (+${def.xp_reward} XP)`, type: 'success' }])
             }
           }
@@ -4451,7 +4489,7 @@ export default function App() {
       }},
       { label: 'Clear Progress', tone: 'danger', onClick: () => {
         void clearProgress(m.id).then(() => {
-          const id = Math.random().toString(36).slice(2)
+          const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Cleared progress for "${m.title}"`, type: 'info' }])
           setRetryNonce(n => n + 1)
         }).catch(err => {
@@ -4499,6 +4537,18 @@ export default function App() {
   const [notifOpen, setNotifOpen] = useState(false)
   const [library, setLibrary] = useState<Media[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
+
+  // 2026-05-19 audit (FE-H2) — monotonic counter for toast IDs.
+  // Previous code used nextToastId() at ~8
+  // sites, which can collide under fast input (rapid double-clicks
+  // on Watched/Unwatched). A duplicate React key triggers "Encountered
+  // two children with the same key" and can corrupt the toast list.
+  // useRef counter is collision-free and order-preserving.
+  const toastIdCounter = useRef(0)
+  const nextToastId = useCallback(() => {
+    toastIdCounter.current += 1
+    return `t${toastIdCounter.current}`
+  }, [])
 
   // M10 Phase 2 — Browse views. Lists fetch lazily on first visit
   // to the tab and stay cached for the session. The null sentinel
@@ -4626,7 +4676,7 @@ export default function App() {
   const navigate = useNavigate()
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
-    const id = Math.random().toString(36).slice(2)
+    const id = nextToastId()
     setToasts(prev => [...prev, { id, message, type }])
   }, [])
 
@@ -4720,7 +4770,7 @@ export default function App() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start playback'
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     } finally {
       setPlayerLoading(false)
@@ -4957,7 +5007,7 @@ export default function App() {
         // room; no live session right now." for the persistent-room
         // case. Surface it as a friendly toast that mentions the
         // link kind so the user understands what they clicked.
-        const id = Math.random().toString(36).slice(2)
+        const id = nextToastId()
         const isOfflineRoom = linkKind === 'r' || (result.error || '').toLowerCase().includes('persistent room')
         setToasts(prev => [...prev, {
           id,
@@ -5050,6 +5100,23 @@ export default function App() {
         // path that left rails/continueItems/etc. visible to the
         // next user.
         resetUserState()
+        return
+      }
+      // 2026-05-19 audit (FE-H4) — also propagate aurora_user
+      // changes (profile edits, avatar updates) from another tab.
+      // Previously only token-clear was observed; if V1 (or another
+      // V2 tab) updated the cached user, V2 would keep showing
+      // stale data until next full reload.
+      if (e.key === 'aurora_user' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue)
+          if (parsed && typeof parsed === 'object') {
+            setUser(parsed)
+          }
+        } catch {
+          // Corrupted aurora_user — ignore; existing state is
+          // better than half-parsed garbage.
+        }
       }
     }
     window.addEventListener('storage', onStorage)
@@ -5168,7 +5235,7 @@ export default function App() {
       })
       .catch(err => {
         if (cancelled || (err && err.name === 'AbortError')) return
-        const id = Math.random().toString(36).slice(2)
+        const id = nextToastId()
         setToasts(prev => [...prev, { id, message: 'Failed to load movies', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
@@ -5190,7 +5257,7 @@ export default function App() {
       })
       .catch(err => {
         if (cancelled || (err && err.name === 'AbortError')) return
-        const id = Math.random().toString(36).slice(2)
+        const id = nextToastId()
         setToasts(prev => [...prev, { id, message: 'Failed to load shows', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
@@ -5232,7 +5299,7 @@ export default function App() {
       // Don't surface a toast for aborted requests — the user
       // changed sort or navigated away, the error is expected.
       if ((err as Error)?.name === 'AbortError') return
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Failed to load more movies', type: 'error' }])
     } finally {
       // Only clear the loading flag if THIS callback still owns
@@ -5264,7 +5331,7 @@ export default function App() {
       setShowsNextPage(page + 1)
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Failed to load more shows', type: 'error' }])
     } finally {
       if (showsLoadMoreAcRef.current === ac) {
@@ -5429,7 +5496,7 @@ export default function App() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to resume'
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     } finally {
       setPlayerLoading(false)
@@ -5454,7 +5521,7 @@ export default function App() {
   const handleRefreshMetadata = useCallback(async (m: Media) => {
     try {
       await refreshMetadata(m.id)
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, {
         id,
         message: 'Metadata refresh triggered — may take a moment.',
@@ -5465,7 +5532,7 @@ export default function App() {
         setDetailItem(detail)
       } catch { /* non-fatal */ }
     } catch (err) {
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       const msg = err instanceof Error ? err.message : 'Failed to refresh'
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
@@ -5478,7 +5545,7 @@ export default function App() {
   // join; for now the user clicks Play themselves after joining).
   const handleStartParty = useCallback(async (m: Media) => {
     if (party.state.code) {
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Leave the current party first.', type: 'info' }])
       return
     }
@@ -5495,7 +5562,7 @@ export default function App() {
       const joinResult = await party.join(resp.code)
       if (joinResult.ok) {
         setPartyPanelOpen(true)
-        const id = Math.random().toString(36).slice(2)
+        const id = nextToastId()
         setToasts(prev => [...prev, {
           id,
           message: `Party started — share code ${resp.code}`,
@@ -5504,7 +5571,7 @@ export default function App() {
       } else {
         // Server created the party but we couldn't join it. Surface
         // the error so the admin knows the party exists.
-        const id = Math.random().toString(36).slice(2)
+        const id = nextToastId()
         setToasts(prev => [...prev, {
           id,
           message: `Party ${resp.code} created but join failed: ${joinResult.error || 'unknown'}`,
@@ -5513,7 +5580,7 @@ export default function App() {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start party'
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
   }, [party])
@@ -5526,7 +5593,7 @@ export default function App() {
     if (!selectedMedia) return
     const file = pickFile(ep.files as EpisodeFile[] | undefined)
     if (!file) {
-      const id = Math.random().toString(36).slice(2)
+      const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'This episode has no playable file.', type: 'error' }])
       return
     }
@@ -6010,7 +6077,7 @@ export default function App() {
               requests={requestsList}
               onRequestSubmitted={(r) => {
                 setRequestsList(prev => prev ? [r, ...prev] : [r])
-                const id = Math.random().toString(36).slice(2)
+                const id = nextToastId()
                 setToasts(prev => [...prev, {
                   id,
                   message: `Requested "${r.title}"`,
@@ -6019,7 +6086,7 @@ export default function App() {
               }}
               onRequestDeleted={(id) => {
                 setRequestsList(prev => prev ? prev.filter(r => r.id !== id) : prev)
-                const tId = Math.random().toString(36).slice(2)
+                const tId = nextToastId()
                 setToasts(prev => [...prev, { id: tId, message: 'Request deleted', type: 'info' }])
               }}
             />
@@ -6092,7 +6159,7 @@ export default function App() {
           voice={party.voice}
           onJoinVoice={() => {
             party.joinVoice().catch(err => {
-              const id = Math.random().toString(36).slice(2)
+              const id = nextToastId()
               setToasts(prev => [...prev, {
                 id,
                 message: err instanceof Error && err.name === 'NotAllowedError'
@@ -6114,7 +6181,7 @@ export default function App() {
           isAdmin={user.role === 'admin'}
           onClose={() => setCollectionsModalOpen(false)}
           onCreated={(c) => {
-            const id = Math.random().toString(36).slice(2)
+            const id = nextToastId()
             setToasts(prev => [...prev, {
               id,
               message: `Created "${c.name}"${c.kind === 'ai' && c.item_count ? ` with ${c.item_count} AI picks` : ''}`,
@@ -6144,7 +6211,7 @@ export default function App() {
                   setAddToListBusy(true)
                   try {
                     await addToWatchlist(activeProfileId, l.id, addToListMedia.id)
-                    const tId = Math.random().toString(36).slice(2)
+                    const tId = nextToastId()
                     setToasts(prev => [...prev, { id: tId, message: `Added to "${l.name}"`, type: 'success' }])
                     setAddToListMedia(null)
                   } catch (err) {
