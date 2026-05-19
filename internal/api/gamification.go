@@ -90,45 +90,38 @@ func NewGamificationEngine(queries *db.Queries) *GamificationEngine {
 // which forced the frontend to display raw keys like "first_watch"
 // instead of "🎬 First Steps".
 func (g *GamificationEngine) AwardForWatch(ctx context.Context, userID int64, when time.Time) []AchievementDef {
-	x, err := g.queries.GetUserXP(ctx, userID)
+	// 2026-05-19 audit (API-H4) — atomic SQL increment replaces the
+	// previous read-modify-write pattern. Two concurrent MarkWatched
+	// calls (multi-device replay) used to last-write-wins one of the
+	// XP grants and silently corrupt streaks. The new query does the
+	// streak math in a CASE expression under a single row lock.
+	prevX, err := g.queries.GetUserXP(ctx, userID)
 	if err != nil {
 		slog.Warn("gamification: get user_xp failed", "user", userID, "error", err)
 		return nil
 	}
-	prevLevel := x.Level
-
-	// XP grant + streak math.
-	x.XP += xpPerWatch
-	x.TotalWatches++
+	prevLevel := prevX.Level
 
 	today := db.TouchDate()
-	if x.LastWatchDate == nil {
-		x.CurrentStreak = 1
-	} else {
-		// Same UTC day → streak unchanged.
-		// Yesterday → streak +1.
-		// Older → streak resets to 1.
-		yesterday := today.AddDate(0, 0, -1)
-		last := time.Date(x.LastWatchDate.Year(), x.LastWatchDate.Month(),
-			x.LastWatchDate.Day(), 0, 0, 0, 0, time.UTC)
-		switch {
-		case last.Equal(today):
-			// no change
-		case last.Equal(yesterday):
-			x.CurrentStreak++
-		default:
-			x.CurrentStreak = 1
-		}
-	}
-	if x.CurrentStreak > x.LongestStreak {
-		x.LongestStreak = x.CurrentStreak
-	}
-	x.LastWatchDate = &today
-	x.Level = computeLevel(x.XP)
-
-	if err := g.queries.UpsertUserXP(ctx, x); err != nil {
-		slog.Warn("gamification: upsert user_xp failed", "user", userID, "error", err)
+	x, err := g.queries.IncrementUserXPForWatch(ctx, userID, xpPerWatch, today)
+	if err != nil {
+		slog.Warn("gamification: increment user_xp failed", "user", userID, "error", err)
 		return nil
+	}
+	// Recompute level from the post-increment XP. The DB stores a
+	// stale `level` we set on initial insert (1); we don't bother
+	// updating it inside the CASE because it's derived from XP and
+	// the next UpsertUserXP (from the bonus-XP path) will write the
+	// right value. Read-side computes from XP too.
+	x.Level = computeLevel(x.XP)
+	// One follow-up upsert to persist the corrected level. This is
+	// safe to race because the level is a pure function of XP, which
+	// already has the atomic increment applied — concurrent callers
+	// just overwrite the same correct value.
+	if err := g.queries.UpsertUserXP(ctx, x); err != nil {
+		slog.Warn("gamification: persist level after increment failed", "user", userID, "error", err)
+		// Continue — the XP delta already landed atomically; level
+		// will sync on the next watch.
 	}
 
 	// Achievement checks. Use a helper closure for "try to unlock";

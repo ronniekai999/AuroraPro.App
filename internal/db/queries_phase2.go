@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -596,6 +595,18 @@ func (q *Queries) SetMediaGenres(ctx context.Context, mediaItemID int64, genreNa
 
 	const maxRetries = 3
 	for attempt := 0; ; attempt++ {
+		// 2026-05-19 audit (BE-H4) — bail out if the caller's ctx is
+		// almost expired. The previous code would launch retry N
+		// inheriting an already-spent context (the failed attempt
+		// may have consumed most of a 30s budget), making the retry
+		// time out almost immediately and disguising the real issue.
+		// 500ms is a soft floor under which a fresh setMediaGenresTx
+		// is unlikely to complete; surface the canceled context up
+		// instead of attempting an obviously-doomed retry.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 500*time.Millisecond {
+			return fmt.Errorf("ctx near deadline before retry %d: %w", attempt, ctx.Err())
+		}
+
 		err := q.setMediaGenresTx(ctx, mediaItemID, cleaned)
 		if err == nil {
 			return nil
@@ -880,12 +891,10 @@ func (q *Queries) GetEpisodeFiles(ctx context.Context, episodeID int64) ([]*mode
 			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt); err != nil {
 			return nil, err
 		}
-		if audioJSON != nil {
-			json.Unmarshal(audioJSON, &f.AudioTracks)
-		}
-		if subtitleJSON != nil {
-			json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-		}
+		// 2026-05-19 audit (BE-H1) — log corrupt JSONB rows instead
+		// of silently dropping their tracks (DecidePlayback breaks).
+		unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+		unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 		files = append(files, f)
 	}
 	return files, rows.Err()
@@ -1181,12 +1190,9 @@ func (q *Queries) GetMediaFileByID(ctx context.Context, id int64) (*models.Media
 	if err != nil {
 		return nil, err
 	}
-	if audioJSON != nil {
-		json.Unmarshal(audioJSON, &f.AudioTracks)
-	}
-	if subtitleJSON != nil {
-		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-	}
+	// 2026-05-19 audit (BE-H1) — log corrupt JSONB rows.
+	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
 }
 
@@ -1204,12 +1210,9 @@ func (q *Queries) GetEpisodeFileByID(ctx context.Context, id int64) (*models.Epi
 	if err != nil {
 		return nil, err
 	}
-	if audioJSON != nil {
-		json.Unmarshal(audioJSON, &f.AudioTracks)
-	}
-	if subtitleJSON != nil {
-		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-	}
+	// 2026-05-19 audit (BE-H1) — log corrupt JSONB rows.
+	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
 }
 
@@ -1328,12 +1331,9 @@ func (q *Queries) GetEpisodeFileByPath(ctx context.Context, path string) (*model
 		}
 		return nil, fmt.Errorf("get episode file: %w", err)
 	}
-	if audioJSON != nil {
-		json.Unmarshal(audioJSON, &f.AudioTracks)
-	}
-	if subtitleJSON != nil {
-		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-	}
+	// 2026-05-19 audit (BE-H1) — log corrupt JSONB rows.
+	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
 }
 
