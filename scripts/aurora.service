@@ -23,7 +23,10 @@ ProtectSystem=strict
 # read-only allows scanning media libraries stored under /home/
 ProtectHome=read-only
 PrivateTmp=yes
-ReadWritePaths=/var/cache/aurora /opt/aurora /var/log/aurora
+# /var/lib/aurora is included so aurora can touch the
+# /var/lib/aurora/trigger-update file used by aurora-update.path
+# to trigger the in-app "Update Now" button without sudo.
+ReadWritePaths=/var/cache/aurora /opt/aurora /var/log/aurora /var/lib/aurora
 
 [Install]
 WantedBy=multi-user.target
