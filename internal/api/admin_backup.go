@@ -415,6 +415,35 @@ BEGIN
     LOOP
         EXECUTE format('DROP TYPE IF EXISTS public.%I CASCADE', r.typname);
     END LOOP;
+    -- Routines (functions AND procedures). Aurora has at least
+    -- update_updated_at() used as a trigger; the dump emits a
+    -- CREATE FUNCTION for it. Without dropping it here, the restore
+    -- fails with "function already exists with same argument types."
+    -- Extension-owned routines (most of pg_trgm + vector live here)
+    -- are filtered by deptype='e'.
+    --
+    -- DROP ROUTINE handles both functions and procedures (PG 11+);
+    -- DROP FUNCTION alone would fail on a CREATE PROCEDURE that a
+    -- future migration might add. Aurora targets PG 14+ (pgvector
+    -- requires it) so DROP ROUTINE is universally available.
+    --
+    -- Aggregates (prokind='a') are excluded from this loop because
+    -- DROP ROUTINE doesn't work on them — they need DROP AGGREGATE.
+    -- Aurora has no aggregates today; if one ever gets added, a
+    -- separate loop will be needed.
+    --
+    -- ::regprocedure casts to the full signature including arg types,
+    -- which DROP ROUTINE needs to disambiguate overloads.
+    FOR r IN
+        SELECT p.oid::regprocedure AS sig
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        AND p.prokind IN ('f', 'p')  -- functions + procedures (skip 'a' aggregates, 'w' window)
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP ROUTINE IF EXISTS %s CASCADE', r.sig);
+    END LOOP;
 END
 $do$;
 `
