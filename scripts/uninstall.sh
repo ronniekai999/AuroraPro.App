@@ -40,7 +40,13 @@ SYSTEMD_UNIT="/etc/systemd/system/aurora.service"
 DB_NAME="aurora"
 DB_USER="aurora"
 
-# Auto-updater pipeline (installed by install.sh ~L897-915, L932).
+# Auto-updater pipeline (installed by install.sh's updater block,
+# which lives in the "if [ -f scripts/aurora-update.sh ] && !
+# $SKIP_UPDATER" section). Files: the updater binary at
+# /usr/local/bin/aurora-update, three systemd units (service +
+# timer + path) under /etc/systemd/system, and historically a
+# sudoers grant (removed in the 2026-05-19 .path-activation
+# rearchitecture but kept here for upgrade-then-uninstall paths).
 UPDATER_BIN="/usr/local/bin/aurora-update"
 UPDATER_SERVICE="/etc/systemd/system/aurora-update.service"
 UPDATER_TIMER="/etc/systemd/system/aurora-update.timer"
@@ -813,11 +819,13 @@ echo "   Aurora Media Server - Uninstallation Complete"
 echo "  ============================================================"
 echo ""
 echo "  The following were NOT removed (shared system packages):"
-echo "    - PostgreSQL server (+ postgresql-contrib, pgvector)"
+echo "    - PostgreSQL server"
+echo "      (+ postgresql-contrib, postgresql-client, pgvector ext)"
 echo "    - FFmpeg / FFprobe"
 echo "    - Go toolchain (/usr/local/go + /etc/profile.d/go.sh)"
-echo "    - Nginx, Certbot"
-echo "    - build-essential, git, python3, acl"
+echo "    - nginx (web server) and certbot (cert manager) —"
+echo "      install.sh installs these only when AURORA_DOMAIN was set"
+echo "    - build-essential, git, python3, acl (build/dev deps)"
 echo "    - Your media files"
 echo ""
 echo "  Removing chmod-fallback world-permissions on media / home dirs"
