@@ -39,6 +39,11 @@ type UpcomingEpisode struct {
 // for a personalized calendar, but library-wide is the right
 // default — TV shows on the server are inherently of interest.
 func (q *Queries) UpcomingEpisodes(ctx context.Context, from, to time.Time) ([]*UpcomingEpisode, error) {
+	// 2026-05-19 audit (BE-M8) — LIMIT 1000. Aurora's calendar UI
+	// shows a forward-looking window of upcoming episodes; even a
+	// massive library wouldn't sensibly display more than ~1000
+	// items in a single fetch. The cap defends against unbounded
+	// row growth as years of episode data accrue.
 	rows, err := q.pool.Query(ctx, `
 		SELECT m.id, m.title, COALESCE(m.poster_path, ''), COALESCE(m.backdrop_path, ''),
 		       e.id, s.season_number, e.episode_number,
@@ -51,6 +56,7 @@ func (q *Queries) UpcomingEpisodes(ctx context.Context, from, to time.Time) ([]*
 		   AND e.air_date <= $2
 		   AND m.type = 'show'
 		 ORDER BY e.air_date ASC, m.title ASC
+		 LIMIT 1000
 	`, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("upcoming episodes: %w", err)

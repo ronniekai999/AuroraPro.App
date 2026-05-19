@@ -511,6 +511,15 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "search query required")
 		return
 	}
+	// 2026-05-19 audit (API-M5) — cap query length. Without this, a
+	// 100 KB query string burns trigram + (optionally) LLM-embed
+	// budget under DB CPU + token cost. 200 chars is comfortably
+	// above any human-typed search (the longest natural-language
+	// title query peaks around 80 chars).
+	if len(query) > 200 {
+		writeError(w, http.StatusBadRequest, "search query must be 200 characters or fewer")
+		return
+	}
 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 50 {
