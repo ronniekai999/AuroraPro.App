@@ -901,12 +901,13 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 		}
 		return nil, fmt.Errorf("get media file: %w", err)
 	}
-	if audioJSON != nil {
-		json.Unmarshal(audioJSON, &f.AudioTracks)
-	}
-	if subtitleJSON != nil {
-		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-	}
+	// 2026-05-19 audit (BE-H1) — route through unmarshalTracks
+	// (queries_crosslib.go) so corrupt JSONB rows log a warning
+	// instead of silently leaving tracks empty. An empty AudioTracks
+	// makes DecidePlayback think the file has no audio and can pick
+	// direct_play for an actually-incompatible file.
+	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
 }
 
@@ -931,12 +932,11 @@ func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*mode
 		); err != nil {
 			return nil, fmt.Errorf("scan media file: %w", err)
 		}
-		if audioJSON != nil {
-			json.Unmarshal(audioJSON, &f.AudioTracks)
-		}
-		if subtitleJSON != nil {
-			json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-		}
+		// 2026-05-19 audit (BE-H1) — see GetMediaFile above for the
+		// rationale; same call site here, log corrupt rows instead
+		// of silently returning empty tracks.
+		unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+		unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 		files = append(files, f)
 	}
 	if err := rows.Err(); err != nil {

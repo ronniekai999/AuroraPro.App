@@ -1626,6 +1626,16 @@ func (m *Manager) HandlePlaybackControl(code string, userID int64, action string
 		return fmt.Errorf("party not found")
 	}
 
+	// 2026-05-19 audit (BE-H8) — clamp timeMs >= 0 at the top of the
+	// handler. The V2 path used to broadcast negative current_time_ms
+	// to all clients if a buggy host (or future bug in the wire layer)
+	// passed timeMs < 0. The V3 sync handler validates this; V2 didn't.
+	// A clamp here is safe because all legitimate playback positions
+	// are >= 0 (frame 0 is the start of the media).
+	if timeMs < 0 {
+		timeMs = 0
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
