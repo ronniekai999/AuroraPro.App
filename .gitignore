@@ -1,0 +1,30 @@
+# macOS metadata
+.DS_Store
+**/.DS_Store
+
+# Local dev artifacts
+*.log
+logs/
+screenshots/
+
+# Built binaries
+/aurora
+/cmd/aurora/aurora
+
+# Environment / secrets
+.env
+.env.local
+*.env.bak
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Frontend build output (rebuilt on each install)
+static/redesign/app/dist/
+static/redesign/app/node_modules/
+
+# Go build cache (in case anyone runs builds in-tree)
+/tmp/
