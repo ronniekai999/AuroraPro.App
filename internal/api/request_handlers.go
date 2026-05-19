@@ -226,6 +226,24 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 2026-05-19 audit (API-H5) — cap free-text fields. Without these,
+	// the 1 MB request body limit could still admit individual fields
+	// up to ~1 MB each, which get stored verbatim and later passed to
+	// Radarr/Sonarr. Caps are generous against real TMDB values:
+	// titles top out around 200 chars, overviews around 1000.
+	if len(payload.Title) > 500 {
+		writeError(w, http.StatusBadRequest, "title must be 500 characters or fewer")
+		return
+	}
+	if len(payload.Overview) > 4000 {
+		writeError(w, http.StatusBadRequest, "overview must be 4000 characters or fewer")
+		return
+	}
+	if len(payload.PosterPath) > 1000 {
+		writeError(w, http.StatusBadRequest, "poster_path must be 1000 characters or fewer")
+		return
+	}
+
 	if !payload.Quality1080p && !payload.Quality4K {
 		writeError(w, http.StatusBadRequest, "at least one quality must be selected")
 		return

@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 // Audit M4 fix (Phase 8) — basename is derived from Vite's
 // `import.meta.env.BASE_URL` instead of hardcoded "/v2". This makes
@@ -17,8 +18,14 @@ import App from './App.tsx'
 // under `/v2/*`. With basename set, navigate composes correctly.
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
 
+// 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
+// render-time throw anywhere in the tree shows a fallback instead of
+// a blank white page. The boundary is OUTSIDE BrowserRouter so a
+// router-internal throw is still caught.
 createRoot(document.getElementById('root')!).render(
-  <BrowserRouter basename={BASENAME}>
-    <App />
-  </BrowserRouter>,
+  <ErrorBoundary>
+    <BrowserRouter basename={BASENAME}>
+      <App />
+    </BrowserRouter>
+  </ErrorBoundary>,
 )

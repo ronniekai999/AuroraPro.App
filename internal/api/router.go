@@ -742,7 +742,16 @@ func frontendHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// 2026-05-19 audit (FE-H6) — tightened from
+		// "strict-origin-when-cross-origin" to "no-referrer" on the
+		// frontend SPA. Aurora embeds JWT tokens as ?token= in some
+		// native-element URLs (backup download anchors, HLS playlist
+		// query strings for Safari) so that clicks from those pages
+		// don't leak the token via the Referer header. The
+		// stricter policy here doesn't affect Aurora's own request
+		// patterns (API calls use Authorization headers, not Referer)
+		// and is materially safer for token hygiene.
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		// Prevent browsers from using stale cached HTML/JS/CSS.  Without an
