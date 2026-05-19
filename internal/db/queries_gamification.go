@@ -61,6 +61,64 @@ func (q *Queries) UpsertUserXP(ctx context.Context, x *models.UserXP) error {
 	return err
 }
 
+// AddBonusXP atomically adds delta to a user's XP and returns the
+// new total. Used for achievement-unlock bonus grants where a
+// previous read-modify-write pattern could revert a concurrent
+// AwardForWatch increment.
+//
+// 2026-05-19 re-audit follow-up (API-H4) — the gamification engine
+// previously did `x.XP += bonus; UpsertUserXP(x)` after each
+// achievement unlock, which re-wrote the whole row from a Go-side
+// snapshot. Under two-watch interleaving, the second UpsertUserXP
+// could overwrite the first's xp value. Atomic SQL increment
+// eliminates the race.
+func (q *Queries) AddBonusXP(ctx context.Context, userID int64, delta int) (int, error) {
+	if delta == 0 {
+		// No-op. Read current XP so the caller has consistent
+		// state if it needs to recompute level.
+		var xp int
+		err := q.pool.QueryRow(ctx,
+			`SELECT xp FROM user_xp WHERE user_id = $1`, userID,
+		).Scan(&xp)
+		if err != nil {
+			return 0, fmt.Errorf("read xp: %w", err)
+		}
+		return xp, nil
+	}
+	var xp int
+	err := q.pool.QueryRow(ctx, `
+		UPDATE user_xp SET xp = xp + $2, updated_at = NOW()
+		WHERE user_id = $1
+		RETURNING xp
+	`, userID, delta).Scan(&xp)
+	if err != nil {
+		return 0, fmt.Errorf("add bonus xp: %w", err)
+	}
+	return xp, nil
+}
+
+// EnsureLevelAtLeast bumps the stored level up to `level` if it's
+// currently lower. Monotone-increasing semantics via GREATEST: two
+// concurrent callers writing different (but both correct-for-their-
+// snapshot) levels converge on the higher one, which matches the
+// real total XP. Levels never decrease across a watch, so this is
+// race-safe.
+//
+// 2026-05-19 re-audit follow-up (API-H4) — replaces UpsertUserXP
+// after the atomic XP increment. The full-row write was the source
+// of the residual race; this targeted UPDATE only touches `level`
+// and is idempotent under concurrent writers.
+func (q *Queries) EnsureLevelAtLeast(ctx context.Context, userID int64, level int) error {
+	_, err := q.pool.Exec(ctx, `
+		UPDATE user_xp SET level = GREATEST(level, $2), updated_at = NOW()
+		WHERE user_id = $1
+	`, userID, level)
+	if err != nil {
+		return fmt.Errorf("ensure level: %w", err)
+	}
+	return nil
+}
+
 // IncrementUserXPForWatch atomically applies the per-watch XP grant
 // AND streak update in a single SQL statement, returning the new row.
 // Callers compute the level from the returned XP value.
