@@ -84,6 +84,14 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 	// dumps would have their TCP conn torn down mid-write and the client
 	// sees "connection reset" even though pg_dump was still going.
 	// Matches the streaming.go pattern at line 648.
+	//
+	// Why 35min for backup but 65min for restore (see Restore below):
+	// pg_dump streams a binary archive directly to the network — its
+	// throughput is bounded by disk read + network write. pg_restore
+	// has to replay every DDL statement, rebuild indexes, and update
+	// every row in a single transaction — roughly an order of magnitude
+	// slower per byte. The asymmetric deadlines reflect the asymmetric
+	// work.
 	if rc := http.NewResponseController(w); rc != nil {
 		_ = rc.SetWriteDeadline(time.Now().Add(35 * time.Minute))
 		_ = rc.SetReadDeadline(time.Now().Add(35 * time.Minute))
@@ -345,7 +353,23 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Bound the search for the "backup" form field so a malicious
+	// upload can't tar-pit us with thousands of huge junk parts
+	// before the real payload. Each junk part body is capped at
+	// maxJunkPartBytes, and we give up entirely after maxJunkParts
+	// non-matching parts.
+	//
+	// In practice the browser sends exactly one part named "backup".
+	// Anything pathological (large number of junk parts, or one
+	// junk part larger than maxJunkPartBytes) is rejected with a
+	// clear error — defense against unbounded io.Copy(io.Discard, p)
+	// the previous code had.
+	const (
+		maxJunkParts     = 16
+		maxJunkPartBytes = 1 << 20 // 1 MiB
+	)
 	var part *multipart.Part
+	junkSeen := 0
 	for {
 		p, err := reader.NextPart()
 		if err == io.EOF {
@@ -359,10 +383,25 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 			part = p
 			break
 		}
-		// Drain unrelated parts so the reader advances. Bounded by
-		// the http server's request body size limit so this can't
-		// be abused for unbounded reads.
-		_, _ = io.Copy(io.Discard, p)
+		junkSeen++
+		if junkSeen > maxJunkParts {
+			_ = p.Close()
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("multipart upload contains more than %d non-'backup' fields — aborting", maxJunkParts))
+			return
+		}
+		// Drain the junk part with a tight cap so a single
+		// adversarial part can't consume unbounded bandwidth.
+		// io.CopyN returns io.EOF when the part was smaller than
+		// the cap (fine); a successful copy of exactly maxJunkPartBytes
+		// means there's more and we reject.
+		n, derr := io.CopyN(io.Discard, p, maxJunkPartBytes)
+		if derr == nil && n == maxJunkPartBytes {
+			_ = p.Close()
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("non-'backup' multipart field exceeds %d-byte drain cap — aborting", maxJunkPartBytes))
+			return
+		}
 		_ = p.Close()
 	}
 	if part == nil {
@@ -545,11 +584,6 @@ BEGIN
     -- future migration might add. Aurora targets PG 14+ (pgvector
     -- requires it) so DROP ROUTINE is universally available.
     --
-    -- Aggregates (prokind='a') are excluded from this loop because
-    -- DROP ROUTINE doesn't work on them — they need DROP AGGREGATE.
-    -- Aurora has no aggregates today; if one ever gets added, a
-    -- separate loop will be needed.
-    --
     -- ::regprocedure casts to the full signature including arg types,
     -- which DROP ROUTINE needs to disambiguate overloads.
     FOR r IN
@@ -561,6 +595,24 @@ BEGIN
         AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
     LOOP
         EXECUTE format('DROP ROUTINE IF EXISTS %s CASCADE', r.sig);
+    END LOOP;
+    -- Aggregates (prokind='a') — separate loop because DROP ROUTINE
+    -- doesn't work on aggregates; they need DROP AGGREGATE.
+    -- Aurora has no user-defined aggregates today, so this loop is
+    -- a no-op against the current schema. It's here so a future
+    -- migration that ever adds CREATE AGGREGATE will not silently
+    -- break the next restore. The deptype='e' filter still preserves
+    -- extension-owned aggregates (none on pg_trgm or vector either,
+    -- but defensive).
+    FOR r IN
+        SELECT p.oid::regprocedure AS sig
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        AND p.prokind = 'a'
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP AGGREGATE IF EXISTS %s CASCADE', r.sig);
     END LOOP;
 END
 $do$;

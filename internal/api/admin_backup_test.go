@@ -30,11 +30,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,34 +279,7 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	if gotTitle != seed.title {
 		t.Errorf("title mismatch:\n  want: %q\n  got:  %q", seed.title, gotTitle)
 	}
-	// The pgvector text representation should round-trip exactly. If
-	// the line-filter corruption ever returns, this comparison fails
-	// loudly with the offending substring visible in the diff.
-	if gotEmbedding != seed.embedding {
-		// Find the first divergent byte for a focused error message.
-		divergeAt := -1
-		minLen := len(gotEmbedding)
-		if len(seed.embedding) < minLen {
-			minLen = len(seed.embedding)
-		}
-		for i := 0; i < minLen; i++ {
-			if gotEmbedding[i] != seed.embedding[i] {
-				divergeAt = i
-				break
-			}
-		}
-		ctxStart := divergeAt - 20
-		if ctxStart < 0 {
-			ctxStart = 0
-		}
-		ctxEnd := divergeAt + 20
-		if ctxEnd > minLen {
-			ctxEnd = minLen
-		}
-		t.Errorf("embedding mismatch at byte %d (len want=%d got=%d):\n  want: ...%s...\n  got:  ...%s...",
-			divergeAt, len(seed.embedding), len(gotEmbedding),
-			seed.embedding[ctxStart:ctxEnd], gotEmbedding[ctxStart:ctxEnd])
-	}
+	assertVectorEqual(t, seed.embedding, gotEmbedding)
 
 	// User + library should also still be there (proves the dependent
 	// rows from the FK chain round-tripped).
@@ -323,6 +299,180 @@ func TestBackupRestoreRoundtrip(t *testing.T) {
 	}
 	if libCount != 1 {
 		t.Errorf("expected restored library, got count=%d", libCount)
+	}
+}
+
+// assertVectorEqual compares two pgvector text representations
+// ("[x,y,z,...]") element-by-element with a small float tolerance.
+//
+// Why not bytes.Equal? pgvector's text serialization is stable today
+// but isn't a formal contract — a future upgrade could legitimately
+// change "0.012345" to "0.0123450" or use exponent form. The roundtrip
+// guarantee that actually matters is "numerically the same vector,"
+// not "byte-identical string." Tolerance check makes the test robust
+// to that. The vector-corruption bug we're guarding against ("0..074918")
+// is detected by parse failure, not byte comparison.
+func assertVectorEqual(t *testing.T, want, got string) {
+	t.Helper()
+	wantVec, err := parsePgVector(want)
+	if err != nil {
+		t.Fatalf("parse want embedding: %v", err)
+	}
+	gotVec, err := parsePgVector(got)
+	if err != nil {
+		// Parse failure on the restored side is the actual signature
+		// of the corruption regression — surface it explicitly.
+		t.Fatalf("restored embedding doesn't parse as pgvector — corruption regression? err=%v, raw=%q", err, got)
+	}
+	if len(wantVec) != len(gotVec) {
+		t.Fatalf("embedding dim mismatch: want=%d got=%d", len(wantVec), len(gotVec))
+	}
+	const tolerance = 1e-6
+	for i := range wantVec {
+		diff := math.Abs(float64(wantVec[i] - gotVec[i]))
+		if diff > tolerance {
+			t.Errorf("embedding[%d] diverges: want=%v got=%v (delta=%v)",
+				i, wantVec[i], gotVec[i], diff)
+			if i > 5 {
+				// Only first few divergences are useful; bail.
+				break
+			}
+		}
+	}
+}
+
+// parsePgVector parses pgvector's "[x,y,z,...]" text form into a
+// []float32. Strict parse: returns an error if any element fails to
+// parse as a float. This is the canonical regression detector — the
+// "0..074918" corruption from the old line-filter pipeline would
+// fail strconv.ParseFloat here.
+func parsePgVector(s string) ([]float32, error) {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || s[0] != '[' || s[len(s)-1] != ']' {
+		return nil, fmt.Errorf("not a pgvector text form (expected [x,y,...]): %q", s)
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return nil, nil
+	}
+	parts := strings.Split(inner, ",")
+	out := make([]float32, len(parts))
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 32)
+		if err != nil {
+			return nil, fmt.Errorf("element %d (%q): %w", i, p, err)
+		}
+		out[i] = float32(v)
+	}
+	return out, nil
+}
+
+// TestBackupRestoreRoundtripMultiRow — guards against silent partial
+// data loss that a single-row test would miss. Inserts 50 media_items,
+// each with a unique embedding. After the roundtrip, all 50 must be
+// present with their embeddings parseable and matching by ID.
+//
+// Why this matters: if any future regression in the pipeline silently
+// drops some rows from a COPY block (the original line-filter bug had
+// exactly this failure mode for rows whose first column happened to
+// match an extension-DDL prefix), a single-row test passes but multi-
+// row catches it.
+func TestBackupRestoreRoundtripMultiRow(t *testing.T) {
+	pool, dbURL := requireBackupTestDB(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Seed: user + library + 50 media_items with distinct embeddings.
+	suffix := time.Now().UTC().Format("20060102150405") + "_multi"
+	var userID, libID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO users (username, email, password_hash, role)
+		 VALUES ($1, $2, 'x', 'admin') RETURNING id`,
+		"multi_"+suffix, "multi_"+suffix+"@example.com",
+	).Scan(&userID); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO libraries (name, type, paths, owner_id)
+		 VALUES ('MultiRow', 'movie', ARRAY['/tmp/multi'], $1) RETURNING id`,
+		userID,
+	).Scan(&libID); err != nil {
+		t.Fatalf("insert library: %v", err)
+	}
+
+	const nRows = 50
+	type rowFixture struct {
+		id    int64
+		title string
+		embed string
+	}
+	fixtures := make([]rowFixture, 0, nRows)
+	for i := 0; i < nRows; i++ {
+		// Distinct embedding per row so order-swap regressions also fail.
+		var sb bytes.Buffer
+		sb.WriteByte('[')
+		for j := 0; j < 384; j++ {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			v := float64((i+1)*(j+1)%97-48) * 0.0011111
+			fmt.Fprintf(&sb, "%.6f", v)
+		}
+		sb.WriteByte(']')
+		title := fmt.Sprintf("MultiRow Test %03d (%s)", i, suffix)
+		var id int64
+		if err := pool.QueryRow(ctx,
+			`INSERT INTO media_items (library_id, type, title, sort_title, embedding)
+			 VALUES ($1, 'movie', $2, $2, $3::vector) RETURNING id`,
+			libID, title, sb.String(),
+		).Scan(&id); err != nil {
+			t.Fatalf("insert media_item %d: %v", i, err)
+		}
+		fixtures = append(fixtures, rowFixture{id: id, title: title, embed: sb.String()})
+	}
+
+	// Backup → wipe → restore.
+	dump := callBackup(t, dbURL)
+	if _, err := pool.Exec(ctx,
+		`DELETE FROM media_items WHERE library_id = $1`, libID,
+	); err != nil {
+		t.Fatalf("perturb media_items: %v", err)
+	}
+	callRestore(t, dbURL, dump)
+
+	pool.Close()
+	freshPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("reconnect after restore: %v", err)
+	}
+	defer freshPool.Close()
+
+	// Every fixture must come back, with its embedding parseable.
+	var restoredCount int
+	if err := freshPool.QueryRow(ctx,
+		`SELECT count(*) FROM media_items WHERE library_id = $1`, libID,
+	).Scan(&restoredCount); err != nil {
+		t.Fatalf("count restored rows: %v", err)
+	}
+	if restoredCount != nRows {
+		t.Fatalf("multi-row restore: expected %d rows, got %d — silent data loss?", nRows, restoredCount)
+	}
+
+	// Spot-check every row's embedding for parse-ability + content.
+	for _, f := range fixtures {
+		var gotTitle, gotEmbedding string
+		if err := freshPool.QueryRow(ctx,
+			`SELECT title, embedding::text FROM media_items WHERE id = $1`,
+			f.id,
+		).Scan(&gotTitle, &gotEmbedding); err != nil {
+			t.Errorf("read row id=%d: %v", f.id, err)
+			continue
+		}
+		if gotTitle != f.title {
+			t.Errorf("row id=%d title mismatch: want=%q got=%q", f.id, f.title, gotTitle)
+		}
+		assertVectorEqual(t, f.embed, gotEmbedding)
 	}
 }
 
@@ -356,6 +506,56 @@ func TestRestoreRejectsLegacyGzipUpload(t *testing.T) {
 	body, _ := io.ReadAll(res.Body)
 	if !bytes.Contains(body, []byte("legacy")) || !bytes.Contains(body, []byte("psql")) {
 		t.Errorf("expected error body to mention 'legacy' + 'psql' workaround, got: %s", body)
+	}
+}
+
+// TestRestoreRejectsTinyValidPrefix — a 5-byte exact "PGDMP" upload
+// (or any upload <256 bytes) passes magic-byte validation but is too
+// small to be a real archive. The handler must reject it BEFORE
+// running the destructive wipe; otherwise a malformed upload would
+// leave the DB empty.
+func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
+	_, dbURL := requireBackupTestDB(t)
+
+	// Just the magic bytes — passes the format check, fails the size check.
+	tiny := []byte("PGDMP")
+
+	h := &AdminHandler{databaseURL: dbURL}
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("backup", "tiny.dump")
+	_, _ = fw.Write(tiny)
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/restore", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.Restore(rec, req)
+
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for tiny upload, got %d", res.StatusCode)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !bytes.Contains(body, []byte("too small")) {
+		t.Errorf("expected error body to mention 'too small', got: %s", body)
+	}
+	// Critically: the wipe must NOT have run. Probe by querying any
+	// migration-created table; if it's gone, the wipe ran prematurely.
+	pool, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		t.Fatalf("connect to verify DB intact: %v", err)
+	}
+	defer pool.Close()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM pg_class WHERE relname = 'users' AND relkind = 'r'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("probe users table: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("DB schema was wiped despite tiny-upload rejection — pre-wipe size check failed")
 	}
 }
 
