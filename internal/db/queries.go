@@ -609,7 +609,13 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 		argIdx++
 	}
 	if filter.Query != "" {
-		where = append(where, fmt.Sprintf("m.title ILIKE '%%%%' || $%d || '%%%%'", argIdx))
+		// 2026-05-19 audit (BE-C1) — `'%%%%'` in Sprintf produces
+		// `'%%'` in the SQL, which ILIKE matches as the LITERAL
+		// two-char string "%%", not the wildcard. Single `%%` in
+		// the format string produces the correct `'%'` wildcard.
+		// The text filter on GET /media has been silently broken
+		// in production until this fix.
+		where = append(where, fmt.Sprintf("m.title ILIKE '%%' || $%d || '%%'", argIdx))
 		args = append(args, filter.Query)
 		argIdx++
 	}

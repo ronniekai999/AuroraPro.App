@@ -212,6 +212,26 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 2026-05-19 audit (BE-H6) — validate LLM URLs to prevent SSRF. An
+	// admin (or a token leaked from admin) can otherwise point these at
+	// cloud metadata services (169.254.169.254) and exfiltrate IAM
+	// credentials, or scan internal-network endpoints. The default
+	// Ollama URL is http://localhost:11434 so loopback must remain
+	// allowed; we just block link-local (cloud metadata) and require
+	// a valid http(s) scheme.
+	if req.OllamaURL != nil && *req.OllamaURL != "" {
+		if err := validateLLMURL(*req.OllamaURL); err != nil {
+			writeError(w, http.StatusBadRequest, "ollama_url: "+err.Error())
+			return
+		}
+	}
+	if req.EmbedURL != nil && *req.EmbedURL != "" {
+		if err := validateLLMURL(*req.EmbedURL); err != nil {
+			writeError(w, http.StatusBadRequest, "embed_url: "+err.Error())
+			return
+		}
+	}
+
 	// restart_required tracks whether ANY field was changed that the running
 	// process can't pick up live. Debug toggle is the only hot-applicable
 	// field today; everything else requires a restart to take effect on the
