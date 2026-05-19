@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -227,10 +228,18 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	// but their sign-in succeeds. This also prevents reflected-URL
 	// attacks where an attacker crafts a malicious ?join= value and
 	// gets it surfaced verbatim in the success-page redirect.
+	//
+	// 2026-05-19 audit (API-H7) — the cookie value now includes the
+	// state token (the same one used for CSRF defense), separated by
+	// a `.`. On callback we verify the state component matches the
+	// state we just validated; a stale cookie from a previous OAuth
+	// flow won't decode to the current state, so the redirect won't
+	// fire. Closes the "stale join cookie substitutes into an
+	// unrelated flow" scenario the auditor flagged.
 	if joinCode := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("join"))); isValidPartyCode(joinCode) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     oauthJoinCookieName,
-			Value:    joinCode,
+			Value:    state + "." + joinCode,
 			Path:     "/api/auth/oauth/",
 			MaxAge:   oauthStateCookieMaxAge, // same lifetime as state — they must complete together
 			HttpOnly: true,
@@ -533,9 +542,27 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Cookie was set in Start when the caller passed ?join=CODE; reading
 	// here means the deep-link survives the OAuth round-trip and the user
 	// lands back on /?join=CODE which initAuth's existing handler picks up.
+	//
+	// 2026-05-19 audit (API-H7) — cookie format is now `state.joinCode`.
+	// Verify the state component matches the state we just validated for
+	// CSRF before honoring the join code. Reject (treat as no-join) when
+	// the prefix doesn't match — that means the cookie is from a
+	// different OAuth flow and shouldn't influence this one.
 	joinCode := ""
-	if c, err := r.Cookie(oauthJoinCookieName); err == nil && isValidPartyCode(c.Value) {
-		joinCode = c.Value
+	if c, err := r.Cookie(oauthJoinCookieName); err == nil {
+		raw := c.Value
+		// New format: "<state>.<code>". Verify the state component
+		// matches the one we just validated.
+		if dot := strings.IndexByte(raw, '.'); dot > 0 {
+			cookieState := raw[:dot]
+			cookieCode := strings.ToUpper(raw[dot+1:])
+			// Constant-time compare on the state component so cookie
+			// behavior doesn't differ between "wrong state" and
+			// "missing state" — same response timing either way.
+			if subtle.ConstantTimeCompare([]byte(cookieState), []byte(gotState)) == 1 && isValidPartyCode(cookieCode) {
+				joinCode = cookieCode
+			}
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthJoinCookieName,

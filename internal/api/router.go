@@ -326,8 +326,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.
-	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc)
-	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc)
+	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
+	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
 
 	// ── API routes (with restrictive security headers) ─────────────────
 	r.Group(func(r chi.Router) {

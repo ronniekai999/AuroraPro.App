@@ -2875,6 +2875,38 @@ func (m *Manager) GetPartyState(code string) *PartyState {
 	return ps
 }
 
+// IsParticipantOrHost returns true if userID is either the party host
+// or currently in the participants list. False if the party doesn't
+// exist. Thread-safe; takes ps.mu internally so callers don't have to
+// reason about the manager's locking discipline.
+//
+// 2026-05-19 audit (API-H2, API-H3) — party-scoped endpoints (reaction
+// timeline, highlight reel MP4) leaked data to any authenticated user
+// who guessed a 6-char party code, because they did no membership
+// check. This helper centralizes the gate so the policy can't be
+// forgotten as new party endpoints are added.
+func (m *Manager) IsParticipantOrHost(code string, userID int64) bool {
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return false
+	}
+	// ps.mu is a sync.Mutex (not RWMutex) per the type declaration
+	// above — write Lock/Unlock to match.
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID == userID {
+		return true
+	}
+	for _, p := range ps.Participants {
+		if p.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 // BuildPartyStateMessage builds the full state message sent to joiners.
 // ps.mu must be held by the caller.
 func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} {
