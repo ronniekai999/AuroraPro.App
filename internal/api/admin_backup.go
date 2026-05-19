@@ -499,9 +499,28 @@ $do$;
 	copyErr := func() error {
 		scanner := bufio.NewScanner(gz)
 		scanner.Buffer(make([]byte, 1<<20), 16<<20)
+		// Audit M1 (deep-debug 2026-05-18) — the extension-DDL
+		// filter must NOT fire inside `COPY ... FROM stdin;` blocks.
+		// COPY data is one row per line; if a row's first column
+		// contained the literal text "CREATE EXTENSION foo" (e.g.,
+		// a movie title with that phrase, an operator error message,
+		// a chat post), the filter would silently drop the row and
+		// the restore would succeed minus that one row — silent
+		// data loss in a recovery operation, which is the worst
+		// possible failure mode. Track the COPY block state and
+		// pass-through unchanged inside it.
+		var inCopyBlock bool
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			if isExtensionDDL(line) {
+			// COPY block start: line begins with `COPY ` and ends
+			// with `FROM stdin;`. pg_dump emits both with no
+			// leading whitespace.
+			if !inCopyBlock && bytes.HasPrefix(line, []byte("COPY ")) && bytes.HasSuffix(line, []byte(" FROM stdin;")) {
+				inCopyBlock = true
+			} else if inCopyBlock && bytes.Equal(line, []byte(`\.`)) {
+				// `\.` on its own line terminates the COPY block.
+				inCopyBlock = false
+			} else if !inCopyBlock && isExtensionDDL(line) {
 				continue
 			}
 			if _, err := stdin.Write(line); err != nil {
@@ -511,7 +530,17 @@ $do$;
 				return err
 			}
 		}
-		return scanner.Err()
+		if err := scanner.Err(); err != nil {
+			// Audit M3 — bufio.ErrTooLong vs other errors. The
+			// generic error gets prepended with hint context so
+			// the operator knows the dump exceeded the 16 MB
+			// per-line ceiling (likely a pathological blob row).
+			if err == bufio.ErrTooLong {
+				return fmt.Errorf("backup contains a line longer than 16 MB (typically a single-row blob column) — bypass this UI and restore directly: `gunzip < backup.sql.gz | psql $DATABASE_URL`. underlying: %w", err)
+			}
+			return err
+		}
+		return nil
 	}()
 	_ = gz.Close()
 	_ = stdin.Close()
