@@ -413,7 +413,7 @@ echo ""
 
 detect_pkg_manager
 if [ -z "$PKG_MGR" ]; then
-    error "No supported package manager (apt/dnf/yum/pacman/zypper). Install one or use the Docker compose flow."
+    error "No supported package manager (apt/dnf/yum/pacman/zypper) — Aurora only supports Linux distributions with one of these."
 fi
 info "Package manager: $PKG_MGR"
 
