@@ -751,10 +751,18 @@ func (h *OAuthHandler) generateUniqueUsername(ctx context.Context, profile *OAut
 		base = "user"
 	}
 
-	// Try the bare base first, then base2, base3, ... until we find a
-	// free slot. Bounded to 100 attempts to prevent runaway loops in the
-	// degenerate "username table is exhaustively occupied" case.
-	for i := 0; i < 100; i++ {
+	// Try the bare base first, then base2, base3, ... bare attempts
+	// are bounded to 10 (most common-name collisions resolve here).
+	// After that we pivot to a random 6-char suffix to short-circuit
+	// the "popular email local-part" DoS surface — without this an
+	// attacker could pre-register foo, foo2, ... foo100 to force
+	// future OAuth signups for "foo@anywhere.com" through 100
+	// sequential DB roundtrips. Random suffix means O(1) attempts
+	// per signup regardless of how many sequential names are taken.
+	//
+	// 2026-05-19 audit (API-M2).
+	const linearAttempts = 10
+	for i := 0; i < linearAttempts; i++ {
 		candidate := base
 		if i > 0 {
 			candidate = fmt.Sprintf("%s%d", base, i+1)
@@ -767,7 +775,26 @@ func (h *OAuthHandler) generateUniqueUsername(ctx context.Context, profile *OAut
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("could not find unique username after 100 attempts")
+	// Random-suffix attempts. 36^6 = ~2 billion candidates; collision
+	// probability vs ~10K existing usernames is ~5e-6 per attempt,
+	// so 10 attempts effectively guarantees a hit.
+	for i := 0; i < 10; i++ {
+		var buf [4]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return "", fmt.Errorf("generate random suffix: %w", err)
+		}
+		// 32-bit value → 6-char base36 string (zero-padded).
+		n := uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3])
+		candidate := fmt.Sprintf("%s_%06s", base, strconv.FormatUint(uint64(n%2176782336), 36))
+		existing, err := h.queries.GetUserByUsername(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if existing == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find unique username after %d linear + 10 random attempts", linearAttempts)
 }
 
 // sanitizeUsername strips characters that aren't safe-for-username:
