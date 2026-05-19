@@ -108,17 +108,14 @@ func (g *GamificationEngine) AwardForWatch(ctx context.Context, userID int64, wh
 		slog.Warn("gamification: increment user_xp failed", "user", userID, "error", err)
 		return nil
 	}
-	// Recompute level from the post-increment XP. The DB stores a
-	// stale `level` we set on initial insert (1); we don't bother
-	// updating it inside the CASE because it's derived from XP and
-	// the next UpsertUserXP (from the bonus-XP path) will write the
-	// right value. Read-side computes from XP too.
+	// 2026-05-19 re-audit follow-up (API-H4) — race-safe level sync.
+	// EnsureLevelAtLeast does a targeted GREATEST update; full-row
+	// UpsertUserXP would clobber concurrent in-flight increments
+	// (their atomic IncrementUserXPForWatch lands, then our stale
+	// snapshot's UpsertUserXP overwrites their xp). Levels are
+	// monotone with XP so GREATEST is the right combinator.
 	x.Level = computeLevel(x.XP)
-	// One follow-up upsert to persist the corrected level. This is
-	// safe to race because the level is a pure function of XP, which
-	// already has the atomic increment applied — concurrent callers
-	// just overwrite the same correct value.
-	if err := g.queries.UpsertUserXP(ctx, x); err != nil {
+	if err := g.queries.EnsureLevelAtLeast(ctx, userID, x.Level); err != nil {
 		slog.Warn("gamification: persist level after increment failed", "user", userID, "error", err)
 		// Continue — the XP delta already landed atomically; level
 		// will sync on the next watch.
@@ -145,10 +142,24 @@ func (g *GamificationEngine) AwardForWatch(ctx context.Context, userID int64, wh
 			// unlocks settle (phase 2 below), so bonus XP from
 			// non-level achievements can push the user past a level
 			// boundary and still trigger level_5/level_10.
+			//
+			// 2026-05-19 re-audit follow-up (API-H4) — atomic
+			// AddBonusXP + EnsureLevelAtLeast replaces the prior
+			// read-modify-write UpsertUserXP. The bonus delta lands
+			// atomically; level is pulled up monotonically via
+			// GREATEST. Local x.XP and x.Level are kept in sync for
+			// the phase-2 milestone checks below.
 			if def.XPReward > 0 {
-				x.XP += def.XPReward
-				x.Level = computeLevel(x.XP)
-				_ = g.queries.UpsertUserXP(ctx, x)
+				newXP, addErr := g.queries.AddBonusXP(ctx, userID, def.XPReward)
+				if addErr != nil {
+					slog.Warn("gamification: bonus xp grant failed", "user", userID, "key", key, "error", addErr)
+				} else {
+					x.XP = newXP
+					x.Level = computeLevel(x.XP)
+					if lerr := g.queries.EnsureLevelAtLeast(ctx, userID, x.Level); lerr != nil {
+						slog.Warn("gamification: level sync after bonus failed", "user", userID, "key", key, "error", lerr)
+					}
+				}
 			}
 		}
 	}
@@ -187,9 +198,16 @@ func (g *GamificationEngine) AwardForWatch(ctx context.Context, userID int64, wh
 	// notches via the bonus XP — we still anchor against prevLevel
 	// (snapshotted at the top of AwardForWatch) so each milestone
 	// fires exactly once regardless of the trajectory.
+	//
+	// 2026-05-19 re-audit follow-up (API-H4) — race-safe sync via
+	// EnsureLevelAtLeast. UpsertUserXP would write the whole row
+	// including streak fields that may have been advanced by a
+	// concurrent in-flight increment.
 	x.Level = computeLevel(x.XP)
 	if x.Level != prevLevel {
-		_ = g.queries.UpsertUserXP(ctx, x)
+		if lerr := g.queries.EnsureLevelAtLeast(ctx, userID, x.Level); lerr != nil {
+			slog.Warn("gamification: phase-2 level sync failed", "user", userID, "error", lerr)
+		}
 	}
 	if x.Level >= 5 && prevLevel < 5 {
 		tryUnlock("level_5")
