@@ -2747,7 +2747,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
       <div className="glass-panel rounded-xl p-6">
         <h3 className="text-white font-semibold mb-2">Database Backup</h3>
         <p className="text-white/50 text-sm mb-4 leading-relaxed">
-          Download a gzipped snapshot of Aurora's database — users, libraries, media items, watch
+          Download a binary snapshot of Aurora's database — users, libraries, media items, watch
           parties, progress, settings. Use this before a server migration or as a periodic safety net.
         </p>
         <p className="text-white/40 text-xs mb-4 leading-relaxed">
@@ -2755,7 +2755,10 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
           session state (refresh tokens, scanner progress).
           <br />
           <strong className="text-white/60">Not included:</strong> the media files themselves and
-          Aurora's config file (<code>aurora.yaml</code>) — copy those manually.
+          Aurora's config file (<code>aurora.env</code>) — copy those manually.
+          <br />
+          <strong className="text-white/60">Format:</strong> PostgreSQL custom-format dump (<code>.dump</code>)
+          — restorable here or via <code>pg_restore</code> from the command line.
         </p>
         <button
           onClick={downloadBackup}
@@ -2768,7 +2771,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
       <div className="glass-panel rounded-xl p-6" style={{ border: '1px solid rgba(255, 175, 0, 0.25)' }}>
         <h3 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h3>
         <p className="text-white/50 text-sm mb-3 leading-relaxed">
-          Upload a previously-downloaded <code>.sql.gz</code> backup file to restore the database.
+          Upload a previously-downloaded <code>.dump</code> backup file to restore the database.
         </p>
         <p className="text-sm mb-3 leading-relaxed px-3 py-2 rounded-lg border-l-2" style={{ color: '#ffd685', background: 'rgba(255, 175, 0, 0.08)', borderColor: 'rgba(255, 175, 0, 0.6)' }}>
           <strong>Destructive operation.</strong> This OVERWRITES all existing data. After restore
@@ -2778,12 +2781,13 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
         <p className="text-white/40 text-xs mb-4 leading-relaxed">
           The restore wraps every change in a single transaction. If any statement fails, the entire
           restore rolls back and the database is left in an empty (wiped) state — you can retry with
-          a different file.
+          a different file. Legacy <code>.sql.gz</code> backups need to be restored via the
+          command line: <code>gunzip &lt; file.sql.gz | psql $DATABASE_URL</code>.
         </p>
         <div className="flex gap-3 flex-wrap items-center">
           <input
             type="file"
-            accept=".gz,.sql.gz,application/gzip"
+            accept=".dump,application/octet-stream"
             disabled={submitting || doneBlocked}
             onChange={e => setFile(e.target.files?.[0] ?? null)}
             className="text-sm text-white/70 file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-white/10 file:text-white/90 file:cursor-pointer hover:file:bg-white/15"

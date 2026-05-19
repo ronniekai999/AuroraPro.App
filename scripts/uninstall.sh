@@ -2,9 +2,24 @@
 # Aurora Media Server - Uninstall Script
 # Safely removes all Aurora components from a Linux system.
 #
-# Removes: binary, install directory, configuration, systemd service,
-#          cache/transcode data, PostgreSQL database+user, nginx reverse proxy
-#          config, Let's Encrypt certificates, system user/group.
+# Removes:
+#   - aurora.service + aurora-update.{service,timer} systemd units
+#   - /usr/local/bin/aurora + /usr/local/bin/aurora-update
+#   - /etc/sudoers.d/aurora-update
+#   - /opt/aurora (install dir), /etc/aurora (config)
+#   - /var/cache/aurora (image+subtitle+transcode caches)
+#   - /var/lib/aurora (source mirror + updater state)
+#   - /var/log/aurora
+#   - PostgreSQL database + role 'aurora'
+#   - Nginx reverse proxy config + Let's Encrypt certificate
+#   - ACL entries granted to the aurora user on media libraries
+#   - System user + group 'aurora'
+#
+# Leaves alone: shared packages (PostgreSQL, FFmpeg, Go, nginx,
+# certbot, build-essential, acl, python3, git, pgvector), your media
+# files, the user's source checkout (only /var/lib/aurora/source is
+# touched), and chmod-fallback world-permissions (mode bits can't be
+# safely reversed without knowing the original).
 #
 # Usage:
 #   sudo ./scripts/uninstall.sh            # Interactive (asks before each step)
@@ -24,6 +39,17 @@ TRANSCODE_FALLBACK="/tmp/aurora-transcode"
 SYSTEMD_UNIT="/etc/systemd/system/aurora.service"
 DB_NAME="aurora"
 DB_USER="aurora"
+
+# Auto-updater pipeline (installed by install.sh ~L897-907, L922).
+UPDATER_BIN="/usr/local/bin/aurora-update"
+UPDATER_SERVICE="/etc/systemd/system/aurora-update.service"
+UPDATER_TIMER="/etc/systemd/system/aurora-update.timer"
+UPDATER_SUDOERS="/etc/sudoers.d/aurora-update"
+
+# State + log dirs (install.sh writes status JSON + log files here).
+STATE_DIR="/var/lib/aurora"             # contains source/ mirror + update-status.json
+UPDATER_SOURCE_DIR="/var/lib/aurora/source"
+LOG_DIR="/var/log/aurora"
 
 # ── Helpers (match install.sh formatting) ────────────────────────
 info()  { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
@@ -117,6 +143,20 @@ detect_components() {
     HAS_CERTBOT_CERT=false
     PROXY_DOMAIN=""
 
+    # Auto-updater + state/log dirs (gaps closed 2026-05-18).
+    HAS_UPDATER_SERVICE=false
+    HAS_UPDATER_TIMER=false
+    TIMER_ACTIVE=false
+    HAS_UPDATER_BIN=false
+    HAS_UPDATER_SUDOERS=false
+    HAS_STATE_DIR=false
+    HAS_LOG_DIR=false
+
+    # Media library paths captured BEFORE the DB is dropped so we can
+    # reverse the ACLs install.sh applied with setfacl. Populated only
+    # when the DB is reachable.
+    MEDIA_PATHS=()
+
     if [ -f "$SYSTEMD_UNIT" ]; then
         HAS_SERVICE=true
         if systemctl is-active aurora &>/dev/null; then
@@ -131,10 +171,39 @@ detect_components() {
     id "$AURORA_USER" &>/dev/null && HAS_SYSTEM_USER=true || true
     getent group "$AURORA_GROUP" &>/dev/null && HAS_SYSTEM_GROUP=true || true
 
+    # Auto-updater pipeline.
+    [ -f "$UPDATER_SERVICE" ] && HAS_UPDATER_SERVICE=true || true
+    if [ -f "$UPDATER_TIMER" ]; then
+        HAS_UPDATER_TIMER=true
+        if systemctl is-active aurora-update.timer &>/dev/null; then
+            TIMER_ACTIVE=true
+        fi
+    fi
+    [ -f "$UPDATER_BIN" ]     && HAS_UPDATER_BIN=true     || true
+    [ -f "$UPDATER_SUDOERS" ] && HAS_UPDATER_SUDOERS=true || true
+    [ -d "$STATE_DIR" ]       && HAS_STATE_DIR=true       || true
+    [ -d "$LOG_DIR" ]         && HAS_LOG_DIR=true         || true
+
     # Check PostgreSQL database and user if psql is available
     if command -v psql &>/dev/null && sudo -u postgres psql -c "SELECT 1" &>/dev/null; then
         if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | grep -q 1; then
             HAS_DB=true
+            # Capture library paths now — they're our only handle for
+            # reversing the ACLs install.sh applied. The libraries
+            # table exists from migration 002; an empty result here is
+            # benign (means no libraries were ever added).
+            #
+            # `mapfile -t` won't tolerate `set -e`-style failures from
+            # psql, so we route through a variable. `|| true` keeps the
+            # uninstall going if the query itself errors.
+            _media_out=$(sudo -u postgres psql -d "$DB_NAME" -tAc \
+                "SELECT DISTINCT path FROM libraries WHERE path IS NOT NULL AND path <> '';" \
+                2>/dev/null || true)
+            if [ -n "$_media_out" ]; then
+                while IFS= read -r _path; do
+                    [ -n "$_path" ] && MEDIA_PATHS+=("$_path")
+                done <<< "$_media_out"
+            fi
         fi
         if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" 2>/dev/null | grep -q 1; then
             HAS_DB_USER=true
@@ -191,6 +260,14 @@ if $HAS_SERVICE; then
     fi
     FOUND_SOMETHING=true
 fi
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_BIN || $HAS_UPDATER_SUDOERS; then
+    if $TIMER_ACTIVE; then
+        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[TIMER ACTIVE]"
+    else
+        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[installed]"
+    fi
+    FOUND_SOMETHING=true
+fi
 if $HAS_BINARY; then
     printf '    %-42s %s\n' "Binary" "$INSTALL_BIN"
     FOUND_SOMETHING=true
@@ -201,6 +278,14 @@ if $HAS_INSTALL_DIR; then
 fi
 if $HAS_CONFIG_DIR; then
     printf '    %-42s %s\n' "Configuration" "$CONFIG_DIR"
+    FOUND_SOMETHING=true
+fi
+if $HAS_STATE_DIR; then
+    printf '    %-42s %s\n' "State directory (source mirror)" "$STATE_DIR"
+    FOUND_SOMETHING=true
+fi
+if $HAS_LOG_DIR; then
+    printf '    %-42s %s\n' "Log directory" "$LOG_DIR"
     FOUND_SOMETHING=true
 fi
 if $HAS_CACHE_DIR; then
@@ -217,6 +302,10 @@ if $HAS_DB; then
 fi
 if $HAS_DB_USER; then
     printf '    %-42s %s\n' "PostgreSQL user" "$DB_USER"
+    FOUND_SOMETHING=true
+fi
+if [ "${#MEDIA_PATHS[@]}" -gt 0 ]; then
+    printf '    %-42s %s\n' "Media-library ACLs (aurora user)" "${#MEDIA_PATHS[@]} path(s)"
     FOUND_SOMETHING=true
 fi
 if $HAS_SYSTEM_USER; then
@@ -250,11 +339,76 @@ if ! confirm "Proceed with uninstallation?"; then
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 1: Stop and disable the systemd service
+# Step 1: Stop the auto-updater (timer + service) FIRST
+# ══════════════════════════════════════════════════════════════════
+# The timer fires aurora-update.service every 5 min. If we tear down
+# aurora.service without stopping the timer first, the next tick will
+# try to `git pull && go build && systemctl restart aurora` against
+# half-removed state. Take the timer offline before anything else.
+
+echo ""
+info "Step 1/9: Stopping auto-updater (timer + service)..."
+echo ""
+
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE; then
+    if $TIMER_ACTIVE; then
+        info "Stopping aurora-update.timer..."
+        systemctl stop aurora-update.timer 2>/dev/null || true
+    fi
+    # In case the timer just fired and the .service is running.
+    if systemctl is-active aurora-update.service &>/dev/null; then
+        info "Waiting for in-flight aurora-update.service to finish..."
+        for _ in $(seq 1 30); do
+            if ! systemctl is-active aurora-update.service &>/dev/null; then
+                break
+            fi
+            sleep 1
+        done
+        if systemctl is-active aurora-update.service &>/dev/null; then
+            warn "aurora-update.service did not exit in 30s. Sending SIGKILL..."
+            systemctl kill -s SIGKILL aurora-update.service 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
+    info "Disabling + removing aurora-update units..."
+    systemctl disable aurora-update.timer    2>/dev/null || true
+    systemctl disable aurora-update.service  2>/dev/null || true
+    rm -f "$UPDATER_TIMER" "$UPDATER_SERVICE"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed aurora-update.timer    2>/dev/null || true
+    systemctl reset-failed aurora-update.service  2>/dev/null || true
+    ok "Auto-updater units removed"
+else
+    ok "No auto-updater units found (skipping)"
+fi
+
+# Updater script + sudoers grant. Safe to remove now that the timer
+# can't re-invoke them.
+if $HAS_UPDATER_BIN; then
+    rm -f "$UPDATER_BIN"
+    ok "Removed $UPDATER_BIN"
+fi
+if $HAS_UPDATER_SUDOERS; then
+    # Validate the sudoers tree is still parseable AFTER removing our
+    # drop-in (defensive — install.sh validated before installing, so
+    # this should always pass). If it doesn't, the system can lock
+    # itself out of sudo, which is exactly the failure mode our
+    # install.sh visudo -cf guard exists to prevent.
+    rm -f "$UPDATER_SUDOERS"
+    if command -v visudo &>/dev/null && ! visudo -c >/dev/null 2>&1; then
+        warn "visudo -c FAILED after removing $UPDATER_SUDOERS — investigate"
+        warn "(this should be impossible; the file we removed was syntax-checked at install)"
+    fi
+    ok "Removed $UPDATER_SUDOERS"
+fi
+
+# ══════════════════════════════════════════════════════════════════
+# Step 2: Stop and disable the aurora systemd service
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 1/7: Stopping Aurora service..."
+info "Step 2/9: Stopping Aurora service..."
 echo ""
 
 if $HAS_SERVICE; then
@@ -289,11 +443,11 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 2: Remove application files
+# Step 3: Remove application files
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 2/7: Removing application files..."
+info "Step 3/9: Removing application files..."
 echo ""
 
 if $HAS_BINARY; then
@@ -311,11 +465,11 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 3: Remove configuration
+# Step 4: Remove configuration
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 3/7: Removing configuration..."
+info "Step 4/9: Removing configuration..."
 echo ""
 
 if $HAS_CONFIG_DIR; then
@@ -330,11 +484,11 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 4: Remove cache and transcode data
+# Step 5: Remove cache and transcode data
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 4/7: Removing cache and transcode data..."
+info "Step 5/9: Removing cache and transcode data..."
 echo ""
 
 if $HAS_CACHE_DIR; then
@@ -352,11 +506,11 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 5: Remove PostgreSQL database and user
+# Step 6: Remove PostgreSQL database and user
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 5/7: PostgreSQL cleanup..."
+info "Step 6/9: PostgreSQL cleanup..."
 echo ""
 
 if $HAS_DB || $HAS_DB_USER; then
@@ -441,11 +595,11 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 6: Remove reverse proxy configuration (nginx + Let's Encrypt)
+# Step 7: Remove reverse proxy configuration (nginx + Let's Encrypt)
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 6/7: Reverse proxy cleanup..."
+info "Step 7/9: Reverse proxy cleanup..."
 echo ""
 
 if $HAS_NGINX_CONFIG || $HAS_NGINX_MAP; then
@@ -504,11 +658,100 @@ elif [ -n "$PROXY_DOMAIN" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 7: Remove system user and group
+# Step 8: Reverse media-library ACLs + remove state/log dirs
+# ══════════════════════════════════════════════════════════════════
+#
+# install.sh applied `setfacl -m u:aurora:rX` recursively on each
+# media library plus traversal ACLs on every ancestor up to /. After
+# `userdel aurora`, those entries become numeric-UID stragglers (e.g.
+# `user:998:rX`) cluttering every `getfacl` on the tree forever.
+#
+# We reverse them BEFORE the userdel below so the entries resolve to
+# the named user `aurora` and `setfacl -x` can match cleanly.
+#
+# Library paths were captured from the DB in detect_components() —
+# they're our only handle since install.sh doesn't persist the list
+# anywhere else. If the DB was already dropped or never had any
+# libraries added, this step is a no-op with a heads-up message.
+
+echo ""
+info "Step 8/9: Reversing media-library ACLs + removing state/log..."
+echo ""
+
+if [ "${#MEDIA_PATHS[@]}" -gt 0 ]; then
+    if command -v setfacl &>/dev/null; then
+        if confirm "Reverse aurora-user ACLs on ${#MEDIA_PATHS[@]} media path(s)?"; then
+            for _media_path in "${MEDIA_PATHS[@]}"; do
+                if [ -e "$_media_path" ]; then
+                    info "  Removing ACL entries from $_media_path..."
+                    # -x removes the named entry; -d -x removes the default ACL.
+                    # Recurse over the tree; ignore failures on individual files.
+                    setfacl -R -x "u:${AURORA_USER}" "$_media_path" 2>/dev/null || true
+                    setfacl -R -d -x "u:${AURORA_USER}" "$_media_path" 2>/dev/null || true
+
+                    # Walk parents up to /, removing traversal ACL where present.
+                    _parent="$(dirname "$_media_path")"
+                    while [ "$_parent" != "/" ] && [ "$_parent" != "." ] && [ -n "$_parent" ]; do
+                        setfacl -x "u:${AURORA_USER}" "$_parent" 2>/dev/null || true
+                        _parent="$(dirname "$_parent")"
+                    done
+                else
+                    warn "  $_media_path no longer exists (skipping)"
+                fi
+            done
+            ok "ACL reversal complete (best-effort)"
+            warn "Note: chmod o+x / o+rX fallbacks from install.sh are NOT reversed —"
+            warn "      we can't know your original mode bits. Run 'getfacl <path>' to inspect."
+        else
+            warn "Skipping ACL reversal — aurora's ACL entries will become numeric UIDs after userdel"
+        fi
+    else
+        warn "setfacl not available — ACL reversal skipped"
+        warn "  Manually after uninstall: 'sudo setfacl -R -x u:${AURORA_USER} <media-path>'"
+    fi
+else
+    if $HAS_DB; then
+        info "No media-library paths recorded in DB (nothing to reverse)"
+    else
+        warn "Database already gone (or never reachable) — couldn't enumerate media paths."
+        warn "  If you used AURORA_MEDIA_DIR during install, manually run:"
+        warn "    sudo setfacl -R -x u:${AURORA_USER} <media-path>"
+    fi
+fi
+
+# State directory — contains /var/lib/aurora/source (root-owned source
+# mirror, can be GBs) and update-status.json written by aurora-update.sh.
+if $HAS_STATE_DIR; then
+    if confirm "Remove $STATE_DIR (source mirror + updater state)?"; then
+        rm -rf "$STATE_DIR"
+        ok "Removed $STATE_DIR"
+    else
+        warn "Keeping $STATE_DIR"
+    fi
+else
+    ok "State directory not found (skipping)"
+fi
+
+# Log directory — install.sh creates /var/log/aurora owned by aurora:aurora
+# 0750. Removing here so logs survive uninstall ONLY if the user explicitly
+# said no above.
+if $HAS_LOG_DIR; then
+    if confirm "Remove $LOG_DIR (aurora logs)?"; then
+        rm -rf "$LOG_DIR"
+        ok "Removed $LOG_DIR"
+    else
+        warn "Keeping $LOG_DIR"
+    fi
+else
+    ok "Log directory not found (skipping)"
+fi
+
+# ══════════════════════════════════════════════════════════════════
+# Step 9: Remove system user and group
 # ══════════════════════════════════════════════════════════════════
 
 echo ""
-info "Step 7/7: Removing system user and group..."
+info "Step 9/9: Removing system user and group..."
 echo ""
 
 if $HAS_SYSTEM_USER; then
@@ -547,13 +790,17 @@ echo "  ============================================================"
 echo "   Aurora Media Server - Uninstallation Complete"
 echo "  ============================================================"
 echo ""
-echo "  The following were NOT removed (not installed by Aurora):"
-echo "    - FFmpeg"
-echo "    - PostgreSQL server"
-echo "    - Go toolchain"
-echo "    - Nginx (web server)"
-echo "    - Certbot (certificate manager)"
+echo "  The following were NOT removed (shared system packages):"
+echo "    - PostgreSQL server (+ postgresql-contrib, pgvector)"
+echo "    - FFmpeg / FFprobe"
+echo "    - Go toolchain (/usr/local/go + /etc/profile.d/go.sh)"
+echo "    - Nginx, Certbot"
+echo "    - build-essential, git, python3, acl"
 echo "    - Your media files"
+echo ""
+echo "  Removing chmod-fallback world-permissions on media / home dirs"
+echo "  was NOT attempted — we can't know your original mode bits."
+echo "  Inspect with: getfacl <path> ; stat -c '%a' <path>"
 echo ""
 echo "  If you also want to remove PostgreSQL entirely:"
 echo "    sudo apt remove --purge postgresql    # Debian/Ubuntu"
