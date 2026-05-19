@@ -923,9 +923,13 @@ if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
         # alone and warn — destroying their custom rules during an
         # upgrade is worse than the dead-weight cost.
         if [ -f /etc/sudoers.d/aurora-update ]; then
-            # Strip blank lines + comments, then require every non-blank
-            # line to be one of our known-installed forms.
-            if awk '!/^[[:space:]]*(#|$)/' /etc/sudoers.d/aurora-update \
+            # Strip CR (defense against a CRLF-saved file), then drop
+            # blank lines + comments, then require every remaining
+            # line to be one of our known-installed forms. If any
+            # line falls outside the whitelist, an admin appended
+            # custom rules — leave the file alone and warn.
+            if tr -d '\r' < /etc/sudoers.d/aurora-update \
+                | awk '!/^[[:space:]]*(#|$)/' \
                 | grep -qvE '^aurora ALL=\(root\) NOPASSWD: (/bin|/usr/bin)/systemctl (start|is-active) aurora-update\.service$' \
                 2>/dev/null; then
                 warn "Legacy /etc/sudoers.d/aurora-update has custom rules — leaving in place."

@@ -579,10 +579,16 @@ BEGIN
     -- Extension-owned routines (most of pg_trgm + vector live here)
     -- are filtered by deptype='e'.
     --
-    -- DROP ROUTINE handles both functions and procedures (PG 11+);
-    -- DROP FUNCTION alone would fail on a CREATE PROCEDURE that a
-    -- future migration might add. Aurora targets PG 14+ (pgvector
-    -- requires it) so DROP ROUTINE is universally available.
+    -- DROP ROUTINE handles both functions and procedures (PG 11+,
+    -- so universally available on Aurora's PG 14+ floor — bumped
+    -- to 14 by pgvector, not by this loop). DROP FUNCTION alone
+    -- would fail on a CREATE PROCEDURE that a future migration
+    -- might add.
+    --
+    -- prokind values: 'f' = function, 'p' = procedure, 'a' = aggregate
+    -- (handled by the separate loop below — DROP AGGREGATE syntax),
+    -- 'w' = window function (only superuser-created, not relevant
+    -- to Aurora's schema).
     --
     -- ::regprocedure casts to the full signature including arg types,
     -- which DROP ROUTINE needs to disambiguate overloads.
@@ -591,7 +597,7 @@ BEGIN
         FROM pg_proc p
         JOIN pg_namespace n ON p.pronamespace = n.oid
         WHERE n.nspname = 'public'
-        AND p.prokind IN ('f', 'p')  -- functions + procedures (skip 'a' aggregates, 'w' window)
+        AND p.prokind IN ('f', 'p')
         AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
     LOOP
         EXECUTE format('DROP ROUTINE IF EXISTS %s CASCADE', r.sig);

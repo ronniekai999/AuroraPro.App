@@ -125,8 +125,15 @@ func (h *SystemHandler) GetUpdateStatus(w http.ResponseWriter, r *http.Request) 
 // on each invocation. systemd's PathChanged= fires on close-after-
 // write, so every POST produces exactly one .path event regardless
 // of the file's prior contents. The aurora-update.service is
-// Type=oneshot — systemd serializes overlapping triggers, so a
-// frantic double-click won't spawn a second build.
+// Type=oneshot — concurrent triggers are handled by systemd.
+//
+// Click-during-build semantics: if aurora-update.service is already
+// running when a PathChanged fires, systemd does NOT queue a second
+// run for after the current one — the new trigger is effectively
+// coalesced into the in-flight invocation. Operationally: clicking
+// Update Now while a build is in progress is a harmless no-op, but
+// it ALSO won't pull commits that landed during the build. The
+// 5-min timer catches those on the next tick.
 //
 // We deliberately do NOT block on the update completing. A clean
 // build + restart cycle is ~30s, and HTTP request lifecycles
@@ -151,8 +158,15 @@ func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	// else writable (e.g. /var/log/aurora/anyfile, /opt/aurora/...).
 	// Both targets are in our ReadWritePaths, so writes would
 	// succeed — not a privilege-escalation, but it's a low-cost
-	// guardrail. On Linux O_NOFOLLOW returns ELOOP if the final
-	// path component is a symlink.
+	// guardrail. Open returns ELOOP if the FINAL path component is
+	// a symlink.
+	//
+	// Note: O_NOFOLLOW only checks the final component, not parent
+	// directories. A symlink at /var/lib → /run/lib (or similar)
+	// would still be followed. For full symlink-traversal blocking
+	// we'd need openat2(RESOLVE_NO_SYMLINKS), which Go's stdlib
+	// doesn't expose portably. Aurora runs on Linux with vanilla
+	// FHS layouts where this isn't a concern, but worth knowing.
 	//
 	// Permissions 0664 only apply if the file is being created here
 	// (it normally exists from install.sh). The file's actual mode +

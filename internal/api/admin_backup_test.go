@@ -514,8 +514,34 @@ func TestRestoreRejectsLegacyGzipUpload(t *testing.T) {
 // small to be a real archive. The handler must reject it BEFORE
 // running the destructive wipe; otherwise a malformed upload would
 // leave the DB empty.
+//
+// Robust against test-ordering pitfalls: we insert a sentinel row
+// in `users` BEFORE the call. If the wipe ran, the sentinel is gone
+// regardless of what prior tests did to the schema. If the schema
+// is broken at the start (e.g., a prior test died), the sentinel
+// insert itself fails, and t.Fatal points the operator at the
+// real cause rather than blaming the handler.
 func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
-	_, dbURL := requireBackupTestDB(t)
+	pool, dbURL := requireBackupTestDB(t)
+
+	// Seed the sentinel. If this insert fails, the DB is in a state
+	// the test can't reason about (most likely: a prior test crashed
+	// mid-restore).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	suffix := time.Now().UTC().Format("20060102150405.000000")
+	sentinelUsername := "tiny_sentinel_" + suffix
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO users (username, email, password_hash, role)
+		 VALUES ($1, $1 || '@example.com', 'x', 'admin')`,
+		sentinelUsername,
+	); err != nil {
+		t.Fatalf("insert sentinel — DB schema is in an inconsistent state, not this handler's fault: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(),
+			`DELETE FROM users WHERE username = $1`, sentinelUsername)
+	})
 
 	// Just the magic bytes — passes the format check, fails the size check.
 	tiny := []byte("PGDMP")
@@ -541,21 +567,17 @@ func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
 	if !bytes.Contains(body, []byte("too small")) {
 		t.Errorf("expected error body to mention 'too small', got: %s", body)
 	}
-	// Critically: the wipe must NOT have run. Probe by querying any
-	// migration-created table; if it's gone, the wipe ran prematurely.
-	pool, err := pgxpool.New(context.Background(), dbURL)
-	if err != nil {
-		t.Fatalf("connect to verify DB intact: %v", err)
+	// The wipe must NOT have run. The sentinel survives iff the size
+	// check ran BEFORE the destructive wipe — exactly the ordering
+	// we're guarding against regressing.
+	var sentinelCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM users WHERE username = $1`, sentinelUsername,
+	).Scan(&sentinelCount); err != nil {
+		t.Fatalf("probe sentinel: %v", err)
 	}
-	defer pool.Close()
-	var n int
-	if err := pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM pg_class WHERE relname = 'users' AND relkind = 'r'`,
-	).Scan(&n); err != nil {
-		t.Fatalf("probe users table: %v", err)
-	}
-	if n == 0 {
-		t.Fatal("DB schema was wiped despite tiny-upload rejection — pre-wipe size check failed")
+	if sentinelCount != 1 {
+		t.Fatal("sentinel row missing after tiny-upload rejection — the destructive wipe ran before the size check. This is the ordering bug BH2 was supposed to fix.")
 	}
 }
 
