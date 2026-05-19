@@ -69,12 +69,29 @@ function ChartContainer({
   )
 }
 
+// 2026-05-19 audit (FE-M2) — chart `id` and color values flow into a
+// dangerouslySetInnerHTML <style> string. If a caller ever passes
+// user-controlled input as `id` or as a config key/color, the
+// resulting CSS could be hijacked (CSS injection → exfil via
+// background-image URL, etc.). Validate strictly here so the
+// contract is enforced at render time regardless of caller hygiene.
+const safeChartIdRe = /^[a-zA-Z0-9_-]+$/
+const safeColorRe = /^(#[0-9a-fA-F]{3,8}|rgb\([\d ,.%]+\)|rgba\([\d ,.%]+\)|hsl\([\d ,.%]+\)|hsla\([\d ,.%]+\)|oklch\([\d ,.%/]+\)|[a-z]+)$/
+
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   const colorConfig = Object.entries(config).filter(
     ([, config]) => config.theme || config.color
   )
 
   if (!colorConfig.length) {
+    return null
+  }
+
+  // Reject IDs that aren't safe CSS attribute-selector tokens.
+  // useId() produces values like ":r0:" which contain colons that
+  // would break the CSS selector; useChart hook wraps that in a
+  // safe ID, but be defensive here.
+  if (!safeChartIdRe.test(id)) {
     return null
   }
 
@@ -90,7 +107,14 @@ ${colorConfig
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    // 2026-05-19 audit (FE-M2) — reject color strings that don't
+    // match a known-safe format. Also defensively constrain the
+    // CSS variable name to alphanum/underscore/dash so a malicious
+    // config key can't break out of the property declaration.
+    if (!color || !safeColorRe.test(color) || !safeChartIdRe.test(key)) {
+      return null
+    }
+    return `  --color-${key}: ${color};`
   })
   .join("\n")}
 }

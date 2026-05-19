@@ -2277,7 +2277,15 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
     try {
       const raw = localStorage.getItem('aurora_prefs')
       if (raw) {
-        const parsed = JSON.parse(raw) as Record<string, unknown>
+        // 2026-05-19 audit (FE-M5) — JSON.parse returns the parsed
+        // value as-is, which can be `null`, a string, or a number
+        // if the localStorage entry was tampered with. Guard
+        // against non-object shapes before property access.
+        const parsedRaw: unknown = JSON.parse(raw)
+        if (!parsedRaw || typeof parsedRaw !== 'object') {
+          throw new Error('aurora_prefs is not an object')
+        }
+        const parsed = parsedRaw as Record<string, unknown>
         rawRef.current = parsed
         return {
           autoplay: parsed.autoplay !== false,
@@ -3369,7 +3377,7 @@ function AdminRoomsTab() {
                     href={`${import.meta.env.BASE_URL}p/${r.active_party_code}`}
                     className="underline hover:text-emerald-200"
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     {import.meta.env.BASE_URL}p/{r.active_party_code}
                   </a>
@@ -3768,7 +3776,7 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
         <a
           href={consoleURL}
           target="_blank"
-          rel="noreferrer"
+          rel="noopener noreferrer"
           className="text-purple-300 hover:text-purple-200 text-xs underline-offset-4 hover:underline"
         >
           Open {label} developer console ↗
@@ -3871,27 +3879,55 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [tab, setTab] = useState<AdminTab>('dashboard')
   const tabs: readonly AdminTab[] = ['dashboard', 'users', 'libraries', 'rooms', 'activity', 'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup'] as const
 
-  // Backup tab — Aurora's /api/admin/backup endpoint streams a
-  // gzipped pg_dump. The browser-native anchor + ?token= ride is
-  // how V1 does it (anchors can't set headers; the token-promotion
-  // middleware whitelists this path). Restore is intentionally not
-  // wired in V2 yet (Phase 3.5) — the upload + danger UX needs
-  // careful porting from V1.
-  const downloadBackup = useCallback(() => {
+  // Backup tab — /api/admin/backup streams a pg_dump custom-format
+  // archive. We fetch the response, materialize it as a Blob, and
+  // hand the user a same-origin object URL.
+  //
+  // 2026-05-19 audit (FE-M4) — the previous implementation set
+  // <a href="/api/admin/backup?token=..."> on a hidden anchor, which
+  // briefly placed the token in the DOM where DevTools or a
+  // misbehaving extension could scrape it. Switching to fetch +
+  // Authorization header keeps the token out of the document
+  // entirely. The trade-off is whole-archive buffering: pg_dump
+  // custom-format is binary and self-compressed, so even a 5 GB
+  // database produces a ~1-2 GB archive — well within browser blob
+  // limits on a modern desktop.
+  const downloadBackup = useCallback(async () => {
     const t = getAccessToken()
     if (!t) {
       window.alert('Sign in required.')
       return
     }
-    // Use a hidden anchor so the browser handles the streaming
-    // download (Content-Disposition kicks in server-side).
-    const a = document.createElement('a')
-    a.href = `/api/admin/backup?token=${encodeURIComponent(t)}`
-    a.download = ''
-    a.style.display = 'none'
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
+    try {
+      const res = await fetch('/api/admin/backup', {
+        headers: { Authorization: 'Bearer ' + t },
+      })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 200) : ''}`)
+      }
+      // Derive a filename from Content-Disposition; fall back to a
+      // timestamp-based default.
+      const cd = res.headers.get('content-disposition') || ''
+      const m = /filename="?([^"]+)"?/i.exec(cd)
+      const filename = m ? m[1] : `aurora-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.dump`
+
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      // Release the blob URL on the next tick so the browser has
+      // finished kicking off the save dialog.
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'unknown error'
+      window.alert('Backup download failed: ' + msg)
+    }
   }, [])
 
   const [stats, setStats] = useState<ServerStats | null>(null)
@@ -4725,9 +4761,15 @@ export default function App() {
       // bucket Settings writes to. Default 'auto' = 1080p preferred.
       let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
       try {
-        const raw = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
-        if (raw.preferred_quality === '4k') preferQuality = '4k'
-        else if (raw.preferred_quality === '1080p') preferQuality = '1080p'
+        // 2026-05-19 audit (FE-M5) — guard against null / non-object
+        // shapes that JSON.parse can return when localStorage was
+        // tampered with.
+        const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+        if (raw && typeof raw === 'object') {
+          const prefs = raw as Record<string, unknown>
+          if (prefs.preferred_quality === '4k') preferQuality = '4k'
+          else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+        }
       } catch { /* ignore */ }
       if (m.type === 'show') {
         // Show → first episode of first season. Audit H3 (2026-05-16):
@@ -5458,9 +5500,15 @@ export default function App() {
     try {
       let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
       try {
-        const raw = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
-        if (raw.preferred_quality === '4k') preferQuality = '4k'
-        else if (raw.preferred_quality === '1080p') preferQuality = '1080p'
+        // 2026-05-19 audit (FE-M5) — guard against null / non-object
+        // shapes that JSON.parse can return when localStorage was
+        // tampered with.
+        const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+        if (raw && typeof raw === 'object') {
+          const prefs = raw as Record<string, unknown>
+          if (prefs.preferred_quality === '4k') preferQuality = '4k'
+          else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+        }
       } catch { /* ignore */ }
       if (c.type === 'show' && c.episode_id) {
         // Find the specific episode's file. We don't have it cached;
