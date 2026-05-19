@@ -321,7 +321,7 @@ export function PartyPanel({
           <a
             href={`/api/parties/${encodeURIComponent(state.code)}/highlight.mp4?token=${encodeURIComponent(localStorage.getItem('aurora_token') || '')}`}
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             className="block text-center mt-3 py-2 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] rounded-lg text-white/70 hover:text-white text-xs transition-colors"
             title="Download a highlight reel of this party (server-generated from reactions)"
           >
