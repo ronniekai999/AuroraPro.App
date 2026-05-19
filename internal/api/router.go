@@ -627,10 +627,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/oauth", adminH.UpdateOAuthSettings)
 				r.Post("/cache/images/purge", adminH.PurgeImageCache)
 				r.Post("/arr/test", adminH.TestARRConnection)
-				// Auto-updater. Manual trigger + status polling. The
-				// trigger shells out to sudo+systemctl (gated by the
-				// /etc/sudoers.d/aurora-update fragment installed by
-				// install.sh); the status read is plain-file I/O.
+				// Auto-updater. Manual trigger + status polling.
+				// TriggerUpdate writes a timestamp to the
+				// /var/lib/aurora/trigger-update file, which the
+				// aurora-update.path systemd unit watches; the
+				// modification fires aurora-update.service as root.
+				// No sudo, no NOPASSWD grant — see system_handlers.go
+				// header for the architectural rationale.
+				// The status read is plain-file I/O on update-status.json.
 				r.Post("/system/update", systemH.TriggerUpdate)
 				r.Get("/system/update/status", systemH.GetUpdateStatus)
 			})

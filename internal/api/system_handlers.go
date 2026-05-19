@@ -40,6 +40,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"syscall"
 	"time"
 )
 
@@ -145,10 +146,18 @@ func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
 	// for human debugging — systemd cares about the close event,
 	// not the contents.
 	//
+	// O_NOFOLLOW: defense-in-depth against a compromised aurora
+	// process swapping the trigger file for a symlink to something
+	// else writable (e.g. /var/log/aurora/anyfile, /opt/aurora/...).
+	// Both targets are in our ReadWritePaths, so writes would
+	// succeed — not a privilege-escalation, but it's a low-cost
+	// guardrail. On Linux O_NOFOLLOW returns ELOOP if the final
+	// path component is a symlink.
+	//
 	// Permissions 0664 only apply if the file is being created here
 	// (it normally exists from install.sh). The file's actual mode +
 	// ownership are managed by install.sh: root:aurora 0664.
-	f, err := os.OpenFile(h.triggerFilePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0664)
+	f, err := os.OpenFile(h.triggerFilePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE|syscall.O_NOFOLLOW, 0664)
 	if err != nil {
 		// errors.Is(err, os.ErrPermission): aurora can't write here.
 		// errors.Is(err, os.ErrNotExist):    parent dir missing (no install)

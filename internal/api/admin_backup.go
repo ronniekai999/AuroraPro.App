@@ -134,6 +134,14 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 		"--compress=6",
 		"--no-owner",
 		"--no-acl",
+		// Defensive: skip publications + subscriptions even though
+		// Aurora doesn't currently use logical replication. If any
+		// future migration ever creates a PUBLICATION, the dump
+		// would emit a CREATE PUBLICATION that the unprivileged
+		// aurora role can't replay during restore. Strip at the
+		// dump side so the dump is self-restorable.
+		"--no-publications",
+		"--no-subscriptions",
 		"--quote-all-identifiers",
 		"--exclude-table-data=refresh_tokens",
 		"--exclude-table-data=scan_progress",
@@ -371,12 +379,14 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	// were `.sql.gz` plain dumps from the old pipeline, and they're
 	// restorable via the shell but not via this UI anymore.
 	magic := make([]byte, len(pgDumpCustomMagic))
-	mn, mErr := io.ReadFull(part, magic)
-	if mErr != nil || mn < len(pgDumpCustomMagic) {
+	// io.ReadFull guarantees either err == nil with full read, or
+	// err != nil (ErrUnexpectedEOF on short read). No need for a
+	// separate length check — if err is nil, the buffer is filled.
+	if _, mErr := io.ReadFull(part, magic); mErr != nil {
 		writeError(w, http.StatusBadRequest, "upload too short to be a pg_dump custom archive")
 		return
 	}
-	if mn >= 2 && magic[0] == 0x1F && magic[1] == 0x8B {
+	if magic[0] == 0x1F && magic[1] == 0x8B {
 		writeError(w, http.StatusBadRequest,
 			"upload is a gzip archive (legacy .sql.gz format) — restore via shell instead: "+
 				"`gunzip < file.sql.gz | psql $DATABASE_URL`. The UI now requires the new .dump format.")
@@ -390,30 +400,66 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reconstruct full reader: the magic bytes we already consumed +
-	// the rest of the part body. Caps at maxRestoreSizeBytes so a
-	// malicious uploader can't stream forever.
-	fullReader := io.LimitReader(io.MultiReader(bytes.NewReader(magic), part), maxRestoreSizeBytes)
+	// the rest of the part body. We read up to maxRestoreSizeBytes+1
+	// — the extra byte is a sentinel: if the copy returns that many
+	// bytes the upload was truncated by the limit, and we reject
+	// with an actionable error (otherwise pg_restore would just see
+	// "unexpected end of file" and the operator would have no clue
+	// the 50 GB cap was hit).
+	fullReader := io.LimitReader(
+		io.MultiReader(bytes.NewReader(magic), part),
+		maxRestoreSizeBytes+1,
+	)
 
 	// Spill the upload to a temp file. pg_restore needs random access
 	// (custom format has a table of contents at the front + jumps to
 	// per-table offsets), so streaming over stdin doesn't work.
+	//
+	// PrivateTmp=yes on aurora.service means CreateTemp lands in a
+	// per-service /tmp namespace. pg_restore is forked from aurora,
+	// inherits that namespace, and reads the file fine. External
+	// debuggers won't see the file — that's a feature, not a bug
+	// (the dump contains password hashes).
 	tmpFile, err := os.CreateTemp("", "aurora-restore-*.dump")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create temp file for upload: "+err.Error())
 		return
 	}
 	tmpPath := tmpFile.Name()
-	// Cleanup on every exit path. The remove can fail if the file's
-	// already gone (defensive) — we ignore that.
+	// Cleanup on every exit path: Close (idempotent — sentinel
+	// errors after first call) and Remove. defers run LIFO, so Close
+	// happens before Remove. The double-close from later f.Close()
+	// after copy is harmless (returns ErrClosed which we ignore).
+	defer tmpFile.Close()
 	defer func() {
 		_ = os.Remove(tmpPath)
 	}()
 
-	// Copy the upload to disk. io.Copy is bounded by the LimitReader
-	// above so this can't fill /tmp.
-	if _, err := io.Copy(tmpFile, fullReader); err != nil {
-		_ = tmpFile.Close()
+	// Copy the upload to disk, bounded by maxRestoreSizeBytes+1.
+	n, err := io.Copy(tmpFile, fullReader)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to spill upload to temp file: "+err.Error())
+		return
+	}
+	if n > maxRestoreSizeBytes {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("upload exceeds the %d GB limit — bypass this UI and restore directly: "+
+				"`pg_restore --single-transaction --no-owner --no-privileges --no-comments "+
+				"--dbname=$DATABASE_URL backup.dump`", maxRestoreSizeBytes>>30))
+		return
+	}
+	// Reject suspiciously tiny uploads BEFORE the destructive wipe.
+	// A real Aurora dump (even an empty database with just schema)
+	// runs to several KB; anything under 256 bytes can't possibly
+	// hold the PGDMP header + TOC + a single table. Without this,
+	// a 5-byte upload of just "PGDMP" wipes the DB then fails in
+	// pg_restore with "unexpected end of file" — leaving the
+	// operator's DB destroyed for a malformed upload.
+	const minRestoreSizeBytes = 256
+	if n < minRestoreSizeBytes {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("upload is too small (%d bytes) to be a valid pg_dump archive (expected >= %d). "+
+				"Refusing to wipe the database for a malformed file.", n, minRestoreSizeBytes))
 		return
 	}
 	if err := tmpFile.Close(); err != nil {
@@ -550,6 +596,9 @@ $do$;
 	//                          everything back. Schema stays wiped, so
 	//                          the operator can retry with a different
 	//                          file without re-wiping manually.
+	//                          (--single-transaction implies bail-on-
+	//                          first-error, so --exit-on-error is
+	//                          redundant; we omit it for clarity.)
 	//   --no-owner            → skip ALTER OWNER statements. Aurora's
 	//                          DB role probably isn't the dump's owner.
 	//   --no-privileges       → skip GRANT/REVOKE. Same rationale.
@@ -558,17 +607,21 @@ $do$;
 	//                          extension-owner privilege we don't have).
 	//                          This is the flag that obsoletes the old
 	//                          line-filter pipeline.
-	//   --exit-on-error       → bail on first error rather than churning
-	//                          through hundreds of cascading downstream
-	//                          failures (faster diagnostic).
 	//   --dbname=DATABASE_URL → connect via libpq URI; pg_restore knows
 	//                          this form.
+	//
+	// Note: --no-publications / --no-subscriptions are applied on the
+	// pg_dump side (see Backup) so they never end up in the archive.
+	// Applying them here too would be a no-op for archives produced by
+	// our Backup, but useful defense-in-depth if an operator restores
+	// a dump from a different source — pg_restore doesn't ship those
+	// flags consistently across versions, so we rely on the dump-side
+	// filter instead.
 	restoreCmd := exec.CommandContext(ctx, "pg_restore",
 		"--single-transaction",
 		"--no-owner",
 		"--no-privileges",
 		"--no-comments",
-		"--exit-on-error",
 		"--dbname="+h.databaseURL,
 		tmpPath,
 	)
