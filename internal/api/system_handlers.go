@@ -11,44 +11,53 @@ package api
 //   1. /var/lib/aurora/update-status.json — JSON status file that
 //      aurora-update.sh writes during each run. Aurora READS it
 //      directly (no privilege escalation needed).
-//   2. /usr/bin/sudo -n systemctl start aurora-update.service —
-//      authorized via /etc/sudoers.d/aurora-update for the aurora
-//      user. Starts the one-shot updater service, which runs as
-//      root via its systemd unit. Returns immediately; the caller
-//      polls the status JSON for progress.
+//   2. /var/lib/aurora/trigger-update — trigger file. Aurora writes
+//      a fresh timestamp to it; aurora-update.path watches the file
+//      via PathChanged= and starts aurora-update.service as root
+//      (systemd is PID 1, no privilege escalation through aurora).
+//
+// Why a file rather than sudo (2026-05-19 rearchitecture):
+//
+//   The previous design called `sudo -n systemctl start aurora-
+//   update.service` via a sudoers grant. That collides with the
+//   NoNewPrivileges=yes hardening on aurora.service, which
+//   unconditionally blocks sudo from elevating. Path activation
+//   keeps the hardening AND removes the sudoers grant entirely —
+//   even a compromised aurora process can only touch one file,
+//   which triggers an idempotent git-pull pipeline (no arbitrary
+//   code execution).
 //
 // install.sh sets all of the above up. On a hand-rolled install
 // missing any piece, these endpoints degrade gracefully:
 //   - missing status file → return {state: "unknown", ...}
-//   - sudo grant absent → POST returns 500 with the actual stderr
-//     so the operator can diagnose.
+//   - trigger file unwritable / .path unit disabled → POST returns
+//     500 with an actionable error message.
 
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"time"
 )
 
 // SystemHandler bundles the small amount of state these endpoints
-// need. Currently just the path to the status file, which is fixed
-// in install.sh but kept configurable to ease unit testing.
+// need. Both paths are fixed in install.sh but kept configurable to
+// ease unit testing.
 type SystemHandler struct {
 	// statusFilePath defaults to /var/lib/aurora/update-status.json.
-	// Tests can override it.
 	statusFilePath string
-	// updaterUnitName is the systemd unit name we ask sudo to start.
-	// Constant in prod; constructor parameter keeps tests honest.
-	updaterUnitName string
+	// triggerFilePath defaults to /var/lib/aurora/trigger-update.
+	// Writing to this file fires aurora-update.path → aurora-update.service.
+	triggerFilePath string
 }
 
 func NewSystemHandler() *SystemHandler {
 	return &SystemHandler{
 		statusFilePath:  "/var/lib/aurora/update-status.json",
-		updaterUnitName: "aurora-update.service",
+		triggerFilePath: "/var/lib/aurora/trigger-update",
 	}
 }
 
@@ -107,37 +116,74 @@ func (h *SystemHandler) GetUpdateStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, status)
 }
 
-// TriggerUpdate kicks off the one-shot updater service via the
-// sudoers-permitted `sudo -n systemctl start aurora-update.service`.
-// Returns immediately (the service runs asynchronously). The
-// caller polls /api/admin/system/update/status for progress.
+// TriggerUpdate kicks off the one-shot updater by touching the
+// trigger file that aurora-update.path watches. Returns immediately;
+// the caller polls /api/admin/system/update/status for progress.
 //
-// We deliberately do NOT block on the update completing — a clean
+// Trigger semantics: we write a fresh RFC3339 timestamp to the file
+// on each invocation. systemd's PathChanged= fires on close-after-
+// write, so every POST produces exactly one .path event regardless
+// of the file's prior contents. The aurora-update.service is
+// Type=oneshot — systemd serializes overlapping triggers, so a
+// frantic double-click won't spawn a second build.
+//
+// We deliberately do NOT block on the update completing. A clean
 // build + restart cycle is ~30s, and HTTP request lifecycles
 // shouldn't camp on that. Polling is the correct shape.
 //
-// Idempotency: systemd's Type=oneshot serializes invocations.
-// `systemctl start` on an already-running oneshot returns 0
-// without spawning a second instance, so a frantic double-click on
-// the button is harmless.
+// Common failure modes and their messages:
+//   - File missing → install.sh's updater block didn't run
+//   - File unwritable → ReadWritePaths in aurora.service doesn't
+//     include /var/lib/aurora, or the file isn't group-writable
+//   - .path unit not enabled → file write succeeds but no service
+//     ever runs; the operator sees "Update started" but the status
+//     JSON never advances. The status-poll endpoint is the right
+//     surface for that diagnostic (a stale "at" timestamp).
 func (h *SystemHandler) TriggerUpdate(w http.ResponseWriter, r *http.Request) {
-	// `sudo -n` = non-interactive; fail immediately if the sudoers
-	// grant isn't present rather than hanging waiting for a
-	// password prompt that will never be answered.
-	cmd := exec.CommandContext(r.Context(), "sudo", "-n", "systemctl", "start", h.updaterUnitName)
-	out, err := cmd.CombinedOutput()
+	// O_WRONLY + O_TRUNC overwrites whatever was there; we don't
+	// care about file history. The body is just a fresh timestamp
+	// for human debugging — systemd cares about the close event,
+	// not the contents.
+	//
+	// Permissions 0664 only apply if the file is being created here
+	// (it normally exists from install.sh). The file's actual mode +
+	// ownership are managed by install.sh: root:aurora 0664.
+	f, err := os.OpenFile(h.triggerFilePath, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0664)
 	if err != nil {
-		// sudo's stderr is usually the most actionable diagnostic
-		// ("a password is required" → sudoers missing; "command
-		// not allowed" → wrong NOPASSWD target). Forward it.
-		slog.Warn("trigger update", "err", err, "output", string(out))
+		// errors.Is(err, os.ErrPermission): aurora can't write here.
+		// errors.Is(err, os.ErrNotExist):    parent dir missing (no install)
+		// Anything else: pass through.
+		slog.Warn("trigger update: open trigger file", "path", h.triggerFilePath, "err", err)
+		switch {
+		case errors.Is(err, os.ErrPermission):
+			writeError(w, http.StatusInternalServerError,
+				"failed to trigger updater: cannot write "+h.triggerFilePath+
+					" — check that install.sh ran and that /var/lib/aurora is in aurora.service's ReadWritePaths")
+		case errors.Is(err, os.ErrNotExist):
+			writeError(w, http.StatusInternalServerError,
+				"failed to trigger updater: "+h.triggerFilePath+" does not exist "+
+					"— the auto-updater block of install.sh was skipped or failed; re-run install.sh")
+		default:
+			writeError(w, http.StatusInternalServerError,
+				"failed to trigger updater: "+err.Error())
+		}
+		return
+	}
+	defer f.Close()
+
+	// Write a timestamp. Contents don't matter to systemd — the
+	// PathChanged= event fires on file modification regardless —
+	// but a timestamp is the most useful thing to find in the file
+	// when diagnosing "did the trigger actually fire?".
+	if _, err := fmt.Fprintf(f, "%s\n", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		slog.Warn("trigger update: write trigger file", "path", h.triggerFilePath, "err", err)
 		writeError(w, http.StatusInternalServerError,
-			"failed to trigger updater: "+string(out))
+			"failed to trigger updater: write failed: "+err.Error())
 		return
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"started": true,
-		"message": "Update started. Poll /api/admin/system/update/status for progress.",
+		"message": "Update triggered. Poll /api/admin/system/update/status for progress.",
 	})
 }

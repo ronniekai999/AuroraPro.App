@@ -3,9 +3,9 @@
 # Safely removes all Aurora components from a Linux system.
 #
 # Removes:
-#   - aurora.service + aurora-update.{service,timer} systemd units
+#   - aurora.service + aurora-update.{service,timer,path} systemd units
 #   - /usr/local/bin/aurora + /usr/local/bin/aurora-update
-#   - /etc/sudoers.d/aurora-update
+#   - /etc/sudoers.d/aurora-update (legacy; new installs don't create it)
 #   - /opt/aurora (install dir), /etc/aurora (config)
 #   - /var/cache/aurora (image+subtitle+transcode caches)
 #   - /var/lib/aurora (source mirror + updater state)
@@ -40,10 +40,14 @@ SYSTEMD_UNIT="/etc/systemd/system/aurora.service"
 DB_NAME="aurora"
 DB_USER="aurora"
 
-# Auto-updater pipeline (installed by install.sh ~L897-907, L922).
+# Auto-updater pipeline (installed by install.sh ~L897-915, L932).
 UPDATER_BIN="/usr/local/bin/aurora-update"
 UPDATER_SERVICE="/etc/systemd/system/aurora-update.service"
 UPDATER_TIMER="/etc/systemd/system/aurora-update.timer"
+UPDATER_PATH_UNIT="/etc/systemd/system/aurora-update.path"
+# Pre-2026-05-19 installs dropped a sudoers grant here. New installs
+# don't (path activation replaces it). Uninstall still cleans it up
+# for upgrade-then-uninstall paths.
 UPDATER_SUDOERS="/etc/sudoers.d/aurora-update"
 
 # State + log dirs (install.sh writes status JSON + log files here).
@@ -146,7 +150,9 @@ detect_components() {
     # Auto-updater + state/log dirs (gaps closed 2026-05-18).
     HAS_UPDATER_SERVICE=false
     HAS_UPDATER_TIMER=false
+    HAS_UPDATER_PATH=false
     TIMER_ACTIVE=false
+    PATH_UNIT_ACTIVE=false
     HAS_UPDATER_BIN=false
     HAS_UPDATER_SUDOERS=false
     HAS_STATE_DIR=false
@@ -177,6 +183,12 @@ detect_components() {
         HAS_UPDATER_TIMER=true
         if systemctl is-active aurora-update.timer &>/dev/null; then
             TIMER_ACTIVE=true
+        fi
+    fi
+    if [ -f "$UPDATER_PATH_UNIT" ]; then
+        HAS_UPDATER_PATH=true
+        if systemctl is-active aurora-update.path &>/dev/null; then
+            PATH_UNIT_ACTIVE=true
         fi
     fi
     [ -f "$UPDATER_BIN" ]     && HAS_UPDATER_BIN=true     || true
@@ -260,12 +272,14 @@ if $HAS_SERVICE; then
     fi
     FOUND_SOMETHING=true
 fi
-if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_BIN || $HAS_UPDATER_SUDOERS; then
-    if $TIMER_ACTIVE; then
-        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[TIMER ACTIVE]"
-    else
-        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[installed]"
-    fi
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_PATH || $HAS_UPDATER_BIN || $HAS_UPDATER_SUDOERS; then
+    case "${TIMER_ACTIVE}-${PATH_UNIT_ACTIVE}" in
+        true-true)  status="[TIMER + PATH ACTIVE]" ;;
+        true-false) status="[TIMER ACTIVE]" ;;
+        false-true) status="[PATH ACTIVE]" ;;
+        *)          status="[installed]" ;;
+    esac
+    printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "$status"
     FOUND_SOMETHING=true
 fi
 if $HAS_BINARY; then
@@ -350,12 +364,18 @@ echo ""
 info "Step 1/9: Stopping auto-updater (timer + service)..."
 echo ""
 
-if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE; then
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_PATH; then
+    # Stop the .path watcher FIRST so any in-flight trigger file
+    # write can't kick off another service start mid-teardown.
+    if $PATH_UNIT_ACTIVE; then
+        info "Stopping aurora-update.path..."
+        systemctl stop aurora-update.path 2>/dev/null || true
+    fi
     if $TIMER_ACTIVE; then
         info "Stopping aurora-update.timer..."
         systemctl stop aurora-update.timer 2>/dev/null || true
     fi
-    # In case the timer just fired and the .service is running.
+    # In case the timer or path unit just fired and the .service is running.
     if systemctl is-active aurora-update.service &>/dev/null; then
         info "Waiting for in-flight aurora-update.service to finish..."
         for _ in $(seq 1 30); do
@@ -372,10 +392,12 @@ if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE; then
     fi
 
     info "Disabling + removing aurora-update units..."
+    systemctl disable aurora-update.path     2>/dev/null || true
     systemctl disable aurora-update.timer    2>/dev/null || true
     systemctl disable aurora-update.service  2>/dev/null || true
-    rm -f "$UPDATER_TIMER" "$UPDATER_SERVICE"
+    rm -f "$UPDATER_PATH_UNIT" "$UPDATER_TIMER" "$UPDATER_SERVICE"
     systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed aurora-update.path     2>/dev/null || true
     systemctl reset-failed aurora-update.timer    2>/dev/null || true
     systemctl reset-failed aurora-update.service  2>/dev/null || true
     ok "Auto-updater units removed"
