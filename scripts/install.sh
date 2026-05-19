@@ -796,6 +796,14 @@ mkdir -p "$INSTALL_DIR/migrations"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$CACHE_DIR/images" "$CACHE_DIR/subtitles" "$TRANSCODE_DIR"
 install -d -m 0750 -o "$AURORA_USER" -g "$AURORA_GROUP" "$LOG_DIR"
+# /var/lib/aurora must exist BEFORE aurora.service starts because
+# the unit's ReadWritePaths= references it (without the `-` prefix,
+# systemd refuses to start the unit if the path is missing). The
+# updater install block further down also writes here, but creating
+# the dir unconditionally up front means a SKIP_UPDATER install
+# (no git remote, or aurora-update.sh missing) still leaves
+# aurora.service startable.
+install -d -m 0755 -o root -g root /var/lib/aurora
 
 # Migrations + static files (atomic swap for the bundle).
 cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
@@ -908,19 +916,35 @@ if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
         # sudoers grant in /etc/sudoers.d/, remove it. With the .path
         # unit it's dead weight; leaving it broadens the sudoers
         # surface for nothing.
+        #
+        # Safety: only remove if the file looks like OUR known fragment
+        # (single `aurora ALL=(root) NOPASSWD: ...` lines). If an admin
+        # appended unrelated sudoers entries to the same file, leave it
+        # alone and warn — destroying their custom rules during an
+        # upgrade is worse than the dead-weight cost.
         if [ -f /etc/sudoers.d/aurora-update ]; then
-            rm -f /etc/sudoers.d/aurora-update
-            ok "Removed legacy sudoers grant (replaced by aurora-update.path)"
+            # Strip blank lines + comments, then require every non-blank
+            # line to be one of our known-installed forms.
+            if awk '!/^[[:space:]]*(#|$)/' /etc/sudoers.d/aurora-update \
+                | grep -qvE '^aurora ALL=\(root\) NOPASSWD: (/bin|/usr/bin)/systemctl (start|is-active) aurora-update\.service$' \
+                2>/dev/null; then
+                warn "Legacy /etc/sudoers.d/aurora-update has custom rules — leaving in place."
+                warn "  Aurora no longer uses this file; remove the aurora-update lines manually if you want to clean up."
+            else
+                rm -f /etc/sudoers.d/aurora-update
+                ok "Removed legacy sudoers grant (replaced by aurora-update.path)"
+            fi
         fi
 
-        # State directory + trigger file. The trigger file is owned
-        # by root:aurora 0664 — aurora (group) can write it, but
-        # only root can replace it entirely. systemd's .path unit
-        # picks up each modification as a fresh trigger event.
+        # Trigger file used by aurora-update.path. Owned root:aurora
+        # 0664 — aurora's group write lets the in-app "Update Now"
+        # handler touch it; only root can replace it entirely.
+        # systemd's PathChanged= picks up each modification as a
+        # fresh trigger event.
         #
-        # Status JSON lives in the same dir, root:root by default
-        # (only the updater process, which runs as root, writes it).
-        install -d -m 0755 -o root -g root /var/lib/aurora
+        # The /var/lib/aurora directory itself was created up at the
+        # "Layout directories" section so aurora.service can start
+        # even when the updater is skipped.
         if [ ! -f /var/lib/aurora/trigger-update ]; then
             : > /var/lib/aurora/trigger-update
         fi

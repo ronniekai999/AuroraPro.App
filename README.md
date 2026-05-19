@@ -77,6 +77,22 @@ journalctl -u aurora-update -n 50
 Config lives at `/etc/aurora/aurora.env`. Cache at `/var/cache/aurora`.
 Logs at `/var/log/aurora` and via journald.
 
+### Upgrading Aurora
+
+The 5-minute auto-updater handles routine code pulls automatically. But when
+an update touches `scripts/install.sh` itself (systemd unit changes, new
+state directories, schema-side ACL adjustments), re-run the installer so it
+can apply those changes:
+
+```bash
+cd /var/lib/aurora/source
+sudo git pull
+sudo ./scripts/install.sh
+```
+
+The installer is idempotent — your JWT secret, database, and config are
+preserved across runs.
+
 ## Uninstall
 
 ```bash

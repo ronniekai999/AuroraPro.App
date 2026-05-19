@@ -174,6 +174,21 @@ func callBackup(t *testing.T, dbURL string) []byte {
 		}
 		t.Fatalf("Backup output is not a pg_dump custom archive; first 32 bytes: %q", head)
 	}
+	// Defense-in-depth: if pg_dump fails mid-stream, Backup logs and
+	// returns mid-response without sending an HTTP error (headers
+	// were already written). The client sees a truncated dump that
+	// still starts with PGDMP. Catch this here so a regression in
+	// the backup pipeline can't masquerade as a "valid" archive that
+	// fails opaquely later in restore.
+	//
+	// A real Aurora dump with our test fixture (1 user + 1 library
+	// + 1 media_item + the schema migrations + extension data) is
+	// always > 1 KB. Below that, something went wrong before
+	// pg_dump finished emitting the TOC.
+	if len(body) < 1024 {
+		t.Fatalf("Backup output suspiciously short (%d bytes) — pg_dump likely failed mid-stream "+
+			"and the response was truncated. Check the server log for the pg_dump stderr.", len(body))
+	}
 	return body
 }
 
