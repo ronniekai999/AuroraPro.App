@@ -23,6 +23,7 @@ package api
 //     scan_progress (transient scanner state — regenerates on next scan).
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -480,10 +481,67 @@ $do$;
 		return
 	}
 
-	// Drive the pipeline. io.Copy returns when gz hits EOF (or errors)
-	// OR when stdin returns an error (e.g., psql exited early). Either
-	// way we close stdin to signal EOF to psql and Wait for it.
-	_, copyErr := io.Copy(stdin, gz)
+	// Drive the pipeline. We filter the dump line-by-line on the way
+	// through, dropping extension-management DDL that requires
+	// superuser / extension-owner privileges (CREATE EXTENSION,
+	// COMMENT ON EXTENSION, ALTER EXTENSION). Aurora's role isn't
+	// the extension owner — postgres is — so leaving these lines in
+	// would fail with "must be owner of extension X" and roll the
+	// whole restore back. The extensions themselves are preserved
+	// by the smarter wipe above, so the dump's view of them is
+	// purely informational and safe to discard.
+	//
+	// 1 MB initial line buffer, 16 MB max. pg_dump --inserts produces
+	// per-row INSERT statements which are typically <1 KB; data lines
+	// in COPY blocks are limited by the table's row width. 16 MB is
+	// the safety ceiling for some pathological row (e.g. a single
+	// blob column).
+	copyErr := func() error {
+		scanner := bufio.NewScanner(gz)
+		scanner.Buffer(make([]byte, 1<<20), 16<<20)
+		// Audit M1 (deep-debug 2026-05-18) — the extension-DDL
+		// filter must NOT fire inside `COPY ... FROM stdin;` blocks.
+		// COPY data is one row per line; if a row's first column
+		// contained the literal text "CREATE EXTENSION foo" (e.g.,
+		// a movie title with that phrase, an operator error message,
+		// a chat post), the filter would silently drop the row and
+		// the restore would succeed minus that one row — silent
+		// data loss in a recovery operation, which is the worst
+		// possible failure mode. Track the COPY block state and
+		// pass-through unchanged inside it.
+		var inCopyBlock bool
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			// COPY block start: line begins with `COPY ` and ends
+			// with `FROM stdin;`. pg_dump emits both with no
+			// leading whitespace.
+			if !inCopyBlock && bytes.HasPrefix(line, []byte("COPY ")) && bytes.HasSuffix(line, []byte(" FROM stdin;")) {
+				inCopyBlock = true
+			} else if inCopyBlock && bytes.Equal(line, []byte(`\.`)) {
+				// `\.` on its own line terminates the COPY block.
+				inCopyBlock = false
+			} else if !inCopyBlock && isExtensionDDL(line) {
+				continue
+			}
+			if _, err := stdin.Write(line); err != nil {
+				return err
+			}
+			if _, err := stdin.Write([]byte{'\n'}); err != nil {
+				return err
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			// Audit M3 — bufio.ErrTooLong vs other errors. The
+			// generic error gets prepended with hint context so
+			// the operator knows the dump exceeded the 16 MB
+			// per-line ceiling (likely a pathological blob row).
+			if err == bufio.ErrTooLong {
+				return fmt.Errorf("backup contains a line longer than 16 MB (typically a single-row blob column) — bypass this UI and restore directly: `gunzip < backup.sql.gz | psql $DATABASE_URL`. underlying: %w", err)
+			}
+			return err
+		}
+		return nil
+	}()
 	_ = gz.Close()
 	_ = stdin.Close()
 	waitErr := psqlCmd.Wait()
@@ -511,4 +569,32 @@ $do$;
 		"status":  "ok",
 		"message": "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do.",
 	})
+}
+
+// isExtensionDDL returns true for lines that pg_dump emits to manage
+// extensions, and which the unprivileged `aurora` role cannot execute:
+//
+//   - CREATE EXTENSION [IF NOT EXISTS] vector WITH SCHEMA public;
+//   - COMMENT ON EXTENSION vector IS '...';
+//   - ALTER EXTENSION vector ... ;
+//
+// Aurora's role isn't the extension owner (postgres is), and many
+// extensions aren't TRUSTED (vector, in particular). install.sh
+// pre-creates the required extensions, so the dump's view of them
+// is purely informational — safe to drop entirely.
+//
+// pg_dump always emits statements on their own line with no leading
+// whitespace. We tolerate leading whitespace anyway for safety
+// against hand-edited dumps. Match is case-sensitive against
+// pg_dump's uppercase output; we don't try to handle hand-edited
+// lowercase dumps because the cost of false-positives (silently
+// dropping legitimate CREATE statements with different DDL) is
+// worse than the cost of telling operators "use a pg_dump output
+// not a hand-edited one."
+func isExtensionDDL(line []byte) bool {
+	t := bytes.TrimLeft(line, " \t")
+	return bytes.HasPrefix(t, []byte("CREATE EXTENSION ")) ||
+		bytes.HasPrefix(t, []byte("COMMENT ON EXTENSION ")) ||
+		bytes.HasPrefix(t, []byte("ALTER EXTENSION ")) ||
+		bytes.HasPrefix(t, []byte("DROP EXTENSION "))
 }
