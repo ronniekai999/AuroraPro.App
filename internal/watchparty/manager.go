@@ -1626,6 +1626,16 @@ func (m *Manager) HandlePlaybackControl(code string, userID int64, action string
 		return fmt.Errorf("party not found")
 	}
 
+	// 2026-05-19 audit (BE-H8) — clamp timeMs >= 0 at the top of the
+	// handler. The V2 path used to broadcast negative current_time_ms
+	// to all clients if a buggy host (or future bug in the wire layer)
+	// passed timeMs < 0. The V3 sync handler validates this; V2 didn't.
+	// A clamp here is safe because all legitimate playback positions
+	// are >= 0 (frame 0 is the start of the media).
+	if timeMs < 0 {
+		timeMs = 0
+	}
+
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
@@ -2873,6 +2883,38 @@ func (m *Manager) GetPartyState(code string) *PartyState {
 		return nil
 	}
 	return ps
+}
+
+// IsParticipantOrHost returns true if userID is either the party host
+// or currently in the participants list. False if the party doesn't
+// exist. Thread-safe; takes ps.mu internally so callers don't have to
+// reason about the manager's locking discipline.
+//
+// 2026-05-19 audit (API-H2, API-H3) — party-scoped endpoints (reaction
+// timeline, highlight reel MP4) leaked data to any authenticated user
+// who guessed a 6-char party code, because they did no membership
+// check. This helper centralizes the gate so the policy can't be
+// forgotten as new party endpoints are added.
+func (m *Manager) IsParticipantOrHost(code string, userID int64) bool {
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return false
+	}
+	// ps.mu is a sync.Mutex (not RWMutex) per the type declaration
+	// above — write Lock/Unlock to match.
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID == userID {
+		return true
+	}
+	for _, p := range ps.Participants {
+		if p.UserID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildPartyStateMessage builds the full state message sent to joiners.

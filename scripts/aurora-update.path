@@ -1,0 +1,26 @@
+[Unit]
+Description=Aurora Media Server — update trigger watcher
+Documentation=https://github.com/aurora-media/aurora
+# Don't fire during initial boot before aurora itself is up.
+After=aurora.service
+
+[Path]
+# Aurora's "Update Now" handler writes a fresh timestamp to this
+# file. systemd notices the close-after-write and starts the
+# updater service as root (the service unit runs with no User=
+# override, so PID 1 launches it with the right privileges).
+#
+# This replaces the previous sudo-based trigger which conflicted
+# with NoNewPrivileges=yes on aurora.service. The new design has
+# zero privilege escalation through the aurora user — even a
+# fully-compromised aurora process can only touch this one file,
+# which triggers the same idempotent git-pull + rebuild pipeline
+# (no arbitrary code execution).
+#
+# PathChanged fires once per close(), so two rapid clicks produce
+# two events; systemd serializes them via the Type=oneshot service.
+PathChanged=/var/lib/aurora/trigger-update
+Unit=aurora-update.service
+
+[Install]
+WantedBy=multi-user.target

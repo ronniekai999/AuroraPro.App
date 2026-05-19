@@ -609,7 +609,13 @@ func (q *Queries) GetMediaItems(ctx context.Context, filter models.MediaFilter, 
 		argIdx++
 	}
 	if filter.Query != "" {
-		where = append(where, fmt.Sprintf("m.title ILIKE '%%%%' || $%d || '%%%%'", argIdx))
+		// 2026-05-19 audit (BE-C1) — `'%%%%'` in Sprintf produces
+		// `'%%'` in the SQL, which ILIKE matches as the LITERAL
+		// two-char string "%%", not the wildcard. Single `%%` in
+		// the format string produces the correct `'%'` wildcard.
+		// The text filter on GET /media has been silently broken
+		// in production until this fix.
+		where = append(where, fmt.Sprintf("m.title ILIKE '%%' || $%d || '%%'", argIdx))
 		args = append(args, filter.Query)
 		argIdx++
 	}
@@ -895,12 +901,13 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 		}
 		return nil, fmt.Errorf("get media file: %w", err)
 	}
-	if audioJSON != nil {
-		json.Unmarshal(audioJSON, &f.AudioTracks)
-	}
-	if subtitleJSON != nil {
-		json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-	}
+	// 2026-05-19 audit (BE-H1) — route through unmarshalTracks
+	// (queries_crosslib.go) so corrupt JSONB rows log a warning
+	// instead of silently leaving tracks empty. An empty AudioTracks
+	// makes DecidePlayback think the file has no audio and can pick
+	// direct_play for an actually-incompatible file.
+	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
 }
 
@@ -925,12 +932,11 @@ func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*mode
 		); err != nil {
 			return nil, fmt.Errorf("scan media file: %w", err)
 		}
-		if audioJSON != nil {
-			json.Unmarshal(audioJSON, &f.AudioTracks)
-		}
-		if subtitleJSON != nil {
-			json.Unmarshal(subtitleJSON, &f.SubtitleTracks)
-		}
+		// 2026-05-19 audit (BE-H1) — see GetMediaFile above for the
+		// rationale; same call site here, log corrupt rows instead
+		// of silently returning empty tracks.
+		unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
+		unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 		files = append(files, f)
 	}
 	if err := rows.Err(); err != nil {

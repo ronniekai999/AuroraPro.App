@@ -1231,6 +1231,17 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 const minSegmentSizeBytes = 4096
 
 func highestSegmentNumber(varDir string) int {
+	// 2026-05-19 audit (BE-H5) — prefer the playlist as the source of
+	// truth for "what's a complete segment." FFmpeg writes the .m3u8
+	// only AFTER finishing each segment, so any segment number that
+	// appears in playlist.m3u8 was emitted intact. This handles the
+	// edge case of a legitimately small final segment (e.g. an EOF
+	// audio frame producing a 2 KB segment) that the size-heuristic
+	// path below would discard, leading to overwrite on restart.
+	if n := playlistHighestSegmentNumber(filepath.Join(varDir, "playlist.m3u8")); n >= 0 {
+		return n
+	}
+
 	entries, err := os.ReadDir(varDir)
 	if err != nil {
 		return -1
@@ -1260,6 +1271,37 @@ func highestSegmentNumber(varDir string) int {
 			// position (the playlist's append_list will still see the
 			// PREVIOUS segment as the last entry, so HLS.js won't have
 			// referenced this partial one).
+			continue
+		}
+		if n > highest {
+			highest = n
+		}
+	}
+	return highest
+}
+
+// playlistHighestSegmentNumber returns the highest seg_N.ts number
+// referenced by the given HLS playlist, or -1 if the playlist doesn't
+// exist or is empty. FFmpeg appends to the playlist only after a
+// segment is fully written, so anything in here is guaranteed complete
+// regardless of its on-disk size.
+//
+// 2026-05-19 audit (BE-H5) — added to defend against the edge case
+// where a final segment is legitimately smaller than minSegmentSizeBytes.
+func playlistHighestSegmentNumber(playlistPath string) int {
+	data, err := os.ReadFile(playlistPath)
+	if err != nil {
+		return -1
+	}
+	highest := -1
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "seg_") || !strings.HasSuffix(line, ".ts") {
+			continue
+		}
+		numStr := strings.TrimSuffix(strings.TrimPrefix(line, "seg_"), ".ts")
+		n, convErr := strconv.Atoi(numStr)
+		if convErr != nil {
 			continue
 		}
 		if n > highest {

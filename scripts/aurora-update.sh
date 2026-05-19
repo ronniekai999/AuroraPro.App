@@ -6,8 +6,11 @@
 # the systemd service. Designed to be called by either:
 #
 #   - aurora-update.timer (every 5 min) — the periodic auto-update
-#   - systemctl start aurora-update.service — the admin UI's
-#     "Update Now" button, which routes through a sudoers grant
+#   - aurora-update.path watching /var/lib/aurora/trigger-update —
+#     the admin UI's "Update Now" button, which writes a timestamp
+#     to that file. systemd (PID 1) starts this service in response
+#     to the PathChanged= event, so no sudo/NOPASSWD grant is
+#     required on the aurora user.
 #
 # Performance contract: when there's nothing new upstream, exits
 # in <1 s (just a `git fetch` + HEAD compare + status write). The

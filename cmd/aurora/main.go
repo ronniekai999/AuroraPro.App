@@ -217,6 +217,21 @@ func main() {
 		slog.Error("failed to create image proxy", "error", err)
 		os.Exit(1)
 	}
+	// 2026-05-19 audit (BE-M7) — background eviction. Runs once per
+	// hour; cheap when already under cap. Keeps the on-disk image
+	// cache bounded against a buggy TMDB feed or stress test that
+	// bursts thousands of unique URLs and exhausts the disk.
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if freed, removed, err := imgProxy.EvictIfOverCap(); err != nil {
+				slog.Warn("image cache evict failed", "error", err)
+			} else if removed > 0 {
+				slog.Info("image cache evicted", "files_removed", removed, "bytes_freed", freed)
+			}
+		}
+	}()
 
 	enricher := metadata.NewEnricher(tmdbClient, tvdbClient, queries, imgProxy)
 	enricher.SetThresholds(cfg.TMDB.AutoMatchThreshold, cfg.TMDB.ReviewThreshold)

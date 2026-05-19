@@ -96,6 +96,21 @@ func (h *PartyHandler) GetReactions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "code required")
 		return
 	}
+	// 2026-05-19 audit (API-H2) — gate on party membership before
+	// returning the reaction stream. Previously any authenticated
+	// user could read any party's reactions if they guessed the
+	// 6-char code, exposing username + emoji + timestamp tuples to
+	// non-participants. Admins are allowed through for incident
+	// response / moderation use cases.
+	claims := getClaimsFromRequest(r)
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) {
+		writeError(w, http.StatusNotFound, "party not found")
+		return
+	}
 	reactions := h.manager.RecentReactions(code)
 	if reactions == nil {
 		// Distinguish "party not found" from "no reactions yet". The
@@ -121,6 +136,18 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 	code := chi.URLParam(r, "code")
 	if code == "" {
 		writeError(w, http.StatusBadRequest, "code required")
+		return
+	}
+	// 2026-05-19 audit (API-H3) — same membership gate as GetReactions.
+	// The highlight reel MP4 is participant-scoped content; we don't
+	// want code-guessing to expose it.
+	claims := getClaimsFromRequest(r)
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) {
+		writeError(w, http.StatusNotFound, "highlight reel not available")
 		return
 	}
 	// File path is resolved on-disk; PartyHandler doesn't know the

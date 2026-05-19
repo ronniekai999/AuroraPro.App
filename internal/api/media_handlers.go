@@ -43,6 +43,14 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name and paths required")
 		return
 	}
+	// 2026-05-19 audit (API-H5) — cap library Name to the same 200
+	// chars the Update path enforces. Without this, a 10 MB JSON name
+	// hits the DB VARCHAR(255) constraint with a generic 500. Library
+	// schema is VARCHAR(255); 200 leaves headroom for trim/whitespace.
+	if len(req.Name) > 200 {
+		writeError(w, http.StatusBadRequest, "name must be 200 characters or fewer")
+		return
+	}
 	if req.Type != models.LibraryMovies && req.Type != models.LibraryShows {
 		writeError(w, http.StatusBadRequest, "type must be 'movie' or 'show'")
 		return
@@ -50,7 +58,12 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Validate library paths exist and are directories.
 	// Resolve symlinks so the blocklist catches the real target.
-	blockedPrefixes := []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run"}
+	//
+	// 2026-05-19 audit (API-H6) — added /var/lib/aurora to the blocklist.
+	// That's Aurora's own state dir (source mirror, update-status.json,
+	// trigger-update). An admin pointing a library at it would expose
+	// Aurora's internal files via direct-play streaming.
+	blockedPrefixes := []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
 	resolvedPaths := make([]string, 0, len(req.Paths))
 	for _, p := range req.Paths {
 		cleanPath := filepath.Clean(p)
@@ -496,6 +509,15 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		writeError(w, http.StatusBadRequest, "search query required")
+		return
+	}
+	// 2026-05-19 audit (API-M5) — cap query length. Without this, a
+	// 100 KB query string burns trigram + (optionally) LLM-embed
+	// budget under DB CPU + token cost. 200 chars is comfortably
+	// above any human-typed search (the longest natural-language
+	// title query peaks around 80 chars).
+	if len(query) > 200 {
+		writeError(w, http.StatusBadRequest, "search query must be 200 characters or fewer")
 		return
 	}
 
