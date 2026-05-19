@@ -593,8 +593,26 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 }
 
 func collectVideoFiles(root string) ([]string, error) {
+	// 2026-05-19 audit (BE-H3) — defend against symlinked files that
+	// escape the library root. filepath.WalkDir (Go 1.21+) does NOT
+	// follow directory symlinks, but it DOES traverse FILE-level
+	// symlinks normally — if a file under root is a symlink to
+	// /etc/passwd or anywhere outside root, IsVideoFile() decides
+	// based on the symlink name's extension and we'd hash+scan the
+	// target. Resolve each candidate and require it to live under
+	// the root we were asked to scan; reject otherwise.
+	//
+	// EvalSymlinks on the root itself ensures the comparison uses the
+	// resolved, canonical form (the LibraryHandler already did this on
+	// path creation, but defensively re-resolve here so this helper
+	// is self-contained).
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve root: %w", err)
+	}
+	resolvedRoot = filepath.Clean(resolvedRoot)
 	var files []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			slog.Warn("walk error", "path", path, "error", err)
 			return nil
@@ -602,12 +620,26 @@ func collectVideoFiles(root string) ([]string, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if IsVideoFile(path) {
-			files = append(files, path)
+		if !IsVideoFile(path) {
+			return nil
 		}
+		// Resolve the file's path to catch symlink-escapes. A file
+		// that's a symlink to something outside the library root
+		// must not be processed.
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			slog.Warn("skip: resolve symlink failed", "path", path, "error", err)
+			return nil
+		}
+		resolved = filepath.Clean(resolved)
+		if !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator)) && resolved != resolvedRoot {
+			slog.Warn("skip: symlink escapes library root", "path", path, "resolved", resolved, "root", resolvedRoot)
+			return nil
+		}
+		files = append(files, path)
 		return nil
 	})
-	return files, err
+	return files, walkErr
 }
 
 func generateFileHash(path string) (string, int64, error) {

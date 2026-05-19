@@ -39,6 +39,16 @@ type libraryWatch struct {
 	library  *models.Library
 	cancel   context.CancelFunc
 	debounce *time.Timer
+	// generation is bumped each time WatchLibrary creates a new entry
+	// for a given library ID. The debounce closure captures the
+	// generation it was scheduled under and only fires the scan if
+	// it still matches. Defends against the race where a library is
+	// unwatched and re-watched (same ID, new entry) while an old
+	// debounce timer is still in flight — without this, the old
+	// timer's closure would scan the NEW library, potentially
+	// triggering ghost scans against a brand-new entry.
+	// 2026-05-19 audit (BE-H2).
+	generation uint64
 }
 
 func NewWatcher(cfg config.ScannerConfig, scanner *Scanner, onChange func(lib *models.Library)) *Watcher {
@@ -191,12 +201,16 @@ func (w *Watcher) WatchLibrary(ctx context.Context, lib *models.Library) error {
 	}
 
 	// Atomic swap: evict any existing entry for this library, install the new one.
+	// 2026-05-19 audit (BE-H2) — new generation per install. The
+	// previous entry's debounce closures captured the old generation
+	// and now skip when they fire (see watchLoop's generation check).
 	w.mu.Lock()
 	if existing, ok := w.watching[lib.ID]; ok {
 		existing.cancel()
 		if existing.debounce != nil {
 			existing.debounce.Stop()
 		}
+		lw.generation = existing.generation + 1
 	}
 	w.watching[lib.ID] = lw
 	w.mu.Unlock()
@@ -297,15 +311,23 @@ func (w *Watcher) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, lw *
 			}
 			lib := lw.library
 			libID := lib.ID
+			// 2026-05-19 audit (BE-H2) — capture the watch entry's
+			// generation. On fire, re-verify the watching[libID]
+			// matches the SAME generation we were scheduled under.
+			// Prevents the closure from triggering a scan against a
+			// re-created library entry (delete + re-add with same ID).
+			gen := lw.generation
 			lw.debounce = time.AfterFunc(w.cfg.WatchDebounce, func() {
-				// Verify library is still being watched (may have been deleted/unwatched
-				// between timer start and fire). Without this, a deleted library would
-				// trigger a ghost scan causing FK violations.
 				w.mu.Lock()
-				_, stillWatched := w.watching[libID]
+				current, stillWatched := w.watching[libID]
 				w.mu.Unlock()
 				if !stillWatched {
 					slog.Debug("debounce fired for unwatched library, skipping", "library_id", libID)
+					return
+				}
+				if current.generation != gen {
+					slog.Debug("debounce fired for replaced library entry, skipping",
+						"library_id", libID, "scheduled_gen", gen, "current_gen", current.generation)
 					return
 				}
 				slog.Info("file changes settled, triggering rescan", "library", lib.Name)

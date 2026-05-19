@@ -3,9 +3,9 @@
 # Safely removes all Aurora components from a Linux system.
 #
 # Removes:
-#   - aurora.service + aurora-update.{service,timer} systemd units
+#   - aurora.service + aurora-update.{service,timer,path} systemd units
 #   - /usr/local/bin/aurora + /usr/local/bin/aurora-update
-#   - /etc/sudoers.d/aurora-update
+#   - /etc/sudoers.d/aurora-update (legacy; new installs don't create it)
 #   - /opt/aurora (install dir), /etc/aurora (config)
 #   - /var/cache/aurora (image+subtitle+transcode caches)
 #   - /var/lib/aurora (source mirror + updater state)
@@ -40,10 +40,20 @@ SYSTEMD_UNIT="/etc/systemd/system/aurora.service"
 DB_NAME="aurora"
 DB_USER="aurora"
 
-# Auto-updater pipeline (installed by install.sh ~L897-907, L922).
+# Auto-updater pipeline (installed by install.sh's updater block,
+# which lives in the "if [ -f scripts/aurora-update.sh ] && !
+# $SKIP_UPDATER" section). Files: the updater binary at
+# /usr/local/bin/aurora-update, three systemd units (service +
+# timer + path) under /etc/systemd/system, and historically a
+# sudoers grant (removed in the 2026-05-19 .path-activation
+# rearchitecture but kept here for upgrade-then-uninstall paths).
 UPDATER_BIN="/usr/local/bin/aurora-update"
 UPDATER_SERVICE="/etc/systemd/system/aurora-update.service"
 UPDATER_TIMER="/etc/systemd/system/aurora-update.timer"
+UPDATER_PATH_UNIT="/etc/systemd/system/aurora-update.path"
+# Pre-2026-05-19 installs dropped a sudoers grant here. New installs
+# don't (path activation replaces it). Uninstall still cleans it up
+# for upgrade-then-uninstall paths.
 UPDATER_SUDOERS="/etc/sudoers.d/aurora-update"
 
 # State + log dirs (install.sh writes status JSON + log files here).
@@ -146,7 +156,9 @@ detect_components() {
     # Auto-updater + state/log dirs (gaps closed 2026-05-18).
     HAS_UPDATER_SERVICE=false
     HAS_UPDATER_TIMER=false
+    HAS_UPDATER_PATH=false
     TIMER_ACTIVE=false
+    PATH_UNIT_ACTIVE=false
     HAS_UPDATER_BIN=false
     HAS_UPDATER_SUDOERS=false
     HAS_STATE_DIR=false
@@ -179,6 +191,12 @@ detect_components() {
             TIMER_ACTIVE=true
         fi
     fi
+    if [ -f "$UPDATER_PATH_UNIT" ]; then
+        HAS_UPDATER_PATH=true
+        if systemctl is-active aurora-update.path &>/dev/null; then
+            PATH_UNIT_ACTIVE=true
+        fi
+    fi
     [ -f "$UPDATER_BIN" ]     && HAS_UPDATER_BIN=true     || true
     [ -f "$UPDATER_SUDOERS" ] && HAS_UPDATER_SUDOERS=true || true
     [ -d "$STATE_DIR" ]       && HAS_STATE_DIR=true       || true
@@ -196,8 +214,16 @@ detect_components() {
             # `mapfile -t` won't tolerate `set -e`-style failures from
             # psql, so we route through a variable. `|| true` keeps the
             # uninstall going if the query itself errors.
+            # Schema note: libraries.paths is TEXT[] NOT NULL (multi-
+            # path libraries are supported per migration 001). We unnest
+            # the array, dedupe, and strip empty/null elements.
+            # The prior version queried a non-existent `path` column,
+            # the error was swallowed by 2>/dev/null, and ACL reversal
+            # was silently a no-op — stranding aurora-uid ACL entries
+            # on every media tree after userdel. Audit caught
+            # 2026-05-19.
             _media_out=$(sudo -u postgres psql -d "$DB_NAME" -tAc \
-                "SELECT DISTINCT path FROM libraries WHERE path IS NOT NULL AND path <> '';" \
+                "SELECT DISTINCT p FROM libraries, unnest(paths) AS u(p) WHERE u.p IS NOT NULL AND u.p <> '';" \
                 2>/dev/null || true)
             if [ -n "$_media_out" ]; then
                 while IFS= read -r _path; do
@@ -260,12 +286,14 @@ if $HAS_SERVICE; then
     fi
     FOUND_SOMETHING=true
 fi
-if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_BIN || $HAS_UPDATER_SUDOERS; then
-    if $TIMER_ACTIVE; then
-        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[TIMER ACTIVE]"
-    else
-        printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "[installed]"
-    fi
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_PATH || $HAS_UPDATER_BIN || $HAS_UPDATER_SUDOERS; then
+    case "${TIMER_ACTIVE}-${PATH_UNIT_ACTIVE}" in
+        true-true)  status="[TIMER + PATH ACTIVE]" ;;
+        true-false) status="[TIMER ACTIVE]" ;;
+        false-true) status="[PATH ACTIVE]" ;;
+        *)          status="[installed]" ;;
+    esac
+    printf '    %-42s %s\n' "Auto-updater (aurora-update.*)" "$status"
     FOUND_SOMETHING=true
 fi
 if $HAS_BINARY; then
@@ -350,12 +378,18 @@ echo ""
 info "Step 1/9: Stopping auto-updater (timer + service)..."
 echo ""
 
-if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE; then
+if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE || $HAS_UPDATER_PATH; then
+    # Stop the .path watcher FIRST so any in-flight trigger file
+    # write can't kick off another service start mid-teardown.
+    if $PATH_UNIT_ACTIVE; then
+        info "Stopping aurora-update.path..."
+        systemctl stop aurora-update.path 2>/dev/null || true
+    fi
     if $TIMER_ACTIVE; then
         info "Stopping aurora-update.timer..."
         systemctl stop aurora-update.timer 2>/dev/null || true
     fi
-    # In case the timer just fired and the .service is running.
+    # In case the timer or path unit just fired and the .service is running.
     if systemctl is-active aurora-update.service &>/dev/null; then
         info "Waiting for in-flight aurora-update.service to finish..."
         for _ in $(seq 1 30); do
@@ -372,10 +406,12 @@ if $HAS_UPDATER_TIMER || $HAS_UPDATER_SERVICE; then
     fi
 
     info "Disabling + removing aurora-update units..."
+    systemctl disable aurora-update.path     2>/dev/null || true
     systemctl disable aurora-update.timer    2>/dev/null || true
     systemctl disable aurora-update.service  2>/dev/null || true
-    rm -f "$UPDATER_TIMER" "$UPDATER_SERVICE"
+    rm -f "$UPDATER_PATH_UNIT" "$UPDATER_TIMER" "$UPDATER_SERVICE"
     systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed aurora-update.path     2>/dev/null || true
     systemctl reset-failed aurora-update.timer    2>/dev/null || true
     systemctl reset-failed aurora-update.service  2>/dev/null || true
     ok "Auto-updater units removed"
@@ -791,11 +827,13 @@ echo "   Aurora Media Server - Uninstallation Complete"
 echo "  ============================================================"
 echo ""
 echo "  The following were NOT removed (shared system packages):"
-echo "    - PostgreSQL server (+ postgresql-contrib, pgvector)"
+echo "    - PostgreSQL server"
+echo "      (+ postgresql-contrib, postgresql-client, pgvector ext)"
 echo "    - FFmpeg / FFprobe"
 echo "    - Go toolchain (/usr/local/go + /etc/profile.d/go.sh)"
-echo "    - Nginx, Certbot"
-echo "    - build-essential, git, python3, acl"
+echo "    - nginx (web server) and certbot (cert manager) —"
+echo "      install.sh installs these only when AURORA_DOMAIN was set"
+echo "    - build-essential, git, python3, acl (build/dev deps)"
 echo "    - Your media files"
 echo ""
 echo "  Removing chmod-fallback world-permissions on media / home dirs"

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -401,4 +402,65 @@ func (ip *ImageProxy) PurgeCache() error {
 		os.Remove(filepath.Join(ip.cacheDir, e.Name()))
 	}
 	return nil
+}
+
+// MaxCacheSizeBytes is the soft cap for the image-cache directory.
+// EvictIfOverCap removes oldest-accessed files until total size is
+// under this cap. 5 GiB is generous against any realistic Aurora
+// catalog — typical 1080p posters/backdrops total <500 MB even for
+// 10 000-item libraries — but small enough to keep operator disk
+// budgets predictable.
+//
+// 2026-05-19 audit (BE-M7) — without an eviction policy the cache
+// grew unboundedly. A malicious or buggy TMDB feed (or a stress test
+// that bursts thousands of unique URLs) could exhaust the disk.
+const MaxCacheSizeBytes int64 = 5 << 30
+
+// EvictIfOverCap reduces the image cache to ≤ MaxCacheSizeBytes by
+// deleting oldest-accessed files first. Cheap when already under cap
+// (one Walk + a sort, no deletes). Best called from a background
+// ticker (e.g. once an hour from cmd/aurora/main.go) — not on the
+// hot path of an image request.
+//
+// Returns (bytesFreed, filesRemoved, error).
+func (ip *ImageProxy) EvictIfOverCap() (int64, int, error) {
+	type entry struct {
+		path  string
+		size  int64
+		atime int64 // unix nano
+	}
+	var entries []entry
+	var total int64
+	err := filepath.Walk(ip.cacheDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		// Access time isn't always tracked (noatime mounts); fall
+		// back to mtime in that case. Both are stable orderings for
+		// "old vs new" within the cache.
+		atime := info.ModTime().UnixNano()
+		entries = append(entries, entry{path: p, size: info.Size(), atime: atime})
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	if total <= MaxCacheSizeBytes {
+		return 0, 0, nil
+	}
+	// Sort oldest-first.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].atime < entries[j].atime })
+	var freed int64
+	var removed int
+	for _, e := range entries {
+		if total-freed <= MaxCacheSizeBytes {
+			break
+		}
+		if err := os.Remove(e.path); err == nil {
+			freed += e.size
+			removed++
+		}
+	}
+	return freed, removed, nil
 }

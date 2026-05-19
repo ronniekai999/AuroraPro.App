@@ -326,8 +326,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.
-	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc)
-	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc)
+	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
+	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
 
 	// ── API routes (with restrictive security headers) ─────────────────
 	r.Group(func(r chi.Router) {
@@ -627,10 +627,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/oauth", adminH.UpdateOAuthSettings)
 				r.Post("/cache/images/purge", adminH.PurgeImageCache)
 				r.Post("/arr/test", adminH.TestARRConnection)
-				// Auto-updater. Manual trigger + status polling. The
-				// trigger shells out to sudo+systemctl (gated by the
-				// /etc/sudoers.d/aurora-update fragment installed by
-				// install.sh); the status read is plain-file I/O.
+				// Auto-updater. Manual trigger + status polling.
+				// TriggerUpdate writes a timestamp to the
+				// /var/lib/aurora/trigger-update file, which the
+				// aurora-update.path systemd unit watches; the
+				// modification fires aurora-update.service as root.
+				// No sudo, no NOPASSWD grant — see system_handlers.go
+				// header for the architectural rationale.
+				// The status read is plain-file I/O on update-status.json.
 				r.Post("/system/update", systemH.TriggerUpdate)
 				r.Get("/system/update/status", systemH.GetUpdateStatus)
 			})
@@ -640,11 +644,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// still admin-only via the wrapping authenticated group +
 			// explicit RequireAdmin.
 			r.With(auth.RequireAdmin).Get("/api/admin/backup", adminH.Backup)
-			// 2026-05-16 — admin restore endpoint. Same rationale (long-
-			// running). Streams the uploaded gzip directly to psql via
-			// MultipartReader (no in-memory buffering even for multi-GB
-			// uploads). Destructive — the handler does its own DROP
-			// SCHEMA / CREATE SCHEMA wipe before piping the dump.
+			// 2026-05-18 — admin restore endpoint. Same rationale (long-
+			// running). Streams the uploaded pg_dump custom-format
+			// archive to a temp file via MultipartReader (bounded
+			// memory), then runs pg_restore --single-transaction
+			// against it. Destructive — the handler runs a per-object
+			// wipe that preserves installed extensions before invoking
+			// pg_restore. See admin_backup.go header for the full
+			// pipeline rationale.
 			r.With(auth.RequireAdmin).Post("/api/admin/restore", adminH.Restore)
 
 			// Requests (media request + ARR integration)
@@ -735,7 +742,16 @@ func frontendHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// 2026-05-19 audit (FE-H6) — tightened from
+		// "strict-origin-when-cross-origin" to "no-referrer" on the
+		// frontend SPA. Aurora embeds JWT tokens as ?token= in some
+		// native-element URLs (backup download anchors, HLS playlist
+		// query strings for Safari) so that clicks from those pages
+		// don't leak the token via the Referer header. The
+		// stricter policy here doesn't affect Aurora's own request
+		// patterns (API calls use Authorization headers, not Referer)
+		// and is materially safer for token hygiene.
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		// Prevent browsers from using stale cached HTML/JS/CSS.  Without an

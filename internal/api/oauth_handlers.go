@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -227,10 +228,18 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	// but their sign-in succeeds. This also prevents reflected-URL
 	// attacks where an attacker crafts a malicious ?join= value and
 	// gets it surfaced verbatim in the success-page redirect.
+	//
+	// 2026-05-19 audit (API-H7) — the cookie value now includes the
+	// state token (the same one used for CSRF defense), separated by
+	// a `.`. On callback we verify the state component matches the
+	// state we just validated; a stale cookie from a previous OAuth
+	// flow won't decode to the current state, so the redirect won't
+	// fire. Closes the "stale join cookie substitutes into an
+	// unrelated flow" scenario the auditor flagged.
 	if joinCode := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("join"))); isValidPartyCode(joinCode) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     oauthJoinCookieName,
-			Value:    joinCode,
+			Value:    state + "." + joinCode,
 			Path:     "/api/auth/oauth/",
 			MaxAge:   oauthStateCookieMaxAge, // same lifetime as state — they must complete together
 			HttpOnly: true,
@@ -533,9 +542,27 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Cookie was set in Start when the caller passed ?join=CODE; reading
 	// here means the deep-link survives the OAuth round-trip and the user
 	// lands back on /?join=CODE which initAuth's existing handler picks up.
+	//
+	// 2026-05-19 audit (API-H7) — cookie format is now `state.joinCode`.
+	// Verify the state component matches the state we just validated for
+	// CSRF before honoring the join code. Reject (treat as no-join) when
+	// the prefix doesn't match — that means the cookie is from a
+	// different OAuth flow and shouldn't influence this one.
 	joinCode := ""
-	if c, err := r.Cookie(oauthJoinCookieName); err == nil && isValidPartyCode(c.Value) {
-		joinCode = c.Value
+	if c, err := r.Cookie(oauthJoinCookieName); err == nil {
+		raw := c.Value
+		// New format: "<state>.<code>". Verify the state component
+		// matches the one we just validated.
+		if dot := strings.IndexByte(raw, '.'); dot > 0 {
+			cookieState := raw[:dot]
+			cookieCode := strings.ToUpper(raw[dot+1:])
+			// Constant-time compare on the state component so cookie
+			// behavior doesn't differ between "wrong state" and
+			// "missing state" — same response timing either way.
+			if subtle.ConstantTimeCompare([]byte(cookieState), []byte(gotState)) == 1 && isValidPartyCode(cookieCode) {
+				joinCode = cookieCode
+			}
+		}
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     oauthJoinCookieName,
@@ -724,10 +751,18 @@ func (h *OAuthHandler) generateUniqueUsername(ctx context.Context, profile *OAut
 		base = "user"
 	}
 
-	// Try the bare base first, then base2, base3, ... until we find a
-	// free slot. Bounded to 100 attempts to prevent runaway loops in the
-	// degenerate "username table is exhaustively occupied" case.
-	for i := 0; i < 100; i++ {
+	// Try the bare base first, then base2, base3, ... bare attempts
+	// are bounded to 10 (most common-name collisions resolve here).
+	// After that we pivot to a random 6-char suffix to short-circuit
+	// the "popular email local-part" DoS surface — without this an
+	// attacker could pre-register foo, foo2, ... foo100 to force
+	// future OAuth signups for "foo@anywhere.com" through 100
+	// sequential DB roundtrips. Random suffix means O(1) attempts
+	// per signup regardless of how many sequential names are taken.
+	//
+	// 2026-05-19 audit (API-M2).
+	const linearAttempts = 10
+	for i := 0; i < linearAttempts; i++ {
 		candidate := base
 		if i > 0 {
 			candidate = fmt.Sprintf("%s%d", base, i+1)
@@ -740,7 +775,26 @@ func (h *OAuthHandler) generateUniqueUsername(ctx context.Context, profile *OAut
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("could not find unique username after 100 attempts")
+	// Random-suffix attempts. 36^6 = ~2 billion candidates; collision
+	// probability vs ~10K existing usernames is ~5e-6 per attempt,
+	// so 10 attempts effectively guarantees a hit.
+	for i := 0; i < 10; i++ {
+		var buf [4]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return "", fmt.Errorf("generate random suffix: %w", err)
+		}
+		// 32-bit value → 6-char base36 string (zero-padded).
+		n := uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3])
+		candidate := fmt.Sprintf("%s_%06s", base, strconv.FormatUint(uint64(n%2176782336), 36))
+		existing, err := h.queries.GetUserByUsername(ctx, candidate)
+		if err != nil {
+			return "", err
+		}
+		if existing == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find unique username after %d linear + 10 random attempts", linearAttempts)
 }
 
 // sanitizeUsername strips characters that aren't safe-for-username:

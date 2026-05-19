@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode"
@@ -164,5 +166,79 @@ func paginatedResponse(data interface{}, total int64, params models.PaginationPa
 		PerPage:    params.PerPage,
 		TotalItems: total,
 		TotalPages: totalPages,
+	}
+}
+
+// validateLLMURL rejects URL strings that point at SSRF-risky targets.
+// Used by the LLM-settings update endpoint to prevent an admin (or a
+// leaked admin token) from pointing Aurora's LLM client at cloud
+// metadata services or other internal-only endpoints to exfiltrate
+// credentials.
+//
+// Policy:
+//   - Scheme must be http or https.
+//   - Host can be a hostname OR an IP literal.
+//   - If the host is a literal IPv4 or IPv6 address, reject link-local
+//     ranges (169.254.0.0/16 and fe80::/10), which include AWS / GCP /
+//     Azure metadata services.
+//   - Loopback (127.0.0.0/8, ::1) is ALLOWED — the default Ollama
+//     install runs at http://localhost:11434.
+//   - Private RFC1918 ranges are ALLOWED — Aurora may run in a docker
+//     network with Ollama on a sibling container at 172.17.x.x.
+//
+// 2026-05-19 audit (BE-H6) — the prior code accepted any string and
+// shoved it straight into http.Get, leaving Aurora's process as an
+// SSRF launchpad against the host's network from an admin role.
+func validateLLMURL(s string) error {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return errors.New("not a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("scheme must be http or https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("missing host")
+	}
+	// If host parses as an IP literal, apply the link-local block.
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return errors.New("link-local addresses are not allowed (cloud metadata SSRF risk)")
+		}
+		// Catch the specific AWS/GCP metadata service even when DNS
+		// resolution would otherwise mask it. 169.254.169.254 is
+		// already covered by IsLinkLocalUnicast, but be explicit.
+		if ip.Equal(net.IPv4(169, 254, 169, 254)) {
+			return errors.New("cloud metadata service is not allowed")
+		}
+	}
+	return nil
+}
+
+// websocketOriginChecker builds the CheckOrigin function used by every
+// WebSocket upgrader in this package. Mirrors the policy implemented by
+// internal/websocket/hub.go: non-browser clients (no Origin header) are
+// allowed; browser clients must match the configured allowlist; a nil
+// checker denies cross-origin entirely.
+//
+// 2026-05-19 audit (API-H1) — V3 dual-socket handlers (sync + room)
+// previously used `return true`, exposing cross-site WebSocket
+// hijacking for any logged-in user. Centralizing the check here keeps
+// the policy consistent and impossible to forget when adding new
+// upgraders.
+func websocketOriginChecker(originAllowed func(string) bool) func(*http.Request) bool {
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// Non-browser clients (curl, Go test, native apps) don't
+			// send Origin. Auth is still required via JWT in the
+			// query param, so this isn't an open door.
+			return true
+		}
+		if originAllowed == nil {
+			return false
+		}
+		return originAllowed(origin)
 	}
 }

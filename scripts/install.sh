@@ -796,6 +796,14 @@ mkdir -p "$INSTALL_DIR/migrations"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$CACHE_DIR/images" "$CACHE_DIR/subtitles" "$TRANSCODE_DIR"
 install -d -m 0750 -o "$AURORA_USER" -g "$AURORA_GROUP" "$LOG_DIR"
+# /var/lib/aurora must exist BEFORE aurora.service starts because
+# the unit's ReadWritePaths= references it (without the `-` prefix,
+# systemd refuses to start the unit if the path is missing). The
+# updater install block further down also writes here, but creating
+# the dir unconditionally up front means a SKIP_UPDATER install
+# (no git remote, or aurora-update.sh missing) still leaves
+# aurora.service startable.
+install -d -m 0755 -o root -g root /var/lib/aurora
 
 # Migrations + static files (atomic swap for the bundle).
 cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
@@ -897,29 +905,55 @@ if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
         install -m 755 "$PROJECT_DIR/scripts/aurora-update.sh" /usr/local/bin/aurora-update
         cp "$PROJECT_DIR/scripts/aurora-update.service" /etc/systemd/system/aurora-update.service
         cp "$PROJECT_DIR/scripts/aurora-update.timer"   /etc/systemd/system/aurora-update.timer
+        # 2026-05-19 — aurora-update.path replaces the previous
+        # sudoers grant. The aurora user can no longer sudo (its
+        # systemd unit has NoNewPrivileges=yes), so the in-app
+        # "Update Now" button now writes a trigger file and lets
+        # systemd's PathChanged= start the service as root.
+        cp "$PROJECT_DIR/scripts/aurora-update.path"    /etc/systemd/system/aurora-update.path
 
-        # Validate the sudoers fragment BEFORE installing it. A broken
-        # /etc/sudoers.d/ file locks every sudo invocation on the box
-        # (including the one you'd need to fix it), so we use
-        # `visudo -cf` to syntax-check the snippet against the live
-        # sudoers grammar first.
-        if visudo -cf "$PROJECT_DIR/scripts/aurora-update.sudoers" >/dev/null 2>&1; then
-            install -m 440 "$PROJECT_DIR/scripts/aurora-update.sudoers" /etc/sudoers.d/aurora-update
-            ok "Sudoers grant installed (aurora user can trigger updates)"
-        else
-            warn "═══════════════════════════════════════════════════════"
-            warn "Sudoers fragment FAILED visudo -cf check — NOT installed."
-            warn "The 5-min auto-update timer will still run as root via"
-            warn "systemd, but the in-app 'Update Now' button will be"
-            warn "INERT (the Go process can't call systemctl without it)."
-            warn "Fix scripts/aurora-update.sudoers and re-run install.sh."
-            warn "═══════════════════════════════════════════════════════"
+        # Migration cleanup — if a previous install dropped the old
+        # sudoers grant in /etc/sudoers.d/, remove it. With the .path
+        # unit it's dead weight; leaving it broadens the sudoers
+        # surface for nothing.
+        #
+        # Safety: only remove if the file looks like OUR known fragment
+        # (single `aurora ALL=(root) NOPASSWD: ...` lines). If an admin
+        # appended unrelated sudoers entries to the same file, leave it
+        # alone and warn — destroying their custom rules during an
+        # upgrade is worse than the dead-weight cost.
+        if [ -f /etc/sudoers.d/aurora-update ]; then
+            # Strip CR (defense against a CRLF-saved file), then drop
+            # blank lines + comments, then require every remaining
+            # line to be one of our known-installed forms. If any
+            # line falls outside the whitelist, an admin appended
+            # custom rules — leave the file alone and warn.
+            if tr -d '\r' < /etc/sudoers.d/aurora-update \
+                | awk '!/^[[:space:]]*(#|$)/' \
+                | grep -qvE '^aurora ALL=\(root\) NOPASSWD: (/bin|/usr/bin)/systemctl (start|is-active) aurora-update\.service$' \
+                2>/dev/null; then
+                warn "Legacy /etc/sudoers.d/aurora-update has custom rules — leaving in place."
+                warn "  Aurora no longer uses this file; remove the aurora-update lines manually if you want to clean up."
+            else
+                rm -f /etc/sudoers.d/aurora-update
+                ok "Removed legacy sudoers grant (replaced by aurora-update.path)"
+            fi
         fi
 
-        # Status JSON lives here. World-readable so the aurora-user
-        # Go process can read it; root-writable so only the updater
-        # (which runs as root via systemd) can mutate it.
-        install -d -m 0755 -o root -g root /var/lib/aurora
+        # Trigger file used by aurora-update.path. Owned root:aurora
+        # 0664 — aurora's group write lets the in-app "Update Now"
+        # handler touch it; only root can replace it entirely.
+        # systemd's PathChanged= picks up each modification as a
+        # fresh trigger event.
+        #
+        # The /var/lib/aurora directory itself was created up at the
+        # "Layout directories" section so aurora.service can start
+        # even when the updater is skipped.
+        if [ ! -f /var/lib/aurora/trigger-update ]; then
+            : > /var/lib/aurora/trigger-update
+        fi
+        chown root:"$AURORA_GROUP" /var/lib/aurora/trigger-update
+        chmod 0664 /var/lib/aurora/trigger-update
         ok "Auto-updater installed: root-owned source at $UPDATER_SOURCE_DIR"
     fi
 elif [ ! -f "$PROJECT_DIR/scripts/aurora-update.sh" ]; then
@@ -1208,6 +1242,15 @@ if [ -f /etc/systemd/system/aurora-update.timer ]; then
     systemctl enable aurora-update.timer &>/dev/null
     systemctl start aurora-update.timer &>/dev/null || warn "Failed to start aurora-update.timer — check 'systemctl status aurora-update.timer'"
     ok "Auto-update timer armed (next check in ~2 min, every 5 min after)"
+fi
+
+# Enable + start the .path watcher that backs the in-app "Update
+# Now" button. Without this the button writes to the trigger file
+# but no service ever fires.
+if [ -f /etc/systemd/system/aurora-update.path ]; then
+    systemctl enable aurora-update.path &>/dev/null
+    systemctl start aurora-update.path  &>/dev/null || warn "Failed to start aurora-update.path — 'Update Now' button will be inert"
+    ok "Update-trigger watcher armed (aurora-update.path)"
 fi
 
 # Port-conflict pre-check (best effort).

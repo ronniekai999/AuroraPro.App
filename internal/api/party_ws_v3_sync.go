@@ -35,12 +35,15 @@ type PartyWSHandlerV3Sync struct {
 }
 
 // NewPartyWSHandlerV3Sync constructs the handler.
-func NewPartyWSHandlerV3Sync(manager *watchparty.Manager, authSvc *auth.Service) *PartyWSHandlerV3Sync {
+// originAllowed gates browser-originated upgrades — see
+// websocketOriginChecker in helpers.go for the policy. Pass
+// cfg.OriginAllowed.
+func NewPartyWSHandlerV3Sync(manager *watchparty.Manager, authSvc *auth.Service, originAllowed func(string) bool) *PartyWSHandlerV3Sync {
 	return &PartyWSHandlerV3Sync{
 		manager: manager,
 		authSvc: authSvc,
 		upgrader: websocket.Upgrader{
-			CheckOrigin:     func(r *http.Request) bool { return true },
+			CheckOrigin:     websocketOriginChecker(originAllowed),
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
