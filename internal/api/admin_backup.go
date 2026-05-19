@@ -415,6 +415,23 @@ BEGIN
     LOOP
         EXECUTE format('DROP TYPE IF EXISTS public.%I CASCADE', r.typname);
     END LOOP;
+    -- Functions (and procedures). Aurora has at least update_updated_at()
+    -- used as a trigger; the dump emits CREATE FUNCTION for each. If we
+    -- don't drop them here, the restore fails with "function X already
+    -- exists with same argument types." Extension-owned functions (most
+    -- of pg_trgm + vector live here) are filtered by deptype='e'.
+    --
+    -- ::regprocedure casts to the full signature including arg types,
+    -- which DROP FUNCTION needs to disambiguate overloads.
+    FOR r IN
+        SELECT p.oid::regprocedure AS sig
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = 'public'
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    LOOP
+        EXECUTE format('DROP FUNCTION IF EXISTS %s CASCADE', r.sig);
+    END LOOP;
 END
 $do$;
 `
