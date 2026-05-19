@@ -214,8 +214,16 @@ detect_components() {
             # `mapfile -t` won't tolerate `set -e`-style failures from
             # psql, so we route through a variable. `|| true` keeps the
             # uninstall going if the query itself errors.
+            # Schema note: libraries.paths is TEXT[] NOT NULL (multi-
+            # path libraries are supported per migration 001). We unnest
+            # the array, dedupe, and strip empty/null elements.
+            # The prior version queried a non-existent `path` column,
+            # the error was swallowed by 2>/dev/null, and ACL reversal
+            # was silently a no-op — stranding aurora-uid ACL entries
+            # on every media tree after userdel. Audit caught
+            # 2026-05-19.
             _media_out=$(sudo -u postgres psql -d "$DB_NAME" -tAc \
-                "SELECT DISTINCT path FROM libraries WHERE path IS NOT NULL AND path <> '';" \
+                "SELECT DISTINCT p FROM libraries, unnest(paths) AS u(p) WHERE u.p IS NOT NULL AND u.p <> '';" \
                 2>/dev/null || true)
             if [ -n "$_media_out" ]; then
                 while IFS= read -r _path; do

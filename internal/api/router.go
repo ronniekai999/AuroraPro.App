@@ -644,11 +644,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// still admin-only via the wrapping authenticated group +
 			// explicit RequireAdmin.
 			r.With(auth.RequireAdmin).Get("/api/admin/backup", adminH.Backup)
-			// 2026-05-16 — admin restore endpoint. Same rationale (long-
-			// running). Streams the uploaded gzip directly to psql via
-			// MultipartReader (no in-memory buffering even for multi-GB
-			// uploads). Destructive — the handler does its own DROP
-			// SCHEMA / CREATE SCHEMA wipe before piping the dump.
+			// 2026-05-18 — admin restore endpoint. Same rationale (long-
+			// running). Streams the uploaded pg_dump custom-format
+			// archive to a temp file via MultipartReader (bounded
+			// memory), then runs pg_restore --single-transaction
+			// against it. Destructive — the handler runs a per-object
+			// wipe that preserves installed extensions before invoking
+			// pg_restore. See admin_backup.go header for the full
+			// pipeline rationale.
 			r.With(auth.RequireAdmin).Post("/api/admin/restore", adminH.Restore)
 
 			// Requests (media request + ARR integration)
