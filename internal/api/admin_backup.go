@@ -2,40 +2,73 @@ package api
 
 // Aurora database backup AND restore endpoints.
 //
-// Streams `pg_dump --format=plain --no-owner --no-acl <DATABASE_URL>` through
-// gzip to the HTTP response. Admin-only (the route is mounted under the
+// Streams `pg_dump --format=custom --compress=6 <DATABASE_URL>` directly
+// to the HTTP response. Admin-only (the route is mounted under the
 // /api/admin chi.Route group which already applies auth.RequireAdmin).
 //
-// Output format: gzipped SQL dump, restorable on any Postgres of equal or
-// later major version via:
+// Output format: PostgreSQL custom-format archive (binary, self-
+// compressed). Restorable on any Postgres of equal or later major
+// version via:
 //
-//     gunzip < aurora-backup-XXX.sql.gz | psql $DATABASE_URL
+//     pg_restore --single-transaction --no-owner --no-privileges \
+//                --no-comments --dbname=$DATABASE_URL backup.dump
+//
+// 2026-05-18 rearchitecture — we previously used `--format=plain | gzip`
+// on the dump side and `gunzip | bufio.Scanner-filter | psql` on the
+// restore side. The text pipeline had a recurring class of bugs:
+//
+//   - Privileged statements (CREATE/COMMENT/ALTER EXTENSION) had to be
+//     filtered line-by-line because the unprivileged Aurora role can't
+//     execute them. Each new statement type was a new whack-a-mole fix.
+//   - The line scanner could mangle long-line data: a pgvector row
+//     spanning >scanner-buffer would split across reads, and the
+//     reassembly produced invalid syntax (e.g. "0..074918" — a double
+//     dot from a row split mid-number).
+//
+// Custom format eliminates BOTH classes:
+//   - pg_restore has --no-owner / --no-privileges / --no-comments
+//     flags that handle every privileged statement, no string parsing.
+//   - Binary format passes through to pg_restore as opaque bytes; we
+//     never inspect the payload. No scanner = no mangling.
+//
+// Operator note for legacy `.sql.gz` backups: restore them via the
+// shell instead — the UI accepts only the new `.dump` format.
+//
+//     gunzip < legacy-backup.sql.gz | psql $DATABASE_URL
 //
 // Notes:
 //   - --no-owner / --no-acl strip role-binding statements so the dump
-//     applies cleanly to a fresh database owned by any user. The new
-//     server's Aurora bootstrap user becomes the implicit owner.
-//   - We stream rather than buffer: the gzip writer is wired straight to
-//     the http.ResponseWriter, so even a 10GB dump uses bounded memory.
+//     applies cleanly to a fresh database owned by any user.
+//   - We stream rather than buffer for backup: pg_dump's stdout is wired
+//     straight to the http.ResponseWriter, so even a 10GB dump uses
+//     bounded memory.
+//   - Restore needs a seekable file (pg_restore reads the table of
+//     contents non-sequentially), so the upload spills to a temp file
+//     bounded by maxRestoreSizeBytes. Cleanup runs on every exit path.
 //   - stderr is buffered (bounded) so on non-zero exit we can include
-//     pg_dump's diagnostic message in the error log. Operator visibility.
+//     pg_dump / pg_restore's diagnostic message in the error log.
 //   - Excluded tables: refresh_tokens (session state — doesn't migrate),
 //     scan_progress (transient scanner state — regenerates on next scan).
 
 import (
-	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// pgDumpCustomMagic is the leading byte signature of a PostgreSQL
+// custom-format dump (`pg_dump --format=custom` / `--format=c`).
+// Used by Restore to validate the upload before doing anything
+// destructive. See PostgreSQL source: src/bin/pg_dump/pg_backup_archiver.h.
+var pgDumpCustomMagic = []byte("PGDMP")
 
 // Backup handles GET /api/admin/backup — streams a gzipped pg_dump of the
 // Aurora database. Long-running (10s to several minutes depending on
@@ -67,34 +100,38 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 	}
 	defer h.backupRestoreMu.Unlock()
 
-	// Filename: aurora-backup-2026-05-16T03-42-15Z.sql.gz — ISO-8601
+	// Filename: aurora-backup-2026-05-18T03-42-15Z.dump — ISO-8601
 	// with colons replaced (Windows-safe), sorts chronologically.
+	// `.dump` is the conventional extension for pg_dump custom format.
 	stamp := time.Now().UTC().Format("2006-01-02T15-04-05Z")
-	filename := fmt.Sprintf("aurora-backup-%s.sql.gz", stamp)
+	filename := fmt.Sprintf("aurora-backup-%s.dump", stamp)
 
 	// pg_dump invocation:
-	//   --format=plain      → portable SQL (vs custom binary which requires pg_restore)
-	//   --no-owner          → don't emit ALTER OWNER (lets restore-as-different-user work)
-	//   --no-acl            → don't emit GRANT/REVOKE
-	//   --quote-all-identifiers → safer round-trip on case-sensitive names
-	//   --exclude-table     → skip ephemeral tables (saves space + avoids
-	//                         migrating user sessions across servers)
+	//   --format=custom     → binary archive; restored with pg_restore.
+	//                         Carries its own compression (zlib) and a
+	//                         table-of-contents so pg_restore can do
+	//                         per-table parallel restore + selective
+	//                         object skipping. CRUCIALLY: pg_restore can
+	//                         skip ownership/privilege/comment statements
+	//                         via flags, so we don't need to filter text.
+	//   --compress=6        → zlib level 6 (default 9 is needlessly slow
+	//                         for the marginal size gain). Matches the
+	//                         old gzip.BestSpeed throughput intent.
+	//   --no-owner          → don't emit ALTER OWNER (lets restore-as-
+	//                         different-user work).
+	//   --no-acl            → don't emit GRANT/REVOKE.
+	//   --quote-all-identifiers → safer round-trip on case-sensitive names.
+	//   --exclude-table-data → skip ephemeral table data (refresh tokens,
+	//                         scan progress) but keep their DDL so the
+	//                         restored DB has the right schema.
 	//
 	// pg_dump reads the DATABASE_URL via the conninfo string argument.
 	// We pass it as the last positional arg; pg_dump auto-detects URI form.
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	// 2026-05-16 audit H2 — switched from --exclude-table to
-	// --exclude-table-data. The former strips BOTH the DDL and the data,
-	// leaving the restored DB without these tables at all. Since
-	// schema_migrations IS dumped, RunMigrations would skip re-creating
-	// them, and every future write to refresh_tokens / scan_progress
-	// would fail with "relation does not exist". --exclude-table-data
-	// keeps the CREATE TABLE statements but drops the row data — these
-	// are session-state tables so the data shouldn't migrate anyway,
-	// but the tables themselves must exist for the app to function.
 	cmd := exec.CommandContext(ctx, "pg_dump",
-		"--format=plain",
+		"--format=custom",
+		"--compress=6",
 		"--no-owner",
 		"--no-acl",
 		"--quote-all-identifiers",
@@ -120,30 +157,27 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 		// pg_dump binary not on $PATH is the typical cause here.
 		// 2026-05-16 audit H9 fix — failure paths must run BEFORE the
 		// download headers are set; otherwise the browser saves the
-		// JSON error body to a .sql.gz file (Content-Type lies).
+		// JSON error body to a .dump file (Content-Type lies).
 		writeError(w, http.StatusInternalServerError, "backup: failed to start pg_dump (is it installed on $PATH?): "+err.Error())
 		return
 	}
 
 	// pg_dump is now running — safe to commit to the download response.
 	// Audit H9: this must happen AFTER cmd.Start() succeeds, not before.
-	w.Header().Set("Content-Type", "application/gzip")
+	// application/octet-stream is the standard MIME for pg_dump custom
+	// format (no registered IANA type for it).
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	w.Header().Set("Cache-Control", "no-store, must-revalidate")
 
-	// Stream pg_dump → gzip → http response. The gzip writer's internal
-	// buffer is small (32KB default) so memory stays bounded. We use
-	// gzip.BestSpeed because pg_dump output is highly compressible
-	// (lots of repeated INSERT INTO ... structure) and the bottleneck
-	// is the network, not CPU.
-	gzWriter, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
-	// streamWithFlush flushes BOTH the gzip writer's internal buffer
-	// AND the http.Flusher so the client sees real-time progress
-	// rather than waiting for gzip's ~64KB window to fill. Audit M7 fix.
-	copyErr := streamWithFlush(gzWriter, stdout, w)
-	if cerr := gzWriter.Close(); cerr != nil && copyErr == nil {
-		copyErr = cerr
-	}
+	// Stream pg_dump → http response. Custom format compresses itself,
+	// so we don't wrap in a gzip layer — eliminates a whole class of
+	// buffer-alignment bugs (the previous gzip.Writer + bufio.Scanner
+	// pipeline could mangle pgvector rows that crossed buffer boundaries).
+	// streamWithFlush pumps bytes through with periodic http.Flusher
+	// calls so the client sees real-time progress instead of waiting
+	// for OS-level write buffering to drain.
+	copyErr := streamWithFlush(w, stdout)
 
 	// Always wait for pg_dump to finish even if the copy errored — leaving
 	// it as a zombie would leak a process slot.
@@ -187,43 +221,27 @@ func (l *limitedStringWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// streamWithFlush copies src→dst in chunks, flushing both the gzip
-// writer's internal buffer AND the underlying http.Flusher after each
-// chunk so the client sees bytes immediately rather than waiting for
-// the entire dump to complete. Important for the UX of a download that
-// takes 30+ seconds.
+// streamWithFlush copies src→dst in 32KB chunks, calling http.Flusher
+// between writes so the client sees bytes as pg_dump emits them rather
+// than waiting for OS-level buffering to drain. Important for the UX of
+// a download that takes 30+ seconds.
 //
-// Audit M7 fix (2026-05-16): without gzWriter.Flush() between writes,
-// gzip's ~64KB sliding-window buffer doesn't drain to the http response
-// until enough input accumulates, so the user saw lumpy bursts instead
-// of streaming progress. The dst here is the gzip.Writer wrapping w;
-// we type-assert to gzipFlusher to call Flush(), and to http.Flusher
-// for the network push.
+// When dst is *not* an http.ResponseWriter (e.g. a test buffer), the
+// type assertion fails silently and the copy proceeds without flushing
+// — the caller just sees one big chunk at EOF. That's correct for
+// non-streaming consumers.
 //
-// Both flushers are opportunistic — when either is absent, the copy
-// still proceeds correctly; the user just sees larger chunks.
-type gzipFlusher interface {
-	Flush() error
-}
-
-func streamWithFlush(dst io.Writer, src io.Reader, w http.ResponseWriter) error {
-	gzFlusher, _ := dst.(gzipFlusher)
-	flusher, _ := w.(http.Flusher)
+// We no longer wrap dst in a gzip.Writer; pg_dump --format=custom emits
+// pre-compressed bytes (zlib). Adding our own gzip layer was the source
+// of the buffer-mangling bugs the 2026-05-18 rearchitecture eliminated.
+func streamWithFlush(dst io.Writer, src io.Reader) error {
+	flusher, _ := dst.(http.Flusher)
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
 			if _, werr := dst.Write(buf[:n]); werr != nil {
 				return werr
-			}
-			// Drain the gzip writer's internal buffer to the underlying
-			// http.ResponseWriter, THEN flush the ResponseWriter to the
-			// network. Order matters: flushing the network without
-			// flushing gzip first would just push whatever previous
-			// chunk's compressed output had spilled into w; the bytes
-			// we just wrote would sit in gzip's buffer.
-			if gzFlusher != nil {
-				_ = gzFlusher.Flush()
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -239,21 +257,36 @@ func streamWithFlush(dst io.Writer, src io.Reader, w http.ResponseWriter) error 
 }
 
 // ============================================================
-// Restore — multipart upload of a backup .sql.gz, piped to psql
+// Restore — multipart upload of a backup .dump, fed to pg_restore
 // ============================================================
 //
-// Companion to Backup. Admin-only. Streams the uploaded file directly
-// through gunzip → psql stdin without ever buffering the whole archive
-// in memory (multi-GB-safe on small servers).
+// Companion to Backup. Admin-only.
 //
 // Pipeline:
-//   1. Validate magic bytes (gzip = 0x1F 0x8B) before committing to the work.
-//   2. Wipe the public schema: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
-//      via a separate psql -c call (the existing pool's prepared-statement
-//      caches are now stale, but psql doesn't care).
-//   3. Stream upload → gzip.Reader → psql stdin with --single-transaction +
-//      ON_ERROR_STOP=on. Any error rolls the whole restore back; the schema
-//      stays wiped (operator can retry).
+//   1. Validate magic bytes (custom format starts with "PGDMP") before
+//      doing anything destructive.
+//   2. Stream the upload to a temp file. pg_restore needs a seekable
+//      file (custom format has a table of contents it reads first, then
+//      jumps around in). We cap the file size at maxRestoreSizeBytes.
+//   3. Wipe the public schema: per-object DROPs that preserve installed
+//      extensions (see wipeSQL below for the why).
+//   4. Run pg_restore with:
+//        --single-transaction  → BEGIN/COMMIT wrap; any failure rolls back
+//        --no-owner            → skip ALTER OWNER statements
+//        --no-privileges       → skip GRANT/REVOKE statements
+//        --no-comments         → skip COMMENT ON statements (including the
+//                                COMMENT ON EXTENSION lines that require
+//                                extension-owner privilege)
+//        --exit-on-error       → bail on first error rather than continuing
+//                                with cascading downstream failures
+//
+// Why we no longer line-filter the dump (2026-05-18 rearchitecture):
+//   The old plain-format + bufio.Scanner filter pipeline could mangle
+//   rows that crossed scanner buffer boundaries — pgvector embeddings
+//   for example, where a single row spans several KB. The corruption
+//   manifested as invalid syntax errors mid-COPY ("0..074918" — a
+//   double-dot from a row split mid-number). Custom format is binary
+//   and goes straight to pg_restore without our code touching it.
 //
 // CRITICAL: Aurora's own pgxpool connections are still pointed at this DB
 // and may have cached metadata or prepared statements. After a successful
@@ -263,11 +296,11 @@ func streamWithFlush(dst io.Writer, src io.Reader, w http.ResponseWriter) error 
 // guaranteed lost-response, (b) the user may want to verify before
 // restarting, (c) systemd / process supervision handles this externally.
 
-// maxRestoreSizeBytes caps the upload to prevent disk exhaustion on /tmp
-// if Go's multipart parser spills to disk. 50GB is comfortably above any
-// realistic Aurora catalog and small enough to fit on a typical server
-// /tmp partition. Users with larger DBs should bypass the UI and run
-// `psql` directly on the server.
+// maxRestoreSizeBytes caps the upload to prevent disk exhaustion when we
+// spill the upload to a temp file. 50GB is comfortably above any realistic
+// Aurora catalog and small enough to fit on a typical server /tmp partition.
+// Users with larger DBs should bypass the UI and run `pg_restore` directly
+// on the server.
 const maxRestoreSizeBytes = 50 << 30
 
 func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
@@ -330,24 +363,63 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	}
 	defer part.Close()
 
-	// Validate gzip magic before doing anything destructive. We
-	// peek-read the first 2 bytes; the bytes flow back into the
-	// pipeline via io.MultiReader so nothing is lost.
-	magic := make([]byte, 2)
+	// Validate magic bytes before doing anything destructive. Custom-
+	// format dumps start with "PGDMP". We peek-read; the bytes flow
+	// back into the pipeline via io.MultiReader so nothing is lost.
+	//
+	// Reject the legacy gzip magic (0x1F 0x8B) with a clear hint: those
+	// were `.sql.gz` plain dumps from the old pipeline, and they're
+	// restorable via the shell but not via this UI anymore.
+	magic := make([]byte, len(pgDumpCustomMagic))
 	mn, mErr := io.ReadFull(part, magic)
-	if mErr != nil || mn < 2 {
-		writeError(w, http.StatusBadRequest, "upload too short to be a gzip archive")
+	if mErr != nil || mn < len(pgDumpCustomMagic) {
+		writeError(w, http.StatusBadRequest, "upload too short to be a pg_dump custom archive")
 		return
 	}
-	if magic[0] != 0x1F || magic[1] != 0x8B {
-		writeError(w, http.StatusBadRequest, "upload is not a gzip archive (bad magic bytes)")
+	if mn >= 2 && magic[0] == 0x1F && magic[1] == 0x8B {
+		writeError(w, http.StatusBadRequest,
+			"upload is a gzip archive (legacy .sql.gz format) — restore via shell instead: "+
+				"`gunzip < file.sql.gz | psql $DATABASE_URL`. The UI now requires the new .dump format.")
+		return
+	}
+	if !bytes.Equal(magic, pgDumpCustomMagic) {
+		writeError(w, http.StatusBadRequest,
+			"upload is not a pg_dump custom archive (expected leading bytes 'PGDMP'). "+
+				"Run pg_dump with --format=custom to produce a compatible file.")
 		return
 	}
 
-	// Reconstruct full reader: the two magic bytes + the rest of the
-	// part body. Caps at maxRestoreSizeBytes so a malicious uploader
-	// can't stream forever.
+	// Reconstruct full reader: the magic bytes we already consumed +
+	// the rest of the part body. Caps at maxRestoreSizeBytes so a
+	// malicious uploader can't stream forever.
 	fullReader := io.LimitReader(io.MultiReader(bytes.NewReader(magic), part), maxRestoreSizeBytes)
+
+	// Spill the upload to a temp file. pg_restore needs random access
+	// (custom format has a table of contents at the front + jumps to
+	// per-table offsets), so streaming over stdin doesn't work.
+	tmpFile, err := os.CreateTemp("", "aurora-restore-*.dump")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create temp file for upload: "+err.Error())
+		return
+	}
+	tmpPath := tmpFile.Name()
+	// Cleanup on every exit path. The remove can fail if the file's
+	// already gone (defensive) — we ignore that.
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+
+	// Copy the upload to disk. io.Copy is bounded by the LimitReader
+	// above so this can't fill /tmp.
+	if _, err := io.Copy(tmpFile, fullReader); err != nil {
+		_ = tmpFile.Close()
+		writeError(w, http.StatusBadRequest, "failed to spill upload to temp file: "+err.Error())
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to close temp file: "+err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
@@ -472,122 +544,50 @@ $do$;
 		return
 	}
 
-	// Phase 2 — pipe upload → gunzip → psql.
-	// --single-transaction wraps the whole restore in BEGIN/COMMIT so
-	//   a mid-restore error rolls everything back (schema stays wiped,
-	//   operator can retry).
-	// --set ON_ERROR_STOP=on aborts on the first error instead of
-	//   continuing with subsequent statements that depend on what
-	//   failed.
-	psqlCmd := exec.CommandContext(ctx, "psql",
-		"--single-transaction",
-		"--set", "ON_ERROR_STOP=on",
-		"--quiet",
-		h.databaseURL,
-	)
-	stdin, err := psqlCmd.StdinPipe()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to open psql stdin: "+err.Error())
-		return
-	}
-	var psqlStderr strings.Builder
-	psqlCmd.Stderr = &limitedStringWriter{w: &psqlStderr, max: 16 * 1024}
-
-	if err := psqlCmd.Start(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start psql (is it installed?): "+err.Error())
-		return
-	}
-
-	gz, err := gzip.NewReader(fullReader)
-	if err != nil {
-		_ = stdin.Close()
-		_ = psqlCmd.Wait()
-		// Audit M3 — by this point we've already wiped the schema.
-		// The error message must communicate that, so the admin knows
-		// the database is empty and they need to retry with a valid
-		// file (or restore from another source).
-		writeError(w, http.StatusBadRequest, "failed to decompress upload: "+err.Error()+" — note: the database has been wiped, retry with a valid backup file")
-		return
-	}
-
-	// Drive the pipeline. We filter the dump line-by-line on the way
-	// through, dropping extension-management DDL that requires
-	// superuser / extension-owner privileges (CREATE EXTENSION,
-	// COMMENT ON EXTENSION, ALTER EXTENSION). Aurora's role isn't
-	// the extension owner — postgres is — so leaving these lines in
-	// would fail with "must be owner of extension X" and roll the
-	// whole restore back. The extensions themselves are preserved
-	// by the smarter wipe above, so the dump's view of them is
-	// purely informational and safe to discard.
+	// Phase 2 — pg_restore the upload.
 	//
-	// 1 MB initial line buffer, 16 MB max. pg_dump --inserts produces
-	// per-row INSERT statements which are typically <1 KB; data lines
-	// in COPY blocks are limited by the table's row width. 16 MB is
-	// the safety ceiling for some pathological row (e.g. a single
-	// blob column).
-	copyErr := func() error {
-		scanner := bufio.NewScanner(gz)
-		scanner.Buffer(make([]byte, 1<<20), 16<<20)
-		// Audit M1 (deep-debug 2026-05-18) — the extension-DDL
-		// filter must NOT fire inside `COPY ... FROM stdin;` blocks.
-		// COPY data is one row per line; if a row's first column
-		// contained the literal text "CREATE EXTENSION foo" (e.g.,
-		// a movie title with that phrase, an operator error message,
-		// a chat post), the filter would silently drop the row and
-		// the restore would succeed minus that one row — silent
-		// data loss in a recovery operation, which is the worst
-		// possible failure mode. Track the COPY block state and
-		// pass-through unchanged inside it.
-		var inCopyBlock bool
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			// COPY block start: line begins with `COPY ` and ends
-			// with `FROM stdin;`. pg_dump emits both with no
-			// leading whitespace.
-			if !inCopyBlock && bytes.HasPrefix(line, []byte("COPY ")) && bytes.HasSuffix(line, []byte(" FROM stdin;")) {
-				inCopyBlock = true
-			} else if inCopyBlock && bytes.Equal(line, []byte(`\.`)) {
-				// `\.` on its own line terminates the COPY block.
-				inCopyBlock = false
-			} else if !inCopyBlock && isExtensionDDL(line) {
-				continue
-			}
-			if _, err := stdin.Write(line); err != nil {
-				return err
-			}
-			if _, err := stdin.Write([]byte{'\n'}); err != nil {
-				return err
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			// Audit M3 — bufio.ErrTooLong vs other errors. The
-			// generic error gets prepended with hint context so
-			// the operator knows the dump exceeded the 16 MB
-			// per-line ceiling (likely a pathological blob row).
-			if err == bufio.ErrTooLong {
-				return fmt.Errorf("backup contains a line longer than 16 MB (typically a single-row blob column) — bypass this UI and restore directly: `gunzip < backup.sql.gz | psql $DATABASE_URL`. underlying: %w", err)
-			}
-			return err
-		}
-		return nil
-	}()
-	_ = gz.Close()
-	_ = stdin.Close()
-	waitErr := psqlCmd.Wait()
+	//   --single-transaction → BEGIN/COMMIT wrap; any failure rolls
+	//                          everything back. Schema stays wiped, so
+	//                          the operator can retry with a different
+	//                          file without re-wiping manually.
+	//   --no-owner            → skip ALTER OWNER statements. Aurora's
+	//                          DB role probably isn't the dump's owner.
+	//   --no-privileges       → skip GRANT/REVOKE. Same rationale.
+	//   --no-comments         → skip COMMENT ON statements, including
+	//                          COMMENT ON EXTENSION (which requires
+	//                          extension-owner privilege we don't have).
+	//                          This is the flag that obsoletes the old
+	//                          line-filter pipeline.
+	//   --exit-on-error       → bail on first error rather than churning
+	//                          through hundreds of cascading downstream
+	//                          failures (faster diagnostic).
+	//   --dbname=DATABASE_URL → connect via libpq URI; pg_restore knows
+	//                          this form.
+	restoreCmd := exec.CommandContext(ctx, "pg_restore",
+		"--single-transaction",
+		"--no-owner",
+		"--no-privileges",
+		"--no-comments",
+		"--exit-on-error",
+		"--dbname="+h.databaseURL,
+		tmpPath,
+	)
+	var restoreStderr strings.Builder
+	restoreCmd.Stderr = &limitedStringWriter{w: &restoreStderr, max: 16 * 1024}
 
-	if copyErr != nil || waitErr != nil {
-		stderrTail := strings.TrimSpace(psqlStderr.String())
+	runErr := restoreCmd.Run()
+	if runErr != nil {
+		stderrTail := strings.TrimSpace(restoreStderr.String())
 		slog.Error("restore failed",
-			"copy_err", copyErr,
-			"wait_err", waitErr,
-			"psql_stderr_tail", stderrTail,
+			"err", runErr,
+			"pg_restore_stderr_tail", stderrTail,
 		)
 		// The --single-transaction wrapped the whole thing, so on
 		// failure the DB is back to the wiped (empty) state. Tell the
 		// operator that explicitly so they know to retry.
 		msg := "restore failed; database is in wiped state, retry with a valid backup."
 		if stderrTail != "" {
-			msg += " psql said: " + stderrTail
+			msg += " pg_restore said: " + stderrTail
 		}
 		writeError(w, http.StatusInternalServerError, msg)
 		return
@@ -598,32 +598,4 @@ $do$;
 		"status":  "ok",
 		"message": "Restore complete. RESTART AURORA NOW — current connections will see stale state until you do.",
 	})
-}
-
-// isExtensionDDL returns true for lines that pg_dump emits to manage
-// extensions, and which the unprivileged `aurora` role cannot execute:
-//
-//   - CREATE EXTENSION [IF NOT EXISTS] vector WITH SCHEMA public;
-//   - COMMENT ON EXTENSION vector IS '...';
-//   - ALTER EXTENSION vector ... ;
-//
-// Aurora's role isn't the extension owner (postgres is), and many
-// extensions aren't TRUSTED (vector, in particular). install.sh
-// pre-creates the required extensions, so the dump's view of them
-// is purely informational — safe to drop entirely.
-//
-// pg_dump always emits statements on their own line with no leading
-// whitespace. We tolerate leading whitespace anyway for safety
-// against hand-edited dumps. Match is case-sensitive against
-// pg_dump's uppercase output; we don't try to handle hand-edited
-// lowercase dumps because the cost of false-positives (silently
-// dropping legitimate CREATE statements with different DDL) is
-// worse than the cost of telling operators "use a pg_dump output
-// not a hand-edited one."
-func isExtensionDDL(line []byte) bool {
-	t := bytes.TrimLeft(line, " \t")
-	return bytes.HasPrefix(t, []byte("CREATE EXTENSION ")) ||
-		bytes.HasPrefix(t, []byte("COMMENT ON EXTENSION ")) ||
-		bytes.HasPrefix(t, []byte("ALTER EXTENSION ")) ||
-		bytes.HasPrefix(t, []byte("DROP EXTENSION "))
 }
