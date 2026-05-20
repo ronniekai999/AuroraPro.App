@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Aurora favicon — public/favicon.svg gets copied to the Vite
+         outDir (static/v2/) at build time, so the deployed path is
+         /v2/favicon.svg. type="image/svg+xml" lets modern browsers
+         use the vector at any DPI without bitmap scaling. -->
+    <link rel="icon" type="image/svg+xml" href="/v2/favicon.svg" />
     <title>Aurora Pro</title>
   </head>
   <body>
