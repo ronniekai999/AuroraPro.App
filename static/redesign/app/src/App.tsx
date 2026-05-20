@@ -3324,6 +3324,26 @@ function AdminServerSettingsTab() {
             </div>
           )
         })}
+        {/* 2026-05-20 — section-scoped Save button.
+            The "edited" state is shared with the top Server Settings
+            section, and a single Save button already exists at the
+            top of the panel. But operators typing into Radarr/Sonarr
+            fields didn't see a Save nearby and assumed their changes
+            were lost (logged the bug after Test → no Save → confusion).
+            Adding a contextual Save here triggers the same save()
+            function — same global behavior, much better UX. */}
+        {settings && (
+          <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center gap-3">
+            <button
+              disabled={saving || Object.keys(edited).length === 0}
+              onClick={save}
+              className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
+            >{saving ? 'Saving…' : Object.keys(edited).length > 0 ? `Save ${Object.keys(edited).length} change${Object.keys(edited).length === 1 ? '' : 's'}` : 'No changes'}</button>
+            <p className="text-white/40 text-xs">
+              Empty API key fields are ignored on save (so the stored key isn't wiped). Use Test first to verify before saving.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )
