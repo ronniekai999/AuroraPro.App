@@ -996,9 +996,16 @@ if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
     # the clone, we persist that config in the mirror's .git/config
     # so the auto-updater's fetches also use it without needing
     # any env var.
+    # 2026-05-20 — use the EXPLICIT-file form of credential.helper.
+    # `credential.helper=store` (bare) makes git-credential-store look
+    # for $HOME/.git-credentials. systemd's aurora-update.service
+    # doesn't propagate HOME to the script, so the auto-updater's
+    # git fetch hits `fatal: unable to set up default path; use --file`
+    # and falls back to the no-TTY username prompt. Specifying the
+    # file path here makes the credential lookup HOME-independent.
     GIT_CRED_ARGS=()
     if [ -n "${AURORA_GIT_TOKEN:-}" ]; then
-        GIT_CRED_ARGS=(-c credential.helper=store)
+        GIT_CRED_ARGS=(-c "credential.helper=store --file=/root/.git-credentials")
     fi
 
     if [ ! -d "$UPDATER_SOURCE_DIR/.git" ]; then
@@ -1024,7 +1031,9 @@ if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
     # at repo scope (not --global) to keep the auth contract
     # narrow: only this one clone uses /root/.git-credentials.
     if [ -n "${AURORA_GIT_TOKEN:-}" ] && [ -d "$UPDATER_SOURCE_DIR/.git" ]; then
-        git -C "$UPDATER_SOURCE_DIR" config credential.helper store
+        # Explicit-file form (see comment above) — survives systemd's
+        # unset-HOME environment when aurora-update.service fires.
+        git -C "$UPDATER_SOURCE_DIR" config credential.helper "store --file=/root/.git-credentials"
     fi
 
     if ! $SKIP_UPDATER; then
