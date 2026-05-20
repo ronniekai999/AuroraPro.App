@@ -49,10 +49,10 @@ func TestNewClient_AutoAddsScheme(t *testing.T) {
 
 func TestIsConfigured(t *testing.T) {
 	tests := []struct {
-		name   string
-		url    string
-		key    string
-		want   bool
+		name string
+		url  string
+		key  string
+		want bool
 	}{
 		{"both set", "http://localhost:7878", "key123", true},
 		{"no url", "", "key123", false},

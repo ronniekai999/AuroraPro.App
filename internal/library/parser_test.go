@@ -6,11 +6,11 @@ import (
 
 func TestParseMoviePath(t *testing.T) {
 	tests := []struct {
-		name       string
-		path       string
-		wantTitle  string
-		wantYear   int
-		wantRes    string
+		name      string
+		path      string
+		wantTitle string
+		wantYear  int
+		wantRes   string
 	}{
 		{
 			name:      "dot-separated with year and resolution",

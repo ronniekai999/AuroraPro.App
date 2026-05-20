@@ -141,14 +141,14 @@ func TestAdjustProfileHeight(t *testing.T) {
 		targetW, sourceW, sourceH int
 		want                      int
 	}{
-		{1920, 1920, 1080, 1080},  // 16:9 → 16:9
-		{1280, 1920, 1080, 720},   // 16:9 → 720p
-		{1920, 3840, 1600, 800},   // 2.4:1 ultrawide
-		{1280, 3840, 1600, 532},   // 2.4:1 → 720p width (532 = even)
-		{854, 3840, 1600, 354},    // 2.4:1 → 480p width (354 = even)
-		{1920, 1440, 1080, 1440},  // 4:3 source
-		{1280, 1440, 1080, 960},   // 4:3 → 720p width
-		{640, 0, 0, 360},          // zero source → fallback 16:9
+		{1920, 1920, 1080, 1080}, // 16:9 → 16:9
+		{1280, 1920, 1080, 720},  // 16:9 → 720p
+		{1920, 3840, 1600, 800},  // 2.4:1 ultrawide
+		{1280, 3840, 1600, 532},  // 2.4:1 → 720p width (532 = even)
+		{854, 3840, 1600, 354},   // 2.4:1 → 480p width (354 = even)
+		{1920, 1440, 1080, 1440}, // 4:3 source
+		{1280, 1440, 1080, 960},  // 4:3 → 720p width
+		{640, 0, 0, 360},         // zero source → fallback 16:9
 	}
 	for _, tt := range tests {
 		got := AdjustProfileHeight(tt.targetW, tt.sourceW, tt.sourceH)

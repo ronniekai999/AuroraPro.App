@@ -26,10 +26,10 @@ type PartyHandler struct {
 	// The frontend fetches once on voice-join rather than hardcoding
 	// the URLs in the SPA — lets operators rotate TURN credentials
 	// without redeploying static assets.
-	stunServers      []string
-	turnURL          string
-	turnUsername     string
-	turnCredential   string
+	stunServers    []string
+	turnURL        string
+	turnUsername   string
+	turnCredential string
 }
 
 // NewPartyHandler creates a new PartyHandler with the given dependencies.
@@ -435,12 +435,12 @@ func (h *PartyHandler) GetInfo(w http.ResponseWriter, r *http.Request) {
 // GetCodeInfo handles GET /api/code/{code}/info — unified lookup for the
 // magic-link landing UX. Returns:
 //
-//   { type: "active", party: {...} }      — there's a live party; client joins it
-//   { type: "offline_room", room: {...} } — code maps to a persistent room
-//                                            with no active session; client
-//                                            shows "Room offline" state
-//   404                                    — code matches neither a live
-//                                            party nor a live persistent room
+//	{ type: "active", party: {...} }      — there's a live party; client joins it
+//	{ type: "offline_room", room: {...} } — code maps to a persistent room
+//	                                         with no active session; client
+//	                                         shows "Room offline" state
+//	404                                    — code matches neither a live
+//	                                         party nor a live persistent room
 //
 // Used by joinParty's pre-flight check (M4) so the frontend can show a
 // friendly "host hasn't started a session yet" message instead of an

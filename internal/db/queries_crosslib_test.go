@@ -8,14 +8,14 @@ import (
 
 func TestMetadataRichness(t *testing.T) {
 	tests := []struct {
-		name     string
-		item     *models.MediaItem
-		wantMin  int // minimum expected score
-		wantMax  int // maximum expected score
+		name    string
+		item    *models.MediaItem
+		wantMin int // minimum expected score
+		wantMax int // maximum expected score
 	}{
 		{
-			name: "empty item",
-			item: &models.MediaItem{},
+			name:    "empty item",
+			item:    &models.MediaItem{},
 			wantMin: 0,
 			wantMax: 0,
 		},

@@ -66,10 +66,10 @@ type Provider interface {
 // Providers opt in by implementing this interface in addition to
 // Provider. The Start handler type-asserts to PKCEProvider; if
 // the assertion succeeds AND WantsPKCE() returns true, the handler:
-//   1. Generates a random code_verifier via oauth2.GenerateVerifier().
-//   2. Adds oauth2.S256ChallengeOption(verifier) to AuthCodeURL.
-//   3. Stores the verifier in an HttpOnly cookie scoped to
-//      /api/auth/oauth/ for the Callback to read.
+//  1. Generates a random code_verifier via oauth2.GenerateVerifier().
+//  2. Adds oauth2.S256ChallengeOption(verifier) to AuthCodeURL.
+//  3. Stores the verifier in an HttpOnly cookie scoped to
+//     /api/auth/oauth/ for the Callback to read.
 //
 // The Callback handler then reads the cookie, clears it, and
 // passes oauth2.VerifierOption(verifier) to cfg.Exchange.

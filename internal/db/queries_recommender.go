@@ -37,9 +37,11 @@ const minHistoryItems = 3
 // This Aurora install runs an older pgvector that has `sum(vector)`,
 // `AVG(vector)`, and the distance operators (<->, <=>) but NOT scalar
 // multiplication. We could:
-//   (a) require pgvector ≥ 0.7 globally
-//   (b) detect the operator at startup and branch
-//   (c) pull embeddings to Go and weight there
+//
+//	(a) require pgvector ≥ 0.7 globally
+//	(b) detect the operator at startup and branch
+//	(c) pull embeddings to Go and weight there
+//
 // All three are more work than they're worth for a perceived improvement
 // over the (already-working) unweighted approach. The top-20-by-recency
 // slice IS itself a form of recency weighting — items older than 20

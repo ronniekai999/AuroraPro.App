@@ -25,10 +25,10 @@ import (
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/logging"
-	"github.com/aurora-media/aurora/internal/search"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/recommender"
+	"github.com/aurora-media/aurora/internal/search"
 	"github.com/aurora-media/aurora/internal/streaming"
 	"github.com/aurora-media/aurora/internal/watchparty"
 	ws "github.com/aurora-media/aurora/internal/websocket"
@@ -479,12 +479,12 @@ func main() {
 				// Disk free on transcode directory
 				diskFreeGB := api.GetDiskFreeGB(cfg.Cache.TranscodeDir)
 				hub.BroadcastToAdmins(ws.EventServerHealth, map[string]interface{}{
-					"memory_alloc_mb":    memStats.Alloc / 1024 / 1024,
-					"goroutines":         runtime.NumGoroutine(),
-					"active_streams":     transcode.ActiveSessions(),
-					"ws_clients":         hub.ClientCount(),
-					"disk_free_gb":       diskFreeGB,
-					"cpu_cores":          runtime.NumCPU(),
+					"memory_alloc_mb": memStats.Alloc / 1024 / 1024,
+					"goroutines":      runtime.NumGoroutine(),
+					"active_streams":  transcode.ActiveSessions(),
+					"ws_clients":      hub.ClientCount(),
+					"disk_free_gb":    diskFreeGB,
+					"cpu_cores":       runtime.NumCPU(),
 				})
 			case <-ctx.Done():
 				return
@@ -575,26 +575,26 @@ func main() {
 
 	// Router
 	router := api.NewRouter(api.RouterDeps{
-		Cfg:          cfg,
-		AuthSvc:      authSvc,
-		Queries:      queries,
-		Scanner:      scanner,
-		Hub:          hub,
-		AuthLimiter:  authLimiter,
-		Watcher:      watcher,
-		Enricher:     enricher,
-		ImgProxy:     imgProxy,
-		Transcode:    transcode,
-		Activity:     activity,
-		RingLog:      ringLog,
-		Pool:         pool,
-		StartTime:    startTime,
-		Version:      version,
-		StaticDir:    staticDir,
-		ArrClients:   arrClients,
-		PartyManager: partyManager,
-		Tmdb:         tmdbClient,
-		Tvdb:         tvdbClient,
+		Cfg:              cfg,
+		AuthSvc:          authSvc,
+		Queries:          queries,
+		Scanner:          scanner,
+		Hub:              hub,
+		AuthLimiter:      authLimiter,
+		Watcher:          watcher,
+		Enricher:         enricher,
+		ImgProxy:         imgProxy,
+		Transcode:        transcode,
+		Activity:         activity,
+		RingLog:          ringLog,
+		Pool:             pool,
+		StartTime:        startTime,
+		Version:          version,
+		StaticDir:        staticDir,
+		ArrClients:       arrClients,
+		PartyManager:     partyManager,
+		Tmdb:             tmdbClient,
+		Tvdb:             tvdbClient,
 		Semantic:         apiSemantic,
 		HeroProv:         apiHero,
 		EmbeddingEnabled: cfg.LLM.Enabled && embedder != nil,

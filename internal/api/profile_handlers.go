@@ -23,7 +23,9 @@ func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 // ListProfiles returns all profiles for the authenticated user.
 func (h *ProfileHandler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	profiles, err := h.queries.GetProfilesByUser(r.Context(), claims.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list profiles")
@@ -38,7 +40,9 @@ func (h *ProfileHandler) ListProfiles(w http.ResponseWriter, r *http.Request) {
 // CreateProfile creates a new profile for the authenticated user.
 func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 
 	var req models.CreateProfileRequest
 	if err := decodeJSON(w, r, &req); err != nil {
@@ -116,7 +120,9 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 // GetProfile returns a single profile by ID.
 func (h *ProfileHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
@@ -139,7 +145,9 @@ func (h *ProfileHandler) GetProfile(w http.ResponseWriter, r *http.Request) {
 // UpdateProfile updates a profile.
 func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
@@ -203,7 +211,9 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 // DeleteProfile deletes a non-default profile.
 func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
@@ -240,7 +250,9 @@ func (h *ProfileHandler) DeleteProfile(w http.ResponseWriter, r *http.Request) {
 // SetDefault sets a profile as the user's default.
 func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
-	if !ok { return }
+	if !ok {
+		return
+	}
 	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid profile id")
