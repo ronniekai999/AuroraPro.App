@@ -497,7 +497,7 @@ func (q *Queries) SetSetting(ctx context.Context, key, value string) error {
 }
 
 // GetSettingExists is the three-state read: returns (value, exists, err).
-// "exists=true with value=''" means the operator explicitly cleared the
+// "exists=true with value=”" means the operator explicitly cleared the
 // setting in the UI (an intentional override), distinct from "exists=false"
 // meaning the row was never written and the env/default should apply.
 // This precedence matters for boot-time config: applyLLMOverrides treats

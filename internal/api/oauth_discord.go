@@ -50,8 +50,8 @@ const (
 // Discord doesn't appear in golang.org/x/oauth2/endpoints, so we
 // declare the endpoint inline. URLs are documented + stable.
 var discordEndpoint = oauth2.Endpoint{
-	AuthURL:  "https://discord.com/api/oauth2/authorize",
-	TokenURL: "https://discord.com/api/oauth2/token",
+	AuthURL:   "https://discord.com/api/oauth2/authorize",
+	TokenURL:  "https://discord.com/api/oauth2/token",
 	AuthStyle: oauth2.AuthStyleInParams,
 }
 

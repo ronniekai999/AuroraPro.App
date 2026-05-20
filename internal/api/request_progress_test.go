@@ -44,18 +44,18 @@ func TestParseTVArrIDs(t *testing.T) {
 	}{
 		{"sonarr:7:81189", 7, 81189, true},
 		{"sonarr:100:999", 100, 999, true},
-		{"sonarr4k:8:82493", 8, 82493, true},   // 4K prefix
-		{"sonarr4k:100:999", 100, 999, true},    // 4K prefix
-		{"81189", 0, 81189, false},              // legacy: no sonarr ID
-		{"sonarr:0:81189", 0, 0, false},         // zero sonarr ID
-		{"sonarr4k:0:82493", 0, 0, false},       // zero 4K sonarr ID
-		{"sonarr:7:0", 0, 0, false},             // zero tvdb ID
-		{"sonarr4k:7:0", 0, 0, false},           // zero 4K tvdb ID
-		{"sonarr:", 0, 0, false},                // malformed
-		{"sonarr4k:", 0, 0, false},              // malformed 4K
-		{"sonarr:abc:def", 0, 0, false},         // non-numeric
-		{"", 0, 0, false},                       // empty
-		{"radarr:42", 0, 0, false},              // wrong prefix
+		{"sonarr4k:8:82493", 8, 82493, true}, // 4K prefix
+		{"sonarr4k:100:999", 100, 999, true}, // 4K prefix
+		{"81189", 0, 81189, false},           // legacy: no sonarr ID
+		{"sonarr:0:81189", 0, 0, false},      // zero sonarr ID
+		{"sonarr4k:0:82493", 0, 0, false},    // zero 4K sonarr ID
+		{"sonarr:7:0", 0, 0, false},          // zero tvdb ID
+		{"sonarr4k:7:0", 0, 0, false},        // zero 4K tvdb ID
+		{"sonarr:", 0, 0, false},             // malformed
+		{"sonarr4k:", 0, 0, false},           // malformed 4K
+		{"sonarr:abc:def", 0, 0, false},      // non-numeric
+		{"", 0, 0, false},                    // empty
+		{"radarr:42", 0, 0, false},           // wrong prefix
 	}
 	for _, tt := range tests {
 		sid, tid, has := parseTVArrIDs(tt.input)
@@ -68,9 +68,9 @@ func TestParseTVArrIDs(t *testing.T) {
 
 func TestMapQueueStage(t *testing.T) {
 	tests := []struct {
-		name   string
-		qi     arr.QueueItem
-		want   string
+		name string
+		qi   arr.QueueItem
+		want string
 	}{
 		{"downloading", arr.QueueItem{Status: "downloading"}, "downloading"},
 		{"queued", arr.QueueItem{Status: "queued"}, "queued"},
@@ -113,9 +113,9 @@ func TestSplitArrJobIDs(t *testing.T) {
 
 func TestIsDualQuality(t *testing.T) {
 	tests := []struct {
-		name    string
-		jobIDs  string
-		want    bool
+		name   string
+		jobIDs string
+		want   bool
 	}{
 		{"single radarr", "radarr:42", false},
 		{"single sonarr", "sonarr:5:82493", false},

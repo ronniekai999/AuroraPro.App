@@ -241,12 +241,14 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 // cascades correctly and never leaves orphan rows.
 //
 // CASCADE (data deleted with the user):
-//   refresh_tokens, watch_progress, requests, profiles, libraries.owner_id,
-//   user_preferences, invite_codes.created_by, watch_party hosts,
-//   party_participants
+//
+//	refresh_tokens, watch_progress, requests, profiles, libraries.owner_id,
+//	user_preferences, invite_codes.created_by, watch_party hosts,
+//	party_participants
 //
 // SET NULL (data preserved, attribution cleared):
-//   invite_codes.used_by, server_settings.updated_by, activity_log.user_id
+//
+//	invite_codes.used_by, server_settings.updated_by, activity_log.user_id
 //
 // Audited 2026-05. If a new table is added that references users(id), it
 // MUST declare an explicit ON DELETE policy and be added to this comment.

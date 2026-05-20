@@ -103,17 +103,17 @@ func (sc *SafeConn) Close() error {
 // means the peer is not in group time; the group stays in Waiting until it
 // empties across all peers.
 type Participant struct {
-	UserID             int64             `json:"user_id"`
-	Username           string            `json:"username"`
-	IsHost             bool              `json:"is_host"`
-	IsBuffering        bool              `json:"is_buffering"`
-	BufferingSince     *time.Time        `json:"-"`
-	ReadyAtMs          int64             `json:"-"`
-	FailedSeekAttempts int               `json:"-"`
-	Suspensions        map[string]bool   `json:"-"`
-	LastSeen           time.Time         `json:"last_seen"`
-	LastRTTms          int64             `json:"-"`
-	ClockOffsetMs      int64             `json:"-"`
+	UserID             int64           `json:"user_id"`
+	Username           string          `json:"username"`
+	IsHost             bool            `json:"is_host"`
+	IsBuffering        bool            `json:"is_buffering"`
+	BufferingSince     *time.Time      `json:"-"`
+	ReadyAtMs          int64           `json:"-"`
+	FailedSeekAttempts int             `json:"-"`
+	Suspensions        map[string]bool `json:"-"`
+	LastSeen           time.Time       `json:"last_seen"`
+	LastRTTms          int64           `json:"-"`
+	ClockOffsetMs      int64           `json:"-"`
 	// Ready is the per-participant "I'm ready to start watching" signal
 	// for M5's spoiler-free start gate. Distinct from `ReadyAtMs` which
 	// is V2's buffered-to-target signal (always set on Ready protocol
@@ -157,7 +157,9 @@ type ReactionRecord struct {
 // GroupState models the Jellyfin-style state machine for a watch party.
 // Idle: no media loaded yet.
 // Waiting: group is paused waiting for all participants to emit Ready at
-//   CurrentTimeMs (triggered by initial play, seek, or buffer hysteresis).
+//
+//	CurrentTimeMs (triggered by initial play, seek, or buffer hysteresis).
+//
 // Playing: group is playing, anchored at CurrentTimeMs @ PlayingSince.
 type GroupState string
 
@@ -178,20 +180,20 @@ const (
 type PartyState struct {
 	mu sync.Mutex // guards mutable fields below
 
-	Code            string
-	HostUserID      int64
-	MediaItemID     int64
-	EpisodeID       *int64
-	MediaTitle      string
-	MediaPoster     string
-	PartyName       string
-	CurrentTimeMs   int64
-	IsPlaying       bool
-	PlayingSince    *time.Time
-	GroupState      GroupState
-	StateRevision   uint64
-	Participants    map[int64]*Participant
-	ChatHistory     []ChatMessage // ring buffer, max chatHistoryMax
+	Code          string
+	HostUserID    int64
+	MediaItemID   int64
+	EpisodeID     *int64
+	MediaTitle    string
+	MediaPoster   string
+	PartyName     string
+	CurrentTimeMs int64
+	IsPlaying     bool
+	PlayingSince  *time.Time
+	GroupState    GroupState
+	StateRevision uint64
+	Participants  map[int64]*Participant
+	ChatHistory   []ChatMessage // ring buffer, max chatHistoryMax
 
 	// Reactions is M6's per-party ring buffer of emoji reactions tagged
 	// with the moment-in-the-movie they were sent at. Used by:
@@ -837,7 +839,7 @@ func (m *Manager) CreateParty(
 		HostUserID:      hostUserID,
 		MediaItemID:     mediaItemID,
 		EpisodeID:       episodeID,
-		MediaTitle:       mediaTitle,
+		MediaTitle:      mediaTitle,
 		MediaPoster:     mediaPoster,
 		PartyName:       partyName,
 		CurrentTimeMs:   initialPositionMs,
@@ -1046,26 +1048,26 @@ func (m *Manager) StartPartyInRoom(
 	// Build PartyState. IsRoomPersistent=true so EndParty preserves the
 	// room (Touch instead of SoftDelete) when this session ends.
 	ps := &PartyState{
-		Code:            roomCode,
-		HostUserID:      hostUserID,
-		MediaItemID:     mediaItemID,
-		EpisodeID:       episodeID,
-		MediaTitle:      mediaTitle,
-		MediaPoster:     mediaPoster,
-		PartyName:       room.Name,
-		CurrentTimeMs:   initialPositionMs,
-		IsPlaying:       false,
-		PlayingSince:    nil,
-		GroupState:      GroupStateIdle,
-		StateRevision:   1,
-		Participants:    make(map[int64]*Participant),
-		ChatHistory:     make([]ChatMessage, 0, chatHistoryMax),
-		Settings:        settings,
-		conns:           make(map[int64]*SafeConn),
-		CreatedAt:       now,
-		MaxParticipants: maxParticipants,
-		dbID:            dbParty.ID,
-		roomDBID:        room.ID,
+		Code:             roomCode,
+		HostUserID:       hostUserID,
+		MediaItemID:      mediaItemID,
+		EpisodeID:        episodeID,
+		MediaTitle:       mediaTitle,
+		MediaPoster:      mediaPoster,
+		PartyName:        room.Name,
+		CurrentTimeMs:    initialPositionMs,
+		IsPlaying:        false,
+		PlayingSince:     nil,
+		GroupState:       GroupStateIdle,
+		StateRevision:    1,
+		Participants:     make(map[int64]*Participant),
+		ChatHistory:      make([]ChatMessage, 0, chatHistoryMax),
+		Settings:         settings,
+		conns:            make(map[int64]*SafeConn),
+		CreatedAt:        now,
+		MaxParticipants:  maxParticipants,
+		dbID:             dbParty.ID,
+		roomDBID:         room.ID,
 		IsRoomPersistent: true,
 
 		Running:        false,
@@ -1724,12 +1726,12 @@ func (m *Manager) HandlePlaybackControl(code string, userID int64, action string
 // CurrentTimeMs from a heartbeat (not even the host's). Position is authored
 // exclusively by HandlePlaybackControl and advanced by PlayingSince. Heartbeats
 // are used for:
-//   1. LastSeen refresh (keeps stale-cleanup from dropping live peers).
-//   2. Buffer hysteresis: if a peer reports is_buffering for longer than
-//      cfg.BufferHysteresis, the group transitions to Waiting. A transient
-//      stall (one heartbeat's worth) does NOT pause the group.
-//   3. Buffer clear: when the last buffering peer reports not-buffering, the
-//      group stays in Waiting until each peer emits a Ready at CurrentTimeMs.
+//  1. LastSeen refresh (keeps stale-cleanup from dropping live peers).
+//  2. Buffer hysteresis: if a peer reports is_buffering for longer than
+//     cfg.BufferHysteresis, the group transitions to Waiting. A transient
+//     stall (one heartbeat's worth) does NOT pause the group.
+//  3. Buffer clear: when the last buffering peer reports not-buffering, the
+//     group stays in Waiting until each peer emits a Ready at CurrentTimeMs.
 //
 // Drift correction is entirely client-side (tiered: ignore / rate-adjust /
 // hard-seek) using the client's own computed server-time offset; the server's
@@ -2014,10 +2016,10 @@ func (m *Manager) RecentReactions(code string) []ReactionRecord {
 // complexity — see handoff doc).
 
 const (
-	highlightReelTopN         = 5  // top-N most-reacted moments to stitch
-	highlightReelWindowSec    = 10 // sliding-window size for reaction density
-	highlightReelClipBeforeSec = 3 // seconds before the moment
-	highlightReelClipAfterSec  = 3 // seconds after the moment
+	highlightReelTopN          = 5  // top-N most-reacted moments to stitch
+	highlightReelWindowSec     = 10 // sliding-window size for reaction density
+	highlightReelClipBeforeSec = 3  // seconds before the moment
+	highlightReelClipAfterSec  = 3  // seconds after the moment
 )
 
 // highlightMoment is a (window center, reaction count) pair after
@@ -2933,7 +2935,7 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 			// reconnect erased the visual state until someone else
 			// toggled their Ready (which then broadcast ready-changed
 			// and re-established the picture).
-			"ready":        p.Ready,
+			"ready": p.Ready,
 		})
 	}
 

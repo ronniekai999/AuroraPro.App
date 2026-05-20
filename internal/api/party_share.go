@@ -20,11 +20,11 @@ import (
 
 	"github.com/aurora-media/aurora/internal/watchparty"
 	"github.com/go-chi/chi/v5"
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
-	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -365,8 +365,8 @@ func (h *PartyShareHandler) composeShareImage(code, partyName, mediaTitle, media
 		return nil, fmt.Errorf("init fonts: %w", err)
 	}
 
-	bgColor := color.RGBA{R: 12, G: 10, B: 24, A: 255}    // deep navy/purple, matches Aurora palette
-	textColor := color.RGBA{R: 244, G: 240, B: 255, A: 255} // near-white with a hint of purple
+	bgColor := color.RGBA{R: 12, G: 10, B: 24, A: 255}        // deep navy/purple, matches Aurora palette
+	textColor := color.RGBA{R: 244, G: 240, B: 255, A: 255}   // near-white with a hint of purple
 	accentColor := color.RGBA{R: 167, G: 139, B: 250, A: 255} // Aurora accent (matches the frontend --accent)
 
 	rgba := image.NewRGBA(image.Rect(0, 0, shareImgWidth, shareImgHeight))

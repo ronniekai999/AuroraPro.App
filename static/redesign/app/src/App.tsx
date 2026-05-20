@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import {
   fetchMe,
   getAccessToken,
+  apiFetchResponse,
   getStoredUser,
   getMedia,
   getMediaFiles,
@@ -2740,9 +2741,8 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
     try {
       const form = new FormData()
       form.append('backup', file)
-      const res = await fetch('/api/admin/restore', {
+      const res = await apiFetchResponse('/api/admin/restore', {
         method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + (getAccessToken() || '') },
         body: form,
       })
       const ct = res.headers.get('content-type') || ''
@@ -3893,15 +3893,8 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   // database produces a ~1-2 GB archive — well within browser blob
   // limits on a modern desktop.
   const downloadBackup = useCallback(async () => {
-    const t = getAccessToken()
-    if (!t) {
-      window.alert('Sign in required.')
-      return
-    }
     try {
-      const res = await fetch('/api/admin/backup', {
-        headers: { Authorization: 'Bearer ' + t },
-      })
+      const res = await apiFetchResponse('/api/admin/backup')
       if (!res.ok) {
         const body = await res.text().catch(() => '')
         throw new Error(`HTTP ${res.status}${body ? ': ' + body.slice(0, 200) : ''}`)
@@ -4714,7 +4707,7 @@ export default function App() {
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
     setToasts(prev => [...prev, { id, message, type }])
-  }, [])
+  }, [nextToastId])
 
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -4817,7 +4810,7 @@ export default function App() {
     } finally {
       setPlayerLoading(false)
     }
-  }, [])
+  }, [nextToastId])
 
   const handleToggleLib = useCallback((m: Media) => {
     setLibrary(prev => {
@@ -5283,7 +5276,7 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
     // moviesSort included in deps so sort changes (which clear
     // moviesList to null) re-run this effect with the new sort.
-  }, [user, view, moviesList, moviesSort])
+  }, [user, view, moviesList, moviesSort, nextToastId])
 
   // M10 Phase 2 — Shows list.
   useEffect(() => {
@@ -5303,7 +5296,7 @@ export default function App() {
         setToasts(prev => [...prev, { id, message: 'Failed to load shows', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, showsList, showsSort])
+  }, [user, view, showsList, showsSort, nextToastId])
 
   // Phase 5.3 final QA — Load More handlers. Append the next page
   // to the existing items array. Page number is derived from
@@ -5352,7 +5345,7 @@ export default function App() {
         moviesLoadMoreAcRef.current = null
       }
     }
-  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesNextPage])
+  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesNextPage, nextToastId])
 
   const handleLoadMoreShows = useCallback(async () => {
     if (!showsList || showsTotal == null || showsLoadingMore) return
@@ -5381,7 +5374,7 @@ export default function App() {
         showsLoadMoreAcRef.current = null
       }
     }
-  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsNextPage])
+  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsNextPage, nextToastId])
 
   // Sort-change handlers. Setting null on the items list triggers
   // the fetch effect above to re-run with the new sort, fetching
@@ -5549,7 +5542,7 @@ export default function App() {
     } finally {
       setPlayerLoading(false)
     }
-  }, [])
+  }, [nextToastId])
 
   // Phase 5.2 — play a specific file (used by the version picker
   // for multi-file movies). Bypasses pickFile's quality-preference
@@ -5584,7 +5577,7 @@ export default function App() {
       const msg = err instanceof Error ? err.message : 'Failed to refresh'
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
-  }, [])
+  }, [nextToastId])
 
   // M10 Phase 4 — start a watch party with this media. Creates a
   // quick-party server-side, then immediately joins it via the same
@@ -5631,7 +5624,7 @@ export default function App() {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     }
-  }, [party])
+  }, [party, nextToastId])
 
   // M10 Phase 2 — play a specific episode (vs handlePlay which
   // plays a parent show's "first available" episode). Used by the
@@ -5653,7 +5646,7 @@ export default function App() {
       title: selectedMedia.title,
       subtitle: `E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
     })
-  }, [selectedMedia])
+  }, [selectedMedia, nextToastId])
 
   // M10 Phase 4.5 — episode list refetches when the user switches
   // season via the picker. The initial-load case is handled inside

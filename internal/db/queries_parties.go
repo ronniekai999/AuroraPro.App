@@ -49,8 +49,8 @@ func (q *Queries) InsertWatchParty(ctx context.Context, party *models.WatchParty
 		party.ScheduledStartAt,
 		party.StartedAt,
 		party.RoomID, // nullable; pre-M3 callers can pass nil and rows
-		              // will still insert (NOT NULL is enforced in code,
-		              // not DB, since historical rows have NULL room_id)
+		// will still insert (NOT NULL is enforced in code,
+		// not DB, since historical rows have NULL room_id)
 	).Scan(&party.ID)
 	if err != nil {
 		return fmt.Errorf("insert watch party: %w", err)

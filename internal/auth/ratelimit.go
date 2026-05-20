@@ -29,7 +29,7 @@ type RateLimiter struct {
 const maxVisitors = 10_000
 
 type visitor struct {
-	count    int
+	count       int
 	windowStart time.Time
 }
 
