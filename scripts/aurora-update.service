@@ -12,6 +12,14 @@ After=aurora.service
 # invocation as a fresh start, so the timer's 5-min cadence works
 # naturally without the unit being in a "running" loop state.
 Type=oneshot
+# 2026-05-20 — explicitly set HOME=/root. systemd doesn't propagate
+# HOME for system services by default; without this, `git` operations
+# that touch config files (credential.helper=store, git config --get,
+# etc.) hit `fatal: unable to set up default path; use --file`.
+# install.sh's credential.helper config also uses the explicit
+# --file=/root/.git-credentials form for defense-in-depth, but
+# setting HOME here covers any future git config lookups too.
+Environment=HOME=/root
 ExecStart=/usr/local/bin/aurora-update
 # 10-minute cap. A clean build on modest hardware is ~30s; even a
 # slow VM with the entire Go module cache cold should finish well
