@@ -1,6 +1,8 @@
 package metadata
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +19,13 @@ import (
 const (
 	tmdbBaseURL  = "https://api.themoviedb.org/3"
 	tmdbImageURL = "https://image.tmdb.org/t/p"
+
+	// tmdbMaxDecompressedBytes caps the gunzipped TMDB response size.
+	// Real TMDB JSON responses are tens of KB; 16 MiB matches the
+	// raw-body cap below and is two orders of magnitude over any
+	// realistic payload. The gunzip helper detects overflow rather
+	// than silently truncating — see defensiveGunzip.
+	tmdbMaxDecompressedBytes = 16 << 20
 
 	// Rate limiting: TMDB allows ~40 req/10s
 	tmdbRateLimit    = 35
@@ -150,6 +159,44 @@ func (c *TMDBClient) get(ctx context.Context, path string, params url.Values) ([
 		if err != nil {
 			lastErr = fmt.Errorf("read response: %w", err)
 			continue
+		}
+
+		// Defensive gzip handling.
+		//
+		// 2026-05-20 — observed in production: TMDB occasionally
+		// returns a gzip-compressed body WITHOUT the matching
+		// `Content-Encoding: gzip` response header. Without that
+		// header, Go's http.Transport doesn't auto-decompress, so
+		// we read raw gzip bytes and json.Unmarshal chokes on the
+		// `\x1f` magic byte ("invalid character '\\x1f' looking
+		// for beginning of value"). One refresh in ~100 fails this
+		// way; the next refresh of the same item usually succeeds.
+		//
+		// Strategy: when the body starts with the gzip magic
+		// (0x1F 0x8B), gunzip ourselves with strict integrity
+		// checks. If anything goes wrong, return a clean error
+		// instead of feeding broken JSON to the caller — the
+		// alternative was a confusing TWO-log-line incident (our
+		// WARN + the caller's `invalid character '\x1f'` decode
+		// error) per bad response.
+		//
+		// `body == nil` is safe: len(nil) == 0, so the >= 2 guard
+		// short-circuits before any indexing.
+		if bytes.HasPrefix(body, []byte{0x1F, 0x8B}) {
+			gunzipped, ungzErr := defensiveGunzip(body, tmdbMaxDecompressedBytes)
+			if ungzErr != nil {
+				// Body was definitely gzip-prefixed and gunzip
+				// failed — the bytes are not JSON either way.
+				// Short-circuit with a clean error so the caller
+				// doesn't try to json.Unmarshal random bytes.
+				slog.Warn("tmdb: response started with gzip magic but gunzip failed",
+					"path", path, "compressed_size", len(body), "error", ungzErr)
+				lastErr = fmt.Errorf("tmdb: gunzip failed for missing-Content-Encoding response: %w", ungzErr)
+				continue // retry — next attempt may get a clean body
+			}
+			slog.Debug("tmdb: gunzipped body missing Content-Encoding header",
+				"path", path, "compressed_size", len(body), "decompressed_size", len(gunzipped))
+			body = gunzipped
 		}
 
 		switch {
@@ -636,4 +683,45 @@ func BestMatch(scannedTitle string, scannedYear int, results []TMDBMovieTV, minT
 		return nil, bestScore
 	}
 	return best, bestScore
+}
+
+// defensiveGunzip decompresses body up to maxBytes, returning the
+// decompressed bytes or an explicit error describing what went wrong.
+//
+// 2026-05-20 audit follow-up (a2fc538) — the original gunzip block
+// used io.LimitReader, which silently truncates at the cap and lets
+// json.Unmarshal fail mid-document with a confusing
+// "unexpected end of JSON input" error. Worse, gzip.Reader.Close()
+// was discarded — that's where Go validates the CRC-32 and size
+// trailer. A truncated gzip whose body length happens to land at
+// a JSON syntactic boundary would have slipped through as "valid".
+//
+// This helper:
+//   - reads maxBytes+1 to detect overflow explicitly
+//   - propagates io.ReadAll errors (decode mid-stream failures)
+//   - propagates gz.Close() errors (CRC / size-trailer mismatch)
+//
+// Returns the decompressed bytes only if every layer passes.
+func defensiveGunzip(body []byte, maxBytes int64) ([]byte, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("gzip.NewReader: %w", err)
+	}
+	// Read maxBytes+1 so we can detect overflow vs. clean EOF.
+	out, readErr := io.ReadAll(io.LimitReader(gz, maxBytes+1))
+	closeErr := gz.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("gzip read: %w", readErr)
+	}
+	if int64(len(out)) > maxBytes {
+		return nil, fmt.Errorf("gzip output exceeds %d byte cap (decompression bomb or runaway response)", maxBytes)
+	}
+	// Close error surfaces CRC-32 / size-trailer mismatches that
+	// io.ReadAll alone won't catch. Treating it as fatal means a
+	// truncated gzip stream can't accidentally produce
+	// "valid-looking" JSON that's missing fields.
+	if closeErr != nil {
+		return nil, fmt.Errorf("gzip close (corrupt stream): %w", closeErr)
+	}
+	return out, nil
 }
