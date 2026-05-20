@@ -1,8 +1,105 @@
 package metadata
 
 import (
+	"bytes"
+	"compress/gzip"
+	"strings"
 	"testing"
 )
+
+// TestDefensiveGunzip — regression coverage for the gunzip-without-
+// Content-Encoding defense (commit a2fc538). The TMDB API
+// occasionally returns gzip-compressed JSON without the matching
+// `Content-Encoding: gzip` response header, so Go's auto-decompression
+// doesn't fire and json.Unmarshal chokes on the `\x1f` magic byte.
+//
+// Without this test the regression risk is high — the defensive code
+// only fires on a rare upstream bug, which means a future refactor
+// could break it silently and we'd only notice when the WARN/error
+// reappeared in production logs.
+//
+// Cases:
+//   - valid gzip round-trips cleanly
+//   - truncated gzip header → error (catches mid-stream corruption)
+//   - bad CRC-32 trailer → error (catches stream-completes-but-corrupt)
+//   - decompression overflow → error (no silent truncation)
+//   - empty or non-gzip body → gzip.NewReader fails cleanly
+func TestDefensiveGunzip(t *testing.T) {
+	t.Run("valid gzip round-trips", func(t *testing.T) {
+		original := []byte(`{"results":[{"id":1,"title":"Test"}]}`)
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		if _, err := gw.Write(original); err != nil {
+			t.Fatalf("gzip write: %v", err)
+		}
+		if err := gw.Close(); err != nil {
+			t.Fatalf("gzip close: %v", err)
+		}
+		got, err := defensiveGunzip(buf.Bytes(), 16<<20)
+		if err != nil {
+			t.Fatalf("defensiveGunzip: %v", err)
+		}
+		if !bytes.Equal(got, original) {
+			t.Errorf("round-trip mismatch:\n  want: %q\n  got:  %q", original, got)
+		}
+	})
+
+	t.Run("truncated gzip header errors out", func(t *testing.T) {
+		// Just the magic bytes — no flags, mtime, etc.
+		truncated := []byte{0x1F, 0x8B}
+		_, err := defensiveGunzip(truncated, 16<<20)
+		if err == nil {
+			t.Fatal("expected error for truncated header, got nil")
+		}
+		if !strings.Contains(err.Error(), "gzip.NewReader") {
+			t.Errorf("expected NewReader error context, got: %v", err)
+		}
+	})
+
+	t.Run("corrupted CRC-32 trailer is rejected via Close", func(t *testing.T) {
+		// Build a valid gzip then flip the last byte of the
+		// 8-byte trailer (CRC + size). gz.Close() catches it
+		// because io.ReadAll completes before the trailer check.
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		_, _ = gw.Write([]byte("hello"))
+		_ = gw.Close()
+		corrupted := buf.Bytes()
+		// Flip a bit in the trailer (last 8 bytes are CRC32 + ISIZE).
+		corrupted[len(corrupted)-4] ^= 0xFF
+		_, err := defensiveGunzip(corrupted, 16<<20)
+		if err == nil {
+			t.Fatal("expected error for corrupted trailer, got nil — Close() error must be surfaced")
+		}
+	})
+
+	t.Run("decompression overflow returns explicit error not silent truncation", func(t *testing.T) {
+		// 64 KB of `A` compresses to a tiny gzip stream. Set the
+		// cap below the decompressed size and verify we get a
+		// clear error instead of a truncated body.
+		var buf bytes.Buffer
+		gw := gzip.NewWriter(&buf)
+		_, _ = gw.Write(bytes.Repeat([]byte("A"), 64*1024))
+		_ = gw.Close()
+		_, err := defensiveGunzip(buf.Bytes(), 1024) // cap < decompressed size
+		if err == nil {
+			t.Fatal("expected overflow error, got nil — would have silently truncated under io.LimitReader")
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("expected overflow error message, got: %v", err)
+		}
+	})
+
+	t.Run("non-gzip body fails at NewReader", func(t *testing.T) {
+		// Defensive — defensiveGunzip is only called when the
+		// caller already verified the gzip magic prefix, but
+		// confirm it fails cleanly if invoked on non-gzip bytes.
+		_, err := defensiveGunzip([]byte("not gzip"), 16<<20)
+		if err == nil {
+			t.Fatal("expected error for non-gzip body, got nil")
+		}
+	})
+}
 
 func TestMatchConfidence(t *testing.T) {
 	tests := []struct {
