@@ -126,7 +126,7 @@ func detectNVIDIA() bool {
 	return false
 }
 
-func detectQSV() bool { return driDeviceExists() }
+func detectQSV() bool   { return driDeviceExists() }
 func detectVAAPI() bool { return driDeviceExists() }
 
 func detectAMF() bool {

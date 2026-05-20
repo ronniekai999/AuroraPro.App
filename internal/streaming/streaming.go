@@ -529,27 +529,27 @@ type TranscodeSession struct {
 	Profiles     []QualityProfile           `json:"profiles"`
 	Variants     map[string]*QualityVariant `json:"-"`
 	variantMu    sync.Mutex
-	StartedAt    time.Time                  `json:"started_at"`
-	LastAccess   time.Time                  `json:"last_access"`
-	SourceWidth  int                        `json:"source_width"`
-	SourceHeight int                        `json:"source_height"`
+	StartedAt    time.Time `json:"started_at"`
+	LastAccess   time.Time `json:"last_access"`
+	SourceWidth  int       `json:"source_width"`
+	SourceHeight int       `json:"source_height"`
 	// Subtitle burn-in config (optional)
-	BurnSubIndex    int    `json:"burn_sub_index,omitempty"`     // -1 = no burn-in
-	BurnSubExternal string `json:"-"`                            // path to external sub file
+	BurnSubIndex    int    `json:"burn_sub_index,omitempty"` // -1 = no burn-in
+	BurnSubExternal string `json:"-"`                        // path to external sub file
 	BurnSubBitmap   bool   `json:"burn_sub_bitmap,omitempty"`
 	// HDR-to-SDR tonemapping: set when transcoding 10-bit HEVC HDR to 8-bit H.264
-	HDRTonemap      bool   `json:"hdr_tonemap,omitempty"`
+	HDRTonemap bool `json:"hdr_tonemap,omitempty"`
 	// Bandwidth estimation: total bytes served for this session
-	BytesServed      int64  `json:"-"`
+	BytesServed int64 `json:"-"`
 	// Remux mode: copy video codec, near-zero CPU (Phase 3 direct stream)
-	Remux            bool   `json:"remux,omitempty"`
-	RemuxAudioCopy   bool   `json:"-"`                           // true = copy audio too, false = transcode audio to AAC
+	Remux          bool `json:"remux,omitempty"`
+	RemuxAudioCopy bool `json:"-"` // true = copy audio too, false = transcode audio to AAC
 	// Audio passthrough: copy audio stream instead of re-encoding to AAC
-	AudioPassthrough bool   `json:"audio_passthrough,omitempty"`
+	AudioPassthrough bool `json:"audio_passthrough,omitempty"`
 	// Audio track selection: 0-based index for -map 0:a:N; -1 = FFmpeg default (first audio)
-	AudioTrackIndex  int    `json:"-"`
+	AudioTrackIndex int `json:"-"`
 	// Source audio channel count for bitrate scaling (0 = default to 2)
-	AudioChannels    int    `json:"-"`
+	AudioChannels int `json:"-"`
 	// Source video codec for BSF selection in remux mode (e.g., "hevc" needs hevc_mp4toannexb)
 	SourceVideoCodec string `json:"-"`
 	// StartSec is the resume seek offset passed to FFmpeg via -ss. When > 0,
@@ -619,27 +619,27 @@ func ffmpegDone(v *QualityVariant) bool {
 
 // SessionInfo is the public API response for a session.
 type SessionInfo struct {
-	ID             string           `json:"id"`
-	UserID         int64            `json:"user_id"`
-	Username       string           `json:"username"`
-	FileName       string           `json:"file_name"`
-	SourceWidth    int              `json:"source_width"`
-	SourceHeight   int              `json:"source_height"`
-	Profiles       []QualityProfile `json:"profiles"`
-	MasterPlaylist string           `json:"master_playlist_url"`
-	StartedAt      time.Time        `json:"started_at"`
-	ActiveVariants []string         `json:"active_variants"`
-	Remux          bool             `json:"remux"`
-	AudioPassthrough bool           `json:"audio_passthrough"`
+	ID               string           `json:"id"`
+	UserID           int64            `json:"user_id"`
+	Username         string           `json:"username"`
+	FileName         string           `json:"file_name"`
+	SourceWidth      int              `json:"source_width"`
+	SourceHeight     int              `json:"source_height"`
+	Profiles         []QualityProfile `json:"profiles"`
+	MasterPlaylist   string           `json:"master_playlist_url"`
+	StartedAt        time.Time        `json:"started_at"`
+	ActiveVariants   []string         `json:"active_variants"`
+	Remux            bool             `json:"remux"`
+	AudioPassthrough bool             `json:"audio_passthrough"`
 	// Resource tracking (Feature 3)
-	Resources      *SessionResources `json:"resources,omitempty"`
+	Resources *SessionResources `json:"resources,omitempty"`
 }
 
 // SessionResources tracks CPU and memory usage for a transcode session's FFmpeg processes.
 type SessionResources struct {
-	CPUTicks     float64 `json:"cpu_ticks"`      // Accumulated CPU clock ticks (utime+stime) across variants
-	MemoryBytes  int64   `json:"memory_bytes"`   // Aggregate RSS across all active variants
-	NumProcesses int     `json:"num_processes"`  // Number of active FFmpeg processes
+	CPUTicks     float64 `json:"cpu_ticks"`     // Accumulated CPU clock ticks (utime+stime) across variants
+	MemoryBytes  int64   `json:"memory_bytes"`  // Aggregate RSS across all active variants
+	NumProcesses int     `json:"num_processes"` // Number of active FFmpeg processes
 	BandwidthBps float64 `json:"bandwidth_bps"` // Estimated bytes per second served
 }
 
@@ -751,9 +751,9 @@ func (tm *TranscodeManager) cleanupLoop() {
 
 // BurnInOpts configures subtitle burn-in for a transcode session.
 type BurnInOpts struct {
-	SubIndex    int    // Embedded subtitle stream index (-1 or unused = none)
+	SubIndex     int    // Embedded subtitle stream index (-1 or unused = none)
 	ExternalPath string // Path to external subtitle file (empty = none)
-	IsBitmap    bool   // True for PGS/VOBSUB bitmap subs
+	IsBitmap     bool   // True for PGS/VOBSUB bitmap subs
 }
 
 // HLSSubtitleTrack carries the info needed to add a subtitle output chain
@@ -1594,8 +1594,8 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 				// corrupt container), FFmpeg skips it instead of aborting the
 				// entire command — preserving video/audio playback.
 				"-map", fmt.Sprintf("0:%d?", st.AbsoluteIndex),
-				"-vn", "-an",       // This output has no video or audio
-				"-c:s", "webvtt",   // Convert any text sub format to WebVTT
+				"-vn", "-an", // This output has no video or audio
+				"-c:s", "webvtt", // Convert any text sub format to WebVTT
 				// Subtitle timestamp handling (Emby-style):
 				// -avoid_negative_ts disabled: prevents FFmpeg from adding
 				// any PTS offset to subtitle cue times. With -copyts and
@@ -2455,7 +2455,7 @@ func injectBurnInFilter(args []string, session *TranscodeSession) []string {
 		for i := 0; i < len(args); i++ {
 			if args[i] == "-vf" && i+1 < len(args) {
 				existingVF = args[i+1] // Capture scale filter before stripping
-				i++ // skip the filter value too
+				i++                    // skip the filter value too
 				continue
 			}
 			result = append(result, args[i])

@@ -29,19 +29,21 @@ import (
 // PartyWSHandlerV3Sync handles /ws/party-sync. One instance per server,
 // shared across all connections.
 type PartyWSHandlerV3Sync struct {
-	manager  *watchparty.Manager
-	authSvc  *auth.Service
-	upgrader websocket.Upgrader
+	manager      *watchparty.Manager
+	authSvc      *auth.Service
+	versionStore *auth.TokenVersionStore
+	upgrader     websocket.Upgrader
 }
 
 // NewPartyWSHandlerV3Sync constructs the handler.
 // originAllowed gates browser-originated upgrades — see
 // websocketOriginChecker in helpers.go for the policy. Pass
 // cfg.OriginAllowed.
-func NewPartyWSHandlerV3Sync(manager *watchparty.Manager, authSvc *auth.Service, originAllowed func(string) bool) *PartyWSHandlerV3Sync {
+func NewPartyWSHandlerV3Sync(manager *watchparty.Manager, authSvc *auth.Service, versionStore *auth.TokenVersionStore, originAllowed func(string) bool) *PartyWSHandlerV3Sync {
 	return &PartyWSHandlerV3Sync{
-		manager: manager,
-		authSvc: authSvc,
+		manager:      manager,
+		authSvc:      authSvc,
+		versionStore: versionStore,
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     websocketOriginChecker(originAllowed),
 			ReadBufferSize:  1024,
@@ -67,14 +69,8 @@ type v3HeartbeatPayload struct {
 }
 
 func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	token := QueryParamToken(r)
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "token query parameter required")
-		return
-	}
-	claims, err := h.authSvc.ValidateAccessToken(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid or expired token")
+	claims, ok := requireQueryTokenClaims(w, r, h.authSvc, h.versionStore)
+	if !ok {
 		return
 	}
 

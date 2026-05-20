@@ -26,9 +26,10 @@ import (
 
 // PartyWSHandlerV3Room handles /ws/party-room.
 type PartyWSHandlerV3Room struct {
-	manager  *watchparty.Manager
-	authSvc  *auth.Service
-	upgrader websocket.Upgrader
+	manager      *watchparty.Manager
+	authSvc      *auth.Service
+	versionStore *auth.TokenVersionStore
+	upgrader     websocket.Upgrader
 
 	rateMu    sync.Mutex
 	chatRates map[int64]*chatRateTracker
@@ -42,10 +43,11 @@ type PartyWSHandlerV3Room struct {
 // originAllowed gates browser-originated upgrades — see
 // websocketOriginChecker in helpers.go for the policy. Pass
 // cfg.OriginAllowed.
-func NewPartyWSHandlerV3Room(manager *watchparty.Manager, authSvc *auth.Service, originAllowed func(string) bool) *PartyWSHandlerV3Room {
+func NewPartyWSHandlerV3Room(manager *watchparty.Manager, authSvc *auth.Service, versionStore *auth.TokenVersionStore, originAllowed func(string) bool) *PartyWSHandlerV3Room {
 	return &PartyWSHandlerV3Room{
-		manager: manager,
-		authSvc: authSvc,
+		manager:      manager,
+		authSvc:      authSvc,
+		versionStore: versionStore,
 		upgrader: websocket.Upgrader{
 			CheckOrigin:     websocketOriginChecker(originAllowed),
 			ReadBufferSize:  1024,
@@ -57,14 +59,8 @@ func NewPartyWSHandlerV3Room(manager *watchparty.Manager, authSvc *auth.Service,
 }
 
 func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	token := QueryParamToken(r)
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "token query parameter required")
-		return
-	}
-	claims, err := h.authSvc.ValidateAccessToken(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid or expired token")
+	claims, ok := requireQueryTokenClaims(w, r, h.authSvc, h.versionStore)
+	if !ok {
 		return
 	}
 

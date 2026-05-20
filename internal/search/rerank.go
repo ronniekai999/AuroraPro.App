@@ -14,10 +14,11 @@ import (
 
 // rerankInputCap is the maximum number of candidates we send to the LLM
 // reranker. Two constraints:
-//   1. Cloud chat models start returning HTTP 500s around 40+ candidates.
-//   2. gpt-oss:20b's mandatory thinking traces scale with prompt size —
-//      25 candidates triggered ~30s response times (timing out our budget);
-//      15 candidates land in ~15s comfortably.
+//  1. Cloud chat models start returning HTTP 500s around 40+ candidates.
+//  2. gpt-oss:20b's mandatory thinking traces scale with prompt size —
+//     25 candidates triggered ~30s response times (timing out our budget);
+//     15 candidates land in ~15s comfortably.
+//
 // 15 is the sweet spot: still gives the LLM enough variety to drop weak
 // matches (vector recall is already ranked, so the top 15 contain the
 // best candidates), and keeps the round-trip well inside the budget on

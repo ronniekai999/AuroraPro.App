@@ -633,6 +633,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       ac.abort()
       closeAndCleanup()
     }
+    // currentSubIndex is read once to restore subtitles across target changes;
+    // adding it as a dependency would restart playback when the user toggles subs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target, closeAndCleanup])
 
   // Keepalive ticker — runs while a session is active. V1 uses 10s.

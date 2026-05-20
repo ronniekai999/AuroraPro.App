@@ -14,7 +14,7 @@ import (
 //   - afOnly:     true = adaptation field only (no payload)
 //   - afLen:      adaptation field length (0 = no adaptation field; >0 = has AF)
 //   - pesPayload: raw bytes placed after TS header (and AF). If pusi=true,
-//                 this should be a valid PES header with optional PTS.
+//     this should be a valid PES header with optional PTS.
 //
 // Returns a 188-byte TS packet.
 func buildTSPacket(pid uint16, pusi bool, afOnly bool, afLen int, pesPayload []byte) []byte {
@@ -63,13 +63,15 @@ func buildTSPacket(pid uint16, pusi bool, afOnly bool, afLen int, pesPayload []b
 // buildPESHeaderWithPTS constructs a PES header with a 33-bit PTS value.
 //
 // PES format (first 14+ bytes):
-//   [00 00 01] [StreamID] [PES_length(2)] [flags(2)] [PES_header_data_length]
-//   [PTS(5 bytes)]
+//
+//	[00 00 01] [StreamID] [PES_length(2)] [flags(2)] [PES_header_data_length]
+//	[PTS(5 bytes)]
 //
 // The PTS is encoded as:
-//   Byte 0: [0010 xxx1] where xxx = PTS[32..30] (for PTS-only; 0011 for PTS+DTS)
-//   Byte 1-2: [PTS[29..22] | PTS[21..15]<<1 | marker]
-//   Byte 3-4: [PTS[14..7] | PTS[6..0]<<1 | marker]
+//
+//	Byte 0: [0010 xxx1] where xxx = PTS[32..30] (for PTS-only; 0011 for PTS+DTS)
+//	Byte 1-2: [PTS[29..22] | PTS[21..15]<<1 | marker]
+//	Byte 3-4: [PTS[14..7] | PTS[6..0]<<1 | marker]
 func buildPESHeaderWithPTS(streamID byte, pts int64) []byte {
 	pes := make([]byte, 14)
 
@@ -343,10 +345,10 @@ func TestExtractFirstPTS_NoPTSFlag(t *testing.T) {
 	// PES header with PTS/DTS flags = 00 (no PTS) — should be skipped
 	pes := make([]byte, 14)
 	pes[0], pes[1], pes[2] = 0, 0, 1 // start code
-	pes[3] = 0xE0                      // video stream
-	pes[6] = 0x80                      // MPEG-2 marker
-	pes[7] = 0x00                      // PTS/DTS flags = 00 (no timestamps)
-	pes[8] = 0                         // header data length = 0
+	pes[3] = 0xE0                    // video stream
+	pes[6] = 0x80                    // MPEG-2 marker
+	pes[7] = 0x00                    // PTS/DTS flags = 00 (no timestamps)
+	pes[8] = 0                       // header data length = 0
 	noPTSPkt := buildTSPacket(0x100, true, false, 0, pes)
 
 	// Real PES with PTS
@@ -485,17 +487,17 @@ func TestExtractFirstPTS_PTSWithDTS(t *testing.T) {
 	pes[3] = 0xE0 // video
 	pes[4] = 0x00
 	pes[5] = 0x00
-	pes[6] = 0x80                                                 // MPEG-2
-	pes[7] = 0xC0                                                 // PTS+DTS present (bits 7-6 = 11)
-	pes[8] = 10                                                   // header data length (5 PTS + 5 DTS)
-	pes[9] = byte(0x31 | ((int(pts>>30) & 0x07) << 1))           // PTS byte 0 with 0011 prefix
-	mid := (pts >> 15) & 0x7FFF                                   // PTS[29..15]
-	pes[10] = byte(mid >> 7)                                      // PTS byte 1
-	pes[11] = byte((mid&0x7F)<<1) | 0x01                         // PTS byte 2
-	low := pts & 0x7FFF                                           // PTS[14..0]
-	pes[12] = byte(low >> 7)                                      // PTS byte 3
-	pes[13] = byte((low&0x7F)<<1) | 0x01                         // PTS byte 4
-	pes[14] = byte(0x11 | ((int(pts>>30) & 0x07) << 1))          // DTS byte 0 (0001 prefix)
+	pes[6] = 0x80                                               // MPEG-2
+	pes[7] = 0xC0                                               // PTS+DTS present (bits 7-6 = 11)
+	pes[8] = 10                                                 // header data length (5 PTS + 5 DTS)
+	pes[9] = byte(0x31 | ((int(pts>>30) & 0x07) << 1))          // PTS byte 0 with 0011 prefix
+	mid := (pts >> 15) & 0x7FFF                                 // PTS[29..15]
+	pes[10] = byte(mid >> 7)                                    // PTS byte 1
+	pes[11] = byte((mid&0x7F)<<1) | 0x01                        // PTS byte 2
+	low := pts & 0x7FFF                                         // PTS[14..0]
+	pes[12] = byte(low >> 7)                                    // PTS byte 3
+	pes[13] = byte((low&0x7F)<<1) | 0x01                        // PTS byte 4
+	pes[14] = byte(0x11 | ((int(pts>>30) & 0x07) << 1))         // DTS byte 0 (0001 prefix)
 	pes[15], pes[16], pes[17], pes[18] = 0x00, 0x01, 0x00, 0x01 // DTS filler
 
 	pkt := buildTSPacket(0x100, true, false, 0, pes)

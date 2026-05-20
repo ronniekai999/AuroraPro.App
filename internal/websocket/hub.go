@@ -15,10 +15,10 @@ const (
 	sendBufferSize = 64
 
 	// WebSocket health check parameters
-	maxMessageSize = 4096              // max inbound message size (bytes)
-	pongWait       = 60 * time.Second  // time allowed to read the next pong
-	pingInterval   = 50 * time.Second  // must be less than pongWait
-	writeWait      = 10 * time.Second  // time allowed to write a message
+	maxMessageSize = 4096             // max inbound message size (bytes)
+	pongWait       = 60 * time.Second // time allowed to read the next pong
+	pingInterval   = 50 * time.Second // must be less than pongWait
+	writeWait      = 10 * time.Second // time allowed to write a message
 )
 
 // OriginChecker returns true if a given origin is allowed to connect.
