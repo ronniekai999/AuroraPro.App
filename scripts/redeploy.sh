@@ -38,13 +38,16 @@
 #   1  build failed (npm or go)
 #   2  install / file copy failed
 #   3  service restart failed or health check timed out
-#   4  preflight failure (wrong dir, missing tools)
+#   4  preflight failure (wrong dir, missing tools, OS, lock held)
+# ── END HELP ──────────────────────────────────────────────────────
 
 set -euo pipefail
 
 # ── Constants (must match install.sh) ────────────────────────────
 INSTALL_BIN="/usr/local/bin/aurora"
 INSTALL_DIR="/opt/aurora"
+INSTALL_USER="aurora"
+INSTALL_GROUP="aurora"
 SPA_SRC_DIR="static/redesign/app"
 SPA_OUTPUT_DIR="static/v2"
 HEALTH_URL="http://localhost:8484/api/health"
@@ -65,7 +68,11 @@ for arg in "$@"; do
         --skip-npm|--skip-frontend) SKIP_FRONTEND=true ;;
         --no-restart) RESTART=false ;;
         -h|--help)
-            sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
+            # Print the header comment up to (but not including) the
+            # END HELP sentinel. Drift-resistant: adding lines to the
+            # header doesn't break --help, and trailing code never
+            # leaks in.
+            sed -n '2,/^# ── END HELP/{/^# ── END HELP/!p;}' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -90,6 +97,16 @@ echo "    Aurora Media Server — Redeploy"
 echo "  ════════════════════════════════════════════════════════════"
 echo ""
 info "Project root: $PROJECT_DIR"
+
+# OS guard. Aurora is bare-metal Linux only — install.sh:391 refuses
+# macOS, redeploy.sh should match. The /opt/aurora layout assumed
+# below doesn't exist on macOS / BSDs anyway, but failing fast with
+# a clear message beats letting the script create files and stall
+# on systemctl.
+case "$(uname -s)" in
+    Linux) ;;
+    *) error "redeploy.sh only supports Linux (this is $(uname -s)). On macOS, build locally with 'go build ./cmd/aurora' and run the binary directly." 4 ;;
+esac
 
 # Sanity: this is actually an Aurora checkout.
 if [ ! -f "$PROJECT_DIR/go.mod" ] || [ ! -d "$PROJECT_DIR/cmd/aurora" ]; then
@@ -119,6 +136,56 @@ if ! sudo -n true 2>/dev/null; then
     info "sudo password needed for install + restart..."
     sudo -v
 fi
+
+# Background sudo keepalive. Default sudo timestamp is 5 minutes —
+# a cold-cache npm build alone can blow past that and force a mid-
+# deploy password prompt. The keepalive refreshes the timestamp
+# every 60s so the script never stalls. PID stashed so the EXIT
+# trap can reap it cleanly.
+sudo -n true 2>/dev/null && (
+    while true; do
+        sudo -n true 2>/dev/null || exit 0
+        sleep 60
+    done
+) &
+SUDO_KEEPALIVE_PID=$!
+
+# ── Single-deploy lock ───────────────────────────────────────────
+# aurora-update.timer fires aurora-update.sh every 5 min, running
+# essentially the same rebuild + install + restart pipeline.
+# Without a lock, a manual redeploy.sh can interleave with the
+# auto-updater and corrupt /opt/aurora/static (one script's `mv
+# static.new static` can land while the other is mid-cp).
+#
+# We share /var/lock/aurora-deploy.lock with any future flock'd
+# auto-updater. `flock -n` returns non-zero immediately if the lock
+# is held, so the operator gets a clear "auto-updater is running,
+# wait or stop the timer" message rather than a confusing race.
+#
+# fd 9 is arbitrary — chosen high enough to avoid clashing with
+# stdin/stdout/stderr (0,1,2). The trap releases via EXIT so even
+# kill -9 of the script frees the lock (kernel reaps the fd).
+LOCK_FILE="/var/lock/aurora-deploy.lock"
+# Ensure the lockfile is owned in a way both this user and the
+# auto-updater (running as root) can open. /var/lock is typically
+# world-writable + sticky on Linux.
+if ! sudo touch "$LOCK_FILE" 2>/dev/null; then
+    warn "Could not create $LOCK_FILE — running WITHOUT cross-script lock. If aurora-update.timer fires mid-deploy, racy state on /opt/aurora is possible. Consider: sudo systemctl stop aurora-update.timer"
+else
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        error "Another deploy (likely aurora-update.service) is running. Wait for it to finish, or 'sudo systemctl stop aurora-update.timer' to suspend the auto-updater." 4
+    fi
+fi
+
+# Cleanup on exit: release the lock (closing fd 9 drops it; the
+# kernel does this on process exit too, but explicit is safer) and
+# reap the sudo keepalive. Done in a single trap so the LIFO order
+# doesn't matter.
+trap '
+    [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+' EXIT
 
 # ══════════════════════════════════════════════════════════════════
 # Step 1 — Build the V2 React SPA
@@ -171,33 +238,52 @@ BIN_SIZE=$(du -h aurora | awk '{print $1}')
 ok "Binary built ($BIN_SIZE)"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 3 — Install the binary
+# Step 3 — Stage the binary (rename last, after static + migrations)
 # ══════════════════════════════════════════════════════════════════
-step "Step 3/5: Installing the binary"
-# `install -m 755` is atomic on the same filesystem: it renames into
-# place, so a running aurora process keeps its open file handle on
-# the old binary until it restarts. No "text file busy" risk.
-if ! sudo install -m 755 aurora "$INSTALL_BIN"; then
-    error "Failed to install binary to $INSTALL_BIN" 2
+# Stage as $INSTALL_BIN.new so the FINAL rename-into-place happens
+# AFTER the static + migrations swap. Pre-audit, the binary swap
+# came first; if the static cp failed (disk full, permission glitch),
+# the running aurora kept its old inode but the next systemctl
+# restart — including the 5-min auto-update timer's restart — would
+# launch the new binary against the old static dir. Mismatch can
+# break the SPA bundle path resolution. Stage-and-rename-last
+# matches aurora-update.sh's pattern.
+step "Step 3/5: Staging the binary (final swap in step 4)"
+if ! sudo install -m 755 aurora "$INSTALL_BIN.new"; then
+    error "Failed to stage binary at $INSTALL_BIN.new" 2
 fi
-ok "Binary installed → $INSTALL_BIN"
+ok "Binary staged → $INSTALL_BIN.new"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 4 — Atomic-swap static/ + copy migrations/
+# Step 4 — Atomic-swap static/ + copy migrations/, then promote binary
 # ══════════════════════════════════════════════════════════════════
-step "Step 4/5: Updating static assets + migrations"
+step "Step 4/5: Updating static assets + migrations, promoting binary"
 
 # Migrations: small SQL files, just overwrite. Aurora's migration
 # runner reads them at startup and applies only those not in the
 # schema_migrations table.
+#
+# `shopt -s nullglob` (in a subshell) makes an empty migrations dir
+# expand to zero args instead of the literal `*.sql` pattern, which
+# would fail under set -e. install.sh has the same latent issue
+# but only runs once; redeploy.sh runs often enough to care.
 if ! sudo mkdir -p "$INSTALL_DIR/migrations"; then
     error "Failed to ensure migrations dir" 2
 fi
-if ! sudo cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"; then
-    error "Failed to copy migrations" 2
+SQL_FILES=()
+shopt -s nullglob
+for f in "$PROJECT_DIR"/migrations/*.sql; do
+    SQL_FILES+=("$f")
+done
+shopt -u nullglob
+if [ "${#SQL_FILES[@]}" -eq 0 ]; then
+    warn "No migration files found in $PROJECT_DIR/migrations — proceeding without copy"
+else
+    if ! sudo cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/"; then
+        error "Failed to copy migrations" 2
+    fi
+    ok "Copied ${#SQL_FILES[@]} migration files"
 fi
-MIGRATION_COUNT=$(find "$PROJECT_DIR/migrations" -maxdepth 1 -name '*.sql' | wc -l | tr -d ' ')
-ok "Copied $MIGRATION_COUNT migration files"
 
 # Static assets: atomic swap pattern matching install.sh.
 # Copy → static.new, rename existing → static.old, rename new → static,
@@ -207,7 +293,10 @@ ok "Copied $MIGRATION_COUNT migration files"
 info "Copying static/ → $INSTALL_DIR/static.new..."
 sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/static.old"
 if ! sudo cp -r "$PROJECT_DIR/static" "$INSTALL_DIR/static.new"; then
-    error "Failed to copy static/" 2
+    # Roll back the staged binary so a subsequent restart can't
+    # accidentally pick up the new code against the old static.
+    sudo rm -f "$INSTALL_BIN.new"
+    error "Failed to copy static/ — staged binary rolled back" 2
 fi
 if [ -d "$INSTALL_DIR/static" ]; then
     sudo mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
@@ -215,6 +304,22 @@ fi
 sudo mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
 sudo rm -rf "$INSTALL_DIR/static.old"
 ok "Static assets swapped"
+
+# Match install.sh + aurora-update.sh: deployed dirs are
+# aurora:aurora-owned so future write paths (cache reflowing into
+# /opt/aurora subdirs, future features) don't trip on root-owned
+# files. World-readable defaults work today but this is
+# defense-in-depth.
+sudo chown -R "$INSTALL_USER:$INSTALL_GROUP" "$INSTALL_DIR/static" "$INSTALL_DIR/migrations" 2>/dev/null || \
+    warn "chown to $INSTALL_USER:$INSTALL_GROUP failed — files left root-owned (readable but not writable by aurora)"
+
+# Final binary swap: rename .new into place. This is the
+# point-of-no-return — after this line, the next systemctl restart
+# picks up the new binary. mv is atomic on a single filesystem.
+if ! sudo mv "$INSTALL_BIN.new" "$INSTALL_BIN"; then
+    error "Failed to promote $INSTALL_BIN.new → $INSTALL_BIN (deploy is in a half-state; investigate manually)" 2
+fi
+ok "Binary promoted → $INSTALL_BIN"
 
 # Clean up the build artifact in the project dir so a subsequent
 # `git status` is clean. The deployed copy is at $INSTALL_BIN.
