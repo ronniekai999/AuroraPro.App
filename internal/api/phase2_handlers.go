@@ -913,16 +913,16 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		FileID           int64  `json:"file_id"`
-		FileType         string `json:"file_type"`                    // "media" or "episode"
-		BurnSubIndex     *int   `json:"burn_sub_index,omitempty"`     // subtitle stream index to burn in
-		BurnSubExternal  string `json:"burn_sub_external,omitempty"`  // external subtitle path
-		Remux            bool   `json:"remux,omitempty"`              // direct stream (copy codecs)
-		AudioPassthrough bool   `json:"audio_passthrough,omitempty"`  // copy audio instead of re-encoding
-		AudioTrackIndex  *int   `json:"audio_track_index,omitempty"`  // 0-based audio track; nil = FFmpeg default
-		AudioChannels    int    `json:"audio_channels,omitempty"`     // source audio channel count for bitrate scaling
-		HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`        // apply HDR-to-SDR tonemapping
-		VideoCodec       string `json:"video_codec,omitempty"`        // source video codec for BSF selection in remux
-		StartSec         int    `json:"start_sec,omitempty"`          // resume position: FFmpeg -ss seek offset in seconds
+		FileType         string `json:"file_type"`                   // "media" or "episode"
+		BurnSubIndex     *int   `json:"burn_sub_index,omitempty"`    // subtitle stream index to burn in
+		BurnSubExternal  string `json:"burn_sub_external,omitempty"` // external subtitle path
+		Remux            bool   `json:"remux,omitempty"`             // direct stream (copy codecs)
+		AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // copy audio instead of re-encoding
+		AudioTrackIndex  *int   `json:"audio_track_index,omitempty"` // 0-based audio track; nil = FFmpeg default
+		AudioChannels    int    `json:"audio_channels,omitempty"`    // source audio channel count for bitrate scaling
+		HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // apply HDR-to-SDR tonemapping
+		VideoCodec       string `json:"video_codec,omitempty"`       // source video codec for BSF selection in remux
+		StartSec         int    `json:"start_sec,omitempty"`         // resume position: FFmpeg -ss seek offset in seconds
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1104,14 +1104,14 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]interface{}{
-		"session_id":         session.ID,
-		"master_playlist":    fmt.Sprintf("/api/stream/hls/%s/master.m3u8", session.ID),
-		"profiles":           session.Profiles,
-		"source_width":       session.SourceWidth,
-		"source_height":      session.SourceHeight,
-		"remux":              session.Remux,
-		"audio_passthrough":  session.AudioPassthrough,
-		"start_sec":          session.StartSec,
+		"session_id":        session.ID,
+		"master_playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8", session.ID),
+		"profiles":          session.Profiles,
+		"source_width":      session.SourceWidth,
+		"source_height":     session.SourceHeight,
+		"remux":             session.Remux,
+		"audio_passthrough": session.AudioPassthrough,
+		"start_sec":         session.StartSec,
 	})
 }
 
@@ -1518,6 +1518,39 @@ func (h *ProgressHandler) SetGamificationEngine(g *GamificationEngine) {
 	h.gamify = g
 }
 
+func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *http.Request, userID int64, requested *int64) (int64, bool) {
+	if requested != nil && *requested != 0 {
+		if *requested < 0 {
+			writeError(w, http.StatusBadRequest, "invalid profile_id")
+			return 0, false
+		}
+		profile, err := h.queries.GetProfile(r.Context(), *requested)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to validate profile")
+			return 0, false
+		}
+		if profile == nil {
+			writeError(w, http.StatusNotFound, "profile not found")
+			return 0, false
+		}
+		if profile.UserID != userID {
+			writeError(w, http.StatusForbidden, "profile does not belong to this user")
+			return 0, false
+		}
+		return profile.ID, true
+	}
+
+	dp, err := h.queries.GetDefaultProfile(r.Context(), userID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve default profile")
+		return 0, false
+	}
+	if dp == nil {
+		return 0, true
+	}
+	return dp.ID, true
+}
+
 // UpdateProgress reports playback position.
 func (h *ProgressHandler) UpdateProgress(w http.ResponseWriter, r *http.Request) {
 	mediaID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -1543,14 +1576,9 @@ func (h *ProgressHandler) UpdateProgress(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Resolve profile_id: use the supplied value, or fall back to the user's default profile.
-	var profileID int64
-	if req.ProfileID != nil && *req.ProfileID != 0 {
-		profileID = *req.ProfileID
-	} else {
-		if dp, err := h.queries.GetDefaultProfile(r.Context(), claims.UserID); err == nil && dp != nil {
-			profileID = dp.ID
-		}
+	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, req.ProfileID)
+	if !ok {
+		return
 	}
 
 	wp := &models.WatchProgress{
@@ -1687,14 +1715,9 @@ func (h *ProgressHandler) MarkWatched(w http.ResponseWriter, r *http.Request) {
 	}
 	decodeJSON(w, r, &req) // Body is optional
 
-	// Resolve profile_id: use the supplied value, or fall back to the user's default profile.
-	var profileID int64
-	if req.ProfileID != nil && *req.ProfileID != 0 {
-		profileID = *req.ProfileID
-	} else {
-		if dp, err := h.queries.GetDefaultProfile(r.Context(), claims.UserID); err == nil && dp != nil {
-			profileID = dp.ID
-		}
+	profileID, ok := h.resolveProgressProfileID(w, r, claims.UserID, req.ProfileID)
+	if !ok {
+		return
 	}
 
 	wp := &models.WatchProgress{
