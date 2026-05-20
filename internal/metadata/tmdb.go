@@ -1,6 +1,8 @@
 package metadata
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -150,6 +152,41 @@ func (c *TMDBClient) get(ctx context.Context, path string, params url.Values) ([
 		if err != nil {
 			lastErr = fmt.Errorf("read response: %w", err)
 			continue
+		}
+
+		// Defensive gzip handling.
+		//
+		// 2026-05-20 — observed in production: TMDB occasionally
+		// returns a gzip-compressed body WITHOUT the matching
+		// `Content-Encoding: gzip` response header. Without that
+		// header, Go's http.Transport doesn't auto-decompress, so
+		// we read raw gzip bytes and json.Unmarshal chokes on the
+		// `\x1f` magic byte ("invalid character '\\x1f' looking
+		// for beginning of value"). One refresh in ~100 fails this
+		// way; the next refresh of the same item usually succeeds.
+		//
+		// Detect the 2-byte gzip magic (0x1F 0x8B) and attempt to
+		// gunzip ourselves before handing the body to the caller.
+		// If gunzip itself fails, we keep the original body — the
+		// caller's json.Unmarshal will then surface the underlying
+		// error with full context.
+		if len(body) >= 2 && body[0] == 0x1F && body[1] == 0x8B {
+			gz, gzErr := gzip.NewReader(bytes.NewReader(body))
+			if gzErr == nil {
+				decompressed, dErr := io.ReadAll(io.LimitReader(gz, 16<<20))
+				_ = gz.Close()
+				if dErr == nil {
+					slog.Debug("tmdb: gunzipped body missing Content-Encoding header",
+						"path", path, "compressed_size", len(body), "decompressed_size", len(decompressed))
+					body = decompressed
+				} else {
+					slog.Warn("tmdb: response started with gzip magic but gunzip failed",
+						"path", path, "error", dErr)
+				}
+			} else {
+				slog.Warn("tmdb: response started with gzip magic but gzip.NewReader failed",
+					"path", path, "error", gzErr)
+			}
 		}
 
 		switch {
