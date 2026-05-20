@@ -129,6 +129,70 @@ if $RESTART && ! command -v systemctl &>/dev/null; then
     warn "systemctl not available — service restart will be skipped; pass --no-restart to silence this"
 fi
 
+# Systemd unit drift detection.
+#
+# 2026-05-20 — observed in production: redeploy.sh's previous flow
+# replaced the binary + static + migrations but NEVER updated the
+# systemd unit at /etc/systemd/system/aurora.service. When the unit
+# file in the repo changes (e.g., a new ReadWritePaths= entry for
+# /var/lib/aurora to support the .path-activated updater), the
+# running service uses the OLD unit definition forever. Symptom in
+# production: Aurora 500s on "Update Now" with
+#   open /var/lib/aurora/trigger-update: read-only file system
+# because ProtectSystem=strict was blocking the write that the new
+# unit definition would have allowed.
+#
+# Fix: detect drift here, BEFORE building anything, and either
+# auto-update the unit (recommended for routine deploys) or refuse
+# and point the operator at install.sh. We auto-update because
+# unit drift is invisible otherwise — the operator only finds out
+# when a feature breaks in production.
+#
+# Files we manage: aurora.service + the auto-updater trio. Sudoers
+# is excluded (install.sh's responsibility; safer to require an
+# explicit install.sh re-run for privilege changes).
+#
+# Gated on systemctl availability (audit MED-1) — on hosts without
+# systemd (Alpine, containers), drift detection is meaningless and
+# auto-update would try to write to /etc/systemd/system/ which
+# likely doesn't exist.
+UNIT_FILES_DRIFTED=()
+UPDATE_UNITS=false
+if command -v systemctl &>/dev/null; then
+    check_unit_drift() {
+        local src="$1" dst="$2"
+        [ -f "$src" ] || return 1
+        [ -f "$dst" ] || { UNIT_FILES_DRIFTED+=("$src (not installed at $dst)"); return 1; }
+        # install.sh rewrites `postgresql.service` → `postgresql-N.service`
+        # in aurora.service depending on the detected PG service name.
+        # Normalize that on both sides before comparing so the rewrite
+        # doesn't register as drift.
+        #
+        # No sudo on the dst read — /etc/systemd/system/*.service files
+        # are 644 root:root by default (world-readable), so plain sed
+        # works and avoids a spurious sudo prompt (audit LOW-1).
+        local src_norm dst_norm
+        src_norm=$(sed 's/postgresql-[0-9]*\.service/postgresql.service/g' "$src")
+        dst_norm=$(sed 's/postgresql-[0-9]*\.service/postgresql.service/g' "$dst")
+        if [ "$src_norm" != "$dst_norm" ]; then
+            UNIT_FILES_DRIFTED+=("$src")
+        fi
+    }
+    check_unit_drift "$PROJECT_DIR/scripts/aurora.service"        /etc/systemd/system/aurora.service
+    check_unit_drift "$PROJECT_DIR/scripts/aurora-update.service" /etc/systemd/system/aurora-update.service
+    check_unit_drift "$PROJECT_DIR/scripts/aurora-update.timer"   /etc/systemd/system/aurora-update.timer
+    check_unit_drift "$PROJECT_DIR/scripts/aurora-update.path"    /etc/systemd/system/aurora-update.path
+
+    if [ "${#UNIT_FILES_DRIFTED[@]}" -gt 0 ]; then
+        warn "Systemd unit drift detected (deployed copy at /etc/systemd/system/ doesn't match repo):"
+        for u in "${UNIT_FILES_DRIFTED[@]}"; do
+            warn "    $u"
+        done
+        warn "Auto-updating units in step 5 (and re-running daemon-reload before restart)."
+        UPDATE_UNITS=true
+    fi
+fi
+
 # Sudo capability. The build steps don't need root; the install
 # + systemctl restart steps do. Prompt for the password up front
 # so the script doesn't pause mid-deploy.
@@ -342,6 +406,41 @@ if ! command -v systemctl &>/dev/null; then
 fi
 
 step "Step 5/5: Restarting aurora.service"
+
+# Apply any drifted systemd units BEFORE restart, then daemon-reload
+# so the new ExecStart / ReadWritePaths / etc. take effect on this
+# very restart. Without daemon-reload, systemctl restart uses the
+# previously-cached unit definition.
+#
+# install.sh's pg_service rewrite is applied here too so an admin
+# on Fedora-17 (postgresql-17.service) doesn't see the After= line
+# stomped back to plain postgresql.service.
+if $UPDATE_UNITS; then
+    info "Applying drifted systemd units..."
+    PG_SERVICE_NAME=""
+    for svc in postgresql postgresql-{17,16,15,14,13}; do
+        if systemctl cat "${svc}.service" &>/dev/null; then
+            PG_SERVICE_NAME="$svc"
+            break
+        fi
+    done
+    for unit in aurora.service aurora-update.service aurora-update.timer aurora-update.path; do
+        src="$PROJECT_DIR/scripts/$unit"
+        [ -f "$src" ] || continue
+        if ! sudo cp "$src" "/etc/systemd/system/$unit"; then
+            error "Failed to copy $unit to /etc/systemd/system/" 3
+        fi
+        # Apply the PG-service patch on aurora.service only.
+        if [ "$unit" = "aurora.service" ] && [ -n "$PG_SERVICE_NAME" ] && [ "$PG_SERVICE_NAME" != "postgresql" ]; then
+            sudo sed -i "s/postgresql\.service/${PG_SERVICE_NAME}.service/g" "/etc/systemd/system/$unit"
+        fi
+    done
+    if ! sudo systemctl daemon-reload; then
+        error "systemctl daemon-reload failed — units may be syntactically broken; check 'systemd-analyze verify /etc/systemd/system/aurora.service'" 3
+    fi
+    ok "Systemd units updated + reloaded"
+fi
+
 if ! sudo systemctl restart aurora; then
     error "systemctl restart aurora failed — check 'journalctl -u aurora -n 50'" 3
 fi
