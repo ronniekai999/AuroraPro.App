@@ -108,16 +108,40 @@ if ! command -v nginx &>/dev/null; then
 fi
 ok "nginx: $(nginx -v 2>&1 | awk -F/ '{print $2}')"
 
+# Install certbot + nginx plugin. Important: these are SEPARATE
+# packages — `apt install certbot` does NOT pull in the nginx plugin
+# automatically. The original version of this script gated the WHOLE
+# install block on `command -v certbot`, so if certbot was already
+# installed (via a prior install.sh run or distro defaults), the nginx
+# plugin install was skipped and `certbot --nginx` would fail with
+# "The requested nginx plugin does not appear to be installed."
+# Now: install certbot if missing, AND ALWAYS ensure the nginx plugin.
+# `pkg_install` is idempotent (apt/dnf/etc treat "already installed"
+# as a no-op success), so this is cheap to always run.
 if ! command -v certbot &>/dev/null; then
-    info "Installing certbot + nginx plugin..."
-    if command -v apt-get &>/dev/null;   then pkg_install certbot python3-certbot-nginx
-    elif command -v dnf &>/dev/null;     then pkg_install certbot python3-certbot-nginx
-    elif command -v yum &>/dev/null;     then pkg_install certbot python3-certbot-nginx
-    elif command -v pacman &>/dev/null;  then pkg_install certbot certbot-nginx
-    elif command -v zypper &>/dev/null;  then pkg_install python3-certbot python3-certbot-nginx
-    fi
+    info "Installing certbot..."
+    pkg_install certbot
 fi
-ok "certbot installed"
+
+info "Ensuring certbot nginx plugin is installed..."
+if   command -v apt-get &>/dev/null;  then pkg_install python3-certbot-nginx
+elif command -v dnf     &>/dev/null;  then pkg_install python3-certbot-nginx
+elif command -v yum     &>/dev/null;  then pkg_install python3-certbot-nginx
+elif command -v pacman  &>/dev/null;  then pkg_install certbot-nginx
+elif command -v zypper  &>/dev/null;  then pkg_install python3-certbot-nginx
+fi
+
+# Sanity check: even after the install, verify the plugin is loadable
+# by certbot. If `certbot plugins` doesn't list `nginx`, fail fast
+# with an actionable message rather than letting the user discover
+# this via the Step 5 cert-issuance failure.
+if ! certbot plugins 2>/dev/null | grep -q '^\* nginx'; then
+    error "certbot nginx plugin is installed but not visible to certbot. Try:
+  sudo apt-get install --reinstall python3-certbot-nginx
+  certbot plugins  # should list '* nginx'
+Then re-run this script." 1
+fi
+ok "certbot + nginx plugin ready"
 
 # ── Detect existing aurora nginx config ──────────────────────────
 step "Step 2/5: Detecting existing aurora nginx config"
