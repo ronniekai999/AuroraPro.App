@@ -1557,14 +1557,25 @@ if $SERVICE_OK && [ -n "$PROXY_DOMAIN" ]; then
         warn "AURORA_DOMAIN is set but AURORA_CERTBOT_EMAIL is not — skipping HTTPS setup."
     else
         if ! command -v nginx &>/dev/null;   then pkg_install nginx; fi
+        # 2026-05-20 — certbot and its nginx plugin are SEPARATE
+        # packages. The old code gated BOTH installs on
+        # `! command -v certbot`; on a box where certbot was already
+        # present (prior setup attempt, distro defaults), the plugin
+        # install got skipped and `certbot --nginx` would fail with
+        # "The requested nginx plugin does not appear to be installed."
+        # Install certbot if missing; ALWAYS ensure the plugin (the
+        # underlying apt/dnf/etc treat re-installs as no-ops).
         if ! command -v certbot &>/dev/null; then
             case "$PKG_MGR" in
-                apt)        pkg_install certbot; pkg_install python3-certbot-nginx ;;
-                dnf|yum)    pkg_install certbot; pkg_install python3-certbot-nginx ;;
-                pacman)     pkg_install certbot; pkg_install certbot-nginx ;;
-                zypper)     pkg_install python3-certbot; pkg_install python3-certbot-nginx ;;
+                apt|dnf|yum|pacman)  pkg_install certbot ;;
+                zypper)              pkg_install python3-certbot ;;
             esac
         fi
+        case "$PKG_MGR" in
+            apt|dnf|yum)  pkg_install python3-certbot-nginx ;;
+            pacman)       pkg_install certbot-nginx ;;
+            zypper)       pkg_install python3-certbot-nginx ;;
+        esac
 
         # Nginx config layout differs by distro.
         if [ -d /etc/nginx/sites-available ]; then
