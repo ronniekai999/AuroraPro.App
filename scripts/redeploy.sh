@@ -161,8 +161,19 @@ UPDATE_UNITS=false
 if command -v systemctl &>/dev/null; then
     check_unit_drift() {
         local src="$1" dst="$2"
-        [ -f "$src" ] || return 1
-        [ -f "$dst" ] || { UNIT_FILES_DRIFTED+=("$src (not installed at $dst)"); return 1; }
+        # IMPORTANT: every exit path must return 0. The function's
+        # "result" is the side-effect on UNIT_FILES_DRIFTED, not the
+        # return code. Returning non-zero would trip `set -e` at the
+        # call site (top-level statements, not in a conditional) and
+        # silently kill the whole script — observed 2026-05-20 when
+        # aurora-update.path was missing on the deploy target and
+        # the operator saw the script stop after "Project root:" with
+        # no error message.
+        [ -f "$src" ] || return 0
+        if [ ! -f "$dst" ]; then
+            UNIT_FILES_DRIFTED+=("$src (not installed at $dst)")
+            return 0
+        fi
         # install.sh rewrites `postgresql.service` → `postgresql-N.service`
         # in aurora.service depending on the detected PG service name.
         # Normalize that on both sides before comparing so the rewrite
@@ -177,6 +188,7 @@ if command -v systemctl &>/dev/null; then
         if [ "$src_norm" != "$dst_norm" ]; then
             UNIT_FILES_DRIFTED+=("$src")
         fi
+        return 0
     }
     check_unit_drift "$PROJECT_DIR/scripts/aurora.service"        /etc/systemd/system/aurora.service
     check_unit_drift "$PROJECT_DIR/scripts/aurora-update.service" /etc/systemd/system/aurora-update.service
