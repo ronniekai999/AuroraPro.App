@@ -79,10 +79,29 @@ Logs at `/var/log/aurora` and via journald.
 
 ### Upgrading Aurora
 
-The 5-minute auto-updater handles routine code pulls automatically. But when
-an update touches `scripts/install.sh` itself (systemd unit changes, new
-state directories, schema-side ACL adjustments), re-run the installer so it
-can apply those changes:
+**Routine updates** are handled automatically by the 5-min `aurora-update.timer`
+— it does `git fetch` + rebuild + restart when origin has new commits.
+
+**Manual rebuild** from a local checkout (when the auto-updater is wedged,
+you're applying local changes, or you want a faster turnaround than the
+5-min tick):
+
+```bash
+cd <your-aurora-clone>
+git pull
+./scripts/redeploy.sh        # build SPA + Go binary, atomic-swap, restart
+```
+
+`redeploy.sh` is the right tool for the routine "I edited code, deploy it"
+loop. It builds the V2 SPA (`npm ci && vite build`), builds the Go binary,
+atomic-swaps `/opt/aurora/static/`, copies migrations, restarts the service,
+and polls `/api/health` until it answers. Use `--skip-npm` to reuse an
+existing frontend build, or `--no-restart` to stage files without bouncing
+the service.
+
+**Reinstall** the systemd units / sudoers / ACLs when an update touches
+`scripts/install.sh` itself (new state directories, systemd unit changes,
+schema-side ACL adjustments):
 
 ```bash
 cd /var/lib/aurora/source
