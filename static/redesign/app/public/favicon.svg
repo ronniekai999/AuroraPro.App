@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36">
+  <!-- Aurora favicon — matches the in-app sidebar logo at App.tsx:946-950.
+       Filled purple circle on transparent background + white play triangle.
+       Solid fill works better at favicon sizes than the in-app stroked
+       circle (anti-aliasing eats the stroke at 16x16). -->
+  <circle cx="18" cy="18" r="16" fill="#A855F7" />
+  <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
+</svg>

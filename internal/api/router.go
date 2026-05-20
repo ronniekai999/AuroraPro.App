@@ -202,6 +202,22 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Handle("/static/*", http.StripPrefix("/static/",
 				safeFileServer(http.Dir(deps.StaticDir))))
 
+			// 2026-05-20 — browsers auto-request /favicon.ico from
+			// the document root before the SPA's <link rel="icon">
+			// has a chance to override. We redirect to the SVG
+			// favicon that lives at /v2/favicon.svg (deployed by
+			// Vite's public/ copy step). Without this, anonymous
+			// /favicon.ico requests log 404 every time someone
+			// hits the bare root URL.
+			//
+			// 302 (StatusFound) matches the rest of this file's
+			// redirect philosophy — leaves room to change paths
+			// without permanent browser-cache lock-in (e.g., if
+			// the Vite base ever flips off /v2/).
+			r.Get("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/v2/favicon.svg", http.StatusFound)
+			})
+
 			// Aurora V2 SPA. The Vite build outputs to static/v2/, so
 			// /v2/assets/* resolves to real built files. Any path that
 			// DOESN'T match a real file (deep links like
