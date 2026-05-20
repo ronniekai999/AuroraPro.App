@@ -453,6 +453,38 @@ if $UPDATE_UNITS; then
     ok "Systemd units updated + reloaded"
 fi
 
+# Ensure /var/lib/aurora + the trigger-update file exist with the
+# right ownership / mode for the .path-activated updater.
+#
+# 2026-05-20 — observed in production after a redeploy: the in-app
+# "Update Now" returned `cannot write /var/lib/aurora/trigger-update`
+# even though aurora.service's ReadWritePaths was correctly updated.
+# Cause: the trigger file simply didn't exist, and aurora (as the
+# `aurora` user) couldn't O_CREATE it because /var/lib/aurora is
+# root:root 0755 — no group/other write. install.sh creates the
+# file root:aurora 0664 so aurora's group-write bit lets it touch.
+# redeploy.sh used to skip this step entirely; if the operator
+# never re-ran install.sh after the .path commit landed, the file
+# was permanently missing.
+#
+# Idempotent: install -d / install -m on existing files just resets
+# perms; the brief touch only fires on missing files. We don't ship
+# any data in the trigger file (the actual content is just a
+# timestamp written by the Go handler).
+if [ -d "$PROJECT_DIR/scripts" ] && [ -f "$PROJECT_DIR/scripts/aurora-update.path" ]; then
+    sudo install -d -m 0755 -o root -g root /var/lib/aurora
+    if [ ! -f /var/lib/aurora/trigger-update ]; then
+        sudo install -m 0664 -o root -g "$INSTALL_GROUP" /dev/null /var/lib/aurora/trigger-update
+        ok "Created /var/lib/aurora/trigger-update"
+    else
+        # Reset ownership + mode every time — cheap idempotency, and
+        # it'll heal a server whose file got cloned with wrong perms
+        # by some prior buggy script revision.
+        sudo chown root:"$INSTALL_GROUP" /var/lib/aurora/trigger-update
+        sudo chmod 0664 /var/lib/aurora/trigger-update
+    fi
+fi
+
 if ! sudo systemctl restart aurora; then
     error "systemctl restart aurora failed — check 'journalctl -u aurora -n 50'" 3
 fi
