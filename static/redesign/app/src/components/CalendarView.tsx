@@ -128,10 +128,10 @@ export function CalendarView({ onOpenMedia }: Props) {
     try { localStorage.setItem(LS_VIEW_MODE_KEY, viewMode) } catch { /* private mode */ }
   }, [viewMode])
 
-  if (error) return <p className="text-red-300 p-8">{error}</p>
-
   // Group episodes by UTC date key (YYYY-MM-DD) — used by both views.
   const groups = useMemoGroups(episodes)
+
+  if (error) return <p className="text-red-300 p-8">{error}</p>
 
   return (
     <div className="animate-fade-in">
