@@ -947,6 +947,54 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [playing, showControlsTemporarily])
 
+  // 2026-05-20 — document-level mousemove + keydown backstop.
+  //
+  // The wrapper-div's onMouseMove was sometimes failing to bring
+  // controls back during playback (reproduced in production:
+  // controls hide at the 3s timer, then mouse hover doesn't
+  // re-reveal them). Suspected causes: an inert/pointer-events
+  // ancestor in the React tree, an event-target weirdness with
+  // the fullscreen-style overlay, or React 19's synthetic-event
+  // pipeline interacting unexpectedly with the `cursor: none`
+  // style we apply when controls are hidden.
+  //
+  // Document-level listeners bypass all of that — if the user
+  // moves the mouse or presses a key ANYWHERE on the page, we
+  // know they're active and want controls back.
+  //
+  // Gated on `target` (audit HIGH) — VideoPlayer is rendered
+  // unconditionally from App.tsx; the early-return-null happens
+  // AFTER hooks run, so without this gate the listeners would
+  // fire continuously across the entire app session even when
+  // no video is open.
+  //
+  // keydown skips editable targets (audit MED) — matches the
+  // existing keyboard-shortcut effect below in this same file
+  // (the one that handles space/arrow shortcuts). PartyPanel's
+  // chat input is a sibling of VideoPlayer in the DOM, so a
+  // global keydown listener would otherwise reveal controls on
+  // every chat keystroke.
+  useEffect(() => {
+    if (!target) return
+    const mouseHandler = () => showControlsTemporarily()
+    const keyHandler = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      const inEditable = !!t && (
+        t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable
+      )
+      if (inEditable) return
+      showControlsTemporarily()
+    }
+    document.addEventListener('mousemove', mouseHandler)
+    document.addEventListener('keydown', keyHandler)
+    document.addEventListener('touchstart', mouseHandler)
+    return () => {
+      document.removeEventListener('mousemove', mouseHandler)
+      document.removeEventListener('keydown', keyHandler)
+      document.removeEventListener('touchstart', mouseHandler)
+    }
+  }, [target, showControlsTemporarily])
+
   // Keep menu-open refs in sync with state for the click-outside
   // dismiss path (audit M4).
   useEffect(() => { audioMenuOpenRef.current = audioMenuOpen }, [audioMenuOpen])
@@ -1258,6 +1306,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                     setSubsMenuOpen(false)
                     return
                   }
+                  // 2026-05-20 — reveal controls on EVERY click,
+                  // not just on state-changing ones. Previously
+                  // controls came back via the [playing]-effect
+                  // when play/pause state flipped, but if vid.play()
+                  // promise-rejected silently (autoplay policy,
+                  // suspended audio context) the state wouldn't
+                  // change and controls stayed hidden — operator
+                  // saw "I clicked the video and nothing happened".
+                  showControlsTemporarily()
                   const vid = videoRef.current
                   if (!vid) return
                   if (vid.paused) void vid.play().catch(() => { /* defensive */ })

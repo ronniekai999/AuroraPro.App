@@ -178,8 +178,17 @@ export function PlayerControls(props: PlayerControlsProps) {
         visible ? 'opacity-100' : 'opacity-0'
       }`}
       aria-hidden={!visible}
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      {...({ inert: !visible ? '' : undefined } as any)}
+      // 2026-05-20 — React 19 supports `inert` as a proper boolean
+      // prop. The previous code used `{inert: '' | undefined}` as a
+      // React-18-era hack; React 19's native form is cleaner and
+      // (more importantly) doesn't risk the empty-string being
+      // re-interpreted by React's prop handling in a way that
+      // accidentally blocks parent event bubbling.
+      //
+      // `!visible || undefined` evaluates to `true` (apply inert)
+      // when invisible, `undefined` (no attribute) when visible —
+      // React 19 treats `inert={true}` as the attribute being set.
+      inert={!visible || undefined}
     >
       {/* Gradient backdrop to lift legibility off bright frames. */}
       <div className="bg-gradient-to-t from-black via-black/70 to-transparent pt-12 pb-4 px-6 pointer-events-auto">
