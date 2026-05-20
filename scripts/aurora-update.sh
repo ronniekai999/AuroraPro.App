@@ -67,6 +67,22 @@ mkdir -p "$(dirname "$LOG_FILE")"
 # (install.sh's install_go function puts the toolchain there).
 [ -d /usr/local/go/bin ] && export PATH="/usr/local/go/bin:$PATH"
 
+# 2026-05-20 — explicitly set HOME if unset. systemd doesn't
+# propagate HOME for system services by default, which breaks two
+# things:
+#   1. `git credential-store` (configured by install.sh) needs
+#      $HOME or the EXPLICIT --file= form. install.sh now uses
+#      the explicit form, so this is belt-and-suspenders.
+#   2. `go build` falls back to $HOME/go/pkg/mod for GOMODCACHE
+#      and errors with "module cache not found: neither GOMODCACHE
+#      nor GOPATH is set" when HOME is unset.
+#
+# Setting HOME here makes the script work regardless of how the
+# systemd unit was configured — important because the unit file
+# is exactly what the auto-updater would need to be ABLE to
+# update, creating a chicken-and-egg loop if it broke.
+[ -z "${HOME:-}" ] && export HOME=/root
+
 # Audit H2 — sanity-check the python3 prerequisite up front. The
 # write_status function below depends on python3 for JSON-safe
 # message encoding; if it's missing, every status write would
