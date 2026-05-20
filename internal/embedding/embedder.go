@@ -29,6 +29,7 @@ import (
 // Bump rules:
 //   - 1 → 2: swapped embedding model (e.g. nomic → bge)
 //   - 1 → 2: changed BuildText format
+//
 // Do NOT bump for trivial code refactors that produce identical output.
 const CurrentVersion int16 = 1
 

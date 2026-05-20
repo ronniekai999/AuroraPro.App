@@ -47,6 +47,28 @@ func QueryParamToken(r *http.Request) string {
 	return tok
 }
 
+// requireQueryTokenClaims validates the browser-compatible ?token= auth path
+// used by WebSocket/HLS-style endpoints. It intentionally mirrors
+// auth.RequireAuth: JWT signature/expiry validation plus token-version
+// revocation checks.
+func requireQueryTokenClaims(w http.ResponseWriter, r *http.Request, svc *auth.Service, versionStore *auth.TokenVersionStore) (*auth.JWTClaims, bool) {
+	token := QueryParamToken(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "token query parameter required")
+		return nil, false
+	}
+	claims, err := svc.ValidateAccessToken(token)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid or expired token")
+		return nil, false
+	}
+	if versionStore != nil && !versionStore.Check(r.Context(), claims.UserID, claims.TokenVersion) {
+		writeError(w, http.StatusUnauthorized, "invalid or expired token")
+		return nil, false
+	}
+	return claims, true
+}
+
 func clientIP(r *http.Request) string {
 	// chi's middleware.RealIP (applied globally in the router) sets
 	// r.RemoteAddr to the trusted client IP from X-Real-Ip / X-Forwarded-For.
@@ -81,9 +103,10 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // that exposes a handler unauthenticated would nil-panic without this.
 //
 // Pattern at call sites:
-//   claims, ok := requireClaims(w, r)
-//   if !ok { return }
-//   // safe to use claims.UserID below
+//
+//	claims, ok := requireClaims(w, r)
+//	if !ok { return }
+//	// safe to use claims.UserID below
 func requireClaims(w http.ResponseWriter, r *http.Request) (*auth.JWTClaims, bool) {
 	c := auth.GetClaims(r.Context())
 	if c == nil {

@@ -30,7 +30,7 @@ type Watcher struct {
 	watching       map[int64]*libraryWatch
 	scanInterval   time.Duration // periodic scan interval (0 = disabled)
 	scanTicker     *time.Ticker  // periodic scan ticker (nil when disabled)
-	scanDone       chan struct{}  // signals the periodic scan goroutine to stop
+	scanDone       chan struct{} // signals the periodic scan goroutine to stop
 	fsWatchEnabled atomic.Bool   // when false, fsnotify events are silently discarded
 	lastScanTime   sync.Map      // map[int64]time.Time — dedup scan triggers from periodic + fsnotify
 }

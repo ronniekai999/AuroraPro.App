@@ -32,16 +32,16 @@ const xpPerWatch = 50
 // steeper later. Level N requires sum of thresholds[1..N].
 // Levels beyond the table extrapolate quadratically.
 var levelThresholds = []int{
-	0,     // L1 — every user starts here
-	100,   // L2
-	300,   // L3
-	600,   // L4
-	1000,  // L5
-	1500,  // L6
-	2200,  // L7
-	3000,  // L8
-	4000,  // L9
-	5200,  // L10
+	0,    // L1 — every user starts here
+	100,  // L2
+	300,  // L3
+	600,  // L4
+	1000, // L5
+	1500, // L6
+	2200, // L7
+	3000, // L8
+	4000, // L9
+	5200, // L10
 }
 
 // AchievementDef is a static definition. Rules are checked

@@ -45,9 +45,10 @@ const (
 
 // PartyWSHandler handles the dedicated WebSocket endpoint for watch parties.
 type PartyWSHandler struct {
-	manager  *watchparty.Manager
-	authSvc  *auth.Service
-	upgrader websocket.Upgrader
+	manager      *watchparty.Manager
+	authSvc      *auth.Service
+	versionStore *auth.TokenVersionStore
+	upgrader     websocket.Upgrader
 
 	// Per-user chat rate limiting
 	rateMu    sync.Mutex
@@ -61,10 +62,11 @@ type chatRateTracker struct {
 }
 
 // NewPartyWSHandler creates a new PartyWSHandler.
-func NewPartyWSHandler(manager *watchparty.Manager, authSvc *auth.Service) *PartyWSHandler {
+func NewPartyWSHandler(manager *watchparty.Manager, authSvc *auth.Service, versionStore *auth.TokenVersionStore) *PartyWSHandler {
 	return &PartyWSHandler{
-		manager: manager,
-		authSvc: authSvc,
+		manager:      manager,
+		authSvc:      authSvc,
+		versionStore: versionStore,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				// Allow all origins -- auth is handled via JWT token in query param.
@@ -182,7 +184,7 @@ type voiceSignalPayload struct {
 type timeSyncPayload struct {
 	ClientSendMs int64 `json:"client_send_ms"`
 	// Optional: client tells us its computed RTT/offset for observability.
-	MeasuredRTTms   int64 `json:"measured_rtt_ms,omitempty"`
+	MeasuredRTTms    int64 `json:"measured_rtt_ms,omitempty"`
 	MeasuredOffsetMs int64 `json:"measured_offset_ms,omitempty"`
 }
 
@@ -204,14 +206,8 @@ type driftReportPayload struct {
 // Auth is via ?token= query parameter, matching the existing /ws endpoint pattern.
 func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Authenticate via query param token (same pattern as /ws in router.go)
-	token := QueryParamToken(r)
-	if token == "" {
-		writeError(w, http.StatusUnauthorized, "token query parameter required")
-		return
-	}
-	claims, err := h.authSvc.ValidateAccessToken(token)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid or expired token")
+	claims, ok := requireQueryTokenClaims(w, r, h.authSvc, h.versionStore)
+	if !ok {
 		return
 	}
 
@@ -287,7 +283,7 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		var msg partyWSMessage
 		if err := json.Unmarshal(rawMsg, &msg); err != nil {
-			h.sendError(sc,"invalid message format")
+			h.sendError(sc, "invalid message format")
 			continue
 		}
 
@@ -296,11 +292,11 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "join-party":
 			var payload joinPartyPayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				h.sendError(sc,"invalid join-party payload")
+				h.sendError(sc, "invalid join-party payload")
 				continue
 			}
 			if payload.PartyCode == "" {
-				h.sendError(sc,"party_code is required")
+				h.sendError(sc, "party_code is required")
 				continue
 			}
 
@@ -313,7 +309,7 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			_, err := h.manager.JoinParty(payload.PartyCode, claims.UserID, claims.Username, sc)
 			if err != nil {
-				h.sendError(sc,err.Error())
+				h.sendError(sc, err.Error())
 				continue
 			}
 
@@ -337,18 +333,18 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			partyCodeMu.Unlock()
 
 			if code == "" {
-				h.sendError(sc,"not in a party")
+				h.sendError(sc, "not in a party")
 				continue
 			}
 
 			var payload playbackControlPayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				h.sendError(sc,"invalid playback-control payload")
+				h.sendError(sc, "invalid playback-control payload")
 				continue
 			}
 
 			if err := h.manager.HandlePlaybackControl(code, claims.UserID, payload.Action, payload.TimeMs); err != nil {
-				h.sendError(sc,err.Error())
+				h.sendError(sc, err.Error())
 			}
 
 		case "sync-heartbeat":
@@ -373,24 +369,24 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			partyCodeMu.Unlock()
 
 			if code == "" {
-				h.sendError(sc,"not in a party")
+				h.sendError(sc, "not in a party")
 				continue
 			}
 
 			// Rate limit chat messages
 			if !h.checkChatRate(claims.UserID) {
-				h.sendError(sc,"chat rate limit exceeded (max 30 messages per minute)")
+				h.sendError(sc, "chat rate limit exceeded (max 30 messages per minute)")
 				continue
 			}
 
 			var payload chatMessagePayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				h.sendError(sc,"invalid chat-message payload")
+				h.sendError(sc, "invalid chat-message payload")
 				continue
 			}
 
 			if err := h.manager.HandleChat(code, claims.UserID, claims.Username, payload.Message); err != nil {
-				h.sendError(sc,err.Error())
+				h.sendError(sc, err.Error())
 			}
 
 		case "reaction":
@@ -399,7 +395,7 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			partyCodeMu.Unlock()
 
 			if code == "" {
-				h.sendError(sc,"not in a party")
+				h.sendError(sc, "not in a party")
 				continue
 			}
 
@@ -408,18 +404,18 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// but keeping behavior aligned makes the eventual V2 deletion
 			// safer (one fewer divergence to reason about).
 			if !h.checkChatRate(claims.UserID) {
-				h.sendError(sc,"reaction rate limit exceeded (max 30 per minute)")
+				h.sendError(sc, "reaction rate limit exceeded (max 30 per minute)")
 				continue
 			}
 
 			var payload reactionPayload
 			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-				h.sendError(sc,"invalid reaction payload")
+				h.sendError(sc, "invalid reaction payload")
 				continue
 			}
 
 			if err := h.manager.HandleReaction(code, claims.UserID, claims.Username, payload.Emoji, payload.AbsMs); err != nil {
-				h.sendError(sc,err.Error())
+				h.sendError(sc, err.Error())
 			}
 
 		case "time-sync":
@@ -486,7 +482,7 @@ func (h *PartyWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = h.manager.HandleDriftReport(code, claims.UserID, payload.DriftMs, payload.Corrected)
 
 		default:
-			h.sendError(sc,"unknown message type: "+msg.Type)
+			h.sendError(sc, "unknown message type: "+msg.Type)
 		}
 	}
 }

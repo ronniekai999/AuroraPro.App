@@ -15,12 +15,12 @@ import (
 	"github.com/aurora-media/aurora/internal/arr"
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // RequestHandler handles HTTP endpoints for the media Requests feature.
@@ -490,11 +490,12 @@ func (h *RequestHandler) dispatchTV(ctx context.Context, req *models.Request, ar
 // addSeriesToSonarr adds a series to a specific Sonarr instance and returns the job ID string.
 //
 // TMDB→TVDB resolution tries three layers:
-//  A. Sonarr's lookup with `tmdb:{id}` (uses Skyhook's cached mapping).
-//  B. TMDB's /tv/{id}/external_ids to read tvdb_id directly, then re-query
-//     Sonarr with `tvdb:{id}` (handles stale Skyhook cache).
-//  C. TVDB SearchSeries by title+year (handles cases where TMDB itself lacks
-//     the tvdb_id link).
+//
+//	A. Sonarr's lookup with `tmdb:{id}` (uses Skyhook's cached mapping).
+//	B. TMDB's /tv/{id}/external_ids to read tvdb_id directly, then re-query
+//	   Sonarr with `tvdb:{id}` (handles stale Skyhook cache).
+//	C. TVDB SearchSeries by title+year (handles cases where TMDB itself lacks
+//	   the tvdb_id link).
 //
 // Only A's "not found" outcome triggers fallback — network/auth errors short-
 // circuit immediately so we don't mask infrastructure problems.
@@ -693,7 +694,7 @@ type RequestMonitor struct {
 	scanner *library.Scanner
 
 	mu           sync.Mutex
-	failCounts   map[int64]int             // consecutive API failures per request ID
+	failCounts   map[int64]int              // consecutive API failures per request ID
 	lastProgress map[int64]downloadProgress // dedup cache for WS progress broadcasts
 }
 

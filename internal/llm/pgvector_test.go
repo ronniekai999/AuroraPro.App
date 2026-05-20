@@ -57,8 +57,8 @@ func TestParseVector_Malformed(t *testing.T) {
 	cases := []string{
 		"",
 		"not a vector",
-		"[1,2,3",   // missing close bracket
-		"1,2,3]",   // missing open bracket
+		"[1,2,3",    // missing close bracket
+		"1,2,3]",    // missing open bracket
 		"[1,abc,3]", // non-numeric element
 		"[1,,3]",    // empty element
 	}

@@ -55,6 +55,8 @@ STATUS_FILE=/var/lib/aurora/update-status.json
 LOG_FILE=/var/log/aurora/update.log
 INSTALL_BIN=/usr/local/bin/aurora
 INSTALL_DIR=/opt/aurora
+SPA_SRC_DIR=static/redesign/app
+SPA_OUTPUT_DIR=static/v2
 
 mkdir -p "$(dirname "$STATUS_FILE")"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -123,6 +125,48 @@ PY
 
 log() {
     printf '[%s] %s\n' "$(date -u +%FT%TZ)" "$1" | tee -a "$LOG_FILE"
+}
+
+build_frontend_bundle() {
+    local out_dir="$1"
+    if [ ! -d "$SPA_SRC_DIR" ]; then
+        log "WARN: $SPA_SRC_DIR missing; reusing committed $SPA_OUTPUT_DIR"
+        if [ ! -d "$SPA_OUTPUT_DIR" ]; then
+            log "No SPA source or committed $SPA_OUTPUT_DIR bundle found"
+            return 1
+        fi
+        rm -rf "$out_dir"
+        mkdir -p "$(dirname "$out_dir")"
+        cp -R "$SPA_OUTPUT_DIR" "$out_dir"
+        return 0
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        log "npm not found; install Node.js/npm or re-run install.sh"
+        return 1
+    fi
+
+    rm -rf "$out_dir"
+    mkdir -p "$(dirname "$out_dir")"
+    if [ -f "$SPA_SRC_DIR/package-lock.json" ]; then
+        log "npm ci..."
+        (cd "$SPA_SRC_DIR" && npm ci --no-audit --no-fund >>"$LOG_FILE" 2>&1)
+    else
+        log "npm install..."
+        (cd "$SPA_SRC_DIR" && npm install --no-audit --no-fund >>"$LOG_FILE" 2>&1)
+    fi
+    log "vite build..."
+    (cd "$SPA_SRC_DIR" && npm run build -- --outDir "$out_dir" >>"$LOG_FILE" 2>&1)
+}
+
+stage_static_bundle() {
+    local built_v2_dir="$1"
+    rm -rf "$INSTALL_DIR/static.new"
+    mkdir -p "$INSTALL_DIR/static.new"
+    if [ -d static ]; then
+        find static -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
+            -exec cp -R {} "$INSTALL_DIR/static.new/" \;
+    fi
+    cp -R "$built_v2_dir" "$INSTALL_DIR/static.new/v2"
 }
 
 # ERR trap — when set -e trips, capture the line and report.
@@ -227,7 +271,16 @@ if ! git merge --ff-only "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
 fi
 
 # ── Build ─────────────────────────────────────────────────────────
-write_status building "Building Aurora binary" "$OLD_SHA" "$NEW_SHA"
+write_status building "Building Aurora frontend and binary" "$OLD_SHA" "$NEW_SHA"
+FRONTEND_TMP="$(mktemp -d)"
+log "frontend build..."
+if ! build_frontend_bundle "$FRONTEND_TMP/v2"; then
+    write_status failed "frontend build failed — see /var/log/aurora/update.log. Old binary/static assets are still running." "$OLD_SHA" "$NEW_SHA"
+    log "frontend build failed"
+    rm -rf "$FRONTEND_TMP"
+    exit 1
+fi
+
 log "go build..."
 
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo "dev")"
@@ -235,6 +288,7 @@ if ! CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o auror
     write_status failed "go build failed — see /var/log/aurora/update.log. Old binary is still running." "$OLD_SHA" "$NEW_SHA"
     log "go build failed"
     rm -f aurora.new
+    rm -rf "$FRONTEND_TMP"
     exit 1
 fi
 
@@ -267,18 +321,37 @@ rm aurora.new
 mv "$INSTALL_BIN.new" "$INSTALL_BIN"
 
 # Migrations
-cp -f migrations/*.sql "$INSTALL_DIR/migrations/" 2>>"$LOG_FILE" || true
+mkdir -p "$INSTALL_DIR/migrations"
+SQL_FILES=()
+shopt -s nullglob
+for f in migrations/*.sql; do
+    SQL_FILES+=("$f")
+done
+shopt -u nullglob
+if [ "${#SQL_FILES[@]}" -eq 0 ]; then
+    write_status failed "No migration files found in source checkout; refusing to install a partial release." "$OLD_SHA" "$NEW_SHA"
+    log "no migration files found"
+    rm -rf "$FRONTEND_TMP"
+    exit 1
+fi
+if ! cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/" 2>>"$LOG_FILE"; then
+    write_status failed "migration copy failed — see /var/log/aurora/update.log. New binary was installed but service was not restarted." "$OLD_SHA" "$NEW_SHA"
+    log "migration copy failed"
+    rm -rf "$FRONTEND_TMP"
+    exit 1
+fi
 
 # Static SPA bundle. Atomic-swap pattern; we now KEEP static.old
 # around as our rollback snapshot until after the health check.
 # The install.sh C1 fix (clear stale .old before rename) still
 # applies — we only clear .old AFTER success or rollback.
 rm -rf "$INSTALL_DIR/static.old"   # clear any pre-existing crash leftover
-cp -r static "$INSTALL_DIR/static.new"
+stage_static_bundle "$FRONTEND_TMP/v2"
 if [ -d "$INSTALL_DIR/static" ]; then
     mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
 fi
 mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
+rm -rf "$FRONTEND_TMP"
 
 chown -R aurora:aurora "$INSTALL_DIR"
 

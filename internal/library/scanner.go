@@ -33,8 +33,8 @@ type Scanner struct {
 	progress map[int64]*models.ScanProgress
 
 	// Batch collectors for file inserts (protected by batchMu)
-	batchMu       sync.Mutex
-	movieFileBuf  []*models.MediaFile
+	batchMu        sync.Mutex
+	movieFileBuf   []*models.MediaFile
 	episodeFileBuf []*models.EpisodeFile
 
 	// enrichedItems tracks media item IDs already enriched during the current scan
