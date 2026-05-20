@@ -187,12 +187,19 @@ func (c *TMDBClient) get(ctx context.Context, path string, params url.Values) ([
 			if ungzErr != nil {
 				// Body was definitely gzip-prefixed and gunzip
 				// failed — the bytes are not JSON either way.
-				// Short-circuit with a clean error so the caller
-				// doesn't try to json.Unmarshal random bytes.
+				//
+				// 2026-05-20 — observed in production that some
+				// queries consistently return the same truncated
+				// gzip body (e.g., `/search/movie?query=A...`
+				// returning 562 bytes every time). Retrying the
+				// same request 4x with exponential backoff just
+				// wastes ~7 seconds + produces noise; the upstream
+				// won't recover within that window. Return the
+				// error immediately so the metadata-refresh loop
+				// moves on to the next item.
 				slog.Warn("tmdb: response started with gzip magic but gunzip failed",
 					"path", path, "compressed_size", len(body), "error", ungzErr)
-				lastErr = fmt.Errorf("tmdb: gunzip failed for missing-Content-Encoding response: %w", ungzErr)
-				continue // retry — next attempt may get a clean body
+				return nil, fmt.Errorf("tmdb: gunzip failed for missing-Content-Encoding response (upstream corruption, retrying won't help): %w", ungzErr)
 			}
 			slog.Debug("tmdb: gunzipped body missing Content-Encoding header",
 				"path", path, "compressed_size", len(body), "decompressed_size", len(gunzipped))
