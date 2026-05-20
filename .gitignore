@@ -22,9 +22,17 @@ screenshots/
 *.swp
 *.swo
 
-# Frontend build output (rebuilt on each install)
+# Frontend build output (rebuilt on each install + redeploy)
+#
+# static/v2/ is the Vite build output. Every install.sh / redeploy.sh
+# run regenerates it via `npm run build`. Tracking it caused painful
+# git-pull conflicts: an operator's local clone always has a freshly-
+# rebuilt v2/ that differs from whatever CI/other-devs committed.
+# Untracked + gitignored, the directory is purely a per-deploy
+# artifact.
 static/redesign/app/dist/
 static/redesign/app/node_modules/
+static/v2/
 
 # Go build cache (in case anyone runs builds in-tree)
 /tmp/

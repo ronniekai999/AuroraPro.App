@@ -519,6 +519,32 @@ else
     ok "Configuration directory not found (skipping)"
 fi
 
+# 2026-05-20 audit (HIGH-2) — clean up the github.com line install.sh
+# may have written to /root/.git-credentials for the auto-updater's
+# private-repo authentication. Don't blow up the file (the operator
+# may have other-host credentials there); just strip our line and
+# delete the file if it ends up empty.
+if [ -f /root/.git-credentials ] && grep -qE '@github\.com(/|$)' /root/.git-credentials; then
+    if confirm "Strip Aurora's github.com entry from /root/.git-credentials?"; then
+        # Same dedupe pattern install.sh uses, but with `||true` so
+        # an all-github.com file produces an empty result instead of
+        # tripping set -e.
+        kept=$(grep -vE '@github\.com(/|$)' /root/.git-credentials || true)
+        if [ -z "$kept" ]; then
+            rm -f /root/.git-credentials
+            ok "Removed /root/.git-credentials (was github.com-only)"
+        else
+            printf '%s\n' "$kept" > /root/.git-credentials.tmp
+            chmod 600 /root/.git-credentials.tmp
+            chown root:root /root/.git-credentials.tmp
+            mv -f /root/.git-credentials.tmp /root/.git-credentials
+            ok "Stripped github.com from /root/.git-credentials (preserved other-host entries)"
+        fi
+    else
+        warn "Keeping /root/.git-credentials github.com line"
+    fi
+fi
+
 # ══════════════════════════════════════════════════════════════════
 # Step 5: Remove cache and transcode data
 # ══════════════════════════════════════════════════════════════════
