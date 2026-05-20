@@ -1221,7 +1221,7 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 //
 // Audit H2 fix: filter out zero-byte / undersized files. If FFmpeg
 // crashed mid-write of seg_N.ts, the file exists but is truncated.
-// Returning N would cause the restart to set hls_start_number=N+1, but
+// Returning N would cause the restart to set start_number=N+1, but
 // the playlist would still reference the truncated seg_N.ts and HLS.js
 // would fetch a corrupt TS and fail. Skip anything under
 // minSegmentSizeBytes — for an MPEG-TS container, even an empty audio-
@@ -1360,7 +1360,7 @@ func audioBitrate(channels int) string {
 
 // startVariant launches FFmpeg for a single profile. resumeSegNum=0 is the
 // normal fresh-start case. resumeSegNum>0 is the P3 auto-restart path:
-// FFmpeg is started with -hls_start_number set so output segment numbering
+// FFmpeg is started with -start_number set so output segment numbering
 // continues from where the prior (crashed) process left off, giving HLS.js
 // seamless playlist continuation. Compatibility shim startVariantAt below
 // is a thin wrapper retained for call-site clarity.
@@ -1569,8 +1569,19 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// are produced by the fresh FFmpeg without overwriting any pre-crash
 	// segments. The +append_list flag above ensures the playlist file is
 	// extended rather than rewritten.
+	//
+	// 2026-05-20 — flag is `-start_number`, NOT `-hls_start_number`.
+	// The HLS muxer documents `start_number` (no `hls_` prefix). The
+	// old `hls_start_number` was a typo that worked on no version of
+	// FFmpeg we ship — every restart attempt crashed with
+	// "Unrecognized option 'hls_start_number'. Error splitting the
+	// argument list". Symptom for the operator: ~4 HTTP 500s on
+	// /api/stream/hls/<id>/source/seg_NNN.ts after the first FFmpeg
+	// crash, until HLS.js reloaded the player session. The crash
+	// itself is a separate occasional FFmpeg issue; the bug here is
+	// that the *recovery* from the crash never worked.
 	if resumeSegNum > 0 {
-		args = append(args, "-hls_start_number", strconv.Itoa(resumeSegNum))
+		args = append(args, "-start_number", strconv.Itoa(resumeSegNum))
 	}
 	args = append(args,
 		"-y",
