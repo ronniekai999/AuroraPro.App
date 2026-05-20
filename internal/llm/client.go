@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -74,10 +75,68 @@ func NewClient(cfg Config) *Client {
 	}
 	c := &Client{
 		cfg:  cfg,
-		http: &http.Client{Timeout: cfg.HTTPTimeout},
+		http: newGuardedHTTPClient(cfg.HTTPTimeout),
 	}
 	c.debug.Store(cfg.Debug)
 	return c
+}
+
+func newGuardedHTTPClient(timeout time.Duration) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	resolver := net.DefaultResolver
+
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := resolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("llm target %q did not resolve", host)
+		}
+		for _, resolved := range ips {
+			if isBlockedLLMTargetIP(resolved.IP) {
+				return nil, fmt.Errorf("llm target %q resolves to restricted address %s", host, resolved.IP)
+			}
+		}
+
+		// Dial vetted addresses directly so DNS cannot resolve to a different
+		// destination between validation and connect. Try each safe address in
+		// order so localhost works whether Ollama binds IPv4, IPv6, or both.
+		var lastErr error
+		for _, resolved := range ips {
+			target := net.JoinHostPort(resolved.IP.String(), port)
+			conn, err := dialer.DialContext(ctx, network, target)
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
+	}
+
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+	}
+}
+
+func isBlockedLLMTargetIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.Equal(net.IPv4(169, 254, 169, 254))
 }
 
 // SetDebug toggles request/response logging at runtime. Safe to call from any

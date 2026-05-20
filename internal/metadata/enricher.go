@@ -52,8 +52,8 @@ type Enricher struct {
 	tvdb            *TVDBClient // optional — nil when TVDB is disabled
 	queries         *db.Queries
 	imgProxy        *ImageProxy // optional — nil means no eager caching
-	autoThreshold   int        // confidence >= this → "matched" (default 85)
-	reviewThreshold int        // confidence >= this → "needs_review" (default 50)
+	autoThreshold   int         // confidence >= this → "matched" (default 85)
+	reviewThreshold int         // confidence >= this → "needs_review" (default 50)
 }
 
 // NewEnricher creates a metadata enricher.
@@ -788,9 +788,9 @@ func (e *Enricher) storeCast(ctx context.Context, mediaItemID int64, credits *TM
 
 	// Key crew (directors, writers, producers)
 	keepJobs := map[string]string{
-		"Director":          "director",
-		"Writer":            "writer",
-		"Screenplay":        "writer",
+		"Director":           "director",
+		"Writer":             "writer",
+		"Screenplay":         "writer",
 		"Executive Producer": "producer",
 	}
 	for _, c := range credits.Crew {

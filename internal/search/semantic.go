@@ -72,7 +72,8 @@ func New(llmClient *llm.Client, q *db.Queries) *Searcher {
 //
 // Examples that return true:  "Inception", "the matrix", "severance s2"
 // Examples that return false: "movies like Severance", "feel-good 90s sci-fi",
-//                             "what should I watch tonight"
+//
+//	"what should I watch tonight"
 func IsLiteralQuery(query string) bool {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {

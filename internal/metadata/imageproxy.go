@@ -19,10 +19,10 @@ import (
 // allowedImageHosts is a domain allowlist for external image proxying.
 // Only these hosts are permitted to prevent SSRF via the image proxy.
 var allowedImageHosts = map[string]bool{
-	"image.tmdb.org":          true,
-	"artworks.thetvdb.com":    true,
-	"www.thetvdb.com":         true,
-	"thetvdb.com":             true,
+	"image.tmdb.org":       true,
+	"artworks.thetvdb.com": true,
+	"www.thetvdb.com":      true,
+	"thetvdb.com":          true,
 }
 
 // ImageProxy serves TMDB images through Aurora and caches them locally.

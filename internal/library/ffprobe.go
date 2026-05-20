@@ -35,17 +35,17 @@ type ffprobeOutput struct {
 }
 
 type ffprobeStream struct {
-	Index          int               `json:"index"`
-	CodecType      string            `json:"codec_type"`
-	CodecName      string            `json:"codec_name"`
-	Profile        string            `json:"profile"`
-	PixFmt         string            `json:"pix_fmt"`
-	Level          int               `json:"level"`
-	Width          int               `json:"width"`
-	Height         int               `json:"height"`
-	Channels       int               `json:"channels"`
-	Tags           map[string]string `json:"tags"`
-	Disposition    ffprobeDisp       `json:"disposition"`
+	Index       int               `json:"index"`
+	CodecType   string            `json:"codec_type"`
+	CodecName   string            `json:"codec_name"`
+	Profile     string            `json:"profile"`
+	PixFmt      string            `json:"pix_fmt"`
+	Level       int               `json:"level"`
+	Width       int               `json:"width"`
+	Height      int               `json:"height"`
+	Channels    int               `json:"channels"`
+	Tags        map[string]string `json:"tags"`
+	Disposition ffprobeDisp       `json:"disposition"`
 }
 
 type ffprobeDisp struct {

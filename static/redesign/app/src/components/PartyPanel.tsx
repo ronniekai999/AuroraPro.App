@@ -85,7 +85,6 @@ export function PartyPanel({
                       ta.style.top = '-1000px'
                       document.body.appendChild(ta)
                       ta.select()
-                      // eslint-disable-next-line @typescript-eslint/no-deprecated
                       document.execCommand('copy')
                       document.body.removeChild(ta)
                     } catch { /* ignore — user can read the code on screen */ }

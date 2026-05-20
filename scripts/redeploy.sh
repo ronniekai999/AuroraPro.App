@@ -361,18 +361,23 @@ else
     ok "Copied ${#SQL_FILES[@]} migration files"
 fi
 
-# Static assets: atomic swap pattern matching install.sh.
-# Copy → static.new, rename existing → static.old, rename new → static,
-# remove old. A failure between steps leaves either the previous
-# static/ intact (if the new copy didn't land) or static.old as a
-# rollback target (if the rename half-succeeded).
-info "Copying static/ → $INSTALL_DIR/static.new..."
+# Static assets: atomic swap pattern matching install.sh. Deploy the built
+# V2 bundle, not the React source tree or node_modules under static/redesign.
+info "Copying built SPA bundle → $INSTALL_DIR/static.new..."
 sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/static.old"
-if ! sudo cp -r "$PROJECT_DIR/static" "$INSTALL_DIR/static.new"; then
+if ! sudo mkdir -p "$INSTALL_DIR/static.new"; then
+    sudo rm -f "$INSTALL_BIN.new"
+    error "Failed to create $INSTALL_DIR/static.new — staged binary rolled back" 2
+fi
+if [ -d "$PROJECT_DIR/static" ]; then
+    find "$PROJECT_DIR/static" -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
+        -exec sudo cp -R {} "$INSTALL_DIR/static.new/" \;
+fi
+if ! sudo cp -R "$PROJECT_DIR/$SPA_OUTPUT_DIR" "$INSTALL_DIR/static.new/v2"; then
     # Roll back the staged binary so a subsequent restart can't
     # accidentally pick up the new code against the old static.
     sudo rm -f "$INSTALL_BIN.new"
-    error "Failed to copy static/ — staged binary rolled back" 2
+    error "Failed to copy built SPA bundle — staged binary rolled back" 2
 fi
 if [ -d "$INSTALL_DIR/static" ]; then
     sudo mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"

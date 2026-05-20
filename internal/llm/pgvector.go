@@ -7,7 +7,8 @@ import (
 )
 
 // FormatVector renders a Go float32 slice as the literal pgvector accepts:
-//   "[0.123,-0.456,...]"
+//
+//	"[0.123,-0.456,...]"
 //
 // We use the text protocol rather than introducing pgx custom-type wiring —
 // pgvector's text format is unambiguous, and the dependency footprint stays at

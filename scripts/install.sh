@@ -34,7 +34,7 @@ set -euo pipefail
 # ── Constants ──────────────────────────────────────────────────────
 # GO_VERSION must be ≥ the `go` directive in go.mod. Bumping go.mod's
 # minor version requires bumping this string too.
-GO_VERSION="1.25.0"
+GO_VERSION="1.26.3"
 AURORA_USER="aurora"
 AURORA_GROUP="aurora"
 INSTALL_BIN="/usr/local/bin/aurora"
@@ -43,6 +43,8 @@ CONFIG_DIR="/etc/aurora"
 CACHE_DIR="/var/cache/aurora"
 TRANSCODE_DIR="/var/cache/aurora/transcode"
 LOG_DIR="/var/log/aurora"
+SPA_SRC_DIR="static/redesign/app"
+SPA_OUTPUT_DIR="static/v2"
 
 # ── Output helpers ─────────────────────────────────────────────────
 info()  { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
@@ -83,7 +85,7 @@ rand_string() {
     printf '%s' "${raw:0:${1:-64}}"
 }
 
-# Portable version compare: version_gte "1.25.0" "1.23" → true.
+# Portable version compare: version_gte "1.26.3" "1.23" → true.
 version_gte() {
     local IFS=.
     local -a v1=($1) v2=($2)
@@ -108,6 +110,44 @@ urlencode_password() {
         s="${s//\"/%22}"; s="${s//\!/%21}"; s="${s//\[/%5B}"; s="${s//\]/%5D}"
         printf '%s' "$s"
     fi
+}
+
+build_frontend_bundle() {
+    local out_dir="$1"
+    if [ ! -d "$PROJECT_DIR/$SPA_SRC_DIR" ]; then
+        warn "SPA source directory $SPA_SRC_DIR not found; reusing committed $SPA_OUTPUT_DIR"
+        if [ ! -d "$PROJECT_DIR/$SPA_OUTPUT_DIR" ]; then
+            error "No built SPA bundle found at $SPA_OUTPUT_DIR"
+        fi
+        rm -rf "$out_dir"
+        mkdir -p "$(dirname "$out_dir")"
+        cp -R "$PROJECT_DIR/$SPA_OUTPUT_DIR" "$out_dir"
+        return
+    fi
+
+    info "Installing frontend dependencies..."
+    if [ -f "$PROJECT_DIR/$SPA_SRC_DIR/package-lock.json" ]; then
+        (cd "$PROJECT_DIR/$SPA_SRC_DIR" && npm ci --no-audit --no-fund)
+    else
+        warn "No package-lock.json — falling back to npm install"
+        (cd "$PROJECT_DIR/$SPA_SRC_DIR" && npm install --no-audit --no-fund)
+    fi
+
+    info "Building V2 SPA..."
+    rm -rf "$out_dir"
+    mkdir -p "$(dirname "$out_dir")"
+    (cd "$PROJECT_DIR/$SPA_SRC_DIR" && npm run build -- --outDir "$out_dir")
+}
+
+stage_static_bundle() {
+    local built_v2_dir="$1"
+    rm -rf "$INSTALL_DIR/static.new"
+    mkdir -p "$INSTALL_DIR/static.new"
+    if [ -d "$PROJECT_DIR/static" ]; then
+        find "$PROJECT_DIR/static" -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
+            -exec cp -R {} "$INSTALL_DIR/static.new/" \;
+    fi
+    cp -R "$built_v2_dir" "$INSTALL_DIR/static.new/v2"
 }
 
 # ── Package manager detection + install ───────────────────────────
@@ -436,6 +476,14 @@ for tool in curl tar git python3; do
         pkg_install "$tool"
     fi
 done
+if ! command -v node &>/dev/null; then
+    info "Installing nodejs..."
+    pkg_install nodejs
+fi
+if ! command -v npm &>/dev/null; then
+    info "Installing npm..."
+    pkg_install npm
+fi
 
 # setfacl — used by the media-dir setup below to grant aurora user
 # read access without resorting to chmod o+rX (which exposes media
@@ -783,6 +831,10 @@ step "Step 4/5: Building Aurora and installing the service"
 
 cd "$PROJECT_DIR"
 VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+FRONTEND_TMP="$(mktemp -d)"
+build_frontend_bundle "$FRONTEND_TMP/v2"
+ok "Frontend bundle built"
+
 info "Building (version: $VERSION)..."
 CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o aurora ./cmd/aurora
 ok "Build complete"
@@ -807,7 +859,7 @@ install -d -m 0755 -o root -g root /var/lib/aurora
 
 # Migrations + static files (atomic swap for the bundle).
 cp -f "$PROJECT_DIR"/migrations/*.sql "$INSTALL_DIR/migrations/"
-cp -r "$PROJECT_DIR/static" "$INSTALL_DIR/static.new"
+stage_static_bundle "$FRONTEND_TMP/v2"
 # Audit C1 — clear any leftover static.old from a previously-crashed
 # run BEFORE the rename. GNU `mv` refuses to overwrite a non-empty
 # directory, so without this an interrupted earlier run would brick
@@ -820,6 +872,7 @@ if [ -d "$INSTALL_DIR/static" ]; then
 fi
 mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
 rm -rf "$INSTALL_DIR/static.old"
+rm -rf "$FRONTEND_TMP"
 ok "Static assets + migrations copied"
 
 # systemd unit. Patch the After= line to the actual detected PG

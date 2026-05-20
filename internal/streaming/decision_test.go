@@ -19,11 +19,11 @@ func TestNormalizeContainer(t *testing.T) {
 		{"avi", "avi"},
 		{"mpegts", "ts"},
 		{"ogg", "ogg"},
-		{"flv", "flv"},                              // unknown → as-is
-		{"  Mov  ", "mp4"},                          // whitespace trimmed
-		{"", ""},                                    // empty
-		{"mov,mp4,m4a,3gp,3g2,mj2", "mp4"},         // comma-separated FFprobe format → first element
-		{"matroska,webm", "mkv"},                    // comma-separated with known alias
+		{"flv", "flv"},                     // unknown → as-is
+		{"  Mov  ", "mp4"},                 // whitespace trimmed
+		{"", ""},                           // empty
+		{"mov,mp4,m4a,3gp,3g2,mj2", "mp4"}, // comma-separated FFprobe format → first element
+		{"matroska,webm", "mkv"},           // comma-separated with known alias
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -165,52 +165,52 @@ func TestDecidePlayback(t *testing.T) {
 		wantIdx    int
 	}{
 		{
-			name: "nil caps backward compat - mp4 h264 aac",
+			name:      "nil caps backward compat - mp4 h264 aac",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: nil,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: -1,
 		},
 		{
-			name: "nil caps backward compat - mkv h264 aac",
+			name:      "nil caps backward compat - mkv h264 aac",
 			container: "mkv", videoCodec: "h264", audio: aacTrack, caps: nil,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: -1,
 		},
 		{
-			name: "nil caps backward compat - mp4 hevc aac",
+			name:      "nil caps backward compat - mp4 hevc aac",
 			container: "mp4", videoCodec: "hevc", audio: aacTrack, caps: nil,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: -1,
 		},
 		{
-			name: "chrome + mp4 h264 aac = direct play",
+			name:      "chrome + mp4 h264 aac = direct play",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "chrome + mkv h264 aac = remux",
+			name:      "chrome + mkv h264 aac = remux",
 			container: "mkv", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "chrome + mp4 hevc aac = transcode",
+			name:      "chrome + mp4 hevc aac = transcode",
 			container: "mp4", videoCodec: "hevc", audio: aacTrack, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "safari + mp4 hevc aac = direct play (HEVC on Safari!)",
+			name:      "safari + mp4 hevc aac = direct play (HEVC on Safari!)",
 			container: "mp4", videoCodec: "hevc", audio: aacTrack, caps: safariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "safari + mp4 h265 aac = direct play (h265 alias)",
+			name:      "safari + mp4 h265 aac = direct play (h265 alias)",
 			container: "mp4", videoCodec: "h265", audio: aacTrack, caps: safariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "safari + mkv hevc aac = remux (container not supported)",
+			name:      "safari + mkv hevc aac = remux (container not supported)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "chrome + mp4 h264 dts = remux for audio",
+			name:      "chrome + mp4 h264 dts = remux for audio",
 			container: "mp4", videoCodec: "h264", audio: dtsTrack, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
@@ -218,69 +218,69 @@ func TestDecidePlayback(t *testing.T) {
 			// BUG FIX: was incorrectly "direct_play" — browser always plays the
 			// default track (DTS, index 0). It can't select the AAC track at
 			// index 1. Must remux with -map to select the compatible track.
-			name: "chrome + mp4 h264 dts+aac = remux to select aac track",
+			name:      "chrome + mp4 h264 dts+aac = remux to select aac track",
 			container: "mp4", videoCodec: "h264", audio: dtsAndAac, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
-			name: "safari + mp4 h264 ac3 = direct play (Safari supports AC3)",
+			name:      "safari + mp4 h264 ac3 = direct play (Safari supports AC3)",
 			container: "mp4", videoCodec: "h264", audio: ac3Track, caps: safariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "chrome + mp4 h264 ac3 = remux for audio (Chrome no AC3)",
+			name:      "chrome + mp4 h264 ac3 = remux for audio (Chrome no AC3)",
 			container: "mp4", videoCodec: "h264", audio: ac3Track, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
 		{
-			name: "matroska container normalized to mkv",
+			name:      "matroska container normalized to mkv",
 			container: "matroska", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "mov container normalized to mp4",
+			name:      "mov container normalized to mp4",
 			container: "mov", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "chrome + webm vp9 opus = direct play",
+			name:      "chrome + webm vp9 opus = direct play",
 			container: "webm", videoCodec: "vp9", audio: []models.AudioTrack{{Codec: "opus", IsDefault: true}}, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		// Edge cases for audit coverage
 		{
 			// Silent video (no audio tracks) should direct play when video+container are OK.
-			name: "empty audio tracks with caps = direct play (silent video)",
+			name:      "empty audio tracks with caps = direct play (silent video)",
 			container: "mp4", videoCodec: "h264", audio: nil, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: -1,
 		},
 		{
-			name: "nil caps backward compat - empty audio = direct play",
+			name:      "nil caps backward compat - empty audio = direct play",
 			container: "mp4", videoCodec: "h264", audio: nil, caps: nil,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: -1,
 		},
 		{
-			name: "avc video codec alias with caps",
+			name:      "avc video codec alias with caps",
 			container: "mp4", videoCodec: "avc", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "avc1 video codec alias with caps",
+			name:      "avc1 video codec alias with caps",
 			container: "mp4", videoCodec: "avc1", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "unknown container with caps = remux",
+			name:      "unknown container with caps = remux",
 			container: "avi", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
-			name: "safari + mkv hevc dts+aac = remux, picks aac track",
+			name:      "safari + mkv hevc dts+aac = remux, picks aac track",
 			container: "mkv", videoCodec: "hevc", audio: dtsAndAac, caps: safariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
-			name: "chrome + mp4 h264 multiple incompatible tracks",
+			name:      "chrome + mp4 h264 multiple incompatible tracks",
 			container: "mp4", videoCodec: "h264",
 			audio: []models.AudioTrack{
 				{Codec: "dts", Channels: 6, IsDefault: true},
@@ -289,14 +289,14 @@ func TestDecidePlayback(t *testing.T) {
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
 		{
-			name: "chrome + mkv h264 dts+aac = remux, picks compatible aac",
+			name:      "chrome + mkv h264 dts+aac = remux, picks compatible aac",
 			container: "mkv", videoCodec: "h264", audio: dtsAndAac, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		// EAC3-specific test cases (Chrome EAC3 bug fix)
 		{
 			// Chrome doesn't support EAC3. Single EAC3 track → remux + transcode audio to AAC.
-			name: "chrome + mp4 h264 eac3 = remux for audio (Chrome no EAC3)",
+			name:      "chrome + mp4 h264 eac3 = remux for audio (Chrome no EAC3)",
 			container: "mp4", videoCodec: "h264", audio: eac3Only, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
@@ -304,19 +304,19 @@ func TestDecidePlayback(t *testing.T) {
 			// Chrome doesn't support EAC3. EAC3 is default, AAC is secondary.
 			// Browser would play default EAC3 track in direct play → garbled audio.
 			// Must remux to select AAC track via -map.
-			name: "chrome + mp4 h264 eac3+aac = remux to select aac (not direct play)",
+			name:      "chrome + mp4 h264 eac3+aac = remux to select aac (not direct play)",
 			container: "mp4", videoCodec: "h264", audio: eac3AndAac, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
 			// Safari supports EAC3 natively. Single EAC3 default track → direct play.
-			name: "safari + mp4 h264 eac3 = direct play (Safari supports EAC3)",
+			name:      "safari + mp4 h264 eac3 = direct play (Safari supports EAC3)",
 			container: "mp4", videoCodec: "h264", audio: eac3Only, caps: safariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Safari supports EAC3. EAC3 is default → direct play (browser picks it).
-			name: "safari + mp4 h264 eac3+aac = direct play (default eac3 ok on Safari)",
+			name:      "safari + mp4 h264 eac3+aac = direct play (default eac3 ok on Safari)",
 			container: "mp4", videoCodec: "h264", audio: eac3AndAac, caps: safariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
@@ -324,105 +324,105 @@ func TestDecidePlayback(t *testing.T) {
 		{
 			// H.264 10-bit in MKV: normally would be remux (h264 in MKV), but 10-bit
 			// pixel format forces full transcode to 8-bit H.264.
-			name: "chrome + mkv h264 10-bit aac = transcode (Hi10P guard)",
+			name:      "chrome + mkv h264 10-bit aac = transcode (Hi10P guard)",
 			container: "mkv", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
-			pixFmt: "yuv420p10le",
+			pixFmt:  "yuv420p10le",
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// H.264 10-bit in MP4: normally would be direct play, but 10-bit forces transcode.
-			name: "chrome + mp4 h264 10-bit aac = transcode (Hi10P guard, even in MP4)",
+			name:      "chrome + mp4 h264 10-bit aac = transcode (Hi10P guard, even in MP4)",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
-			pixFmt: "yuv420p10le",
+			pixFmt:  "yuv420p10le",
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// H.264 8-bit (normal yuv420p): should still direct play normally.
-			name: "chrome + mp4 h264 8-bit aac = direct play (normal, yuv420p)",
+			name:      "chrome + mp4 h264 8-bit aac = direct play (normal, yuv420p)",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
-			pixFmt: "yuv420p",
+			pixFmt:  "yuv420p",
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// H.264 with empty pixFmt (legacy data): should still work as before.
-			name: "chrome + mp4 h264 empty pixfmt aac = direct play (backward compat)",
+			name:      "chrome + mp4 h264 empty pixfmt aac = direct play (backward compat)",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
-			pixFmt: "",
+			pixFmt:  "",
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// H.264 10-bit with nil caps (static fallback): should still force transcode.
-			name: "nil caps + mp4 h264 10-bit aac = transcode (static fallback Hi10P guard)",
+			name:      "nil caps + mp4 h264 10-bit aac = transcode (static fallback Hi10P guard)",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: nil,
-			pixFmt: "yuv420p10le",
+			pixFmt:  "yuv420p10le",
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: -1,
 		},
 		{
 			// H.264 10-bit with 422 chroma: also 10-bit, should transcode.
-			name: "chrome + mkv h264 yuv422p10le aac = transcode (Hi10P 4:2:2)",
+			name:      "chrome + mkv h264 yuv422p10le aac = transcode (Hi10P 4:2:2)",
 			container: "mkv", videoCodec: "h264", audio: aacTrack, caps: chromeCaps,
-			pixFmt: "yuv422p10le",
+			pixFmt:  "yuv422p10le",
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Safari + H.264 10-bit: Safari also cannot play H.264 10-bit via MSE.
-			name: "safari + mp4 h264 10-bit aac = transcode (Hi10P on Safari too)",
+			name:      "safari + mp4 h264 10-bit aac = transcode (Hi10P on Safari too)",
 			container: "mp4", videoCodec: "h264", audio: aacTrack, caps: safariCaps,
-			pixFmt: "yuv420p10le",
+			pixFmt:  "yuv420p10le",
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		// ── HEVC remux: HLS.js v1.6+ can demux HEVC from .ts segments ──
 		{
 			// Chrome with HEVC support + MKV HEVC: remux with hevc_mp4toannexb BSF.
 			// HLS.js v1.6+ transmuxes HEVC .ts → fMP4 for MSE. Near-zero CPU.
-			name: "chromeHEVC + mkv hevc aac = remux (HEVC .ts via HLS.js v1.6+)",
+			name:      "chromeHEVC + mkv hevc aac = remux (HEVC .ts via HLS.js v1.6+)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: chromeHEVCCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome with HEVC support + MP4 HEVC AAC: direct play is fine (no HLS.js
 			// involved — browser plays MP4 natively via MSE).
-			name: "chromeHEVC + mp4 hevc aac = direct play (no HLS.js needed)",
+			name:      "chromeHEVC + mp4 hevc aac = direct play (no HLS.js needed)",
 			container: "mp4", videoCodec: "hevc", audio: aacTrack, caps: chromeHEVCCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome with HEVC support + MKV HEVC EAC3: remux with audio transcode.
 			// Video is copied (HEVC in .ts works with HLS.js v1.6+), audio EAC3→AAC.
-			name: "chromeHEVC + mkv hevc eac3 = remux, audio transcode",
+			name:      "chromeHEVC + mkv hevc eac3 = remux, audio transcode",
 			container: "mkv", videoCodec: "hevc", audio: eac3Only, caps: chromeHEVCCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
 		{
 			// Chrome with HEVC support + MP4 HEVC, non-default audio track: remux
 			// to select compatible AAC track via -map.
-			name: "chromeHEVC + mp4 hevc dts+aac = remux to select aac track",
+			name:      "chromeHEVC + mp4 hevc dts+aac = remux to select aac track",
 			container: "mp4", videoCodec: "hevc", audio: dtsAndAac, caps: chromeHEVCCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
 			// Safari + MKV HEVC: native HLS handles HEVC in .ts natively → remux is fine.
-			name: "safari + mkv hevc aac = remux (native HLS handles HEVC .ts)",
+			name:      "safari + mkv hevc aac = remux (native HLS handles HEVC .ts)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome WITHOUT HEVC support + MKV HEVC: videoOK is false →
 			// transcode to H.264 (client can't play HEVC at all).
-			name: "chrome (no HEVC) + mkv hevc aac = transcode (no HEVC support)",
+			name:      "chrome (no HEVC) + mkv hevc aac = transcode (no HEVC support)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// h265 alias: same behavior as hevc — remux with BSF.
-			name: "chromeHEVC + mkv h265 aac = remux (h265 alias)",
+			name:      "chromeHEVC + mkv h265 aac = remux (h265 alias)",
 			container: "mkv", videoCodec: "h265", audio: aacTrack, caps: chromeHEVCCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome HEVC + MP4 HEVC + EAC3 audio: can't direct play (EAC3 not
 			// supported on Chrome). Must remux for audio transcode.
-			name: "chromeHEVC + mp4 hevc eac3 = remux, audio recode",
+			name:      "chromeHEVC + mp4 hevc eac3 = remux, audio recode",
 			container: "mp4", videoCodec: "hevc", audio: eac3Only, caps: chromeHEVCCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
@@ -430,13 +430,13 @@ func TestDecidePlayback(t *testing.T) {
 		{
 			// MP4 + H.264 + AAC (no default flag): should still direct play.
 			// Before fix, this forced an unnecessary remux.
-			name: "chrome + mp4 h264 aac (no default flag) = direct play",
+			name:      "chrome + mp4 h264 aac (no default flag) = direct play",
 			container: "mp4", videoCodec: "h264", audio: aacTrackNoDefault, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// MKV + H.264 + AAC (no default flag): remux for container, audio passthrough.
-			name: "chrome + mkv h264 aac (no default flag) = remux",
+			name:      "chrome + mkv h264 aac (no default flag) = remux",
 			container: "mkv", videoCodec: "h264", audio: aacTrackNoDefault, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
@@ -446,72 +446,72 @@ func TestDecidePlayback(t *testing.T) {
 		// Direct play bypasses HLS.js entirely.
 		{
 			// macOS Safari + MP4 H.264 + EAC3: direct play is fine (browser plays natively).
-			name: "macSafari + mp4 h264 eac3 = direct play (native, no HLS.js)",
+			name:      "macSafari + mp4 h264 eac3 = direct play (native, no HLS.js)",
 			container: "mp4", videoCodec: "h264", audio: eac3Only, caps: macSafariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// macOS Safari + MKV H.264 + EAC3: must remux (MKV container), but EAC3
 			// cannot be passthrough into .ts for HLS.js → audio transcoded to AAC.
-			name: "macSafari + mkv h264 eac3 = remux, audio transcode (HLS.js can't demux EAC3 from .ts)",
+			name:      "macSafari + mkv h264 eac3 = remux, audio transcode (HLS.js can't demux EAC3 from .ts)",
 			container: "mkv", videoCodec: "h264", audio: eac3Only, caps: macSafariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
 		{
 			// macOS Safari + MKV HEVC + AAC: HLSJS=true, HLS.js v1.6+ handles HEVC .ts
 			// → remux with hevc_mp4toannexb BSF. Near-zero CPU.
-			name: "macSafari + mkv hevc aac = remux (HLS.js v1.6+ handles HEVC .ts)",
+			name:      "macSafari + mkv hevc aac = remux (HLS.js v1.6+ handles HEVC .ts)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: macSafariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// macOS Safari + MP4 HEVC + AAC: direct play (no HLS.js involved).
-			name: "macSafari + mp4 hevc aac = direct play (native, no HLS.js)",
+			name:      "macSafari + mp4 hevc aac = direct play (native, no HLS.js)",
 			container: "mp4", videoCodec: "hevc", audio: aacTrack, caps: macSafariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// macOS Safari + MKV H.264 + EAC3+AAC: remux (MKV container), picks AAC
 			// track (the only one HLS.js can handle in .ts), passthrough.
-			name: "macSafari + mkv h264 eac3+aac = remux, picks aac track (HLS.js safe)",
+			name:      "macSafari + mkv h264 eac3+aac = remux, picks aac track (HLS.js safe)",
 			container: "mkv", videoCodec: "h264", audio: eac3AndAac, caps: macSafariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
 			// macOS Safari + MP4 H.264 + EAC3+AAC: direct play (EAC3 is default, browser handles it natively).
-			name: "macSafari + mp4 h264 eac3+aac = direct play (default eac3 ok natively)",
+			name:      "macSafari + mp4 h264 eac3+aac = direct play (default eac3 ok natively)",
 			container: "mp4", videoCodec: "h264", audio: eac3AndAac, caps: macSafariCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// macOS Safari + MKV HEVC + EAC3: HEVC remux is fine (HLS.js v1.6+), but
 			// EAC3 is not HLS.js-safe → remux with audio transcode (EAC3→AAC).
-			name: "macSafari + mkv hevc eac3 = remux, audio transcode (EAC3 unsafe for HLS.js)",
+			name:      "macSafari + mkv hevc eac3 = remux, audio transcode (EAC3 unsafe for HLS.js)",
 			container: "mkv", videoCodec: "hevc", audio: eac3Only, caps: macSafariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
 		// ── VP9/AV1 remux guard: HLS.js TS demuxer cannot handle these codecs ──
 		{
 			// Chrome + MKV VP9 + AAC: VP9 in .ts is unplayable by HLS.js → full transcode.
-			name: "chrome + mkv vp9 aac = transcode (VP9 not viable in .ts)",
+			name:      "chrome + mkv vp9 aac = transcode (VP9 not viable in .ts)",
 			container: "mkv", videoCodec: "vp9", audio: aacTrack, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome + MKV AV1 + AAC: AV1 in .ts is unplayable by HLS.js → full transcode.
-			name: "chrome + mkv av1 aac = transcode (AV1 not viable in .ts)",
+			name:      "chrome + mkv av1 aac = transcode (AV1 not viable in .ts)",
 			container: "mkv", videoCodec: "av1", audio: aacTrack, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome + WebM VP9 + Opus: native WebM → direct play (no .ts involved).
-			name: "chrome + webm vp9 opus = direct play (native WebM, no .ts)",
+			name:      "chrome + webm vp9 opus = direct play (native WebM, no .ts)",
 			container: "webm", videoCodec: "vp9", audio: []models.AudioTrack{{Codec: "opus", IsDefault: true}}, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// Chrome + MKV VP8 + AAC: VP8 in .ts also unplayable → full transcode.
-			name: "chrome + mkv vp8 aac = transcode (VP8 not viable in .ts)",
+			name:      "chrome + mkv vp8 aac = transcode (VP8 not viable in .ts)",
 			container: "mkv", videoCodec: "vp8", audio: aacTrack,
 			caps: &ClientCaps{
 				VideoCodecs: map[string]bool{"h264": true, "vp8": true, "vp9": true},
@@ -524,7 +524,7 @@ func TestDecidePlayback(t *testing.T) {
 		{
 			// Safari iOS (no HLS.js) + MKV VP9: VP9 not in Safari caps → transcode
 			// (but importantly, the .ts guard is irrelevant since HLSJS=false).
-			name: "safari + mkv vp9 aac = transcode (Safari has no VP9 support)",
+			name:      "safari + mkv vp9 aac = transcode (Safari has no VP9 support)",
 			container: "mkv", videoCodec: "vp9", audio: aacTrack, caps: safariCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
@@ -537,14 +537,14 @@ func TestDecidePlayback(t *testing.T) {
 			// Gangland repro: MPEG-4 Part 2 video + MP3 audio in MKV. Video
 			// forces full transcode (Chrome can't decode mpeg4), and audio
 			// MUST be re-encoded to AAC to match the advertised codec string.
-			name: "chrome + mkv mpeg4 mp3 = transcode, audio recoded (Gangland bug)",
+			name:      "chrome + mkv mpeg4 mp3 = transcode, audio recoded (Gangland bug)",
 			container: "mkv", videoCodec: "mpeg4", audio: mp3Track, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: false, wantIdx: 0,
 		},
 		{
 			// H.264 + MP3 in MKV: video could be remuxed, but MP3 passthrough
 			// into .ts is unsafe (Safari decode, hls.js framing). Remux+recode.
-			name: "chrome + mkv h264 mp3 = remux, audio recoded (mp3 not ts-safe)",
+			name:      "chrome + mkv h264 mp3 = remux, audio recoded (mp3 not ts-safe)",
 			container: "mkv", videoCodec: "h264", audio: mp3Track, caps: chromeCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
@@ -552,14 +552,14 @@ func TestDecidePlayback(t *testing.T) {
 			// H.264 + MP3 in MP4 on Chrome (browser has MP3 caps): direct play
 			// is still correct — the browser plays the MP4 natively, no HLS
 			// pipeline involved, so the ts-safety concern doesn't apply.
-			name: "chrome + mp4 h264 mp3 = direct play (native, no HLS)",
+			name:      "chrome + mp4 h264 mp3 = direct play (native, no HLS)",
 			container: "mp4", videoCodec: "h264", audio: mp3Track, caps: chromeCaps,
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
 			// HEVC + MP3 on a client without HEVC support: full transcode.
 			// Audio MP3 → AAC recode to match manifest.
-			name: "chrome (no HEVC) + mkv hevc mp3 = transcode, audio recoded",
+			name:      "chrome (no HEVC) + mkv hevc mp3 = transcode, audio recoded",
 			container: "mkv", videoCodec: "hevc", audio: mp3Track, caps: chromeCaps,
 			wantDec: "transcode", wantRemux: false, wantAudioP: false, wantIdx: 0,
 		},
@@ -567,7 +567,7 @@ func TestDecidePlayback(t *testing.T) {
 			// Safari (native HLS, HLSJS=false) + MKV H.264 + MP3: HLSNative
 			// path also benefits from AAC recode — Safari's native HLS is
 			// strict about mp3-in-ts depending on OS version.
-			name: "safari + mkv h264 mp3 = remux, audio recoded (mp3 unsafe in .ts)",
+			name:      "safari + mkv h264 mp3 = remux, audio recoded (mp3 unsafe in .ts)",
 			container: "mkv", videoCodec: "h264", audio: mp3Track, caps: safariCaps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: false, wantIdx: 0,
 		},
@@ -613,8 +613,8 @@ func TestFindBestAudioTrack(t *testing.T) {
 			wantCompat: true, wantDefault: true,
 		},
 		{
-			name: "single compatible default",
-			tracks: []models.AudioTrack{{Codec: "aac", IsDefault: true}},
+			name:    "single compatible default",
+			tracks:  []models.AudioTrack{{Codec: "aac", IsDefault: true}},
 			wantIdx: 0, wantCodec: "aac", wantCompat: true, wantDefault: true,
 		},
 		{
@@ -757,11 +757,11 @@ func TestHlsCodecString(t *testing.T) {
 		height int
 		want   string
 	}{
-		{360, "avc1.42001e,mp4a.40.2"},   // Level 3.0
-		{480, "avc1.42001e,mp4a.40.2"},   // Level 3.0
-		{720, "avc1.42001f,mp4a.40.2"},   // Level 3.1
-		{1080, "avc1.420028,mp4a.40.2"},  // Level 4.0
-		{2160, "avc1.640033,mp4a.40.2"},  // High profile, Level 5.1 (4K)
+		{360, "avc1.42001e,mp4a.40.2"},  // Level 3.0
+		{480, "avc1.42001e,mp4a.40.2"},  // Level 3.0
+		{720, "avc1.42001f,mp4a.40.2"},  // Level 3.1
+		{1080, "avc1.420028,mp4a.40.2"}, // Level 4.0
+		{2160, "avc1.640033,mp4a.40.2"}, // High profile, Level 5.1 (4K)
 	}
 	for _, tt := range tests {
 		got := hlsCodecString(tt.height)

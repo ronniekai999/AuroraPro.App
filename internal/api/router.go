@@ -66,31 +66,31 @@ func GetDiskFreeGB(path string) float64 {
 
 // RouterDeps holds all dependencies needed by the router.
 type RouterDeps struct {
-	Cfg         *config.Config
-	AuthSvc     *auth.Service
-	Queries     *db.Queries
-	Scanner     *library.Scanner
-	Hub         *ws.Hub
-	AuthLimiter *auth.RateLimiter
-	Watcher     *library.Watcher
-	Enricher    *metadata.Enricher
-	ImgProxy    *metadata.ImageProxy
-	Transcode    *streaming.TranscodeManager
-	Activity     *ActivityLogger
-	RingLog      *logging.RingBufferHandler
-	Pool         *pgxpool.Pool
-	StartTime    time.Time
-	Version      string
-	StaticDir    string // Path to static files directory (e.g. "static")
-	ArrClients   *arr.ArrClients
-	PartyManager *watchparty.Manager
-	Tmdb         *metadata.TMDBClient // optional — enables TMDB external_ids fallback for Sonarr lookup
-	Tvdb         *metadata.TVDBClient // optional — enables TVDB direct-search fallback for Sonarr lookup
-	Semantic         SemanticSearcher // optional — enables natural-language /search when LLM is configured
-	HeroProv         HeroProvider     // optional — enables personalized /api/me/hero
-	EmbeddingEnabled bool             // for the admin dashboard's coverage card
-	EmbeddingVersion int16            // current embedding.CurrentVersion at boot
-	LLMClient        *llm.Client      // optional — admin debug toggle target (Phase 6)
+	Cfg              *config.Config
+	AuthSvc          *auth.Service
+	Queries          *db.Queries
+	Scanner          *library.Scanner
+	Hub              *ws.Hub
+	AuthLimiter      *auth.RateLimiter
+	Watcher          *library.Watcher
+	Enricher         *metadata.Enricher
+	ImgProxy         *metadata.ImageProxy
+	Transcode        *streaming.TranscodeManager
+	Activity         *ActivityLogger
+	RingLog          *logging.RingBufferHandler
+	Pool             *pgxpool.Pool
+	StartTime        time.Time
+	Version          string
+	StaticDir        string // Path to static files directory (e.g. "static")
+	ArrClients       *arr.ArrClients
+	PartyManager     *watchparty.Manager
+	Tmdb             *metadata.TMDBClient // optional — enables TMDB external_ids fallback for Sonarr lookup
+	Tvdb             *metadata.TVDBClient // optional — enables TVDB direct-search fallback for Sonarr lookup
+	Semantic         SemanticSearcher     // optional — enables natural-language /search when LLM is configured
+	HeroProv         HeroProvider         // optional — enables personalized /api/me/hero
+	EmbeddingEnabled bool                 // for the admin dashboard's coverage card
+	EmbeddingVersion int16                // current embedding.CurrentVersion at boot
+	LLMClient        *llm.Client          // optional — admin debug toggle target (Phase 6)
 	// RootCtx is the server-lifecycle context. Handlers that spawn long-
 	// lived background goroutines (e.g. ARR dispatch) parent off this so
 	// graceful shutdown stops them. May be nil; handlers must tolerate it.
@@ -326,8 +326,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.
-	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
-	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc, cfg.OriginAllowed)
+	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc, tokenVerStore, cfg.OriginAllowed)
+	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc, tokenVerStore, cfg.OriginAllowed)
 
 	// ── API routes (with restrictive security headers) ─────────────────
 	r.Group(func(r chi.Router) {
@@ -709,14 +709,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 		// WebSocket (authenticated via query param for browser compat)
 		r.Get("/ws", func(w http.ResponseWriter, r *http.Request) {
-			token := QueryParamToken(r)
-			if token == "" {
-				writeError(w, http.StatusUnauthorized, "token query parameter required")
-				return
-			}
-			claims, err := deps.AuthSvc.ValidateAccessToken(token)
-			if err != nil {
-				writeError(w, http.StatusUnauthorized, "invalid or expired token")
+			claims, ok := requireQueryTokenClaims(w, r, deps.AuthSvc, tokenVerStore)
+			if !ok {
 				return
 			}
 			deps.Hub.HandleConnectAuth(w, r, claims.UserID, claims.Role)

@@ -118,16 +118,16 @@ func (h *AdminHandler) SetLLMClient(c *llm.Client) {
 // which can drift from DebugLog (the persisted DB setting) between a write
 // and the next reload. The UI renders both: persisted (saved) vs live (now).
 type LLMSettings struct {
-	Provider      string `json:"provider"`       // "ollama_cloud" | "local" | "" (env-controlled)
-	OllamaURL     string `json:"ollama_url"`     // for chat endpoint
-	EmbedURL      string `json:"embed_url"`      // optional override for local embeddings
-	APIKeyMasked  string `json:"api_key_masked"` // never the raw key
-	HasAPIKey     bool   `json:"has_api_key"`
-	ChatModel     string `json:"chat_model"`
-	EmbedModel    string `json:"embed_model"`
-	DebugLog      bool   `json:"debug_log"`       // persisted setting in DB
-	LiveDebugLog  bool   `json:"live_debug_log"`  // in-memory state of the *active* client
-	ClientLoaded  bool   `json:"client_loaded"`   // false when LLM is disabled at startup
+	Provider     string `json:"provider"`       // "ollama_cloud" | "local" | "" (env-controlled)
+	OllamaURL    string `json:"ollama_url"`     // for chat endpoint
+	EmbedURL     string `json:"embed_url"`      // optional override for local embeddings
+	APIKeyMasked string `json:"api_key_masked"` // never the raw key
+	HasAPIKey    bool   `json:"has_api_key"`
+	ChatModel    string `json:"chat_model"`
+	EmbedModel   string `json:"embed_model"`
+	DebugLog     bool   `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog bool   `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded bool   `json:"client_loaded"`  // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -380,7 +380,7 @@ func (h *AdminHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		Goroutines:         runtime.NumGoroutine(),
 		CPUCores:           float64(runtime.NumCPU()),
 		DiskFreeGB:         diskFreeGB,
-		ActiveStreams:       h.transcode.ActiveSessions(),
+		ActiveStreams:      h.transcode.ActiveSessions(),
 		WebSocketClients:   h.hub.ClientCount(),
 		LibraryCount:       libCount,
 		MovieCount:         movieCount,
@@ -792,11 +792,11 @@ type OAuthSettings struct {
 // write paths can't drift on key names. Per-provider sub-structs keep
 // the field names readable at use sites.
 var oauthSettingKeys = struct {
-	GoogleEnabled, GoogleClientID, GoogleClientSecret, GoogleRedirectURL, GoogleBypassInvite                string
-	DiscordEnabled, DiscordClientID, DiscordClientSecret, DiscordRedirectURL, DiscordBypassInvite           string
-	TwitchEnabled, TwitchClientID, TwitchClientSecret, TwitchRedirectURL, TwitchBypassInvite                string
-	FacebookEnabled, FacebookClientID, FacebookClientSecret, FacebookRedirectURL, FacebookBypassInvite      string
-	TwitterEnabled, TwitterClientID, TwitterClientSecret, TwitterRedirectURL, TwitterBypassInvite           string
+	GoogleEnabled, GoogleClientID, GoogleClientSecret, GoogleRedirectURL, GoogleBypassInvite           string
+	DiscordEnabled, DiscordClientID, DiscordClientSecret, DiscordRedirectURL, DiscordBypassInvite      string
+	TwitchEnabled, TwitchClientID, TwitchClientSecret, TwitchRedirectURL, TwitchBypassInvite           string
+	FacebookEnabled, FacebookClientID, FacebookClientSecret, FacebookRedirectURL, FacebookBypassInvite string
+	TwitterEnabled, TwitterClientID, TwitterClientSecret, TwitterRedirectURL, TwitterBypassInvite      string
 }{
 	GoogleEnabled:      "oauth_google_enabled",
 	GoogleClientID:     "oauth_google_client_id",
@@ -952,8 +952,8 @@ func (h *AdminHandler) UpdateOAuthSettings(w http.ResponseWriter, r *http.Reques
 	// URL is validated independently so a typo on one doesn't block
 	// updates to another.
 	for _, v := range []struct {
-		field   string
-		val     *string
+		field string
+		val   *string
 	}{
 		{"google_redirect_url", req.GoogleRedirectURL},
 		{"discord_redirect_url", req.DiscordRedirectURL},

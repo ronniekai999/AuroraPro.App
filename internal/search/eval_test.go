@@ -29,15 +29,15 @@ import (
 // evalCase is one row of the golden set. Each predicate is optional: leave a
 // field empty/zero to skip that assertion.
 type evalCase struct {
-	name        string
-	query       string
-	wantIntent  string   // exact match if non-empty
-	wantGenres  []string // each must appear in parsed.Genres (case-insensitive)
-	wantYearMin int      // if >0, parsed.YearMin must equal this
-	wantYearMax int      // if >0, parsed.YearMax must equal this
-	wantMedia   string   // exact match if non-empty
-	wantSimTo   []string // titles that must appear in similar_to_titles
-	hydeNonEmpty bool    // require a non-empty hyde_overview (default true)
+	name         string
+	query        string
+	wantIntent   string   // exact match if non-empty
+	wantGenres   []string // each must appear in parsed.Genres (case-insensitive)
+	wantYearMin  int      // if >0, parsed.YearMin must equal this
+	wantYearMax  int      // if >0, parsed.YearMax must equal this
+	wantMedia    string   // exact match if non-empty
+	wantSimTo    []string // titles that must appear in similar_to_titles
+	hydeNonEmpty bool     // require a non-empty hyde_overview (default true)
 }
 
 var evalCases = []evalCase{
