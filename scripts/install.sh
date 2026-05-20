@@ -25,6 +25,10 @@
 #   AURORA_SONARR_API_KEY=...
 #   AURORA_TVDB_API_KEY=... + AURORA_TVDB_PIN=...
 #   AURORA_MEDIA_DIR=/path                  — grant read access to a media dir
+#   AURORA_GIT_TOKEN=<PAT>                  — for private repos: writes
+#                                              /root/.git-credentials so
+#                                              the auto-updater can fetch
+#                                              without prompting
 #
 # Re-running this script after editing source code rebuilds + restarts
 # the service while keeping the existing JWT secret and database.
@@ -56,6 +60,12 @@ step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
 cleanup_on_interrupt() {
     echo ""
     warn "Installation interrupted. Re-run this script to resume — partial state is safe."
+    # 2026-05-20 audit (MED-1) — clean up partial atomic-write
+    # tempfiles that we'd otherwise leave behind with secrets
+    # (JWT_SECRET + DB password in aurora.env.tmp, PAT in
+    # .git-credentials.tmp). Both at mode 600/640 so not
+    # world-readable, but still dead state worth removing.
+    rm -f /etc/aurora/aurora.env.tmp /root/.git-credentials.tmp 2>/dev/null || true
 }
 trap cleanup_on_interrupt INT TERM
 
@@ -929,22 +939,92 @@ fi
 if [ -f "$PROJECT_DIR/scripts/aurora-update.sh" ] && ! $SKIP_UPDATER; then
     info "Installing auto-updater..."
 
+    # Private-repo auth (2026-05-20). For public repos, the auto-
+    # updater's `git fetch` works without credentials. For private
+    # repos, systemd's non-interactive context can't prompt — the
+    # symptom is `fatal: could not read Username for 'https://github.com'`
+    # spamming /var/log/aurora/update.log every 5 min.
+    #
+    # If the operator sets AURORA_GIT_TOKEN=<PAT> before running
+    # install.sh, we install a root-owned credential file and
+    # configure credential.helper=store on the mirror only. The
+    # token never lands in .git/config or process args (which
+    # would leak to ps + journal). Use `x-access-token` as the
+    # username so the same flow works for both classic and
+    # fine-grained PATs without surfacing the actual username.
+    if [ -n "${AURORA_GIT_TOKEN:-}" ]; then
+        info "Configuring git credential store for private-repo auth..."
+        # 2026-05-20 audit (HIGH-1) — DEDUPE, don't truncate. If the
+        # operator already has credentials in /root/.git-credentials
+        # for gitlab.com, bitbucket.org, or a second github account,
+        # a plain `> file` would silently nuke them. We preserve
+        # non-github.com entries and replace any existing github.com
+        # line with the new token.
+        #
+        # Filter: drop lines whose host component is exactly
+        # "github.com" (with or without a trailing path). Other
+        # hosts ("github.com.evil.example", "ghe.example.com") are
+        # preserved untouched.
+        {
+            if [ -f /root/.git-credentials ]; then
+                # grep -v returns 1 when nothing matches the
+                # inverted pattern (all lines were github.com).
+                # || true keeps us going under set -e.
+                grep -vE '@github\.com(/|$)' /root/.git-credentials || true
+            fi
+            printf 'https://x-access-token:%s@github.com\n' "$AURORA_GIT_TOKEN"
+        } > /root/.git-credentials.tmp
+        # Permissions BEFORE rename — chmod 600 makes the umask
+        # dance unnecessary (the file is 600 from the rename
+        # onward, regardless of what umask was at write time).
+        chmod 600 /root/.git-credentials.tmp
+        chown root:root /root/.git-credentials.tmp
+        mv -f /root/.git-credentials.tmp /root/.git-credentials
+        ok "Updated /root/.git-credentials (preserved other-host entries)"
+        # Note: credential.helper is configured on the source
+        # mirror itself (below, after the clone/fetch step) — that
+        # way we don't pollute git's global config.
+    fi
+
     # Set up the root-owned source mirror. Clone fresh if absent;
     # otherwise refresh `git fetch` so the updater starts from a
     # current state. We also force-set the origin URL in case a
     # prior install pointed it elsewhere.
+    #
+    # If AURORA_GIT_TOKEN is set, we tell the clone/fetch to use
+    # the credential store via -c credential.helper=store. After
+    # the clone, we persist that config in the mirror's .git/config
+    # so the auto-updater's fetches also use it without needing
+    # any env var.
+    GIT_CRED_ARGS=()
+    if [ -n "${AURORA_GIT_TOKEN:-}" ]; then
+        GIT_CRED_ARGS=(-c credential.helper=store)
+    fi
+
     if [ ! -d "$UPDATER_SOURCE_DIR/.git" ]; then
         info "Cloning $UPDATER_ORIGIN_URL to $UPDATER_SOURCE_DIR (root-owned)..."
         # Clone shallowly to keep disk use modest; `git fetch` later
         # will deepen if needed for tag-describe.
-        if ! git clone --quiet "$UPDATER_ORIGIN_URL" "$UPDATER_SOURCE_DIR"; then
-            warn "git clone of $UPDATER_ORIGIN_URL into $UPDATER_SOURCE_DIR failed. Auto-updater disabled — fix the remote and re-run."
+        if ! git "${GIT_CRED_ARGS[@]}" clone --quiet "$UPDATER_ORIGIN_URL" "$UPDATER_SOURCE_DIR"; then
+            warn "git clone of $UPDATER_ORIGIN_URL into $UPDATER_SOURCE_DIR failed."
+            if [ -z "${AURORA_GIT_TOKEN:-}" ]; then
+                warn "  If this is a private repo, set AURORA_GIT_TOKEN=<PAT> and re-run install.sh."
+            fi
+            warn "  Auto-updater disabled — fix the remote and re-run."
             SKIP_UPDATER=true
         fi
     else
         info "Refreshing existing source mirror at $UPDATER_SOURCE_DIR..."
         git -C "$UPDATER_SOURCE_DIR" remote set-url origin "$UPDATER_ORIGIN_URL"
-        git -C "$UPDATER_SOURCE_DIR" fetch --quiet origin || warn "git fetch in $UPDATER_SOURCE_DIR failed — updater will retry on next tick."
+        git "${GIT_CRED_ARGS[@]}" -C "$UPDATER_SOURCE_DIR" fetch --quiet origin || warn "git fetch in $UPDATER_SOURCE_DIR failed — updater will retry on next tick."
+    fi
+
+    # Persist credential.helper=store in the mirror's .git/config
+    # so aurora-update.sh's non-interactive fetches just-work. Set
+    # at repo scope (not --global) to keep the auth contract
+    # narrow: only this one clone uses /root/.git-credentials.
+    if [ -n "${AURORA_GIT_TOKEN:-}" ] && [ -d "$UPDATER_SOURCE_DIR/.git" ]; then
+        git -C "$UPDATER_SOURCE_DIR" config credential.helper store
     fi
 
     if ! $SKIP_UPDATER; then
@@ -1026,6 +1106,15 @@ fi
 JWT_SECRET="${EXISTING_JWT:-$(rand_string 64)}"
 
 info "Writing $CONFIG_DIR/aurora.env..."
+# Atomic write: write to .tmp then rename into place. The previous
+# `{ ... } > aurora.env` truncated the file at open time, then
+# wrote ~20 printf lines one at a time. If aurora-update.sh
+# happened to `source` the file during that few-ms window (the
+# 5-min timer fired in just the wrong moment), it saw an empty
+# file → `AURORA_SOURCE_DIR` unset → logged "AURORA_SOURCE_DIR
+# missing" in /var/log/aurora/update.log. Atomic rename closes
+# the race (the running aurora.env is either the old version or
+# the fully-written new version — never empty).
 {
     printf '# Aurora Media Server — auto-generated %s\n' "$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     printf '# Edit and run "systemctl restart aurora" to apply changes.\n\n'
@@ -1079,9 +1168,13 @@ info "Writing $CONFIG_DIR/aurora.env..."
         [ -n "${AURORA_SONARR_URL:-}" ]      && printf 'SONARR_URL=%s\n' "$AURORA_SONARR_URL"
         [ -n "${AURORA_SONARR_API_KEY:-}" ]  && printf 'SONARR_API_KEY=%s\n' "$AURORA_SONARR_API_KEY"
     fi
-} > "$CONFIG_DIR/aurora.env"
-chmod 640 "$CONFIG_DIR/aurora.env"
-chown root:"$AURORA_GROUP" "$CONFIG_DIR/aurora.env"
+} > "$CONFIG_DIR/aurora.env.tmp"
+chmod 640 "$CONFIG_DIR/aurora.env.tmp"
+chown root:"$AURORA_GROUP" "$CONFIG_DIR/aurora.env.tmp"
+# Atomic rename — on POSIX this is a single inode swap. Concurrent
+# readers (aurora-update.sh sourcing the file) either see the old
+# version or the new version, never a half-written one.
+mv -f "$CONFIG_DIR/aurora.env.tmp" "$CONFIG_DIR/aurora.env"
 ok "Configuration written"
 
 # ── Media directory access ────────────────────────────────────────
