@@ -1282,7 +1282,25 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         </div>
 
         {/* Video */}
-        <div className="flex-1 flex items-center justify-center bg-black relative">
+        {/* 2026-05-20 — `min-h-0` is the canonical Tailwind/flexbox fix
+            for the "child overflows flex parent by N pixels" bug. By
+            default, a flex child gets `min-height: auto` which prevents
+            it from shrinking below its intrinsic content size. With a
+            <video object-contain> child, that intrinsic size depends
+            on the video's natural dimensions and can exceed the
+            available flex space — pushing the container's bottom past
+            the viewport.
+            Symptom in production: controls (positioned `absolute bottom-0`
+            of this container) rendered 1.25px below the viewport,
+            invisible behind macOS browser chrome / dock. DevTools
+            opening triggered a layout recompute that pulled things
+            back into view, which is why the bug only surfaced
+            "without DevTools open."
+            `overflow-hidden` is belt-and-suspenders — if any future
+            child still overflows for some reason, it clips visually
+            instead of pushing absolute-positioned descendants past
+            the viewport. */}
+        <div className="flex-1 min-h-0 flex items-center justify-center bg-black relative overflow-hidden">
           {errorMsg ? (
             <div className="text-center px-8">
               <p className="text-red-400 text-lg font-medium">Playback Error</p>
