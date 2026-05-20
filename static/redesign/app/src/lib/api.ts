@@ -240,18 +240,26 @@ async function tryRefresh(): Promise<boolean> {
   return p
 }
 
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE'
+
 interface FetchOpts {
-  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  method?: HttpMethod
   body?: unknown
   headers?: Record<string, string>
   signal?: AbortSignal
 }
 
-export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}): Promise<T> {
+interface FetchResponseOpts {
+  method?: HttpMethod
+  body?: BodyInit | null
+  headers?: Record<string, string>
+  signal?: AbortSignal
+}
+
+export async function apiFetchResponse(path: string, opts: FetchResponseOpts = {}): Promise<Response> {
   const doRequest = async (): Promise<Response> => {
     const headers: Record<string, string> = {
       'Accept': 'application/json',
-      ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
       ...opts.headers,
     }
     const token = getAccessToken()
@@ -259,7 +267,7 @@ export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}):
     return fetch(path, {
       method: opts.method || 'GET',
       headers,
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      body: opts.body ?? undefined,
       signal: opts.signal,
       credentials: 'same-origin',
     })
@@ -272,6 +280,20 @@ export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}):
       res = await doRequest()
     }
   }
+  return res
+}
+
+export async function apiFetch<T = unknown>(path: string, opts: FetchOpts = {}): Promise<T> {
+  const hasBody = opts.body !== undefined && opts.body !== null
+  const res = await apiFetchResponse(path, {
+    method: opts.method,
+    body: hasBody ? JSON.stringify(opts.body) : undefined,
+    headers: {
+      ...(hasBody ? { 'Content-Type': 'application/json' } : {}),
+      ...opts.headers,
+    },
+    signal: opts.signal,
+  })
 
   const ct = res.headers.get('content-type') || ''
   const parseBody = async (): Promise<unknown> => {
@@ -426,15 +448,8 @@ export async function searchMedia(
 ): Promise<SearchResult> {
   if (!query.trim()) return { items: [], mode: 'literal' }
   const params = new URLSearchParams({ q: query, limit: String(limit) })
-  // Bypass apiFetch so we can read the response headers — apiFetch
-  // returns only the parsed body. This is the only call site that
-  // needs header access, so adding header-return to apiFetch would
-  // be over-generalization.
-  const token = getAccessToken()
-  const res = await fetch(`/api/media/search?${params.toString()}`, {
-    headers: token ? { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' } : { 'Accept': 'application/json' },
+  const res = await apiFetchResponse(`/api/media/search?${params.toString()}`, {
     signal,
-    credentials: 'same-origin',
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const items = (await res.json()) as ServerMediaItem[]
@@ -1547,16 +1562,47 @@ export interface TmdbSearchResult {
   overview?: string
   year?: number
 }
+
+interface TmdbSearchEnvelope {
+  results?: TmdbSearchItem[]
+}
+
+interface TmdbSearchItem {
+  id: number
+  media_type?: 'movie' | 'tv' | 'person'
+  title?: string
+  name?: string
+  poster_path?: string | null
+  overview?: string
+  release_date?: string
+  first_air_date?: string
+}
+
 export async function searchTmdb(
   q: string,
   signal?: AbortSignal,
 ): Promise<TmdbSearchResult[]> {
   if (!q.trim()) return []
-  const results = await apiFetch<TmdbSearchResult[]>(
-    `/api/requests/search?q=${encodeURIComponent(q)}`,
+  const envelope = await apiFetch<TmdbSearchEnvelope>(
+    `/api/requests/search?q=${encodeURIComponent(q)}&type=multi`,
     { signal },
   )
-  return results || []
+  return (envelope.results || [])
+    .filter(item => item.media_type === 'movie' || item.media_type === 'tv')
+    .map(item => {
+      const mediaType: TmdbSearchResult['media_type'] = item.media_type === 'tv' ? 'tv' : 'movie'
+      const date = mediaType === 'tv' ? item.first_air_date : item.release_date
+      const year = date && date.length >= 4 ? Number.parseInt(date.slice(0, 4), 10) : 0
+      return {
+        tmdb_id: item.id,
+        media_type: mediaType,
+        title: item.title || item.name || '',
+        poster_path: item.poster_path || '',
+        overview: item.overview || '',
+        year: Number.isFinite(year) ? year : 0,
+      }
+    })
+    .filter(item => item.tmdb_id > 0 && item.title)
 }
 
 export interface CreateRequestPayload {

@@ -76,9 +76,9 @@ func TestFindExternalSubtitles(t *testing.T) {
 
 	// Create unrelated files that should NOT be picked up
 	unrelated := []string{
-		"OtherMovie.eng.srt",    // Different base name
-		"Movie.2024.nfo",        // Not a subtitle extension
-		"Movie.2024.eng.txt",    // Not a subtitle extension
+		"OtherMovie.eng.srt", // Different base name
+		"Movie.2024.nfo",     // Not a subtitle extension
+		"Movie.2024.eng.txt", // Not a subtitle extension
 	}
 	for _, f := range unrelated {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte("content"), 0o644); err != nil {
@@ -527,4 +527,3 @@ func TestCanDirectPlay(t *testing.T) {
 		})
 	}
 }
-

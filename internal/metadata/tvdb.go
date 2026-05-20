@@ -203,20 +203,20 @@ type tvdbResponse[T any] struct {
 
 // TVDBSearchResult represents a single search result from TVDB's /search endpoint.
 type TVDBSearchResult struct {
-	ObjectID      string  `json:"objectID"`
-	Name          string  `json:"name"`
-	Slug          string  `json:"slug"`
-	Overview      string  `json:"overview"`
-	Type          string  `json:"type"` // "series", "movie", "person", "company"
-	TVDBId        string  `json:"tvdb_id"`
-	Year          string  `json:"year"`
-	ImageURL      string  `json:"image_url"`
-	PrimaryType   string  `json:"primary_type"`
-	Status        string  `json:"status"`
-	Country       string  `json:"country"`
-	Network       string  `json:"network"`
-	RemoteIDs     []tvdbRemoteID `json:"remote_ids,omitempty"`
-	Translations  map[string]string `json:"translations,omitempty"`
+	ObjectID     string            `json:"objectID"`
+	Name         string            `json:"name"`
+	Slug         string            `json:"slug"`
+	Overview     string            `json:"overview"`
+	Type         string            `json:"type"` // "series", "movie", "person", "company"
+	TVDBId       string            `json:"tvdb_id"`
+	Year         string            `json:"year"`
+	ImageURL     string            `json:"image_url"`
+	PrimaryType  string            `json:"primary_type"`
+	Status       string            `json:"status"`
+	Country      string            `json:"country"`
+	Network      string            `json:"network"`
+	RemoteIDs    []tvdbRemoteID    `json:"remote_ids,omitempty"`
+	Translations map[string]string `json:"translations,omitempty"`
 }
 
 type tvdbRemoteID struct {
@@ -278,25 +278,25 @@ func (c *TVDBClient) SearchSeries(ctx context.Context, query string, year int) (
 
 // TVDBSeriesExtended represents the extended series record.
 type TVDBSeriesExtended struct {
-	ID               int               `json:"id"`
-	Name             string            `json:"name"`
-	Slug             string            `json:"slug"`
-	Overview         string            `json:"overview"`
-	Image            string            `json:"image"`
-	FirstAired       string            `json:"firstAired"`
-	LastAired        string            `json:"lastAired"`
-	Status           *tvdbStatus       `json:"status"`
-	OriginalLanguage string            `json:"originalLanguage"`
-	Score            int               `json:"score"`
-	Year             string            `json:"year"`
-	AverageRuntime   int               `json:"averageRuntime"`
-	Genres           []tvdbGenre       `json:"genres"`
-	Seasons          []TVDBSeason      `json:"seasons"`
-	Characters       []tvdbCharacter   `json:"characters"`
-	Artworks         []TVDBArtwork     `json:"artworks"`
-	RemoteIDs        []tvdbRemoteID    `json:"remoteIds"`
+	ID               int                 `json:"id"`
+	Name             string              `json:"name"`
+	Slug             string              `json:"slug"`
+	Overview         string              `json:"overview"`
+	Image            string              `json:"image"`
+	FirstAired       string              `json:"firstAired"`
+	LastAired        string              `json:"lastAired"`
+	Status           *tvdbStatus         `json:"status"`
+	OriginalLanguage string              `json:"originalLanguage"`
+	Score            int                 `json:"score"`
+	Year             string              `json:"year"`
+	AverageRuntime   int                 `json:"averageRuntime"`
+	Genres           []tvdbGenre         `json:"genres"`
+	Seasons          []TVDBSeason        `json:"seasons"`
+	Characters       []tvdbCharacter     `json:"characters"`
+	Artworks         []TVDBArtwork       `json:"artworks"`
+	RemoteIDs        []tvdbRemoteID      `json:"remoteIds"`
 	ContentRatings   []tvdbContentRating `json:"contentRatings"`
-	OriginalNetwork  *tvdbCompany      `json:"originalNetwork"`
+	OriginalNetwork  *tvdbCompany        `json:"originalNetwork"`
 }
 
 type tvdbStatus struct {
@@ -311,15 +311,15 @@ type tvdbGenre struct {
 }
 
 type tvdbCharacter struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	PeopleID    int    `json:"peopleId"`
-	PersonName  string `json:"personName"`
-	PeopleType  string `json:"peopleType"`
-	Image       string `json:"image"`
-	Sort        int    `json:"sort"`
-	Type        int    `json:"type"`
-	URL         string `json:"url"`
+	ID           int    `json:"id"`
+	Name         string `json:"name"`
+	PeopleID     int    `json:"peopleId"`
+	PersonName   string `json:"personName"`
+	PeopleType   string `json:"peopleType"`
+	Image        string `json:"image"`
+	Sort         int    `json:"sort"`
+	Type         int    `json:"type"`
+	URL          string `json:"url"`
 	PersonImgURL string `json:"personImgURL"`
 }
 
@@ -339,11 +339,11 @@ type tvdbCompany struct {
 
 // TVDBSeason represents a season within an extended series record.
 type TVDBSeason struct {
-	ID           int       `json:"id"`
-	Number       int       `json:"number"`
-	Name         string    `json:"name"`
-	Image        string    `json:"image"`
-	Type         *tvdbSeasonType `json:"type"`
+	ID     int             `json:"id"`
+	Number int             `json:"number"`
+	Name   string          `json:"name"`
+	Image  string          `json:"image"`
+	Type   *tvdbSeasonType `json:"type"`
 }
 
 type tvdbSeasonType struct {
@@ -354,41 +354,41 @@ type tvdbSeasonType struct {
 
 // TVDBArtwork represents a single artwork record.
 type TVDBArtwork struct {
-	ID         int    `json:"id"`
-	Image      string `json:"image"`
-	Thumbnail  string `json:"thumbnail"`
-	Language   string `json:"language"`
-	Type       int    `json:"type"`
-	Score      int    `json:"score"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
+	ID        int    `json:"id"`
+	Image     string `json:"image"`
+	Thumbnail string `json:"thumbnail"`
+	Language  string `json:"language"`
+	Type      int    `json:"type"`
+	Score     int    `json:"score"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
 }
 
 // TVDB artwork type constants (from /artwork/types).
 const (
-	TVDBArtBanner        = 1
-	TVDBArtPoster        = 2
-	TVDBArtBackground    = 3
-	TVDBArtIcon          = 5
-	TVDBArtClearArt      = 6
-	TVDBArtClearLogo     = 7
-	TVDBArtSeasonPoster  = 8
-	TVDBArtSeasonBanner  = 9
+	TVDBArtBanner       = 1
+	TVDBArtPoster       = 2
+	TVDBArtBackground   = 3
+	TVDBArtIcon         = 5
+	TVDBArtClearArt     = 6
+	TVDBArtClearLogo    = 7
+	TVDBArtSeasonPoster = 8
+	TVDBArtSeasonBanner = 9
 )
 
 // TVDBEpisode represents an episode from the series episodes endpoint.
 type TVDBEpisode struct {
-	ID              int     `json:"id"`
-	SeriesID        int     `json:"seriesId"`
-	Name            string  `json:"name"`
-	Overview        string  `json:"overview"`
-	Image           string  `json:"image"`
-	SeasonNumber    int     `json:"seasonNumber"`
-	Number          int     `json:"number"` // episode number within season
-	AiredDate       string  `json:"aired"`
-	Runtime         int     `json:"runtime"`
-	Year            string  `json:"year"`
-	IsMovie         int     `json:"isMovie"`
+	ID           int    `json:"id"`
+	SeriesID     int    `json:"seriesId"`
+	Name         string `json:"name"`
+	Overview     string `json:"overview"`
+	Image        string `json:"image"`
+	SeasonNumber int    `json:"seasonNumber"`
+	Number       int    `json:"number"` // episode number within season
+	AiredDate    string `json:"aired"`
+	Runtime      int    `json:"runtime"`
+	Year         string `json:"year"`
+	IsMovie      int    `json:"isMovie"`
 }
 
 // GetSeriesExtended fetches full series detail including seasons, characters, artwork.

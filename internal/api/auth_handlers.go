@@ -157,7 +157,7 @@ func (h *AuthHandler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 		return gerr == nil && v == "true"
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"has_users":                   count > 0,
+		"has_users": count > 0,
 		// Audit M6 — `setup_complete` was declared on the TS
 		// SetupStatus interface but never emitted by the backend.
 		// Frontend treated undefined as false → "server not set
@@ -165,11 +165,11 @@ func (h *AuthHandler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 		// alias the same condition; if Aurora ever adds richer
 		// setup state (e.g. "first user created but no library
 		// scanned yet"), this is where to wire it.
-		"setup_complete":              count > 0,
-		"requires_invite":             count > 0,
-		"is_initial_setup":            count == 0,
-		"oauth_google_enabled":        readBool("oauth_google_enabled"),
-		"oauth_google_bypass_invite":  readBool("oauth_google_bypass_invite"),
+		"setup_complete":             count > 0,
+		"requires_invite":            count > 0,
+		"is_initial_setup":           count == 0,
+		"oauth_google_enabled":       readBool("oauth_google_enabled"),
+		"oauth_google_bypass_invite": readBool("oauth_google_bypass_invite"),
 		// Phase B — Discord + Twitch enabled/bypass flags. Frontend
 		// AuthView reads these to conditionally render sign-in
 		// buttons + adjust invite-code messaging.

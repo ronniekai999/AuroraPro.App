@@ -48,7 +48,7 @@ var (
 	reQualitySuffix = regexp.MustCompile(`(?i)\s*[\[\(]\s*(4K|UHD|2160p|1080p|720p|480p|HDR|HDR10\+?|DV|Dolby\s*Vision|REMUX|3D)\s*[\]\)]`)
 
 	// Characters to strip from titles
-	reClean = regexp.MustCompile(`[\.\-_]+`)
+	reClean      = regexp.MustCompile(`[\.\-_]+`)
 	reMultiSpace = regexp.MustCompile(`\s{2,}`)
 )
 

@@ -13,9 +13,9 @@ type QualityProfile struct {
 	VideoBitrate string `json:"-"`
 	MaxRate      string `json:"-"`
 	BufSize      string `json:"-"`
-	CRF          int    `json:"-"`           // Software encoder quality (ignored by HW encoders)
-	HLSBandwidth int    `json:"bandwidth"`   // Declared bandwidth in master playlist (bits/sec)
-	CodecString  string `json:"-"`           // HLS CODECS attribute (e.g., "avc1.420028,mp4a.40.2"); empty = omitted
+	CRF          int    `json:"-"`         // Software encoder quality (ignored by HW encoders)
+	HLSBandwidth int    `json:"bandwidth"` // Declared bandwidth in master playlist (bits/sec)
+	CodecString  string `json:"-"`         // HLS CODECS attribute (e.g., "avc1.420028,mp4a.40.2"); empty = omitted
 }
 
 // AllProfiles defines all supported quality tiers.

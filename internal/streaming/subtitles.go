@@ -357,8 +357,8 @@ func escapeFFmpegPath(path string) string {
 	path = strings.ReplaceAll(path, "'", "'\\''")
 	path = strings.ReplaceAll(path, "[", "\\[")
 	path = strings.ReplaceAll(path, "]", "\\]")
-	path = strings.ReplaceAll(path, ";", "\\;")  // Filter chain separator
-	path = strings.ReplaceAll(path, "=", "\\=")  // Key-value separator
-	path = strings.ReplaceAll(path, ",", "\\,")  // Filter graph separator
+	path = strings.ReplaceAll(path, ";", "\\;") // Filter chain separator
+	path = strings.ReplaceAll(path, "=", "\\=") // Key-value separator
+	path = strings.ReplaceAll(path, ",", "\\,") // Filter graph separator
 	return path
 }

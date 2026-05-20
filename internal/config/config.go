@@ -13,19 +13,19 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig
-	Database  DatabaseConfig
-	Auth      AuthConfig
-	Scanner   ScannerConfig
-	TMDB      TMDBConfig
-	TVDB      TVDBConfig
-	Cache     CacheConfig
-	Transcode TranscodeConfig
-	TLS       TLSConfig
-	Logging   LogConfig
-	Requests  RequestsConfig
+	Server     ServerConfig
+	Database   DatabaseConfig
+	Auth       AuthConfig
+	Scanner    ScannerConfig
+	TMDB       TMDBConfig
+	TVDB       TVDBConfig
+	Cache      CacheConfig
+	Transcode  TranscodeConfig
+	TLS        TLSConfig
+	Logging    LogConfig
+	Requests   RequestsConfig
 	WatchParty WatchPartyConfig
-	LLM       LLMConfig
+	LLM        LLMConfig
 }
 
 // LLMConfig governs the local-LLM sidecar used for semantic search and
@@ -46,14 +46,14 @@ type LLMConfig struct {
 // thresholds makes the system tunable per-deployment without recompiling;
 // defaults match Jellyfin SyncPlay / mpv-shim values that are known to work.
 type WatchPartyConfig struct {
-	HeartbeatInterval    time.Duration // client position-report cadence
-	TimeSyncInterval     time.Duration // client NTP-style handshake cadence
-	BufferHysteresis     time.Duration // min buffering duration before group pauses
-	PlayScheduleDelay    time.Duration // lead time added to play-at-server-time commands
-	DriftIgnoreMs        int64         // <= this ms of drift → no action
-	DriftRateAdjustMs    int64         // <= this ms → rate-nudge (else hard seek)
-	DriftHardSeekMs      int64         // <= this ms → hard seek (else counts as failed attempt)
-	DriftMaxAttempts     int           // consecutive failed-seek attempts before dropping client
+	HeartbeatInterval time.Duration // client position-report cadence
+	TimeSyncInterval  time.Duration // client NTP-style handshake cadence
+	BufferHysteresis  time.Duration // min buffering duration before group pauses
+	PlayScheduleDelay time.Duration // lead time added to play-at-server-time commands
+	DriftIgnoreMs     int64         // <= this ms of drift → no action
+	DriftRateAdjustMs int64         // <= this ms → rate-nudge (else hard seek)
+	DriftHardSeekMs   int64         // <= this ms → hard seek (else counts as failed attempt)
+	DriftMaxAttempts  int           // consecutive failed-seek attempts before dropping client
 
 	// M8 — voice (WebRTC) ICE configuration. The defaults work for
 	// same-network and most home-NAT setups (Google's public STUN).
@@ -62,10 +62,10 @@ type WatchPartyConfig struct {
 	// BSD-3) and set the URL/credential env vars. The frontend
 	// fetches this config via /api/voice/ice-servers on join so we
 	// can rotate credentials without redeploying the SPA.
-	VoiceSTUNServers   []string // STUN URLs (e.g. "stun:stun.l.google.com:19302")
-	VoiceTURNURL       string   // TURN URL (e.g. "turn:turn.aurora.example:3478") — empty disables TURN
-	VoiceTURNUsername  string   // TURN long-term credential username
-	VoiceTURNCredential string  // TURN long-term credential secret
+	VoiceSTUNServers    []string // STUN URLs (e.g. "stun:stun.l.google.com:19302")
+	VoiceTURNURL        string   // TURN URL (e.g. "turn:turn.aurora.example:3478") — empty disables TURN
+	VoiceTURNUsername   string   // TURN long-term credential username
+	VoiceTURNCredential string   // TURN long-term credential secret
 }
 
 // RequestsConfig holds configuration for the media Requests feature,
@@ -337,7 +337,7 @@ func Load() (*Config, error) {
 			// 70s = 10s margin over the longest recommender per-call
 			// ctx (discoverBudget = 60s). See llm/client.go for the
 			// rationale; keep this in sync with that default.
-			HTTPTimeout:     70 * time.Second,
+			HTTPTimeout: 70 * time.Second,
 		},
 		WatchParty: WatchPartyConfig{
 			HeartbeatInterval: 500 * time.Millisecond,

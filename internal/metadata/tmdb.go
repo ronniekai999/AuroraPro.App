@@ -240,23 +240,23 @@ type TMDBSearchResult struct {
 }
 
 type TMDBMovieTV struct {
-	ID               int      `json:"id"`
-	Title            string   `json:"title"`             // Movies
-	Name             string   `json:"name"`              // TV
-	OriginalTitle    string   `json:"original_title"`    // Movies
-	OriginalName     string   `json:"original_name"`     // TV
-	Overview         string   `json:"overview"`
-	ReleaseDate      string   `json:"release_date"`      // Movies: "2024-01-15"
-	FirstAirDate     string   `json:"first_air_date"`    // TV
-	PosterPath       *string  `json:"poster_path"`
-	BackdropPath     *string  `json:"backdrop_path"`
-	VoteAverage      float64  `json:"vote_average"`
-	VoteCount        int      `json:"vote_count"`
-	Popularity       float64  `json:"popularity"`
-	GenreIDs         []int    `json:"genre_ids"`
-	OriginalLanguage string   `json:"original_language"`
-	MediaType        string   `json:"media_type"`        // "movie" or "tv" (multi search only)
-	Adult            bool     `json:"adult"`
+	ID               int     `json:"id"`
+	Title            string  `json:"title"`          // Movies
+	Name             string  `json:"name"`           // TV
+	OriginalTitle    string  `json:"original_title"` // Movies
+	OriginalName     string  `json:"original_name"`  // TV
+	Overview         string  `json:"overview"`
+	ReleaseDate      string  `json:"release_date"`   // Movies: "2024-01-15"
+	FirstAirDate     string  `json:"first_air_date"` // TV
+	PosterPath       *string `json:"poster_path"`
+	BackdropPath     *string `json:"backdrop_path"`
+	VoteAverage      float64 `json:"vote_average"`
+	VoteCount        int     `json:"vote_count"`
+	Popularity       float64 `json:"popularity"`
+	GenreIDs         []int   `json:"genre_ids"`
+	OriginalLanguage string  `json:"original_language"`
+	MediaType        string  `json:"media_type"` // "movie" or "tv" (multi search only)
+	Adult            bool    `json:"adult"`
 }
 
 // DisplayTitle returns Title for movies, Name for TV.
@@ -282,34 +282,34 @@ func (t TMDBMovieTV) Year() int {
 
 type TMDBMovieDetail struct {
 	TMDBMovieTV
-	IMDbID        string          `json:"imdb_id"`
-	Tagline       string          `json:"tagline"`
-	Status        string          `json:"status"`
-	Runtime       int             `json:"runtime"`
-	Budget        int64           `json:"budget"`
-	Revenue       int64           `json:"revenue"`
-	Genres        []TMDBGenre     `json:"genres"`
-	Credits       *TMDBCredits    `json:"credits,omitempty"`
-	Images        *TMDBImages     `json:"images,omitempty"`
-	ContentRating string          `json:"-"` // filled from release_dates
-	ReleaseDates  *TMDBRelDates   `json:"release_dates,omitempty"`
+	IMDbID        string        `json:"imdb_id"`
+	Tagline       string        `json:"tagline"`
+	Status        string        `json:"status"`
+	Runtime       int           `json:"runtime"`
+	Budget        int64         `json:"budget"`
+	Revenue       int64         `json:"revenue"`
+	Genres        []TMDBGenre   `json:"genres"`
+	Credits       *TMDBCredits  `json:"credits,omitempty"`
+	Images        *TMDBImages   `json:"images,omitempty"`
+	ContentRating string        `json:"-"` // filled from release_dates
+	ReleaseDates  *TMDBRelDates `json:"release_dates,omitempty"`
 }
 
 type TMDBTVDetail struct {
 	TMDBMovieTV
-	Tagline         string          `json:"tagline"`
-	Status          string          `json:"status"`
-	Type            string          `json:"type"`
-	NumberSeasons   int             `json:"number_of_seasons"`
-	NumberEpisodes  int             `json:"number_of_episodes"`
-	EpisodeRuntime  []int           `json:"episode_run_time"`
-	Genres          []TMDBGenre     `json:"genres"`
-	CreatedBy       []TMDBCreator   `json:"created_by"`
-	Seasons         []TMDBSeason    `json:"seasons"`
-	Credits         *TMDBCredits    `json:"credits,omitempty"`
-	Images          *TMDBImages     `json:"images,omitempty"`
-	ContentRatings  *TMDBContentRat `json:"content_ratings,omitempty"`
-	ExternalIDs     *TMDBExtIDs     `json:"external_ids,omitempty"`
+	Tagline        string          `json:"tagline"`
+	Status         string          `json:"status"`
+	Type           string          `json:"type"`
+	NumberSeasons  int             `json:"number_of_seasons"`
+	NumberEpisodes int             `json:"number_of_episodes"`
+	EpisodeRuntime []int           `json:"episode_run_time"`
+	Genres         []TMDBGenre     `json:"genres"`
+	CreatedBy      []TMDBCreator   `json:"created_by"`
+	Seasons        []TMDBSeason    `json:"seasons"`
+	Credits        *TMDBCredits    `json:"credits,omitempty"`
+	Images         *TMDBImages     `json:"images,omitempty"`
+	ContentRatings *TMDBContentRat `json:"content_ratings,omitempty"`
+	ExternalIDs    *TMDBExtIDs     `json:"external_ids,omitempty"`
 }
 
 type TMDBSeason struct {
@@ -481,7 +481,7 @@ func (c *TMDBClient) GetMovie(ctx context.Context, tmdbID int) (*TMDBMovieDetail
 		imgLangs = c.language + "," + imgLangs
 	}
 	params := url.Values{
-		"append_to_response":    {"credits,images,release_dates"},
+		"append_to_response":     {"credits,images,release_dates"},
 		"include_image_language": {imgLangs},
 	}
 	body, err := c.get(ctx, fmt.Sprintf("/movie/%d", tmdbID), params)
@@ -520,7 +520,7 @@ func (c *TMDBClient) GetTV(ctx context.Context, tmdbID int) (*TMDBTVDetail, erro
 		imgLangs = c.language + "," + imgLangs
 	}
 	params := url.Values{
-		"append_to_response":    {"credits,images,content_ratings,external_ids"},
+		"append_to_response":     {"credits,images,content_ratings,external_ids"},
 		"include_image_language": {imgLangs},
 	}
 	body, err := c.get(ctx, fmt.Sprintf("/tv/%d", tmdbID), params)
