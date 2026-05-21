@@ -1,9 +1,17 @@
 package llmjson
 
 import (
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// trailingBracketTag matches a trailing "[content]" tag with optional
+// surrounding whitespace. Content is restricted to non-space chars so
+// we don't accidentally strip mid-title bracket content like
+// "Show [Region 1] Edition" — only the prompt-shape `[type]` /
+// `[show]` / `[movie]` suffix that LLMs mirror from the candidate list.
+var trailingBracketTag = regexp.MustCompile(`\s*\[\S+\]\s*$`)
 
 // Title-fallback resolution for LLM-emitted picks.
 //
@@ -129,6 +137,32 @@ func ResolveByTitle(idx CandidateTitleIndex, pickTitle string) (int, bool) {
 	}
 	if i, ok := idx[strings.ToLower(pickTitle)]; ok {
 		return i, true
+	}
+	// LLMs sometimes mirror the candidate-list prompt format back into
+	// their picks, e.g. `"title": "Lizzie McGuire (2001) [show]"`. The
+	// candidate prompt is built by buildRerankPrompt / buildDiscoverPrompt
+	// in the recommender as `"Title (YEAR) [type]"`, but the index only
+	// seeds `Title` and `Title (YEAR)` variants — so the tagged title
+	// falls through and the pick gets dropped. gpt-oss:120b observed
+	// emitting this format consistently (2026-05-21). Strip the trailing
+	// `[\S+]` tag and retry the lookup.
+	//
+	// The regex restricts to non-whitespace content inside the brackets
+	// so we don't accidentally consume mid-title bracket sequences like
+	// "Show [Region 1] Edition" — only the prompt-shape tag at end of
+	// string (`[show]`, `[movie]`, future single-token tags). On a real
+	// match the resolver retries both case variants of the cleaned form.
+	if cleaned := trailingBracketTag.ReplaceAllString(pickTitle, ""); cleaned != pickTitle {
+		cleaned = strings.TrimSpace(cleaned)
+		if cleaned == "" {
+			return 0, false
+		}
+		if i, ok := idx[cleaned]; ok {
+			return i, true
+		}
+		if i, ok := idx[strings.ToLower(cleaned)]; ok {
+			return i, true
+		}
 	}
 	return 0, false
 }
