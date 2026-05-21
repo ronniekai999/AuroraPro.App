@@ -72,6 +72,7 @@ import {
   type ContinueWatchingItem,
   type EpisodeFile,
   type HeroPick,
+  type HeroPersonalization,
   type Library,
   type LLMSettings,
   type MatchSearchResult,
@@ -250,7 +251,7 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
 // playback bug: clicking Play on the mock hero (id=1, "Cosmic Drift")
 // would call getMediaFiles(1) and stream whatever real movie has
 // database id=1 — a different title than what the user saw on screen.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -262,6 +263,10 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   onRefreshHero?: () => void
   // Pause auto-rotation while user hovers.
   onPauseChange?: (paused: boolean) => void
+  // Personalization status — drives the cold-start hint that replaces
+  // the empty reason line when we're below the watch-history threshold.
+  // null = unknown / not yet loaded.
+  personalization?: HeroPersonalization | null
 }) {
   // Audit H3 (Phase 5.3 audit-8) — useState MUST be called before
   // any conditional return so the hook ordering stays stable across
@@ -410,10 +415,18 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
           </div>
-          {/* Phase 5.3 — personalization reason ("Because you watched X"). */}
-          {reason && (
+          {/* Phase 5.3 — personalization reason ("Because you watched X").
+              When the reason is empty AND we're in cold-start mode, show
+              a hint about the watch-history threshold instead — same
+              visual slot, but explanatory copy that tells the user why
+              the picks aren't personalized yet. */}
+          {reason ? (
             <p className="text-purple-200/80 text-xs italic mb-2 max-w-md">{reason}</p>
-          )}
+          ) : personalization?.coldStart ? (
+            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
+              Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
+            </p>
+          ) : null}
           <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl">{hero.title}</h2>
           {hero.description && (
             <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
@@ -433,11 +446,16 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
             </button>
           </div>
         </div>
-        {/* Refresh-suggestions button: rerolls the personalized pool. */}
+        {/* Refresh-suggestions button: rerolls the personalized pool.
+            In cold-start mode the reroll is deterministic (popular-
+            unwatched, no LLM input), so we explain that in the tooltip
+            instead of letting the user think it's broken. */}
         {onRefreshHero && (
           <button
             onClick={onRefreshHero}
-            title="Refresh suggestions"
+            title={personalization?.coldStart
+              ? `Refresh — picks won't change in cold-start (${personalization.historyCount}/${personalization.threshold} titles watched). Watch a few more to unlock personalized rerolls.`
+              : 'Refresh suggestions'}
             className="p-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/70 hover:text-white transition-colors"
           >
             <Icon name="refresh" size={16} />
@@ -1044,8 +1062,11 @@ interface HomeViewProps {
   heroReason?: string
   onRefreshHero?: () => void
   onHeroPauseChange?: (paused: boolean) => void
+  // Cold-start hint info — passed through from the /api/me/hero response.
+  // null = unknown (initial load); set when the response lands.
+  heroPersonalization?: HeroPersonalization | null
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization }: HomeViewProps) {
   // M10 Phase 2 audit H1 fix: do NOT fall back to mock rails. The
   // prototype's MOVIES/SHOWS/ANIME mock arrays use database-collision-
   // prone IDs (1-8, 101-105, 201-204) which silently route real
@@ -1063,6 +1084,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
         reason={heroReason}
         onRefreshHero={onRefreshHero}
         onPauseChange={onHeroPauseChange}
+        personalization={heroPersonalization ?? null}
       />
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
@@ -4758,6 +4780,11 @@ export default function App() {
   const [heroPool, setHeroPool] = useState<HeroPick[]>([])
   const [heroIndex, setHeroIndex] = useState(0)
   const [heroPaused, setHeroPaused] = useState(false)
+  // Personalization status from /api/me/hero. When `coldStart` is true,
+  // we're below the watch-history threshold and Hero is serving the
+  // popular-unwatched fallback with no LLM blurbs — drives a UI hint
+  // explaining why nothing's curated yet.
+  const [heroPersonalization, setHeroPersonalization] = useState<HeroPersonalization | null>(null)
   // Audit M1 (Phase 5.3 audit-8) — ref to read latest heroPool from
   // the home-rails effect's closure without adding it to deps
   // (which would cause the rails to re-fetch every time the hero
@@ -5769,16 +5796,18 @@ export default function App() {
   const reloadHeroPool = useCallback(async (refresh: boolean) => {
     if (!user) return
     try {
-      const picks = await getHeroPool(refresh, activeProfileId ?? undefined)
-      heroPoolRef.current = picks
-      setHeroPool(picks)
+      const resp = await getHeroPool(refresh, activeProfileId ?? undefined)
+      heroPoolRef.current = resp.picks
+      setHeroPool(resp.picks)
+      setHeroPersonalization(resp.personalization)
       setHeroIndex(0)
-      if (picks.length > 0) setHomeHero(picks[0].media)
+      if (resp.picks.length > 0) setHomeHero(resp.picks[0].media)
     } catch {
       // Non-fatal — keep whatever hero we had (listRecent fallback
       // from home-rails effect).
       heroPoolRef.current = []
       setHeroPool([])
+      setHeroPersonalization(null)
     }
   }, [user, activeProfileId])
   useEffect(() => {
@@ -6063,6 +6092,7 @@ export default function App() {
               heroReason={heroPool[heroIndex]?.reason}
               onRefreshHero={() => void reloadHeroPool(true)}
               onHeroPauseChange={setHeroPaused}
+              heroPersonalization={heroPersonalization}
             />
           )}
           {/* M10 Phase 2 — Browse views use real API data when loaded.

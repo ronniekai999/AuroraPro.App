@@ -469,19 +469,40 @@ export interface HeroPick {
   media: UIMedia
   reason?: string
 }
+export interface HeroPersonalization {
+  coldStart: boolean
+  historyCount: number
+  threshold: number
+}
+export interface HeroPoolResponse {
+  picks: HeroPick[]
+  personalization: HeroPersonalization
+}
 export async function getHeroPool(
   refresh = false,
   profileId?: number,
   signal?: AbortSignal,
-): Promise<HeroPick[]> {
+): Promise<HeroPoolResponse> {
   const params = new URLSearchParams()
   if (refresh) params.set('refresh', '1')
   if (profileId) params.set('profile_id', String(profileId))
   const qs = params.toString()
-  const resp = await apiFetch<{ picks: { item: ServerMediaItem; reason?: string }[] }>(
+  const resp = await apiFetch<{
+    picks: { item: ServerMediaItem; reason?: string }[],
+    personalization?: { cold_start?: boolean; history_count?: number; threshold?: number },
+  }>(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
-  return (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason }))
+  return {
+    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason })),
+    // Defaults preserve the pre-personalization-field behavior for any
+    // server older than this change (cold_start=false hides the hint).
+    personalization: {
+      coldStart:    resp.personalization?.cold_start ?? false,
+      historyCount: resp.personalization?.history_count ?? 0,
+      threshold:    resp.personalization?.threshold ?? 3,
+    },
+  }
 }
 
 // Phase 5.3 — LLM-curated Discover rails. Returns up to ~6 themed
