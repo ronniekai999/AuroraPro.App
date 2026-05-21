@@ -152,32 +152,13 @@ interface Toast {
   type: 'success' | 'error' | 'info'
 }
 
-// Phase 5.2 parity — ServerStat and Notification interfaces were
-// removed alongside the mock arrays that referenced them. The
-// replacement panels render server-derived types directly
-// (ServerStats from api.ts, ActivityEntry from api.ts), so no
-// frontend-local interfaces are needed.
-
 /* ─────────────────────── MOCK DATA ─────────────────────── */
 
-// M10 Phase 2 audit H1 (2026-05-16) — the mock rail arrays
-// (CONTINUE_WATCHING, NEW_ARRIVALS, RECENT_ANIME, TOP_RATED) have
-// been removed. They were only used by HomeView's fallback rendering
-// path, which we deleted because the IDs (1-8, 101-105, 201-204)
-// collided with real Aurora media IDs — clicking Play on a mock
-// card during the home-load window would stream the real media item
-// with that same numeric id, NOT what the user saw on screen. The
-// MOVIES/SHOWS/ANIME arrays above are kept ONLY because Search's
-// mock fallback references them in deleted code paths; future
-// cleanup will remove those arrays too once we're sure nothing reads
-// them.
-
-
-// Phase 5.2 parity — NOTIFICATIONS + SERVER_STATS mock arrays are
-// gone. NotificationPanel + ServerPanel now fetch real data via the
-// admin API. The `Notification` and `ServerStat` type definitions
-// remain in case some other code path needs them, but neither array
-// is rendered anywhere.
+// Mock rail arrays (CONTINUE_WATCHING, NEW_ARRIVALS, etc.) were
+// removed. Their numeric IDs collided with real Aurora media IDs and
+// could stream the wrong item if a Play click hit the mock card
+// during the home-load window. MOVIES/SHOWS/ANIME arrays remain only
+// because Search's deleted-mock-fallback path references them.
 
 /* ─────────────────────── ICONS ─────────────────────── */
 function Icon({ name, size = 20, className = '' }: { name: string; size?: number; className?: string }) {
@@ -249,12 +230,9 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
 }
 
 /* ─────────────────────── HERO SECTION ─────────────────────── */
-// M10 Phase 1 — accepts an optional real `hero` prop. M10 Phase 2
-// audit H1 fix: when `hero` is absent we render a NEUTRAL placeholder
-// instead of falling back to MOVIES[0]. The mock fallback was a real
-// playback bug: clicking Play on the mock hero (id=1, "Cosmic Drift")
-// would call getMediaFiles(1) and stream whatever real movie has
-// database id=1 — a different title than what the user saw on screen.
+// When `hero` is absent we render a NEUTRAL placeholder rather than
+// falling back to a mock entry — the mock id collided with a real
+// database id and Play would stream the wrong title.
 function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization }: {
   hero?: Media
   onPlay: (m: Media) => void
@@ -272,12 +250,8 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   // null = unknown / not yet loaded.
   personalization?: HeroPersonalization | null
 }) {
-  // Audit H3 (Phase 5.3 audit-8) — useState MUST be called before
-  // any conditional return so the hook ordering stays stable across
-  // renders. Previously the placeholder branch returned BEFORE the
-  // useState call, which makes React see different hook counts when
-  // the hero loads. Concurrent rendering would crash this; even
-  // today eslint-react-hooks flags it.
+  // useState MUST be called before any conditional return so hook
+  // ordering stays stable across renders (Rules of Hooks).
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   if (!heroProp) {
     return (
@@ -296,13 +270,8 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
     )
   }
   const hero = heroProp
-  // Phase 5.3 final QA fix — render the REAL backdrop. The original
-  // prototype shipped <HeroGlassBlock /> + giant AURORA holographic
-  // text because there was no real media yet; once real Aurora hero
-  // picks flowed in, the prototype chrome was covering them. V1
-  // shows the actual backdrop; V2 does the same now. We fall back to
-  // poster when backdrop is absent (some TMDB rows have no backdrop)
-  // and finally to the gradient if neither is set.
+  // Backdrop → poster → gradient fallback chain (some TMDB rows have
+  // no backdrop image).
   const bgImage = hero.backdrop || hero.poster || ''
   // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
   // doesn't feel like a static still. The transition smooths cursor
@@ -312,12 +281,8 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
 
   return (
     <section
-      // Phase 5.3 final QA — bleed to viewport edges. HomeView is
-      // wrapped in `<div className="p-8">`, so `-mx-8 -mt-8` cancels
-      // the parent's padding and lets the hero touch the right edge
-      // of the viewport and the bottom of the sticky top bar. No
-      // more visible rounded-corner "card" lines — the hero feels
-      // like part of the chrome.
+      // Bleed to viewport edges: HomeView wraps content in p-8, so
+      // -mx-8 -mt-8 cancels that padding for the hero only.
       className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden -mx-8 -mt-8 mb-10 bg-[#050505]"
       onMouseMove={(e) => {
         const rect = e.currentTarget.getBoundingClientRect()
@@ -326,31 +291,17 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
           y: (e.clientY - rect.top) / rect.height
         })
       }}
-      // Audit L2 (Phase 5.3 audit-8) — pause rotation over the
-      // ENTIRE hero, not just the subtitle area. V1 attaches at
-      // this level too.
-      //
-      // Audit M4 (Phase 5.3 final QA) — `key={hero.id}` USED to live
-      // here for a remount-based crossfade. That broke pause-on-
-      // hover: when the cursor was over the hero at rotation time,
-      // the new <section> didn't always receive a mouseenter
-      // (browsers don't reliably synthesize one on element
-      // replacement), so heroPaused stayed false. Worse, mousePos
-      // reset to 0.5/0.5 mid-hover and snapped the parallax. The
-      // fix is to keep the section stable and put the key on the
-      // <img> only — that way the fade runs on the image swap but
-      // hover handlers + mousePos state survive the rotation.
+      // Pause rotation over the entire hero. Do NOT put key={hero.id}
+      // on this <section>: a remount-based crossfade breaks pause-on-
+      // hover because browsers don't reliably synthesize mouseenter
+      // on element replacement. Key the <img> instead.
       onMouseEnter={() => onPauseChange?.(true)}
       onMouseLeave={() => onPauseChange?.(false)}
     >
-      {/* Phase 5.3 final QA audit H1 — brand-gradient fallback base
-          layer. The new partially-positioned gradient stack only
-          covers the bottom 2/3 and left 2/3, so if the backdrop img
-          is missing or errors out the top-right quadrant would be a
-          flat dark void. This layer paints the Aurora violet→ink
-          gradient under everything so the empty state still feels
-          on-brand. The img (when present) covers this naturally;
-          when display:none-ed by onError, this shows through. */}
+      {/* Brand-gradient fallback base layer. The positioned gradient
+          stack above only covers part of the hero; this paints the
+          violet→ink gradient under everything so a missing/errored
+          backdrop still feels on-brand. */}
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]"
@@ -372,12 +323,9 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
           loading="eager"
           decoding="async"
           onError={(e) => {
-            // Backdrop URL 404s happen when the server hasn't
-            // mirrored the TMDB image yet. Hide the broken-image
-            // icon and let the gradient layer take over. Note: the
-            // remount-on-rotation pattern (key={bgImage}) means a
-            // fresh <img> is created for each new backdrop, so this
-            // played:none is naturally scoped to the failing src.
+            // 404 happens when the server hasn't mirrored the TMDB
+            // image yet. Hide the broken-image icon; the gradient
+            // layer below takes over.
             const img = e.currentTarget
             img.style.display = 'none'
           }}
@@ -576,16 +524,10 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
 }
 
 /* ─────────────────────── AUTH VIEW ─────────────────────── */
-// filterAuthError maps server-side auth-failure messages to a small
-// set of user-safe strings. Any message that doesn't match a known
-// pattern falls back to the generic "Login failed. Please try again."
-//
-// 2026-05-19 audit (FE-H5) — previously the raw err.message from
-// apiFetch was shown verbatim. Today Aurora's auth endpoints return
-// safe strings, but a future endpoint that leaks stack-trace or
-// internal schema detail in the body would surface through this UI
-// unchanged. The whitelist makes the safe path the default and
-// requires deliberate addition for new categories.
+// Maps server-side auth-failure messages to a small whitelist of
+// user-safe strings. Whitelist (not blacklist) so that an endpoint
+// which accidentally leaks stack-trace / schema detail won't surface
+// it through this UI.
 function filterAuthError(msg: string): string {
   const lower = msg.toLowerCase()
   const knownPatterns: Array<{ match: string; safe: string }> = [
@@ -609,14 +551,9 @@ function filterAuthError(msg: string): string {
   return 'Login failed. Please try again.'
 }
 
-// AuthView — M10 Phase 1.
-//
-// Real /api/auth/login wired. Registration is intentionally a no-op in
-// Phase 1 (still mock UI) — Aurora's /api/auth/register requires an
-// invite code in most deployments, and the registration UX in V1
-// includes a setup-status check and OAuth Google button that haven't
-// been ported yet. Phase 2 ports the full registration flow; for now,
-// admins create new users from the V1 admin UI.
+// AuthView — login + registration. Registration requires an invite
+// code in most deployments; the setup-status probe below relaxes that
+// for a fresh install.
 function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   const [isRegister, setIsRegister] = useState(false)
   const [username, setUsername] = useState('')
@@ -673,13 +610,8 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
       onLogin(user)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Login failed'
-      // 2026-05-19 audit (FE-H5) — bucket unknown error strings into
-      // a generic "Login failed" rather than surfacing raw server
-      // text verbatim. Aurora's auth endpoints return safe strings
-      // today ("invalid credentials", "rate limited", etc.), but a
-      // future endpoint that surfaces stack-trace-ish detail or
-      // internal schema names would leak through this UI without
-      // the whitelist. Patterns are matched as substrings (lowercase).
+      // Bucket unknown error strings into a generic message; see
+      // filterAuthError above for the whitelist rationale.
       setError(filterAuthError(msg))
     } finally {
       setSubmitting(false)
@@ -699,9 +631,6 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           </div>
           <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA</h1>
           <p className="text-white/40 text-sm mt-1">Your personal media universe</p>
-          {/* Phase 8 — V2 BETA badge removed. Aurora's V2 React UI
-              is the canonical interface now; the V1 single-file
-              vanilla HTML has been retired. */}
         </div>
 
         {/* Card */}
@@ -785,13 +714,10 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             {submitting ? 'Signing in…' : isRegister ? 'Create Account' : 'Sign In'}
           </button>
 
-          {/* Phase B — OAuth sign-in row. Each button hits the
-              generic /api/auth/oauth/{provider}/start endpoint. The
-              ?invite= query forwards any entered invite code through
-              the OAuth round-trip so register-mode sign-ins claim it
-              atomically server-side. Buttons render only when the
-              provider is enabled in server settings (read from
-              setupStatus). */}
+          {/* OAuth sign-in row. The ?invite= query forwards an entered
+              invite code through the round-trip so register-mode
+              sign-ins claim it atomically server-side. Each button
+              renders only when its provider is enabled in setupStatus. */}
           {(setupStatus?.oauth_google_enabled || setupStatus?.oauth_discord_enabled || setupStatus?.oauth_twitch_enabled || setupStatus?.oauth_facebook_enabled || setupStatus?.oauth_twitter_enabled) && (
             <>
               <div className="flex items-center gap-3 my-6">
@@ -943,12 +869,9 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
 }
 
 /* ─────────────────────── SIDEBAR ─────────────────────── */
-// M10 Phase 3 — accepts `user` so admin-only nav entries (Admin tab)
-// can be conditionally rendered. Non-admins never see the Admin link
-// — and even if they typed /v2/ then manually flipped state to view
-// === 'admin', the server-side /api/admin/* endpoints would reject
-// their non-admin token, so the worst case is a permission-denied
-// toast, not data leakage.
+// Sidebar conditionally renders the Admin link for admins. The
+// server-side /api/admin/* endpoints enforce the gate too — the
+// frontend check is for UX, not security.
 function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount }: {
   user?: ApiUser
   currentView: string
@@ -1053,30 +976,22 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
 }
 
 /* ─────────────────────── HOME VIEW ─────────────────────── */
-// M10 Phase 1 — HomeView accepts optional real data via props. The
-// shape matches the prototype's rails so the visual layout doesn't
-// change when wired. `loading` is shown while the first /api/media
-// call is in flight; on subsequent navigations away-and-back, the
-// previously-fetched rails are reused (App.tsx caches them).
+// HomeView. Rails are cached at App level so navigating away-and-back
+// reuses the previously-fetched data.
 interface HomeViewProps {
   onSelect: (m: Media) => void
   onPlay: (m: Media) => void
   hero?: Media
-  // Phase 5.3 final QA audit CW1 — `kind` discriminator replaces
-  // the brittle `title === 'Continue Watching'` string check below.
-  // Title is a user-visible label; checking it for behavior breaks
-  // silently if anyone localizes / renames / capitalizes
-  // differently. `kind` is a stable identifier the renderer can
-  // reason about regardless of presentation.
+  // `kind` is a stable discriminator. Don't use the user-visible
+  // `title` for behavior: renaming or localizing it would silently
+  // break the Continue Watching code path.
   rails?: { title: string; items: Media[]; aspect: 'poster' | 'landscape'; kind?: 'continue-watching' }[]
   loading?: boolean
   error?: string | null
   onRetry?: () => void
-  // M10 Phase 4.5 — Continue Watching click resume. The home view
-  // remaps these items into UIMedia for the rail; when the user
-  // clicks Play, App needs the ORIGINAL ContinueWatchingItem to get
-  // position_ms + episode_id. We thread the originals through here
-  // and let App's onPlayContinue handler do the lookup.
+  // The rail remaps ContinueWatchingItem → UIMedia for rendering,
+  // but App's onPlayContinue handler needs the original record for
+  // position_ms + episode_id. Thread the originals through here.
   continueItems?: ContinueWatchingItem[]
   onPlayContinue?: (c: ContinueWatchingItem) => void
   onCardContext?: (e: React.MouseEvent, m: Media) => void
@@ -1089,12 +1004,9 @@ interface HomeViewProps {
   heroPersonalization?: HeroPersonalization | null
 }
 function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization }: HomeViewProps) {
-  // M10 Phase 2 audit H1 fix: do NOT fall back to mock rails. The
-  // prototype's MOVIES/SHOWS/ANIME mock arrays use database-collision-
-  // prone IDs (1-8, 101-105, 201-204) which silently route real
-  // playback to whatever real media item happens to share that id.
-  // Empty rails during the brief load window are correct — the
-  // loading toast above signals to the user that data is on its way.
+  // Do NOT fall back to mock rails: their IDs collide with real
+  // media IDs and silently route Play to the wrong title. Empty
+  // rails during the load window are correct.
   const effectiveRails = rails ?? []
 
   return (
@@ -1131,13 +1043,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
       )}
       {effectiveRails.map((rail, i) => {
         if (rail.items.length === 0) return null
-        // M10 Phase 4.5 — intercept Play on the Continue Watching
-        // rail. Each clicked card resolves back to its original
-        // ContinueWatchingItem via id match, then onPlayContinue
-        // resumes at position_ms with the right episode_id. Audit
-        // CW1 — keyed on `rail.kind === 'continue-watching'`, not
-        // the user-visible title. Title can be localized or renamed
-        // without silently breaking resume behavior.
+        // Intercept Play on the Continue Watching rail so it resumes
+        // at position_ms with the correct episode_id. Key on
+        // rail.kind (not the user-visible title) so renaming or
+        // localizing the title doesn't silently break resume.
         const railPlay = (rail.kind === 'continue-watching' && onPlayContinue && continueItems)
           ? (m: Media) => {
               const orig = continueItems.find(c => c.media_item_id === m.id)
@@ -1171,16 +1080,12 @@ function BrowseView({
   items: Media[]
   title: string
   subtitle: string
-  // Phase 5.3 final QA — `total` is the real catalog count from the
-  // server (paginated response's total_items). When null the page
-  // is still loading or the server didn't surface a count, so we
-  // fall back to items.length (good enough for tiny libraries).
+  // Real catalog count from the server (paginated total_items). When
+  // null the page is still loading; fall back to items.length.
   total?: number | null
-  // Phase 5.3 final QA — sort is now controlled by the parent (App)
-  // because changing sort triggers a re-fetch from page 1. Client-
-  // side sort was removed: it only sorted within the loaded 100
-  // items, which becomes a visible bug as soon as page 2 loads
-  // (next page arrives in server-order and concatenates AFTER the
+  // Sort is parent-controlled: changing it triggers a re-fetch from
+  // page 1. Client-side sort is not safe across paginated loads
+  // (later pages arrive in server-order and would concat after a
   // re-sorted page 1).
   sortBy: BrowseSort
   onSortChange: (s: BrowseSort) => void
@@ -1215,15 +1120,9 @@ function BrowseView({
   const pillLabel = title === 'TV Shows' ? 'BROWSE SERIES' : title === 'Movies' ? 'BROWSE FILMS' : 'BROWSE'
   return (
     <div className="animate-fade-in relative">
-      {/* Phase 5.3 final QA — edgeless header. The previous version
-          was a 180px-tall rounded-2xl card with a border, which
-          looked "boxy" against the otherwise edge-to-edge page.
-          New: pill + headline + subtitle in flow, matching the
-          My Library aesthetic. Background mood comes from soft
-          blurred blobs anchored to the top-right of the page —
-          NOT contained in a box, so the gradient bleeds into the
-          page chrome without a visible seam. The "futuristic"
-          feel here is the absence of containment. */}
+      {/* Edgeless header: soft blurred blobs anchored to the page
+          (not inside a container) so the gradient bleeds without a
+          visible seam. */}
       <div
         aria-hidden="true"
         className="absolute -top-8 -left-8 -right-8 h-[360px] pointer-events-none overflow-hidden"
@@ -1241,11 +1140,9 @@ function BrowseView({
         <p className="text-white/60 text-sm mt-2">
           {subtitle}
           <span className="text-white/30 mx-1.5">•</span>
-          {/* Phase 5.3 final QA — render the real catalog total.
-              When the server returns more items than we've loaded
-              (server caps per_page at 100), be explicit about the
-              page-of-N truth instead of misleadingly claiming the
-              page-size is the whole library. */}
+          {/* When the server has more items than we've loaded (per_page
+              caps at 100), show "N of M" rather than misleadingly
+              claiming the page-size is the whole library. */}
           {total != null && total > items.length ? (
             <>
               Showing {items.length.toLocaleString()} of{' '}
@@ -1370,13 +1267,9 @@ function BrowseView({
 }
 
 /* ─────────────────────── CAST CARD ─────────────────────── */
-// Audit H2 (Phase 5.3 final QA) — extracted from DetailView so each
-// card owns its own image-failure state. The previous inline version
-// used <img onError={() => style.display='none'}> which left a 80px
-// gap where the avatar should be, AND looked different from cards
-// that legitimately had no profile_path (the else branch rendered a
-// placeholder). Now: useState flips to placeholder on error, so a
-// broken thumbnail looks identical to a missing thumbnail.
+// Each card owns its own image-failure state so a broken thumbnail
+// renders the same placeholder as a missing one (instead of an
+// 80px hole).
 function CastCard({ member }: { member: { id: number; name: string; profile_path?: string; character?: string; role_type: string } }) {
   const [imgFailed, setImgFailed] = useState(false)
   const showImg = !!member.profile_path && !imgFailed
@@ -1404,11 +1297,6 @@ function CastCard({ member }: { member: { id: number; name: string; profile_path
 }
 
 /* ─────────────────────── DETAIL VIEW ─────────────────────── */
-// M10 Phase 2 — accepts optional real-data props. When `apiEpisodes`
-// is provided, render real episodes from /api/media/{id}/.../episodes
-// instead of the mock `media.episodes`. `onPlayEpisode` fires on
-// click with the actual ApiEpisode object so the parent can resolve
-// the right fileId for that specific episode.
 interface DetailViewProps {
   media: Media
   onBack: () => void
@@ -1438,12 +1326,10 @@ interface DetailViewProps {
   // Phase 5.2 — admin-only refresh-metadata. Only rendered when
   // the caller is admin (App gates with user.role === 'admin').
   onRefreshMetadata?: (m: Media) => void
-  // Phase 5.3 — admin-only manual identify. Opens the ManualMatchModal
-  // (TMDB + TVDB search) so the admin can correct a wrong auto-match
-  // when the catalog enricher picked the wrong title or hit a low
-  // confidence score. Distinct from Refresh: Refresh re-runs the same
-  // auto-match (might land on the same wrong answer); Identify lets
-  // the admin pick a specific TMDB/TVDB ID manually.
+  // Admin-only manual identify. Opens ManualMatchModal so the admin
+  // can pick a specific TMDB/TVDB id when the auto-matcher landed on
+  // the wrong title. Distinct from Refresh (which re-runs the same
+  // auto-match and may land on the same wrong answer).
   onIdentify?: (m: Media) => void
   // Phase 5.2 — version selector for movies with multiple files.
   // App passes the files list; DetailView surfaces them as chips.
@@ -1468,10 +1354,8 @@ function DetailView({
   const rating = detail?.rating ?? media.rating
   const realPoster = detail ? posterURL(detail.poster_path) : media.poster
   const realBackdrop = detail ? backdropURL(detail.backdrop_path) : (media.backdrop || media.poster)
-  // Phase 6 — Dynamic theming. Extract a dominant color from the
-  // poster + apply via CSS variables. Falls back silently to the
-  // default Aurora purple on extraction failure. Re-runs whenever
-  // the resolved poster URL changes (different media item).
+  // Extract a dominant color from the poster for accent tinting.
+  // Silently falls back to the default Aurora purple on failure.
   const [palette, setPalette] = useState(DEFAULT_PALETTE)
   useEffect(() => {
     if (!realPoster) return
@@ -1483,24 +1367,20 @@ function DetailView({
   const realRuntime = detail?.runtime_minutes
     ? `${Math.floor(detail.runtime_minutes / 60)}h ${detail.runtime_minutes % 60}m`
     : media.duration
-  // Phase 5.3 final QA — split cast/crew from the unified server list.
-  // Server returns one CastMember[] for both cast AND crew, discriminated
-  // by role_type. V1 renders "cast" only in the avatars row, then
-  // surfaces directors/writers/creators as compact text rows under the
-  // title. Mirrors that grouping.
+  // Server returns one CastMember[] for cast AND crew, discriminated
+  // by role_type. Split here so cast renders as avatars and crew
+  // renders as compact text rows under the title.
   const castMembers = (detail?.cast || []).filter(c => c.role_type === 'cast')
   const directors = (detail?.cast || []).filter(c => c.role_type === 'director')
   const writers = (detail?.cast || []).filter(c => c.role_type === 'writer')
   const creators = (detail?.cast || []).filter(c => c.role_type === 'creator')
   // Audio/subtitle tracks. Lookup order:
-  //   1. detail.files[0] — movies and movies-only routes
+  //   1. detail.files[0] — movies
   //   2. files[0] — when a separate /api/media/{id}/files call ran
-  //   3. Audit H3 (Phase 5.3 final QA) — for shows, fall back to the
-  //      first episode that HAS a file. Show-level files live in the
-  //      `media_files` table which is empty for shows (their files
-  //      live in `episode_files`), so detail.files / files are
-  //      always empty for shows. Without this fallback, Media Info
-  //      never renders for any TV show — a regression vs V1.
+  //   3. For shows, the first episode that has a file. Show-level
+  //      files live in media_files which is always empty for shows
+  //      (their files are in episode_files), so without (3) Media
+  //      Info would never render for a TV show.
   let trackFile: { audio_tracks?: AudioTrack[]; subtitle_tracks?: SubtitleTrack[] } | undefined =
     detail?.files?.[0] || files?.[0]
   if (!trackFile && media.type === 'show' && apiEpisodes) {
@@ -1548,8 +1428,7 @@ function DetailView({
               ))}
             </div>
             <h1 className="text-white text-5xl font-bold font-display mb-2">{media.title}</h1>
-            {/* Phase 5.3 final QA — tagline from TMDB. Italic, muted,
-                directly under the title to mirror V1 + Netflix/Plex. */}
+            {/* TMDB tagline. */}
             {detail?.tagline && (
               <p className="text-purple-200/70 text-base italic mb-3">{detail.tagline}</p>
             )}
@@ -1597,22 +1476,15 @@ function DetailView({
             <p className="text-white/70 text-base leading-relaxed mb-6 line-clamp-4">
               {loading && !detail ? 'Loading details…' : (description || 'No description available.')}
             </p>
-            {/* Phase 5.3 final QA — action buttons. Fixes uneven
-                sizing from the QA screenshots:
-                - flex-wrap so they reflow on narrow viewports instead
-                  of compressing into wrapping text inside each pill
-                - whitespace-nowrap so button text never breaks across
-                  lines inside a single button
-                - uniform py-2.5 + h-11 height across all variants;
-                  px-6 base, px-7 on the primary Play CTA only
-                - same icon size (size={16}) on every button so the
-                  visual baseline matches */}
+            {/* Action buttons share uniform height (h-11) and icon
+                size (16). flex-wrap + whitespace-nowrap keeps text
+                from wrapping inside individual pills on narrow
+                viewports. */}
             <div className="flex items-center gap-3 flex-wrap">
               <button
                 onClick={() => onPlay(media)}
-                // Phase 6 — dynamic-theme Play button. Background +
-                // glow tinted to match the poster's dominant color.
-                // Falls back to Aurora purple when extraction fails.
+                // Tint background + glow with the poster's dominant
+                // color (falls back to Aurora purple).
                 style={{
                   backgroundColor: palette.accent,
                   boxShadow: `0 0 24px ${palette.glow}`,
@@ -1838,15 +1710,9 @@ function DetailView({
                       hasFile ? '' : 'opacity-70'
                     }`}
                     onClick={() => {
-                      // Audit M7 (Phase 5.3 final QA) — separate the
-                      // two branches: "has file" should attempt play
-                      // regardless of whether the unavailable
-                      // handler is wired, because falling through to
-                      // the unavailable toast when a file DOES exist
-                      // would lie to the user about file presence.
-                      // If the parent forgot to wire onPlayEpisode,
-                      // we silently no-op (still a programming bug
-                      // worth fixing, but not a misleading toast).
+                      // Keep these branches separate so a "has file"
+                      // case can never fall through to the
+                      // unavailable toast and lie about file presence.
                       if (hasFile) {
                         onPlayEpisode?.(ep)
                         return
@@ -1884,10 +1750,7 @@ function DetailView({
             </div>
           </div>
         )}
-        {/* Empty-state for shows with no episodes loaded yet — but
-            the parent's loading flag is still true. Don't render
-            the prototype's mock episodes anymore (those would lie
-            about content existing). */}
+        {/* Empty-state for shows with no episodes loaded. */}
         {media.type === 'show' && (!apiEpisodes || apiEpisodes.length === 0) && !loading && (
           <p className="text-white/40 text-sm">No episodes available yet.</p>
         )}
@@ -1897,11 +1760,9 @@ function DetailView({
 }
 
 /* ─────────────────────── LIBRARY VIEW ─────────────────────── */
-// M10 Phase 4.5 — LibraryView reframed as "In Progress" (Continue
-// Watching). Aurora doesn't have a per-user "Add to Library" concept
-// (libraries are server-wide); V1 has Watchlists instead. For now V2
-// uses /api/progress/continue as the library source. Phase 4.6 can
-// add Watchlists if your QA finds the need.
+// LibraryView is framed as "In Progress" / Continue Watching.
+// Aurora has no per-user "Add to Library" concept (libraries are
+// server-wide) — this view sources from /api/progress/continue.
 function LibraryView({ continueItems, onSelect, onPlayContinue }: {
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
@@ -1912,11 +1773,6 @@ function LibraryView({ continueItems, onSelect, onPlayContinue }: {
     ? continueItems
     : continueItems.filter(c => c.type === filter)
 
-  // Phase 5.3 final QA — warmer copy. "In Progress / N titles ready
-  // to resume" was technically accurate but emotionally flat. The
-  // new framing treats unfinished titles as open stories instead of
-  // bureaucratic line items. Headline is a verb (Pick Up…) to make
-  // the page feel like an invitation, not a list.
   const count = continueItems.length
   return (
     <div className="animate-fade-in">
@@ -2001,11 +1857,10 @@ function LibraryView({ continueItems, onSelect, onPlayContinue }: {
 }
 
 /* ─────────────────────── REQUEST ERROR HUMANIZER ─────────────────────── */
-// Phase 5.3 final QA — server-side request errors are raw Radarr/
-// Sonarr/TVDB API responses meant for logs, not end users. Pattern-
-// match the common shapes and surface a short, friendly sentence
-// instead. The original error stays available as a `title` tooltip
-// for admin debugging — see RequestsView's render below.
+// Server-side request errors are raw Radarr/Sonarr/TVDB API
+// responses meant for logs. Pattern-match the common shapes and
+// surface a short, friendly sentence. The raw error stays available
+// as a tooltip in RequestsView for admin debugging.
 function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
   if (!raw) return ''
   const r = raw.toLowerCase()
@@ -2083,22 +1938,18 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
 }
 
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
-// M10 Phase 4.5 — RequestsView wired to /api/requests. Shows the
-// user's submitted requests with real status colors. Create-request
-// UX (TMDB search + submit) is Phase 4.6 polish — for now, V1's
-// /?ui=v1 → Requests is the create path.
+// RequestsView — submitted requests with status. Includes an inline
+// TMDB search + create dialog.
 function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'processing' | 'available' | 'failed'>('all')
-  // Phase 4.6 — inline TMDB search + create. The dialog is a small
-  // modal-like panel that overlays the requests list when open.
+  // Inline TMDB search + create dialog.
   const [createOpen, setCreateOpen] = useState(false)
   const [searchQ, setSearchQ] = useState('')
   const [searchResults, setSearchResults] = useState<TmdbSearchResult[]>([])
   const [searching, setSearching] = useState(false)
   const [submitting, setSubmitting] = useState<number | null>(null) // tmdb_id currently submitting
-  // Phase 5.2 parity — V1 lets the user pick 4K when ARR has a 4K
-  // service configured. We can't easily probe here (would need
-  // RequestsConfig); default false + offer it on every form.
+  // 4K toggle — default false. We can't easily probe whether a 4K
+  // ARR service is configured here, so we always offer it.
   const [requestQuality4K, setRequestQuality4K] = useState(false)
   useEffect(() => {
     if (!createOpen) return
@@ -2164,11 +2015,9 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
               placeholder="Search TMDB for title…"
               className="w-full px-4 py-2.5 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm focus:outline-none focus:bg-white/[0.06] mb-3"
             />
-            {/* Phase 5.2 parity — 4K quality toggle for the request.
-                Server-side, the ARR clients map to the configured
-                Radarr/Sonarr instance; the 4K branch needs a *_4k
-                service configured (admin check). If not, the
-                request stays in the 1080p ARR. */}
+            {/* 4K request toggle. Server-side, this routes to the
+                configured *_4k Radarr/Sonarr; without one it falls
+                back to the 1080p ARR. */}
             <label className="flex items-center gap-2 mb-3 text-sm text-white/70">
               <input type="checkbox" checked={requestQuality4K} onChange={e => setRequestQuality4K(e.target.checked)} />
               Request in 4K when available
@@ -2241,7 +2090,7 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
         <div className="text-center py-20">
           <Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />
           <h3 className="text-white/60 text-lg mb-2">No requests {filter !== 'all' ? `in "${filter}"` : 'yet'}</h3>
-          <p className="text-white/40 text-sm">Use the "Request New (V1)" button above to submit one.</p>
+          <p className="text-white/40 text-sm">Use the "Request New" button above to submit one.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2312,38 +2161,26 @@ function formatRequestDate(iso: string): string {
 }
 
 /* ─────────────────────── SETTINGS VIEW ─────────────────────── */
-// M10 Phase 1 — SettingsView receives the current user + a logout
-// callback from App(). The rest of the settings UI is still mock —
-// Phase 3 will wire it to /api/users/me/preferences and admin
-// settings. For now, the only functional control is "Sign Out".
 interface SettingsViewProps {
   user?: ApiUser
   onLogout?: () => void
 }
 function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) {
-  // M10 Phase 4.5 — persist to localStorage under the same key V1
-  // uses (`aurora_prefs`) so both UIs share preferences during the
-  // cutover.
+  // Persist to localStorage under `aurora_prefs`. We capture the raw
+  // parsed object in a ref and merge before each write so any keys
+  // this component doesn't know about (e.g. legacy `volume`, `muted`)
+  // round-trip untouched instead of being clobbered.
   //
-  // Audit M4 (Phase 4.5) — preserve V1-only keys we don't know
-  // about. V1 may have written `volume`, `muted`, or other keys
-  // V2 doesn't recognize. The naive {audioLang, subtitleLang, ...}
-  // write would CLOBBER them on every change. We capture the raw
-  // parsed object in a ref and merge before each write so V1-only
-  // keys round-trip untouched.
-  //
-  // We also skip the first useEffect write (initial mount) so just
-  // opening the settings page doesn't normalize the file.
+  // The first useEffect write is skipped so just opening Settings
+  // doesn't rewrite the stored object.
   const rawRef = useRef<Record<string, unknown>>({})
   const skipFirstWriteRef = useRef(true)
   const [settings, setSettings] = useState(() => {
     try {
       const raw = localStorage.getItem('aurora_prefs')
       if (raw) {
-        // 2026-05-19 audit (FE-M5) — JSON.parse returns the parsed
-        // value as-is, which can be `null`, a string, or a number
-        // if the localStorage entry was tampered with. Guard
-        // against non-object shapes before property access.
+        // JSON.parse can return null/string/number if localStorage
+        // was tampered with. Guard before property access.
         const parsedRaw: unknown = JSON.parse(raw)
         if (!parsedRaw || typeof parsedRaw !== 'object') {
           throw new Error('aurora_prefs is not an object')
@@ -2539,12 +2376,9 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
           </div>
         )}
 
-        {/* Phase 4.6 — Profiles + Watchlists. Self-contained card
-            because the watchlists require an active profile selection,
-            and we don't yet thread that through the rest of the app. */}
         <ProfilesAndWatchlistsCard />
 
-        {/* Phase 6 — Gamification: XP card + achievements grid. */}
+        {/* Gamification: XP card + achievements grid. */}
         <div className="mt-6">
           <h2 className="text-white text-xl font-semibold mb-4">Your Progress</h2>
           <GamificationCard />
@@ -2554,10 +2388,8 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
   )
 }
 
-// Phase 4.6 — Profiles + Watchlists card. Lists profiles (CRUD-lite),
-// expands into watchlists per profile (lazy). Future scope: thread
-// the active profile_id through media fetches (server already
-// supports ?profile_id=N on most endpoints).
+// Profiles + Watchlists card. Lists profiles (CRUD-lite), expands
+// into watchlists per profile (lazy-loaded).
 function ProfilesAndWatchlistsCard() {
   const [profiles, setProfiles] = useState<Profile[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -2652,17 +2484,12 @@ function ProfilesAndWatchlistsCard() {
 }
 
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
-// M10 Phase 3 — SearchView wired to /api/media/search with debounce.
-// The query comes from the top-bar input; we debounce 300ms so each
-// keystroke doesn't fire a request (the backend's semantic path is
-// LLM-routed and not free). Results are cached per-query in a tiny
-// in-component map so navigating away-and-back doesn't re-hit the
-// server for the same query.
+// SearchView — debounced 300ms per keystroke (the semantic path is
+// LLM-routed and not free).
 function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: Media) => void; onPlay: (m: Media) => void }) {
   const [results, setResults] = useState<Media[]>([])
-  // Phase 5.2 parity — real Smart-search badge driven by the
-  // server's X-Search-Mode response header. Only show "Smart" when
-  // the LLM/semantic path actually fired.
+  // Driven by the server's X-Search-Mode response — only show the
+  // Smart badge when semantic search actually fired.
   const [searchMode, setSearchMode] = useState<'literal' | 'semantic'>('literal')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -2682,9 +2509,8 @@ function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: 
     setLoading(true)
     const ac = new AbortController()
     const debounceId = window.setTimeout(() => {
-      // M10 Phase 3 — Aurora server-side: trigram + optional semantic
-      // routing. The endpoint takes ?q= and returns an array (NOT a
-      // paginated envelope; see media_handlers.go:Search).
+      // Server-side: trigram + optional semantic routing. Endpoint
+      // returns an array, not a paginated envelope.
       void (async () => {
         try {
           const r = await searchMedia(q, 30, ac.signal)
@@ -2714,9 +2540,8 @@ function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: 
       <div className="mb-6">
         <div className="flex items-center gap-3 flex-wrap">
           <h1 className="text-white text-3xl font-bold font-display">Search Results</h1>
-          {/* Phase 5.2 parity — real Smart badge, only when LLM
-              actually ran. The old static badge in the top bar
-              that always said "Smart" was misleading. */}
+          {/* Smart badge renders only when the server actually used
+              the semantic path. */}
           {!loading && results.length > 0 && searchMode === 'semantic' && (
             <span className="px-3 py-1 rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-200 text-xs font-medium">
               ✨ Smart search
@@ -2770,21 +2595,15 @@ function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: 
 }
 
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
-// M10 Phase 4.5 — V2 admin Backup + Restore card. Backup mirrors V1
-// (anchor + token download). Restore wraps the V1 multipart upload
-// flow with the same hard-confirm dialog model. Once V2 has this,
-// admins never need to go back to V1 for migration ops.
+// Admin backup + restore card. Backup is a tokenized anchor
+// download; restore is a multipart upload guarded by a hard-confirm.
 function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) {
   const [file, setFile] = useState<File | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [status, setStatus] = useState<string>('')
   const [doneBlocked, setDoneBlocked] = useState(false)
-  // Audit MED-4 (Phase 4.5 final) — guard setState after unmount.
-  // The restore POST can take MINUTES; if the admin tabs away
-  // mid-upload, AdminBackupRestore unmounts and the fetch's
-  // resolution would setState on a dead component. React 18
-  // swallows the warning but the admin never sees the outcome.
-  // Mark mounted=false in cleanup and gate all setState calls.
+  // The restore POST can take minutes — guard against setState after
+  // unmount if the admin tabs away mid-upload.
   const mountedRef = useRef(true)
   useEffect(() => () => { mountedRef.current = false }, [])
 
@@ -2828,20 +2647,17 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
         }
         throw new Error(errMsg)
       }
-      // Audit MED-4 — if the user navigated away mid-restore, still
-      // alert() so they know the outcome. alert() is the only
-      // surface that survives an unmounted React component.
+      // alert() survives an unmounted React component, so the admin
+      // hears the outcome even if they tabbed away mid-restore.
       window.alert((body && body.message) || 'The database has been restored. RESTART AURORA NOW to use the new data.')
       if (!mountedRef.current) return
       setStatus('Restore complete — RESTART AURORA NOW')
-      // M10 Phase 1 audit M4 parity — keep the button locked after
-      // success.
+      // Lock the button after success.
       setDoneBlocked(true)
     } catch (e) {
       console.error('[Aurora] Restore failed', e)
       const msg = e instanceof Error ? e.message : 'see console'
-      // Audit MED-4 — alert on failure too, so admin who tabbed
-      // away still hears about it.
+      // alert on failure too, so the admin still hears about it.
       window.alert('Restore failed: ' + msg)
       if (!mountedRef.current) return
       setStatus('Failed: ' + msg)
@@ -2920,8 +2736,6 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
     </div>
   )
 }
-
-// M10 Phase 4.6 — admin sub-tabs.
 
 function NowPlayingWidget() {
   const [items, setItems] = useState<TranscodeSession[]>([])
@@ -3046,11 +2860,9 @@ function UpdatePanel() {
     if (status) stateRef.current = status.state
   }, [status])
 
-  // Polling cadence: 2 s while an update is actively running
-  // (so the UI shows phase transitions live), 10 s otherwise.
-  // Audit M1 — uses a ref-counter for the slow-cadence skip rather
-  // than `Date.now() % 5` arithmetic, which oscillated between
-  // bursts and stalls because the tick phase drifted vs. real time.
+  // Polling: 2s during an active update (live phase transitions),
+  // 10s otherwise. Uses a ref-counter for the slow-cadence skip —
+  // Date.now()-modulo drifts vs real time and bursts/stalls.
   useEffect(() => {
     let cancelled = false
     const tickRef = { count: 0 }
@@ -3067,14 +2879,9 @@ function UpdatePanel() {
         }
       } catch (e) {
         if (cancelled) return
-        // Suppress transient errors when an update is actively in
-        // flight. Aurora restarts the service as part of the update,
-        // so a 502 / network error during ACTIVE states is expected
-        // and not actionable. Keep showing the prior status until
-        // the backend comes back; the next poll will succeed and
-        // refresh state. Without this, the dashboard flashes a
-        // misleading "HTTP 502" mid-update even when everything is
-        // working as designed.
+        // Aurora restarts the service mid-update; a 502 during an
+        // ACTIVE state is expected. Suppress transient errors so the
+        // dashboard doesn't flash a misleading "HTTP 502".
         if (ACTIVE_STATES.has(stateRef.current)) return
         setError(e instanceof Error ? e.message : 'Failed to read update status')
       }
@@ -3091,9 +2898,8 @@ function UpdatePanel() {
     return () => { cancelled = true; window.clearInterval(id) }
   }, [])
 
-  // Separate, low-rate interval whose sole job is to invalidate
-  // the "5 min ago" / "just now" string. Audit M2 — formerly
-  // coupled to the polling loop, which made the cadence muddled.
+  // Low-rate interval to invalidate the "N min ago" relative string,
+  // decoupled from the status-poll cadence.
   useEffect(() => {
     const id = window.setInterval(() => setTick(t => (t + 1) % 1000), 30_000)
     return () => window.clearInterval(id)
@@ -3104,12 +2910,9 @@ function UpdatePanel() {
     setTriggering(true)
     try {
       await triggerUpdate()
-      // Audit M3 — optimistically set state to `checking` IMMEDIATELY
-      // so the button locks out and the spinner appears, without
-      // racing the script's first write_status (typically 100-500 ms
-      // after sudo returns). The next poll converges on the real
-      // state. Without this, fast double-clicks would re-fire the
-      // trigger because isActive lingered false briefly.
+      // Optimistically set state to `checking` so the button locks
+      // out immediately — without this, fast double-clicks could
+      // re-fire the trigger during the script's first-write delay.
       setStatus(prev => ({
         state: 'checking',
         at: new Date().toISOString(),
@@ -3250,10 +3053,8 @@ function AdminLibrariesTab() {
   )
 }
 
-// Phase 5 — Server admin tab. Hosts all "ops" actions that don't
-// fit into a dedicated tab: server-settings (transcode max, scan
-// interval, content-rating filtering, requests toggle), invite-code
-// creation, image-cache purge, ARR (Radarr/Sonarr) test & save.
+// Server admin tab — hosts ops that don't fit a dedicated tab:
+// server-settings, image-cache purge, ARR (Radarr/Sonarr) test & save.
 function AdminServerSettingsTab() {
   const [settings, setSettings] = useState<ServerSettingsMap | null>(null)
   const [edited, setEdited] = useState<ServerSettingsMap>({})
@@ -3273,11 +3074,8 @@ function AdminServerSettingsTab() {
     if (Object.keys(edited).length === 0) return
     setSaving(true)
     try {
-      // Audit M3 (Phase 5.1 audit-7) — never send an empty ARR API
-      // key. V1's UX is "leave empty to keep existing"; without
-      // this filter V2 would overwrite the stored key with '',
-      // silently unhooking Radarr/Sonarr. Drop empty *_api_key
-      // entries from the patch so they're not sent at all.
+      // Empty ARR API key means "keep existing"; never send '' or
+      // we'd overwrite the stored key and silently unhook the ARR.
       const patch: ServerSettingsMap = {}
       for (const [k, v] of Object.entries(edited)) {
         if (k.endsWith('_api_key') && v === '') continue
@@ -3369,12 +3167,10 @@ function AdminServerSettingsTab() {
                 <input type="password" defaultValue="" onChange={e => setVal(keyKey, e.target.value)} placeholder={settings[keyKey] ? 'API Key (saved)' : 'API Key'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
                 <button
                   onClick={async () => {
-                    // Audit M2 (Phase 5.1 audit-7) — refuse to test
-                    // unless the user typed a new key. The stored
-                    // value comes back masked (****abcd) from the
-                    // server; sending the mask to ARR would always
-                    // 401 and falsely report a working integration
-                    // as broken.
+                    // The stored key comes back masked (****abcd);
+                    // sending the mask to ARR would always 401 and
+                    // falsely fail a working integration. Require
+                    // the user to retype the key for a Test.
                     const typedKey = edited[keyKey]
                     if (!typedKey) {
                       setArrTest({ svc, msg: 'Type your API key in the field above to test (the saved key is masked).' })
@@ -3382,7 +3178,7 @@ function AdminServerSettingsTab() {
                     }
                     try {
                       const r = await testARRConnection(svc, val(urlKey, ''), typedKey)
-                      // Audit H1 — server returns `connected`, not `ok`.
+                      // Server returns `connected`, not `ok`.
                       setArrTest({ svc, msg: r.connected ? 'OK · connection succeeded' : `Failed: ${r.error ?? 'unknown'}` })
                     } catch (e) { setArrTest({ svc, msg: 'Failed: ' + (e instanceof Error ? e.message : 'unknown') }) }
                   }}
@@ -3393,14 +3189,9 @@ function AdminServerSettingsTab() {
             </div>
           )
         })}
-        {/* 2026-05-20 — section-scoped Save button.
-            The "edited" state is shared with the top Server Settings
-            section, and a single Save button already exists at the
-            top of the panel. But operators typing into Radarr/Sonarr
-            fields didn't see a Save nearby and assumed their changes
-            were lost (logged the bug after Test → no Save → confusion).
-            Adding a contextual Save here triggers the same save()
-            function — same global behavior, much better UX. */}
+        {/* Section-scoped Save button. Shares the same `edited` state
+            and save() with the top of the panel — operators typing in
+            ARR fields shouldn't need to scroll back up. */}
         {settings && (
           <div className="mt-3 pt-3 border-t border-white/[0.06] flex items-center gap-3">
             <button
@@ -3454,12 +3245,10 @@ function AdminRoomsTab() {
               <p className="text-white/90 text-sm font-medium truncate">{r.name} <span className="text-purple-300 font-mono text-xs ml-2">{r.code}</span></p>
               {r.description && <p className="text-white/40 text-xs truncate">{r.description}</p>}
               {r.active_party_code && (
-                // Audit H2 fix (Phase 8) — V1 retirement made
-                // `/?ui=v1#p/CODE` a dead URL. Emit the working
-                // `{BASE}p/CODE` shape as an <a> so admins can
-                // right-click → copy. Audit M4 — pull the base
-                // path from Vite's BASE_URL so this stays in
-                // lockstep if the SPA mount ever moves.
+                // Emit the working `{BASE}p/CODE` URL as an <a> so
+                // admins can right-click → copy. Pull the base from
+                // Vite's BASE_URL so this stays in lockstep if the
+                // SPA mount moves.
                 <p className="text-emerald-300 text-xs">
                   Live now — join via{' '}
                   <a
@@ -3954,33 +3743,19 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   )
 }
 
-// M10 Phase 3 — AdminView wired to real /api/admin/* endpoints.
-// Each tab lazy-fetches on first visit and caches for the session.
-// V1's admin UI has more tabs (libraries, sessions, flagged, llm,
-// oauth, backup, interface) — Phase 3 ships the 4 the prototype
-// already laid out. Phase 3.5+ adds the rest.
+// AdminView wired to /api/admin/* endpoints. Each tab lazy-fetches
+// on first visit and caches for the session.
 function AdminView({ currentAdminId }: { currentAdminId: number }) {
-  // Phase 8 — Interface tab removed alongside V1 retirement. Aurora
-  // only has one UI now (this one). The `ui_version` server setting
-  // is no longer read by anything; existing rows in server_settings
-  // remain as harmless dead data.
   type AdminTab = 'dashboard' | 'users' | 'libraries' | 'rooms' | 'activity' | 'sessions' | 'flagged' | 'logs' | 'server' | 'llm' | 'oauth' | 'backup'
   const [tab, setTab] = useState<AdminTab>('dashboard')
   const tabs: readonly AdminTab[] = ['dashboard', 'users', 'libraries', 'rooms', 'activity', 'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup'] as const
 
-  // Backup tab — /api/admin/backup streams a pg_dump custom-format
-  // archive. We fetch the response, materialize it as a Blob, and
-  // hand the user a same-origin object URL.
-  //
-  // 2026-05-19 audit (FE-M4) — the previous implementation set
-  // <a href="/api/admin/backup?token=..."> on a hidden anchor, which
-  // briefly placed the token in the DOM where DevTools or a
-  // misbehaving extension could scrape it. Switching to fetch +
-  // Authorization header keeps the token out of the document
-  // entirely. The trade-off is whole-archive buffering: pg_dump
-  // custom-format is binary and self-compressed, so even a 5 GB
-  // database produces a ~1-2 GB archive — well within browser blob
-  // limits on a modern desktop.
+  // /api/admin/backup streams a pg_dump archive. We fetch with the
+  // Authorization header (rather than a tokenized anchor) so the
+  // token never enters the DOM, then materialize the response as a
+  // Blob for download. Trade-off: whole-archive buffering, but
+  // pg_dump custom-format is self-compressed so even multi-GB DBs
+  // fit comfortably.
   const downloadBackup = useCallback(async () => {
     try {
       const res = await apiFetchResponse('/api/admin/backup')
@@ -4073,8 +3848,8 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
         setActivityErr(err instanceof Error ? err.message : 'Failed to load activity')
       })
       .finally(() => setActivityLoading(false))
-    // Audit M1 — return cleanup so rapid tab-switch doesn't leak the
-    // request and fire setState on an unmounted AdminView.
+    // Cleanup so a rapid tab-switch doesn't fire setState on an
+    // unmounted AdminView.
     return () => ac.abort()
   }, [tab, activity])
 
@@ -4089,7 +3864,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
         setLogsErr(err instanceof Error ? err.message : 'Failed to load logs')
       })
       .finally(() => setLogsLoading(false))
-    // Audit M1 — same cleanup pattern as activity above.
+    // Same cleanup pattern as activity above.
     return () => ac.abort()
   }, [tab, logs])
 
@@ -4397,10 +4172,8 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
 
 
 /* ─────────────────────── SERVER PANEL ─────────────────────── */
-// Phase 5.2 parity — ServerPanel real data. The old version rendered
-// hardcoded mocks (`Active Streams: 3, Disk Free: 4.2 TB, ...`); now
-// it fetches /api/admin/dashboard on open (admin) or /api/health
-// (non-admin) and shows real numbers. Polls every 5s while open.
+// ServerPanel fetches /api/admin/dashboard and polls every 5s while
+// open. Non-admins see a "admin-only" message.
 function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
   const [stats, setStats] = useState<ServerStats | null>(null)
   useEffect(() => {
@@ -4435,12 +4208,8 @@ function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
     ]
     : []
-  // Phase 5.3 final QA audit F1 — z-[45] so the panel sits ABOVE
-  // the new sticky top-bar+scan stack (z-40). Without this, the
-  // panel rendered after the sticky wrapper in DOM order shares
-  // the tiebreak rule and gets covered. z-[45] threads between
-  // the sticky stack (40) and overlays like ContextMenu (100) /
-  // modals (60s).
+  // z-[45] sits above the sticky top-bar stack (40) and below
+  // ContextMenu (100) / modals (60s).
   return (
     <div className="fixed top-0 left-[240px] right-0 bg-[#0a0a0f]/95 backdrop-blur-xl border-b border-white/[0.06] p-6 z-[45] animate-fade-in">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 max-w-5xl">
@@ -4469,12 +4238,9 @@ function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
 }
 
 /* ─────────────────────── NOTIFICATION PANEL ─────────────────────── */
-// Phase 5.2 parity — NotificationPanel real data. V1 has a global
-// WS feed (now_playing, library_update, request_status, scan_complete,
-// party_invite) that drives this. V2 doesn't yet have a global
-// socket; until that lands, surface the most recent activity log
-// entries (for admins) or a friendly empty-state for users. This
-// is honest, not fake mock data.
+// NotificationPanel surfaces recent admin activity log entries.
+// Real-time WS-driven notifications are TODO; non-admins see an
+// empty state.
 function NotificationPanel({ open, isAdmin, onClose }: {
   open: boolean
   isAdmin: boolean
@@ -4501,8 +4267,7 @@ function NotificationPanel({ open, isAdmin, onClose }: {
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
   if (!open) return null
-  // Phase 5.3 final QA audit F1 — z-[45] to clear the sticky top
-  // bar+scan stack (z-40). Same reason as ServerPanel above.
+  // z-[45] — same layering rationale as ServerPanel above.
   return (
     <div className="fixed top-0 left-[240px] w-[360px] max-h-[80vh] bg-[#0a0a0f]/95 backdrop-blur-xl border-r border-b border-white/[0.06] z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -4562,9 +4327,7 @@ function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: 
   )
 }
 
-// M10 Phase 2 — quiet placeholder while a browse list is in flight.
-// Better than flashing the prototype's mock-Movies grid (which would
-// confuse the user into thinking their library has 8 mock items).
+// Quiet placeholder while a browse list is in flight.
 function BrowseLoadingState({ title }: { title: string }) {
   return (
     <div className="animate-fade-in">
@@ -4585,19 +4348,17 @@ function BrowseLoadingState({ title }: { title: string }) {
 export default function App() {
   const [view, setView] = useState('home')
   const [prevView, setPrevView] = useState('home')
-  // M10 Phase 1 — auth state is tri-valued: `null` = checking the
-  // stored token via /api/auth/me, `false` = no session, an ApiUser
-  // = logged in. The auth-check phase uses null so we don't flash the
-  // login screen for already-authenticated users on every reload.
+  // Tri-valued auth state: `null` = checking via /api/auth/me,
+  // `false` = no session, ApiUser = logged in. The intermediate
+  // null prevents flashing the login screen on reload.
   const [user, setUser] = useState<ApiUser | null | false>(null)
   const [selectedMedia, setSelectedMedia] = useState<Media | null>(null)
-  // M10 Phase 2 — playerTarget replaces the old playerMedia (a V2 Media
-  // mock object). The real player needs server-side identifiers
-  // (fileId, fileType, episodeId) that don't live on the UI Media
-  // type, so the Play action resolves them via /api/media/{id}/files
-  // (movie) or seasons/episodes (show) BEFORE constructing the
-  // target. The intermediate `playerLoading` state lets the UI show
-  // "Resolving…" instead of opening a blank player.
+  // The player needs server-side identifiers (fileId, fileType,
+  // episodeId) that aren't on the UI Media type. Play resolves these
+  // via /api/media/{id}/files (movie) or seasons/episodes (show)
+  // before constructing the target; playerLoading covers the
+  // resolution window so the UI shows "Resolving…" instead of a
+  // blank player.
   const [playerTarget, setPlayerTarget] = useState<PlayTarget | null>(null)
   const [playerLoading, setPlayerLoading] = useState(false)
 
@@ -4633,11 +4394,8 @@ export default function App() {
         void markWatched(m.id).then((res) => {
           const id = nextToastId()
           setToasts(prev => [...prev, { id, message: `Marked "${m.title}" as watched`, type: 'success' }])
-          // Phase 6 — surface achievement unlocks from the server's
-          // gamification engine. Each unlock gets its own toast so
-          // the user sees them sequenced rather than concatenated.
-          // Audit M5 fix — server now returns full defs (icon +
-          // title + xp_reward), not just raw keys.
+          // Surface achievement unlocks from the server's gamification
+          // engine. One toast per unlock so they sequence cleanly.
           if (res?.achievements_unlocked && res.achievements_unlocked.length > 0) {
             for (const def of res.achievements_unlocked) {
               const tid = nextToastId()
@@ -4686,27 +4444,19 @@ export default function App() {
   }, [addToListMedia, activeProfileId])
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
-  // Phase 5.3 final QA — ref to the search input so Cmd+K / Ctrl+K
-  // can actually move the cursor there. Previously the shortcut
-  // just flipped `searchOpen=true` (a logical-state flag) without
-  // focusing the DOM input — so the visible behavior was nothing.
+  // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
-  // Phase 5.3 final QA — Cmd+K now opens a full-screen Spotlight-
-  // style palette (see SearchPalette.tsx) instead of just focusing
-  // the top-bar input. Keeps the top-bar input for click-to-search
-  // flows; the palette is the keyboard-first power-user surface.
+  // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
+  // input stays for click-to-search flows).
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [serverOpen, setServerOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   const [library, setLibrary] = useState<Media[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
 
-  // 2026-05-19 audit (FE-H2) — monotonic counter for toast IDs.
-  // Previous code used nextToastId() at ~8
-  // sites, which can collide under fast input (rapid double-clicks
-  // on Watched/Unwatched). A duplicate React key triggers "Encountered
-  // two children with the same key" and can corrupt the toast list.
-  // useRef counter is collision-free and order-preserving.
+  // Monotonic counter for toast IDs. Date.now()-based IDs can collide
+  // under fast double-clicks and duplicate React keys corrupt the
+  // toast list.
   const toastIdCounter = useRef(0)
   const nextToastId = useCallback(() => {
     toastIdCounter.current += 1
@@ -4719,41 +4469,29 @@ export default function App() {
   // via BrowseLoadingState).
   const [moviesList, setMoviesList] = useState<Media[] | null>(null)
   const [showsList, setShowsList] = useState<Media[] | null>(null)
-  // Phase 5.3 final QA — track the real server-side catalog total
-  // for each browse page. The /api/media endpoint caps per_page at
-  // 100 server-side (internal/api/helpers.go:153), so a 2,394-item
-  // library would otherwise show "100 titles" in the header which
-  // is a visible lie. These totals back the "Showing N of TOTAL"
-  // subtitle. null = not yet known (rendered as the page-size).
+  // Real server-side catalog total for the "Showing N of M" header.
+  // /api/media caps per_page at 100, so without this the header
+  // would read "100 titles" on a multi-thousand-item library.
   const [moviesTotal, setMoviesTotal] = useState<number | null>(null)
   const [showsTotal, setShowsTotal] = useState<number | null>(null)
-  // Phase 5.3 final QA — server-side sort + Load More pagination.
-  // Sort lives at App level (not BrowseView) because changing sort
+  // Sort lives here (not in BrowseView) because changing sort
   // triggers a re-fetch from page 1, and the parent owns the cache.
-  // The default 'rating' matches V1 and matches what most catalog
-  // browsers expect on first open.
   type MediaSort = 'rating' | 'title' | 'year' | 'recent'
   const [moviesSort, setMoviesSort] = useState<MediaSort>('rating')
   const [showsSort, setShowsSort] = useState<MediaSort>('rating')
   const [moviesLoadingMore, setMoviesLoadingMore] = useState(false)
   const [showsLoadingMore, setShowsLoadingMore] = useState(false)
-  // Phase 5.3 final QA audit HIGH-1 — track next-page-to-fetch in
-  // state explicitly. Was previously derived as
-  // `Math.floor(list.length / 100) + 1`, which breaks if catalog
-  // items get deleted between fetches (server returns a short
-  // page, length math no longer aligns, next click re-fetches the
-  // SAME page → duplicate items + React key warnings). Server's
-  // response includes the page it returned, so we trust that and
-  // increment.
+  // Track next-page-to-fetch in state rather than deriving from
+  // list.length: if catalog items are deleted between fetches the
+  // server returns a short page, the length math misaligns, and the
+  // next click re-fetches the same page (duplicate items + key
+  // warnings). Trust the server's returned page number instead.
   const [moviesNextPage, setMoviesNextPage] = useState(1)
   const [showsNextPage, setShowsNextPage] = useState(1)
-  // Phase 5.3 final QA audit HIGH-2 — AbortController refs for
-  // Load More. The fetch effect has its own controller, but the
-  // Load More callbacks were unguarded — a sort change while a
-  // Load More was in flight could let the stale-sort response
-  // append onto the new sort's list, corrupting state. The ref
-  // lets handleSortChange + handleLoadMore coordinate cancellation
-  // across renders without depending on useEffect lifecycle.
+  // AbortController refs let handleSortChange + handleLoadMore
+  // coordinate cancellation across renders so a sort change can
+  // cancel an in-flight Load More (which would otherwise append a
+  // stale-sort response onto the new list).
   const moviesLoadMoreAcRef = useRef<AbortController | null>(null)
   const showsLoadMoreAcRef = useRef<AbortController | null>(null)
   // Per-page size constant. Server caps at 100; we ride at the cap
@@ -4761,12 +4499,8 @@ export default function App() {
   // `nextPage` consistently with the initial fetch.
   const BROWSE_PER_PAGE = 100
 
-  // M10 Phase 2 — Detail view. When the user clicks a card, we set
-  // selectedMedia (lightweight, immediate) and ALSO fetch the full
-  // detail + episodes. detailFiles + detailSeasons exist only as
-  // effect-local variables in the fetch — they're not surfaced in
-  // the UI yet (Phase 2.5 will add a per-season episode picker and
-  // a versions list for movies with multiple files).
+  // On card click we set selectedMedia (lightweight, immediate) and
+  // also fetch the full detail + episodes in the background.
   const [detailItem, setDetailItem] = useState<MediaDetail | null>(null)
   const [detailEpisodes, setDetailEpisodes] = useState<ApiEpisode[]>([])
   const [detailFiles, setDetailFiles] = useState<MediaFile[]>([])
@@ -4775,10 +4509,9 @@ export default function App() {
   // M10 Phase 4.5 — multi-season support.
   const [detailSeasons, setDetailSeasons] = useState<{ season_number: number; episode_count?: number }[]>([])
   const [detailSelectedSeason, setDetailSelectedSeason] = useState<number | null>(null)
-  // M10 Phase 4.5 — Continue Watching rail data, lives on the home
-  // alongside the existing rails. listContinueWatching returns the
-  // original ContinueWatchingItem records (NOT mapped to UIMedia)
-  // because handlePlay needs the resume position_ms to seed playback.
+  // Continue Watching rail data. Kept as ContinueWatchingItem (not
+  // mapped to UIMedia) because handlePlay needs position_ms to
+  // seed resume.
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
@@ -4789,12 +4522,9 @@ export default function App() {
     const ac = new AbortController()
     listProfiles(ac.signal).then(ps => {
       setProfiles(ps)
-      // Audit M6 (Phase 5.1 audit-7) — validate the stored active
-      // profile against the loaded list. If the active id no longer
-      // exists (deleted from another tab, or cleared server-side),
-      // fall back to the default. Without this, the picker would
-      // visibly point at "nothing" while every continue-watching
-      // fetch sent a stale profile_id the server would reject.
+      // Validate the stored active profile against the loaded list.
+      // If it no longer exists (deleted from another tab), fall back
+      // to the default so we don't keep sending a stale profile_id.
       const validCurrent = activeProfileId && ps.some(p => p.id === activeProfileId)
       if (!validCurrent && ps.length > 0) {
         const def = ps.find(p => p.is_default) || ps[0]
@@ -4808,11 +4538,9 @@ export default function App() {
   // effect and don't want to re-run on that change.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
-  // M10 Phase 1 — real-data rails for HomeView. `null` rails means
-  // "haven't fetched yet" (HomeView shows mock fallback during this
-  // window). Empty arrays inside rails are filtered out by HomeView
-  // so a freshly-installed Aurora with no movies doesn't render
-  // ghost rails.
+  // `null` rails = not yet fetched. Empty arrays inside rails are
+  // filtered out by HomeView so a fresh install with no media
+  // doesn't render ghost rails.
   const [homeHero, setHomeHero] = useState<Media | null>(null)
   // Phase 5.3 — personalized hero pool. Server returns 4-8 picks
   // with reason blurbs; client rotates every 9s with crossfade.
@@ -4825,17 +4553,12 @@ export default function App() {
   // popular-unwatched fallback with no LLM blurbs — drives a UI hint
   // explaining why nothing's curated yet.
   const [heroPersonalization, setHeroPersonalization] = useState<HeroPersonalization | null>(null)
-  // Audit M1 (Phase 5.3 audit-8) — ref to read latest heroPool from
-  // the home-rails effect's closure without adding it to deps
-  // (which would cause the rails to re-fetch every time the hero
-  // rotates). Updated in lockstep with setHeroPool below.
+  // Ref to read latest heroPool from the home-rails effect without
+  // adding it to deps (which would re-fetch rails on every rotate).
   const heroPoolRef = useRef<HeroPick[]>([])
-  // Audit M2 (Phase 5.3 final QA) — throttle the "no file available"
-  // toast so a user mashing a no-file episode row doesn't get a stack
-  // of identical toasts. Keys: episode_id → last-shown timestamp (ms).
-  // 2s cooldown per episode is enough to dedupe accidental double-
-  // clicks AND repeated Enter/Space taps while still re-firing if
-  // the user genuinely re-clicks much later.
+  // Throttle the "no file available" toast (episode_id → last-shown
+  // ms). 2s cooldown dedupes accidental double-clicks while still
+  // letting a genuine later click re-fire.
   const unavailableToastRef = useRef<Map<number, number>>(new Map())
   const [homeRails, setHomeRails] = useState<HomeViewProps['rails']>(undefined)
   const [homeLoading, setHomeLoading] = useState(false)
@@ -4857,22 +4580,12 @@ export default function App() {
     setView(v)
     setSelectedMedia(null)
     setSearchOpen(false)
-    // 2026-05-21 — clear the search input when navigating away.
-    // The query text was sticking in the input box after the user
-    // hit Home / Movies / TV Shows from the search view, which made
-    // it look like the search bar was somehow "stuck". The input is
-    // a controlled component on `searchQuery`, so the cleanup has
-    // to happen via setSearchQuery, not via direct DOM. The same
-    // reset also covers the edge case where a stale query would
-    // otherwise re-fire `setView('search')` if the user toggled
-    // focus back into the input.
+    // Clear the search input on navigate. It's a controlled input on
+    // `searchQuery`, so this prevents the text from sticking after
+    // leaving the search view.
     setSearchQuery('')
-    // Audit H2 (Phase 4.5 final-6) — close the player on nav so
-    // the URL and rendered state stay in sync. Without this, a
-    // user with the player open + a programmatic URL change (e.g.
-    // magic-link auto-join's history.replaceState) ends up with
-    // a stale playerTarget the next reload would silently drop —
-    // leaving a "did the video crash?" mystery in QA.
+    // Close the player on nav so the URL and rendered state stay in
+    // sync (matters for programmatic history.replaceState calls).
     setPlayerTarget(null)
     navigate(`/${v}`)
   }, [view, navigate])
@@ -4883,19 +4596,11 @@ export default function App() {
     setView('detail')
   }, [view])
 
-  // M10 Phase 2 — Play resolution.
-  //
-  // V2's Media type doesn't carry server file IDs (it's a UI shape
-  // derived from /api/media which returns the parent MediaItem, not
-  // its files). To actually play something we have to:
-  //   1. For movies: GET /api/media/{id}/files, pick a file.
-  //   2. For shows: figure out which episode to play. Resume logic
-  //      would call /api/media/{id}/next-episode; for Phase 2 we
-  //      just play the first episode of season 1.
-  //
-  // Phase 2.5 should port the V1 picker (4K/version-tag preference,
-  // resume-position from /api/me/continue) and the next-episode
-  // smart-resume.
+  // Play resolution. The UI Media type doesn't carry server file
+  // IDs, so we resolve them here:
+  //   - Movies: GET /api/media/{id}/files, pick a file.
+  //   - Shows: play the first episode of season 1 (TODO: port the
+  //     V1 next-episode smart-resume).
   const handlePlay = useCallback(async (m: Media) => {
     setPlayerLoading(true)
     try {
@@ -4903,9 +4608,8 @@ export default function App() {
       // bucket Settings writes to. Default 'auto' = 1080p preferred.
       let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
       try {
-        // 2026-05-19 audit (FE-M5) — guard against null / non-object
-        // shapes that JSON.parse can return when localStorage was
-        // tampered with.
+        // Guard against null / non-object shapes that JSON.parse can
+        // return when localStorage was tampered with.
         const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
         if (raw && typeof raw === 'object') {
           const prefs = raw as Record<string, unknown>
@@ -4992,12 +4696,10 @@ export default function App() {
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        // Phase 5.3 final QA — Cmd+K now opens the Spotlight-style
-        // SearchPalette overlay, not the top-bar input. Guards
-        // preserved from audit MEDIUM-1/2/3:
-        //   - skip on AuthView (no `user` means no palette either)
-        //   - skip if user is typing in another editable element
-        //   - skip if a modal is already open
+        // Cmd+K opens the SearchPalette overlay. Guard against:
+        //   - unauthenticated (no user)
+        //   - typing in another editable element
+        //   - any modal already open
         if (!user) return
         const target = e.target as HTMLElement | null
         const inEditable = !!target && (
@@ -5015,31 +4717,16 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-    // Phase 5.3 final QA audit MEDIUM-3 — modal-state deps so the
-    // Cmd+K guard re-binds when a modal opens/closes (avoids stale
-    // closure reading "no modal" while a modal is actually open).
-    // `user` so Cmd+K is gated on auth state. `paletteOpen` so the
-    // Esc handler defers to the palette's own close logic.
+    // Modal-state deps so the Cmd+K guard re-binds when a modal
+    // opens/closes (avoids a stale closure reading "no modal" while
+    // one is actually open).
   }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
 
-  // M10 Phase 1 — auth boot.
-  //
-  // On first render: if we have a stored access token AND a cached
-  // User, optimistically render the app with the cached user (fast UX)
-  // while validating the token via /api/auth/me in the background.
-  // If validation fails, drop to the login screen. If we have no
-  // token at all, go straight to login without the /me round-trip.
-  //
-  // This pattern is what V1 does too — see the bootstrap sequence in
-  // aurora_pro.html around the `S.token` initialization.
-  //
-  // Audit H3 — guard against late `fetchMe` resolving onto stale state.
-  // If the user logs out then logs in as a different user before the
-  // in-flight /me settles, the response from THIS effect must not
-  // clobber the new user's session. The `cancelled` flag + the
-  // re-check of `getAccessToken()` together cover both: explicit
-  // abort path AND the race where the request has already been sent
-  // (its token snapshot is now stale).
+  // Auth boot. If we have a stored token + cached user, optimistically
+  // render with the cached user while validating via /api/auth/me in
+  // the background. The cancelled flag + the re-check of
+  // getAccessToken() guard against a late /me settling onto stale
+  // state if the user logged out (or as a different user) mid-flight.
   useEffect(() => {
     const cached = getStoredUser()
     const token = getAccessToken()
@@ -5075,18 +4762,10 @@ export default function App() {
     }
   }, [])
 
-  // Phase 5 — TV episode auto-advance in party. When the host moves
-  // the party to a different episode (or a different movie), the
-  // server broadcasts media-change. We need to resolve the new
-  // media's first file and re-emit playerTarget so the player
-  // tears down + re-init with the new content.
-  //
-  // Audit M4 (Phase 5.1 audit-7) — generation counter so a slow
-  // first resolve (e.g. ep5 in season 12 → 12 sequential
-  // getEpisodes calls) can't overwrite a fast second resolve
-  // (ep6 in season 1 → 1 call). Each dispatch increments the gen;
-  // the resolve checks it before calling setPlayerTarget. Stale
-  // resolves silently no-op.
+  // Resolve the new media's first file when the host changes the
+  // party's media. The generation counter prevents a slow earlier
+  // resolve (e.g. ep5 in season 12 → many sequential getEpisodes
+  // calls) from overwriting a fast later resolve.
   const mediaChangeGenRef = useRef(0)
   useEffect(() => {
     return party.onMediaChange((p) => {
@@ -5145,17 +4824,10 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [party.onMediaChange])
 
-  // M10 Phase 4.5 — magic-link auto-join. The server redirects
-  // /p/{code} and /r/{code} to {BASE}p/{code}. React Router catches
-  // the path and lands the SPA on home; we extract the code and
-  // trigger party.join. Runs once on first authed render. If join
-  // succeeds, opens the panel.
-  //
-  // Audit M4 (Phase 8) — strip the dynamic Vite base off the
-  // pathname before regex-matching. Hardcoding `/v2/` here would
-  // break the day someone changes Vite's `base` (e.g. moves V2 to
-  // root). BASE_URL always has a trailing slash; we drop it for the
-  // prefix-strip so the remainder regex starts with `/`.
+  // Magic-link auto-join. The server redirects /p/{code} and
+  // /r/{code} to {BASE}p/{code}; we extract the code and trigger
+  // party.join. We strip the dynamic Vite base before regex-matching
+  // so the lookup survives a future change to Vite's `base`.
   useEffect(() => {
     if (!user) return
     const base = import.meta.env.BASE_URL.replace(/\/$/, '') // '' or '/v2'
@@ -5171,11 +4843,9 @@ export default function App() {
     // active, or no-op if not).
     window.history.replaceState({}, '', import.meta.env.BASE_URL)
     void (async () => {
-      // Audit HIGH-3 (Phase 4.5 final) — if already in a party,
-      // confirm before clobbering. The naïve flow would silently
-      // disconnect the user from their current party (and emit
-      // participant-left to everyone else there) on any magic
-      // link click — even an accidental one.
+      // If already in a party, confirm before clobbering — otherwise
+      // an accidental magic-link click silently disconnects the user
+      // and notifies everyone else with participant-left.
       if (party.state.code && party.state.code !== code) {
         const ok = window.confirm(
           `You're in party ${party.state.code}. Leave it and join ${code}?`
@@ -5186,11 +4856,8 @@ export default function App() {
       if (result.ok) {
         setPartyPanelOpen(true)
       } else {
-        // Phase 5 — friendly offline-room state. The preflight error
-        // text from useParty is already "That code is a persistent
-        // room; no live session right now." for the persistent-room
-        // case. Surface it as a friendly toast that mentions the
-        // link kind so the user understands what they clicked.
+        // Persistent rooms surface a friendly "offline" toast (vs
+        // a generic error) so the user understands what they clicked.
         const id = nextToastId()
         const isOfflineRoom = linkKind === 'r' || (result.error || '').toLowerCase().includes('persistent room')
         setToasts(prev => [...prev, {
@@ -5207,23 +4874,16 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
-  // Audit HIGH-1 (Phase 4.5 final) — full state reset on logout. The
-  // old version cleared only homeRails + homeHero; everything else
-  // (continueItems, moviesList, showsList, requestsList, library,
-  // selectedMedia, detailItem, detailEpisodes, playerTarget) leaked
-  // across to the next user's login. On a shared family browser this
-  // surfaced as "I see my partner's Continue Watching for 200ms after
-  // logging in." Worse, clicking those cards triggered server calls
-  // that could either reveal or 403 on the prior user's media.
-  // Hoisted ABOVE the storage useEffect so both call sites can use it.
+  // Full state reset on logout. Must clear every per-user cache
+  // (rails, library, detail, player, …) — on a shared browser, a
+  // missed field briefly leaks the previous user's data to the next
+  // login. Hoisted above the storage useEffect so both the explicit
+  // logout and the cross-tab path can share it.
   const resetUserState = useCallback(() => {
     setHomeRails(undefined)
     setHomeHero(null)
-    // Audit M2 (Phase 5.3 audit-8) — clear hero pool too. The
-    // original Phase 4.5 resetUserState was added before Phase 5.3
-    // introduced heroPool/heroIndex/heroPaused/heroPoolRef. Without
-    // these clears, user A's "Because you watched X" blurb is
-    // briefly visible to user B after a cross-tab logout.
+    // Clear hero pool too — without this, user A's personalized
+    // blurb is briefly visible to user B after a cross-tab logout.
     setHeroPool([])
     setHeroIndex(0)
     setHeroPaused(false)
@@ -5233,17 +4893,16 @@ export default function App() {
     setShowsList(null)
     setMoviesTotal(null)
     setShowsTotal(null)
-    // Phase 5.3 final QA — pagination state reset on logout/
-    // cross-tab. Sort preference is per-user so reset to default;
-    // loading-more flags are per-session so safe to clear.
+    // Pagination state reset on logout. Sort preference is per-user
+    // so default it back; loading flags are per-session.
     setMoviesSort('rating')
     setShowsSort('rating')
     setMoviesLoadingMore(false)
     setShowsLoadingMore(false)
     setMoviesNextPage(1)
     setShowsNextPage(1)
-    // Audit HIGH-2 — abort any in-flight Load More so a stale
-    // response doesn't leak into the next user's session.
+    // Abort any in-flight Load More so a stale response doesn't
+    // leak into the next user's session.
     moviesLoadMoreAcRef.current?.abort()
     moviesLoadMoreAcRef.current = null
     showsLoadMoreAcRef.current?.abort()
@@ -5261,15 +4920,11 @@ export default function App() {
     setView('home')
   }, [])
 
-  // Audit M4 (Phase 1) + H3 (Phase 4) — cross-tab logout. If the
-  // user logs out in V1 (or in another V2 tab), localStorage emits a
-  // `storage` event in EVERY other tab. We immediately:
-  //   1. Tear down the watch party (its sockets are now holding a
-  //      revoked token; outbound chat/sync would silently fail and
-  //      the user would type into the void).
-  //   2. Drop the auth state so the UI flips to AuthView.
-  //   3. Clear the cached home rails so a re-login by a different
-  //      user doesn't briefly see the previous user's content.
+  // Cross-tab logout. A logout in another tab clears aurora_token
+  // and fires a `storage` event here; we tear down the watch party
+  // (its sockets now hold a revoked token), drop auth state, and
+  // clear cached state so a re-login as a different user doesn't
+  // briefly see the previous user's content.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === 'aurora_token' && !e.newValue) {
@@ -5279,18 +4934,13 @@ export default function App() {
         // participant entry anyway.
         party.leave()
         setUser(false)
-        // Audit HIGH-1 (Phase 4.5 final) — full state reset to match
-        // handleLogout. Cross-tab logout went through a shorter
-        // path that left rails/continueItems/etc. visible to the
-        // next user.
+        // Full state reset to match handleLogout — cross-tab logout
+        // must clear rails/continueItems/etc. too.
         resetUserState()
         return
       }
-      // 2026-05-19 audit (FE-H4) — also propagate aurora_user
-      // changes (profile edits, avatar updates) from another tab.
-      // Previously only token-clear was observed; if V1 (or another
-      // V2 tab) updated the cached user, V2 would keep showing
-      // stale data until next full reload.
+      // Propagate aurora_user changes (profile edits, avatar updates)
+      // from another tab so we don't show stale user data.
       if (e.key === 'aurora_user' && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue)
@@ -5307,24 +4957,10 @@ export default function App() {
     return () => window.removeEventListener('storage', onStorage)
   }, [party, resetUserState])
 
-  // M10 Phase 1 — Home rails fetch.
-  //
-  // Triggers once the user is authenticated. Pulls three rails in
-  // parallel: Recent Additions (also drives the hero), Top Rated
-  // Movies, Top Rated Shows. Continue Watching is Phase 2 work
-  // (needs /api/me/continue).
-  //
-  // Audit M5 — the AbortController is owned by the useEffect that
-  // triggers the fetch, so a logout/relogin while in flight cleanly
-  // cancels the previous fetch and prevents stale rails from a
-  // previous user's session settling into state.
-  //
-  // Failures are non-fatal: an individual rail's error sets homeError
-  // and HomeView renders the message + a Retry button. The user can
-  // still navigate to Movies / Shows / Settings.
-  //
-  // `retryNonce` lets the Retry button trigger a re-fetch without
-  // changing `user`. Bumping it causes the effect to re-run with a
+  // Home rails fetch — pulls Recent / Top Rated Movies / Top Rated
+  // Shows in parallel, with Discover + Anchor rails wrapped in
+  // catch() so the base rails always render if the recommender is
+  // down. retryNonce lets the Retry button re-run the effect with a
   // fresh AbortController.
   const [retryNonce, setRetryNonce] = useState(0)
   const requestHomeReload = useCallback(() => setRetryNonce(n => n + 1), [])
@@ -5349,21 +4985,16 @@ export default function App() {
           getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
         ])
         if (cancelled) return
-        // Audit M1 (Phase 5.3 audit-8) — only set the rails-derived
-        // hero when the personalized pool didn't supply one. Read
-        // via ref so closure staleness doesn't fool us into thinking
-        // the pool is still empty after the hero fetch already
-        // populated it.
+        // Only set the rails-derived hero when the personalized pool
+        // hasn't supplied one. Read via ref to avoid closure
+        // staleness reporting the pool as empty after the hero fetch
+        // already populated it.
         if (heroPoolRef.current.length === 0) {
           const hero = (recent[0] || movies[0] || null) as Media | null
           if (hero) setHomeHero(hero)
         }
-        // Final QA — Discover rails go BETWEEN core rails. The order
-        // matches V1: Recently Added on top (fresh content cue),
-        // Continue Watching (prepended elsewhere), Discover next
-        // (taste-driven exploration), then "Because You Watched X"
-        // (anchor recall), then the top-rated catalog rails as a
-        // fallback to "what's good in the library."
+        // Rail order: Recently Added → Continue Watching (prepended
+        // elsewhere) → Discover → "Because You Watched X" → top-rated.
         const personalizedRails = [
           ...(discover.length > 0
             ? discover
@@ -5396,25 +5027,21 @@ export default function App() {
     }
   }, [user, retryNonce, activeProfileId])
 
-  // M10 Phase 2 — Movies list. Fetch on first visit to the tab; cache
-  // for the session. Same pattern for Shows below. Phase 2.5 may add
-  // search/filter/sort UI that re-fetches with different query
-  // params, but for now this is a static one-shot.
+  // Movies list — fetch on first visit, cache for the session.
+  // Shows uses the same pattern below.
   useEffect(() => {
     if (!user || view !== 'movies' || moviesList !== null) return
     let cancelled = false
     const ac = new AbortController()
-    // Server-side sort: previously hardcoded 'title' while client
-    // re-sorted by 'rating'. With pagination, the client-side sort
-    // would only sort within the first 100 items and items 101-200
-    // would arrive in the *server's* order, producing mis-ordered
-    // appends. Server-side is now the single source of truth.
+    // Server-side sort is the single source of truth — client-side
+    // sort can't cope with pagination (items 101+ arrive in server
+    // order and concat after a re-sorted page 1).
     listMediaWithTotal({ type: 'movie', perPage: BROWSE_PER_PAGE, sortBy: moviesSort, signal: ac.signal })
       .then(({ items, total, page }) => {
         if (cancelled) return
         setMoviesList(items as Media[])
         setMoviesTotal(total)
-        // Audit HIGH-1 — trust server's page number, then advance.
+        // Trust the server's returned page number, then advance.
         setMoviesNextPage(page + 1)
       })
       .catch(err => {
@@ -5427,7 +5054,6 @@ export default function App() {
     // moviesList to null) re-run this effect with the new sort.
   }, [user, view, moviesList, moviesSort, nextToastId])
 
-  // M10 Phase 2 — Shows list.
   useEffect(() => {
     if (!user || view !== 'shows' || showsList !== null) return
     let cancelled = false
@@ -5447,17 +5073,13 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, view, showsList, showsSort, nextToastId])
 
-  // Phase 5.3 final QA — Load More handlers. Append the next page
-  // to the existing items array. Page number is derived from
-  // items.length / BROWSE_PER_PAGE so the math survives even if the
-  // user navigated away and back mid-pagination (state persists at
-  // App level). Guarded against double-clicks, missing data, and
-  // the "already showing everything" case.
+  // Load More handlers — append the next page. Page state lives at
+  // App level so the math survives navigating away and back mid-
+  // pagination.
   const handleLoadMoreMovies = useCallback(async () => {
     if (!moviesList || moviesTotal == null || moviesLoadingMore) return
     if (moviesList.length >= moviesTotal) return
-    // Audit HIGH-2 — abort any prior in-flight Load More (defensive,
-    // the isLoadingMore guard above already blocks double-clicks).
+    // Defensive: abort any prior in-flight Load More.
     moviesLoadMoreAcRef.current?.abort()
     const ac = new AbortController()
     moviesLoadMoreAcRef.current = ac
@@ -5554,15 +5176,10 @@ export default function App() {
     setShowsLoadingMore(false)
   }, [showsSort])
 
-  // M10 Phase 2 — Detail fetch. Triggered when the user clicks a
-  // card (handleSelect sets selectedMedia + flips view to 'detail').
-  // We fetch full metadata + the right child resource:
+  // Detail fetch. Triggered when handleSelect flips view to 'detail'.
   //   - Movies: /api/media/{id}/files
-  //   - Shows: /api/media/{id}/seasons + episodes of season 1
-  //
-  // Episodes of OTHER seasons are loaded on-demand by the season
-  // picker (Phase 2.5) — for now Phase 2 only shows season 1's
-  // episodes inline. The full multi-season UI is a polish item.
+  //   - Shows: /api/media/{id}/seasons + episodes of the first season
+  // Episodes of other seasons load on demand via the season picker.
   useEffect(() => {
     if (!user || view !== 'detail' || !selectedMedia) {
       setDetailItem(null)
@@ -5571,9 +5188,8 @@ export default function App() {
       setDetailSeasons([])
       setDetailSelectedSeason(null)
       setDetailError(null)
-      // Audit H1 (Phase 4.5) — clear the ref so navigating away+
-      // back doesn't see a stale (mediaId, season) and skip the
-      // re-fetch.
+      // Clear the ref so navigate-away-and-back doesn't see a stale
+      // (mediaId, season) and skip the re-fetch.
       currentEpisodesSeasonRef.current = null
       return
     }
@@ -5593,30 +5209,26 @@ export default function App() {
         if (detail.type === 'show') {
           const seasonsRaw = await getSeasons(selectedMedia.id, ac.signal)
           if (cancelled) return
-          // Audit H3 — sort by season_number; same rationale as
-          // handlePlay's show path. Without the sort, Detail can
-          // show episodes for the wrong season at the top.
+          // Sort by season_number so Detail doesn't show the wrong
+          // season at the top.
           const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
           setDetailSeasons(seasons)
           if (seasons.length > 0) {
-            // M10 Phase 4.5 — auto-select the first season so the
-            // user lands on something. They can switch with the
-            // picker below the episode list.
+            // Auto-select the first season so the user lands on
+            // something; they can switch via the picker.
             setDetailSelectedSeason(seasons[0].season_number)
             const epsRaw = await getEpisodes(selectedMedia.id, seasons[0].season_number, ac.signal)
             if (cancelled) return
             const eps = [...epsRaw].sort((a, b) => a.episode_number - b.episode_number)
             setDetailEpisodes(eps)
-            // Audit H1 (Phase 4.5) — stamp the ref so the
-            // season-switch effect knows what's currently loaded.
+            // Stamp the ref so the season-switch effect knows
+            // what's currently loaded.
             currentEpisodesSeasonRef.current = { mediaId: selectedMedia.id, season: seasons[0].season_number }
           }
         } else {
-          // Phase 5.2 — capture the files list so DetailView can
-          // render the version picker for multi-file movies (4K +
-          // 1080p, alt cuts, cross-library). handlePlay still
-          // re-fetches inside its own flow for resilience, but the
-          // UI gets the list from here.
+          // Capture the files list so DetailView can render the
+          // version picker for multi-file movies. handlePlay still
+          // re-fetches in its own flow for resilience.
           try {
             const files = await getMediaFiles(selectedMedia.id, ac.signal)
             if (!cancelled) setDetailFiles(files)
@@ -5632,19 +5244,16 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, view, selectedMedia])
 
-  // M10 Phase 4.5 — Continue Watching resume. The card came from
-  // listContinueWatching; we have media_item_id + (optional)
-  // episode_id + position_ms. Resolve the file the same way
-  // handlePlay does (because we don't have file_id in the response)
-  // but with the resume position threaded through.
+  // Continue Watching resume — resolves the file the same way
+  // handlePlay does (the rail response doesn't carry file_id) but
+  // threads position_ms through to the player.
   const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
     setPlayerLoading(true)
     try {
       let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
       try {
-        // 2026-05-19 audit (FE-M5) — guard against null / non-object
-        // shapes that JSON.parse can return when localStorage was
-        // tampered with.
+        // Guard against null / non-object shapes that JSON.parse can
+        // return when localStorage was tampered with.
         const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
         if (raw && typeof raw === 'object') {
           const prefs = raw as Record<string, unknown>
@@ -5693,9 +5302,8 @@ export default function App() {
     }
   }, [nextToastId])
 
-  // Phase 5.2 — play a specific file (used by the version picker
-  // for multi-file movies). Bypasses pickFile's quality-preference
-  // logic since the user is explicitly choosing a version.
+  // Play a specific file from the version picker — bypasses
+  // pickFile's quality preference since the user picked explicitly.
   const handlePlayFile = useCallback((m: Media, fileId: number) => {
     setPlayerTarget({
       mediaItemId: m.id,
@@ -5706,8 +5314,8 @@ export default function App() {
     })
   }, [])
 
-  // Phase 5.2 — admin refresh-metadata. Re-fetches detail after
-  // server-side refresh starts so the UI shows updated fields.
+  // Admin refresh-metadata — re-fetches detail after the server
+  // starts the refresh so the UI shows updated fields.
   const handleRefreshMetadata = useCallback(async (m: Media) => {
     try {
       await refreshMetadata(m.id)
@@ -5728,17 +5336,10 @@ export default function App() {
     }
   }, [nextToastId])
 
-  // Phase 5.3 — admin "Identify" flow. Opens ManualMatchModal (which
-  // already exists for the Admin → Flagged tab) from the detail screen.
-  // Distinct from Refresh: Refresh re-runs the auto-matcher; Identify
-  // lets the admin search TMDB/TVDB and pick a specific match by ID —
-  // the only escape hatch when the auto-matcher keeps picking wrong.
-  //
-  // The modal expects a ServerMediaItem-shaped target. We synthesize
-  // one from Media (the UI-shape we have on hand) since the modal only
-  // reads id/title/type/file_path — file_path is optional and used as
-  // a display caption, so leaving it undefined is benign. Saves a
-  // round-trip vs fetching the full server record for a modal open.
+  // Admin "Identify" flow — opens ManualMatchModal from the detail
+  // screen. The modal expects a ServerMediaItem but only reads
+  // id/title/type/file_path; we synthesize one from the UI Media to
+  // skip a round-trip.
   const [identifyTarget, setIdentifyTarget] = useState<ServerMediaItem | null>(null)
   const handleIdentify = useCallback((m: Media) => {
     setIdentifyTarget({
@@ -5772,11 +5373,8 @@ export default function App() {
     }])
   }, [identifyTarget, nextToastId])
 
-  // M10 Phase 4 — start a watch party with this media. Creates a
-  // quick-party server-side, then immediately joins it via the same
-  // dual-socket dance and opens the panel. The host's player should
-  // auto-load this media (Phase 4.5 will auto-fire handlePlay on
-  // join; for now the user clicks Play themselves after joining).
+  // Start a watch party with this media. Creates a quick-party
+  // server-side, joins it, and opens the panel.
   const handleStartParty = useCallback(async (m: Media) => {
     if (party.state.code) {
       const id = nextToastId()
@@ -5787,10 +5385,8 @@ export default function App() {
       const resp = await createQuickParty({
         media_item_id: m.id,
         media_title: m.title,
-        // Audit M3 (Phase 4.5 final-6) — strip ANY image-proxy size
-        // variant prefix, not just /w500/. Future code paths that
-        // emit /w200/ or /original/ posters won't double-proxy
-        // (resulting URL is `/api/images/w500//api/images/original/foo.jpg`).
+        // Strip ANY image-proxy size variant prefix to avoid
+        // double-proxying (e.g. `/api/images/w500//api/images/...`).
         media_poster: String(m.poster || '').replace(/^\/api\/images\/[^/]+\//, ''),
       })
       const joinResult = await party.join(resp.code)
@@ -5843,15 +5439,11 @@ export default function App() {
 
   // M10 Phase 4.5 — episode list refetches when the user switches
   // season via the picker. The initial-load case is handled inside
-  // the main detail effect above (uses seasons[0]).
+  // the main detail effect above.
   //
-  // Audit H1 (Phase 4.5) — track WHICH season the current
-  // `detailEpisodes` came from via a ref. Comparing by
-  // `episodes.length === season.episode_count` was a false-positive
-  // factory: two 10-ep seasons would make the guard skip the
-  // refetch, leaving the user looking at S1 episodes after clicking
-  // the S2 chip. Identity tracking eliminates that class of bug
-  // entirely.
+  // We track which (mediaId, season) the current `detailEpisodes`
+  // came from via a ref — comparing by episode count instead would
+  // false-skip the refetch on equal-sized seasons.
   const currentEpisodesSeasonRef = useRef<{ mediaId: number; season: number } | null>(null)
   useEffect(() => {
     if (!selectedMedia || !detailSelectedSeason) return
@@ -5882,11 +5474,8 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [selectedMedia, detailSelectedSeason, view, detailItem?.type])
 
-  // Phase 5.3 — personalized hero. Fetch from /api/me/hero. 503 means
-  // no LLM/recommender configured; fall back to listRecent[0] (the
-  // existing behavior, surfaced via setHomeHero in the home-rails
-  // effect below). Re-fetches on activeProfileId change so each
-  // profile sees its own picks.
+  // Personalized hero from /api/me/hero. 503 = no recommender; we
+  // fall back to listRecent[0] (set in the home-rails effect).
   const reloadHeroPool = useCallback(async (refresh: boolean) => {
     if (!user) return
     try {
@@ -5908,18 +5497,13 @@ export default function App() {
     void reloadHeroPool(false)
   }, [reloadHeroPool])
 
-  // Phase 5.3 — hero rotation. V1 cycles every 9s with a brief
-  // crossfade. We just swap the underlying Media; HeroSection's
-  // CSS transitions cover the visual. Pause on hover (consumer
-  // controls heroPaused).
+  // Hero rotation. Cycles every 9s; pauses on hover via heroPaused.
+  // CSS in HeroSection handles the crossfade.
   useEffect(() => {
     if (heroPool.length < 2 || heroPaused) return
-    // Audit M3 (Phase 5.3 audit-8) — compute `next` outside the
-    // setState updater. React's updater functions must be PURE
-    // (no side effects); calling setHomeHero inside a setHeroIndex
-    // updater violates that rule and double-fires under StrictMode.
-    // Track the current index in a ref so the interval doesn't
-    // capture a stale heroPool/index pair.
+    // Compute `next` outside the setState updater — React updaters
+    // must be pure, and calling setHomeHero inside setHeroIndex
+    // double-fires under StrictMode.
     let cur = heroIndex
     const id = window.setInterval(() => {
       const next = (cur + 1) % heroPool.length
@@ -5934,14 +5518,9 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [heroPool, heroPaused])
 
-  // M10 Phase 4.5 — Continue Watching rail fetch. Lives alongside the
-  // home rails effect but is its own fetch so retry/failure paths
-  // are independent. Empty list = no in-progress items; we just
-  // don't render the rail in that case.
-  //
-  // Phase 5 — re-fetches when activeProfileId changes so the rail
-  // reflects the selected profile's progress, not the user-global
-  // history.
+  // Continue Watching rail. Its own fetch (independent of home
+  // rails) so retry/failure paths don't couple. Re-fetches on
+  // activeProfileId change.
   useEffect(() => {
     if (!user) return
     let cancelled = false
@@ -5957,7 +5536,7 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, retryNonce, activeProfileId])
 
-  // M10 Phase 4.5 — Requests list lazy-fetch when user visits the tab.
+  // Requests list — lazy-fetch on first visit to the tab.
   useEffect(() => {
     if (!user || view !== 'requests' || requestsList !== null) return
     let cancelled = false
@@ -5972,10 +5551,7 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, view, requestsList])
 
-  // M10 Phase 1 — logout. Clears localStorage and drops to AuthView.
-  // resetUserState is defined above the storage useEffect so both
-  // explicit-logout and cross-tab-logout paths can share the same
-  // privacy reset.
+  // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
     party.leave()
     await apiLogout()
@@ -6008,24 +5584,18 @@ export default function App() {
         setServerOpen={setServerOpen}
         notifOpen={notifOpen}
         setNotifOpen={setNotifOpen}
-        notifCount={0 /* Phase 5.2 parity — was NOTIFICATIONS.length (hardcoded 3). Real unread-count needs the global WS + server unread-state; surface 0 until that lands rather than a permanently-wrong badge. */}
+        notifCount={0 /* Real unread-count needs the global WS + server unread-state; show 0 until that lands rather than a permanently-wrong badge. */}
       />
 
-      {/* Server Panel — Phase 5.2 parity: real data, admin-gated. */}
       <ServerPanel open={serverOpen} isAdmin={user.role === 'admin'} />
 
-      {/* Notification Panel — Phase 5.2 parity: surfaces real
-          activity for admins, honest empty-state for users. */}
       <NotificationPanel
         open={notifOpen}
         isAdmin={user.role === 'admin'}
         onClose={() => setNotifOpen(false)}
       />
 
-      {/* Phase 5.3 final QA — Cmd+K Spotlight palette. Overlays
-          everything at z-200. Selecting a result navigates to the
-          detail page for that title. The top-bar input still works
-          for click-to-search; this palette is the keyboard surface. */}
+      {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}
       <SearchPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
@@ -6039,16 +5609,12 @@ export default function App() {
 
       {/* Main Content */}
       <main className="ml-[240px] min-h-screen">
-        {/* Phase 5.3 final QA — sticky stack: scan bar above header.
-            Was previously two competing fixed/sticky elements that
-            overlapped on row 0. Now both live inside one sticky
-            container so the scan bar contributes its height to flow,
-            pushing the header (and the entire page below) down. The
-            bar+header pin together when the user scrolls. */}
+        {/* Sticky stack: scan bar + header in one sticky container
+            so the scan bar contributes its height to flow and both
+            pin together on scroll. */}
         <div className="sticky top-0 z-40">
-          {/* Phase 5.3 parity — global scan progress bar. Admin-only.
-              Returns null when no scan is active, so the header sits
-              at top:0 in the common case with zero layout penalty. */}
+          {/* Global scan progress bar (admin-only). Returns null when
+              no scan is active. */}
           <ScanProgressBar isAdmin={user.role === 'admin'} />
           {/* Top Bar */}
           <header className="bg-[#050505]/80 backdrop-blur-xl border-b border-white/[0.04] px-8 py-3 flex items-center justify-between">
@@ -6072,12 +5638,6 @@ export default function App() {
                 }}
                 onFocus={() => setSearchOpen(true)}
               />
-              {/* Phase 5.2 parity — removed the always-on "Smart"
-                  badge that misled users into thinking every search
-                  was LLM-routed. The real badge now lives in
-                  SearchView, driven by X-Search-Mode response
-                  header, so it only appears when semantic search
-                  actually fires. */}
             </div>
           </div>
 
@@ -6134,19 +5694,12 @@ export default function App() {
               onSelect={handleSelect}
               onPlay={handlePlay}
               hero={homeHero ?? undefined}
-              // M10 Phase 4.5 — prepend Continue Watching rail when
-              // the user has in-progress items. Cards click-to-resume:
-              // handlePlayContinue threads through the right episode +
-              // position so playback resumes mid-content.
-              //
-              // Audit H2 (Phase 4.5) — dedupe by media_item_id at the
-              // rail level. /api/progress/continue can return multiple
-              // rows for the same show (e.g. user has progress on
-              // both S1E5 and S3E2). The rail shows one card per
-              // show (the most-recently-watched) to avoid duplicate-
-              // key React errors AND to avoid the click-the-old-card-
-              // play-the-new-episode confusion. LibraryView still
-              // shows every row (it uses composite keys).
+              // Prepend the Continue Watching rail. Dedupe by
+              // media_item_id at the rail level so a show with
+              // progress on multiple episodes only surfaces one card
+              // (most-recently-watched) — avoids duplicate-key
+              // warnings and the "click the old card, play the new
+              // episode" confusion. LibraryView keeps every row.
               rails={(() => {
                 if (!homeRails && continueItems.length === 0) return undefined
                 const base = homeRails ?? []
@@ -6161,17 +5714,12 @@ export default function App() {
                   {
                     title: 'Continue Watching',
                     items: deduped.map(c => mapContinueToMedia(c)) as Media[],
-                    // Phase 5.3 final QA — was 'landscape', which
-                    // cropped portrait posters to a 16:9 slice and
-                    // hid the title art (only the middle band of
-                    // each poster was visible). 'poster' uses the
-                    // full 2:3 frame so the whole poster shows. The
-                    // progress bar still differentiates this rail
-                    // visually without needing a unique aspect.
+                    // 'poster' (not 'landscape') so the full 2:3
+                    // frame shows — landscape cropped to a 16:9
+                    // slice that hid title art.
                     aspect: 'poster' as const,
-                    // Audit CW1 — stable identifier for the resume-
-                    // play interceptor in HomeView. Title is what
-                    // the user reads; kind is what the code keys on.
+                    // Stable identifier for HomeView's resume-play
+                    // interceptor (title is for display only).
                     kind: 'continue-watching' as const,
                   },
                   ...base,
@@ -6244,9 +5792,9 @@ export default function App() {
               apiEpisodes={detailEpisodes}
               onPlayEpisode={handlePlayEpisode}
               onEpisodeUnavailable={(ep) => {
-                // Audit M2 — dedupe identical toasts per episode
-                // within a 2s window. Mash-protected without losing
-                // legitimate later re-clicks.
+                // Dedupe identical toasts per episode within a 2s
+                // window — mash-protected without losing later
+                // legitimate re-clicks.
                 const now = Date.now()
                 const last = unavailableToastRef.current.get(ep.id) || 0
                 if (now - last < 2000) return
@@ -6269,8 +5817,6 @@ export default function App() {
           )}
           {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} onPlay={handlePlay} />}
           {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} />}
-          {/* Phase 6 — Collections view. CollectionsModal sits at
-              the root render below so the popup overlays everything. */}
           {view === 'collections' && (
             <CollectionsView
               isAdmin={user.role === 'admin'}
@@ -6346,12 +5892,10 @@ export default function App() {
         target={playerTarget}
         onClose={() => setPlayerTarget(null)}
         onChangeAudioTrack={(index, resumeMs) => {
-          // M10 Phase 4.5 — re-emit target with new audio index; the
-          // player effect tears down + recreates the HLS session.
-          // Audit M2 (Phase 7) — also update resumePositionMs to
-          // the live playback position so the new session resumes
-          // from where the user actually was, not from the
-          // original session's start.
+          // Re-emit target with the new audio index. The player
+          // tears down + recreates the HLS session; thread the live
+          // position through resumePositionMs so playback resumes
+          // where the user actually was.
           setPlayerTarget(prev => prev ? {
             ...prev,
             audioTrackIndex: index,
@@ -6360,9 +5904,9 @@ export default function App() {
         }}
         onSendReaction={party.state.code ? party.sendReaction : undefined}
         onFallbackToTranscode={() => {
-          // Phase 5 — re-emit current target with forceTranscode=true.
-          // The player's mediaErrorFallbackTriedRef latch prevents
-          // an infinite loop if transcode ALSO fails.
+          // Re-emit current target with forceTranscode=true. The
+          // player's mediaErrorFallbackTriedRef prevents an infinite
+          // loop if transcode also fails.
           setPlayerTarget(prev => prev ? { ...prev, forceTranscode: true } : prev)
         }}
         party={party.state.code ? {
@@ -6371,9 +5915,8 @@ export default function App() {
           helloAbsMsRef: party.helloAbsMsRef,
           hlsStartSec: party.state.hlsStartSec,
           isPlaying: party.state.isPlaying,
-          // Audit H3 (Phase 4.5 final-6) — thread the party's
-          // mediaItemId so the player can refuse to mirror when
-          // local content doesn't match.
+          // Thread the party's mediaItemId so the player can refuse
+          // to mirror when local content doesn't match.
           partyMediaItemId: party.state.mediaItemId,
           requestPlay: party.requestPlay,
           requestPause: party.requestPause,
@@ -6381,12 +5924,10 @@ export default function App() {
         } : undefined}
       />
 
-      {/* M10 Phase 4.5 — floating reaction overlay. Renders whenever
-          we have any recent reaction events, even when the player
-          isn't open — so a panel-only user still sees them. */}
+      {/* Floating reaction overlay — renders independently of the
+          player so panel-only users still see reactions. */}
       {party.state.code && <ReactionOverlay events={party.state.recentReactions} />}
 
-      {/* M10 Phase 4 — party panel */}
       {partyPanelOpen && party.state.code && (
         <PartyPanel
           state={party.state}
@@ -6413,7 +5954,6 @@ export default function App() {
         />
       )}
 
-      {/* Phase 6 — Collections create modal. */}
       {collectionsModalOpen && (
         <CollectionsModal
           isAdmin={user.role === 'admin'}
@@ -6429,7 +5969,6 @@ export default function App() {
         />
       )}
 
-      {/* Phase 5 — Add to Watchlist dialog. */}
       {addToListMedia && activeProfileId && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAddToListMedia(null)}>
           <div className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
@@ -6473,8 +6012,7 @@ export default function App() {
         </div>
       )}
 
-      {/* M10 Phase 4 — join-party prompt. Simple modal; Phase 4.5
-          can polish to match the V1 magic-link join flow. */}
+      {/* Join-party prompt. */}
       {partyJoinPrompt && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6">
@@ -6530,7 +6068,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Phase 5.2 parity — context menu on cards. */}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -6540,11 +6077,8 @@ export default function App() {
         />
       )}
 
-      {/* Phase 5.3 — Manual identify modal (admin-only). Triggered by
-          DetailView's Identify button via handleIdentify. Rendered at
-          the App level so it overlays whatever screen the admin was
-          looking at. Same modal that powers the Admin → Flagged tab
-          match flow. */}
+      {/* Manual identify modal (admin-only). Rendered at App level so
+          it overlays any screen. Same modal as Admin → Flagged. */}
       {identifyTarget && (
         <ManualMatchModal
           target={identifyTarget}
