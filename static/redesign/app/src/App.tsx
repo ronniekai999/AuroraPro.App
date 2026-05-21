@@ -1438,6 +1438,13 @@ interface DetailViewProps {
   // Phase 5.2 — admin-only refresh-metadata. Only rendered when
   // the caller is admin (App gates with user.role === 'admin').
   onRefreshMetadata?: (m: Media) => void
+  // Phase 5.3 — admin-only manual identify. Opens the ManualMatchModal
+  // (TMDB + TVDB search) so the admin can correct a wrong auto-match
+  // when the catalog enricher picked the wrong title or hit a low
+  // confidence score. Distinct from Refresh: Refresh re-runs the same
+  // auto-match (might land on the same wrong answer); Identify lets
+  // the admin pick a specific TMDB/TVDB ID manually.
+  onIdentify?: (m: Media) => void
   // Phase 5.2 — version selector for movies with multiple files.
   // App passes the files list; DetailView surfaces them as chips.
   // Clicking a chip plays that specific file (4K version, alt cut, etc.).
@@ -1451,6 +1458,7 @@ function DetailView({
   seasons, selectedSeason, onSelectSeason,
   onAddToWatchlist,
   onRefreshMetadata,
+  onIdentify,
   files, onPlayFile,
 }: DetailViewProps) {
   // Prefer real metadata when available — overview, runtime, rating
@@ -1648,11 +1656,21 @@ function DetailView({
               {onRefreshMetadata && (
                 <button
                   onClick={() => onRefreshMetadata(media)}
-                  title="Re-fetch metadata from TMDB/TVDB"
+                  title="Re-fetch metadata from TMDB/TVDB (auto-match)"
                   className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 whitespace-nowrap"
                 >
                   <Icon name="refresh" size={16} />
                   Refresh
+                </button>
+              )}
+              {onIdentify && (
+                <button
+                  onClick={() => onIdentify(media)}
+                  title="Manually search TMDB/TVDB and pick the correct match"
+                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-200 whitespace-nowrap"
+                >
+                  <Icon name="info" size={16} />
+                  Identify
                 </button>
               )}
             </div>
@@ -5700,6 +5718,50 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // Phase 5.3 — admin "Identify" flow. Opens ManualMatchModal (which
+  // already exists for the Admin → Flagged tab) from the detail screen.
+  // Distinct from Refresh: Refresh re-runs the auto-matcher; Identify
+  // lets the admin search TMDB/TVDB and pick a specific match by ID —
+  // the only escape hatch when the auto-matcher keeps picking wrong.
+  //
+  // The modal expects a ServerMediaItem-shaped target. We synthesize
+  // one from Media (the UI-shape we have on hand) since the modal only
+  // reads id/title/type/file_path — file_path is optional and used as
+  // a display caption, so leaving it undefined is benign. Saves a
+  // round-trip vs fetching the full server record for a modal open.
+  const [identifyTarget, setIdentifyTarget] = useState<ServerMediaItem | null>(null)
+  const handleIdentify = useCallback((m: Media) => {
+    setIdentifyTarget({
+      id: m.id,
+      library_id: 0, // not used by the modal
+      type: m.type === 'show' || m.type === 'anime' ? 'show' : 'movie',
+      title: m.title,
+      year: m.year,
+      added_at: '',
+      updated_at: '',
+    } as ServerMediaItem)
+  }, [])
+  const handleIdentifyClose = useCallback(() => setIdentifyTarget(null), [])
+  const handleIdentifyMatched = useCallback(async () => {
+    const id = identifyTarget?.id
+    setIdentifyTarget(null)
+    if (!id) return
+    // Re-fetch detail so the new metadata (poster, overview, etc.)
+    // shows up immediately in the open detail view. Non-fatal: a
+    // failed re-fetch just leaves the old data on screen until the
+    // user navigates away and back.
+    try {
+      const detail = await getMedia(id)
+      setDetailItem(detail)
+    } catch { /* non-fatal */ }
+    const tid = nextToastId()
+    setToasts(prev => [...prev, {
+      id: tid,
+      message: 'Match saved — metadata is re-enriching in the background.',
+      type: 'info',
+    }])
+  }, [identifyTarget, nextToastId])
+
   // M10 Phase 4 — start a watch party with this media. Creates a
   // quick-party server-side, then immediately joins it via the same
   // dual-socket dance and opens the panel. The host's player should
@@ -6190,6 +6252,7 @@ export default function App() {
               onSelectSeason={setDetailSelectedSeason}
               onAddToWatchlist={profiles.length > 0 ? (m) => setAddToListMedia(m) : undefined}
               onRefreshMetadata={user.role === 'admin' ? handleRefreshMetadata : undefined}
+              onIdentify={user.role === 'admin' ? handleIdentify : undefined}
               files={detailFiles}
               onPlayFile={handlePlayFile}
             />
@@ -6464,6 +6527,19 @@ export default function App() {
           y={contextMenu.y}
           items={contextMenu.items}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {/* Phase 5.3 — Manual identify modal (admin-only). Triggered by
+          DetailView's Identify button via handleIdentify. Rendered at
+          the App level so it overlays whatever screen the admin was
+          looking at. Same modal that powers the Admin → Flagged tab
+          match flow. */}
+      {identifyTarget && (
+        <ManualMatchModal
+          target={identifyTarget}
+          onClose={handleIdentifyClose}
+          onMatched={handleIdentifyMatched}
         />
       )}
 
