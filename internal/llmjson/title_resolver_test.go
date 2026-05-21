@@ -179,6 +179,66 @@ func TestResolveByTitle_TrimsWhitespace(t *testing.T) {
 	}
 }
 
+// TestResolveByTitle_StripsTrailingTypeTag: gpt-oss:120b (observed
+// 2026-05-21 in hero rerank logs) emits picks formatted as
+// `"Lizzie McGuire (2001) [show]"` — mirroring buildRerankPrompt's
+// candidate-list format verbatim. Before this fix, the trailing
+// `[show]` made the lookup fail (index seeds `Title` and
+// `Title (YEAR)` only), all picks got dropped, and the hero rail
+// silently fell back to vector order with no reasons.
+func TestResolveByTitle_StripsTrailingTypeTag(t *testing.T) {
+	items := []fakeCand{
+		{title: "Lizzie McGuire", year: 2001},
+		{title: "The Conjuring", year: 2013},
+	}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+
+	// Title (year) [type] — the canonical gpt-oss:120b shape.
+	got, ok := ResolveByTitle(idx, "Lizzie McGuire (2001) [show]")
+	if !ok || got != 0 {
+		t.Errorf("'Title (year) [type]' should resolve to 0, got %d ok=%v", got, ok)
+	}
+	// Title [type] — same pattern without the year.
+	got, ok = ResolveByTitle(idx, "The Conjuring [movie]")
+	if !ok || got != 1 {
+		t.Errorf("'Title [type]' should resolve to 1, got %d ok=%v", got, ok)
+	}
+	// Case-insensitive after stripping.
+	got, ok = ResolveByTitle(idx, "LIZZIE MCGUIRE (2001) [SHOW]")
+	if !ok || got != 0 {
+		t.Errorf("uppercase tagged title should resolve to 0, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_PreservesMidTitleBrackets: a title that legitimately
+// contains brackets (mid-string, not trailing) should NOT have those
+// brackets stripped. Guards against the resolver going too aggressive on
+// the strip step. We don't currently know of media titles with mid-bracket
+// content, but the regex deliberately anchors to `$` to keep this safe.
+func TestResolveByTitle_PreservesMidTitleBrackets(t *testing.T) {
+	items := []fakeCand{
+		{title: "Doctor Who", year: 2005},
+	}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	// Title with a mid-string bracket sequence — should NOT match
+	// Doctor Who because we don't strip mid-string brackets.
+	if _, ok := ResolveByTitle(idx, "Doctor [Who] (2005)"); ok {
+		t.Error("mid-string brackets should NOT be stripped — would cause false positives")
+	}
+}
+
+// TestResolveByTitle_StripsTagOnTitleWithoutYearInIndex: the index has
+// a bare title (no year). LLM emits the title with a tag suffix but no
+// year. Stripping the tag should resolve back to the bare title.
+func TestResolveByTitle_StripsTagOnTitleWithoutYearInIndex(t *testing.T) {
+	items := []fakeCand{{title: "Cosmic Drift", year: 0}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	got, ok := ResolveByTitle(idx, "Cosmic Drift [show]")
+	if !ok || got != 0 {
+		t.Errorf("bare title with tag should resolve, got %d ok=%v", got, ok)
+	}
+}
+
 // TestBuildCandidateTitleIndexWithCollisions_NoCollisions: the unique
 // case — collision count is 0 for distinct titles + years.
 func TestBuildCandidateTitleIndexWithCollisions_NoCollisions(t *testing.T) {
