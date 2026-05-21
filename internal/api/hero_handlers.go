@@ -107,7 +107,32 @@ func (h *HeroHandler) Get(w http.ResponseWriter, r *http.Request) {
 	// across concurrent readers since the same pointers are served from the
 	// 24h cache. See recommender.Hero.annotatePicks.
 
-	writeJSON(w, http.StatusOK, map[string]any{"picks": picks})
+	// Personalization status — drives the UI's cold-start hint. When the
+	// profile has fewer than the threshold of embedded watch_progress
+	// rows, hero falls back to popular-unwatched (no LLM reasons, no
+	// Discover rails). Without this signal the UI silently shows
+	// non-personalized picks as if they were curated, which makes it
+	// look like the LLM is broken when it's actually just waiting for
+	// taste data.
+	//
+	// Failures are non-fatal — degrade to "history_count: 0" rather
+	// than failing the whole response. The hero picks are the contract;
+	// the personalization hint is gravy.
+	historyCount, hcErr := h.queries.PersonalizationHistoryCount(r.Context(), profileID)
+	if hcErr != nil {
+		slog.Warn("hero: history count failed (non-fatal)", "profile", profileID, "error", hcErr)
+	}
+	threshold := db.PersonalizationThreshold()
+	coldStart := historyCount < threshold
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"picks": picks,
+		"personalization": map[string]any{
+			"cold_start":    coldStart,
+			"history_count": historyCount,
+			"threshold":     threshold,
+		},
+	})
 }
 
 // Rail returns a longer list of personalized recommendations for a "More

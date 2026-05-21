@@ -91,6 +91,38 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 	return *vec, nil
 }
 
+// PersonalizationHistoryCount returns the number of distinct watch_progress
+// rows for the profile where the joined media has an embedding — i.e. the
+// inputs that BuildProfileVector would count. Exposed for UI cold-start
+// hints ("Watch X more titles to unlock personalized picks").
+//
+// Capped at 20 to mirror BuildProfileVector's LIMIT — past that we're
+// fully personalized and the exact count stops mattering for UX.
+func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int64) (int, error) {
+	row := q.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM watch_progress wp
+		JOIN media_items m ON m.id = wp.media_item_id
+		WHERE wp.profile_id = $1
+		  AND m.embedding IS NOT NULL`,
+		profileID,
+	)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("personalization history count: %w", err)
+	}
+	if n > 20 {
+		n = 20
+	}
+	return n, nil
+}
+
+// PersonalizationThreshold is the public-facing read of minHistoryItems.
+// Lives here next to BuildProfileVector so the constant + accessor stay
+// co-located — easier to maintain than re-deriving the gate in the API
+// layer.
+func PersonalizationThreshold() int { return minHistoryItems }
+
 // NearestUnwatched returns the top-N items by cosine distance to the given
 // vector, excluding anything the profile has any watch_progress on. Results
 // are deduplicated cross-library (same tmdb_id) keeping the richest copy.
