@@ -154,7 +154,20 @@ func (s *SonarrClient) LookupSeriesByTmdbID(ctx context.Context, tmdbID int) (*S
 		return nil, fmt.Errorf("%w for TMDB ID %d", ErrSeriesNotFound, tmdbID)
 	}
 
-	return nil, fmt.Errorf("Sonarr lookup returned %d results for TMDB ID %d but none matched exactly", len(results), tmdbID)
+	// Sonarr returned result(s) but none has an exact TMDB match. This
+	// happens when Sonarr's Skyhook cache returns a series whose stored
+	// `tmdbId` field is empty (TVDB has the show but not yet linked to
+	// TMDB in Skyhook), or when Sonarr falls back to a name-search for
+	// the literal "tmdb:N" string and picks an unrelated series.
+	//
+	// Treat this as ErrSeriesNotFound so the caller's fallback chain
+	// (resolveTvdbID Layers B + C in request_handlers.go) fires: read
+	// the TVDB ID from TMDB's own external_ids endpoint, or search TVDB
+	// directly by title+year. Returning a generic error here would
+	// short-circuit Layer A's `!errors.Is(err, ErrSeriesNotFound)` guard
+	// and bail the entire request — even though a valid TVDB ID may be
+	// one TMDB API call away.
+	return nil, fmt.Errorf("%w: Sonarr returned %d result(s) for TMDB ID %d with no exact match (Skyhook cache likely missing TMDB linkage)", ErrSeriesNotFound, len(results), tmdbID)
 }
 
 // LookupSeriesByTvdbID searches Sonarr for a series using TVDB ID directly.
@@ -186,7 +199,10 @@ func (s *SonarrClient) LookupSeriesByTvdbID(ctx context.Context, tvdbID int) (*S
 		return nil, fmt.Errorf("%w for TVDB ID %d", ErrSeriesNotFound, tvdbID)
 	}
 
-	return nil, fmt.Errorf("Sonarr lookup returned %d results for TVDB ID %d but none matched exactly", len(results), tvdbID)
+	// Same fallback rationale as LookupSeriesByTmdbID: Sonarr returned
+	// something but no exact TVDB match. Treat as ErrSeriesNotFound so
+	// the caller can fall through to TVDB-direct-search by title+year.
+	return nil, fmt.Errorf("%w: Sonarr returned %d result(s) for TVDB ID %d with no exact match", ErrSeriesNotFound, len(results), tvdbID)
 }
 
 // AddSeries adds a TV series to Sonarr for automated downloading.
