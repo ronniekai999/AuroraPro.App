@@ -202,6 +202,15 @@ if [ -n "$EXISTING_CONF" ]; then
     #    :443 server block, each with its own server_name. Editing
     #    only one would leave the :443 block stale, so the new domain
     #    serves HTTP but not HTTPS. Edit ALL server_name lines.
+    #  - HIGH (2026-05-21): the sole-domain case (`server_name DOMAIN;`)
+    #    was not detected by the presence check, because the previous
+    #    regex `server_name[[:space:]][^;]*(^|[[:space:]])DOMAIN`
+    #    requires whitespace BEFORE DOMAIN that's distinct from the
+    #    whitespace after `server_name`. When DOMAIN is the only entry,
+    #    there's no such intermediate whitespace — the check returned
+    #    false → sed appended DOMAIN → `server_name DOMAIN DOMAIN;`.
+    #    Fix: use `[[:space:]]+([^;]*[[:space:]])?DOMAIN` so the "other
+    #    domains before DOMAIN" group is properly optional.
     #
     # Match patterns:
     #   `server_name <DOMAIN>;`                         (sole domain)
@@ -211,7 +220,8 @@ if [ -n "$EXISTING_CONF" ]; then
     #   `server_name foo.<DOMAIN>;`                     (parent domain)
     #   `server_name <DOMAIN>.evil.example;`            (wrong host)
     DOMAIN_ESC="${DOMAIN//./\\.}"
-    if grep -qE "server_name[[:space:]][^;]*(^|[[:space:]])${DOMAIN_ESC}([[:space:]]|;)" "$EXISTING_CONF"; then
+    DOMAIN_RE="server_name[[:space:]]+([^;]*[[:space:]])?${DOMAIN_ESC}([[:space:]]|;)"
+    if grep -qE "$DOMAIN_RE" "$EXISTING_CONF"; then
         ok "'$DOMAIN' is already in server_name — no edit needed"
     else
         info "Adding '$DOMAIN' to server_name in $EXISTING_CONF..."
@@ -221,8 +231,8 @@ if [ -n "$EXISTING_CONF" ]; then
         # group preserves indentation + existing domains, we append.
         sed -i -E "s/^([[:space:]]*)server_name[[:space:]]+([^;]+);/\1server_name \2 ${DOMAIN};/g" \
             "$EXISTING_CONF"
-        if grep -qE "server_name[[:space:]][^;]*(^|[[:space:]])${DOMAIN_ESC}([[:space:]]|;)" "$EXISTING_CONF"; then
-            EDITED=$(grep -cE "server_name[[:space:]][^;]*(^|[[:space:]])${DOMAIN_ESC}([[:space:]]|;)" "$EXISTING_CONF")
+        if grep -qE "$DOMAIN_RE" "$EXISTING_CONF"; then
+            EDITED=$(grep -cE "$DOMAIN_RE" "$EXISTING_CONF")
             ok "Added '$DOMAIN' to $EDITED server_name line(s)"
         else
             warn "Could not augment server_name automatically — backup at ${EXISTING_CONF}.bak.*"
@@ -309,20 +319,23 @@ fi
 # ── Run certbot ──────────────────────────────────────────────────
 step "Step 5/5: Let's Encrypt cert via certbot --nginx"
 
-# Check if a cert already exists for this domain.
-if certbot certificates 2>/dev/null | grep -qE "Domains:.*(^|[[:space:]])${DOMAIN_ESC:-${DOMAIN//./\\.}}([[:space:]]|$)"; then
-    info "Cert for $DOMAIN already exists — running renew/expand to include it..."
-    # `--expand` lets us add the domain to an existing cert if needed.
-    # `--non-interactive` requires we already agreed to TOS (we have,
-    # if there's an existing cert).
-    if certbot --nginx -d "$DOMAIN" --expand --non-interactive --agree-tos -m "$EMAIL" --redirect 2>&1; then
-        ok "Cert updated; nginx rewritten to redirect HTTP → HTTPS"
-    else
-        warn "Cert renewal returned non-zero — check 'certbot certificates' for current state"
-    fi
+# Cert provisioning — three distinct cases:
+#   A. Cert already covers $DOMAIN              → skip certbot entirely
+#      (re-running certbot --expand on an already-covered domain has
+#      been observed to perturb the nginx config; safest is a no-op)
+#   B. Cert exists but doesn't cover $DOMAIN    → expand it
+#   C. No cert exists                            → issue a new one
+DOMAIN_ESC="${DOMAIN_ESC:-${DOMAIN//./\\.}}"
+if certbot certificates 2>/dev/null | grep -qE "Domains:.*(^|[[:space:]])${DOMAIN_ESC}([[:space:]]|$)"; then
+    # Case A: cert already covers this domain. Nothing to do.
+    ok "Cert for $DOMAIN is already current — skipping certbot"
+    info "  Renewal handled by certbot.timer (verify with: systemctl status certbot.timer)"
 else
-    info "Requesting new cert for $DOMAIN..."
-    if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect 2>&1; then
+    # Cases B + C are handled by the same command. `--expand` adds the
+    # domain to an existing cert if one exists; otherwise certbot
+    # issues a new cert covering $DOMAIN.
+    info "Requesting/expanding cert for $DOMAIN..."
+    if certbot --nginx -d "$DOMAIN" --expand --non-interactive --agree-tos -m "$EMAIL" --redirect 2>&1; then
         ok "Cert issued; nginx rewritten to redirect HTTP → HTTPS"
         # Ensure the renewal timer is running so the cert auto-renews.
         systemctl enable certbot.timer &>/dev/null \
