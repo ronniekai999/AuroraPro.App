@@ -111,8 +111,28 @@ Your job: produce 3-5 themed rails. Each rail has:
     "Movies"    — empty category
     "Because You Watched Scooby-Doo" — anchor-pinned, that's the other rail's job
 - A list of 5-8 picks from the candidate list, each with a 1-based "index"
-  and a one-sentence "reason" (≤ 80 chars, no quotes, no emojis). Reasons
-  may reference anchors but the RAIL TITLE should not.
+  and a one-sentence "reason" (≤ 80 chars, no quotes, no emojis). The
+  RAIL TITLE should not reference a specific anchor (that's the other
+  rail's job).
+
+  REASONS MUST be grounded in a specific anchor or watched-title pattern.
+  Mirror the same style as the hero rail — explain WHY THIS USER will
+  like THIS PICK, drawing the line back to something concrete in their
+  watch history.
+
+  GOOD reason examples (specific, anchor-grounded, personalized):
+    "Because you liked the dark humor of Death Note"
+    "Same heartwarming animated quests as Finding Nemo"
+    "Slow-burn supernatural beats like your weekend pick"
+    "Goofy teen comedy in the Drake & Josh tradition"
+  BAD reason examples (plot summary, generic, not personalized):
+    "Grim Reaper teams up with kids for darkly comic quests"
+    "An animated adventure for the whole family"
+    "A classic teen comedy from the early 2000s"
+    "Fans of the genre will enjoy this one"
+
+  If you genuinely can't ground a pick in the watch history, DROP it
+  rather than emit a generic plot-summary reason — quality over coverage.
 
 Aim for VARIETY across rails — mix genre, mood, era, and structural
 patterns (anthology, monster-of-the-week, ensemble heist, etc.). Three
