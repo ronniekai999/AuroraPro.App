@@ -44,8 +44,18 @@ import (
 const vectorRecallSize = 50
 
 // queryParseBudget caps the parser LLM call. Slow parsers degrade the whole
-// search latency, and the fallback ("embed the raw query") is acceptable.
-const queryParseBudget = 8 * time.Second
+// search latency, and the fallback ("embed the raw query") is acceptable
+// when the parser doesn't return in time.
+//
+// 2026-05-21 bump: 8s was tuned for local Ollama (small 3B chat models
+// return in 1-3s). Cloud Turbo's gpt-oss:120b takes 6-25s per call —
+// every parse was timing out and falling through to raw-query embedding,
+// which dramatically hurt vector retrieval quality (a search for "movies
+// like Harry Potter" without HyDE expansion produced 14/15 unrelated
+// candidates). 30s gives Cloud enough headroom while still bounding
+// worst-case latency. Successful parses cache for 10 min so the cost is
+// only paid on cache miss, not every keystroke.
+const queryParseBudget = 30 * time.Second
 
 // Searcher coordinates the LLM-driven natural-language search pipeline.
 // Safe for concurrent use; the parse cache and HTTP client both are.
