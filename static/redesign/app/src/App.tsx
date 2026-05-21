@@ -4857,6 +4857,16 @@ export default function App() {
     setView(v)
     setSelectedMedia(null)
     setSearchOpen(false)
+    // 2026-05-21 — clear the search input when navigating away.
+    // The query text was sticking in the input box after the user
+    // hit Home / Movies / TV Shows from the search view, which made
+    // it look like the search bar was somehow "stuck". The input is
+    // a controlled component on `searchQuery`, so the cleanup has
+    // to happen via setSearchQuery, not via direct DOM. The same
+    // reset also covers the edge case where a stale query would
+    // otherwise re-fire `setView('search')` if the user toggled
+    // focus back into the input.
+    setSearchQuery('')
     // Audit H2 (Phase 4.5 final-6) — close the player on nav so
     // the URL and rendered state stay in sync. Without this, a
     // user with the player open + a programmatic URL change (e.g.

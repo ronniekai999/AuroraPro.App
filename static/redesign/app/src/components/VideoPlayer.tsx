@@ -919,30 +919,38 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // position — without having to remember to pass a flag. Matches
   // Netflix/YouTube/Plex behavior; fixes "older resolution videos
   // hide the controls" complaint from passive viewers.
-  // 2026-05-20 — auto-hide TEMPORARILY disabled. Production
-  // reproed a bug where controls would hide at the 3s timer and
-  // never reappear on hover/click despite three layered fixes
-  // (React-19 inert rewrite, click handler showControls call,
-  // document-level mousemove listener). Without a way to debug
-  // live, the failure mode in front of users is "stuck hidden,
-  // can't pause" which is much worse than "always visible."
   //
-  // Reverting to always-visible during playback is a UX
-  // regression (chrome over the bottom edge of the video) but
-  // unblocks playback. Re-enable auto-hide after we can repro
-  // the stuck-hidden bug locally with DevTools open.
+  // 2026-05-20 — auto-hide TEMPORARILY disabled while we hunted a
+  // stuck-hidden bug: controls would fade at 3s and never reappear
+  // on hover. Root cause turned out to be the flexbox overflow
+  // issue (min-h-0 missing on the video container — the <video>
+  // was pushing the container 1.25px past the viewport bottom, so
+  // PlayerControls — `absolute bottom-0` inside it — rendered
+  // off-screen the moment ANY layout reflow happened).
   //
-  // The setTimeout + ref machinery is preserved so callers
-  // (mousemove handler, keyboard shortcut, click handler) can
-  // still call showControlsTemporarily() without changes — it
-  // just becomes setControlsVisible(true) and nothing else.
+  // 2026-05-21 — re-enabled now that the min-h-0 fix has been
+  // running in production for a day with zero stuck-control
+  // reports. The setTimeout + ref machinery was preserved
+  // throughout the disable so re-enabling is a 5-line change.
   const showControlsTemporarily = useCallback(() => {
     setControlsVisible(true)
     if (hideTimerRef.current) {
       window.clearTimeout(hideTimerRef.current)
       hideTimerRef.current = null
     }
-    // Auto-hide schedule disabled — see comment above.
+    // Only schedule the auto-hide when:
+    //   - playingRef.current is true — hiding during pause is just
+    //     hostile UX; the user is contemplating their next move
+    //   - lastInBottomZoneRef.current is false — the user's cursor
+    //     is NOT in the seek-bar/buttons region; pinning visible
+    //     when they're clearly aiming at controls matches
+    //     Netflix / YouTube / Plex behavior
+    if (playingRef.current && !lastInBottomZoneRef.current) {
+      hideTimerRef.current = window.setTimeout(() => {
+        setControlsVisible(false)
+        hideTimerRef.current = null
+      }, 3000)
+    }
   }, [])
 
   // Phase 7 — controls visibility timer driven by play/pause flip.
