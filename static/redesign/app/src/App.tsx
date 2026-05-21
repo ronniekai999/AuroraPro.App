@@ -2995,9 +2995,26 @@ function UpdatePanel() {
     const fetchStatus = async () => {
       try {
         const s = await getUpdateStatus()
-        if (!cancelled) setStatus(s)
+        if (!cancelled) {
+          setStatus(s)
+          // Clear any prior transient error. Without this, a single
+          // 502 caught during the ~50 ms backend-restart window
+          // would stick in the UI forever (until the user navigates
+          // away), even though subsequent polls succeed.
+          setError(null)
+        }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to read update status')
+        if (cancelled) return
+        // Suppress transient errors when an update is actively in
+        // flight. Aurora restarts the service as part of the update,
+        // so a 502 / network error during ACTIVE states is expected
+        // and not actionable. Keep showing the prior status until
+        // the backend comes back; the next poll will succeed and
+        // refresh state. Without this, the dashboard flashes a
+        // misleading "HTTP 502" mid-update even when everything is
+        // working as designed.
+        if (ACTIVE_STATES.has(stateRef.current)) return
+        setError(e instanceof Error ? e.message : 'Failed to read update status')
       }
     }
     void fetchStatus()
