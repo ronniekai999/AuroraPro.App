@@ -887,6 +887,20 @@ window.location.replace(dest);
 		redirectTo = "/?join=" + joinCode
 	}
 
+	// Override the strict `/api/*` CSP set by the securityHeaders middleware
+	// (default-src 'none' would block the inline <script> + <style> below,
+	// leaving the user stuck on the "Signing you in…" spinner forever
+	// because the localStorage-write + window.location.replace JS never
+	// runs). The bridge page body is fully server-controlled (no user
+	// content rendered as raw JS — html/template's JS-context escaping
+	// safely handles tokens + user fields) and the page runs once before
+	// redirecting, so 'unsafe-inline' on script/style is acceptable here.
+	// The strict API CSP still applies to every other /api/* endpoint.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; "+
+			"script-src 'unsafe-inline'; "+
+			"style-src 'unsafe-inline'; "+
+			"frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = tpl.Execute(w, map[string]interface{}{
@@ -919,6 +933,15 @@ body{background:#0c0a18;color:#f4f0ff;font-family:system-ui,sans-serif;display:f
 		http.Error(w, message, http.StatusBadRequest)
 		return
 	}
+	// Override the strict `/api/*` CSP. The error page has no inline
+	// script — only inline <style> — so style-src 'unsafe-inline' is
+	// sufficient. Without this override the page renders as unstyled
+	// black text on a white background (the styles get blocked) which
+	// looks broken and obscures the actual error message.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; "+
+			"style-src 'unsafe-inline'; "+
+			"frame-ancestors 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusBadRequest)
