@@ -1598,6 +1598,26 @@ map $http_upgrade $connection_upgrade {
 MAP
         fi
 
+        # Saltbox/Swizzin compatibility: if /etc/nginx/apps/*.conf exists on
+        # this host, include it in Aurora's server block so the existing
+        # path-based app routes (/sonarr, /radarr, /flood, /nzbget, etc.)
+        # continue to work alongside Aurora. Without this, an Aurora install
+        # on a Swizzin host silently breaks every Swizzin app route.
+        APPS_INCLUDE_LINE=""
+        if [ -d /etc/nginx/apps ] && compgen -G '/etc/nginx/apps/*.conf' >/dev/null 2>&1; then
+            info "Detected /etc/nginx/apps/*.conf — including Saltbox/Swizzin app routes"
+            APPS_INCLUDE_LINE='    include /etc/nginx/apps/*.conf;  # Saltbox/Swizzin apps'
+            # Warn if any apps/*.conf defines a catchall `location /` that
+            # would collide with Aurora's own `location /`. Most common
+            # offender on Swizzin is panel.conf.
+            COLLIDING=$(grep -lE '^[[:space:]]*location[[:space:]]+/[[:space:]]*\{' /etc/nginx/apps/*.conf 2>/dev/null || true)
+            if [ -n "$COLLIDING" ]; then
+                warn "These apps/*.conf files define 'location /' which collides with Aurora:"
+                for f in $COLLIDING; do warn "  $f"; done
+                warn "Rename them to *.disabled or remove their 'location /' block; nginx -t will fail otherwise."
+            fi
+        fi
+
         cat > "$NGINX_CONF_PATH" <<CONF
 # Aurora — managed by install.sh
 upstream aurora_backend {
@@ -1609,6 +1629,7 @@ server {
     listen [::]:80;
     server_name ${PROXY_DOMAIN};
     client_max_body_size 0;
+${APPS_INCLUDE_LINE}
     location / {
         proxy_pass http://aurora_backend;
         proxy_set_header Host              \$host;
