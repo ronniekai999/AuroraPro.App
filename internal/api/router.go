@@ -462,12 +462,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 			// Media
 			r.Route("/api/media", func(r chi.Router) {
-				// 75s covers the search path's worst case: queryParseBudget
-				// (8s) + rerankBudget (45s) + vector recall + DB hydration
-				// (~5s) ≈ 58s, leaving margin for Cloud-side jitter. Other
-				// /api/media endpoints (Get, ListGenres, etc.) return in
-				// milliseconds, so the wider bound is irrelevant for them.
-				r.Use(middleware.Timeout(75 * time.Second))
+				// 100s covers the search path's worst case: queryParseBudget
+				// (30s) + rerankBudget (45s) + vector recall + DB hydration
+				// (~5s) ≈ 80s, leaving 20s margin for Cloud-side jitter.
+				// Bumped from 75s on 2026-05-21 when queryParseBudget was
+				// raised from 8s → 30s for Cloud Turbo's gpt-oss:120b
+				// (which routinely takes 6-25s for query parse); the
+				// previous 75s cap would have 504'd mid-search whenever
+				// parse hit its budget. Other /api/media endpoints (Get,
+				// ListGenres, etc.) return in milliseconds, so the wider
+				// bound is irrelevant for them.
+				r.Use(middleware.Timeout(100 * time.Second))
 				r.Get("/", mediaH.List)
 				r.Get("/recent", mediaH.Recent)
 				r.Get("/search", mediaH.Search)
