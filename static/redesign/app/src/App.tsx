@@ -3196,7 +3196,9 @@ function AdminServerSettingsTab() {
   const [settings, setSettings] = useState<ServerSettingsMap | null>(null)
   const [edited, setEdited] = useState<ServerSettingsMap>({})
   const [saving, setSaving] = useState(false)
-  const [inviteCode, setInviteCode] = useState<string | null>(null)
+  // inviteCode state previously lived here for the Server-tab Invite UI.
+  // The Invite UI now lives on the Users tab inside AdminView; that
+  // component owns its own inviteCode state.
   const [arrTest, setArrTest] = useState<{ svc: string; msg: string } | null>(null)
   const reload = useCallback(async () => {
     try { setSettings(await getAllSettings()); setEdited({}) }
@@ -3276,20 +3278,8 @@ function AdminServerSettingsTab() {
         )}
       </div>
 
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Invite Codes</h3>
-        <p className="text-white/40 text-xs mb-3">Create a one-time invite code for a new user to register with.</p>
-        <button
-          onClick={async () => { try { const r = await createInvite(); setInviteCode(r.code) } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }}
-          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg"
-        >Generate Invite</button>
-        {inviteCode && (
-          <div className="mt-3 p-3 bg-white/[0.04] border border-white/[0.06] rounded">
-            <p className="text-white/60 text-xs mb-1">Share this code:</p>
-            <p className="font-mono text-lg text-purple-300 tracking-wider">{inviteCode}</p>
-          </div>
-        )}
-      </div>
+      {/* Invite Codes section moved to Admin → Users tab (its natural home).
+          See `tab === 'users'` block in AdminView. */}
 
       <div className="glass-panel rounded-xl p-5">
         <h3 className="text-white font-semibold mb-3">Image Cache</h3>
@@ -3966,6 +3956,12 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [usersLoading, setUsersLoading] = useState(false)
   const [usersErr, setUsersErr] = useState<string | null>(null)
+  // Invite code generation lives on the Users tab (its natural home)
+  // rather than the Server settings tab. Local state so the latest code
+  // sticks around until the admin clicks Generate again or navigates away.
+  const [inviteCode, setInviteCode] = useState<string | null>(null)
+  const [inviteBusy, setInviteBusy] = useState(false)
+  const [inviteCopied, setInviteCopied] = useState(false)
   const [activity, setActivity] = useState<ActivityEntry[] | null>(null)
   const [activityLoading, setActivityLoading] = useState(false)
   const [activityErr, setActivityErr] = useState<string | null>(null)
@@ -4165,7 +4161,45 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
       )}
 
       {tab === 'users' && (
-        <div className="glass-panel rounded-xl overflow-hidden">
+        <div className="space-y-4">
+          {/* Invite section — primary entry point for adding new users.
+              Lives here (next to the user list) rather than under
+              Server settings because that's where admins look. */}
+          <div className="glass-panel rounded-xl p-5">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <h3 className="text-white font-semibold mb-1">Invite a user</h3>
+                <p className="text-white/40 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
+              </div>
+              <button
+                disabled={inviteBusy}
+                onClick={async () => {
+                  setInviteBusy(true); setInviteCopied(false)
+                  try { const r = await createInvite(); setInviteCode(r.code) }
+                  catch (e) { window.alert(e instanceof Error ? e.message : 'failed to generate invite') }
+                  finally { setInviteBusy(false) }
+                }}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm rounded-lg whitespace-nowrap"
+              >{inviteBusy ? 'Generating…' : 'Generate Invite Code'}</button>
+            </div>
+            {inviteCode && (
+              <div className="mt-4 p-4 bg-white/[0.04] border border-white/[0.06] rounded flex items-center justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <p className="text-white/60 text-xs mb-1">Share this code:</p>
+                  <p className="font-mono text-lg text-purple-300 tracking-wider break-all">{inviteCode}</p>
+                </div>
+                <button
+                  onClick={async () => {
+                    try { await navigator.clipboard.writeText(inviteCode); setInviteCopied(true); setTimeout(() => setInviteCopied(false), 2000) }
+                    catch { /* clipboard API may be unavailable on http:// — silently no-op */ }
+                  }}
+                  className="px-3 py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/80 text-xs rounded whitespace-nowrap"
+                >{inviteCopied ? '✓ Copied' : 'Copy'}</button>
+              </div>
+            )}
+          </div>
+
+          <div className="glass-panel rounded-xl overflow-hidden">
           {usersLoading && !users && <p className="p-6 text-white/40 text-sm">Loading users…</p>}
           {usersErr && <p className="p-6 text-red-300 text-sm">{usersErr}</p>}
           {users && (
@@ -4232,6 +4266,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
               </tbody>
             </table>
           )}
+          </div>
         </div>
       )}
 
