@@ -66,6 +66,10 @@ export interface ServerMediaItem {
   // list responses.
   match_status?: string
   file_path?: string
+  // LLM-generated per-pick reason. Populated by the recommender for
+  // hero rerank picks and discover-rail items; the field is omitempty
+  // on the Go side so it's absent on non-personalized responses.
+  reason?: string
 }
 
 export interface PaginatedResponse<T> {
@@ -97,6 +101,12 @@ export interface UIMedia {
   progress?: number
   cast?: string[]
   tags?: string[]
+  // LLM-generated per-pick reason — populated for Discover-rail items
+  // and Hero picks (recommender/discover.go:406 + hero rerank). Lets the
+  // card surface "why this was picked for you" as a hover tooltip
+  // without an extra fetch. Empty / undefined when the item came from
+  // a non-personalized source (regular rails, search results, etc.).
+  reason?: string
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -356,6 +366,11 @@ export function mapMedia(item: ServerMediaItem): UIMedia {
       ...(item.has_4k ? ['4K'] : []),
       ...(item.content_rating ? [item.content_rating] : []),
     ],
+    // Carry the LLM-generated reason through to the UI layer. For
+    // non-personalized endpoints (listMedia, search, etc.) the field
+    // is absent on the server response and the spread leaves it
+    // undefined here — MediaCard hides the hover hint accordingly.
+    reason: item.reason,
   }
 }
 

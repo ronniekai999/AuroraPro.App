@@ -131,6 +131,10 @@ interface Media {
   episodes?: Episode[]
   cast?: string[]
   tags?: string[]
+  // LLM-generated per-pick reason. Populated for items that came from
+  // a personalized endpoint (Hero rerank, Discover rails). MediaCard
+  // surfaces this as a hover tooltip on cards in those rails.
+  reason?: string
 }
 
 interface Episode {
@@ -498,6 +502,13 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
             className={`media-card ${aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}`}
             onClick={() => onSelect(item)}
             onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
+            // When the recommender attached a per-pick reason (Discover
+            // rails, Hero picks), surface it as a native hover tooltip so
+            // the user can see WHY this title was picked for them — same
+            // text shown italic on the Hero, just lifted up here for the
+            // grid cards. Empty / undefined reason → no title attribute,
+            // browser shows no tooltip.
+            title={item.reason || undefined}
           >
             <div className={`relative overflow-hidden rounded-xl ${aspect === 'poster' ? 'aspect-[2/3]' : 'aspect-video'}`}>
               <img
@@ -506,6 +517,17 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
                 className="w-full h-full object-cover"
                 loading="lazy"
               />
+              {/* Subtle ✨ indicator in the top-right corner when this
+                  card has an LLM reason — without it, the user has no
+                  way to know there's a tooltip to hover for. Position
+                  matches existing badge convention; size kept small so
+                  it doesn't compete with the poster art. */}
+              {item.reason && (
+                <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md bg-purple-500/30 backdrop-blur-sm border border-purple-400/40 text-purple-100 text-[10px] font-medium flex items-center gap-1 pointer-events-none">
+                  <span aria-hidden="true">✨</span>
+                  <span className="sr-only">{item.reason}</span>
+                </div>
+              )}
               {/* Progress bar */}
               {item.progress !== undefined && item.progress > 0 && (
                 <div className="progress-bar">
