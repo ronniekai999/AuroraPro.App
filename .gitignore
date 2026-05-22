@@ -36,9 +36,3 @@ static/v2/
 
 # Go build cache (in case anyone runs builds in-tree)
 /tmp/
-
-# Personal documents that shouldn't be tracked — operator may
-# drop files into the repo root (downloads etc.) and `git add -A`
-# would otherwise scoop them up.
-*.pdf
-Order Confirmation.pdf
