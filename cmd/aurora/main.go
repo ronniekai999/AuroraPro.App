@@ -261,11 +261,18 @@ func main() {
 		// to come up; the backfill goroutine will retry on its own.
 		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := llmClient.Ping(pingCtx); err != nil {
+			// Use llmCfg (post-DB-override values) so the log reflects what the
+			// client is ACTUALLY using, not the env-default. `applyLLMOverrides`
+			// above mutates llmCfg with the admin-saved URL / models. Logging
+			// cfg.LLM here would show the stale env baseline (e.g. the Docker
+			// hostname `http://ollama:11434`) even after the admin pointed the
+			// client at Ollama Cloud, which made operators chase phantom bugs.
 			slog.Warn("ollama not reachable at startup; semantic search will activate when it comes up",
-				"url", cfg.LLM.OllamaURL, "error", err)
+				"url", llmCfg.BaseURL, "error", err)
 		} else {
-			slog.Info("ollama reachable", "url", cfg.LLM.OllamaURL,
-				"embed_model", cfg.LLM.EmbedModel, "chat_model", cfg.LLM.ChatModel)
+			slog.Info("ollama reachable", "url", llmCfg.BaseURL,
+				"embed_url", llmCfg.EmbedURL,
+				"embed_model", llmCfg.EmbedModel, "chat_model", llmCfg.ChatModel)
 		}
 		pingCancel()
 
