@@ -2623,7 +2623,14 @@ function ProfilesAndWatchlistsCard() {
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
 // SearchView — debounced 300ms per keystroke (the semantic path is
 // LLM-routed and not free).
-function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: Media) => void; onPlay: (m: Media) => void }) {
+function SearchView({ query, onSelect, onPlay, libraryIds, onToggleLib }: {
+  query: string
+  onSelect: (m: Media) => void
+  onPlay: (m: Media) => void
+  // My Library + button — same contract as MediaRail / BrowseView.
+  libraryIds?: Set<number>
+  onToggleLib?: (m: Media) => void
+}) {
   const [results, setResults] = useState<Media[]>([])
   // Driven by the server's X-Search-Mode response — only show the
   // Smart badge when semantic search actually fired.
@@ -2713,6 +2720,26 @@ function SearchView({ query, onSelect, onPlay }: { query: string; onSelect: (m: 
                     <Icon name="movie" size={32} className="text-white/20" />
                   </div>
                 )}
+                {/* My Library + button — same contract / styling / z-10 as
+                    the other card surfaces. Lets users save a search result
+                    without needing to open the detail view first. */}
+                {onToggleLib && (() => {
+                  const isInLib = !!libraryIds?.has(item.id)
+                  return (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
+                      title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
+                      aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
+                      className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
+                        isInLib
+                          ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
+                          : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
+                      }`}
+                    >
+                      {isInLib ? '✓' : '+'}
+                    </button>
+                  )
+                })()}
                 <div className="card-actions">
                   <button className="action-btn" onClick={(e) => { e.stopPropagation(); void onPlay(item) }}>
                     <Icon name="play" size={16} />
@@ -5982,7 +6009,7 @@ export default function App() {
               onPlayFile={handlePlayFile}
             />
           )}
-          {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} onPlay={handlePlay} />}
+          {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} onPlay={handlePlay} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
           {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} />}
           {view === 'collections' && (
             <CollectionsView
