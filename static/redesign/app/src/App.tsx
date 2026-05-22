@@ -4362,8 +4362,8 @@ function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
   }
   const tiles = stats && isAdmin
     ? [
-      { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', tone: stats.active_streams > 0 ? 'ok' : 'idle' },
-      { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hard-drive', tone: stats.disk_free_gb < 10 ? 'warn' : 'ok' },
+      { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', tone: 'ok' },
+      { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', tone: stats.disk_free_gb < 10 ? 'warn' : 'ok' },
       { label: 'Memory', value: `${stats.memory_alloc_mb} MB`, icon: 'zap', tone: 'ok' },
       { label: 'Library Size', value: fmtBytes(stats.total_file_size_bytes), icon: 'film', tone: 'ok' },
       { label: 'Movies / Shows', value: `${stats.movie_count.toLocaleString()} · ${stats.show_count.toLocaleString()}`, icon: 'film', tone: 'ok' },
