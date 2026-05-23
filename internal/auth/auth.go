@@ -21,11 +21,24 @@ var (
 	ErrUserExists         = errors.New("username or email already taken")
 )
 
+// ScopeCast marks a JWT as bound to a single HLS transcode session, for
+// handing to Chromecast/AirPlay receivers that fetch URLs without our
+// Authorization headers. Cast tokens are accepted ONLY by RequireStreamAuth
+// (HLS playlist/segment routes). ValidateAccessToken rejects them so a
+// leaked cast token cannot be promoted to a regular session credential.
+const ScopeCast = "stream:cast"
+
 type JWTClaims struct {
 	UserID       int64  `json:"user_id"`
 	Username     string `json:"username"`
 	Role         string `json:"role"`
 	TokenVersion int    `json:"tv,omitempty"` // matches users.token_version at issue time
+	// Scope, when non-empty, restricts the token to a narrow purpose
+	// (e.g. ScopeCast for HLS-only). Regular access tokens have Scope == "".
+	Scope string `json:"scope,omitempty"`
+	// SessionID is the HLS transcode session this token is bound to.
+	// Only set when Scope == ScopeCast; empty otherwise.
+	SessionID string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -140,6 +153,80 @@ func (s *Service) ValidateAccessToken(tokenStr string) (*JWTClaims, error) {
 
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok || !token.Valid {
+		return nil, ErrInvalidToken
+	}
+	// Scoped tokens (e.g. ScopeCast) are not valid as a general access
+	// token — they must be presented through their dedicated validator
+	// (ValidateCastToken). Rejecting them here means a leaked cast token
+	// cannot impersonate a full session even if it lands in the Bearer
+	// header on a non-stream route.
+	if claims.Scope != "" {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
+}
+
+// GenerateCastToken issues a JWT bound to a single HLS transcode session,
+// suitable for embedding in URLs handed to Chromecast/AirPlay receivers.
+// The token carries Scope=ScopeCast and SessionID=sessionID; ValidateCastToken
+// requires both to match before granting access. TTL is configured via
+// cfg.CastTokenExpiry (default 4h) rather than the 15-min access TTL so a
+// long movie does not require mid-playback URL refresh.
+func (s *Service) GenerateCastToken(userID int64, username, role string, tokenVersion int, sessionID string) (string, time.Time, error) {
+	if sessionID == "" {
+		return "", time.Time{}, errors.New("cast token requires sessionID")
+	}
+	// Only the Go zero value triggers the default fallback. Negative
+	// durations are honored verbatim (mostly useful in tests that need
+	// to mint an already-expired token, mirroring AccessTokenExpiry).
+	ttl := s.cfg.CastTokenExpiry
+	if ttl == 0 {
+		ttl = 4 * time.Hour
+	}
+	expiresAt := time.Now().Add(ttl)
+	claims := JWTClaims{
+		UserID:       userID,
+		Username:     username,
+		Role:         role,
+		TokenVersion: tokenVersion,
+		Scope:        ScopeCast,
+		SessionID:    sessionID,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			NotBefore: jwt.NewNumericDate(time.Now()),
+			Issuer:    "aurora",
+			Subject:   fmt.Sprintf("%d", userID),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenStr, err := token.SignedString([]byte(s.cfg.JWTSecret))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("sign cast token: %w", err)
+	}
+	return tokenStr, expiresAt, nil
+}
+
+// ValidateCastToken parses and validates a cast-scoped JWT. Returns
+// ErrInvalidToken if the signature, expiry, scope, or session binding
+// fails. The caller is responsible for the TokenVersion (revocation)
+// check via TokenVersionStore, mirroring how ValidateAccessToken is paired
+// with that store in RequireAuth.
+func (s *Service) ValidateCastToken(tokenStr string) (*JWTClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(s.cfg.JWTSecret), nil
+	})
+	if err != nil {
+		return nil, ErrInvalidToken
+	}
+	claims, ok := token.Claims.(*JWTClaims)
+	if !ok || !token.Valid {
+		return nil, ErrInvalidToken
+	}
+	if claims.Scope != ScopeCast || claims.SessionID == "" {
 		return nil, ErrInvalidToken
 	}
 	return claims, nil

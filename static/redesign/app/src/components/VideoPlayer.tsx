@@ -27,6 +27,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
+import { Airplay, Cast, StopCircle } from 'lucide-react'
 import {
   forceTokenRefresh,
   type EpisodeFile,
@@ -37,6 +38,7 @@ import {
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import {
+  createCastToken,
   createSession,
   deleteSession,
   getStreamInfo,
@@ -45,6 +47,7 @@ import {
   type StreamInfo,
   type SubtitleTrack,
 } from '@/lib/streaming'
+import { absoluteUrl, useCast } from '@/lib/cast'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -249,6 +252,75 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // target. Without this, a chronically broken codec would loop
   // (fallback to transcode → also fails → fallback again).
   const mediaErrorFallbackTriedRef = useRef<boolean>(false)
+
+  // ── Chromecast / AirPlay (Cast & AirPlay milestone) ─────────────
+  // airplayAvailable mirrors the WebKit
+  // `webkitplaybacktargetavailabilitychanged` event so we can hide
+  // the AirPlay button on devices that have no receiver nearby
+  // (instead of showing a button that opens a "no devices" picker).
+  const [airplayAvailable, setAirplayAvailable] = useState(false)
+  // Build CastLoadArgs at click-time by minting a session-scoped
+  // token. The hook awaits this after the device picker resolves,
+  // so a dismissed picker does not waste a token. Watch parties
+  // currently disable casting (the receiver runs an independent
+  // playback timeline that won't stay in sync with the party).
+  const castLoadGetter = useCallback(async () => {
+    const sid = sessionIdRef.current
+    if (!sid || !target) return null
+    const resp = await createCastToken(sid)
+    return {
+      contentUrl: absoluteUrl(resp.playlist),
+      contentType: 'application/x-mpegURL',
+      title: target.title,
+      subtitle: target.subtitle,
+      // Server's hls_start_sec + the local elapsed offset gives us
+      // the absolute resume position in source-file seconds, which
+      // the Default Media Receiver consumes as `currentTime`.
+      startTime: startSecRef.current + (videoRef.current?.currentTime ?? 0),
+    }
+  }, [target])
+  const cast = useCast(castLoadGetter)
+
+  // AirPlay device availability is signaled by a WebKit-specific
+  // event on the <video> element. Browsers without AirPlay (Chrome,
+  // Firefox) never fire it, so the button stays hidden — exactly
+  // the desired behavior.
+  useEffect(() => {
+    const vid = videoRef.current
+    if (!vid) return
+    const ev = 'webkitplaybacktargetavailabilitychanged'
+    const handler = (e: Event) => {
+      const a = (e as Event & { availability?: string }).availability
+      setAirplayAvailable(a === 'available')
+    }
+    // The event type is not in the standard DOM lib; cast through
+    // addEventListener's generic-string overload.
+    vid.addEventListener(ev as keyof HTMLVideoElementEventMap, handler as EventListener)
+    return () => {
+      vid.removeEventListener(ev as keyof HTMLVideoElementEventMap, handler as EventListener)
+    }
+  }, [target])
+
+  // While a Cast session is connected, pause local playback. The
+  // receiver runs its own copy of the stream; running the local
+  // <video> in parallel wastes bandwidth and double-counts as "now
+  // playing" upstream. Restore play state when the session ends —
+  // but only auto-resume if we were the one who paused (don't fight
+  // a user-initiated pause that happened mid-session).
+  const pausedByCastRef = useRef(false)
+  useEffect(() => {
+    const vid = videoRef.current
+    if (!vid) return
+    if (cast.status.connected) {
+      if (!vid.paused) {
+        pausedByCastRef.current = true
+        vid.pause()
+      }
+    } else if (pausedByCastRef.current) {
+      pausedByCastRef.current = false
+      void vid.play().catch(() => { /* defensive — autoplay may block */ })
+    }
+  }, [cast.status.connected])
 
   // M10 Phase 4.5 — apply a subtitle track. Server exposes per-track
   // VTT extraction at /api/stream/{fileId}/subtitles/{index}?type=...
@@ -1332,6 +1404,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 className="w-full h-full object-contain cursor-pointer"
                 playsInline
                 preload="auto"
+                // Opt the video into Safari's AirPlay target picker.
+                // No-op everywhere else; ignored by non-WebKit browsers.
+                x-webkit-airplay="allow"
                 // Click on the video toggles play/pause. Mirrors
                 // YouTube/Plex muscle memory.
                 // Audit M4 fix — if a menu (audio/subs picker) is
@@ -1359,6 +1434,69 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   else vid.pause()
                 }}
               />
+              {/* Cast + AirPlay button cluster. Each button is
+                  rendered only when its protocol has a reachable
+                  receiver, so the user never sees a button that
+                  opens an empty picker. Hidden in watch parties
+                  because the receiver's playback timeline can't
+                  be sync'd with the party state machine. */}
+              {!party && (cast.status.available || airplayAvailable || cast.status.connected) && (
+                <div
+                  className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
+                    controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  {cast.status.connected ? (
+                    <button
+                      type="button"
+                      onClick={() => cast.stop()}
+                      title={`Stop casting to ${cast.status.deviceName ?? 'device'}`}
+                      aria-label="Stop casting"
+                      className="inline-flex items-center gap-2 rounded-full bg-purple-600/90 hover:bg-purple-600 px-3 h-9 text-white text-xs font-medium"
+                    >
+                      <StopCircle size={16} />
+                      <span className="hidden sm:inline">
+                        Casting to {cast.status.deviceName ?? 'device'}
+                      </span>
+                    </button>
+                  ) : (
+                    cast.status.available && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void cast.start().catch((err) => {
+                            // Picker dismissal also rejects; differentiate
+                            // by message to avoid an alarming toast on
+                            // benign user-cancels.
+                            const msg = err instanceof Error ? err.message : String(err)
+                            if (!/cancel|dismiss/i.test(msg)) {
+                              setErrorMsg(`Cast failed: ${msg}`)
+                            }
+                          })
+                        }}
+                        title="Cast to a Chromecast device"
+                        aria-label="Cast"
+                        className="inline-flex items-center justify-center rounded-full bg-black/60 hover:bg-black/80 w-9 h-9 text-white"
+                      >
+                        <Cast size={18} />
+                      </button>
+                    )
+                  )}
+                  {airplayAvailable && !cast.status.connected && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        videoRef.current?.webkitShowPlaybackTargetPicker?.()
+                      }}
+                      title="AirPlay to an Apple TV or HomePod"
+                      aria-label="AirPlay"
+                      className="inline-flex items-center justify-center rounded-full bg-black/60 hover:bg-black/80 w-9 h-9 text-white"
+                    >
+                      <Airplay size={18} />
+                    </button>
+                  )}
+                </div>
+              )}
               <PlayerControls
                 playing={playing}
                 currentSec={currentSec}
