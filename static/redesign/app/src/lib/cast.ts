@@ -163,53 +163,94 @@ export function useCast(
   })
 
   useEffect(() => {
-    let canceled = false
+    let mounted = true
+    let cleanup = () => {}
+    let listenersAttached = false
 
-    ensureSdk()
-      .then(() => {
-        if (canceled || !window.cast) return
-        const ctx = window.cast.framework.CastContext.getInstance()
-        const refresh = () => {
-          const castState = ctx.getCastState()
-          const session = ctx.getCurrentSession()
-          setStatus({
-            supported: true,
-            available: castState !== window.cast!.framework.CastState.NO_DEVICES_AVAILABLE,
-            connected: castState === window.cast!.framework.CastState.CONNECTED,
-            deviceName: session ? session.getCastDevice().friendlyName : null,
-          })
-        }
-        const onCastState = () => refresh()
-        const onSessionState = () => refresh()
-        ctx.addEventListener(
-          window.cast.framework.CastContextEventType.CAST_STATE_CHANGED,
-          onCastState,
-        )
-        ctx.addEventListener(
-          window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED,
-          onSessionState,
-        )
-        refresh()
+    // Kick off the script load (best-effort — errors here are non-fatal
+    // because we fall back to polling: even if the script's
+    // __onGCastApiAvailable callback never fires, we can still detect a
+    // populated window.cast.framework on subsequent ticks).
+    void ensureSdk().catch((e) => {
+      // eslint-disable-next-line no-console
+      console.warn('[Aurora Cast] ensureSdk rejected (will keep polling):', e)
+    })
 
-        return () => {
-          ctx.removeEventListener(
-            window.cast!.framework.CastContextEventType.CAST_STATE_CHANGED,
-            onCastState,
-          )
-          ctx.removeEventListener(
-            window.cast!.framework.CastContextEventType.SESSION_STATE_CHANGED,
-            onSessionState,
-          )
+    const tryAttach = (): boolean => {
+      if (!mounted) return false
+      const fw = window.cast?.framework
+      if (!fw) return false
+      const ctx = fw.CastContext.getInstance()
+      // Defensive: setOptions is idempotent — calling it again is
+      // safe and ensures the receiver app ID is set even if our
+      // earlier init didn't get a chance to set it (e.g. SDK loaded
+      // before the script-injection branch could call setOptions).
+      try {
+        ctx.setOptions({
+          receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+          autoJoinPolicy: fw.AutoJoinPolicy.ORIGIN_SCOPED,
+          resumeSavedSession: false,
+        })
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[Aurora Cast] setOptions threw:', e)
+      }
+
+      const refresh = () => {
+        if (!mounted) return
+        const castState = ctx.getCastState()
+        const session = ctx.getCurrentSession()
+        setStatus({
+          supported: true,
+          available: castState !== fw.CastState.NO_DEVICES_AVAILABLE,
+          connected: castState === fw.CastState.CONNECTED,
+          deviceName: session ? session.getCastDevice().friendlyName : null,
+        })
+      }
+      const onCastState = () => refresh()
+      const onSessionState = () => refresh()
+      ctx.addEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
+      ctx.addEventListener(fw.CastContextEventType.SESSION_STATE_CHANGED, onSessionState)
+      cleanup = () => {
+        try {
+          ctx.removeEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
+          ctx.removeEventListener(fw.CastContextEventType.SESSION_STATE_CHANGED, onSessionState)
+        } catch { /* listener cleanup is best-effort */ }
+      }
+      refresh()
+      // eslint-disable-next-line no-console
+      console.info('[Aurora Cast] SDK detected and listeners attached')
+      listenersAttached = true
+      return true
+    }
+
+    // Try once immediately — the SDK may already be loaded (e.g.
+    // because a previous component mounted it earlier in this session).
+    if (!tryAttach()) {
+      // Poll every 500ms for up to 30s. The CAF Sender SDK normally
+      // loads in <2s on a warm connection; the 30s cap protects
+      // against zombie polling on browsers that never load it at all
+      // (Firefox without an extension, locked-down corporate proxies).
+      const intervalId = window.setInterval(() => {
+        if (tryAttach()) window.clearInterval(intervalId)
+      }, 500)
+      window.setTimeout(() => {
+        if (!listenersAttached) {
+          window.clearInterval(intervalId)
+          // eslint-disable-next-line no-console
+          console.warn('[Aurora Cast] SDK did not initialize within 30s — Cast button will remain hidden')
         }
-      })
-      .catch(() => {
-        if (!canceled) {
-          setStatus((s) => ({ ...s, supported: false }))
-        }
-      })
+      }, 30000)
+      return () => {
+        mounted = false
+        window.clearInterval(intervalId)
+        cleanup()
+      }
+    }
 
     return () => {
-      canceled = true
+      mounted = false
+      cleanup()
     }
   }, [])
 
