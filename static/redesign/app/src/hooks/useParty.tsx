@@ -482,7 +482,11 @@ export function useParty(): UseParty {
     // surface friendly errors before opening the WS.
     try {
       const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(code)}/info`)
-      if (info.kind !== 'party') {
+      // Backend distinguishes "active" (live party) from "offline_room"
+      // (persistent room with no live session). Only "active" is
+      // joinable — for "offline_room" surface a friendly message so
+      // the user knows to start the party from the room first.
+      if (info.type !== 'active') {
         const error = 'That code is a persistent room; no live session right now.'
         setStatePatch({ joining: false, error })
         return { ok: false, error }
