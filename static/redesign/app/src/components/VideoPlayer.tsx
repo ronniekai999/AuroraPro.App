@@ -27,7 +27,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
-import { Airplay, Cast, StopCircle } from 'lucide-react'
+import { Cast, StopCircle } from 'lucide-react'
 import {
   forceTokenRefresh,
   type EpisodeFile,
@@ -254,11 +254,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const mediaErrorFallbackTriedRef = useRef<boolean>(false)
 
   // ── Chromecast / AirPlay (Cast & AirPlay milestone) ─────────────
-  // airplayAvailable mirrors the WebKit
-  // `webkitplaybacktargetavailabilitychanged` event so we can hide
-  // the AirPlay button on devices that have no receiver nearby
-  // (instead of showing a button that opens a "no devices" picker).
-  const [airplayAvailable, setAirplayAvailable] = useState(false)
+  // AirPlay is handled entirely by Safari's native UI: setting
+  // `x-webkit-airplay="allow"` on the <video> below makes Safari
+  // render its own AirPlay glyph + open the system picker. We add
+  // no custom AirPlay button — a second one would be redundant
+  // clutter that drives the same picker.
+  //
   // Build CastLoadArgs at click-time by minting a session-scoped
   // token. The hook awaits this after the device picker resolves,
   // so a dismissed picker does not waste a token. Watch parties
@@ -280,26 +281,6 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
   const cast = useCast(castLoadGetter)
-
-  // AirPlay device availability is signaled by a WebKit-specific
-  // event on the <video> element. Browsers without AirPlay (Chrome,
-  // Firefox) never fire it, so the button stays hidden — exactly
-  // the desired behavior.
-  useEffect(() => {
-    const vid = videoRef.current
-    if (!vid) return
-    const ev = 'webkitplaybacktargetavailabilitychanged'
-    const handler = (e: Event) => {
-      const a = (e as Event & { availability?: string }).availability
-      setAirplayAvailable(a === 'available')
-    }
-    // The event type is not in the standard DOM lib; cast through
-    // addEventListener's generic-string overload.
-    vid.addEventListener(ev as keyof HTMLVideoElementEventMap, handler as EventListener)
-    return () => {
-      vid.removeEventListener(ev as keyof HTMLVideoElementEventMap, handler as EventListener)
-    }
-  }, [target])
 
   // While a Cast session is connected, pause local playback. The
   // receiver runs its own copy of the stream; running the local
@@ -1434,13 +1415,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   else vid.pause()
                 }}
               />
-              {/* Cast + AirPlay button cluster. Each button is
-                  rendered only when its protocol has a reachable
-                  receiver, so the user never sees a button that
-                  opens an empty picker. Hidden in watch parties
-                  because the receiver's playback timeline can't
-                  be sync'd with the party state machine. */}
-              {!party && (cast.status.available || airplayAvailable || cast.status.connected) && (
+              {/* Cast button. Visible whenever the Cast SDK loaded
+                  successfully, NOT gated on a currently-reachable
+                  receiver — mDNS discovery is slow and unreliable
+                  on some networks, and YouTube/Netflix both show
+                  the button even when no devices are yet visible
+                  (the picker itself handles the "no devices"
+                  case). Hidden in watch parties because the
+                  receiver runs an independent playback timeline
+                  the party can't sync with.
+
+                  AirPlay deliberately has no custom button: Safari
+                  renders its own native AirPlay glyph on the video
+                  element when `x-webkit-airplay="allow"` is set
+                  and a receiver is reachable. A second button
+                  would be visual clutter that opens the same
+                  picker. Chrome has no AirPlay support at all,
+                  so there's nothing to add there either. */}
+              {!party && cast.status.supported && (
                 <div
                   className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
                     controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
@@ -1460,39 +1452,36 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                       </span>
                     </button>
                   ) : (
-                    cast.status.available && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void cast.start().catch((err) => {
-                            // Picker dismissal also rejects; differentiate
-                            // by message to avoid an alarming toast on
-                            // benign user-cancels.
-                            const msg = err instanceof Error ? err.message : String(err)
-                            if (!/cancel|dismiss/i.test(msg)) {
-                              setErrorMsg(`Cast failed: ${msg}`)
-                            }
-                          })
-                        }}
-                        title="Cast to a Chromecast device"
-                        aria-label="Cast"
-                        className="inline-flex items-center justify-center rounded-full bg-black/60 hover:bg-black/80 w-9 h-9 text-white"
-                      >
-                        <Cast size={18} />
-                      </button>
-                    )
-                  )}
-                  {airplayAvailable && !cast.status.connected && (
                     <button
                       type="button"
                       onClick={() => {
-                        videoRef.current?.webkitShowPlaybackTargetPicker?.()
+                        void cast.start().catch((err) => {
+                          // Picker dismissal also rejects; differentiate
+                          // by message to avoid an alarming toast on
+                          // benign user-cancels.
+                          const msg = err instanceof Error ? err.message : String(err)
+                          if (!/cancel|dismiss/i.test(msg)) {
+                            setErrorMsg(`Cast failed: ${msg}`)
+                          }
+                        })
                       }}
-                      title="AirPlay to an Apple TV or HomePod"
-                      aria-label="AirPlay"
-                      className="inline-flex items-center justify-center rounded-full bg-black/60 hover:bg-black/80 w-9 h-9 text-white"
+                      title={
+                        cast.status.available
+                          ? 'Cast to a Chromecast device'
+                          : 'Cast (no devices found — check that your Chromecast is on the same Wi-Fi)'
+                      }
+                      aria-label="Cast"
+                      // Dim the button when no devices are visible so users
+                      // get a visual hint that it may not do anything yet,
+                      // without hiding it entirely (the SDK's picker will
+                      // surface the real status if they click).
+                      className={`inline-flex items-center justify-center rounded-full w-9 h-9 text-white ${
+                        cast.status.available
+                          ? 'bg-black/60 hover:bg-black/80'
+                          : 'bg-black/40 hover:bg-black/60 text-white/70'
+                      }`}
                     >
-                      <Airplay size={18} />
+                      <Cast size={18} />
                     </button>
                   )}
                 </div>
