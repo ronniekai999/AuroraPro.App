@@ -55,13 +55,16 @@ function ensureSdk(): Promise<void> {
       }
       try {
         const ctx = window.cast!.framework.CastContext.getInstance()
+        // Bare-minimum options. autoJoinPolicy + resumeSavedSession
+        // intentionally omitted — passing fw.AutoJoinPolicy.* can
+        // evaluate to undefined on some SDK builds and cause the CAF
+        // Sender to silently reject the whole options object, leading
+        // to "Cannot start session before cast options are provided"
+        // on requestSession(). useCast also re-applies setOptions
+        // defensively after polling detects the framework, so this
+        // call is best-effort.
         ctx.setOptions({
           receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
-          // ORIGIN_SCOPED means a tab on aurora.local only auto-rejoins
-          // sessions started from aurora.local — not from random other
-          // sites that happened to be casting on the same network.
-          autoJoinPolicy: window.cast!.framework.AutoJoinPolicy.ORIGIN_SCOPED,
-          resumeSavedSession: false,
         })
         sdkLoadState = 'ready'
         resolve()
@@ -181,16 +184,21 @@ export function useCast(
       const fw = window.cast?.framework
       if (!fw) return false
       const ctx = fw.CastContext.getInstance()
-      // Defensive: setOptions is idempotent — calling it again is
-      // safe and ensures the receiver app ID is set even if our
-      // earlier init didn't get a chance to set it (e.g. SDK loaded
-      // before the script-injection branch could call setOptions).
+      // Apply receiver options. Only receiverApplicationId is
+      // strictly required — autoJoinPolicy + resumeSavedSession
+      // have sensible defaults (TAB_AND_ORIGIN_SCOPED, true). We
+      // deliberately do NOT pass autoJoinPolicy here: referencing
+      // fw.AutoJoinPolicy.ORIGIN_SCOPED could evaluate to undefined
+      // on some SDK builds, and the CAF Sender silently rejects the
+      // whole options object when any field is undefined — leaving
+      // requestSession() to fail with "Cannot start session before
+      // cast options are provided" (seen in live testing 2026-05-23).
       try {
         ctx.setOptions({
           receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
-          autoJoinPolicy: fw.AutoJoinPolicy.ORIGIN_SCOPED,
-          resumeSavedSession: false,
         })
+        // eslint-disable-next-line no-console
+        console.info('[Aurora Cast] setOptions applied with app ID', DEFAULT_MEDIA_RECEIVER_APP_ID)
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn('[Aurora Cast] setOptions threw:', e)
@@ -259,6 +267,19 @@ export function useCast(
       throw new Error('cast SDK not ready')
     }
     const ctx = window.cast.framework.CastContext.getInstance()
+    // Belt-and-suspenders: re-apply setOptions right before requesting
+    // a session. The CAF Sender will throw "Cannot start session
+    // before cast options are provided" if any earlier setOptions call
+    // didn't take effect (e.g. timing race with SDK init). Calling
+    // again is idempotent and cheap.
+    try {
+      ctx.setOptions({
+        receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+      })
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[Aurora Cast] setOptions in start() threw:', e)
+    }
     // requestSession opens the Cast device picker. Resolves when
     // the user selects a device, rejects if they dismiss it.
     await ctx.requestSession()
