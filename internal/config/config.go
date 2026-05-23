@@ -127,12 +127,18 @@ type AuthConfig struct {
 	JWTSecret          string
 	AccessTokenExpiry  time.Duration
 	RefreshTokenExpiry time.Duration
-	Argon2Memory       uint32
-	Argon2Iterations   uint32
-	Argon2Parallelism  uint8
-	Argon2SaltLength   uint32
-	Argon2KeyLength    uint32
-	InviteCodeLength   int
+	// CastTokenExpiry bounds the lifetime of session-scoped tokens
+	// embedded in Chromecast/AirPlay URLs. Long enough to cover a feature
+	// film without mid-playback rotation; short enough that a leaked
+	// token expires before it could be used to drain a transcode quota
+	// long-term. Default 4h.
+	CastTokenExpiry   time.Duration
+	Argon2Memory      uint32
+	Argon2Iterations  uint32
+	Argon2Parallelism uint8
+	Argon2SaltLength  uint32
+	Argon2KeyLength   uint32
+	InviteCodeLength  int
 }
 
 type ScannerConfig struct {
@@ -188,6 +194,7 @@ type yamlConfig struct {
 		JWTSecret          string `yaml:"jwt_secret"`
 		AccessTokenMinutes int    `yaml:"access_token_minutes"`
 		RefreshTokenDays   int    `yaml:"refresh_token_days"`
+		CastTokenHours     int    `yaml:"cast_token_hours"`
 	} `yaml:"auth"`
 	Scanner struct {
 		Workers         int    `yaml:"workers"`
@@ -284,6 +291,7 @@ func Load() (*Config, error) {
 		Auth: AuthConfig{
 			AccessTokenExpiry:  15 * time.Minute,
 			RefreshTokenExpiry: 30 * 24 * time.Hour,
+			CastTokenExpiry:    4 * time.Hour,
 			Argon2Memory:       64 * 1024,
 			Argon2Iterations:   3,
 			Argon2Parallelism:  4,
@@ -465,6 +473,9 @@ func loadYAML(cfg *Config) error {
 	}
 	if yc.Auth.RefreshTokenDays > 0 {
 		cfg.Auth.RefreshTokenExpiry = time.Duration(yc.Auth.RefreshTokenDays) * 24 * time.Hour
+	}
+	if yc.Auth.CastTokenHours > 0 {
+		cfg.Auth.CastTokenExpiry = time.Duration(yc.Auth.CastTokenHours) * time.Hour
 	}
 	if yc.Scanner.Workers > 0 {
 		cfg.Scanner.Workers = yc.Scanner.Workers
@@ -665,6 +676,11 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("REFRESH_TOKEN_DAYS"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			cfg.Auth.RefreshTokenExpiry = time.Duration(i) * 24 * time.Hour
+		}
+	}
+	if v := os.Getenv("CAST_TOKEN_HOURS"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.Auth.CastTokenExpiry = time.Duration(i) * time.Hour
 		}
 	}
 	if v := os.Getenv("SCANNER_WORKERS"); v != "" {

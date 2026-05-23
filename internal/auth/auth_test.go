@@ -331,3 +331,141 @@ func TestTokenClaims_Subject(t *testing.T) {
 		t.Errorf("claims.Subject = %q, want %q", claims.Subject, "123")
 	}
 }
+
+// ============================================================
+// Cast token (Chromecast / AirPlay)
+// ============================================================
+
+func newCastTestService() *Service {
+	return NewService(config.AuthConfig{
+		JWTSecret:         "test-secret-key-that-is-at-least-32-chars-long-for-testing",
+		AccessTokenExpiry: 15 * time.Minute,
+		CastTokenExpiry:   4 * time.Hour,
+		Argon2Memory:      64 * 1024,
+		Argon2Iterations:  1,
+		Argon2Parallelism: 1,
+		Argon2SaltLength:  16,
+		Argon2KeyLength:   32,
+	})
+}
+
+func TestGenerateCastToken_RoundTrip(t *testing.T) {
+	svc := newCastTestService()
+
+	tokenStr, expiresAt, err := svc.GenerateCastToken(42, "testuser", "admin", 7, "sess-abc")
+	if err != nil {
+		t.Fatalf("GenerateCastToken() error: %v", err)
+	}
+	if tokenStr == "" {
+		t.Fatal("GenerateCastToken() returned empty token")
+	}
+	// Cast tokens should live longer than the 15-min access token TTL.
+	if want := time.Now().Add(3 * time.Hour); expiresAt.Before(want) {
+		t.Errorf("cast expiry too short: %v (want > %v)", expiresAt, want)
+	}
+
+	claims, err := svc.ValidateCastToken(tokenStr)
+	if err != nil {
+		t.Fatalf("ValidateCastToken() error: %v", err)
+	}
+	if claims.UserID != 42 {
+		t.Errorf("claims.UserID = %d, want 42", claims.UserID)
+	}
+	if claims.Scope != ScopeCast {
+		t.Errorf("claims.Scope = %q, want %q", claims.Scope, ScopeCast)
+	}
+	if claims.SessionID != "sess-abc" {
+		t.Errorf("claims.SessionID = %q, want %q", claims.SessionID, "sess-abc")
+	}
+	if claims.TokenVersion != 7 {
+		t.Errorf("claims.TokenVersion = %d, want 7", claims.TokenVersion)
+	}
+}
+
+func TestGenerateCastToken_RequiresSessionID(t *testing.T) {
+	svc := newCastTestService()
+	if _, _, err := svc.GenerateCastToken(1, "u", "user", 0, ""); err == nil {
+		t.Error("GenerateCastToken should reject empty sessionID")
+	}
+}
+
+// A cast token must NOT be accepted by ValidateAccessToken — otherwise a
+// leaked cast URL token could be lifted into a Bearer header on any other
+// authenticated endpoint. This is the load-bearing isolation guarantee.
+func TestValidateAccessToken_RejectsCastToken(t *testing.T) {
+	svc := newCastTestService()
+	castTok, _, err := svc.GenerateCastToken(1, "u", "user", 0, "sess-xyz")
+	if err != nil {
+		t.Fatalf("GenerateCastToken() error: %v", err)
+	}
+	if _, err := svc.ValidateAccessToken(castTok); err != ErrInvalidToken {
+		t.Errorf("ValidateAccessToken(castToken) = %v, want ErrInvalidToken", err)
+	}
+}
+
+// A regular access token must NOT be accepted by ValidateCastToken — the
+// dedicated validator should require Scope == ScopeCast.
+func TestValidateCastToken_RejectsRegularToken(t *testing.T) {
+	svc := newCastTestService()
+	tok, _, err := svc.GenerateAccessToken(1, "u", "user", 0)
+	if err != nil {
+		t.Fatalf("GenerateAccessToken() error: %v", err)
+	}
+	if _, err := svc.ValidateCastToken(tok); err != ErrInvalidToken {
+		t.Errorf("ValidateCastToken(accessToken) = %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestValidateCastToken_Expired(t *testing.T) {
+	svc := NewService(config.AuthConfig{
+		JWTSecret:        "test-secret-key-that-is-at-least-32-chars-long-for-testing",
+		CastTokenExpiry:  -1 * time.Hour, // already expired
+		Argon2Memory:     64 * 1024,
+		Argon2Iterations: 1,
+		Argon2Parallelism: 1,
+		Argon2SaltLength: 16,
+		Argon2KeyLength:  32,
+	})
+	tok, _, err := svc.GenerateCastToken(1, "u", "user", 0, "sess-1")
+	if err != nil {
+		t.Fatalf("GenerateCastToken() error: %v", err)
+	}
+	if _, err := svc.ValidateCastToken(tok); err != ErrInvalidToken {
+		t.Errorf("ValidateCastToken(expired) = %v, want ErrInvalidToken", err)
+	}
+}
+
+func TestValidateCastToken_Tampered(t *testing.T) {
+	svc := newCastTestService()
+	tok, _, err := svc.GenerateCastToken(1, "u", "user", 0, "sess-1")
+	if err != nil {
+		t.Fatalf("GenerateCastToken() error: %v", err)
+	}
+	// Flip a character in the signature segment.
+	tampered := tok[:len(tok)-2] + "AA"
+	if _, err := svc.ValidateCastToken(tampered); err != ErrInvalidToken {
+		t.Errorf("ValidateCastToken(tampered) = %v, want ErrInvalidToken", err)
+	}
+}
+
+// Cast tokens fall back to a sensible default TTL (4h) when config is unset,
+// so a misconfigured deployment doesn't accidentally mint zero-lifetime tokens.
+func TestGenerateCastToken_DefaultExpiryWhenUnset(t *testing.T) {
+	svc := NewService(config.AuthConfig{
+		JWTSecret:         "test-secret-key-that-is-at-least-32-chars-long-for-testing",
+		AccessTokenExpiry: 15 * time.Minute,
+		// CastTokenExpiry deliberately omitted (zero value).
+		Argon2Memory:      64 * 1024,
+		Argon2Iterations:  1,
+		Argon2Parallelism: 1,
+		Argon2SaltLength:  16,
+		Argon2KeyLength:   32,
+	})
+	_, expiresAt, err := svc.GenerateCastToken(1, "u", "user", 0, "sess-1")
+	if err != nil {
+		t.Fatalf("GenerateCastToken() error: %v", err)
+	}
+	if want := time.Now().Add(3 * time.Hour); expiresAt.Before(want) {
+		t.Errorf("default cast expiry too short: %v (want > %v)", expiresAt, want)
+	}
+}

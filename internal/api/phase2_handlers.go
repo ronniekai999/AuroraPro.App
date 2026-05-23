@@ -561,10 +561,11 @@ type StreamHandler struct {
 	subCache  string
 	hub       *ws.Hub
 	activity  *ActivityLogger
+	authSvc   *auth.Service // for minting cast-scoped tokens
 }
 
-func NewStreamHandler(queries *db.Queries, transcode *streaming.TranscodeManager, subCache string, hub *ws.Hub, activity *ActivityLogger) *StreamHandler {
-	return &StreamHandler{queries: queries, transcode: transcode, subCache: subCache, hub: hub, activity: activity}
+func NewStreamHandler(queries *db.Queries, transcode *streaming.TranscodeManager, subCache string, hub *ws.Hub, activity *ActivityLogger, authSvc *auth.Service) *StreamHandler {
+	return &StreamHandler{queries: queries, transcode: transcode, subCache: subCache, hub: hub, activity: activity, authSvc: authSvc}
 }
 
 // isNowPlayingEnabled checks whether the now_playing_enabled server setting is "true".
@@ -809,21 +810,42 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 // Phase 3: Adaptive HLS Handlers
 // ============================================================
 
-// ServeMasterPlaylist serves the adaptive master playlist listing all quality variants.
-func (h *StreamHandler) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request) {
+// requireSessionAccess centralizes the auth check used by every HLS route:
+// the caller must be authenticated (regular OR cast token), the session
+// must exist, the session must belong to the caller (or the caller is
+// admin), and if a cast token is presented its bound SessionID must
+// match the URL's sessionID. Returns false (and writes the response) on
+// any failure, so handlers should immediately return.
+func (h *StreamHandler) requireSessionAccess(w http.ResponseWriter, r *http.Request, sessionID string) bool {
 	claims := auth.GetClaims(r.Context())
 	if claims == nil {
 		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
+		return false
 	}
-	sessionID := chi.URLParam(r, "sessionID")
+	if claims.Scope == auth.ScopeCast && claims.SessionID != sessionID {
+		// A cast token may only access the session it was minted for.
+		// Treat as 403 rather than 404 — leaking session existence to
+		// a token-bearing principal is no worse than to its owner, but
+		// the wrong-session case is genuinely a permission error.
+		writeError(w, http.StatusForbidden, "cast token does not match session")
+		return false
+	}
 	owner := h.transcode.GetSessionOwner(sessionID)
 	if owner < 0 {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
+		return false
 	}
 	if owner != claims.UserID && claims.Role != "admin" {
 		writeError(w, http.StatusForbidden, "session belongs to another user")
+		return false
+	}
+	return true
+}
+
+// ServeMasterPlaylist serves the adaptive master playlist listing all quality variants.
+func (h *StreamHandler) ServeMasterPlaylist(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionID")
+	if !h.requireSessionAccess(w, r, sessionID) {
 		return
 	}
 	h.transcode.ServeMasterPlaylist(w, r, sessionID, QueryParamToken(r))
@@ -832,19 +854,8 @@ func (h *StreamHandler) ServeMasterPlaylist(w http.ResponseWriter, r *http.Reque
 // ServeVariantPlaylist serves the media playlist for a specific quality (e.g. "720p").
 // If the variant hasn't started transcoding yet, it's started on-demand.
 func (h *StreamHandler) ServeVariantPlaylist(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
 	sessionID := chi.URLParam(r, "sessionID")
-	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "session belongs to another user")
+	if !h.requireSessionAccess(w, r, sessionID) {
 		return
 	}
 	profile := chi.URLParam(r, "profile")
@@ -853,19 +864,8 @@ func (h *StreamHandler) ServeVariantPlaylist(w http.ResponseWriter, r *http.Requ
 
 // ServeHLSSegment serves a .ts segment from a specific quality variant.
 func (h *StreamHandler) ServeHLSSegment(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
 	sessionID := chi.URLParam(r, "sessionID")
-	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "session belongs to another user")
+	if !h.requireSessionAccess(w, r, sessionID) {
 		return
 	}
 	profile := chi.URLParam(r, "profile")
@@ -877,19 +877,8 @@ func (h *StreamHandler) ServeHLSSegment(w http.ResponseWriter, r *http.Request) 
 // from the inline HLS subtitle extraction pipeline (Emby-style). Both file
 // types live in the session's root output directory.
 func (h *StreamHandler) ServeHLSSubtitleFile(w http.ResponseWriter, r *http.Request) {
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
 	sessionID := chi.URLParam(r, "sessionID")
-	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "session belongs to another user")
+	if !h.requireSessionAccess(w, r, sessionID) {
 		return
 	}
 	subsFile := chi.URLParam(r, "subsFile")
@@ -901,6 +890,57 @@ func (h *StreamHandler) ServeHLSSubtitleFile(w http.ResponseWriter, r *http.Requ
 	} else {
 		writeError(w, http.StatusBadRequest, "invalid subtitle file type")
 	}
+}
+
+// CreateCastToken mints a cast-scoped JWT bound to a specific HLS session,
+// then returns the playable master-playlist URL pre-signed with that token.
+// The web sender hands the returned URL to Chromecast or AirPlay; receivers
+// can fetch the master playlist, variant playlists, and segments without
+// our Authorization header because the embedded token authenticates each
+// sub-resource (via the existing ?token= promotion middleware).
+//
+// Requires a regular access token (this endpoint sits inside the RequireAuth
+// group). The caller must own the session, or be an admin.
+func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	sessionID := chi.URLParam(r, "sessionID")
+	if sessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing sessionID")
+		return
+	}
+	owner := h.transcode.GetSessionOwner(sessionID)
+	if owner < 0 {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if owner != claims.UserID && claims.Role != "admin" {
+		writeError(w, http.StatusForbidden, "session belongs to another user")
+		return
+	}
+	if h.authSvc == nil {
+		// Defensive: in tests the handler may be wired without an auth
+		// service. Production wiring (NewStreamHandler in router.go)
+		// always passes deps.AuthSvc, so this branch is unreachable in
+		// the real binary.
+		writeError(w, http.StatusInternalServerError, "auth service not configured")
+		return
+	}
+	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
+		claims.UserID, claims.Username, claims.Role, claims.TokenVersion, sessionID,
+	)
+	if err != nil {
+		slog.Error("generate cast token", "session_id", sessionID, "user_id", claims.UserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to mint cast token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token":      tokenStr,
+		"expires_at": expiresAt.Unix(),
+		"playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8?token=%s", sessionID, tokenStr),
+	})
 }
 
 // CreateSession explicitly creates a new transcode session (Phase 3 API).

@@ -294,7 +294,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	tvH := NewTVHandler(deps.Queries)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
-	streamH := NewStreamHandler(deps.Queries, deps.Transcode, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity)
+	streamH := NewStreamHandler(deps.Queries, deps.Transcode, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
 	progressH := NewProgressHandler(deps.Queries, deps.Hub)
 	if deps.HeroProv != nil {
 		progressH.SetHeroProvider(deps.HeroProv)
@@ -513,19 +513,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.With(auth.RequireAdmin).Get("/sessions", streamH.ListSessions)
 				r.Delete("/sessions/{sessionID}", streamH.DeleteSession)
 				r.Post("/sessions/{sessionID}/keepalive", streamH.KeepAlive)
+				// Mint a cast-scoped token for handing to Chromecast/AirPlay
+				// receivers. Bound to a single sessionID; rejected by
+				// RequireAuth so it cannot impersonate a regular session.
+				r.Post("/sessions/{sessionID}/cast-token", streamH.CreateCastToken)
 
-				// Phase 3: Adaptive HLS playlists + segments
-				r.Get("/hls/{sessionID}/master.m3u8", streamH.ServeMasterPlaylist)
-				r.Get("/hls/{sessionID}/{profile}/stream.m3u8", streamH.ServeVariantPlaylist)
-				r.Get("/hls/{sessionID}/{profile}/{segment}", streamH.ServeHLSSegment)
-
-				// Inline HLS subtitle playlists + segments (Emby-style)
-				// Subtitle files live in the session root dir (not variant subdirs).
-				// URLs: /api/stream/hls/{sessionID}/subs_N.m3u8 (playlist)
-				//        /api/stream/hls/{sessionID}/subs_N_NNNNN.vtt (segment)
-				// Matched by {subsFile} — the handler validates filename patterns
-				// and dispatches to playlist or segment serving accordingly.
-				r.Get("/hls/{sessionID}/{subsFile}", streamH.ServeHLSSubtitleFile)
+				// NOTE: HLS playlist + segment routes live in a sibling
+				// group (search for "RequireStreamAuth" below) so they can
+				// accept either a regular access token OR a cast token.
+				// They MUST NOT be defined here — RequireAuth in the
+				// surrounding group rejects scoped tokens by design.
 
 				// Phase 3: Hardware acceleration status
 				r.Get("/hwaccel", streamH.HWAccelStatus)
@@ -726,6 +723,25 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// endpoint serves the cached MP4 (404 if not yet generated
 			// or if the party never had enough reactions).
 			r.Get("/api/parties/{code}/highlight.mp4", partyH.ServeHighlightReel)
+		})
+
+		// HLS playlist + segment routes — sibling of the RequireAuth
+		// group above. RequireStreamAuth accepts either a regular access
+		// token OR a cast token (Scope == ScopeCast) so Chromecast and
+		// AirPlay receivers, which can't carry our Authorization header,
+		// can fetch via a token-in-URL handed to them by the web sender.
+		// Handlers still enforce that a cast token's SessionID matches
+		// the URL's sessionID; see the scope check in each handler.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireStreamAuth(deps.AuthSvc, tokenVerStore))
+			r.Get("/api/stream/hls/{sessionID}/master.m3u8", streamH.ServeMasterPlaylist)
+			r.Get("/api/stream/hls/{sessionID}/{profile}/stream.m3u8", streamH.ServeVariantPlaylist)
+			r.Get("/api/stream/hls/{sessionID}/{profile}/{segment}", streamH.ServeHLSSegment)
+			// Inline HLS subtitle playlists + segments (Emby-style).
+			// Subtitle files live in the session root dir (not variant subdirs).
+			// URLs: /api/stream/hls/{sessionID}/subs_N.m3u8 (playlist)
+			//        /api/stream/hls/{sessionID}/subs_N_NNNNN.vtt (segment)
+			r.Get("/api/stream/hls/{sessionID}/{subsFile}", streamH.ServeHLSSubtitleFile)
 		})
 
 		// WebSocket (authenticated via query param for browser compat)

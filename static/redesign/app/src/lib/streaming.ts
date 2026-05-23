@@ -159,3 +159,24 @@ export async function keepalive(sessionId: string, signal?: AbortSignal): Promis
     // Phase 2.5).
   }
 }
+
+// Cast / AirPlay support — mint a session-scoped token to hand to a
+// Chromecast or AirPlay receiver. Returned `playlist` is a relative URL
+// already containing the token; the caller must prepend window.location.origin
+// before handing it off (receivers fetch over the network from outside the
+// page and need a fully-qualified URL).
+export interface CastTokenResponse {
+  token: string
+  expires_at: number // Unix seconds
+  playlist: string // /api/stream/hls/{sid}/master.m3u8?token=...
+}
+
+export async function createCastToken(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<CastTokenResponse> {
+  return apiFetch<CastTokenResponse>(
+    `/api/stream/sessions/${sessionId}/cast-token`,
+    { method: 'POST', signal },
+  )
+}
