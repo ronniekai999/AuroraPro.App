@@ -158,18 +158,27 @@ export type InboundSyncMessage =
 // dual-socket join.
 
 export interface CodeInfo {
-  kind: 'party' | 'room'
-  code: string
-  // For 'party': party-specific fields. For 'room': room-specific.
+  // Backend (party_handlers.go GetCodeInfo) returns `type` with values
+  // "active" (live party) or "offline_room" (persistent room with no
+  // active session). Schema is committed to this shape; we mirror it
+  // exactly. An earlier `kind: 'party'|'room'` shape never matched the
+  // server and silently failed every join with the "persistent room"
+  // toast — fixed in this PR.
+  type: 'active' | 'offline_room'
+  code?: string
+  // For type === 'active': party-specific fields. For 'offline_room':
+  // room-specific. Both optional in the type so consumers must
+  // narrow on `type` before reading either.
   party?: {
     code: string
     media_title?: string
     media_poster?: string
     party_name?: string
     host_username?: string
-    participant_count: number
+    participant_count?: number
   }
   room?: {
+    code?: string
     name?: string
     description?: string
     host_username?: string
