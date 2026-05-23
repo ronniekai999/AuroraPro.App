@@ -260,6 +260,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // no custom AirPlay button — a second one would be redundant
   // clutter that drives the same picker.
   //
+  // castError is a transient banner under the Cast button, NOT
+  // the main errorMsg state — a cast failure should not tear down
+  // local playback. Cleared automatically after 4s.
+  const [castError, setCastError] = useState<string | null>(null)
+  //
   // Build CastLoadArgs at click-time by minting a session-scoped
   // token. The hook awaits this after the device picker resolves,
   // so a dismissed picker does not waste a token. Watch parties
@@ -1456,12 +1461,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                       type="button"
                       onClick={() => {
                         void cast.start().catch((err) => {
-                          // Picker dismissal also rejects; differentiate
-                          // by message to avoid an alarming toast on
-                          // benign user-cancels.
+                          // Log + briefly flag the button. Deliberately
+                          // do NOT call setErrorMsg here — that would
+                          // surface the full-screen "Playback Error"
+                          // overlay used for actual hls.js failures,
+                          // killing the in-progress local playback over
+                          // a transient cast hiccup. The user can just
+                          // click Cast again to retry.
                           const msg = err instanceof Error ? err.message : String(err)
                           if (!/cancel|dismiss/i.test(msg)) {
-                            setErrorMsg(`Cast failed: ${msg}`)
+                            // eslint-disable-next-line no-console
+                            console.warn('[Aurora Cast] start failed:', msg)
+                            setCastError(msg)
+                            window.setTimeout(() => setCastError(null), 4000)
                           }
                         })
                       }}
@@ -1484,6 +1496,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                       <Cast size={18} />
                     </button>
                   )}
+                </div>
+              )}
+              {/* Cast error toast — positioned just under the Cast
+                  button cluster. Auto-clears after 4s via setTimeout
+                  in the click handler. Local playback continues
+                  unaffected. */}
+              {castError && (
+                <div
+                  className="absolute top-16 right-4 max-w-xs px-3 py-2 rounded-md bg-red-600/90 text-white text-xs shadow-lg"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Cast failed: {castError}
                 </div>
               )}
               <PlayerControls
