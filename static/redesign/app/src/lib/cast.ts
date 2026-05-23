@@ -281,8 +281,28 @@ export function useCast(
       console.warn('[Aurora Cast] setOptions in start() threw:', e)
     }
     // requestSession opens the Cast device picker. Resolves when
-    // the user selects a device, rejects if they dismiss it.
-    await ctx.requestSession()
+    // the user selects a device, rejects if they dismiss it. Wrap
+    // in a richer rethrow so the caller sees the full Cast error
+    // object (code + description + details), not just a bare
+    // "session_error" string — those extra fields are what tell us
+    // whether it was the receiver-app launch, a network problem, or
+    // the user dismissing the picker.
+    try {
+      await ctx.requestSession()
+    } catch (rawErr) {
+      const e = rawErr as { code?: string; description?: string; details?: unknown } & Error
+      // eslint-disable-next-line no-console
+      console.error('[Aurora Cast] requestSession failed:', {
+        code: e?.code,
+        description: e?.description,
+        details: e?.details,
+        message: e?.message,
+        raw: rawErr,
+      })
+      const code = e?.code ?? 'unknown'
+      const desc = e?.description ?? e?.message ?? ''
+      throw new Error(desc ? `${code}: ${desc}` : code)
+    }
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
 
@@ -291,6 +311,13 @@ export function useCast(
       session.endSession(true)
       throw new Error('no media to cast')
     }
+    // eslint-disable-next-line no-console
+    console.info('[Aurora Cast] loading media:', {
+      url: load.contentUrl,
+      type: load.contentType,
+      startTime: load.startTime,
+      device: session.getCastDevice().friendlyName,
+    })
 
     const media = new window.chrome.cast.media.MediaInfo(load.contentUrl, load.contentType)
     media.streamType = window.chrome.cast.media.StreamType.BUFFERED
