@@ -186,11 +186,26 @@ func vaapiTestArgs() ([]string, string) {
 func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 	// scale=W:-2 preserves source aspect ratio with even-number rounding.
 	// This prevents distortion of ultrawide (2.4:1), 4:3, or other non-16:9 content.
-	scale := fmt.Sprintf("scale=%d:-2", width)
+	//
+	// `format=yuv420p` is appended to force the filter graph to produce
+	// 8-bit 4:2:0 output, regardless of the source pixel format. Without
+	// this, a 10-bit source (yuv420p10le — common for modern HEVC SDR
+	// remuxes) flows straight into libx264 with the "baseline" H.264
+	// profile, which is 8-bit-only. libx264 then errors with:
+	//   "file doesn't support a bit depth of 10
+	//    Error setting profile baseline."
+	// and the variant exits before producing any segments. The
+	// alternative (using profile=high10) would produce 10-bit H.264
+	// output that browsers + MSE don't reliably support. 2026-05-24 fix.
+	scale := fmt.Sprintf("scale=%d:-2,format=yuv420p", width)
 	level := h264Level(height)
 	profile := h264Profile(height)
 	switch h.Type {
 	case HWAccelNVENC:
+		// h264_nvenc handles 10-bit input internally but still respects
+		// the profile constraint. Adding format=yuv420p to the filter
+		// graph guarantees 8-bit input arrives at the encoder, matching
+		// the libx264 path's contract.
 		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "vbr",
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	case HWAccelQSV:
@@ -198,6 +213,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 			"-profile", profile, "-level", level, "-vf", scale}
 	case HWAccelVAAPI:
 		// VAAPI does not support explicit baseline profile constraint — leave as-is.
+		// The format=nv12 step here is the equivalent 8-bit downconvert.
 		dev := h.DevicePath
 		if dev == "" {
 			dev = findDRIDevice()

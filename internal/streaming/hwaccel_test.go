@@ -97,6 +97,30 @@ func TestVideoEncoderArgs_AMF(t *testing.T) {
 	assertContainsVF(t, args, "scale=640:-2")
 }
 
+// QA fix 2026-05-24 — without `format=yuv420p` in the filter chain,
+// libx264 with the baseline profile fails on 10-bit input (modern
+// HEVC SDR remuxes are commonly 10-bit). Asserts the downconvert is
+// part of the -vf for every CPU-side encoder pipeline. VAAPI is
+// excluded because it uses `format=nv12` for the equivalent
+// downconvert on hardware surfaces.
+func TestVideoEncoderArgs_Forces8BitOutput(t *testing.T) {
+	types := []struct {
+		name string
+		hw   HWAccelInfo
+	}{
+		{"software", HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"}},
+		{"nvenc", HWAccelInfo{Type: HWAccelNVENC, VideoEncoder: "h264_nvenc"}},
+		{"qsv", HWAccelInfo{Type: HWAccelQSV, VideoEncoder: "h264_qsv"}},
+		{"amf", HWAccelInfo{Type: HWAccelAMF, VideoEncoder: "h264_amf"}},
+	}
+	for _, tt := range types {
+		t.Run(tt.name, func(t *testing.T) {
+			args := tt.hw.VideoEncoderArgs(1920, 1080)
+			assertContainsVF(t, args, "format=yuv420p")
+		})
+	}
+}
+
 func TestVideoEncoderArgs_BaselineProfile(t *testing.T) {
 	// Verify baseline profile is present in all hardware encoder types
 	// (except VAAPI which doesn't support it)
