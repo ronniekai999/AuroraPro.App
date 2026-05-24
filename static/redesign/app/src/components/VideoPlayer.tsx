@@ -47,7 +47,7 @@ import {
   type StreamInfo,
   type SubtitleTrack,
 } from '@/lib/streaming'
-import { absoluteUrl, useCast } from '@/lib/cast'
+import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -263,7 +263,33 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // castError is a transient banner under the Cast button, NOT
   // the main errorMsg state — a cast failure should not tear down
   // local playback. Cleared automatically after 4s.
+  //
+  // The dismiss timer ID lives in a ref so a rapid second cast
+  // attempt within the 4-second window cancels the prior timer
+  // before scheduling its own; otherwise the first timer would
+  // race ahead and clear the SECOND error message early (or, if
+  // the second attempt succeeded, briefly flash null after the
+  // first timer fires).
   const [castError, setCastError] = useState<string | null>(null)
+  const castErrorTimerRef = useRef<number | null>(null)
+  const flashCastError = useCallback((msg: string) => {
+    if (castErrorTimerRef.current !== null) {
+      window.clearTimeout(castErrorTimerRef.current)
+    }
+    setCastError(msg)
+    castErrorTimerRef.current = window.setTimeout(() => {
+      setCastError(null)
+      castErrorTimerRef.current = null
+    }, 4000)
+  }, [])
+  // Clean up any pending toast timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (castErrorTimerRef.current !== null) {
+        window.clearTimeout(castErrorTimerRef.current)
+      }
+    }
+  }, [])
   //
   // Build CastLoadArgs at click-time by minting a session-scoped
   // token. The hook awaits this after the device picker resolves,
@@ -274,6 +300,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const sid = sessionIdRef.current
     if (!sid || !target) return null
     const resp = await createCastToken(sid)
+    // Defense-in-depth: confirm the server actually gave us a
+    // cast-scoped JWT before we hand its URL to a receiver. A future
+    // bug that wired this path to a different token-mint endpoint
+    // (or returned the user's regular access token) would otherwise
+    // leak full account credentials onto a Chromecast. Server-side
+    // ValidateAccessToken refuses scoped tokens, so the asymmetry
+    // exists; this just catches the wrong-direction failure at the
+    // source rather than letting it propagate to the receiver.
+    assertCastScopedToken(resp.token)
     return {
       contentUrl: absoluteUrl(resp.playlist),
       contentType: 'application/x-mpegURL',
@@ -292,7 +327,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // <video> in parallel wastes bandwidth and double-counts as "now
   // playing" upstream. Restore play state when the session ends —
   // but only auto-resume if we were the one who paused (don't fight
-  // a user-initiated pause that happened mid-session).
+  // a user-initiated pause).
+  //
+  // The "pause" event listener below clears pausedByCastRef whenever
+  // the local video is paused while cast is connected — covering two
+  // cases the simpler "set on connect / play on disconnect" pattern
+  // would mishandle: (a) the user manually presses pause during a
+  // cast session, (b) the local video pauses for a non-user reason
+  // (buffering on a paused-then-disconnected receiver). Either way,
+  // on cast end we no longer override their state.
   const pausedByCastRef = useRef(false)
   useEffect(() => {
     const vid = videoRef.current
@@ -302,7 +345,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         pausedByCastRef.current = true
         vid.pause()
       }
-    } else if (pausedByCastRef.current) {
+      // While connected, ANY subsequent pause (not the one we just
+      // caused — that was synchronous above) means the user took
+      // explicit action. Clear the auto-resume flag.
+      const onLocalPause = () => {
+        // The synchronous pause above won't fire this handler before
+        // the listener is attached (microtask ordering), so anything
+        // that does fire is necessarily user-driven or post-our-pause.
+        pausedByCastRef.current = false
+      }
+      vid.addEventListener('pause', onLocalPause)
+      return () => {
+        vid.removeEventListener('pause', onLocalPause)
+      }
+    }
+    if (pausedByCastRef.current) {
       pausedByCastRef.current = false
       void vid.play().catch(() => { /* defensive — autoplay may block */ })
     }
@@ -1472,8 +1529,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                           if (!/cancel|dismiss/i.test(msg)) {
                             // eslint-disable-next-line no-console
                             console.warn('[Aurora Cast] start failed:', msg)
-                            setCastError(msg)
-                            window.setTimeout(() => setCastError(null), 4000)
+                            flashCastError(msg)
                           }
                         })
                       }}
