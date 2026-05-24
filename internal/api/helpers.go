@@ -66,6 +66,11 @@ func requireQueryTokenClaims(w http.ResponseWriter, r *http.Request, svc *auth.S
 		writeError(w, http.StatusUnauthorized, "invalid or expired token")
 		return nil, false
 	}
+	// QA fix — surface user_id to the outer RequestLogger. All callers
+	// of this helper (WS endpoints, /ws/party-room, etc.) bypass the
+	// standard auth.RequireAuth middleware and would otherwise log as
+	// user_id=0.
+	auth.SetRequestUserID(r.Context(), claims.UserID)
 	return claims, true
 }
 

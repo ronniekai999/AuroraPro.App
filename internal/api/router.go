@@ -631,6 +631,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/dashboard", adminH.Dashboard)
 				r.Get("/activity", adminH.Activity)
 				r.Get("/sessions", adminH.Sessions)
+				r.Get("/sessions/{sessionID}/diagnose", adminH.DiagnoseSession)
 				r.Get("/settings", adminH.GetSettings)
 				r.Put("/settings", adminH.UpdateSettings)
 				r.Get("/logs", adminH.Logs)

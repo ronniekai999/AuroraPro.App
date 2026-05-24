@@ -39,21 +39,31 @@ func (sc *statusCapture) Flush() {
 	}
 }
 
-// RequestLogger is a custom middleware that logs method, path, status, latency,
-// and user_id (from JWT claims if present).
+// RequestLogger is a custom middleware that logs method, path, status,
+// latency, and user_id (from JWT claims if present).
+//
+// user_id flow: install a *requestUserHolder into the request context
+// BEFORE next.ServeHTTP runs. Downstream auth middleware updates the
+// holder via setRequestUserID. After ServeHTTP returns, the holder
+// reflects whoever authenticated (or zero for anonymous / public).
+// This pointer-in-context pattern is necessary because http.Request
+// contexts are immutable per-request — see requestUserHolder docs.
 func RequestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sc := &statusCapture{ResponseWriter: w, status: http.StatusOK}
 
-		next.ServeHTTP(sc, r)
+		ctx, holder := auth.NewRequestContextWithUserIDHolder(r.Context())
+		next.ServeHTTP(sc, r.WithContext(ctx))
 
 		latency := time.Since(start)
 
-		var userID int64
-		if claims := auth.GetClaims(r.Context()); claims != nil {
-			userID = claims.UserID
-		}
+		// The holder is the canonical source. We can't fall back to
+		// `auth.GetClaims(r.Context())` here — r's context is the
+		// outer one (before middleware), so claims are unreachable
+		// from this point. Any new auth middleware MUST call
+		// auth.SetRequestUserID to surface its user.
+		userID := holder.Load()
 
 		slog.Info("request",
 			"method", r.Method,

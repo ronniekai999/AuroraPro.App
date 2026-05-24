@@ -39,6 +39,8 @@ import {
   scanLibrary,
   listAdminSessions,
   deleteStreamSession,
+  diagnoseSession,
+  type SessionDiagnostic,
   listFlaggedItems,
   getAdminLLM,
   updateAdminLLM,
@@ -3474,11 +3476,28 @@ function AdminRoomsTab() {
 function AdminSessionsTab() {
   const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  // Diagnose modal — populated when an admin clicks the "Diag"
+  // button on a transcode row. Surfaces FFmpeg stderr + per-variant
+  // state so operators can debug "variant start failed" 500s
+  // without grepping syslog.
+  const [diag, setDiag] = useState<SessionDiagnostic | null>(null)
+  const [diagLoading, setDiagLoading] = useState(false)
+  const [diagErr, setDiagErr] = useState<string | null>(null)
   const reload = useCallback(async () => {
     try { setItems(await listAdminSessions()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload(); const id = window.setInterval(() => void reload(), 5000); return () => window.clearInterval(id) }, [reload])
+  const openDiagnose = useCallback(async (sessionID: string) => {
+    setDiag(null); setDiagErr(null); setDiagLoading(true)
+    try {
+      setDiag(await diagnoseSession(sessionID))
+    } catch (e) {
+      setDiagErr(e instanceof Error ? e.message : 'failed')
+    } finally {
+      setDiagLoading(false)
+    }
+  }, [])
   return (
     <div className="glass-panel rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
@@ -3537,7 +3556,10 @@ function AdminSessionsTab() {
                   <td className="text-white/40 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
                   <td>
                     {isTranscode ? (
-                      <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Kill</button>
+                      <div className="flex items-center gap-1.5">
+                        <button onClick={() => void openDiagnose(s.id)} className="px-2 py-1 bg-white/[0.05] hover:bg-white/[0.10] text-white/70 text-xs rounded" title="Show FFmpeg stderr + variant state">Diag</button>
+                        <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Kill</button>
+                      </div>
                     ) : (
                       // Direct-play has no FFmpeg lifecycle to terminate.
                       // The registry GCs after 60s of no byte-serves; an
@@ -3550,6 +3572,76 @@ function AdminSessionsTab() {
             })}
           </tbody>
         </table>
+      )}
+
+      {/* Diagnose modal — admin-only FFmpeg state view for a session. */}
+      {(diag || diagLoading || diagErr) && (
+        <div className="fixed inset-0 z-[80] flex items-start justify-center pt-24 px-4" onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }}>
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+          <div className="relative w-full max-w-3xl bg-[#0a0a0f] border border-white/[0.08] rounded-xl shadow-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-white font-semibold">Session diagnostic</h3>
+              <button onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }} className="text-white/40 hover:text-white" aria-label="Close">
+                <Icon name="x" size={16} />
+              </button>
+            </div>
+            {diagLoading && <p className="text-white/50 text-sm">Loading…</p>}
+            {diagErr && <p className="text-red-300 text-sm">{diagErr}</p>}
+            {diag && (
+              <div className="space-y-3 font-mono text-xs">
+                <div>
+                  <div className="text-white/40">Session</div>
+                  <div className="text-white/80 break-all">{diag.session_id}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-white/40">Source codec</div>
+                    <div className="text-white/80">{diag.source_video_codec || '—'}</div>
+                  </div>
+                  <div>
+                    <div className="text-white/40">HW Accel</div>
+                    <div className="text-white/80">{diag.hw_accel}</div>
+                  </div>
+                  <div>
+                    <div className="text-white/40">Mode</div>
+                    <div className="text-white/80">{diag.remux ? 'remux' : 'transcode'}</div>
+                  </div>
+                  <div>
+                    <div className="text-white/40">File path</div>
+                    <div className="text-white/80 break-all">{diag.file_path}</div>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-white/40 mb-1">Variants ({diag.variants?.length || 0})</div>
+                  <div className="space-y-2">
+                    {diag.variants?.map((v) => (
+                      <div key={v.profile} className="border border-white/[0.06] rounded-lg p-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-white/90 font-medium">{v.profile}</span>
+                          {v.started && !v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">running</span>}
+                          {v.exited && <span className="px-1.5 py-0.5 text-[10px] rounded bg-red-500/15 text-red-300 border border-red-500/30">exited</span>}
+                          {(v.restart_attempts ?? 0) > 0 && <span className="text-white/40">restarts={v.restart_attempts}</span>}
+                        </div>
+                        {v.error && (
+                          <div className="mb-1">
+                            <div className="text-white/40">error</div>
+                            <div className="text-red-300/90 whitespace-pre-wrap break-words">{v.error}</div>
+                          </div>
+                        )}
+                        {v.stderr_tail && (
+                          <div>
+                            <div className="text-white/40">ffmpeg stderr tail</div>
+                            <pre className="text-white/70 whitespace-pre-wrap break-words bg-black/40 rounded p-2 max-h-64 overflow-y-auto">{v.stderr_tail}</pre>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )

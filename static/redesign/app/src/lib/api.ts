@@ -1039,6 +1039,30 @@ export async function deleteStreamSession(id: string): Promise<void> {
   await apiFetch(`/api/stream/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
+// Admin-only — returns FFmpeg-side state for a transcode session
+// including the stderr tail. Use to debug "variant start failed"
+// 500s without needing server log access.
+export interface VariantDiagnostic {
+  profile: string
+  started: boolean
+  exited: boolean
+  output_dir?: string
+  error?: string
+  stderr_tail?: string
+  restart_attempts?: number
+}
+export interface SessionDiagnostic {
+  session_id: string
+  file_path: string
+  source_video_codec?: string
+  hw_accel: string
+  remux: boolean
+  variants: VariantDiagnostic[]
+}
+export async function diagnoseSession(id: string, signal?: AbortSignal): Promise<SessionDiagnostic> {
+  return apiFetch<SessionDiagnostic>(`/api/admin/sessions/${encodeURIComponent(id)}/diagnose`, { signal })
+}
+
 // /api/admin/flagged returns ServerMediaItem records flagged via
 // match_status. Reuses ServerMediaItem from above.
 export async function listFlaggedItems(signal?: AbortSignal): Promise<ServerMediaItem[]> {
