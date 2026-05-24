@@ -319,6 +319,27 @@ export function useCast(
       device: session.getCastDevice().friendlyName,
     })
 
+    // Self-test: try to fetch the master playlist ourselves before
+    // handing it to the receiver. If Chrome can't fetch it, the
+    // receiver definitely won't either, and we can surface a much
+    // clearer error (auth/server problem) than the SDK's silent hang
+    // (receiver-side problem). Best-effort — we don't block casting
+    // on this test, just log the result.
+    try {
+      const probe = await fetch(load.contentUrl, { method: 'GET', credentials: 'omit' })
+      const preview = probe.ok ? (await probe.text()).split('\n').slice(0, 3).join(' | ') : ''
+      // eslint-disable-next-line no-console
+      console.info('[Aurora Cast] URL self-test:', {
+        status: probe.status,
+        ok: probe.ok,
+        contentType: probe.headers.get('content-type'),
+        firstLines: preview,
+      })
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[Aurora Cast] URL self-test fetch threw:', e)
+    }
+
     const media = new window.chrome.cast.media.MediaInfo(load.contentUrl, load.contentType)
     media.streamType = window.chrome.cast.media.StreamType.BUFFERED
 
@@ -359,7 +380,24 @@ export function useCast(
       request.activeTrackIds = [load.activeTextTrackIndex]
     }
 
-    await session.loadMedia(request)
+    try {
+      await session.loadMedia(request)
+      // eslint-disable-next-line no-console
+      console.info('[Aurora Cast] loadMedia resolved — receiver should now be playing')
+    } catch (rawErr) {
+      const e = rawErr as { code?: string; description?: string; details?: unknown } & Error
+      // eslint-disable-next-line no-console
+      console.error('[Aurora Cast] loadMedia failed:', {
+        code: e?.code,
+        description: e?.description,
+        details: e?.details,
+        message: e?.message,
+        raw: rawErr,
+      })
+      const code = e?.code ?? 'unknown'
+      const desc = e?.description ?? e?.message ?? ''
+      throw new Error(desc ? `${code}: ${desc}` : `loadMedia: ${code}`)
+    }
   }
 
   const stop = () => {
