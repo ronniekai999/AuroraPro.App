@@ -76,6 +76,7 @@ type RouterDeps struct {
 	Enricher         *metadata.Enricher
 	ImgProxy         *metadata.ImageProxy
 	Transcode        *streaming.TranscodeManager
+	DirectPlay       *streaming.DirectPlayRegistry
 	Activity         *ActivityLogger
 	RingLog          *logging.RingBufferHandler
 	Pool             *pgxpool.Pool
@@ -294,7 +295,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	tvH := NewTVHandler(deps.Queries)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
-	streamH := NewStreamHandler(deps.Queries, deps.Transcode, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
+	streamH := NewStreamHandler(deps.Queries, deps.Transcode, deps.DirectPlay, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
 	progressH := NewProgressHandler(deps.Queries, deps.Hub)
 	if deps.HeroProv != nil {
 		progressH.SetHeroProvider(deps.HeroProv)
@@ -306,7 +307,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	progressH.SetGamificationEngine(gamifyEngine)
 	gamifyH := NewGamificationHandler(deps.Queries)
 	profileH := NewProfileHandler(deps.Queries)
-	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
+	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.DirectPlay, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
 	// Auto-updater endpoints. Handler is stateless beyond the
 	// status-file path and unit name, both fixed by install.sh.

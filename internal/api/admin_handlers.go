@@ -28,6 +28,7 @@ import (
 type AdminHandler struct {
 	queries      *db.Queries
 	transcode    *streaming.TranscodeManager
+	directPlay   *streaming.DirectPlayRegistry
 	hub          *ws.Hub
 	activity     *ActivityLogger
 	ringLog      *logging.RingBufferHandler
@@ -71,6 +72,7 @@ func (h *AdminHandler) SetDatabaseURL(url string) {
 func NewAdminHandler(
 	queries *db.Queries,
 	transcode *streaming.TranscodeManager,
+	directPlay *streaming.DirectPlayRegistry,
 	hub *ws.Hub,
 	activity *ActivityLogger,
 	ringLog *logging.RingBufferHandler,
@@ -84,6 +86,7 @@ func NewAdminHandler(
 	h := &AdminHandler{
 		queries:    queries,
 		transcode:  transcode,
+		directPlay: directPlay,
 		hub:        hub,
 		activity:   activity,
 		ringLog:    ringLog,
@@ -380,7 +383,7 @@ func (h *AdminHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		Goroutines:         runtime.NumGoroutine(),
 		CPUCores:           float64(runtime.NumCPU()),
 		DiskFreeGB:         diskFreeGB,
-		ActiveStreams:      h.transcode.ActiveSessions(),
+		ActiveStreams:      h.transcode.ActiveSessions() + directPlayCount(h.directPlay),
 		WebSocketClients:   h.hub.ClientCount(),
 		LibraryCount:       libCount,
 		MovieCount:         movieCount,
@@ -446,10 +449,84 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Sessions returns active transcode sessions.
+// Sessions returns active streams — transcode + direct-play —
+// as a flat array tagged with a `kind` discriminator so the admin
+// UI can render them in a single table. Direct-play sessions only
+// have a subset of the transcode fields populated.
 func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
-	sessions := h.transcode.ListSessions()
-	writeJSON(w, http.StatusOK, sessions)
+	type unifiedSession struct {
+		// Common fields
+		ID       string    `json:"id"`
+		Kind     string    `json:"kind"` // "transcode" or "direct"
+		UserID   int64     `json:"user_id"`
+		Username string    `json:"username,omitempty"`
+		FileName string    `json:"file_name"`
+		StartedAt time.Time `json:"started_at"`
+		// Transcode-only
+		Resolution string                       `json:"resolution,omitempty"`
+		Profiles   []streaming.QualityProfile   `json:"profiles,omitempty"`
+		Variants   []string                     `json:"active_variants,omitempty"`
+		Resources  *streaming.SessionResources  `json:"resources,omitempty"`
+		Remux      bool                         `json:"remux,omitempty"`
+		// Direct-play only
+		FileType  string `json:"file_type,omitempty"`
+		FileID    int64  `json:"file_id,omitempty"`
+		Decision  string `json:"decision,omitempty"`
+	}
+
+	tc := h.transcode.ListSessions()
+	dpList := []streaming.DirectPlaySession(nil)
+	if h.directPlay != nil {
+		dpList = h.directPlay.List()
+	}
+	out := make([]unifiedSession, 0, len(tc)+len(dpList))
+	for _, s := range tc {
+		// QA fix — only emit Resolution when we actually know the
+		// source dimensions. omitempty alone wouldn't help because
+		// "0x0" is a non-empty string and the frontend would render
+		// it verbatim.
+		var resolution string
+		if s.SourceWidth > 0 && s.SourceHeight > 0 {
+			resolution = fmt.Sprintf("%dx%d", s.SourceWidth, s.SourceHeight)
+		}
+		out = append(out, unifiedSession{
+			ID:         s.ID,
+			Kind:       "transcode",
+			UserID:     s.UserID,
+			Username:   s.Username,
+			FileName:   s.FileName,
+			StartedAt:  s.StartedAt,
+			Resolution: resolution,
+			Profiles:   s.Profiles,
+			Variants:   s.ActiveVariants,
+			Resources:  s.Resources,
+			Remux:      s.Remux,
+		})
+	}
+	for _, dp := range dpList {
+		out = append(out, unifiedSession{
+			ID:        dp.ID,
+			Kind:      "direct",
+			UserID:    dp.UserID,
+			Username:  dp.Username,
+			FileName:  dp.FileName,
+			StartedAt: dp.StartedAt,
+			FileType:  dp.FileType,
+			FileID:    dp.FileID,
+			Decision:  dp.Decision,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// directPlayCount safely returns the active direct-play count.
+// Pulled out for the dashboard-stats call site that needs a single
+// integer without rebuilding the full snapshot.
+func directPlayCount(r *streaming.DirectPlayRegistry) int {
+	if r == nil {
+		return 0
+	}
+	return r.ActiveCount()
 }
 
 // GetSettings returns all server settings.

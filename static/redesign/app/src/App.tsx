@@ -88,7 +88,7 @@ import {
   type ServerStats,
   type SetupStatus,
   type TmdbSearchResult,
-  type TranscodeSession,
+  type ActiveStreamRow,
   type Watchlist,
   type Episode as ApiEpisode,
   type User as ApiUser,
@@ -2935,7 +2935,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
 }
 
 function NowPlayingWidget() {
-  const [items, setItems] = useState<TranscodeSession[]>([])
+  const [items, setItems] = useState<ActiveStreamRow[]>([])
   const [users, setUsers] = useState<Map<number, string>>(new Map())
   useEffect(() => {
     let cancelled = false
@@ -2975,13 +2975,17 @@ function NowPlayingWidget() {
         {items.map(s => (
           <div key={s.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
             <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-              {(users.get(s.user_id) || '?')[0]?.toUpperCase()}
+              {(s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-white/90 text-sm font-medium">{users.get(s.user_id) || `User ${s.user_id}`}</p>
-              <p className="text-white/40 text-xs">{s.file_type} #{s.file_id} · {s.preset || 'auto'} · {s.resolution || 'src'}</p>
+              <p className="text-white/90 text-sm font-medium truncate">{s.username || users.get(s.user_id) || `User ${s.user_id}`}</p>
+              <p className="text-white/40 text-xs truncate">
+                {s.file_name}
+                {s.resolution && ` · ${s.resolution}`}
+                {s.kind === 'direct' && ` · Direct Play`}
+              </p>
             </div>
-            <span className={`badge-glass text-xs ${s.status === 'running' ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20' : 'bg-amber-500/10 text-amber-300 border-amber-500/20'}`}>{s.status}</span>
+            <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
           </div>
         ))}
       </div>
@@ -3468,7 +3472,7 @@ function AdminRoomsTab() {
 }
 
 function AdminSessionsTab() {
-  const [items, setItems] = useState<TranscodeSession[] | null>(null)
+  const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const reload = useCallback(async () => {
     try { setItems(await listAdminSessions()) }
@@ -3478,37 +3482,72 @@ function AdminSessionsTab() {
   return (
     <div className="glass-panel rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-white font-semibold">Active Transcode Streams</h3>
+        <h3 className="text-white font-semibold">Active Streams</h3>
         <button onClick={() => void reload()} className="text-white/60 hover:text-white text-xs">Refresh</button>
       </div>
-      {/* QA BUG-010 — direct-play streams don't create a
-          TranscodeSession (no FFmpeg pipeline, just byte-range
-          file serves), so they don't appear here. Clarify the
-          scope in the empty-state copy so a user playing
-          Direct-Play h264/aac isn't surprised the tab stays empty.
-          Tracking direct-play streams uniformly would need a
-          parallel session registry — deferred. */}
+      {/* Active streams now span BOTH kinds (transcode + direct-play).
+          The Kind column tells operators which pipeline is serving
+          the stream; Kill is only available for transcode sessions
+          (direct-play has no FFmpeg process to terminate — it
+          expires from the registry after 60s of no byte-serves). */}
       {err && <p className="text-red-300 text-sm">{err}</p>}
       {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/40 text-sm">No active transcode streams. Direct-play sessions (no transcode) are not tracked here.</p>}
+      {items && items.length === 0 && <p className="text-white/40 text-sm">No active streams.</p>}
       {items && items.length > 0 && (
         <table className="data-table w-full">
           <thead>
-            <tr><th>Session</th><th>User</th><th>File</th><th>Status</th><th>Started</th><th></th></tr>
+            <tr><th>Session</th><th>Kind</th><th>User</th><th>File</th><th>Detail</th><th>Started</th><th></th></tr>
           </thead>
           <tbody>
-            {items.map(s => (
-              <tr key={s.id}>
-                <td className="font-mono text-xs">{s.id.slice(0, 8)}</td>
-                <td>{s.user_id}</td>
-                <td>{s.file_type} #{s.file_id}</td>
-                <td>{s.status} <span className="text-white/40 text-xs">({s.preset || 'auto'})</span></td>
-                <td className="text-white/40 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
-                <td>
-                  <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Kill</button>
-                </td>
-              </tr>
-            ))}
+            {items.map(s => {
+              const isTranscode = s.kind === 'transcode'
+              return (
+                <tr key={s.id}>
+                  <td className="font-mono text-xs">{s.id.slice(0, 10)}</td>
+                  <td>
+                    <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                      isTranscode
+                        ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                        : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                    }`}>
+                      {isTranscode ? 'Transcode' : 'Direct'}
+                    </span>
+                  </td>
+                  <td>{s.username || s.user_id}</td>
+                  <td className="max-w-[280px] truncate" title={s.file_name}>{s.file_name}</td>
+                  <td>
+                    {isTranscode ? (
+                      <>
+                        {s.resolution && <span className="text-white/60 text-xs">{s.resolution}</span>}
+                        {s.remux && <span className="ml-1 text-white/40 text-xs">remux</span>}
+                        {s.active_variants && s.active_variants.length > 0 && (
+                          <span className="ml-1 text-white/40 text-xs">({s.active_variants.join(', ')})</span>
+                        )}
+                      </>
+                    ) : (
+                      // QA review fix — `decision` is hard-coded to
+                      // "direct_play" in all three Touch call sites,
+                      // so the previous "direct_stream" branch was
+                      // dead code. If remux (direct_stream) ever
+                      // wires through to the registry, restore the
+                      // conditional here.
+                      <span className="text-white/60 text-xs">Direct Play</span>
+                    )}
+                  </td>
+                  <td className="text-white/40 text-xs">{new Date(s.started_at).toLocaleTimeString()}</td>
+                  <td>
+                    {isTranscode ? (
+                      <button onClick={async () => { if (!window.confirm('Terminate this stream?')) return; try { await deleteStreamSession(s.id); await reload() } catch (e) { window.alert('Failed: ' + (e instanceof Error ? e.message : 'unknown')) } }} className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Kill</button>
+                    ) : (
+                      // Direct-play has no FFmpeg lifecycle to terminate.
+                      // The registry GCs after 60s of no byte-serves; an
+                      // explicit Kill button would mislead operators.
+                      <span className="text-white/30 text-xs" title="Direct-play sessions auto-expire when the client stops requesting bytes">—</span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}

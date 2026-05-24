@@ -556,16 +556,17 @@ func (h *MetadataHandler) ProxyImage(w http.ResponseWriter, r *http.Request) {
 // ============================================================
 
 type StreamHandler struct {
-	queries   *db.Queries
-	transcode *streaming.TranscodeManager
-	subCache  string
-	hub       *ws.Hub
-	activity  *ActivityLogger
-	authSvc   *auth.Service // for minting cast-scoped tokens
+	queries    *db.Queries
+	transcode  *streaming.TranscodeManager
+	directPlay *streaming.DirectPlayRegistry
+	subCache   string
+	hub        *ws.Hub
+	activity   *ActivityLogger
+	authSvc    *auth.Service // for minting cast-scoped tokens
 }
 
-func NewStreamHandler(queries *db.Queries, transcode *streaming.TranscodeManager, subCache string, hub *ws.Hub, activity *ActivityLogger, authSvc *auth.Service) *StreamHandler {
-	return &StreamHandler{queries: queries, transcode: transcode, subCache: subCache, hub: hub, activity: activity, authSvc: authSvc}
+func NewStreamHandler(queries *db.Queries, transcode *streaming.TranscodeManager, directPlay *streaming.DirectPlayRegistry, subCache string, hub *ws.Hub, activity *ActivityLogger, authSvc *auth.Service) *StreamHandler {
+	return &StreamHandler{queries: queries, transcode: transcode, directPlay: directPlay, subCache: subCache, hub: hub, activity: activity, authSvc: authSvc}
 }
 
 // isNowPlayingEnabled checks whether the now_playing_enabled server setting is "true".
@@ -654,8 +655,69 @@ func (h *StreamHandler) ServeDirectFile(w http.ResponseWriter, r *http.Request) 
 	if h.activity != nil && claims != nil {
 		h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(filePath), "direct_play")
 	}
+	// Register / extend a direct-play session entry so the admin
+	// Active Streams view can show this stream alongside transcodes.
+	// Range requests during playback keep calling this handler →
+	// touching extends LastAccess. Idle gaps > TTL expire the entry.
+	//
+	// fileType is whitelisted to prevent a malicious client from
+	// iterating arbitrary `?type=` strings against the same fileID
+	// and creating unbounded registry entries before TTL sweeps them.
+	if h.directPlay != nil && claims != nil {
+		ft := fileType
+		if ft != "media" && ft != "episode" {
+			// Match the resolveFilePath fallback above: media first,
+			// episode second. We use the same disambiguator (which
+			// table the lookup succeeded against) by re-checking.
+			if _, err := h.queries.GetMediaFileByID(r.Context(), fileID); err == nil {
+				ft = "media"
+			} else {
+				ft = "episode"
+			}
+		}
+		sid := h.directPlay.Touch(claims.UserID, claims.Username, ft, fileID, filepath.Base(filePath), "direct_play")
+		// Heartbeat the registry while the response is being written
+		// — http.ServeFile is synchronous and for single-range
+		// requests (one Range: bytes=0-) won't re-enter this handler
+		// for the duration of playback, so without a heartbeat the
+		// entry would expire mid-stream and admin UI would show no
+		// active stream.
+		stopHB := make(chan struct{})
+		go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, ft, fileID, filepath.Base(filePath), stopHB)
+		defer close(stopHB)
+	}
 
 	streaming.ServeFile(w, r, filePath)
+}
+
+// heartbeatRegistry pings the direct-play registry every 20s while
+// either the request context is alive AND no stop signal has fired.
+// The stop chan covers the "handler returned normally" case (defer
+// close); the request ctx covers the "client disconnected" case.
+// 20s gives plenty of buffer against the 60s TTL while not spinning
+// the lock too often.
+func heartbeatRegistry(ctx context.Context, reg *streaming.DirectPlayRegistry, sessionID string, claims *auth.JWTClaims, fileType string, fileID int64, fileName string, stop <-chan struct{}) {
+	if reg == nil || claims == nil {
+		return
+	}
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-t.C:
+			// Touch is keyed by (userID, fileType, fileID), so re-
+			// Touching with the same args extends the existing
+			// entry's LastAccess (it does NOT create a duplicate).
+			// sessionID is captured for symmetry with End() but
+			// unused here.
+			_ = sessionID
+			reg.Touch(claims.UserID, claims.Username, fileType, fileID, fileName, "direct_play")
+		}
+	}
 }
 
 // StreamMediaFile serves a media file via direct play or initiates HLS transcoding.
@@ -682,6 +744,15 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		claims := auth.GetClaims(r.Context())
 		if h.activity != nil && claims != nil {
 			h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
+		}
+		// Register / extend a direct-play session entry (see comment
+		// in ServeDirectFile for the rationale + heartbeat detail).
+		if h.directPlay != nil && claims != nil {
+			fileName := filepath.Base(file.Path)
+			sid := h.directPlay.Touch(claims.UserID, claims.Username, "media", fileID, fileName, "direct_play")
+			stopHB := make(chan struct{})
+			go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "media", fileID, fileName, stopHB)
+			defer close(stopHB)
 		}
 		// Broadcast now_playing for direct play
 		if claims != nil {
@@ -750,6 +821,15 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 		claims := auth.GetClaims(r.Context())
 		if h.activity != nil && claims != nil {
 			h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
+		}
+		// Register / extend a direct-play session entry (see comment
+		// in ServeDirectFile for the rationale + heartbeat detail).
+		if h.directPlay != nil && claims != nil {
+			fileName := filepath.Base(file.Path)
+			sid := h.directPlay.Touch(claims.UserID, claims.Username, "episode", fileID, fileName, "direct_play")
+			stopHB := make(chan struct{})
+			go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "episode", fileID, fileName, stopHB)
+			defer close(stopHB)
 		}
 		// Broadcast now_playing for direct play
 		if claims != nil {
@@ -1171,13 +1251,22 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListSessions lists all active transcode sessions (admin).
+// ListSessions lists all active streams (admin). Returns transcode
+// sessions (FFmpeg-backed) AND direct-play sessions (byte-range
+// serves without transcode) as two arrays so the UI can render them
+// distinctly. `count` is the combined total — what the admin
+// dashboard's "Active Streams" tile expects.
 func (h *StreamHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	sessions := h.transcode.ListSessions()
+	var directPlays []streaming.DirectPlaySession
+	if h.directPlay != nil {
+		directPlays = h.directPlay.List()
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sessions": sessions,
-		"count":    len(sessions),
-		"hw_accel": h.transcode.HWAccelStatus(),
+		"sessions":     sessions,
+		"direct_plays": directPlays,
+		"count":        len(sessions) + len(directPlays),
+		"hw_accel":     h.transcode.HWAccelStatus(),
 	})
 }
 
