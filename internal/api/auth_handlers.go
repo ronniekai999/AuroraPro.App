@@ -449,8 +449,32 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		_ = h.queries.RevokeRefreshToken(r.Context(), req.RefreshToken)
 	}
 
-	if h.activity != nil && rt != nil {
-		h.activity.LogLogout(r.Context(), rt.UserID)
+	if rt != nil {
+		// Bump token_version so outstanding access AND cast-scoped tokens
+		// are invalidated immediately, not just on natural expiry. Without
+		// this, a long-lived cast URL (default 4h TTL) handed to a
+		// Chromecast or AirPlay receiver remains playable after the user
+		// signs out — defeating the purpose of logout on a shared device.
+		//
+		// Side effect: this kills the user's access tokens on OTHER
+		// devices too. Aurora's model is "logout = kill all sessions",
+		// matching the password-change path above. Multi-device users
+		// who want per-device logout would need a separate session-id
+		// concept, out of scope here.
+		if _, err := h.queries.BumpUserTokenVersion(r.Context(), rt.UserID); err != nil {
+			slog.Error("failed to bump token_version on logout", "user_id", rt.UserID, "error", err)
+			// Don't fail the logout — the refresh token IS revoked,
+			// which prevents session renewal. Access/cast tokens will
+			// expire naturally (15m / 4h). Operator will see the log.
+		} else if h.tokenVerStore != nil {
+			// Drop cached version so the next authenticated request
+			// reloads the new value and rejects pre-bump tokens.
+			h.tokenVerStore.Invalidate(rt.UserID)
+		}
+
+		if h.activity != nil {
+			h.activity.LogLogout(r.Context(), rt.UserID)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})

@@ -239,10 +239,15 @@ export function useCast(
       // loads in <2s on a warm connection; the 30s cap protects
       // against zombie polling on browsers that never load it at all
       // (Firefox without an extension, locked-down corporate proxies).
+      //
+      // Both the interval AND the timeout IDs are captured so the
+      // cleanup function can clear them on unmount. Without the
+      // timeout clear, every player open/close would leak a pending
+      // 30-second timer that fires later with stale closure state.
       const intervalId = window.setInterval(() => {
         if (tryAttach()) window.clearInterval(intervalId)
       }, 500)
-      window.setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
         if (!listenersAttached) {
           window.clearInterval(intervalId)
           // eslint-disable-next-line no-console
@@ -252,6 +257,7 @@ export function useCast(
       return () => {
         mounted = false
         window.clearInterval(intervalId)
+        window.clearTimeout(timeoutId)
         cleanup()
       }
     }
@@ -421,4 +427,39 @@ export function absoluteUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) return path
   const origin = window.location.origin
   return path.startsWith('/') ? `${origin}${path}` : `${origin}/${path}`
+}
+
+// assertCastScopedToken decodes a JWT (without verifying its signature —
+// only the server can do that) and throws if the `scope` claim is not
+// "stream:cast". Used as a defense-in-depth check before handing a URL
+// containing the token to a Chromecast / AirPlay receiver: a regular
+// 15-minute access token (full account scope) must never end up on a
+// receiver fetch, even if a future bug routes one through the cast
+// flow. The server-side ValidateAccessToken already refuses scoped
+// tokens, so the asymmetry is enforced; this check just surfaces a
+// frontend bug at the source instead of letting it leak.
+//
+// Signature verification is intentionally NOT done client-side — we
+// don't have the secret. A tampered scope claim would be caught by
+// the server on the next API call. The only goal here is to catch
+// "we accidentally used the wrong token kind."
+export function assertCastScopedToken(token: string): void {
+  const parts = token.split('.')
+  if (parts.length !== 3) {
+    throw new Error('cast token is not a valid JWT')
+  }
+  let payload: { scope?: string }
+  try {
+    // base64url -> base64 -> JSON
+    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4)
+    payload = JSON.parse(atob(padded)) as { scope?: string }
+  } catch {
+    throw new Error('cast token payload is not parseable')
+  }
+  if (payload.scope !== 'stream:cast') {
+    throw new Error(
+      `expected cast-scoped token, got scope=${JSON.stringify(payload.scope ?? null)}`,
+    )
+  }
 }
