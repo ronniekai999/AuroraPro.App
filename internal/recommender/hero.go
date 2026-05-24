@@ -601,10 +601,12 @@ func topN(items []*models.MediaItem, n int) []HeroPick {
 const heroRerankSystem = `You curate a personalized "Featured" hero rail for a media server.
 
 You will receive:
-1. A short list of titles the user recently watched (their taste anchors).
-2. A numbered list of candidate titles (already pre-filtered by similarity to their taste).
+1. A short list of titles the user recently watched (their taste anchors). Each anchor lists its actual genres after an em dash, e.g. "Drake & Josh (2004) [show] — Comedy, Family".
+2. A numbered list of candidate titles (already pre-filtered by similarity to their taste), each with a short overview.
 
 Your job: pick exactly 5 candidates that best match the user's taste, and write a one-sentence "reason" for each — grounded in a specific anchor when possible (e.g. "Because you finished Severance" or "Slow-burn sci-fi like your weekend pick"). Reasons must be ≤ 80 characters, no emojis, no quotes.
+
+Important: when you reference an anchor's genre or vibe in a reason, you MUST use the genres listed alongside that anchor in the prompt — NOT what you remember about the title from training. If an anchor lists "Comedy, Family", describe it as comedy/family even if you'd otherwise call it something else. If the listed genres don't fit the candidate well, ground the reason in the candidate's own overview instead.
 
 Respond with ONLY the JSON object. No preamble.`
 
@@ -704,7 +706,21 @@ func buildRerankPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem)
 		if a.Year > 0 {
 			fmt.Fprintf(&b, " (%d)", a.Year)
 		}
-		fmt.Fprintf(&b, " [%s]\n", a.Type)
+		fmt.Fprintf(&b, " [%s]", a.Type)
+		// QA BUG-010 — surface anchor genres so the LLM doesn't have
+		// to infer them from its training data. Without this it
+		// confidently mis-described "Drake & Josh" as "action-spy"
+		// (it's a comedy). Per-anchor cap of 4 genres and 80 chars
+		// after join — across 5 anchors that's at most ~400 chars
+		// added to the user prompt, negligible against context.
+		if len(a.Genres) > 0 {
+			gs := a.Genres
+			if len(gs) > 4 {
+				gs = gs[:4]
+			}
+			fmt.Fprintf(&b, " — %s", sanitizePromptText(strings.Join(gs, ", "), 80))
+		}
+		b.WriteByte('\n')
 	}
 	b.WriteString("\nCandidates:\n")
 	for i, c := range candidates {

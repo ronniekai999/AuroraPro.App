@@ -535,7 +535,17 @@ func buildDiscoverPrompt(anchors []db.TasteAnchor, candidates []*models.MediaIte
 		if a.Year > 0 {
 			fmt.Fprintf(&b, " (%d)", a.Year)
 		}
-		fmt.Fprintf(&b, " [%s]\n", a.Type)
+		fmt.Fprintf(&b, " [%s]", a.Type)
+		// QA BUG-010 — mirror buildRerankPrompt's genre grounding
+		// so Discover rail-naming has real anchor metadata too.
+		if len(a.Genres) > 0 {
+			gs := a.Genres
+			if len(gs) > 4 {
+				gs = gs[:4]
+			}
+			fmt.Fprintf(&b, " — %s", sanitizePromptText(strings.Join(gs, ", "), 80))
+		}
+		b.WriteByte('\n')
 	}
 	b.WriteString("\nCandidates:\n")
 	for i, c := range candidates {
