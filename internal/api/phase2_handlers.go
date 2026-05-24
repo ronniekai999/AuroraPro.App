@@ -1748,6 +1748,25 @@ func (h *ProgressHandler) ContinueWatching(w http.ResponseWriter, r *http.Reques
 		items = []models.ContinueWatchingItem{}
 	}
 
+	// QA BUG-007 — attach the first genre per item so CW cards
+	// show the same genre tag as the rest of the rails. Non-fatal:
+	// genre lookup failure leaves Genre empty and the card just
+	// omits the tag. Pattern mirrors RecentTasteAnchors genre
+	// attach in queries_recommender.go.
+	if len(items) > 0 {
+		ids := make([]int64, len(items))
+		for i := range items {
+			ids[i] = items[i].MediaItemID
+		}
+		if byID, gerr := h.queries.GetMediaGenresBatch(r.Context(), ids); gerr == nil {
+			for i := range items {
+				if g, ok := byID[items[i].MediaItemID]; ok && len(g) > 0 {
+					items[i].Genre = g[0]
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, items)
 }
 

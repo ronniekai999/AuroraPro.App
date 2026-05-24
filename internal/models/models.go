@@ -412,6 +412,10 @@ type UpdateProgressRequest struct {
 }
 
 // ContinueWatchingItem is an enriched progress entry for the "Continue Watching" row.
+// QA BUG-007 — Rating + Genre were previously absent, leaving cards
+// in this rail visually leaner than the rest (no star, no genre tag).
+// Rating is selected in the SQL; Genre is attached post-fetch via
+// GetMediaGenresBatch in the handler.
 type ContinueWatchingItem struct {
 	WatchProgress
 	Title        string  `json:"title"`
@@ -419,6 +423,8 @@ type ContinueWatchingItem struct {
 	BackdropPath string  `json:"backdrop_path,omitempty"`
 	Type         string  `json:"type"`
 	Year         int     `json:"year,omitempty"`
+	Rating       float64 `json:"rating,omitempty"`
+	Genre        string  `json:"genre,omitempty"`
 	EpisodeTitle string  `json:"episode_title,omitempty"`
 	SeasonNum    *int    `json:"season_number,omitempty"`
 	EpisodeNum   *int    `json:"episode_number,omitempty"`

@@ -573,6 +573,7 @@ func (q *Queries) GetRecentlyWatched(ctx context.Context, userID int64, limit in
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
 		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
 		FROM watch_progress wp
@@ -603,6 +604,7 @@ func (q *Queries) GetWatchHistory(ctx context.Context, userID int64, params mode
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
 		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
 		FROM watch_progress wp
@@ -625,9 +627,13 @@ func scanContinueWatchingRows(rows pgx.Rows) ([]models.ContinueWatchingItem, err
 	var items []models.ContinueWatchingItem
 	for rows.Next() {
 		var c models.ContinueWatchingItem
+		// Field order MUST match the SELECT list in GetContinueWatching
+		// and GetContinueWatchingByProfile. QA BUG-007 added Rating
+		// between Year and EpisodeTitle in both SELECTs and here.
 		if err := rows.Scan(&c.ID, &c.UserID, &c.ProfileID, &c.MediaItemID, &c.EpisodeID,
 			&c.PositionMs, &c.DurationMs, &c.Completed, &c.UpdatedAt,
 			&c.Title, &c.PosterPath, &c.BackdropPath, &c.Type, &c.Year,
+			&c.Rating,
 			&c.EpisodeTitle, &c.SeasonNum, &c.EpisodeNum); err != nil {
 			return nil, err
 		}
