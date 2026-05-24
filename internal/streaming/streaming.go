@@ -580,7 +580,13 @@ type QualityVariant struct {
 	Cancel    context.CancelFunc
 	Ready     chan struct{}
 	Err       error
-	started   bool
+	// StderrTail is the last ~600 bytes of FFmpeg's stderr, captured
+	// by the cmd.Wait goroutine after the process exits. Populated
+	// unconditionally (not just on error) so that admins debugging
+	// "variant start failed" 500s can see the real reason via the
+	// session diagnose path. Empty until the process exits.
+	StderrTail string
+	started    bool
 	// exited is set by the cmd.Wait goroutine when ffmpeg returns. The
 	// playback/poll paths read it (via ffmpegDone) to fail fast instead of
 	// spinning a long retry budget on a process that's already dead.
@@ -1094,6 +1100,70 @@ func (tm *TranscodeManager) ActiveSessions() int {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return len(tm.sessions)
+}
+
+// VariantDiagnostic is the admin-visible shape of a single variant's
+// state — enough to debug "variant start failed" 500s without grepping
+// syslog. Includes the FFmpeg stderr tail (which can include file
+// paths) so it MUST only be returned from admin-gated endpoints.
+type VariantDiagnostic struct {
+	Profile    string `json:"profile"`
+	Started    bool   `json:"started"`
+	Exited     bool   `json:"exited"`
+	OutputDir  string `json:"output_dir,omitempty"`
+	Error      string `json:"error,omitempty"`
+	StderrTail string `json:"stderr_tail,omitempty"`
+	Restarts   int    `json:"restart_attempts,omitempty"`
+}
+
+// SessionDiagnostic captures the FFmpeg-side state of a session for
+// admin debugging. Returns nil if the session doesn't exist; admins
+// hitting an unknown sessionID get a 404 from the handler.
+type SessionDiagnostic struct {
+	SessionID        string              `json:"session_id"`
+	FilePath         string              `json:"file_path"`
+	SourceVideoCodec string              `json:"source_video_codec,omitempty"`
+	HWAccel          string              `json:"hw_accel"`
+	Remux            bool                `json:"remux"`
+	Variants         []VariantDiagnostic `json:"variants"`
+}
+
+// DiagnoseSession returns a snapshot of variant state + FFmpeg stderr
+// for the named session. Returns (nil, false) if the session is
+// unknown. The returned VariantDiagnostic.StderrTail can contain file
+// paths and shell-quoted args — callers MUST gate on admin role.
+func (tm *TranscodeManager) DiagnoseSession(sessionID string) (*SessionDiagnostic, bool) {
+	tm.mu.Lock()
+	s, ok := tm.sessions[sessionID]
+	tm.mu.Unlock()
+	if !ok || s == nil {
+		return nil, false
+	}
+	out := &SessionDiagnostic{
+		SessionID:        s.ID,
+		FilePath:         s.FilePath,
+		SourceVideoCodec: s.SourceVideoCodec,
+		HWAccel:          tm.hwAccel.DisplayName,
+		Remux:            s.Remux,
+	}
+	s.variantMu.Lock()
+	defer s.variantMu.Unlock()
+	for name, v := range s.Variants {
+		errStr := ""
+		if v.Err != nil {
+			errStr = v.Err.Error()
+		}
+		out.Variants = append(out.Variants, VariantDiagnostic{
+			Profile:    name,
+			Started:    v.started,
+			Exited:     v.exited,
+			OutputDir:  v.OutputDir,
+			Error:      errStr,
+			StderrTail: v.StderrTail,
+			Restarts:   v.restartAttempts,
+		})
+	}
+	return out, true
 }
 
 // ============================================================
@@ -1666,18 +1736,37 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 				}
 				select {
 				case <-cmdDone:
-					// FFmpeg exited — check one last time for the playlist
+					// FFmpeg exited — check one last time for the playlist.
 					if _, err := os.Stat(playlistPath); err == nil {
 						close(v.Ready)
 						return
 					}
-					v.Err = fmt.Errorf("FFmpeg exited before producing playlist for %s", p.Name)
+					// cmdDone closes AFTER the cmd.Wait goroutine has
+					// already populated v.Err (with the stderr tail) and
+					// v.StderrTail. Don't overwrite the richer error with
+					// the bare "exited before producing playlist" string;
+					// only set when nothing is there yet (e.g. cmd.Wait
+					// didn't observe a non-nil error, which is rare but
+					// possible when ctx was canceled).
+					session.variantMu.Lock()
+					if v.Err == nil {
+						if v.StderrTail != "" {
+							v.Err = fmt.Errorf("FFmpeg exited before producing playlist for %s (stderr tail: %s)", p.Name, v.StderrTail)
+						} else {
+							v.Err = fmt.Errorf("FFmpeg exited before producing playlist for %s", p.Name)
+						}
+					}
+					session.variantMu.Unlock()
 					close(v.Ready)
 					return
 				case <-time.After(500 * time.Millisecond):
 				}
 			}
-			v.Err = fmt.Errorf("transcode timeout: no segments for %s", p.Name)
+			session.variantMu.Lock()
+			if v.Err == nil {
+				v.Err = fmt.Errorf("transcode timeout: no segments for %s", p.Name)
+			}
+			session.variantMu.Unlock()
 			close(v.Ready)
 		}()
 
@@ -1709,9 +1798,12 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}
 		// Mark the variant as terminated so segment/subtitle handlers
 		// can fail fast instead of spinning their retry budgets. Also
-		// preserve the error so EnsureVariant callers can see it.
+		// preserve the error so EnsureVariant callers can see it. Set
+		// StderrTail unconditionally — the polling goroutine may consult
+		// it even on the "exited cleanly but no playlist" path.
 		session.variantMu.Lock()
 		v.exited = true
+		v.StderrTail = stderrTail
 		if waitErr != nil && ctx.Err() == nil && v.Err == nil {
 			if stderrTail != "" {
 				v.Err = fmt.Errorf("%w (ffmpeg stderr tail: %s)", waitErr, stderrTail)

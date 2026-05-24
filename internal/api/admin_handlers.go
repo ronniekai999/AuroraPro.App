@@ -23,6 +23,7 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/streaming"
 	ws "github.com/aurora-media/aurora/internal/websocket"
+	"github.com/go-chi/chi/v5"
 )
 
 type AdminHandler struct {
@@ -517,6 +518,28 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// DiagnoseSession returns a per-variant snapshot of FFmpeg state for
+// the given transcode session, including stderr tails. Admin-gated
+// because stderr can contain absolute file paths + shell args from
+// the FFmpeg command line.
+//
+// Used by the Active Streams tab's "Diagnose" button when a transcode
+// session is showing as failed — saves the operator from grepping
+// syslog for `ffmpeg variant exited` lines.
+func (h *AdminHandler) DiagnoseSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := chi.URLParam(r, "sessionID")
+	if sessionID == "" {
+		writeError(w, http.StatusBadRequest, "missing sessionID")
+		return
+	}
+	diag, ok := h.transcode.DiagnoseSession(sessionID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, diag)
 }
 
 // directPlayCount safely returns the active direct-play count.

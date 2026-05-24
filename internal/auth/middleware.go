@@ -4,9 +4,60 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/aurora-media/aurora/internal/httputil"
 )
+
+// UserIDHolder is a mutable, request-scoped slot for the
+// authenticated user's ID, written by auth middleware once claims are
+// validated. The outer RequestLogger in package `api` installs an
+// empty holder into the request context BEFORE downstream middleware
+// runs; auth middleware later updates it via SetRequestUserID. The
+// logger reads it AFTER next.ServeHTTP returns.
+//
+// Why we need this rather than reading claims directly from the
+// outer ctx: Go's http.Request context is immutable per-request —
+// `r.WithContext(ctx)` creates a NEW request that downstream sees,
+// but the outer logger keeps a reference to the original `r`. So
+// claims written by RequireAuth via WithContext are visible only
+// inside its subtree, not back at the outer logger. The
+// pointer-in-context pattern lets the inner write be visible to the
+// outer read.
+//
+// Defined in the auth package (not api) so all auth middlewares can
+// write to it without forcing api -> auth -> api circular imports.
+type UserIDHolder struct {
+	id atomic.Int64
+}
+
+type userIDHolderKey struct{}
+
+// NewRequestContextWithUserIDHolder returns a context derived from
+// parent with a fresh UserIDHolder installed. The outer logger
+// middleware calls this; the returned holder is the one auth
+// middlewares will write into.
+func NewRequestContextWithUserIDHolder(parent context.Context) (context.Context, *UserIDHolder) {
+	h := &UserIDHolder{}
+	return context.WithValue(parent, userIDHolderKey{}, h), h
+}
+
+// SetRequestUserID writes userID into the request-scoped holder if
+// one is installed. No-op when called from a code path that bypassed
+// the logger middleware (e.g., tests).
+func SetRequestUserID(ctx context.Context, userID int64) {
+	if h, _ := ctx.Value(userIDHolderKey{}).(*UserIDHolder); h != nil {
+		h.id.Store(userID)
+	}
+}
+
+// Load returns the current user ID. Zero means "not yet set / public".
+func (h *UserIDHolder) Load() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.id.Load()
+}
 
 type contextKey string
 
@@ -49,6 +100,11 @@ func RequireAuth(svc *Service, versionStore *TokenVersionStore) func(http.Handle
 					return
 				}
 			}
+
+			// QA fix — surface user_id to the outer RequestLogger.
+			// See UserIDHolder docs for why this can't just rely on
+			// the ClaimsContextKey below.
+			SetRequestUserID(r.Context(), claims.UserID)
 
 			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -101,6 +157,9 @@ func RequireStreamAuth(svc *Service, versionStore *TokenVersionStore) func(http.
 					return
 				}
 			}
+
+			// QA fix — surface user_id to the outer RequestLogger.
+			SetRequestUserID(r.Context(), claims.UserID)
 
 			ctx := context.WithValue(r.Context(), ClaimsContextKey, claims)
 			next.ServeHTTP(w, r.WithContext(ctx))
