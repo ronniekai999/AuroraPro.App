@@ -313,7 +313,18 @@ func buildRailReasonPrompt(anchors []db.TasteAnchor, items []*models.MediaItem) 
 			if a.Year > 0 {
 				fmt.Fprintf(&b, " (%d)", a.Year)
 			}
-			fmt.Fprintf(&b, " [%s]\n", a.Type)
+			fmt.Fprintf(&b, " [%s]", a.Type)
+			// QA BUG-010 — mirror buildRerankPrompt's genre grounding
+			// so this LLM also has real anchor metadata instead of
+			// training-data guesses.
+			if len(a.Genres) > 0 {
+				gs := a.Genres
+				if len(gs) > 4 {
+					gs = gs[:4]
+				}
+				fmt.Fprintf(&b, " — %s", sanitizePromptText(strings.Join(gs, ", "), 80))
+			}
+			b.WriteByte('\n')
 		}
 		b.WriteByte('\n')
 	}
