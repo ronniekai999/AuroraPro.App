@@ -299,6 +299,14 @@ func main() {
 		hub.BroadcastToAdmins(ws.EventTranscodeStatus, data)
 	}
 
+	// Direct-play registry — companion to the transcode manager for
+	// tracking byte-range / remux streams that don't have an FFmpeg
+	// process lifecycle. Touched on every stream-serve in the
+	// handlers; the admin Sessions endpoint joins this with
+	// transcode.ListSessions() for a unified view. 60s default TTL.
+	directPlay := streaming.NewDirectPlayRegistry(0)
+	defer directPlay.Close()
+
 	// embedItem is invoked after each successful enrichment path below. It
 	// regenerates the semantic-search vector so newly-imported content is
 	// findable by natural-language query immediately, not on the next backfill.
@@ -592,6 +600,7 @@ func main() {
 		Enricher:         enricher,
 		ImgProxy:         imgProxy,
 		Transcode:        transcode,
+		DirectPlay:       directPlay,
 		Activity:         activity,
 		RingLog:          ringLog,
 		Pool:             pool,

@@ -999,19 +999,40 @@ export async function scanLibrary(id: number): Promise<void> {
   await apiFetch(`/api/libraries/${id}/scan`, { method: 'POST' })
 }
 
-export interface TranscodeSession {
+// Unified Active Streams row. Transcode-backed and direct-play-backed
+// streams arrive on the same array tagged with `kind` so the admin
+// Sessions tab can render them together. Fields that don't apply to
+// a row's kind are omitted by the server.
+export interface ActiveStreamRow {
   id: string
+  kind: 'transcode' | 'direct'
   user_id: number
-  file_id: number
-  file_type: string
-  status: string
-  preset: string
-  resolution?: string
+  username?: string
+  file_name: string
   started_at: string
-  last_active: string
+  // Transcode-only
+  resolution?: string
+  active_variants?: string[]
+  resources?: {
+    cpu_ticks?: number
+    memory_bytes?: number
+    num_processes?: number
+    bandwidth_bps?: number
+  }
+  remux?: boolean
+  // Direct-play only
+  file_type?: 'media' | 'episode'
+  file_id?: number
+  decision?: 'direct_play' | 'direct_stream'
 }
-export async function listAdminSessions(signal?: AbortSignal): Promise<TranscodeSession[]> {
-  const res = await apiFetch<TranscodeSession[]>('/api/admin/sessions', { signal })
+
+// Back-compat alias — old callers expecting a TranscodeSession-shaped
+// row keep working against the union type. New code should use
+// ActiveStreamRow directly.
+export type TranscodeSession = ActiveStreamRow
+
+export async function listAdminSessions(signal?: AbortSignal): Promise<ActiveStreamRow[]> {
+  const res = await apiFetch<ActiveStreamRow[]>('/api/admin/sessions', { signal })
   return res || []
 }
 export async function deleteStreamSession(id: string): Promise<void> {

@@ -1042,25 +1042,48 @@ func (q *Queries) GetLatestEpisodeProgress(ctx context.Context, userID, mediaIte
 	return &wp, nil
 }
 
-// GetContinueWatching returns in-progress items for the "Continue Watching" row.
+// GetContinueWatching returns in-progress items for the "Continue
+// Watching" row, deduplicated to one entry per show (or movie).
+//
+// QA finding follow-up — previously each in-progress episode of a TV
+// show rendered as its own card, so "Drake & Josh S1E1" and "Drake &
+// Josh S1E2" both appeared on Library/Home. The DISTINCT ON wrapper
+// rolls those up to a single most-recent row per media_item (the
+// show), so the user sees one Drake & Josh card whose
+// episode-specific fields (season/episode/episode_title) describe
+// where they left off.
+//
+// Movies are unaffected — one media_item per movie means DISTINCT ON
+// is a no-op for them.
 func (q *Queries) GetContinueWatching(ctx context.Context, userID int64, limit int) ([]models.ContinueWatchingItem, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
 
+	// DISTINCT ON requires the ORDER BY to lead with the same column;
+	// the outer wrapper re-orders by updated_at DESC for the actual
+	// display order.
 	rows, err := q.pool.Query(ctx, `
-		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
-		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
-		       COALESCE(mi.rating, 0),
-		       COALESCE(e.title, ''),
-		       s.season_number, e.episode_number
-		FROM watch_progress wp
-		JOIN media_items mi ON mi.id = wp.media_item_id
-		LEFT JOIN tv_episodes e ON e.id = wp.episode_id
-		LEFT JOIN tv_seasons s ON s.id = e.season_id
-		WHERE wp.user_id = $1 AND wp.completed = FALSE AND wp.position_ms > 0
-		ORDER BY wp.updated_at DESC
+		SELECT id, user_id, profile_id, media_item_id, episode_id,
+		       position_ms, duration_ms, completed, updated_at,
+		       title, poster_path, backdrop_path, type, year, rating,
+		       episode_title, season_number, episode_number
+		FROM (
+		  SELECT DISTINCT ON (wp.media_item_id)
+		         wp.id, wp.user_id, COALESCE(wp.profile_id, 0) AS profile_id, wp.media_item_id, wp.episode_id,
+		         wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
+		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type, mi.year,
+		         COALESCE(mi.rating, 0) AS rating,
+		         COALESCE(e.title, '') AS episode_title,
+		         s.season_number, e.episode_number
+		  FROM watch_progress wp
+		  JOIN media_items mi ON mi.id = wp.media_item_id
+		  LEFT JOIN tv_episodes e ON e.id = wp.episode_id
+		  LEFT JOIN tv_seasons s ON s.id = e.season_id
+		  WHERE wp.user_id = $1 AND wp.completed = FALSE AND wp.position_ms > 0
+		  ORDER BY wp.media_item_id, wp.updated_at DESC
+		) dedup
+		ORDER BY updated_at DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
 		return nil, err
@@ -1076,19 +1099,29 @@ func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID in
 		limit = 20
 	}
 
+	// Same DISTINCT ON dedup as GetContinueWatching above — see that
+	// comment for the rationale.
 	rows, err := q.pool.Query(ctx, `
-		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
-		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
-		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
-		       COALESCE(mi.rating, 0),
-		       COALESCE(e.title, ''),
-		       s.season_number, e.episode_number
-		FROM watch_progress wp
-		JOIN media_items mi ON mi.id = wp.media_item_id
-		LEFT JOIN tv_episodes e ON e.id = wp.episode_id
-		LEFT JOIN tv_seasons s ON s.id = e.season_id
-		WHERE wp.profile_id = $1 AND wp.completed = FALSE AND wp.position_ms > 0
-		ORDER BY wp.updated_at DESC
+		SELECT id, user_id, profile_id, media_item_id, episode_id,
+		       position_ms, duration_ms, completed, updated_at,
+		       title, poster_path, backdrop_path, type, year, rating,
+		       episode_title, season_number, episode_number
+		FROM (
+		  SELECT DISTINCT ON (wp.media_item_id)
+		         wp.id, wp.user_id, COALESCE(wp.profile_id, 0) AS profile_id, wp.media_item_id, wp.episode_id,
+		         wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
+		         mi.title, COALESCE(mi.poster_path, '') AS poster_path, COALESCE(mi.backdrop_path, '') AS backdrop_path, mi.type, mi.year,
+		         COALESCE(mi.rating, 0) AS rating,
+		         COALESCE(e.title, '') AS episode_title,
+		         s.season_number, e.episode_number
+		  FROM watch_progress wp
+		  JOIN media_items mi ON mi.id = wp.media_item_id
+		  LEFT JOIN tv_episodes e ON e.id = wp.episode_id
+		  LEFT JOIN tv_seasons s ON s.id = e.season_id
+		  WHERE wp.profile_id = $1 AND wp.completed = FALSE AND wp.position_ms > 0
+		  ORDER BY wp.media_item_id, wp.updated_at DESC
+		) dedup
+		ORDER BY updated_at DESC
 		LIMIT $2`, profileID, limit)
 	if err != nil {
 		return nil, err
