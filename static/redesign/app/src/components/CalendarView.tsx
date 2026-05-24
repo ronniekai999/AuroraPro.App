@@ -143,15 +143,43 @@ export function CalendarView({ onOpenMedia }: Props) {
             </span>
           </div>
           <h1 className="text-white text-4xl font-bold font-display">Calendar</h1>
-          {episodes && (
-            <p className="text-white/60 text-sm mt-2">
-              {viewMode === 'list'
-                ? (episodes.length === 0
-                  ? 'No upcoming episodes from shows in your library.'
-                  : `${episodes.length} episode${episodes.length === 1 ? '' : 's'} airing in the next ${LIST_WINDOW_DAYS} days.`)
-                : `${episodes.length} episode${episodes.length === 1 ? '' : 's'} airing in ${cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })}.`}
-            </p>
-          )}
+          {episodes && (() => {
+            // QA BUG-004 — make the window explicit + leading in both
+            // views, in matching shape, so the count delta between
+            // List ("next 30 days") and Grid ("May 2026") is
+            // self-explanatory rather than surprising.
+            //
+            // The grid mode's FETCH window includes lead/trail days
+            // padding from adjacent months (so chips render on the
+            // full visible grid). For the subtitle COUNT we must
+            // restrict to the cursorMonth's actual boundaries —
+            // otherwise "May 2026 · 98 episodes" silently includes
+            // late-April and early-June airdates and is wrong.
+            let displayed = episodes
+            if (viewMode === 'grid') {
+              const monthStart = firstOfMonthUTC(cursorMonth).getTime()
+              // lastOfMonthUTC returns the LAST day at 00:00 UTC; +1d
+              // gives an exclusive upper bound covering the whole day.
+              const monthEnd = lastOfMonthUTC(cursorMonth).getTime() + 86_400_000
+              displayed = episodes.filter(e => {
+                const t = new Date(e.air_date).getTime()
+                return t >= monthStart && t < monthEnd
+              })
+            }
+            const rangeLabel = viewMode === 'list'
+              ? `Next ${LIST_WINDOW_DAYS} days`
+              : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
+            const epWord = `episode${displayed.length === 1 ? '' : 's'}`
+            return (
+              <p className="text-white/60 text-sm mt-2">
+                <span className="text-white/85 font-medium">{rangeLabel}</span>
+                <span className="text-white/30 mx-1.5">•</span>
+                {displayed.length === 0
+                  ? 'no upcoming episodes from shows in your library'
+                  : `${displayed.length} ${epWord} from shows in your library`}
+              </p>
+            )
+          })()}
         </div>
 
         {/* View-mode toggle */}
