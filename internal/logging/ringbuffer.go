@@ -54,12 +54,12 @@ func (h *RingBufferHandler) Handle(ctx context.Context, r slog.Record) error {
 		attrs["group"] = g
 	}
 	for _, a := range h.attrs {
-		attrs[a.Key] = a.Value.Any()
+		attrs[a.Key] = serializeAttrValue(a.Value.Any())
 	}
 
 	// Collect attrs from the record itself
 	r.Attrs(func(a slog.Attr) bool {
-		attrs[a.Key] = a.Value.Any()
+		attrs[a.Key] = serializeAttrValue(a.Value.Any())
 		return true
 	})
 
@@ -138,4 +138,24 @@ func (h *RingBufferHandler) Entries(limit, offset int) []models.LogEntry {
 	}
 
 	return result
+}
+
+// serializeAttrValue converts slog attribute values into a form that
+// JSON-encodes usefully on the API boundary. The default Value.Any()
+// returns the bare Go type — for `error` interfaces that means the
+// JSON encoder sees an interface with no exported fields and emits
+// `{}`, dropping the actual message. QA BUG-011 fix: stringify
+// errors here so the admin Logs UI can render them.
+//
+// Only the error case is touched; primitives and structs with
+// exported fields keep their native shape so the UI can render
+// them as it sees fit.
+func serializeAttrValue(v interface{}) interface{} {
+	if v == nil {
+		return nil
+	}
+	if err, ok := v.(error); ok {
+		return err.Error()
+	}
+	return v
 }

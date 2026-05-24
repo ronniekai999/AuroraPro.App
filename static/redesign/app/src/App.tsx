@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router'
+import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
   getAccessToken,
@@ -193,6 +193,7 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
     clock: <><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></>,
     info: <><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></>,
     maximize: <><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></>,
+    menu: <><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></>,
     volume: <><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14M15.54 8.46a5 5 0 010 7.07" /></>,
     volumeX: <><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>,
     skipForward: <><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" y1="5" x2="19" y2="19" /></>,
@@ -897,7 +898,7 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
 // Sidebar conditionally renders the Admin link for admins. The
 // server-side /api/admin/* endpoints enforce the gate too — the
 // frontend check is for UX, not security.
-function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount }: {
+function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount, mobileOpen, onMobileClose }: {
   user?: ApiUser
   currentView: string
   onNavigate: (v: string) => void
@@ -906,6 +907,11 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
   notifOpen: boolean
   setNotifOpen: (v: boolean) => void
   notifCount: number
+  // QA BUG-012 — mobile drawer support. Below md (768px) the sidebar
+  // is hidden by default and slides in over content when mobileOpen
+  // is true. md+ ignores both props; the sidebar is always visible.
+  mobileOpen: boolean
+  onMobileClose: () => void
 }) {
   const isAdmin = sidebarUser?.role === 'admin'
   const navItems = [
@@ -920,14 +926,14 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
   ]
 
   return (
-    <aside className="fixed left-0 top-0 bottom-0 w-[240px] bg-[#050505] border-r border-white/[0.06] z-50 flex flex-col">
+    <aside className={`fixed left-0 top-0 bottom-0 w-[240px] bg-[#050505] border-r border-white/[0.06] z-50 flex flex-col transition-transform duration-200 md:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
       {/* Brand — Phase 8 fix: clicking the logo always returns to
           home, matching every other media-app convention (Netflix,
           Spotify, YouTube etc). `type="button"` prevents form
           submission if the sidebar ever ends up inside a form. */}
       <button
         type="button"
-        onClick={() => onNavigate('home')}
+        onClick={() => { onNavigate('home'); onMobileClose() }}
         className="p-5 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
         aria-label="Go to home"
       >
@@ -946,7 +952,7 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
           <button
             key={item.id}
             className={`nav-link-item w-full ${currentView === item.id ? 'active' : ''}`}
-            onClick={() => onNavigate(item.id)}
+            onClick={() => { onNavigate(item.id); onMobileClose() }}
           >
             <Icon name={item.icon} size={18} />
             {item.label}
@@ -979,7 +985,7 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
         </button>
         <button
           className={`nav-link-item w-full ${currentView === 'settings' ? 'active' : ''}`}
-          onClick={() => onNavigate('settings')}
+          onClick={() => { onNavigate('settings'); onMobileClose() }}
         >
           <Icon name="settings" size={18} />
           Settings
@@ -4080,21 +4086,32 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
         <p className="text-white/50 text-sm mt-1">Server management dashboard</p>
       </div>
 
-      {/* Tabs */}
+      {/* Tabs.
+          QA BUG-006 — `capitalize` only uppercases the first letter
+          per word, so "llm" → "Llm" and "oauth" → "Oauth". Override
+          for the acronyms; everything else still falls through to
+          the existing capitalize rule. */}
       <div className="flex items-center gap-2 mb-6 border-b border-white/[0.06] pb-1">
-        {tabs.map(t => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium capitalize transition-all border-b-2 -mb-0.5 ${
-              tab === t
-                ? 'text-purple-400 border-purple-500'
-                : 'text-white/40 border-transparent hover:text-white/70'
-            }`}
-          >
-            {t}
-          </button>
-        ))}
+        {tabs.map(t => {
+          const labelOverride: Partial<Record<AdminTab, string>> = {
+            llm: 'LLM',
+            oauth: 'OAuth',
+          }
+          const display = labelOverride[t]
+          return (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-2 text-sm font-medium ${display ? '' : 'capitalize'} transition-all border-b-2 -mb-0.5 ${
+                tab === t
+                  ? 'text-purple-400 border-purple-500'
+                  : 'text-white/40 border-transparent hover:text-white/70'
+              }`}
+            >
+              {display ?? t}
+            </button>
+          )
+        })}
       </div>
 
       {tab === 'dashboard' && (
@@ -4328,19 +4345,57 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
           {logs && (
             <div className="space-y-1 max-h-[500px] overflow-y-auto">
               {logs.length === 0 && <p className="text-white/40 text-sm font-sans">No log entries.</p>}
-              {logs.map((entry, i) => (
-                <div key={i} className="flex gap-3">
-                  <span className="text-white/40 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
-                  <span className={`flex-shrink-0 ${
-                    entry.level === 'ERROR' || entry.level === 'error' ? 'text-red-400' :
-                    entry.level === 'WARN' || entry.level === 'warn' ? 'text-amber-400' :
-                    'text-purple-400'
-                  }`}>
-                    [{entry.level.toUpperCase()}]
-                  </span>
-                  <span className="text-white/60 break-words">{entry.message}</span>
-                </div>
-              ))}
+              {logs.map((entry, i) => {
+                // QA BUG-011 — surface structured attrs.
+                // RequestLogger emits method/path/status/latency/user_id;
+                // without rendering these the log view was just a wall
+                // of "[INFO] request" with no triage value. For request
+                // logs we format compactly; for everything else we dump
+                // remaining attrs as key=value pairs (skipping null/empty).
+                const attrs = entry.attrs ?? {}
+                const isRequest = entry.message === 'request'
+                let summary = ''
+                if (isRequest) {
+                  const method = String(attrs.method ?? '')
+                  const path = String(attrs.path ?? '')
+                  const status = attrs.status
+                  const latency = attrs.latency
+                  const uid = attrs.user_id
+                  const parts: string[] = []
+                  if (method) parts.push(method)
+                  if (status !== undefined && status !== null) parts.push(String(status))
+                  if (path) parts.push(path)
+                  if (latency !== undefined && latency !== null && latency !== '') parts.push(String(latency))
+                  if (uid !== undefined && uid !== null && uid !== 0 && uid !== '') parts.push(`uid=${String(uid)}`)
+                  summary = parts.join(' ')
+                } else {
+                  // Non-request log — show message then any non-empty attrs.
+                  // Filter only on null/undefined/empty-string. Zero values
+                  // (e.g. retries=0 / queued=0 / failed=0) are legitimate
+                  // log signals indicating "no work pending" or "no
+                  // errors" and should NOT be hidden. Errors are
+                  // pre-stringified by ringbuffer.go's serializeAttrValue
+                  // so they render as readable text, not "{}".
+                  const tail = Object.entries(attrs)
+                    .filter(([_, v]) => v !== null && v !== undefined && v !== '')
+                    .map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`)
+                    .join(' ')
+                  summary = tail ? `${entry.message} · ${tail}` : entry.message
+                }
+                return (
+                  <div key={i} className="flex gap-3">
+                    <span className="text-white/40 flex-shrink-0">{new Date(entry.time).toLocaleString()}</span>
+                    <span className={`flex-shrink-0 ${
+                      entry.level === 'ERROR' || entry.level === 'error' ? 'text-red-400' :
+                      entry.level === 'WARN' || entry.level === 'warn' ? 'text-amber-400' :
+                      'text-purple-400'
+                    }`}>
+                      [{entry.level.toUpperCase()}]
+                    </span>
+                    <span className="text-white/60 break-words">{summary}</span>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>
@@ -4407,7 +4462,7 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
   // z-[45] sits above the sticky top-bar stack (40) and below
   // ContextMenu (100) / modals (60s).
   return (
-    <div className="fixed bottom-4 left-[252px] w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto">
+    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto">
       {/* No "Server Status" heading — the trigger button in the
           sidebar (line ~960) already shows that label, and the panel
           opens directly under it. Matching the NotificationPanel
@@ -4490,7 +4545,7 @@ function NotificationPanel({ open, isAdmin, onClose }: {
   //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="fixed bottom-4 left-[252px] w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
+    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">{isAdmin ? 'Recent Activity' : 'Notifications'}</h3>
         <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
@@ -4566,6 +4621,41 @@ function BrowseLoadingState({ title }: { title: string }) {
 }
 
 /* ─────────────────────── MAIN APP ─────────────────────── */
+
+// QA BUG-001 — URL → view mapping for direct loads / browser
+// back-forward / bookmarks. The BrowserRouter basename is "/v2"
+// (set in main.tsx), so useLocation().pathname returns the path
+// WITHOUT that prefix — "/movies" rather than "/v2/movies".
+//
+// 'detail' is intentionally absent: it's a selectedMedia-scoped
+// transient view with no URL representation. Clicking a card sets
+// view='detail' but leaves the URL on the prior top-level path,
+// so a refresh re-renders that top-level view (movies/shows/etc.)
+// rather than a dangling detail page with no selectedMedia.
+const VIEW_BY_PATH: Record<string, string> = {
+  '': 'home',
+  '/': 'home',
+  '/home': 'home',
+  '/movies': 'movies',
+  '/shows': 'shows',
+  '/library': 'library',
+  '/calendar': 'calendar',
+  '/collections': 'collections',
+  '/requests': 'requests',
+  '/admin': 'admin',
+  '/settings': 'settings',
+  '/search': 'search',
+}
+
+function pathToView(pathname: string): string {
+  // Exact match first.
+  if (VIEW_BY_PATH[pathname] !== undefined) return VIEW_BY_PATH[pathname]
+  // First-segment fallback so future subroutes (e.g. /movies/genre/action)
+  // still resolve to the top-level view that contains them.
+  const first = pathname.split('/').filter(Boolean)[0]
+  return VIEW_BY_PATH['/' + (first ?? '')] ?? 'home'
+}
+
 export default function App() {
   const [view, setView] = useState('home')
   const [prevView, setPrevView] = useState('home')
@@ -4672,6 +4762,9 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [serverOpen, setServerOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
+  // QA BUG-012 — mobile sidebar drawer state. Below md (768px) the
+  // sidebar is hidden by default and toggles in over content.
+  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false)
   // My Library — user-saved titles. Persisted to localStorage so the
   // collection survives refreshes. Items are snapshots (full Media
   // objects) so the card poster / title / year stays accessible even
@@ -4814,6 +4907,26 @@ export default function App() {
   const [homeError, setHomeError] = useState<string | null>(null)
 
   const navigate = useNavigate()
+  const location = useLocation()
+
+  // QA BUG-001 — sync URL → view on mount and on every pathname
+  // change (browser back/forward, bookmarks, direct loads). Without
+  // this, `view = useState('home')` always wins on cold load even
+  // if the URL says `/v2/calendar`. The setView call is idempotent;
+  // when in-app handleNavigate triggers a pathname change, this
+  // effect just confirms the same view we already set.
+  useEffect(() => {
+    const target = pathToView(location.pathname)
+    if (target !== view) {
+      setView(target)
+    }
+    // Intentionally NOT including `view` in deps — we only want
+    // this to fire on URL changes. Including view would cause it
+    // to reconcile back to the URL after any setView('detail')
+    // call (which IS desired sometimes, but we have explicit
+    // navigation back from detail via handleBack).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname])
 
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
@@ -5167,7 +5280,15 @@ export default function App() {
     setPlayerTarget(null)
     setPartyPanelOpen(false)
     setView('home')
-  }, [])
+    // QA BUG-001 follow-up — also drop the URL back to root.
+    // Without this, the URL stayed at /v2/admin (or wherever)
+    // through logout. Combined with the new URL→view sync effect,
+    // the next user to log in on this device would land directly
+    // on the previous user's last view (and admin tab if they
+    // were admin) before our auth checks fired. Server-side guards
+    // prevent data leakage, but the UX reads as a permissions bug.
+    navigate('/')
+  }, [navigate])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party
@@ -5834,7 +5955,39 @@ export default function App() {
         notifOpen={notifOpen}
         setNotifOpen={setNotifOpen}
         notifCount={0 /* Real unread-count needs the global WS + server unread-state; show 0 until that lands rather than a permanently-wrong badge. */}
+        mobileOpen={sidebarMobileOpen}
+        onMobileClose={() => setSidebarMobileOpen(false)}
       />
+
+      {/* QA BUG-012 — mobile sidebar backdrop + hamburger trigger.
+          Both are md:hidden so the desktop layout (sidebar always
+          present at 240px) is unchanged. The backdrop dismisses
+          on tap. The hamburger sits at the top-left in the space
+          the sidebar would normally occupy. z-40 for backdrop puts
+          it above content (10-30) but below sidebar (50). */}
+      {sidebarMobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
+          onClick={() => setSidebarMobileOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <button
+        type="button"
+        className={`fixed top-3 z-[55] md:hidden w-10 h-10 rounded-lg bg-[#0a0a0f]/80 backdrop-blur-sm border border-white/[0.08] flex items-center justify-center text-white/80 hover:text-white hover:bg-[#0a0a0f] ${
+          // QA BUG-012 follow-up — when the sidebar drawer is open
+          // the hamburger sits ABOVE the AURORA brand button (also
+          // top-left of the sidebar). Tapping the upper-left would
+          // close the drawer instead of triggering the documented
+          // brand-as-home affordance. Swap to top-right while open.
+          sidebarMobileOpen ? 'right-3' : 'left-3'
+        }`}
+        onClick={() => setSidebarMobileOpen(o => !o)}
+        aria-label={sidebarMobileOpen ? 'Close menu' : 'Open menu'}
+        aria-expanded={sidebarMobileOpen}
+      >
+        <Icon name={sidebarMobileOpen ? 'x' : 'menu'} size={18} />
+      </button>
 
       <ServerPanel
         open={serverOpen}
@@ -5861,7 +6014,7 @@ export default function App() {
       />
 
       {/* Main Content */}
-      <main className="ml-[240px] min-h-screen">
+      <main className="md:ml-[240px] min-h-screen">
         {/* Sticky stack: scan bar + header in one sticky container
             so the scan bar contributes its height to flow and both
             pin together on scroll. */}
