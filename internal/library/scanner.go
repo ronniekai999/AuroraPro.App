@@ -439,6 +439,8 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 			ef.SubtitleTracks = probeResult.SubtitleTracks
 			ef.VideoProfile = probeResult.VideoProfile
 			ef.VideoPixFmt = probeResult.VideoPixFmt
+			ef.ColorTransfer = probeResult.ColorTransfer
+			ef.ColorPrimaries = probeResult.ColorPrimaries
 		} else if parsed.Resolution != "" {
 			ef.Resolution = parsed.Resolution
 		}
@@ -479,6 +481,8 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 			mf.SubtitleTracks = probeResult.SubtitleTracks
 			mf.VideoProfile = probeResult.VideoProfile
 			mf.VideoPixFmt = probeResult.VideoPixFmt
+			mf.ColorTransfer = probeResult.ColorTransfer
+			mf.ColorPrimaries = probeResult.ColorPrimaries
 		} else if parsed.Resolution != "" {
 			mf.Resolution = parsed.Resolution
 		}
