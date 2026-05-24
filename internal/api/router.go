@@ -793,19 +793,24 @@ func frontendHeaders(next http.Handler) http.Handler {
 		// for days after a deployment — causing missing UI elements, broken
 		// features, or JS errors when the API has changed.
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		// Chromecast Cast SDK loads from https://www.gstatic.com/cv/... —
-		// added to script-src so the dynamic <script> tag injected by
-		// lib/cast.ts can execute. Pinned to the /cv/ path prefix so the
-		// allowlist covers ONLY the Cast Sender bundle, not everything
-		// else served from gstatic (recaptcha, Meet, Hangouts, charts,
-		// etc.). font-src already allowed fonts.gstatic.com for Google
-		// Fonts. We don't know yet whether the SDK makes any XHRs back to
-		// gstatic at runtime (most cast traffic flows through Chrome's
-		// native cast extension, not the page), so connect-src is left
-		// tight; if CSP errors appear, add the specific URL to connect-src.
+		// Chromecast Cast SDK loads scripts from multiple gstatic paths.
+		// PR #51 pinned to /cv/ thinking that covered the SDK, but the
+		// bootstrap at /cv/js/sender/v1/cast_sender.js dynamically pulls
+		// the framework + sender shims from /cast/sdk/ and /eureka/clank/.
+		// Confirmed via QA console (2026-05-24):
+		//   - /cv/js/sender/v1/cast_sender.js      (bootstrap, our injected tag)
+		//   - /cast/sdk/libs/sender/1.0/cast_framework.js  (CAF v3 framework)
+		//   - /eureka/clank/{147,148,...}/cast_sender.js   (versioned shims)
+		// Without all three prefixes the framework never initializes and
+		// our 30s timeout fires ("SDK did not initialize within 30s —
+		// Cast button will remain hidden").
+		//
+		// Each prefix is listed explicitly so the allowlist still
+		// excludes the rest of gstatic (recaptcha, Meet bundles, etc.)
+		// per the original security-review concern.
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com/cv/; "+
+				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com/cv/ https://www.gstatic.com/cast/ https://www.gstatic.com/eureka/; "+
 				"worker-src blob:; "+
 				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 				"font-src 'self' https://fonts.gstatic.com; "+
