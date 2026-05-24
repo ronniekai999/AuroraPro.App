@@ -419,26 +419,63 @@ input::placeholder, textarea::placeholder {
   animation: pulse-glow 2s ease-in-out infinite;
 }
 
-/* Card overlay actions */
+/* Card overlay actions
+ *
+ * QA BUG-001 — the previous layout centered the action buttons via
+ * `inset: 0; flex center`, putting the 44px Play button at the
+ * geometric center of every card. Users instinctively click center —
+ * they thought "click the poster" auto-played the title. The card's
+ * onClick already navigates to detail; only the Play button starts
+ * playback. Anchoring the buttons to the bottom-right corner with
+ * a small bias gives the Play button its own affordance while
+ * leaving the rest of the card's surface area to the detail-nav
+ * click target.
+ *
+ * BUG-009 — making the Play button visible-on-hover is the requested
+ * "on-card Play affordance"; the existing `.media-card::before`
+ * gradient + scale-lift transform handle the broader "this is
+ * interactive" hover cue.
+ */
 .card-actions {
   position: absolute;
-  inset: 0;
+  bottom: 8px;
+  right: 8px;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
+  gap: 8px;
   opacity: 0;
-  transition: opacity 0.3s ease;
+  /* translateY animates the button "in" from below on hover; subtle
+   * but signals direction so users notice the new affordance. */
+  transform: translateY(4px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
   z-index: 2;
+  /* pointer-events: none on the container is critical for touch
+   * devices that have no hover: the button DOM node would otherwise
+   * stay hit-testable while opacity:0, intercepting taps in the
+   * bottom-right corner and firing Play instead of bubbling to the
+   * card's onSelect (detail-nav). The hover rule below re-enables
+   * pointer-events only when the button is actually visible. */
+  pointer-events: none;
 }
 
 .media-card:hover .card-actions {
   opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
 }
 
 .action-btn {
-  width: 44px;
-  height: 44px;
+  /* Slightly smaller than the previous 44px center button — corner
+   * anchored buttons read as accessories rather than the primary CTA,
+   * which matches the actual UX intent (Play is one option; the card
+   * click going to Detail is the default).
+   *
+   * No box-shadow — the parent `.relative.overflow-hidden.rounded-xl`
+   * (~5 call sites) clips it to a sliver that contributes no lift.
+   * The :hover ::before gradient on .media-card provides enough
+   * background contrast for the white button to read clearly. */
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.95);
   border: none;
