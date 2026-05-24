@@ -1816,14 +1816,21 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 			return
 		}
 		// Append ?token= to .ts segment lines (not to #EXT directives).
-		// Trim \r from each line before checking the suffix — FFmpeg may
-		// produce playlists with \r\n line endings on some platforms.
+		// Trim \r from EVERY line — FFmpeg may produce playlists with
+		// \r\n line endings on some platforms, and stripping only the
+		// rewritten lines would produce a mixed-ending output (rewritten
+		// .ts lines get \n, EXT directives keep \r\n). HLS clients
+		// tolerate either but mixed endings are sloppy and have
+		// occasionally tripped third-party parsers. Normalize to \n
+		// throughout for a clean, consistent body.
 		tokenSuffix := "?token=" + queryToken
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			trimmed := strings.TrimRight(line, "\r")
 			if strings.HasSuffix(trimmed, ".ts") {
 				lines[i] = trimmed + tokenSuffix
+			} else {
+				lines[i] = trimmed
 			}
 		}
 		if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {
@@ -1995,12 +2002,17 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 			http.Error(w, "subtitle playlist not found", http.StatusNotFound)
 			return
 		}
+		// Normalize all lines to LF (matches the .ts rewriter above) —
+		// without the else-trim, EXT directives keep their \r and the
+		// output has mixed endings.
 		tokenSuffix := "?token=" + queryToken
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			trimmed := strings.TrimRight(line, "\r")
 			if strings.HasSuffix(trimmed, ".vtt") {
 				lines[i] = trimmed + tokenSuffix
+			} else {
+				lines[i] = trimmed
 			}
 		}
 		if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {

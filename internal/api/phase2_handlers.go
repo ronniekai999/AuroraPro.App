@@ -822,14 +822,30 @@ func (h *StreamHandler) requireSessionAccess(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
-	if claims.Scope == auth.ScopeCast && claims.SessionID != sessionID {
-		// A cast token may only access the session it was minted for.
-		// Treat as 403 rather than 404 — leaking session existence to
-		// a token-bearing principal is no worse than to its owner, but
-		// the wrong-session case is genuinely a permission error.
-		writeError(w, http.StatusForbidden, "cast token does not match session")
-		return false
+
+	// Cast-scoped tokens get a tighter, uniform-error check: a holder
+	// of cast token X for session A probing other sessionIDs must not
+	// be able to distinguish "B exists but isn't yours" (was 403) from
+	// "B does not exist" (was 404) — both leak information. Collapse
+	// to a single 403 regardless of session existence.
+	//
+	// Ownership is implicit: a cast token's SessionID was bound at
+	// mint time to a session the minter owned, so SessionID match
+	// alone is sufficient (and the TokenVersion check in middleware
+	// catches password-change revocation).
+	if claims.Scope == auth.ScopeCast {
+		owner := h.transcode.GetSessionOwner(sessionID)
+		if owner < 0 || claims.SessionID != sessionID {
+			writeError(w, http.StatusForbidden, "cast token does not grant access to this session")
+			return false
+		}
+		return true
 	}
+
+	// Regular access tokens: keep the existing 404 / 403 split. The
+	// information leak here is less severe because access tokens are
+	// account-scoped and short-lived (15min) — a logged-in user can
+	// already see most of their own resources via the regular API.
 	owner := h.transcode.GetSessionOwner(sessionID)
 	if owner < 0 {
 		writeError(w, http.StatusNotFound, "session not found")

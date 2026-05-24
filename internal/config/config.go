@@ -195,6 +195,11 @@ type yamlConfig struct {
 		AccessTokenMinutes int    `yaml:"access_token_minutes"`
 		RefreshTokenDays   int    `yaml:"refresh_token_days"`
 		CastTokenHours     int    `yaml:"cast_token_hours"`
+		// CastTokenMinutes lets operators configure sub-hour cast
+		// TTLs (e.g. 5 minutes to match a tight SessionTimeout).
+		// If both CastTokenHours and CastTokenMinutes are set,
+		// CastTokenMinutes wins (more granular).
+		CastTokenMinutes int `yaml:"cast_token_minutes"`
 	} `yaml:"auth"`
 	Scanner struct {
 		Workers         int    `yaml:"workers"`
@@ -477,6 +482,13 @@ func loadYAML(cfg *Config) error {
 	if yc.Auth.CastTokenHours > 0 {
 		cfg.Auth.CastTokenExpiry = time.Duration(yc.Auth.CastTokenHours) * time.Hour
 	}
+	// Minutes wins over hours when both are set — it's the more granular
+	// expression of intent. An operator who sets cast_token_minutes:5
+	// after a previous cast_token_hours:4 wants the new value to take
+	// effect without having to also clear the old one.
+	if yc.Auth.CastTokenMinutes > 0 {
+		cfg.Auth.CastTokenExpiry = time.Duration(yc.Auth.CastTokenMinutes) * time.Minute
+	}
 	if yc.Scanner.Workers > 0 {
 		cfg.Scanner.Workers = yc.Scanner.Workers
 	}
@@ -681,6 +693,11 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("CAST_TOKEN_HOURS"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil && i > 0 {
 			cfg.Auth.CastTokenExpiry = time.Duration(i) * time.Hour
+		}
+	}
+	if v := os.Getenv("CAST_TOKEN_MINUTES"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.Auth.CastTokenExpiry = time.Duration(i) * time.Minute
 		}
 	}
 	if v := os.Getenv("SCANNER_WORKERS"); v != "" {
