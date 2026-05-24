@@ -423,8 +423,15 @@ export function useCast(
 // Exposed as a named export so tests / other modules (e.g. an Android
 // sender that ever moves into the web bundle) can reuse the same
 // origin-joining logic.
+//
+// Handles four input shapes:
+//   - Already-absolute (https://host/p)   → passthrough
+//   - Scheme-relative  (//host/p)         → prepend current protocol
+//   - Root-relative    (/p)               → prepend window.location.origin
+//   - Bare path        (p)                → prepend origin + /
 export function absoluteUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) return path
+  if (path.startsWith('//')) return `${window.location.protocol}${path}`
   const origin = window.location.origin
   return path.startsWith('/') ? `${origin}${path}` : `${origin}/${path}`
 }

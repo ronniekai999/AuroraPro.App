@@ -791,17 +791,19 @@ func frontendHeaders(next http.Handler) http.Handler {
 		// for days after a deployment — causing missing UI elements, broken
 		// features, or JS errors when the API has changed.
 		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		// Chromecast Cast SDK loads from https://www.gstatic.com — added
-		// to script-src so the dynamic <script> tag injected by lib/cast.ts
-		// can execute. font-src already allowed fonts.gstatic.com; the new
-		// www.gstatic.com entry is for the Cast Sender JS bundle. We don't
-		// know yet whether the SDK makes any XHRs back to gstatic at runtime
-		// (most cast traffic flows through Chrome's native cast extension,
-		// not the page), so connect-src is left tight; if CSP errors appear
-		// after this lands, add gstatic.com to connect-src too.
+		// Chromecast Cast SDK loads from https://www.gstatic.com/cv/... —
+		// added to script-src so the dynamic <script> tag injected by
+		// lib/cast.ts can execute. Pinned to the /cv/ path prefix so the
+		// allowlist covers ONLY the Cast Sender bundle, not everything
+		// else served from gstatic (recaptcha, Meet, Hangouts, charts,
+		// etc.). font-src already allowed fonts.gstatic.com for Google
+		// Fonts. We don't know yet whether the SDK makes any XHRs back to
+		// gstatic at runtime (most cast traffic flows through Chrome's
+		// native cast extension, not the page), so connect-src is left
+		// tight; if CSP errors appear, add the specific URL to connect-src.
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
-				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com; "+
+				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com/cv/; "+
 				"worker-src blob:; "+
 				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 				"font-src 'self' https://fonts.gstatic.com; "+
