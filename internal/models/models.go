@@ -129,19 +129,25 @@ type AnchorRef struct {
 }
 
 type MediaFile struct {
-	ID             int64           `json:"id"`
-	MediaItemID    int64           `json:"media_item_id"`
-	Path           string          `json:"-"`
-	SizeBytes      int64           `json:"size_bytes"`
-	Container      string          `json:"container"`
-	VideoCodec     string          `json:"video_codec,omitempty"`
-	AudioCodec     string          `json:"audio_codec,omitempty"`
-	Resolution     string          `json:"resolution,omitempty"`
-	VersionTag     string          `json:"version_tag,omitempty"`
-	Bitrate        int64           `json:"bitrate,omitempty"`
-	DurationMs     int64           `json:"duration_ms,omitempty"`
-	VideoProfile   string          `json:"video_profile,omitempty"`
-	VideoPixFmt    string          `json:"video_pix_fmt,omitempty"`
+	ID           int64  `json:"id"`
+	MediaItemID  int64  `json:"media_item_id"`
+	Path         string `json:"-"`
+	SizeBytes    int64  `json:"size_bytes"`
+	Container    string `json:"container"`
+	VideoCodec   string `json:"video_codec,omitempty"`
+	AudioCodec   string `json:"audio_codec,omitempty"`
+	Resolution   string `json:"resolution,omitempty"`
+	VersionTag   string `json:"version_tag,omitempty"`
+	Bitrate      int64  `json:"bitrate,omitempty"`
+	DurationMs   int64  `json:"duration_ms,omitempty"`
+	VideoProfile string `json:"video_profile,omitempty"`
+	VideoPixFmt  string `json:"video_pix_fmt,omitempty"`
+	// Color metadata — distinguishes HDR (smpte2084 PQ / arib-std-b67
+	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
+	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
+	// Empty = unknown (treat as non-HDR, safer default).
+	ColorTransfer  string          `json:"color_transfer,omitempty"`
+	ColorPrimaries string          `json:"color_primaries,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
@@ -174,19 +180,25 @@ type Episode struct {
 }
 
 type EpisodeFile struct {
-	ID             int64           `json:"id"`
-	EpisodeID      int64           `json:"episode_id"`
-	Path           string          `json:"-"`
-	SizeBytes      int64           `json:"size_bytes"`
-	Container      string          `json:"container"`
-	VideoCodec     string          `json:"video_codec,omitempty"`
-	AudioCodec     string          `json:"audio_codec,omitempty"`
-	Resolution     string          `json:"resolution,omitempty"`
-	VersionTag     string          `json:"version_tag,omitempty"`
-	Bitrate        int64           `json:"bitrate,omitempty"`
-	DurationMs     int64           `json:"duration_ms,omitempty"`
-	VideoProfile   string          `json:"video_profile,omitempty"`
-	VideoPixFmt    string          `json:"video_pix_fmt,omitempty"`
+	ID           int64  `json:"id"`
+	EpisodeID    int64  `json:"episode_id"`
+	Path         string `json:"-"`
+	SizeBytes    int64  `json:"size_bytes"`
+	Container    string `json:"container"`
+	VideoCodec   string `json:"video_codec,omitempty"`
+	AudioCodec   string `json:"audio_codec,omitempty"`
+	Resolution   string `json:"resolution,omitempty"`
+	VersionTag   string `json:"version_tag,omitempty"`
+	Bitrate      int64  `json:"bitrate,omitempty"`
+	DurationMs   int64  `json:"duration_ms,omitempty"`
+	VideoProfile string `json:"video_profile,omitempty"`
+	VideoPixFmt  string `json:"video_pix_fmt,omitempty"`
+	// Color metadata — distinguishes HDR (smpte2084 PQ / arib-std-b67
+	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
+	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
+	// Empty = unknown (treat as non-HDR, safer default).
+	ColorTransfer  string          `json:"color_transfer,omitempty"`
+	ColorPrimaries string          `json:"color_primaries,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`

@@ -1373,6 +1373,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var filePath, container, videoCodec, audioCodec, resolution, videoPixFmt string
+	var colorTransfer, colorPrimaries string
 	var durationMs int64
 	var audioTracks []models.AudioTrack
 
@@ -1390,6 +1391,8 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		durationMs = f.DurationMs
 		audioTracks = f.AudioTracks
 		videoPixFmt = f.VideoPixFmt
+		colorTransfer = f.ColorTransfer
+		colorPrimaries = f.ColorPrimaries
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), fileID)
 		if err != nil {
@@ -1404,6 +1407,8 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		durationMs = f.DurationMs
 		audioTracks = f.AudioTracks
 		videoPixFmt = f.VideoPixFmt
+		colorTransfer = f.ColorTransfer
+		colorPrimaries = f.ColorPrimaries
 	}
 
 	// Synthesize a single-track list if no multi-track info stored
@@ -1457,10 +1462,26 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Detect HDR content: 10-bit video (HEVC, VP9, AV1) requires tonemapping
-	// when transcoded to 8-bit H.264 to prevent washed-out SDR output.
-	is10bit := strings.Contains(strings.ToLower(videoPixFmt), "10")
-	hdrTonemap := is10bit && pd.Decision == "transcode"
+	// Detect HDR content. The previous heuristic ("10-bit + transcode →
+	// tonemap") was wrong: plenty of SDR content is encoded in 10-bit
+	// (modern HEVC SDR remuxes, anime, etc.). Applying the zscale
+	// tonemap chain to SDR sources crashes FFmpeg with "no path between
+	// colorspaces" (zscale needs a known HDR transfer function as
+	// input). 2026-05-24 fix.
+	//
+	// Canonical HDR signal: color_transfer is one of "smpte2084" (PQ /
+	// HDR10) or "arib-std-b67" (HLG). color_primaries == "bt2020" is a
+	// less reliable secondary signal (wide-gamut SDR also uses bt2020).
+	//
+	// For files scanned before the color-metadata migration (color_*
+	// fields empty), we default to NO tonemap — washed-out SDR output
+	// is a much milder failure than total transcode crash. Users with
+	// real HDR content should re-scan to pick up the metadata, or
+	// pass hdr_tonemap=true explicitly on the session create payload.
+	isHDR := colorTransfer == "smpte2084" || colorTransfer == "arib-std-b67"
+	hdrTonemap := isHDR && pd.Decision == "transcode"
+	_ = videoPixFmt    // retained for future use (10-bit logging / metrics)
+	_ = colorPrimaries // retained for future use (wide-gamut SDR detection)
 
 	info := models.StreamInfo{
 		FileID:           fileID,

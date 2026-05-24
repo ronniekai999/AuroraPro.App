@@ -24,6 +24,13 @@ type ProbeResult struct {
 	VideoProfile string // e.g., "High", "High 10", "Main"
 	VideoPixFmt  string // e.g., "yuv420p", "yuv420p10le"
 
+	// Color metadata — needed to distinguish HDR (PQ/HLG) from SDR
+	// 10-bit. Without these, the transcode pipeline would mis-apply
+	// HDR-to-SDR tonemapping to SDR sources and crash zscale with
+	// "no path between colorspaces". 2026-05-24 fix.
+	ColorTransfer  string // e.g., "bt709", "smpte2084" (PQ), "arib-std-b67" (HLG)
+	ColorPrimaries string // e.g., "bt709", "bt2020"
+
 	// Multi-track info (Gap 2)
 	AudioTracks    []models.AudioTrack    `json:"audio_tracks,omitempty"`
 	SubtitleTracks []models.SubtitleTrack `json:"subtitle_tracks,omitempty"`
@@ -35,17 +42,19 @@ type ffprobeOutput struct {
 }
 
 type ffprobeStream struct {
-	Index       int               `json:"index"`
-	CodecType   string            `json:"codec_type"`
-	CodecName   string            `json:"codec_name"`
-	Profile     string            `json:"profile"`
-	PixFmt      string            `json:"pix_fmt"`
-	Level       int               `json:"level"`
-	Width       int               `json:"width"`
-	Height      int               `json:"height"`
-	Channels    int               `json:"channels"`
-	Tags        map[string]string `json:"tags"`
-	Disposition ffprobeDisp       `json:"disposition"`
+	Index          int               `json:"index"`
+	CodecType      string            `json:"codec_type"`
+	CodecName      string            `json:"codec_name"`
+	Profile        string            `json:"profile"`
+	PixFmt         string            `json:"pix_fmt"`
+	Level          int               `json:"level"`
+	Width          int               `json:"width"`
+	Height         int               `json:"height"`
+	Channels       int               `json:"channels"`
+	ColorTransfer  string            `json:"color_transfer"`  // e.g. "smpte2084", "arib-std-b67", "bt709"
+	ColorPrimaries string            `json:"color_primaries"` // e.g. "bt2020", "bt709"
+	Tags           map[string]string `json:"tags"`
+	Disposition    ffprobeDisp       `json:"disposition"`
 }
 
 type ffprobeDisp struct {
@@ -111,6 +120,8 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 				result.VideoCodec = stream.CodecName
 				result.VideoProfile = stream.Profile
 				result.VideoPixFmt = stream.PixFmt
+				result.ColorTransfer = stream.ColorTransfer
+				result.ColorPrimaries = stream.ColorPrimaries
 				if stream.Width > 0 && stream.Height > 0 {
 					result.Resolution = fmt.Sprintf("%dx%d", stream.Width, stream.Height)
 				}
