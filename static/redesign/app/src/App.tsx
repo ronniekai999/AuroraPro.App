@@ -4362,7 +4362,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
 /* ─────────────────────── SERVER PANEL ─────────────────────── */
 // ServerPanel fetches /api/admin/dashboard and polls every 5s while
 // open. Non-admins see a "admin-only" message.
-function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
+function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boolean; onClose: () => void }) {
   const [stats, setStats] = useState<ServerStats | null>(null)
   useEffect(() => {
     if (!open || !isAdmin) return
@@ -4396,26 +4396,45 @@ function ServerPanel({ open, isAdmin }: { open: boolean; isAdmin: boolean }) {
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
     ]
     : []
+  // QA BUG-005 — anchor near the Server Status trigger in the sidebar
+  // footer (bottom-left) instead of spanning the entire top of the
+  // content area. The previous `top-0 left-[240px] right-0` covered
+  // the global header (search, watch-party button, account avatar),
+  // making them unreachable while the panel was open. Mirroring the
+  // NotificationPanel layout (also a sidebar-footer trigger) but at
+  // ~480px wide to fit a 2-column tile grid.
+  //
   // z-[45] sits above the sticky top-bar stack (40) and below
   // ContextMenu (100) / modals (60s).
   return (
-    <div className="fixed top-0 left-[240px] right-0 bg-[#0a0a0f]/95 backdrop-blur-xl border-b border-white/[0.06] p-6 z-[45] animate-fade-in">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 max-w-5xl">
+    <div className="fixed bottom-4 left-[252px] w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto">
+      {/* No "Server Status" heading — the trigger button in the
+          sidebar (line ~960) already shows that label, and the panel
+          opens directly under it. Matching the NotificationPanel
+          pattern, we DO offer a close affordance for symmetry. */}
+      <button
+        onClick={onClose}
+        className="absolute top-3 right-3 text-white/40 hover:text-white transition-colors"
+        aria-label="Close server status"
+      >
+        <Icon name="x" size={16} />
+      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pr-6">
         {!isAdmin && <p className="text-white/40 text-sm col-span-full">Server status is admin-only.</p>}
         {isAdmin && !stats && <p className="text-white/40 text-sm col-span-full">Loading stats…</p>}
         {tiles.map(stat => (
-          <div key={stat.label} className="glass-panel rounded-xl p-4">
+          <div key={stat.label} className="glass-panel rounded-xl p-3">
             <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
                 stat.tone === 'warn' ? 'bg-amber-500/10 text-amber-400' :
                 stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40' :
                 'bg-emerald-500/10 text-emerald-400'
               }`}>
-                <Icon name={stat.icon} size={18} />
+                <Icon name={stat.icon} size={16} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <p className="text-white/50 text-xs">{stat.label}</p>
-                <p className="text-white text-lg font-bold">{stat.value}</p>
+                <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
             </div>
           </div>
@@ -5817,7 +5836,11 @@ export default function App() {
         notifCount={0 /* Real unread-count needs the global WS + server unread-state; show 0 until that lands rather than a permanently-wrong badge. */}
       />
 
-      <ServerPanel open={serverOpen} isAdmin={user.role === 'admin'} />
+      <ServerPanel
+        open={serverOpen}
+        isAdmin={user.role === 'admin'}
+        onClose={() => setServerOpen(false)}
+      />
 
       <NotificationPanel
         open={notifOpen}
