@@ -53,8 +53,20 @@ function ensureSdk(): Promise<void> {
         reject(new Error(`cast unavailable: ${reason ?? 'unknown'}`))
         return
       }
+      // Some Chromium builds invoke this callback with available=true
+      // BEFORE actually populating window.cast.framework. Dereferencing
+      // eagerly produces a TypeError that surfaces as a load-time
+      // console warning (QA BUG-008). Defer to the polling-based
+      // useCast hook instead — it's resilient to delayed framework
+      // availability and will pick up state once the namespace lands.
+      const fw = window.cast?.framework
+      if (!fw) {
+        sdkLoadState = 'ready'
+        resolve()
+        return
+      }
       try {
-        const ctx = window.cast!.framework.CastContext.getInstance()
+        const ctx = fw.CastContext.getInstance()
         // Bare-minimum options. autoJoinPolicy + resumeSavedSession
         // intentionally omitted — passing fw.AutoJoinPolicy.* can
         // evaluate to undefined on some SDK builds and cause the CAF
@@ -172,12 +184,15 @@ export function useCast(
 
     // Kick off the script load (best-effort — errors here are non-fatal
     // because we fall back to polling: even if the script's
-    // __onGCastApiAvailable callback never fires, we can still detect a
-    // populated window.cast.framework on subsequent ticks).
-    void ensureSdk().catch((e) => {
-      // eslint-disable-next-line no-console
-      console.warn('[Aurora Cast] ensureSdk rejected (will keep polling):', e)
-    })
+    // __onGCastApiAvailable callback never fires, we can still detect
+    // a populated window.cast.framework on subsequent ticks).
+    //
+    // We deliberately swallow rejections silently here: every failure
+    // mode (callback skipped, framework not yet ready, options call
+    // throws) is recoverable via the polling loop below. If polling
+    // ALSO times out after 30s, we log a definitive warning then —
+    // that's the one users should actually see.
+    void ensureSdk().catch(() => { /* polling fallback handles it */ })
 
     const tryAttach = (): boolean => {
       if (!mounted) return false
