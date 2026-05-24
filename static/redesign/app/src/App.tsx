@@ -525,7 +525,7 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
               </div>
             </div>
             <div className="mt-2 px-1">
-              <h3 className="text-white/90 text-sm font-medium truncate">{item.title}</h3>
+              <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
               <div className="flex items-center gap-2 mt-0.5">
                 {/* Phase 5.3 final QA — only render the star when
                     we actually have a rating. Continue Watching
@@ -1285,7 +1285,7 @@ function BrowseView({
               )}
             </div>
             <div className="mt-2">
-              <h3 className="text-white/90 text-sm font-medium truncate">{item.title}</h3>
+              <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
               <div className="flex items-center gap-2 mt-0.5">
                 {item.rating > 0 && (
                   <span className="text-yellow-400 text-xs flex items-center gap-0.5">
@@ -1441,8 +1441,13 @@ function DetailView({
     return () => { cancelled = true }
   }, [realPoster])
   const realGenre = (detail?.genres && detail.genres[0]) || media.genre
+  // QA BUG-013 — TMDB's TV detail returns per-episode runtime, not
+  // the series total. Append "/ep" for any episodic type (shows AND
+  // anime — anime is the same data model with a different label) so
+  // users don't read "0h 24m" as the total length of a multi-season
+  // series.
   const realRuntime = detail?.runtime_minutes
-    ? `${Math.floor(detail.runtime_minutes / 60)}h ${detail.runtime_minutes % 60}m`
+    ? `${Math.floor(detail.runtime_minutes / 60)}h ${detail.runtime_minutes % 60}m${media.type !== 'movie' ? ' / ep' : ''}`
     : media.duration
   // Server returns one CastMember[] for cast AND crew, discriminated
   // by role_type. Split here so cast renders as avatars and crew
@@ -1891,13 +1896,17 @@ function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue,
         </div>
       )}
 
-      {/* Saved items grid */}
+      {/* Saved items grid.
+          QA BUG-003 — the empty-state copy was "Your library is empty",
+          which read as contradictory when the Continue Watching rail
+          below it had items. Distinguish the two surfaces in the
+          copy: "saved titles" vs "in-progress watches". */}
       {library.length === 0 ? (
         <div className="text-center py-16">
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
-          <h3 className="text-white/70 text-lg mb-2">Your library is empty</h3>
+          <h3 className="text-white/70 text-lg mb-2">No saved titles yet</h3>
           <p className="text-white/40 text-sm max-w-md mx-auto">
-            Hover any title and click the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left to save it here.
+            Hover any title and click the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>
         </div>
       ) : filteredLibrary.length === 0 ? (
@@ -1933,7 +1942,7 @@ function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue,
                 </div>
               </div>
               <div className="mt-2">
-                <h3 className="text-white/90 text-sm font-medium truncate">{m.title}</h3>
+                <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{m.title}</h3>
                 <div className="flex items-center gap-2 mt-0.5">
                   {m.rating > 0 && (
                     <span className="text-yellow-400 text-xs flex items-center gap-0.5">
@@ -2004,7 +2013,7 @@ function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue,
                     )}
                   </div>
                   <div className="mt-2">
-                    <h3 className="text-white/90 text-sm font-medium truncate">{c.title}</h3>
+                    <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{c.title}</h3>
                     <span className="text-white/40 text-xs">{sub}</span>
                   </div>
                 </div>
@@ -2771,7 +2780,7 @@ function SearchView({ query, onSelect, onPlay, libraryIds, onToggleLib }: {
                 </div>
               </div>
               <div className="mt-2">
-                <h3 className="text-white/90 text-sm font-medium truncate">{item.title}</h3>
+                <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
                 <span className="text-white/40 text-xs">{item.year || ''}{item.genre ? ' · ' + item.genre : ''}</span>
               </div>
             </div>
@@ -3469,12 +3478,19 @@ function AdminSessionsTab() {
   return (
     <div className="glass-panel rounded-xl p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-white font-semibold">Active Streams</h3>
+        <h3 className="text-white font-semibold">Active Transcode Streams</h3>
         <button onClick={() => void reload()} className="text-white/60 hover:text-white text-xs">Refresh</button>
       </div>
+      {/* QA BUG-010 — direct-play streams don't create a
+          TranscodeSession (no FFmpeg pipeline, just byte-range
+          file serves), so they don't appear here. Clarify the
+          scope in the empty-state copy so a user playing
+          Direct-Play h264/aac isn't surprised the tab stays empty.
+          Tracking direct-play streams uniformly would need a
+          parallel session registry — deferred. */}
       {err && <p className="text-red-300 text-sm">{err}</p>}
       {items === null && <p className="text-white/40 text-sm">Loading…</p>}
-      {items && items.length === 0 && <p className="text-white/40 text-sm">No active streams.</p>}
+      {items && items.length === 0 && <p className="text-white/40 text-sm">No active transcode streams. Direct-play sessions (no transcode) are not tracked here.</p>}
       {items && items.length > 0 && (
         <table className="data-table w-full">
           <thead>
@@ -4096,6 +4112,11 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
           const labelOverride: Partial<Record<AdminTab, string>> = {
             llm: 'LLM',
             oauth: 'OAuth',
+            // QA BUG-010 follow-up — tab heading inside reads
+            // "Active Transcode Streams" but the nav label was
+            // just "Sessions", which read as generic and made
+            // direct-play streams' absence more confusing.
+            sessions: 'Transcodes',
           }
           const display = labelOverride[t]
           return (
@@ -4126,7 +4147,12 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                 {[
-                  { label: 'Total Media', value: (stats.movie_count + stats.show_count).toLocaleString(), icon: 'film', color: 'text-purple-400' },
+                  // QA BUG-002 — relabel "Total Media" → "Media File
+                  // Entries" so it reads as raw row count, not the
+                  // deduped title count users see on browse pages.
+                  // Same source as the Server Status tile: raw COUNT
+                  // includes cross-library duplicates.
+                  { label: 'Media File Entries', value: (stats.movie_count + stats.show_count).toLocaleString(), icon: 'film', color: 'text-purple-400' },
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
@@ -4445,7 +4471,13 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', tone: stats.disk_free_gb < 10 ? 'warn' : 'ok' },
       { label: 'Memory', value: `${stats.memory_alloc_mb} MB`, icon: 'zap', tone: 'ok' },
       { label: 'Library Size', value: fmtBytes(stats.total_file_size_bytes), icon: 'film', tone: 'ok' },
-      { label: 'Movies / Shows', value: `${stats.movie_count.toLocaleString()} · ${stats.show_count.toLocaleString()}`, icon: 'film', tone: 'ok' },
+      // QA BUG-002 — label as "Files" not "Titles" so users
+      // don't read this as conflicting with the Movies/Shows
+      // browse header (deduped library titles). Raw count
+      // includes cross-library duplicates (e.g. a film present
+      // in BOTH "Movies" and "4K Movies" libraries is counted
+      // twice here, once on the browse page).
+      { label: 'Files: Movies · Shows', value: `${stats.movie_count.toLocaleString()} · ${stats.show_count.toLocaleString()}`, icon: 'film', tone: 'ok' },
       { label: 'Users', value: String(stats.user_count), icon: 'users', tone: 'ok' },
       { label: 'Active Parties', value: String(stats.active_parties), icon: 'users', tone: 'ok' },
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
@@ -6255,6 +6287,26 @@ export default function App() {
                   description: '',
                 })
               }}
+              // QA BUG-007 — pass the same library affordance other
+              // surfaces (Movies/Shows/Search) already have. Map the
+              // ServerMediaItem to UIMedia carrying real poster/year/
+              // rating/genre so toggling into My Library persists the
+              // full record to localStorage (otherwise the stored
+              // entry shows up as a posterless year-0 placeholder
+              // until the next /api/media refresh re-hydrates it).
+              libraryIds={libraryIds}
+              onToggleLib={(m) => handleToggleLib({
+                id: m.id,
+                title: m.title,
+                year: m.year ?? 0,
+                rating: m.rating ?? 0,
+                duration: '',
+                genre: (m.genres && m.genres[0]) || '',
+                type: m.type,
+                poster: posterURL(m.poster_path),
+                backdrop: backdropURL(m.backdrop_path),
+                description: m.overview ?? '',
+              })}
             />
           )}
           {/* Phase 6 — Calendar view (upcoming TV episodes). */}

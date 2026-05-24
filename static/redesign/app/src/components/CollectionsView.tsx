@@ -19,9 +19,18 @@ interface Props {
   isAdmin: boolean
   onOpenCreate: () => void
   onOpenMedia: (id: number) => void
+  // QA BUG-007 — wire the same + button users see on Movies/Shows/Search.
+  // libraryIds is the set of media IDs currently in My Library;
+  // onToggleLib adds/removes via the full ServerMediaItem so the
+  // mapped UIMedia carries real poster/year/rating fields into
+  // localStorage. A stub-with-empties would clobber the persisted
+  // record on toggle. Both optional so the component still renders
+  // if a caller hasn't wired them yet.
+  libraryIds?: Set<number>
+  onToggleLib?: (m: ServerMediaItem) => void
 }
 
-export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia }: Props) {
+export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib }: Props) {
   const [collections, setCollections] = useState<Collection[] | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [items, setItems] = useState<ServerMediaItem[]>([])
@@ -110,6 +119,28 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia }: Props) {
                     className="w-full h-full object-cover"
                     loading="lazy"
                   />
+                  {/* QA BUG-007 — Add-to-Library + button, matching
+                      the affordance present on every other card surface
+                      (Movies / Shows / Search / Home rails). Top-left
+                      placement intentional: top-right is reserved for
+                      the admin remove-from-collection X below. */}
+                  {onToggleLib && (() => {
+                    const isInLib = !!libraryIds?.has(m.id)
+                    return (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onToggleLib(m) }}
+                        title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
+                        aria-label={isInLib ? `Remove ${m.title} from My Library` : `Add ${m.title} to My Library`}
+                        className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
+                          isInLib
+                            ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
+                            : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
+                        }`}
+                      >
+                        {isInLib ? '✓' : '+'}
+                      </button>
+                    )
+                  })()}
                   {isAdmin && (
                     <button
                       onClick={async (e) => {
@@ -141,7 +172,7 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia }: Props) {
                   )}
                 </div>
                 <div className="mt-2">
-                  <h3 className="text-white/90 text-sm font-medium truncate">{m.title}</h3>
+                  <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{m.title}</h3>
                   {m.year && (
                     <span className="text-white/40 text-xs">{m.year}</span>
                   )}

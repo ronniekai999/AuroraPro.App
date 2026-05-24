@@ -1502,6 +1502,11 @@ export interface ContinueWatchingItem {
   backdrop_path?: string
   type: 'movie' | 'show'
   year?: number
+  // QA BUG-007 — backend now selects mi.rating and attaches the
+  // first genre via GetMediaGenresBatch so CW cards have the same
+  // metadata as other rails.
+  rating?: number
+  genre?: string
   episode_title?: string
   season_number?: number
   episode_number?: number
@@ -1535,9 +1540,9 @@ export function mapContinueToMedia(c: ContinueWatchingItem): UIMedia {
     id: c.media_item_id,
     title: c.title,
     year: c.year || 0,
-    rating: 0,
+    rating: c.rating ?? 0,
     duration: '',
-    genre: '',
+    genre: c.genre ?? '',
     type: c.type === 'show' ? 'show' : 'movie',
     poster: posterURL(c.poster_path),
     backdrop: backdropURL(c.backdrop_path),

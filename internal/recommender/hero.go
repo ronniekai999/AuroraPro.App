@@ -604,9 +604,11 @@ You will receive:
 1. A short list of titles the user recently watched (their taste anchors). Each anchor lists its actual genres after an em dash, e.g. "Drake & Josh (2004) [show] — Comedy, Family".
 2. A numbered list of candidate titles (already pre-filtered by similarity to their taste), each with a short overview.
 
-Your job: pick exactly 5 candidates that best match the user's taste, and write a one-sentence "reason" for each — grounded in a specific anchor when possible (e.g. "Because you finished Severance" or "Slow-burn sci-fi like your weekend pick"). Reasons must be ≤ 80 characters, no emojis, no quotes.
+Your job: pick exactly 5 candidates that best match the user's taste, and write a one-sentence "reason" for each — grounded in a specific anchor when possible. Good shapes: "Because you finished Severance", "Slow-burn sci-fi like your weekend pick", "If you liked Drake & Josh". Reasons must be ≤ 80 characters, no emojis, no quotes.
 
-Important: when you reference an anchor's genre or vibe in a reason, you MUST use the genres listed alongside that anchor in the prompt — NOT what you remember about the title from training. If an anchor lists "Comedy, Family", describe it as comedy/family even if you'd otherwise call it something else. If the listed genres don't fit the candidate well, ground the reason in the candidate's own overview instead.
+Vocabulary: avoid the word "vibe" — it's been overused in past output. Prefer plain descriptors like "tone", "feel", "style", or just naming the genre directly. The phrase "vibe of [show]" specifically reads as filler; rewrite it.
+
+Important: when you reference an anchor's genre or tone in a reason, you MUST use the genres listed alongside that anchor in the prompt — NOT what you remember about the title from training. If an anchor lists "Comedy, Family", describe it as comedy/family even if you'd otherwise call it something else. If the listed genres don't fit the candidate well, ground the reason in the candidate's own overview instead.
 
 Respond with ONLY the JSON object. No preamble.`
 

@@ -1052,6 +1052,7 @@ func (q *Queries) GetContinueWatching(ctx context.Context, userID int64, limit i
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
 		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
 		FROM watch_progress wp
@@ -1079,6 +1080,7 @@ func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID in
 		SELECT wp.id, wp.user_id, COALESCE(wp.profile_id, 0), wp.media_item_id, wp.episode_id,
 		       wp.position_ms, wp.duration_ms, wp.completed, wp.updated_at,
 		       mi.title, COALESCE(mi.poster_path, ''), COALESCE(mi.backdrop_path, ''), mi.type, mi.year,
+		       COALESCE(mi.rating, 0),
 		       COALESCE(e.title, ''),
 		       s.season_number, e.episode_number
 		FROM watch_progress wp

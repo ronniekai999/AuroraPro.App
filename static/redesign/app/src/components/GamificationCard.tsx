@@ -89,7 +89,13 @@ export function GamificationCard() {
 
           <div className="flex items-center justify-between mt-4 pt-4 border-t border-white/[0.04]">
             <div>
-              <p className="text-white/40 text-xs">Total watches</p>
+              {/* QA BUG-003 — "Total watches" only increments on
+                  ≥90% completion (see internal/db/queries_gamification.go
+                  BumpWatchCount). Mid-watch Continue Watching items
+                  don't bump it. Relabel as "Completed" so users
+                  don't read 0 here while seeing 4 in-progress
+                  watches on the Library page as a sync bug. */}
+              <p className="text-white/40 text-xs">Completed</p>
               <p className="text-white/90 text-lg font-semibold">{xp.total_watches}</p>
             </div>
             <div className="text-right">
