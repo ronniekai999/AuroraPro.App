@@ -1105,6 +1105,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
 type BrowseSort = 'rating' | 'title' | 'year' | 'recent'
 function BrowseView({
   items, title, subtitle, total, sortBy, onSortChange,
+  genreFilter, onGenreChange,
   onLoadMore, isLoadingMore,
   onSelect, onPlay, onCardContext,
   libraryIds, onToggleLib,
@@ -1121,6 +1122,11 @@ function BrowseView({
   // re-sorted page 1).
   sortBy: BrowseSort
   onSortChange: (s: BrowseSort) => void
+  // Genre is ALSO parent-controlled (QA BUG-003) so it survives
+  // the moviesList=null intermediate state on sort changes.
+  // Empty string = "All Genres".
+  genreFilter: string
+  onGenreChange: (g: string) => void
   // Load More — appends the next page. Button is rendered only
   // when items.length < total. While in flight isLoadingMore is
   // true so the button can disable + show a spinner.
@@ -1137,7 +1143,6 @@ function BrowseView({
   // doesn't expose a genre filter, so this only filters within
   // loaded pages. Acceptable trade-off for now — flagging as a
   // backend follow-up to support server-side genre.
-  const [genreFilter, setGenreFilter] = useState('')
   const genres = ['All Genres', ...Array.from(new Set(items.map(i => i.genre)))]
 
   // No client-side sort — server is the source of truth. Just
@@ -1175,10 +1180,23 @@ function BrowseView({
         <p className="text-white/60 text-sm mt-2">
           {subtitle}
           <span className="text-white/30 mx-1.5">•</span>
-          {/* When the server has more items than we've loaded (per_page
-              caps at 100), show "N of M" rather than misleadingly
-              claiming the page-size is the whole library. */}
-          {total != null && total > items.length ? (
+          {/* Count display branches on whether a genre filter is
+              active. Without server-side genre support, we can only
+              honestly report the count of FILTERED items within the
+              loaded subset — not the true library-wide count for
+              that genre. QA BUG-002 fix: when filtering, show the
+              filtered count and a hint about partial visibility.
+              Guard matches the filter pass-through above (line ~1147):
+              both empty string AND the sentinel 'All Genres' map to
+              "no filter active". */}
+          {genreFilter && genreFilter !== 'All Genres' ? (
+            <>
+              <span className="text-white/90 font-medium">{filtered.length.toLocaleString()}</span> {genreFilter} title{filtered.length === 1 ? '' : 's'}
+              {total != null && total > items.length && (
+                <span className="text-white/40"> (in first {items.length.toLocaleString()} of {total.toLocaleString()} loaded)</span>
+              )}
+            </>
+          ) : total != null && total > items.length ? (
             <>
               Showing {items.length.toLocaleString()} of{' '}
               <span className="text-white/90 font-medium">{total.toLocaleString()}</span> title{total === 1 ? '' : 's'}
@@ -1198,7 +1216,7 @@ function BrowseView({
             <span className="text-white/40 text-sm">Genre:</span>
             <select
               value={genreFilter}
-              onChange={(e) => setGenreFilter(e.target.value)}
+              onChange={(e) => onGenreChange(e.target.value)}
               className="text-sm py-2 px-3"
             >
               {genres.map(g => <option key={g} value={g === 'All Genres' ? '' : g}>{g}</option>)}
@@ -4044,9 +4062,15 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
     if (!then) return iso
     const diff = Date.now() - then
     if (diff < 60_000) return 'just now'
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min ago`
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} hr ago`
-    return `${Math.floor(diff / 86_400_000)} days ago`
+    // QA BUG-007 — pluralize correctly for n === 1.
+    // "min" stays unchanged across counts (it's already abbreviated),
+    // "hr" / "day" pick the singular when n is exactly 1.
+    const mins = Math.floor(diff / 60_000)
+    if (diff < 3_600_000) return `${mins} min ago`
+    const hrs = Math.floor(diff / 3_600_000)
+    if (diff < 86_400_000) return `${hrs} ${hrs === 1 ? 'hr' : 'hrs'} ago`
+    const days = Math.floor(diff / 86_400_000)
+    return `${days} ${days === 1 ? 'day' : 'days'} ago`
   }
 
   return (
@@ -4426,14 +4450,28 @@ function NotificationPanel({ open, isAdmin, onClose }: {
     if (!t) return ''
     const diff = Date.now() - t
     if (diff < 60_000) return 'just now'
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min ago`
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} hr ago`
+    // Mirror the AdminView.fmtRelative shape above so future edits
+    // touch both consistently. "min" / "hr" / "d" are abbreviations
+    // that already read OK at n === 1 (no grammar issue like the
+    // "1 days ago" QA bug in the unabbreviated form), but the
+    // singular branch on "hr" keeps the two formatters aligned.
+    const mins = Math.floor(diff / 60_000)
+    if (diff < 3_600_000) return `${mins} min ago`
+    const hrs = Math.floor(diff / 3_600_000)
+    if (diff < 86_400_000) return `${hrs} ${hrs === 1 ? 'hr' : 'hrs'} ago`
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
   if (!open) return null
+  // QA BUG-006 — anchor near the Notifications trigger in the sidebar
+  // footer (bottom-left) instead of the top-left of the content area.
+  // The previous `top-0 left-[240px]` covered the page heading and
+  // looked unrelated to the button that opened it. `bottom-4` plus a
+  // bounded max-height keeps the panel reachable on short viewports
+  // (content scrolls inside).
+  //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="fixed top-0 left-[240px] w-[360px] max-h-[80vh] bg-[#0a0a0f]/95 backdrop-blur-xl border-r border-b border-white/[0.06] z-[45] animate-fade-in overflow-y-auto">
+    <div className="fixed bottom-4 left-[252px] w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">{isAdmin ? 'Recent Activity' : 'Notifications'}</h3>
         <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
@@ -4664,6 +4702,13 @@ export default function App() {
   type MediaSort = 'rating' | 'title' | 'year' | 'recent'
   const [moviesSort, setMoviesSort] = useState<MediaSort>('rating')
   const [showsSort, setShowsSort] = useState<MediaSort>('rating')
+  // Genre filter — QA BUG-003 fix. Previously this lived inside
+  // BrowseView, but changing Sort sets moviesList=null which
+  // unmounts BrowseView and resets its local state. Lifting to
+  // the parent keeps the user's genre selection across sort
+  // changes (and across the loading-skeleton intermediate state).
+  const [moviesGenre, setMoviesGenre] = useState('')
+  const [showsGenre, setShowsGenre] = useState('')
   const [moviesLoadingMore, setMoviesLoadingMore] = useState(false)
   const [showsLoadingMore, setShowsLoadingMore] = useState(false)
   // Track next-page-to-fetch in state rather than deriving from
@@ -5937,6 +5982,8 @@ export default function App() {
                   subtitle="Browse your movie collection"
                   sortBy={moviesSort}
                   onSortChange={handleMoviesSortChange}
+                  genreFilter={moviesGenre}
+                  onGenreChange={setMoviesGenre}
                   onLoadMore={handleLoadMoreMovies}
                   isLoadingMore={moviesLoadingMore}
                   onSelect={handleSelect}
@@ -5956,6 +6003,8 @@ export default function App() {
                   subtitle="Browse your series collection"
                   sortBy={showsSort}
                   onSortChange={handleShowsSortChange}
+                  genreFilter={showsGenre}
+                  onGenreChange={setShowsGenre}
                   onLoadMore={handleLoadMoreShows}
                   isLoadingMore={showsLoadingMore}
                   onSelect={handleSelect}
