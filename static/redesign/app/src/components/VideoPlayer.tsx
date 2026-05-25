@@ -1017,6 +1017,32 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     vid.addEventListener('pause', onPause)
     vid.addEventListener('seeked', onSeeked)
 
+    // 2026-05-25 — Race-recovery for host broadcast. The play event can
+    // fire BEFORE `party.isHost` resolves to true: when the player
+    // opens, hls.js often autoplays as soon as MANIFEST_PARSED fires,
+    // which can land in the same render where `party.state.hostUserId`
+    // is still undefined (it's set atomically with party-state but
+    // React's render order can split it from `playerTarget`). At that
+    // moment, App.tsx computes `isHost: party.state.hostUserId ===
+    // user.id` as `undefined === 1 → false`, the play listener
+    // captures isHost=false, hostShouldBroadcast() returns false, and
+    // request-play never goes out. Server's ps.IsPlaying stays false,
+    // brother never gets a tick, brother's auto-open never fires.
+    //
+    // The useEffect re-runs when party.isHost flips (it's in the
+    // dep array), so the second binding has isHost=true — but the
+    // play event has already passed; no new play event fires because
+    // the video is already playing locally.
+    //
+    // Fix: on every re-bind, if we're the host AND the video is
+    // already playing locally AND the party doesn't yet know,
+    // re-broadcast. This catches the race and any other timing edge
+    // that suppressed the initial play.
+    if (party.isHost && !vid.paused && !party.isPlaying && !isApplyingRemote() &&
+        (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)) {
+      party.requestPlay()
+    }
+
     return () => {
       window.clearInterval(id)
       vid.removeEventListener('play', onPlay)
