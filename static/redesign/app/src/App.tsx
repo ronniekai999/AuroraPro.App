@@ -6318,12 +6318,25 @@ export default function App() {
 
   // Start a watch party with this media. Creates a quick-party
   // server-side, joins it, and opens the panel.
+  //
+  // QA 2026-05-25 — production observed: detail-page Watch Party
+  // click → POST /api/parties → 201 → silent failure (no panel, no
+  // toast, no error, no WebSocket attempt). Root cause: party.join's
+  // preflight (GET /api/code/{code}/info) silently failed for a
+  // just-created party — possibly a race where the manager's
+  // in-memory state hadn't propagated to the GetCodeInfo path yet,
+  // or apiFetch's error swallow. The fix is two-pronged:
+  //   1. Pass skipPreflight=true here. We just created the party,
+  //      we don't need to verify it exists via a separate GET.
+  //   2. Log + toast on EVERY exit path (success, join-fail, throw)
+  //      so the user always sees something — no more silent state.
   const handleStartParty = useCallback(async (m: Media) => {
     if (party.state.code) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Leave the current party first.', type: 'info' }])
       return
     }
+    let createdCode: string | null = null
     try {
       const resp = await createQuickParty({
         media_item_id: m.id,
@@ -6332,7 +6345,8 @@ export default function App() {
         // double-proxying (e.g. `/api/images/w500//api/images/...`).
         media_poster: String(m.poster || '').replace(/^\/api\/images\/[^/]+\//, ''),
       })
-      const joinResult = await party.join(resp.code)
+      createdCode = resp.code
+      const joinResult = await party.join(resp.code, { skipPreflight: true })
       if (joinResult.ok) {
         setPartyPanelOpen(true)
         const id = nextToastId()
@@ -6343,18 +6357,30 @@ export default function App() {
         }])
       } else {
         // Server created the party but we couldn't join it. Surface
-        // the error so the admin knows the party exists.
+        // the error so the admin knows the party exists. Used to be
+        // possible to silently end up here with `joinResult.error`
+        // empty string — guard with a non-empty fallback.
         const id = nextToastId()
         setToasts(prev => [...prev, {
           id,
-          message: `Party ${resp.code} created but join failed: ${joinResult.error || 'unknown'}`,
+          message: `Party ${resp.code} created but join failed: ${joinResult.error || 'no error message returned (check console)'}`,
           type: 'error',
         }])
+        // eslint-disable-next-line no-console
+        console.error('[Aurora WatchParty] join failed after create', { code: resp.code, joinResult })
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start party'
       const id = nextToastId()
-      setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
+      setToasts(prev => [...prev, {
+        id,
+        message: createdCode
+          ? `Party ${createdCode} created but couldn't join: ${msg}`
+          : msg,
+        type: 'error',
+      }])
+      // eslint-disable-next-line no-console
+      console.error('[Aurora WatchParty] handleStartParty threw', { createdCode, err })
     }
   }, [party, nextToastId])
 

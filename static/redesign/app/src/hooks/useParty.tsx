@@ -113,7 +113,16 @@ export interface UseParty {
   // error } on failure. Audit M1 (Phase 4.5) — callers need the
   // synchronous error string because `state.error` is set via React
   // batched updates and isn't visible to the awaiter yet.
-  join: (code: string) => Promise<{ ok: boolean; error?: string }>
+  //
+  // QA 2026-05-25 — added `skipPreflight` so handleStartParty can
+  // bypass the GET /api/code/{code}/info check after createQuickParty.
+  // Production observed: detail-page Watch Party POST 201s, but the
+  // join's preflight returned 404 or wrong shape, silently leaving
+  // the party in the in-memory manager but never connecting the host
+  // (orphan party row, no UI feedback). When we JUST created the
+  // party, we know it's active — preflight is redundant + the source
+  // of the silent failure.
+  join: (code: string, opts?: { skipPreflight?: boolean }) => Promise<{ ok: boolean; error?: string }>
   // Tear down both sockets and clear state.
   leave: () => void
   sendChat: (message: string) => void
@@ -465,7 +474,7 @@ export function useParty(): UseParty {
     ws.onerror = () => { /* silent — onclose handles cleanup */ }
   }, [handleSyncMessage, setStatePatch])
 
-  const join = useCallback(async (rawCode: string): Promise<{ ok: boolean; error?: string }> => {
+  const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<{ ok: boolean; error?: string }> => {
     const code = rawCode.trim().toUpperCase()
     if (!/^[A-Z0-9]{6}$/.test(code)) {
       const error = 'Party code must be 6 letters or digits.'
@@ -480,21 +489,29 @@ export function useParty(): UseParty {
     // code. We don't deeply use the response yet (Phase 4.5 will
     // render an "offline room" panel) but we use the success/404 to
     // surface friendly errors before opening the WS.
-    try {
-      const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(code)}/info`)
-      // Backend distinguishes "active" (live party) from "offline_room"
-      // (persistent room with no live session). Only "active" is
-      // joinable — for "offline_room" surface a friendly message so
-      // the user knows to start the party from the room first.
-      if (info.type !== 'active') {
-        const error = 'That code is a persistent room; no live session right now.'
+    //
+    // QA 2026-05-25 — skip the preflight for create-then-join flows.
+    // Production observed the preflight failing silently for parties
+    // we JUST created, leaving the room socket unopened and the user
+    // staring at an unchanged detail page. We trust the caller when
+    // they say "I made this code, just join it."
+    if (!opts?.skipPreflight) {
+      try {
+        const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(code)}/info`)
+        // Backend distinguishes "active" (live party) from "offline_room"
+        // (persistent room with no live session). Only "active" is
+        // joinable — for "offline_room" surface a friendly message so
+        // the user knows to start the party from the room first.
+        if (info.type !== 'active') {
+          const error = 'That code is a persistent room; no live session right now.'
+          setStatePatch({ joining: false, error })
+          return { ok: false, error }
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : 'Invalid party code.'
         setStatePatch({ joining: false, error })
         return { ok: false, error }
       }
-    } catch (err) {
-      const error = err instanceof Error ? err.message : 'Invalid party code.'
-      setStatePatch({ joining: false, error })
-      return { ok: false, error }
     }
 
     const token = getAccessToken()
