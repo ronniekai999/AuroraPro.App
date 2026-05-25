@@ -50,7 +50,14 @@ export type OutboundSyncMessage =
   | { type: 'request-pause'; payload: { abs_ms: number } }
   | { type: 'request-seek'; payload: { abs_ms: number } }
   | { type: 'heartbeat'; payload: { abs_ms: number; buffering?: boolean } }
-  | { type: 'time-sync-request'; payload: { client_ms: number } }
+  // 2026-05-25 — server's actual protocol is `time-sync` (not
+  // `time-sync-request`), and the round-trip carries server_recv + server_send
+  // separately so the client can compute one-way latencies properly. The
+  // original placeholder type with {client_ms} never matched server reality
+  // (party_ws_v3_sync.go:207 expects {client_send_ms}). The optional
+  // measured_* fields let the client report its computed RTT/offset back to
+  // the server for observability (see manager.RecordRTT) — purely diagnostic.
+  | { type: 'time-sync'; payload: { client_send_ms: number; measured_rtt_ms?: number; measured_offset_ms?: number } }
 
 // ──────────────────────────────────────────────────────────────────
 // Wire types — inbound (server → client)
@@ -172,7 +179,15 @@ export type InboundSyncMessage =
   | { type: 'tick'; payload: TickPayload }
   | { type: 'pause'; payload: PauseSeekPayload }
   | { type: 'seek'; payload: PauseSeekPayload }
-  | { type: 'time-sync-response'; payload: { client_ms: number; server_ms: number } }
+  // 2026-05-25 — matches server response shape (party_ws_v3_sync.go:218).
+  // server_recv_ms is when the server received the client_send_ms,
+  // server_send_ms is when the server sent this response. The split lets
+  // the client distinguish server processing time from network RTT:
+  //   total_rtt = client_recv_ms - client_send_ms
+  //   server_proc = server_send_ms - server_recv_ms
+  //   network_rtt = total_rtt - server_proc
+  //   offset = ((server_recv_ms - client_send_ms) + (server_send_ms - client_recv_ms)) / 2
+  | { type: 'time-sync-response'; payload: { client_send_ms: number; server_recv_ms: number; server_send_ms: number } }
   | { type: 'party-ended' }
   | { type: 'error'; payload: { error: string } }
 

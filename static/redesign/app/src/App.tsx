@@ -7077,6 +7077,9 @@ export default function App() {
           requestPlay: party.requestPlay,
           requestPause: party.requestPause,
           requestSeek: party.requestSeek,
+          // 2026-05-25 — NTP-style clock offset for drift extrapolation.
+          // Filled by repeated time-syncs on the sync socket.
+          clockOffsetRef: party.clockOffsetRef,
         } : undefined}
       />
 
