@@ -26,6 +26,46 @@
     --input: 0 0% 14%;
     --ring: 270 91% 65%;
     --radius: 0.625rem;
+
+    /* Glow theme tokens — drive the white/purple edge + halo on
+       .glass-panel, .glass-card, and .media-card. Default is
+       "Aurora" (white border, purple-tinted halo). Users override
+       via Settings → Appearance → Glow Style, which writes
+       data-glow="subtle" | "heavy" on <html>. */
+    --glow-border: rgba(220, 200, 255, 0.22);
+    --glow-border-strong: rgba(220, 200, 255, 0.45);
+    --glow-halo:
+      0 0 0 1px rgba(220, 200, 255, 0.14),
+      0 0 28px rgba(168, 85, 247, 0.12),
+      0 0 56px rgba(255, 255, 255, 0.05);
+    --glow-halo-strong:
+      0 0 0 1px rgba(220, 200, 255, 0.25),
+      0 0 34px rgba(168, 85, 247, 0.20),
+      0 0 72px rgba(255, 255, 255, 0.08);
+  }
+
+  html[data-glow="subtle"] {
+    --glow-border: rgba(255, 255, 255, 0.10);
+    --glow-border-strong: rgba(255, 255, 255, 0.18);
+    --glow-halo:
+      0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 0 14px rgba(255, 255, 255, 0.04);
+    --glow-halo-strong:
+      0 0 0 1px rgba(255, 255, 255, 0.12),
+      0 0 18px rgba(255, 255, 255, 0.08);
+  }
+
+  html[data-glow="heavy"] {
+    --glow-border: rgba(220, 200, 255, 0.40);
+    --glow-border-strong: rgba(220, 200, 255, 0.65);
+    --glow-halo:
+      0 0 0 1px rgba(220, 200, 255, 0.28),
+      0 0 32px rgba(168, 85, 247, 0.30),
+      0 0 64px rgba(255, 255, 255, 0.12);
+    --glow-halo-strong:
+      0 0 0 1px rgba(220, 200, 255, 0.50),
+      0 0 48px rgba(168, 85, 247, 0.40),
+      0 0 96px rgba(255, 255, 255, 0.18);
   }
 
   body {
@@ -55,20 +95,22 @@
   .glass-panel {
     background: rgba(255, 255, 255, 0.03);
     backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--glow-border);
+    box-shadow: var(--glow-halo);
   }
 
   .glass-card {
     background: rgba(255, 255, 255, 0.04);
     backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glow-border);
+    box-shadow: var(--glow-halo);
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
   .glass-card:hover {
     background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(168, 85, 247, 0.25);
-    box-shadow: 0 8px 32px rgba(168, 85, 247, 0.12);
+    border-color: var(--glow-border-strong);
+    box-shadow: var(--glow-halo-strong);
   }
 
   .glow-purple {
@@ -198,6 +240,8 @@
   position: relative;
   overflow: hidden;
   border-radius: 12px;
+  border: 1px solid var(--glow-border);
+  box-shadow: var(--glow-halo);
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   cursor: pointer;
 }
@@ -215,7 +259,8 @@
 
 .media-card:hover {
   transform: translateY(-8px) scale(1.02);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(168, 85, 247, 0.15);
+  border-color: var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong), 0 20px 40px rgba(0, 0, 0, 0.6);
 }
 
 .media-card:hover::before {
