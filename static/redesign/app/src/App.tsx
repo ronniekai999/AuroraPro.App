@@ -5620,6 +5620,95 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [party.onMediaChange])
 
+  // 2026-05-25 — Guest auto-open-player. Symptom: in the EEJ7DB live test,
+  // the host clicked Play but nothing opened on the guest's end. Root
+  // cause: onMediaChange above only fires when the host SWITCHES media
+  // mid-party (server emits a `media-change` event), but the initial
+  // play case (guest already joined, host hits Play in their already-
+  // open player) only flows tick/play events on the sync socket —
+  // there's no media-change to subscribe to, so nothing in App.tsx ever
+  // opens the player for the guest, and the sync events go nowhere.
+  //
+  // Fix: watch (state.code, state.mediaItemId, state.isPlaying, user.id,
+  // state.hostUserId, playerTarget) and auto-open the guest's player
+  // when all of: in a party, we're not the host, media is set, host
+  // is playing, and we don't already have a player open. This also
+  // covers the "guest joined a party that was ALREADY playing" case —
+  // party-state arrives with isPlaying=true and the effect fires
+  // immediately.
+  //
+  // We deliberately do NOT auto-open if isPlaying is false — the
+  // lobby (with the I'm Ready button, chat, reactions) should remain
+  // visible until the host actually starts. Closing the player
+  // manually mid-party will allow this to re-fire on the next tick
+  // (state.isPlaying is sampled live), which is the desired "pop me
+  // back into the player" UX.
+  const guestAutoOpenGenRef = useRef(0)
+  useEffect(() => {
+    if (!user) return
+    if (!party.state.code) return
+    if (!party.state.mediaItemId) return
+    if (!party.state.isPlaying) return
+    if (party.state.hostUserId === user.id) return // we ARE the host
+    if (playerTarget) return // already has player open
+    const myGen = ++guestAutoOpenGenRef.current
+    const mediaItemId = party.state.mediaItemId
+    const episodeId = party.state.episodeId
+    void (async () => {
+      try {
+        if (episodeId) {
+          const seasonsRaw = await getSeasons(mediaItemId)
+          const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
+          let foundEp: ApiEpisode | null = null
+          let foundSeasonNum = 0
+          for (const s of seasons) {
+            const eps = await getEpisodes(mediaItemId, s.season_number)
+            const ep = eps.find(e => e.id === episodeId)
+            if (ep) { foundEp = ep; foundSeasonNum = s.season_number; break }
+          }
+          if (!foundEp) return
+          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          const file = pickFile(foundEp.files as EpisodeFile[] | undefined)
+          if (!file) return
+          const titleDetail = await getMedia(mediaItemId).catch(() => null)
+          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          setPlayerTarget({
+            mediaItemId,
+            fileId: file.id,
+            fileType: 'episode',
+            episodeId: foundEp.id,
+            title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
+            subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
+          })
+        } else {
+          const files = await getMediaFiles(mediaItemId)
+          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          const file = pickFile(files)
+          if (!file) return
+          const titleDetail = await getMedia(mediaItemId).catch(() => null)
+          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          setPlayerTarget({
+            mediaItemId,
+            fileId: file.id,
+            fileType: 'media',
+            title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
+          })
+        }
+      } catch (err) {
+        console.warn('[Aurora] guest auto-open resolve failed', err)
+      }
+    })()
+  }, [
+    user,
+    party.state.code,
+    party.state.mediaItemId,
+    party.state.episodeId,
+    party.state.isPlaying,
+    party.state.hostUserId,
+    party.state.mediaTitle,
+    playerTarget,
+  ])
+
   // Magic-link auto-join. The server redirects /p/{code} and
   // /r/{code} to {BASE}p/{code}; we extract the code and trigger
   // party.join. We strip the dynamic Vite base before regex-matching

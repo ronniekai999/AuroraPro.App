@@ -277,11 +277,23 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				h.sendErr(sc, err.Error())
 			}
 
-		case "mark-ready":
+		case "ready", "mark-ready":
 			// M5 — participant's "I'm ready to start watching" toggle for
 			// the spoiler-free start gate. Broadcasts updated participant
 			// state so the host's UI can show real-time readiness; host's
 			// request-play later evaluates the gate.
+			//
+			// 2026-05-25 — accept both "ready" and "mark-ready" because
+			// the client (useParty.tsx sendReady) sends "ready" while the
+			// server originally only accepted "mark-ready". Mismatch
+			// surfaced as `unknown message type (v3-room): ready` toasts
+			// during the EEJ7DB live test (host + every guest who clicked
+			// the I'm Ready button). Keeping "mark-ready" as an alias
+			// avoids breaking any internal callers / future tooling
+			// that already speak the original name. Note: V2's "ready"
+			// (party_ws.go) is a different semantic (buffering ready
+			// with PositionMs) — we're on the V3 socket here so there's
+			// no collision risk.
 			//
 			// Rate-limited via the same per-user tracker as chat (30/min).
 			// Each mark-ready triggers a full-participant-list broadcast
