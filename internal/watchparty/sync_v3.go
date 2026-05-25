@@ -153,7 +153,14 @@ func (m *Manager) broadcastToSyncPeers(ps *PartyState, msg map[string]interface{
 		conns = append(conns, c)
 	}
 	ps.mu.Unlock()
+	// 2026-05-25 — reset write deadline before each conn write to
+	// prevent the silent ErrDeadlineExceeded class of bug (see
+	// broadcastWriteTimeout comment in manager.go). Sync ticks fire
+	// frequently (every ~250ms while Running) so this is the most
+	// affected path of the four broadcast helpers.
+	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range conns {
+		_ = c.SetWriteDeadline(deadline)
 		if err := c.WriteMessage(1 /*TextMessage*/, data); err != nil {
 			slog.Debug("v3: sync write failed", "err", err, "code", ps.Code)
 		}
@@ -174,7 +181,15 @@ func (m *Manager) broadcastToRoomPeers(ps *PartyState, msg map[string]interface{
 		conns = append(conns, c)
 	}
 	ps.mu.Unlock()
+	// 2026-05-25 — reset write deadline before each broadcast write.
+	// See broadcastWriteTimeout doc in manager.go for the production
+	// bug this prevents (host gets initial party-state with 10s
+	// deadline set by the WS handler, deadline expires, every
+	// subsequent broadcast write silently fails with
+	// ErrDeadlineExceeded).
+	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range conns {
+		_ = c.SetWriteDeadline(deadline)
 		if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
 			slog.Debug("v3: room write failed", "err", err, "code", ps.Code)
 		}
@@ -260,10 +275,19 @@ func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc
 			"ready":    ps.Participants[userID].Ready,
 		},
 	})
+	// 2026-05-25 fix — set write deadline before each conn write.
+	// Without this, the host's stale 10s deadline from the initial
+	// party-state send had already expired by the time a brother joined
+	// (even seconds later), so this WriteMessage silently failed with
+	// ErrDeadlineExceeded and the host never saw the participant-join
+	// broadcast (even though server-side roomConns and Participants
+	// were correctly populated).
+	joinDeadline := time.Now().Add(broadcastWriteTimeout)
 	for uid, c := range ps.roomConns {
 		if uid == userID || c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(joinDeadline)
 		_ = c.WriteMessage(websocket.TextMessage, joinMsg)
 	}
 
@@ -299,6 +323,9 @@ func (m *Manager) JoinPartyV3Sync(code string, userID int64, sc *SafeConn) error
 	if err != nil {
 		return nil // non-fatal — tick broadcasts will still land
 	}
+	// 2026-05-25 — set fresh write deadline (see broadcastWriteTimeout
+	// doc in manager.go for the bug class this prevents).
+	_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
 	_ = sc.WriteMessage(websocket.TextMessage, data)
 	slog.Info("v3: participant joined (sync)", "code", code, "user_id", userID)
 	return nil
@@ -548,10 +575,15 @@ func (m *Manager) broadcastToRoomPeersLocked(ps *PartyState, msg map[string]inte
 	if err != nil {
 		return
 	}
+	// 2026-05-25 — reset write deadline before each conn write to
+	// prevent the silent ErrDeadlineExceeded class of bug (see
+	// broadcastWriteTimeout comment in manager.go).
+	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.roomConns {
 		if c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(deadline)
 		_ = c.WriteMessage(websocket.TextMessage, data)
 	}
 }
@@ -571,10 +603,15 @@ func (m *Manager) broadcastToSyncPeersLocked(ps *PartyState, msg map[string]inte
 	if err != nil {
 		return
 	}
+	// 2026-05-25 — reset write deadline before each conn write to
+	// prevent silent ErrDeadlineExceeded (see broadcastWriteTimeout
+	// comment in manager.go).
+	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.syncConns {
 		if c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(deadline)
 		_ = c.WriteMessage(websocket.TextMessage, data)
 	}
 }
@@ -814,10 +851,13 @@ func (m *Manager) emitTickLocked(ps *PartyState) {
 	if err != nil {
 		return
 	}
+	// 2026-05-25 — reset write deadline (see broadcastWriteTimeout).
+	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.syncConns {
 		if c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(deadline)
 		_ = c.WriteMessage(websocket.TextMessage, data)
 	}
 }

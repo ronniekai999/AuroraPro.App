@@ -180,6 +180,23 @@ const (
 // longest a single network glitch could plausibly take to recover.
 const HostDisconnectGracePeriod = 90 * time.Second
 
+// broadcastWriteTimeout — max time to wait for a single broadcast
+// write to land on a participant's conn before considering it dead.
+// 2026-05-25 fix: every broadcast helper now calls
+// `conn.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))`
+// IMMEDIATELY before WriteMessage. Without this reset, the initial
+// party-state send (which sets a 10s deadline via the WS handler at
+// party_ws_v3_room.go) leaks its expired deadline forward and silently
+// breaks every subsequent broadcast to the host — symptom in
+// production: brother joins, server registers count 1→2, but host
+// sees no participant-join, no chat, no reactions because every
+// WriteMessage returns ErrDeadlineExceeded after the 10s elapsed.
+//
+// 10s matches partyWriteWait used elsewhere — a healthy LAN/WAN write
+// completes in milliseconds; if it takes 10s the conn is genuinely
+// hosed and we want to mark it failed + clean up.
+const broadcastWriteTimeout = 10 * time.Second
+
 // PartyState is the authoritative in-memory state for an active watch party.
 // The mu field is a per-party mutex that protects mutable fields (CurrentTimeMs,
 // IsPlaying, PlayingSince, Participants, ChatHistory, conns).
@@ -1426,6 +1443,8 @@ func (m *Manager) JoinParty(code string, userID int64, username string, sc *Safe
 	if sc != nil {
 		stateMsg := m.BuildPartyStateMessage(ps)
 		if data, err := json.Marshal(stateMsg); err == nil {
+			// 2026-05-25 — set write deadline (see broadcastWriteTimeout).
+			_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
 			if err := sc.WriteMessage(websocket.TextMessage, data); err != nil {
 				slog.Debug("failed to send party state to joiner", "error", err)
 			}
@@ -1541,16 +1560,23 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	// V3 pools: broadcast the same signal on both sockets so clients
 	// speaking either protocol see the close. Piggybacks off the same
 	// message envelope; V3 clients will treat "party-ended" the same.
+	// 2026-05-25 — reset write deadline before each (see
+	// broadcastWriteTimeout). Critical here: if the host's conn has a
+	// stale expired deadline, the party-ended message never lands and
+	// the host's UI freezes on a dead party until they reload.
+	endDeadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.syncConns {
 		if c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(endDeadline)
 		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
 	}
 	for _, c := range ps.roomConns {
 		if c == nil {
 			continue
 		}
+		_ = c.SetWriteDeadline(endDeadline)
 		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
 	}
 
@@ -2837,6 +2863,19 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 		return
 	}
 
+	// 2026-05-25 — set a fresh write deadline before EACH conn write.
+	// Production bug: the WS handler set a 10s SetWriteDeadline on the
+	// host's conn when sending the initial party-state, and no other
+	// path reset it. After 10s, every subsequent broadcast write
+	// failed with ErrDeadlineExceeded — silently swallowed by the
+	// `_ = c.WriteMessage(...)` / "err := ; err != nil { log Debug; mark
+	// failed }" patterns below. Result: host sees no participant-join,
+	// chat, reactions, or any other server-pushed event after the
+	// 10-second mark, even though their WS is fully alive (their own
+	// reads + heartbeats keep arriving). Now: set deadline immediately
+	// before each Write so it never silently expires.
+	broadcastWriteDeadline := time.Now().Add(broadcastWriteTimeout)
+
 	// V2 conns pool (empty in V3-only deployments but kept for the case
 	// where V2 routes are re-added or tests inject V2 connections).
 	var failedV2 []int64
@@ -2848,6 +2887,7 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 			failedV2 = append(failedV2, uid)
 			continue
 		}
+		_ = conn.SetWriteDeadline(broadcastWriteDeadline)
 		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 			slog.Debug("failed to write to party participant (v2)", "user_id", uid, "error", err)
 			failedV2 = append(failedV2, uid)
@@ -2868,6 +2908,7 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 			failedRoom = append(failedRoom, uid)
 			continue
 		}
+		_ = conn.SetWriteDeadline(broadcastWriteDeadline)
 		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 			slog.Debug("failed to write to party participant (v3-room)", "user_id", uid, "error", err)
 			failedRoom = append(failedRoom, uid)
@@ -2893,6 +2934,11 @@ func (m *Manager) sendToUserLocked(ps *PartyState, userID int64, msg interface{}
 		return
 	}
 
+	// 2026-05-25 — set fresh write deadline (see broadcastWriteTimeout
+	// doc earlier in this file). sendToUserLocked is the only direct-
+	// to-user write path; same silent-failure class as the broadcast
+	// helpers without this reset.
+	_ = conn.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
 		slog.Debug("failed to write to party participant", "user_id", userID, "error", err)
 		delete(ps.conns, userID)
