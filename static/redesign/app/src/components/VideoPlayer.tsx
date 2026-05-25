@@ -195,6 +195,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const [audioMenuOpen, setAudioMenuOpen] = useState(false)
   const [subsMenuOpen, setSubsMenuOpen] = useState(false)
   const [currentSubIndex, setCurrentSubIndex] = useState<number>(-1) // -1 = off
+  // Mirror of `currentSubIndex` for use inside hls.js event listeners
+  // that are registered once per play effect and would otherwise see
+  // a stale closure value. Updated whenever applySubtitle / the reset
+  // calls setCurrentSubIndex. Reading state via ref instead of closure
+  // is essential for the SUBTITLE_TRACK_SWITCH guard below — if we
+  // read stale -1, a level-switch event would wipe the user's picked
+  // sub mid-playback.
+  const currentSubIndexRef = useRef<number>(-1)
 
   // Phase 7 — custom-controls playback state. Mirrors the <video>
   // element via `*event` handlers below. All in REAL-FILE units so
@@ -402,6 +410,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     if (!target) return
     const vid = videoRef.current
     if (!vid) return
+    // Mirror to ref so hls.js event listeners see the latest pick.
+    currentSubIndexRef.current = index
     // Remove any existing track first.
     if (activeTrackRef.current) {
       try {
@@ -536,6 +546,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           activeTrackRef.current = null
         }
         setCurrentSubIndex(-1)
+        currentSubIndexRef.current = -1
 
         const resumeSec = (target.resumePositionMs && target.resumePositionMs > 0)
           ? Math.floor(target.resumePositionMs / 1000)
@@ -664,6 +675,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         hls.loadSource(masterUrl)
         hls.attachMedia(vid)
 
+        // QA 2026-05-25 (round 4) — hls.js manages SUBTITLES groups
+        // from the m3u8 master via its OWN internal track state
+        // (`hls.subtitleTrack`), separate from the DOM TextTracks
+        // list. When the master has `DEFAULT=YES` on a SUBTITLES
+        // group (which ffmpeg's subtitle pass-through emits for any
+        // file with embedded subs), hls.js promotes that track and
+        // enables it BEFORE MANIFEST_PARSED fires — and even if we
+        // call `disableAllTextTracks(vid)` after, hls.js will
+        // re-enable it on the next subtitle-track update event.
+        //
+        // The browser-visible bug: every playback started with
+        // English subs auto-on, regardless of our DOM-level disable.
+        // Verified at aurorapro.app on 2026-05-25: vid.textTracks[0]
+        // mode = 'showing' throughout playback.
+        //
+        // Fix: tell hls.js itself that NO subtitle track should be
+        // selected. Our picker still works via the separate <track>
+        // element / VTT extraction path; we just need hls.js to
+        // stop fighting us over the m3u8's DEFAULT hint.
+        try { hls.subtitleTrack = -1 } catch { /* hls.js property */ }
+        try { hls.subtitleDisplay = false } catch { /* defensive */ }
+
         // When the server -ss'd, HLS time 0 IS the resume position
         // already, so don't seek client-side. When start_sec=0 but
         // resumeSec>0 (server didn't honour our offset for some
@@ -684,12 +717,37 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // the source of truth for subs; the m3u8's hint is just
           // metadata.
           disableAllTextTracks(vid)
+          // Re-assert the hls.js-level disable here too — hls.js's
+          // SUBTITLE_TRACKS_UPDATED can fire AFTER MANIFEST_PARSED
+          // and re-promote DEFAULT tracks; this idempotent set keeps
+          // them off until the user opts in via the picker.
+          try { hls.subtitleTrack = -1 } catch { /* defensive */ }
           const newSubsHls = info.subtitles || []
           if (subToRestore >= 0 && newSubsHls.some(s => s.index === subToRestore)) {
             applySubtitle(subToRestore)
           }
           vid.play().catch(() => { /* autoplay-blocked, user clicks play */ })
         })
+
+        // Belt-and-suspenders: if hls.js fires SUBTITLE_TRACKS_UPDATED
+        // (master playlist parsed) or SUBTITLE_TRACK_SWITCHED (track
+        // changed by ABR / DEFAULT hint), force the index back to -1
+        // unless the user has explicitly picked one via our picker.
+        // This is the event hls.js uses to re-promote DEFAULT tracks
+        // after parsing the subtitle playlist, which is what was
+        // sneaking past our MANIFEST_PARSED disable.
+        const enforceNoAutoSub = () => {
+          // CRITICAL: read via ref. This listener is registered once
+          // per play effect and would capture a stale closure value.
+          // If we read stale -1 here after the user picks a sub via
+          // the picker, a level-switch SUBTITLE_TRACK_SWITCH event
+          // would silently wipe the user's selection mid-playback.
+          if (currentSubIndexRef.current >= 0) return // user picked one
+          try { hls.subtitleTrack = -1 } catch { /* defensive */ }
+          disableAllTextTracks(vid)
+        }
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, enforceNoAutoSub)
+        hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, enforceNoAutoSub)
 
         // Error handling — basic. V1's full ladder is in Phase 2.5.
         // We do the standard hls.js advisories: media errors → try
