@@ -184,7 +184,18 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// counter. No payload needed; the read itself is the value.
 			// Pure no-op on the server side.
 
-		case "chat-message":
+		case "chat", "chat-message":
+			// 2026-05-25 — accept both "chat" and "chat-message" for the
+			// same reason as "ready"/"mark-ready" (party_ws_v3_room.go
+			// above): the client (useParty.tsx sendChat) sends "chat"
+			// while the server originally only accepted "chat-message".
+			// Mismatch surfaced as silently-dropped chat messages
+			// during the M76PQA live test — host typed chats, no one
+			// saw them, no error toast because the chat input doesn't
+			// surface the WebSocket "error" response. Keeping
+			// "chat-message" as an alias so any internal callers /
+			// future tooling that already speak the original name
+			// keep working.
 			codeMu.Lock()
 			code := currentCode
 			codeMu.Unlock()

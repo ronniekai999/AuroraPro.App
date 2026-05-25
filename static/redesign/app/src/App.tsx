@@ -5649,6 +5649,14 @@ export default function App() {
     if (!party.state.code) return
     if (!party.state.mediaItemId) return
     if (!party.state.isPlaying) return
+    // 2026-05-25 — require hostUserId to actually be set before
+    // making the host vs guest decision. Without this null-check,
+    // a transient render where state.code/mediaItemId/isPlaying are
+    // populated but state.hostUserId is briefly undefined would
+    // evaluate `undefined === user.id` as false, slip past the host
+    // guard, and auto-open the host's player as if they were a
+    // guest. Fix: bail if hostUserId hasn't arrived yet.
+    if (party.state.hostUserId == null) return
     if (party.state.hostUserId === user.id) return // we ARE the host
     if (playerTarget) return // already has player open
     const myGen = ++guestAutoOpenGenRef.current
