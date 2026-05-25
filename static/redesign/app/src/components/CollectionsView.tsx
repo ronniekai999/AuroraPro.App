@@ -28,14 +28,29 @@ interface Props {
   // if a caller hasn't wired them yet.
   libraryIds?: Set<number>
   onToggleLib?: (m: ServerMediaItem) => void
+  // QA 2026-05-25 — bumped by App.handleNavigate when the user clicks
+  // the Collections nav item while already on /collections. Acts as
+  // a "back to index" signal so the side-nav doubles as a back
+  // button from a collection detail view. Optional so callers that
+  // don't wire it just keep the old behavior (drill-down state
+  // sticky until the user clicks the in-page Back affordance).
+  rewindNonce?: number
 }
 
-export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib }: Props) {
+export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds, onToggleLib, rewindNonce }: Props) {
   const [collections, setCollections] = useState<Collection[] | null>(null)
   const [selected, setSelected] = useState<number | null>(null)
   const [items, setItems] = useState<ServerMediaItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadingItems, setLoadingItems] = useState(false)
+
+  // Re-click on the Collections nav resets to the index. Skip the
+  // initial render (nonce === 0 OR undefined) so first-paint doesn't
+  // wipe a selection set via deep-link.
+  useEffect(() => {
+    if (rewindNonce === undefined || rewindNonce === 0) return
+    setSelected(null)
+  }, [rewindNonce])
 
   // Initial list fetch.
   useEffect(() => {

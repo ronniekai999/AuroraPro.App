@@ -225,6 +225,11 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
     rss: <><path d="M4 11a9 9 0 019 9" /><path d="M4 4a16 16 0 0116 16" /><circle cx="5" cy="19" r="1" /></>,
     mic: <><path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z" /><path d="M19 10v2a7 7 0 01-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /><line x1="8" y1="23" x2="16" y2="23" /></>,
     circle: <circle cx="12" cy="12" r="10" />,
+    // Feather's "log-out" shape — used by the avatar dropdown for
+    // the Sign Out action. The hyphenated `log-out` is the canonical
+    // Feather name; keeping it here lets call sites use the standard
+    // name verbatim.
+    'log-out': <><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>,
   }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -423,7 +428,7 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
 }
 
 /* ─────────────────────── MEDIA RAIL ─────────────────────── */
-function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib }: {
+function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
@@ -439,6 +444,15 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
   // don't care about library state stay unchanged.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
+  // QA 2026-05-25 — "See All" was a non-functional button (no onClick)
+  // that the QA report flagged as misleading because clicking it did
+  // nothing (and felt like a scroll glitch since the rail itself
+  // scrolls horizontally when you drag). Now: optional callback;
+  // when supplied the button is shown and clickable, when not the
+  // button is hidden entirely. AI-curated rails (no dedicated page
+  // for them) skip it; "Top Rated Movies" etc. wire it to navigate
+  // to the right browse view with the matching sort.
+  onSeeAll?: () => void
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -446,9 +460,14 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
     <section className="mb-10">
       <div className="flex items-center justify-between mb-4 px-1">
         <h2 className="text-white text-xl font-semibold">{title}</h2>
-        <button className="flex items-center gap-1 text-white/40 hover:text-purple-400 text-sm transition-colors">
-          See All <Icon name="chevronRight" size={16} />
-        </button>
+        {onSeeAll && (
+          <button
+            onClick={onSeeAll}
+            className="flex items-center gap-1 text-white/40 hover:text-purple-400 text-sm transition-colors"
+          >
+            See All <Icon name="chevronRight" size={16} />
+          </button>
+        )}
       </div>
       <div
         ref={scrollRef}
@@ -1019,7 +1038,23 @@ interface HomeViewProps {
   // `kind` is a stable discriminator. Don't use the user-visible
   // `title` for behavior: renaming or localizing it would silently
   // break the Continue Watching code path.
-  rails?: { title: string; items: Media[]; aspect: 'poster' | 'landscape'; kind?: 'continue-watching' }[]
+  rails?: {
+    title: string
+    items: Media[]
+    aspect: 'poster' | 'landscape'
+    kind?: 'continue-watching'
+    // QA 2026-05-25 — when present, MediaRail renders a clickable
+    // "See All" affordance that routes here. Built-in rails wire it
+    // ("Top Rated Movies" → /movies + sort=rating); curated/AI rails
+    // (no dedicated browse page) leave it undefined so the button
+    // hides — no more misleading clicks that do nothing.
+    seeAllTarget?: { view: 'movies' | 'shows'; sortBy?: 'rating' | 'recent' | 'title' | 'year' }
+  }[]
+  // App-level navigation callback so HomeView can request a route
+  // change for See All clicks. Optional so the type stays backwards
+  // compatible with renderers that don't wire it (the See All button
+  // simply won't appear in that case).
+  onNavigate?: (view: string, opts?: { sortBy?: 'rating' | 'recent' | 'title' | 'year' }) => void
   loading?: boolean
   error?: string | null
   onRetry?: () => void
@@ -1041,7 +1076,7 @@ interface HomeViewProps {
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1092,6 +1127,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
               else onPlay(m)
             }
           : onPlay
+        const seeAllHandler = rail.seeAllTarget && onNavigate
+          ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
+          : undefined
         return (
           <MediaRail
             key={`${rail.title}-${i}`}
@@ -1103,6 +1141,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
             onCardContext={onCardContext}
             libraryIds={libraryIds}
             onToggleLib={onToggleLib}
+            onSeeAll={seeAllHandler}
           />
         )
       })}
@@ -2112,6 +2151,14 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
 // TMDB search + create dialog.
 function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
   const [filter, setFilter] = useState<'all' | 'pending' | 'processing' | 'available' | 'failed'>('all')
+  // QA 2026-05-25 — request cards looked clickable but didn't do
+  // anything when clicked. The request carries `overview` text from
+  // TMDB that we were fetching and storing but never rendering. Now:
+  // clicking a card toggles an inline overview reveal. Tracks which
+  // request IDs are currently expanded so multiple can be open at
+  // once. Closes on a second click. Stays a no-op if overview is
+  // empty (some older TMDB entries have nothing).
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
   // Inline TMDB search + create dialog.
   const [createOpen, setCreateOpen] = useState(false)
   const [searchQ, setSearchQ] = useState('')
@@ -2266,8 +2313,24 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
+            const isExpanded = expanded.has(req.id)
+            const hasOverview = !!req.overview && req.overview.trim().length > 0
+            const toggle = () => {
+              if (!hasOverview) return
+              setExpanded(prev => {
+                const next = new Set(prev)
+                if (next.has(req.id)) next.delete(req.id)
+                else next.add(req.id)
+                return next
+              })
+            }
             return (
-              <div key={req.id} className="glass-card rounded-xl p-4 flex gap-4">
+              <div key={req.id} className={`glass-card rounded-xl p-4 flex gap-4 ${hasOverview ? 'cursor-pointer hover:bg-white/[0.02] transition-colors' : 'cursor-default'}`}
+                onClick={toggle}
+                role={hasOverview ? 'button' : undefined}
+                aria-expanded={hasOverview ? isExpanded : undefined}
+                aria-label={hasOverview ? `${req.title}, click to ${isExpanded ? 'hide' : 'show'} overview` : undefined}
+              >
                 <div className="w-[70px] h-[105px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
                   {poster ? <img src={poster} alt={req.title} className="w-full h-full object-cover" /> : null}
                 </div>
@@ -2278,6 +2341,9 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                     {req.quality_4k && <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px]">4K</span>}
                     {req.quality_1080p && <span className="badge-glass bg-white/[0.04] text-white/60 border border-white/[0.06] text-[10px]">1080p</span>}
                   </div>
+                  {hasOverview && isExpanded && (
+                    <p className="text-white/60 text-xs mb-2 leading-relaxed">{req.overview}</p>
+                  )}
                   {req.error_message && (
                     // Phase 5.3 final QA — show humanized error in
                     // the body; keep the raw server response in the
@@ -2294,7 +2360,12 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                       <span className="text-white/30 text-xs">{formatRequestDate(req.requested_at)}</span>
                       {(req.status === 'pending' || req.status === 'failed') && (
                         <button
-                          onClick={async () => {
+                          onClick={async (e) => {
+                            // Wrap click stops propagation to the
+                            // newly-clickable card wrapper — without
+                            // this, clicking delete also toggles the
+                            // overview expand.
+                            e.stopPropagation()
                             if (!window.confirm(`Delete request for "${req.title}"?`)) return
                             try {
                               await deleteRequest(req.id)
@@ -4817,9 +4888,125 @@ function pathToView(pathname: string): string {
   return VIEW_BY_PATH['/' + (first ?? '')] ?? 'home'
 }
 
+/* ─────────────────────── USER MENU (avatar dropdown) ─────────────────────── */
+// Top-bar avatar opens a small menu instead of deep-scrolling to the
+// Settings → Account section. Standard expectation (Plex / Netflix /
+// Jellyfin all expose Profile / Settings / Sign Out via the avatar).
+//
+// Closes on: outside click, Escape, route change (any setView via
+// onNavigate also flips `open` shut). The trigger toggles open state
+// so re-clicking the avatar dismisses without needing to outside-click.
+function UserMenu({
+  user,
+  onNavigate,
+  onSignOut,
+}: {
+  user: ApiUser
+  onNavigate: (v: string) => void
+  onSignOut: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDocClick = (e: MouseEvent) => {
+      if (!rootRef.current) return
+      if (rootRef.current.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        triggerRef.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const go = (view: string) => {
+    setOpen(false)
+    onNavigate(view)
+  }
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen(o => !o)}
+        title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white font-bold text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/60"
+      >
+        {user.username[0]?.toUpperCase() || 'U'}
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 mt-2 w-56 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[50] overflow-hidden animate-fade-in"
+        >
+          {/* Header — show identity so users with multiple accounts
+              know which one is signed in. role=admin gets a small
+              chip; non-admin users get a clean header. */}
+          <div className="px-4 py-3 border-b border-white/[0.06]">
+            <p className="text-white text-sm font-medium truncate">{user.username}</p>
+            <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
+              {user.role === 'admin' ? (
+                <>
+                  <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
+                  Account
+                </>
+              ) : 'Account'}
+            </p>
+          </div>
+          <button
+            role="menuitem"
+            onClick={() => go('settings')}
+            className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
+          >
+            <Icon name="settings" size={14} className="text-white/50" />
+            Settings
+          </button>
+          {user.role === 'admin' && (
+            <button
+              role="menuitem"
+              onClick={() => go('admin')}
+              className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
+            >
+              <Icon name="shield" size={14} className="text-white/50" />
+              Admin
+            </button>
+          )}
+          <div className="border-t border-white/[0.06] mt-1" />
+          <button
+            role="menuitem"
+            onClick={() => { setOpen(false); onSignOut() }}
+            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2"
+          >
+            <Icon name="log-out" size={14} className="text-red-400/60" />
+            Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   const [view, setView] = useState('home')
   const [prevView, setPrevView] = useState('home')
+  // Bumped every time the user clicks the current view's nav item.
+  // Views with internal drill-down state (CollectionsView's selected
+  // collection, future views) can subscribe via useEffect deps and
+  // reset back to their index. See handleNavigate's same-view branch.
+  const [navRewindNonce, setNavRewindNonce] = useState(0)
   // Tri-valued auth state: `null` = checking via /api/auth/me,
   // `false` = no session, ApiUser = logged in. The intermediate
   // null prevents flashing the login screen on reload.
@@ -4923,6 +5110,13 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [serverOpen, setServerOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
+  // QA 2026-05-25 — popovers were sticking around after route
+  // changes. The Notifications + Server Status drawers are anchored
+  // to the sidebar trigger, but their state lived independent of
+  // `view`, so navigating away from Home left the popover floating
+  // over the new page until the user manually closed it. Auto-close
+  // both when `view` changes. Same effect mounts once and runs on
+  // every view transition — cheap, no extra deps needed.
   // QA BUG-012 — mobile sidebar drawer state. Below md (768px) the
   // sidebar is hidden by default and toggles in over content.
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false)
@@ -5105,6 +5299,35 @@ export default function App() {
   }, [])
 
   const handleNavigate = useCallback((v: string) => {
+    // QA 2026-05-25 — clicking the *current* view's nav item should
+    // act as "reset to list" for views with internal drill-down
+    // state. Bump a per-view nonce so child components can listen
+    // and clear their selection (e.g. CollectionsView popping back
+    // from a collection detail to the index). Other views ignore
+    // the nonce and the click is a no-op as before.
+    //
+    // The nonce only fires from in-app nav clicks. Browser back/
+    // forward and URL-driven navigation use the popstate-synced
+    // view effect (~L5279) which compares against the current view
+    // and short-circuits if equal — so a browser-back from
+    // /collections detail back to /collections won't bump the
+    // nonce. The pathname doesn't actually encode drill-down state
+    // (it's internal to CollectionsView), so this is consistent;
+    // calling out so future maintainers don't get surprised.
+    if (v === view) {
+      setNavRewindNonce(n => n + 1)
+      // Also close popovers — without this, the popover-close
+      // effect (keyed on `view`) wouldn't fire because `view`
+      // didn't change. Inconsistent UX otherwise: re-clicking
+      // Home with Notifications open would scroll-to-top but
+      // leave the popover floating.
+      setNotifOpen(false)
+      setServerOpen(false)
+      // Still scroll-to-top so a long Movies grid resets to the
+      // header — same UX as desktop apps re-clicking a tab.
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
     setPrevView(view)
     setView(v)
     setSelectedMedia(null)
@@ -5545,10 +5768,18 @@ export default function App() {
             : []),
         ]
         setHomeRails([
+          // Recently Added blends movies + shows so the See All
+          // can't honestly map to a single browse page — leave the
+          // affordance off rather than pick one arbitrarily.
           { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const },
           ...personalizedRails,
-          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const },
-          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const },
+          // Top Rated rails map cleanly to /movies and /shows with
+          // sortBy=rating (the default), so the See All button takes
+          // the user to the full Top Rated catalog.
+          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const,
+            seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
+          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const,
+            seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
         ])
       } catch (err) {
         if (cancelled) return
@@ -5566,6 +5797,15 @@ export default function App() {
 
   // Movies list — fetch on first visit, cache for the session.
   // Shows uses the same pattern below.
+  // QA Batch B 2026-05-25 — popovers auto-close on route change.
+  // Both Notifications + Server Status drawers anchor to the sidebar
+  // trigger but their open state was independent of `view`, so they
+  // floated over new pages until the user manually clicked them shut.
+  useEffect(() => {
+    setNotifOpen(false)
+    setServerOpen(false)
+  }, [view])
+
   useEffect(() => {
     if (!user || view !== 'movies' || moviesList !== null) return
     let cancelled = false
@@ -6310,14 +6550,16 @@ export default function App() {
                 ))}
               </select>
             )}
-            {/* User */}
-            <button
-              onClick={() => handleNavigate('settings')}
-              title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
-              className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white font-bold text-sm"
-            >
-              {user.username[0]?.toUpperCase() || 'U'}
-            </button>
+            {/* User — QA 2026-05-25: avatar now opens a dropdown menu
+                instead of deep-scrolling to the Account section of
+                Settings. The previous behavior surprised users who
+                expected a Plex/Netflix-style profile menu (Profile /
+                Settings / Sign Out). */}
+            <UserMenu
+              user={user}
+              onNavigate={(v) => handleNavigate(v)}
+              onSignOut={() => { void handleLogout() }}
+            />
           </div>
         </header>
         </div>{/* /sticky stack */}
@@ -6372,6 +6614,22 @@ export default function App() {
               heroPersonalization={heroPersonalization}
               libraryIds={libraryIds}
               onToggleLib={handleToggleLib}
+              onNavigate={(v, opts) => {
+                // QA 2026-05-25 — "See All" deep-link to a browse
+                // page with an explicit sort. If the destination's
+                // current sort doesn't match, route through the
+                // sort-change handler so the page resets list/total
+                // /cursor and refetches with the rail's sort. If it
+                // already matches, the cached list is correct and
+                // we skip the refetch.
+                if (opts?.sortBy && v === 'movies' && opts.sortBy !== moviesSort) {
+                  handleMoviesSortChange(opts.sortBy as MediaSort)
+                }
+                if (opts?.sortBy && v === 'shows' && opts.sortBy !== showsSort) {
+                  handleShowsSortChange(opts.sortBy as MediaSort)
+                }
+                handleNavigate(v)
+              }}
             />
           )}
           {/* M10 Phase 2 — Browse views use real API data when loaded.
@@ -6470,6 +6728,7 @@ export default function App() {
           {view === 'collections' && (
             <CollectionsView
               isAdmin={user.role === 'admin'}
+              rewindNonce={navRewindNonce}
               onOpenCreate={() => setCollectionsModalOpen(true)}
               onOpenMedia={(id) => {
                 // Synthesize a minimal Media shape for handleSelect;
