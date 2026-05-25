@@ -403,12 +403,14 @@ export async function listMedia(opts: {
   type?: 'movie' | 'show'
   perPage?: number
   sortBy?: 'recent' | 'rating' | 'title' | 'year'
+  genre?: string
   signal?: AbortSignal
 } = {}): Promise<UIMedia[]> {
   const params = new URLSearchParams()
   if (opts.type) params.set('type', opts.type)
   if (opts.perPage) params.set('per_page', String(opts.perPage))
   if (opts.sortBy) params.set('sort_by', opts.sortBy)
+  if (opts.genre) params.set('genre', opts.genre)
   const qs = params.toString()
   const path = qs ? `/api/media?${qs}` : '/api/media'
   const resp = await apiFetch<PaginatedResponse<ServerMediaItem>>(path, { signal: opts.signal })
@@ -421,11 +423,18 @@ export async function listMedia(opts: {
 // 100 of 2,394") instead of misleadingly claiming the page-size is
 // the whole library. The simple `listMedia` is kept for callers
 // (home rails, etc.) that only need items.
+//
+// `genre` is server-side. Threaded to the API as `?genre=...` so the
+// total reflects the *filtered* catalog count, not "filtered subset of
+// the loaded page" — which was the original BrowseView bug where
+// Horror+Top-Rated and Horror+A-Z returned different counts depending
+// on what subset of the catalog had been paginated in.
 export async function listMediaWithTotal(opts: {
   type?: 'movie' | 'show'
   perPage?: number
   page?: number
   sortBy?: 'recent' | 'rating' | 'title' | 'year'
+  genre?: string
   signal?: AbortSignal
 } = {}): Promise<{ items: UIMedia[]; total: number; page: number; perPage: number; totalPages: number }> {
   const params = new URLSearchParams()
@@ -433,6 +442,7 @@ export async function listMediaWithTotal(opts: {
   if (opts.perPage) params.set('per_page', String(opts.perPage))
   if (opts.page) params.set('page', String(opts.page))
   if (opts.sortBy) params.set('sort_by', opts.sortBy)
+  if (opts.genre) params.set('genre', opts.genre)
   const qs = params.toString()
   const path = qs ? `/api/media?${qs}` : '/api/media'
   const resp = await apiFetch<PaginatedResponse<ServerMediaItem>>(path, { signal: opts.signal })
@@ -443,6 +453,18 @@ export async function listMediaWithTotal(opts: {
     perPage: resp.per_page || 0,
     totalPages: resp.total_pages || 1,
   }
+}
+
+// listGenres returns the canonical list of genre names present in the
+// library, optionally narrowed to a single media type. Used by the
+// BrowseView dropdown so the genre set is stable across pagination
+// and sort changes — building the dropdown from `items.map(i => i.genre)`
+// only reflects the subset visible on the current page, which is the
+// root cause of the inconsistent genre-filter bug.
+export async function listGenres(type?: 'movie' | 'show', signal?: AbortSignal): Promise<string[]> {
+  const qs = type ? `?type=${encodeURIComponent(type)}` : ''
+  const resp = await apiFetch<{ genres: string[] }>(`/api/media/genres${qs}`, { signal })
+  return resp.genres || []
 }
 
 // Search the media library. Aurora has both a literal/trigram path

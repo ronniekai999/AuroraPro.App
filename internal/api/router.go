@@ -475,6 +475,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// bound is irrelevant for them.
 				r.Use(middleware.Timeout(100 * time.Second))
 				r.Get("/", mediaH.List)
+				r.Get("/genres", mediaH.ListGenres)
 				r.Get("/recent", mediaH.Recent)
 				r.Get("/search", mediaH.Search)
 				r.Get("/{id}", metaH.GetEnriched)
