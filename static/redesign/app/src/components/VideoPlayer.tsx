@@ -83,6 +83,13 @@ export interface PartySync {
   requestPlay: () => void
   requestPause: (absMs: number) => void
   requestSeek: (absMs: number) => void
+  // 2026-05-25 — NTP-style clock offset from server in ms. Lets the
+  // drift loop's `Date.now() - tick.server_now_ms` extrapolation work
+  // when client + server clocks aren't aligned. Optional because the
+  // first time-sync round-trip takes ~50ms after sync-socket open;
+  // when undefined OR null on first render we just don't apply it
+  // (the drift loop falls back to assuming offset = 0, same as before).
+  clockOffsetRef?: React.MutableRefObject<number>
 }
 
 export interface PlayTarget {
@@ -927,10 +934,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // ticks instead of jumping in 0.5-2s steps. Without extrapolation
     // the rate-adjust algorithm sees a sawtooth drift that it can't
     // converge on.
-    const DRIFT_IGNORE_MS = 200
-    const DRIFT_HARD_MS = 3000
-    const RATE_UP = 1.03
-    const RATE_DN = 0.97
+    // 2026-05-25 — tightened from the original (200/3000/1.03/0.97) to
+    // converge faster on the steady-state 1-2s drift observed during the
+    // KG4K7J / 7PRH73 live tests. Old values closed 1s of drift in ~33s
+    // (RATE_UP=1.03 gains 0.03s/s), so any persistent backpressure on
+    // the guest's HLS pipeline produced a stable 1-2s offset that the
+    // soft-correction couldn't catch. New constants:
+    //   DRIFT_IGNORE_MS 200 → 150 (tighter dead zone)
+    //   RATE_UP 1.03 → 1.06     (close 1s in ~17s, still smooth audio)
+    //   RATE_DN 0.97 → 0.94
+    //   DRIFT_HARD_MS 3000 → 1800 (snap >1.8s — combined with time-sync,
+    //                              hard-snaps should be rare in practice)
+    // Combined with the new time-sync clock-offset correction (below),
+    // expected steady-state drift drops to 300-600ms — meaningfully
+    // better than Plex/Jellyfin's typical 1-2s baseline.
+    const DRIFT_IGNORE_MS = 150
+    const DRIFT_HARD_MS = 1800
+    const RATE_UP = 1.06
+    const RATE_DN = 0.94
     const id = window.setInterval(() => {
       // Host doesn't pull from server tick (it IS the source of truth).
       if (party.isHost) return
@@ -967,7 +988,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // Extrapolate the tick by elapsed wall-clock since the server
       // emitted it. If the tick is older than ~3s, fall back to its
       // own abs_ms (server might be stalled or we're disconnected).
-      const elapsedMs = Math.max(0, Date.now() - t.server_now_ms)
+      //
+      // 2026-05-25 — apply NTP-style clock-offset correction. Without
+      // this, the subtraction `Date.now() - t.server_now_ms` carries
+      // the client's clock skew into elapsedMs, which becomes false
+      // drift. A guest with their machine clock running 800ms behind
+      // the server's would see persistent 800ms behind-target drift
+      // that no rate-correction could close (the target keeps moving
+      // away). The offset is filled by repeated time-syncs on the
+      // sync socket (see useParty.tsx).
+      const clockOffset = party.clockOffsetRef?.current ?? 0
+      const correctedNow = Date.now() + clockOffset
+      const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
       const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
       const targetSec = absMsToHlsSec(projectedAbsMs)
       const localSec = vid.currentTime
@@ -1514,6 +1546,46 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   </div>
                 )}
               </div>
+            )}
+            {/* 2026-05-25 — "Resync Now" button. Guest-only escape hatch
+                for when soft drift-correction hasn't caught up yet (e.g.
+                after a quick network blip, a long pause, or because the
+                guest's HLS pipeline is structurally a beat behind). Snaps
+                the local player to the host's projected target position.
+                Hidden for the host (would be a no-op + confusing UX) and
+                hidden outside a party. Equivalent in spirit to Plex's
+                "Sync" button + Jellyfin's "Re-sync" link. */}
+            {party && !party.isHost && (
+              <button
+                onClick={() => {
+                  const vid = videoRef.current
+                  const t = party.tickRef.current
+                  if (!vid || !t) return
+                  // Apply same clock-offset + extrapolation logic as
+                  // the steady-state drift loop so a manual click
+                  // lands on EXACTLY where the loop is targeting.
+                  // Without this, the button could undo all the
+                  // existing soft-corrections by snapping to a stale
+                  // tick position.
+                  const clockOffset = party.clockOffsetRef?.current ?? 0
+                  const correctedNow = Date.now() + clockOffset
+                  const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
+                  const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
+                  const targetSec = Math.max(0, (projectedAbsMs / 1000) - (startSecRef.current ?? 0))
+                  // Same 300ms suppression as the hard-snap path so
+                  // the resulting `seeked` event isn't re-broadcast
+                  // by the guest's onSeeked handler as a request-seek
+                  // (which would ping-pong every other guest).
+                  extendSuppression(300)
+                  try { vid.currentTime = targetSec } catch { /* defensive */ }
+                  vid.playbackRate = 1.0
+                }}
+                className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
+                aria-label="Resync to host"
+                title="Snap to host's current position"
+              >
+                ⟳ Sync
+              </button>
             )}
             {/* M10 Phase 4.5 — reaction picker (party only). */}
             {onSendReaction && (

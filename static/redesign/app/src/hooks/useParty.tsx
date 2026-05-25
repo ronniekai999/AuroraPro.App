@@ -164,6 +164,19 @@ export interface UseParty {
   // re-renders on every tick (which fires at 1-2 Hz).
   tickRef: React.MutableRefObject<TickPayload | null>
   helloAbsMsRef: React.MutableRefObject<number>
+  // 2026-05-25 — NTP-style clock offset from server, in ms.
+  // Use as: serverTime ≈ Date.now() + clockOffsetRef.current
+  // Without this correction, the drift-extrapolation in VideoPlayer
+  // (Date.now() - t.server_now_ms) is wrong by however much the
+  // client clock skews from the server's. Tested locally on a host
+  // with NTP off — saw 400-800ms steady-state drift on watch-party
+  // guests that disappeared after enabling sync. Filled by repeated
+  // time-sync round-trips on the sync socket.
+  clockOffsetRef: React.MutableRefObject<number>
+  // Most-recent measured round-trip-time, ms. Exposed for diagnostics
+  // (drift overlay) and so consumers can decide how much to trust the
+  // current offset estimate (high RTT variance ⇒ noisy estimate).
+  rttRef: React.MutableRefObject<number>
 }
 
 export function useParty(): UseParty {
@@ -172,6 +185,16 @@ export function useParty(): UseParty {
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
   const helloAbsMsRef = useRef<number>(0)
+  // 2026-05-25 — clock-offset estimation via repeated time-syncs.
+  // EMA-smoothed across samples (newest weighted 30%) so a single
+  // spike from a busy CPU doesn't blow the estimate.
+  const clockOffsetRef = useRef<number>(0)
+  const rttRef = useRef<number>(0)
+  // Tracks whether we've done the initial 5-shot burst since the sync
+  // socket opened. Cleared on sync-socket close so reconnects re-burst.
+  const timeSyncBurstDoneRef = useRef<boolean>(false)
+  // Interval handle for the steady-state 30s pings.
+  const timeSyncTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // The latest party-code we attempted to join. Used by reconnect
   // logic + to refuse late onmessage callbacks from a previous join
   // attempt the user already left.
@@ -257,8 +280,20 @@ export function useParty(): UseParty {
     }
   }, [])
 
+  // 2026-05-25 — stop time-sync interval. Called on sync-WS close so a
+  // dead socket doesn't keep firing send() into a closed FD (it would
+  // throw silently but still burn CPU). Re-armed on next openSyncSocket.
+  const stopTimeSync = useCallback(() => {
+    if (timeSyncTimerRef.current) {
+      clearInterval(timeSyncTimerRef.current)
+      timeSyncTimerRef.current = null
+    }
+    timeSyncBurstDoneRef.current = false
+  }, [])
+
   const closeSockets = useCallback(() => {
     stopHeartbeat()
+    stopTimeSync()
     cancelReconnect()
     if (syncWsRef.current) {
       try { syncWsRef.current.close() } catch { /* defensive */ }
@@ -270,7 +305,7 @@ export function useParty(): UseParty {
     }
     // Phase 4.6 — losing the room socket = voice is gone too.
     voiceRef.current?.onRoomSocketDown()
-  }, [stopHeartbeat, cancelReconnect])
+  }, [stopHeartbeat, stopTimeSync, cancelReconnect])
 
   const leave = useCallback(() => {
     // Mark this as user-initiated FIRST so any pending close handlers
@@ -523,6 +558,35 @@ export function useParty(): UseParty {
           setState(INITIAL_STATE)
         }, 50)
         break
+      case 'time-sync-response': {
+        // 2026-05-25 — NTP-style clock offset estimation. Standard
+        // formula assuming symmetric one-way latency:
+        //   offset ≈ ((server_recv - client_send) + (server_send - client_recv)) / 2
+        //   rtt    ≈ (client_recv - client_send) - (server_send - server_recv)
+        //
+        // The split server_recv/server_send terms separate network RTT
+        // from server processing time — if the server queues the response
+        // for, say, 5ms, that 5ms shouldn't inflate our RTT estimate. The
+        // protocol's authors clearly knew what they were doing.
+        //
+        // EMA smoothing across samples (30% new, 70% existing) absorbs
+        // single-sample spikes from a busy CPU / TCP delayed-ack /
+        // network jitter without drifting too slowly to react to real
+        // clock drift on long sessions.
+        const p = msg.payload
+        const clientRecvMs = Date.now()
+        const newOffset = ((p.server_recv_ms - p.client_send_ms) + (p.server_send_ms - clientRecvMs)) / 2
+        const newRtt = (clientRecvMs - p.client_send_ms) - (p.server_send_ms - p.server_recv_ms)
+        if (rttRef.current === 0) {
+          // First sample: take it raw (no history to blend with).
+          clockOffsetRef.current = newOffset
+          rttRef.current = newRtt
+        } else {
+          clockOffsetRef.current = 0.7 * clockOffsetRef.current + 0.3 * newOffset
+          rttRef.current = 0.7 * rttRef.current + 0.3 * newRtt
+        }
+        break
+      }
       case 'error':
         setStatePatch({ error: msg.payload.error })
         break
@@ -669,6 +733,41 @@ export function useParty(): UseParty {
         pendingSyncIntentRef.current = null
         try { ws.send(JSON.stringify(pending)) } catch { /* defensive */ }
       }
+      // 2026-05-25 — start clock-offset estimation via repeated
+      // time-syncs. We use a 5-shot burst at 250ms intervals to get a
+      // fast, reasonably-accurate initial estimate (single-sample RTT
+      // can vary by 100ms+ depending on the OS scheduler, batching 5
+      // and EMA-smoothing converges quickly), then settle to a 30s
+      // steady-state ping to catch any clock drift on long sessions.
+      //
+      // The 30s cadence is chosen to be much faster than typical OS
+      // clock drift (usually <1ms/s) but slow enough that we don't
+      // spam the server. Each time-sync is ~50 bytes, so 2 messages/
+      // minute is negligible.
+      const sendTimeSync = () => {
+        if (syncWsRef.current !== ws) return // stale
+        if (ws.readyState !== WebSocket.OPEN) return
+        const payload = {
+          client_send_ms: Date.now(),
+          // Send our last-measured RTT/offset back to the server for
+          // observability (manager.RecordRTT logs it). Optional fields —
+          // server ignores zeroes from our first-ever ping.
+          measured_rtt_ms: Math.round(rttRef.current),
+          measured_offset_ms: Math.round(clockOffsetRef.current),
+        }
+        const m: OutboundSyncMessage = { type: 'time-sync', payload }
+        try { ws.send(JSON.stringify(m)) } catch { /* defensive */ }
+      }
+      if (!timeSyncBurstDoneRef.current) {
+        timeSyncBurstDoneRef.current = true
+        // 5-shot burst at 250ms spacing. First fires immediately.
+        sendTimeSync()
+        for (let i = 1; i < 5; i++) {
+          setTimeout(sendTimeSync, i * 250)
+        }
+      }
+      stopTimeSync()
+      timeSyncTimerRef.current = setInterval(sendTimeSync, 30_000)
     }
     ws.onmessage = ev => {
       // Audit M3 (P4) — drop messages from a stale ws. If the user
@@ -681,10 +780,13 @@ export function useParty(): UseParty {
       if (syncWsRef.current === ws) {
         syncWsRef.current = null
         setStatePatch({ syncConnected: false })
+        // Stop pinging into a closed socket. Reconnect (when it
+        // exists for the sync socket) will re-arm via onopen.
+        stopTimeSync()
       }
     }
     ws.onerror = () => { /* silent — onclose handles cleanup */ }
-  }, [handleSyncMessage, setStatePatch])
+  }, [handleSyncMessage, setStatePatch, stopTimeSync])
 
   const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<{ ok: boolean; error?: string }> => {
     const code = rawCode.trim().toUpperCase()
@@ -833,6 +935,8 @@ export function useParty(): UseParty {
     requestSeek,
     tickRef,
     helloAbsMsRef,
+    clockOffsetRef,
+    rttRef,
     onMediaChange,
   }
 }
