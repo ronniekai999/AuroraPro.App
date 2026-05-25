@@ -244,7 +244,29 @@ export function useParty(): UseParty {
     }
     switch (msg.type) {
       case 'party-state': {
+        // 2026-05-25 critical bug fix — production diagnosis at
+        // aurorapro.app:
+        //   1. POST /api/parties → 201 (server creates party)
+        //   2. useParty.join sets state.code = "YZ8BN4" via setStatePatch
+        //   3. /ws/party-room opens, server sends party-state
+        //   4. This handler USED to read `payload.{code, party_name,
+        //      media_title, ...}` directly — but the server nests those
+        //      inside `payload.party`. So `p.code` was undefined.
+        //   5. setStatePatch with `code: undefined` overwrote the
+        //      previously-set code → state.code became undefined.
+        //   6. UI re-rendered: no green dot, no panel, no toast.
+        //
+        // Confirmed via MutationObserver in production: title
+        // transitioned "Join a watch party" → "In party YZ8BN4" →
+        // "Join a watch party" within 321ms. Confirmed via server
+        // source: manager.go's BuildPartyStateMessage uses a nested
+        // {party: {code, party_name, ...}} structure.
+        //
+        // The participants + chat_history fields ARE at the payload
+        // root (server keeps them out of the nested object). Server
+        // sends `revision` here vs `rev` elsewhere; we map both.
         const p = msg.payload
+        const inner = p.party || {}
         // Audit MED-3 (Phase 4.5 final) — clear recentReactions when
         // the party's mediaItemId changes vs. our current state.
         // Phase 4 doesn't handle media-change broadcasts yet, but
@@ -253,21 +275,21 @@ export function useParty(): UseParty {
         // Without this, reactions from the previous movie keep
         // floating on screen after the swap.
         setStatePatch(prev => ({
-          code: p.code,
-          partyName: p.party_name,
-          mediaTitle: p.media_title,
-          mediaPoster: p.media_poster,
-          mediaItemId: p.media_item_id,
-          episodeId: p.episode_id,
-          hostUserId: p.host_user_id,
+          code: inner.code,
+          partyName: inner.party_name,
+          mediaTitle: inner.media_title,
+          mediaPoster: inner.media_poster,
+          mediaItemId: inner.media_item_id,
+          episodeId: inner.episode_id,
+          hostUserId: inner.host_user_id,
           participants: p.participants ?? [],
           chat: (p.chat_history ?? []).slice(-MAX_CHAT),
-          isPlaying: p.is_playing,
-          currentTimeMs: p.current_time_ms,
-          rev: p.rev ?? 0,
+          isPlaying: inner.is_playing,
+          currentTimeMs: inner.current_time_ms,
+          rev: inner.revision ?? 0,
           error: null,
           recentReactions:
-            prev.mediaItemId && prev.mediaItemId !== p.media_item_id
+            prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
               ? []
               : prev.recentReactions,
         }))

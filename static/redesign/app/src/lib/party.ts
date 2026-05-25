@@ -55,7 +55,16 @@ export interface PartyParticipant {
   ready: boolean
 }
 
-export interface PartyStatePayload {
+// 2026-05-25 — the original type put every field at the root of
+// `payload`, but the server's actual shape (see
+// internal/watchparty/manager.go BuildPartyStateMessage) puts party-
+// specific fields inside a nested `party` object while keeping
+// participants + chat_history at the root. The mismatch caused
+// `setStatePatch({code: payload.code, ...})` to write `undefined` to
+// every party-specific state field, including `code` — which is what
+// flipped `state.code` from "YZ8BN4" back to "" 321ms after a
+// successful join in production. Type now mirrors reality.
+export interface PartyStateInnerParty {
   code: string
   host_user_id: number
   media_item_id: number
@@ -65,12 +74,19 @@ export interface PartyStatePayload {
   party_name?: string
   current_time_ms: number
   is_playing: boolean
+  // Server emits this as `revision` here (vs `rev` in tick/pause/seek
+  // payloads on the sync socket). Both refer to the same monotonic
+  // state revision; the handler maps revision → rev internally.
+  revision?: number
+}
+
+export interface PartyStatePayload {
+  party: PartyStateInnerParty
   participants: PartyParticipant[]
   // The room delivers chat_history with the first party-state so a
   // late-joining guest sees what's been said. Subsequent messages
   // arrive as `chat-message` events.
   chat_history?: ChatMessageEvent[]
-  rev?: number
 }
 
 export interface ChatMessageEvent {
