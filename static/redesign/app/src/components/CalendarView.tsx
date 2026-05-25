@@ -48,17 +48,30 @@ function lastOfMonthUTC(d: Date): Date {
 }
 
 // Audit M3 fix — UTC-consistent date math.
+//
+// QA 2026-05-25 — separator was inconsistent: ` · ` for days 0-6,
+// `, ` for days 7+. Normalized to ` · ` everywhere so the calendar
+// reads consistently. Also added year when the date is in a different
+// calendar year from today (relevant for the rolling 30-day list view
+// when it crosses Dec→Jan, and for the grid when the user navigates
+// to a future/past month).
 function formatGroupDate(iso: string): string {
   const datePart = iso.length >= 10 ? iso.slice(0, 10) : iso
   const d = new Date(`${datePart}T00:00:00Z`)
   const today = todayUTC()
   const diffDays = Math.round((d.getTime() - today.getTime()) / (24 * 60 * 60 * 1000))
   const weekday = d.toLocaleDateString(undefined, { weekday: 'long', timeZone: 'UTC' })
-  const monthDay = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+  // Include year only when it differs from today's year — keeps the
+  // common case ("May 28") compact while still disambiguating
+  // year-boundary entries ("Jan 3, 2027").
+  const dateOpts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', timeZone: 'UTC' }
+  if (d.getUTCFullYear() !== today.getUTCFullYear()) {
+    dateOpts.year = 'numeric'
+  }
+  const monthDay = d.toLocaleDateString(undefined, dateOpts)
   if (diffDays === 0) return `Today · ${monthDay}`
   if (diffDays === 1) return `Tomorrow · ${monthDay}`
-  if (diffDays > 1 && diffDays < 7) return `${weekday} · ${monthDay}`
-  return `${weekday}, ${monthDay}`
+  return `${weekday} · ${monthDay}`
 }
 
 export function CalendarView({ onOpenMedia }: Props) {
