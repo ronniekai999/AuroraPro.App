@@ -2519,6 +2519,65 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
       </div>
 
       <div className="space-y-6">
+        {/* Appearance — Glow Style picker. Writes
+            aurora_prefs.glow_intensity and live-updates <html data-glow>
+            so panels/cards reflow their border + halo immediately.
+            Default ("aurora") is the unprefixed :root token set in
+            index.css; only "subtle" and "heavy" set the attribute. */}
+        <div className="glass-panel rounded-xl p-6">
+          <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <Icon name="eye" size={18} className="text-purple-400" />
+            Appearance
+          </h3>
+          <div className="space-y-3">
+            <div>
+              <p className="text-white/80 text-sm font-medium">Glow Style</p>
+              <p className="text-white/40 text-xs">Border and halo around panels, cards, and the hero.</p>
+            </div>
+            <div role="radiogroup" aria-label="Glow style" className="grid grid-cols-3 gap-3">
+              {([
+                { id: 'subtle', label: 'Subtle', desc: 'Faint white edge' },
+                { id: 'aurora', label: 'Aurora', desc: 'White + purple (default)' },
+                { id: 'heavy',  label: 'Heavy',  desc: 'Bright white + purple bloom' },
+              ] as const).map(opt => {
+                // Read via rawRef so an unrelated keys' update doesn't lose
+                // this value. The `setSettings(s => ({...s}))` below forces
+                // the chip to re-render after each click since rawRef
+                // mutations are invisible to React.
+                const stored = rawRef.current.glow_intensity
+                const current = typeof stored === 'string' ? stored : 'aurora'
+                const active = current === opt.id
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => {
+                      rawRef.current = { ...rawRef.current, glow_intensity: opt.id }
+                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
+                      // "aurora" is the default — no attribute needed (and removing
+                      // it keeps a clean DOM for users who never touched the setting).
+                      if (opt.id === 'aurora') document.documentElement.removeAttribute('data-glow')
+                      else document.documentElement.setAttribute('data-glow', opt.id)
+                      // Force re-render so the active chip updates.
+                      setSettings(s => ({ ...s }))
+                    }}
+                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                      active
+                        ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
+                        : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                    }`}
+                  >
+                    <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
+                    <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+
         {sections.map(section => (
           <div key={section.title} className="glass-panel rounded-xl p-6">
             <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">

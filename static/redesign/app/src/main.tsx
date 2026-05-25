@@ -18,6 +18,24 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 // under `/v2/*`. With basename set, navigate composes correctly.
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
 
+// Apply the user's glow-style preference BEFORE first paint so panels
+// and cards render with the correct border/halo on the very first
+// frame. Default is "aurora" (white border + purple halo), defined as
+// the unprefixed :root tokens in index.css — so we only set the
+// attribute when the user has explicitly chosen "subtle" or "heavy".
+try {
+  const raw = localStorage.getItem('aurora_prefs')
+  if (raw) {
+    const parsed: unknown = JSON.parse(raw)
+    const glow = parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>).glow_intensity
+      : null
+    if (glow === 'subtle' || glow === 'heavy') {
+      document.documentElement.setAttribute('data-glow', glow)
+    }
+  }
+} catch { /* ignore — fall through to default */ }
+
 // 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
 // render-time throw anywhere in the tree shows a fallback instead of
 // a blank white page. The boundary is OUTSIDE BrowserRouter so a
