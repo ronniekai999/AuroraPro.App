@@ -47,6 +47,25 @@ import {
 import { apiFetch, getAccessToken } from '@/lib/api'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
 
+// 2026-05-25 — room-socket keepalive cadence. Server's gorilla/websocket
+// already does protocol-level PING/PONG every 60s, but some upstream
+// proxies (notably Cloudflare on non-Enterprise plans) don't reset
+// their idle counter on control frames — only on data frames. Sending
+// a `{type:"heartbeat"}` JSON data frame every 25s keeps every
+// reasonable proxy happy. Server treats it as a no-op. 25s is well
+// under the 30s WebSocket-idle floor most proxies enforce, and well
+// under the 90s server pong-wait.
+const ROOM_HEARTBEAT_INTERVAL_MS = 25_000
+
+// Reconnect machinery — when the room WS closes unexpectedly (i.e. not
+// from a user-initiated leave), try to re-open with exponential backoff.
+// Caps at MAX_RECONNECT_ATTEMPTS; after that we surface "Connection
+// lost — refresh to retry." The server-side host-disconnect grace
+// period (90s in manager.go) gives the host enough time to land any
+// of these attempts before guests get kicked.
+const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000]
+const MAX_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length
+
 export interface PartyState {
   joining: boolean
   code: string | null
@@ -73,6 +92,12 @@ export interface PartyState {
   // Connection health flags (true once each socket is open).
   roomConnected: boolean
   syncConnected: boolean
+  // 2026-05-25 — true while the room WS is mid-reconnect after an
+  // unexpected close. UI shows a "Reconnecting…" badge so users
+  // know what's happening (vs the previous "party silently dead"
+  // behavior). False when fully connected OR when we've given up
+  // after MAX_RECONNECT_ATTEMPTS.
+  reconnecting: boolean
   // UI-facing: did the last operation fail? Cleared on next action.
   error: string | null
 }
@@ -89,6 +114,7 @@ const INITIAL_STATE: PartyState = {
   rev: 0,
   roomConnected: false,
   syncConnected: false,
+  reconnecting: false,
   error: null,
 }
 
@@ -190,12 +216,50 @@ export function useParty(): UseParty {
   // glue to swap playerTarget when the host advances to a new
   // episode mid-party.
   const mediaChangeSubsRef = useRef<Set<(p: { media_item_id: number; episode_id?: number }) => void>>(new Set())
+  // 2026-05-25 — room-socket keepalive + reconnect machinery.
+  // heartbeatTimerRef holds the setInterval handle that fires a
+  // `{type: "heartbeat"}` data frame every ROOM_HEARTBEAT_INTERVAL_MS
+  // while the room WS is open. Resets every reasonable upstream
+  // proxy's idle timer; specifically required at aurorapro.app where
+  // Cloudflare was killing the room WS at exactly 90s of "idleness"
+  // (control-frame PING/PONG didn't count).
+  //
+  // reconnectAttemptRef counts in-flight reconnect attempts after an
+  // unexpected close. Reset to 0 on successful WS open or explicit
+  // leave. reconnectTimerRef holds the setTimeout for the backoff
+  // delay so we can cancel it if the user leaves mid-backoff.
+  const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const reconnectAttemptRef = useRef<number>(0)
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Tracks whether the user explicitly left (leave-party) — used to
+  // suppress reconnect attempts after a deliberate teardown.
+  const userInitiatedLeaveRef = useRef<boolean>(false)
 
   const setStatePatch = useCallback((patch: Partial<PartyState> | ((s: PartyState) => Partial<PartyState>)) => {
     setState(prev => ({ ...prev, ...(typeof patch === 'function' ? patch(prev) : patch) }))
   }, [])
 
+  // Stop the heartbeat interval. Called on WS close, leave, unmount.
+  // Safe to call when no timer is set — clearInterval on null is a no-op
+  // here because we guard.
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current)
+      heartbeatTimerRef.current = null
+    }
+  }, [])
+
+  // Cancel any pending reconnect timer. Called on leave or unmount.
+  const cancelReconnect = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+  }, [])
+
   const closeSockets = useCallback(() => {
+    stopHeartbeat()
+    cancelReconnect()
     if (syncWsRef.current) {
       try { syncWsRef.current.close() } catch { /* defensive */ }
       syncWsRef.current = null
@@ -206,9 +270,14 @@ export function useParty(): UseParty {
     }
     // Phase 4.6 — losing the room socket = voice is gone too.
     voiceRef.current?.onRoomSocketDown()
-  }, [])
+  }, [stopHeartbeat, cancelReconnect])
 
   const leave = useCallback(() => {
+    // Mark this as user-initiated FIRST so any pending close handlers
+    // know not to attempt reconnect. Without this flag, calling leave()
+    // would trigger closeSockets() → onclose fires → reconnect loop
+    // starts → user is unexpectedly rejoined moments later.
+    userInitiatedLeaveRef.current = true
     // Try to send a clean leave-party on the room socket before close
     // so the server fires participant-left to everyone else promptly.
     // (The server will eventually GC us on the socket-close path too,
@@ -219,6 +288,7 @@ export function useParty(): UseParty {
       try { rws.send(JSON.stringify(msg)) } catch { /* defensive */ }
     }
     activeCodeRef.current = null
+    reconnectAttemptRef.current = 0
     closeSockets()
     setState(INITIAL_STATE)
     tickRef.current = null
@@ -459,6 +529,110 @@ export function useParty(): UseParty {
     }
   }, [setStatePatch, closeSockets])
 
+  // 2026-05-25 — opens the room WebSocket and wires up:
+  //   - onopen: send `join-party`, start heartbeat interval, mark
+  //     roomConnected, clear reconnect counter
+  //   - onmessage: route through handleRoomMessage (with stale-WS guard)
+  //   - onclose: if NOT user-initiated, schedule a reconnect with
+  //     exponential backoff; otherwise clean up and stay disconnected
+  //
+  // Re-callable: the reconnect path invokes this again with a fresh
+  // token (in case the access token rotated during the outage). The
+  // server's host-disconnect-grace-period (90s in manager.go) means
+  // the party survives most transient outages without ending.
+  //
+  // Defined as a stable useCallback because the onclose handler
+  // references it indirectly through openRoomSocketRef to avoid
+  // stale-closure-captures of itself (a callback can't reference
+  // itself synchronously).
+  const openRoomSocketRef = useRef<((code: string, token: string) => void) | null>(null)
+  const openRoomSocket = useCallback((code: string, token: string) => {
+    // Belt-and-suspenders: if openRoomSocket is ever called from a
+    // path that didn't go through `join()` (currently only the
+    // reconnect timer does, but future callers might bypass `join`),
+    // ensure the user-initiated-leave flag is cleared so the upcoming
+    // onclose doesn't suppress its own reconnect by mistake.
+    userInitiatedLeaveRef.current = false
+    const rws = new WebSocket(buildWsUrl('/ws/party-room', token))
+    roomWsRef.current = rws
+
+    rws.onopen = () => {
+      // Send the join-party handshake so the server registers us.
+      const msg: OutboundRoomMessage = { type: 'join-party', payload: { party_code: code } }
+      try { rws.send(JSON.stringify(msg)) } catch { /* defensive */ }
+
+      // Reset reconnect counters and flip UI flags.
+      reconnectAttemptRef.current = 0
+      setStatePatch({ roomConnected: true, joining: false, reconnecting: false })
+
+      // Start the keepalive. Clear any prior interval first
+      // (defensive — should already be null after onclose, but harmless).
+      stopHeartbeat()
+      heartbeatTimerRef.current = setInterval(() => {
+        const ws = roomWsRef.current
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        try { ws.send(JSON.stringify({ type: 'heartbeat' } satisfies OutboundRoomMessage)) }
+        catch { /* defensive — onclose will follow if the send failed for real */ }
+      }, ROOM_HEARTBEAT_INTERVAL_MS)
+    }
+
+    rws.onmessage = ev => {
+      // Stale-WS guard (Audit M3 P4) — a slow callback from an old WS
+      // we already replaced via reconnect shouldn't mutate state.
+      if (roomWsRef.current !== rws) return
+      handleRoomMessage(ev.data)
+    }
+
+    rws.onclose = () => {
+      // Only react if THIS socket is still the active one (not a
+      // late close from a socket we already replaced).
+      if (roomWsRef.current !== rws) return
+      roomWsRef.current = null
+      stopHeartbeat()
+
+      // Suppress reconnect when the user explicitly left.
+      if (userInitiatedLeaveRef.current) {
+        setStatePatch({ roomConnected: false, reconnecting: false })
+        return
+      }
+
+      const attempt = reconnectAttemptRef.current
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        setStatePatch({
+          roomConnected: false,
+          reconnecting: false,
+          error: 'Lost connection to the party. Refresh to retry.',
+        })
+        return
+      }
+
+      // Schedule the next attempt with exp backoff.
+      const delay = RECONNECT_BACKOFF_MS[attempt]
+      reconnectAttemptRef.current = attempt + 1
+      setStatePatch({ roomConnected: false, reconnecting: true })
+      reconnectTimerRef.current = setTimeout(() => {
+        reconnectTimerRef.current = null
+        // Pull a fresh token at each attempt — the access token may
+        // have rotated during the outage.
+        const freshToken = getAccessToken()
+        const code = activeCodeRef.current
+        if (!code || !freshToken) {
+          setStatePatch({ reconnecting: false })
+          return
+        }
+        // Re-enter via the ref so the function picks up the latest
+        // closure (rather than capturing a stale version of itself).
+        openRoomSocketRef.current?.(code, freshToken)
+      }, delay)
+    }
+
+    rws.onerror = () => { /* silent — close handler covers UI */ }
+  }, [handleRoomMessage, setStatePatch, stopHeartbeat])
+
+  // Keep the ref pointed at the latest version so onclose can recurse
+  // without stale-closure shenanigans.
+  openRoomSocketRef.current = openRoomSocket
+
   const openSyncSocket = useCallback((code: string) => {
     const token = getAccessToken()
     if (!token) return
@@ -543,30 +717,13 @@ export function useParty(): UseParty {
       return { ok: false, error }
     }
     activeCodeRef.current = code
+    userInitiatedLeaveRef.current = false
+    reconnectAttemptRef.current = 0
     setStatePatch({ code, joining: true })
 
-    const rws = new WebSocket(buildWsUrl('/ws/party-room', token))
-    roomWsRef.current = rws
-    rws.onopen = () => {
-      const msg: OutboundRoomMessage = { type: 'join-party', payload: { party_code: code } }
-      try { rws.send(JSON.stringify(msg)) } catch { /* defensive */ }
-      setStatePatch({ roomConnected: true, joining: false })
-    }
-    rws.onmessage = ev => {
-      // Audit M3 (P4) — drop messages from a stale ws (see same
-      // guard in openSyncSocket above).
-      if (roomWsRef.current !== rws) return
-      handleRoomMessage(ev.data)
-    }
-    rws.onclose = () => {
-      if (roomWsRef.current === rws) {
-        roomWsRef.current = null
-        setStatePatch({ roomConnected: false })
-      }
-    }
-    rws.onerror = () => { /* silent — close handler covers UI */ }
+    openRoomSocket(code, token)
     return { ok: true }
-  }, [closeSockets, handleRoomMessage, setStatePatch])
+  }, [closeSockets, setStatePatch, openRoomSocket])
 
   const sendChat = useCallback((message: string) => {
     const trimmed = message.trim()

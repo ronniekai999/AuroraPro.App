@@ -170,6 +170,20 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				_ = h.manager.LeavePartyV3Room(code, claims.UserID)
 			}
 
+		case "heartbeat":
+			// 2026-05-25 — application-level keepalive. The protocol-level
+			// PING/PONG that gorilla/websocket runs every partyPingInterval
+			// is a control-frame round-trip that some upstream proxies
+			// (notably Cloudflare on non-Enterprise plans) don't count as
+			// "the connection is active." Production-observed failure: at
+			// aurorapro.app, host's room WS dropped at exactly 90s (= our
+			// partyPongWait) because the proxy's idle counter never reset,
+			// and the server's SetReadDeadline expired waiting for a pong
+			// that never made it through. Application-level data frames
+			// like this heartbeat DO reset every reasonable proxy's idle
+			// counter. No payload needed; the read itself is the value.
+			// Pure no-op on the server side.
+
 		case "chat-message":
 			codeMu.Lock()
 			code := currentCode

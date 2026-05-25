@@ -169,6 +169,17 @@ const (
 	GroupStatePlaying GroupState = "playing"
 )
 
+// HostDisconnectGracePeriod — how long the server keeps a party alive
+// after the host's room WebSocket drops unexpectedly. Lets the host
+// recover from a transient network blip, browser tab throttle, proxy
+// idle timeout, or page reload without taking the whole party down
+// with them. Explicit `leave-party` from the host still ends the
+// party immediately (deliberate user action).
+//
+// 90s matches partyPongWait in the WS handler — i.e. roughly the
+// longest a single network glitch could plausibly take to recover.
+const HostDisconnectGracePeriod = 90 * time.Second
+
 // PartyState is the authoritative in-memory state for an active watch party.
 // The mu field is a per-party mutex that protects mutable fields (CurrentTimeMs,
 // IsPlaying, PlayingSince, Participants, ChatHistory, conns).
@@ -227,6 +238,23 @@ type PartyState struct {
 	// snack break, sudden buffer hiccup). Flipped to true the first time
 	// request-play succeeds.
 	HasEverPlayed bool
+
+	// HostDisconnectGracePeriod — 2026-05-25 fix for "party dies the
+	// instant the host's room WebSocket drops". Previous behavior:
+	// LeavePartyV3Room called endPartyInternal immediately when isHost.
+	// Caught in production at aurorapro.app: host's room WS hit a 90s
+	// idle/proxy timeout, server cleaned up → guests got 404s on the
+	// shared code → "we never see them on our end, show never starts."
+	//
+	// HostDisconnectedAt is set when the host's room WS closes
+	// unexpectedly (NOT on explicit leave-party — that's still
+	// immediate). If non-nil and the host's WS hasn't reconnected
+	// within HostGracePeriod, a background goroutine ends the party.
+	// If the host's room WS reconnects in that window, the field is
+	// cleared and the goroutine no-ops on next check.
+	//
+	// Defended by ps.mu like every other field on PartyState.
+	HostDisconnectedAt *time.Time
 
 	// ============================================================
 	// V3 "Running/Paused" model (Phase 1 — coexists with V2).
