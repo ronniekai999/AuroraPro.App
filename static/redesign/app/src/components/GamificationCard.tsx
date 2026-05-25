@@ -94,8 +94,19 @@ export function GamificationCard() {
                   BumpWatchCount). Mid-watch Continue Watching items
                   don't bump it. Relabel as "Completed" so users
                   don't read 0 here while seeing 4 in-progress
-                  watches on the Library page as a sync bug. */}
-              <p className="text-white/40 text-xs">Completed</p>
+                  watches on the Library page as a sync bug.
+                  2026-05-25 — added tooltip so the 90% threshold
+                  is discoverable. Previous QA round confused this
+                  zero with a counter bug ("CW has 5 items, Completed
+                  reads 0"); CW items are by definition in-progress,
+                  so they're correctly excluded — but only the code
+                  comment said so, the user-facing label did not. */}
+              <p
+                className="text-white/40 text-xs cursor-help"
+                title="Counts items you've watched to ≥90% of their runtime. In-progress items in Continue Watching are excluded by design."
+              >
+                Completed
+              </p>
               <p className="text-white/90 text-lg font-semibold">{xp.total_watches}</p>
             </div>
             <div className="text-right">

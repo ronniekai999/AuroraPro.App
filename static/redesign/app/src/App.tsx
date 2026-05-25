@@ -12,6 +12,7 @@ import {
   listMedia,
   listRecent,
   listMediaWithTotal,
+  listGenres,
   getHeroPool,
   getDiscoverRails,
   getAnchorRails,
@@ -1113,7 +1114,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
 type BrowseSort = 'rating' | 'title' | 'year' | 'recent'
 function BrowseView({
   items, title, subtitle, total, sortBy, onSortChange,
-  genreFilter, onGenreChange,
+  genreFilter, onGenreChange, availableGenres,
   onLoadMore, isLoadingMore,
   onSelect, onPlay, onCardContext,
   libraryIds, onToggleLib,
@@ -1131,10 +1132,17 @@ function BrowseView({
   sortBy: BrowseSort
   onSortChange: (s: BrowseSort) => void
   // Genre is ALSO parent-controlled (QA BUG-003) so it survives
-  // the moviesList=null intermediate state on sort changes.
-  // Empty string = "All Genres".
+  // the moviesList=null intermediate state on sort changes. Empty
+  // string = "All Genres". Genre is now also server-side: changing
+  // it clears items and re-fetches page 1, same lifecycle as sort.
   genreFilter: string
   onGenreChange: (g: string) => void
+  // Canonical genre catalog from /api/media/genres. Stable across
+  // pagination + sort changes so the dropdown never offers a filter
+  // that returns zero results, and never hides a genre that exists
+  // in the library but hasn't been paginated into view yet. Null
+  // while loading.
+  availableGenres: string[] | null
   // Load More — appends the next page. Button is rendered only
   // when items.length < total. While in flight isLoadingMore is
   // true so the button can disable + show a spinner.
@@ -1147,17 +1155,23 @@ function BrowseView({
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
 }) {
-  // Genre filter stays client-side: the /api/media endpoint
-  // doesn't expose a genre filter, so this only filters within
-  // loaded pages. Acceptable trade-off for now — flagging as a
-  // backend follow-up to support server-side genre.
-  const genres = ['All Genres', ...Array.from(new Set(items.map(i => i.genre)))]
+  // Genre is now server-side (Batch A 2026-05-25). The server filters
+  // + paginates against the FULL catalog, so `items.length` is already
+  // the count of horror titles loaded so far and `total` is the real
+  // horror catalog size — not "horror within the loaded page" which
+  // was the previous bug (Top-Rated returned 3, A-Z returned 11 for
+  // the same Horror filter because the loaded subsets differed).
+  //
+  // availableGenres comes from /api/media/genres and is stable
+  // regardless of pagination. Falls back to deriving from items
+  // while the genres fetch is in flight, so first paint isn't blocked.
+  const genres = availableGenres && availableGenres.length > 0
+    ? ['All Genres', ...availableGenres]
+    : ['All Genres', ...Array.from(new Set(items.map(i => i.genre).filter(Boolean)))]
 
-  // No client-side sort — server is the source of truth. Just
-  // filter by genre.
-  const filtered = items.filter(i =>
-    !genreFilter || genreFilter === 'All Genres' || i.genre === genreFilter
-  )
+  // No client-side filter — items array already reflects the server's
+  // (type + genre + sort) filter set.
+  const filtered = items
   const hasMore = total != null && items.length < total
   const remaining = total != null ? Math.max(0, total - items.length) : 0
 
@@ -1188,30 +1202,21 @@ function BrowseView({
         <p className="text-white/60 text-sm mt-2">
           {subtitle}
           <span className="text-white/30 mx-1.5">•</span>
-          {/* Count display branches on whether a genre filter is
-              active. Without server-side genre support, we can only
-              honestly report the count of FILTERED items within the
-              loaded subset — not the true library-wide count for
-              that genre. QA BUG-002 fix: when filtering, show the
-              filtered count and a hint about partial visibility.
-              Guard matches the filter pass-through above (line ~1147):
-              both empty string AND the sentinel 'All Genres' map to
-              "no filter active". */}
-          {genreFilter && genreFilter !== 'All Genres' ? (
-            <>
-              <span className="text-white/90 font-medium">{filtered.length.toLocaleString()}</span> {genreFilter} title{filtered.length === 1 ? '' : 's'}
-              {total != null && total > items.length && (
-                <span className="text-white/40"> (in first {items.length.toLocaleString()} of {total.toLocaleString()} loaded)</span>
-              )}
-            </>
-          ) : total != null && total > items.length ? (
+          {/* Server-side filter means `total` is the true catalog
+              count for the active (type + genre) combination — no
+              longer "filtered subset of loaded page". The branch on
+              `genreFilter` is kept only for the label
+              ("X Horror titles" vs "X titles"). */}
+          {total != null && total > items.length ? (
             <>
               Showing {items.length.toLocaleString()} of{' '}
-              <span className="text-white/90 font-medium">{total.toLocaleString()}</span> title{total === 1 ? '' : 's'}
+              <span className="text-white/90 font-medium">{total.toLocaleString()}</span>
+              {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{total === 1 ? '' : 's'}
             </>
           ) : (
             <>
-              <span className="text-white/90 font-medium">{(total ?? items.length).toLocaleString()}</span> title{(total ?? items.length) === 1 ? '' : 's'}
+              <span className="text-white/90 font-medium">{(total ?? items.length).toLocaleString()}</span>
+              {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{(total ?? items.length) === 1 ? '' : 's'}
             </>
           )}
         </p>
@@ -1301,16 +1306,19 @@ function BrowseView({
         ))}
       </div>
 
-      {/* Phase 5.3 final QA — Load More. Server caps per_page at
-          100, so a 2,394-item library needs 24 clicks to see every
-          poster. Acceptable for now; future iteration could swap
-          for infinite-scroll with IntersectionObserver if users
-          ask for it. Button shows "Load 100 more (1,294 remaining)"
-          so the user knows the cadence + scope. Hidden when there
-          are no more pages or the genre filter is active (filter
-          is client-only, so "more pages" wouldn't help the user
-          find more of the filtered genre anyway). */}
-      {hasMore && !genreFilter && (
+      {/* Load More — Server caps per_page at 100, so a 2,394-item
+          library needs 24 clicks to see every poster. Acceptable
+          for now; future iteration could swap for infinite-scroll
+          with IntersectionObserver if users ask for it. Button
+          shows "Load 100 more (1,294 remaining)" so the user knows
+          the cadence + scope.
+
+          With server-side genre filtering, Load More works the same
+          whether a genre is selected or not — paginating the filtered
+          set instead of the full library. The "filtering loaded titles
+          only" banner is gone; counts and pagination now reflect the
+          real (type + genre) catalog. */}
+      {hasMore && (
         <div className="mt-10 flex flex-col items-center gap-2">
           <button
             onClick={onLoadMore}
@@ -1329,16 +1337,6 @@ function BrowseView({
           <p className="text-white/40 text-xs">
             {remaining.toLocaleString()} title{remaining === 1 ? '' : 's'} remaining
           </p>
-        </div>
-      )}
-
-      {/* When genre filter is active AND more pages exist, surface
-          the limitation honestly. Client-only genre filter can't
-          reach unloaded items, so promise of "more comedies"
-          requires loading more catalog first. */}
-      {hasMore && genreFilter && genreFilter !== 'All Genres' && (
-        <div className="mt-10 text-center text-white/40 text-xs">
-          Filtering loaded titles only. Clear the genre filter to load more from the catalog.
         </div>
       )}
     </div>
@@ -4984,6 +4982,12 @@ export default function App() {
   // changes (and across the loading-skeleton intermediate state).
   const [moviesGenre, setMoviesGenre] = useState('')
   const [showsGenre, setShowsGenre] = useState('')
+  // Canonical genre catalogs from /api/media/genres — populated once
+  // per browse view, used to render the dropdown so it doesn't shift
+  // as the user paginates. Null while in flight; BrowseView falls
+  // back to deriving from items so first paint isn't blocked.
+  const [moviesGenres, setMoviesGenres] = useState<string[] | null>(null)
+  const [showsGenres, setShowsGenres] = useState<string[] | null>(null)
   const [moviesLoadingMore, setMoviesLoadingMore] = useState(false)
   const [showsLoadingMore, setShowsLoadingMore] = useState(false)
   // Track next-page-to-fetch in state rather than deriving from
@@ -5566,10 +5570,15 @@ export default function App() {
     if (!user || view !== 'movies' || moviesList !== null) return
     let cancelled = false
     const ac = new AbortController()
-    // Server-side sort is the single source of truth — client-side
+    // Server-side sort + genre — single source of truth. Client-side
     // sort can't cope with pagination (items 101+ arrive in server
-    // order and concat after a re-sorted page 1).
-    listMediaWithTotal({ type: 'movie', perPage: BROWSE_PER_PAGE, sortBy: moviesSort, signal: ac.signal })
+    // order and concat after a re-sorted page 1). Genre is now also
+    // server-side so the (genre, sort) combo paginates correctly and
+    // total counts reflect the real catalog, not the loaded page.
+    listMediaWithTotal({
+      type: 'movie', perPage: BROWSE_PER_PAGE, sortBy: moviesSort,
+      genre: moviesGenre || undefined, signal: ac.signal,
+    })
       .then(({ items, total, page }) => {
         if (cancelled) return
         setMoviesList(items as Media[])
@@ -5583,15 +5592,33 @@ export default function App() {
         setToasts(prev => [...prev, { id, message: 'Failed to load movies', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
-    // moviesSort included in deps so sort changes (which clear
-    // moviesList to null) re-run this effect with the new sort.
-  }, [user, view, moviesList, moviesSort, nextToastId])
+    // moviesSort + moviesGenre included in deps so changes (which
+    // clear moviesList to null via the handlers below) re-run this
+    // effect with the new filter set.
+  }, [user, view, moviesList, moviesSort, moviesGenre, nextToastId])
+
+  // One-time fetch of the canonical genre catalog per browse view.
+  // Doesn't need to re-fire on sort/page changes — genre set doesn't
+  // shift with pagination. Only re-fetches when the user navigates
+  // back into the view fresh (moviesGenres === null reset).
+  useEffect(() => {
+    if (!user || view !== 'movies' || moviesGenres !== null) return
+    let cancelled = false
+    const ac = new AbortController()
+    listGenres('movie', ac.signal)
+      .then(gs => { if (!cancelled) setMoviesGenres(gs) })
+      .catch(() => { /* dropdown falls back to deriving from items */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [user, view, moviesGenres])
 
   useEffect(() => {
     if (!user || view !== 'shows' || showsList !== null) return
     let cancelled = false
     const ac = new AbortController()
-    listMediaWithTotal({ type: 'show', perPage: BROWSE_PER_PAGE, sortBy: showsSort, signal: ac.signal })
+    listMediaWithTotal({
+      type: 'show', perPage: BROWSE_PER_PAGE, sortBy: showsSort,
+      genre: showsGenre || undefined, signal: ac.signal,
+    })
       .then(({ items, total, page }) => {
         if (cancelled) return
         setShowsList(items as Media[])
@@ -5604,7 +5631,17 @@ export default function App() {
         setToasts(prev => [...prev, { id, message: 'Failed to load shows', type: 'error' }])
       })
     return () => { cancelled = true; ac.abort() }
-  }, [user, view, showsList, showsSort, nextToastId])
+  }, [user, view, showsList, showsSort, showsGenre, nextToastId])
+
+  useEffect(() => {
+    if (!user || view !== 'shows' || showsGenres !== null) return
+    let cancelled = false
+    const ac = new AbortController()
+    listGenres('show', ac.signal)
+      .then(gs => { if (!cancelled) setShowsGenres(gs) })
+      .catch(() => { /* fallback path */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [user, view, showsGenres])
 
   // Load More handlers — append the next page. Page state lives at
   // App level so the math survives navigating away and back mid-
@@ -5619,12 +5656,13 @@ export default function App() {
     // Capture the sort at request time. If sort changes mid-flight,
     // this generation will be aborted before the response can write.
     const sortAtFetch = moviesSort
+    const genreAtFetch = moviesGenre
     const pageToFetch = moviesNextPage
     setMoviesLoadingMore(true)
     try {
       const { items, page } = await listMediaWithTotal({
         type: 'movie', perPage: BROWSE_PER_PAGE, page: pageToFetch, sortBy: sortAtFetch,
-        signal: ac.signal,
+        genre: genreAtFetch || undefined, signal: ac.signal,
       })
       // Audit HIGH-2 — second guard: if the controller has been
       // swapped (sort change replaced the ref), discard the result
@@ -5649,7 +5687,7 @@ export default function App() {
         moviesLoadMoreAcRef.current = null
       }
     }
-  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesNextPage, nextToastId])
+  }, [moviesList, moviesTotal, moviesLoadingMore, moviesSort, moviesGenre, moviesNextPage, nextToastId])
 
   const handleLoadMoreShows = useCallback(async () => {
     if (!showsList || showsTotal == null || showsLoadingMore) return
@@ -5658,12 +5696,13 @@ export default function App() {
     const ac = new AbortController()
     showsLoadMoreAcRef.current = ac
     const sortAtFetch = showsSort
+    const genreAtFetch = showsGenre
     const pageToFetch = showsNextPage
     setShowsLoadingMore(true)
     try {
       const { items, page } = await listMediaWithTotal({
         type: 'show', perPage: BROWSE_PER_PAGE, page: pageToFetch, sortBy: sortAtFetch,
-        signal: ac.signal,
+        genre: genreAtFetch || undefined, signal: ac.signal,
       })
       if (showsLoadMoreAcRef.current !== ac) return
       setShowsList(prev => [...(prev ?? []), ...(items as Media[])])
@@ -5678,7 +5717,7 @@ export default function App() {
         showsLoadMoreAcRef.current = null
       }
     }
-  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsNextPage, nextToastId])
+  }, [showsList, showsTotal, showsLoadingMore, showsSort, showsGenre, showsNextPage, nextToastId])
 
   // Sort-change handlers. Setting null on the items list triggers
   // the fetch effect above to re-run with the new sort, fetching
@@ -5708,6 +5747,33 @@ export default function App() {
     setShowsNextPage(1)
     setShowsLoadingMore(false)
   }, [showsSort])
+
+  // Genre-change handlers — mirror sort handlers because genre is
+  // now also a server-side filter. Setting moviesList=null triggers
+  // the fetch effect to re-run with the new (sort, genre) tuple,
+  // starting at page 1, and the in-flight Load More is aborted so
+  // its response can't append a stale-genre page onto the new list.
+  const handleMoviesGenreChange = useCallback((g: string) => {
+    if (g === moviesGenre) return
+    moviesLoadMoreAcRef.current?.abort()
+    moviesLoadMoreAcRef.current = null
+    setMoviesGenre(g)
+    setMoviesList(null)
+    setMoviesTotal(null)
+    setMoviesNextPage(1)
+    setMoviesLoadingMore(false)
+  }, [moviesGenre])
+
+  const handleShowsGenreChange = useCallback((g: string) => {
+    if (g === showsGenre) return
+    showsLoadMoreAcRef.current?.abort()
+    showsLoadMoreAcRef.current = null
+    setShowsGenre(g)
+    setShowsList(null)
+    setShowsTotal(null)
+    setShowsNextPage(1)
+    setShowsLoadingMore(false)
+  }, [showsGenre])
 
   // Detail fetch. Triggered when handleSelect flips view to 'detail'.
   //   - Movies: /api/media/{id}/files
@@ -6322,7 +6388,8 @@ export default function App() {
                   sortBy={moviesSort}
                   onSortChange={handleMoviesSortChange}
                   genreFilter={moviesGenre}
-                  onGenreChange={setMoviesGenre}
+                  onGenreChange={handleMoviesGenreChange}
+                  availableGenres={moviesGenres}
                   onLoadMore={handleLoadMoreMovies}
                   isLoadingMore={moviesLoadingMore}
                   onSelect={handleSelect}
@@ -6343,7 +6410,8 @@ export default function App() {
                   sortBy={showsSort}
                   onSortChange={handleShowsSortChange}
                   genreFilter={showsGenre}
-                  onGenreChange={setShowsGenre}
+                  onGenreChange={handleShowsGenreChange}
+                  availableGenres={showsGenres}
                   onLoadMore={handleLoadMoreShows}
                   isLoadingMore={showsLoadingMore}
                   onSelect={handleSelect}

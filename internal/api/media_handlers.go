@@ -429,6 +429,35 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, paginatedResponse(items, total, params))
 }
 
+// ListGenres returns the distinct genre names present in the library,
+// optionally narrowed to a single media type (movie | show). Used by
+// BrowseView to populate the genre dropdown with the FULL catalog of
+// genres — not just the genres present in the currently loaded page,
+// which would shift each time the user paginated or re-sorted.
+//
+// Returns: { "genres": ["Action", "Comedy", "Horror", ...] }
+// Sorted alphabetically; admin/internal-only genres (none currently)
+// are not filtered here — the genres table is curated.
+func (h *MediaHandler) ListGenres(w http.ResponseWriter, r *http.Request) {
+	mediaType := r.URL.Query().Get("type")
+	// Whitelist the type param so a typo returns 400 instead of an
+	// empty array (which would look like a legitimate "no genres
+	// found" response and silently break the dropdown).
+	if mediaType != "" && mediaType != "movie" && mediaType != "show" {
+		writeError(w, http.StatusBadRequest, "type must be 'movie' or 'show'")
+		return
+	}
+	genres, err := h.queries.ListGenres(r.Context(), mediaType)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list genres")
+		return
+	}
+	if genres == nil {
+		genres = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"genres": genres})
+}
+
 func (h *MediaHandler) GetFiles(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {

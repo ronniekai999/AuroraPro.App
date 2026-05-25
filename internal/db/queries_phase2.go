@@ -843,13 +843,46 @@ func (q *Queries) GetSeasons(ctx context.Context, mediaItemID int64) ([]models.S
 }
 
 func (q *Queries) GetEpisodes(ctx context.Context, mediaItemID int64, seasonNum int) ([]models.EpisodeDetail, error) {
+	// Co-fetches the canonical season_id for (media, season_number) so
+	// we can sanity-check that every episode row's season_id matches.
+	// If we ever see episodes attached to a season_id that doesn't
+	// match the requested season_number, the seasons table has drifted
+	// from the episodes table — log it loudly so the data corruption
+	// can be diagnosed. This is the defensive guard for the QA report
+	// that "S1 and S2 of a multi-season show return the same titles":
+	// without this log, the bug shows up as a UX symptom with no trail
+	// back to the inconsistent data.
+	var canonicalSeasonID int64
+	if err := q.pool.QueryRow(ctx,
+		`SELECT id FROM tv_seasons WHERE media_item_id = $1 AND season_number = $2`,
+		mediaItemID, seasonNum,
+	).Scan(&canonicalSeasonID); err != nil {
+		// Not an error — the show simply may not have this season.
+		// The downstream JOIN-based query will return zero rows in
+		// that case, which is the right behavior.
+		canonicalSeasonID = 0
+	}
+
+	// Critical: the JOIN to tv_seasons must also constrain on
+	// s.media_item_id, NOT just e.media_item_id. Without that extra
+	// predicate, an episode row whose season_id points at a different
+	// show's season (data corruption: scanner race, manual edit, or
+	// an importer regression) would leak into the result set as long
+	// as both shows happen to have a season N. The unique index is
+	// UNIQUE(season_id, episode_number) — it does NOT prevent an
+	// episode-row from being attached to the wrong show's season.
+	//
+	// This is the candidate root cause of the QA "S1 and S2 return
+	// the same episode titles" bug. Tightening the JOIN here means
+	// the defensive log below should never fire for a clean DB; if
+	// it does, the WARN identifies exactly which row drifted.
 	rows, err := q.pool.Query(ctx, `
 		SELECT e.id, e.season_id, e.media_item_id, e.episode_number,
 		       COALESCE(e.title, ''), COALESCE(e.overview, ''),
 		       COALESCE(e.runtime_minutes, 0), e.air_date,
 		       COALESCE(e.still_path, '')
 		FROM tv_episodes e
-		JOIN tv_seasons s ON s.id = e.season_id
+		JOIN tv_seasons s ON s.id = e.season_id AND s.media_item_id = e.media_item_id
 		WHERE e.media_item_id = $1 AND s.season_number = $2
 		ORDER BY e.episode_number`, mediaItemID, seasonNum)
 	if err != nil {
@@ -863,6 +896,20 @@ func (q *Queries) GetEpisodes(ctx context.Context, mediaItemID int64, seasonNum 
 		if err := rows.Scan(&ep.ID, &ep.SeasonID, &ep.MediaItemID, &ep.Number,
 			&ep.Title, &ep.Overview, &ep.RuntimeMin, &ep.AirDate, &ep.StillPath); err != nil {
 			return nil, err
+		}
+		// Defensive: warn if an episode came back with a season_id
+		// that does NOT match the canonical (media, season_number)
+		// row. The JOIN should prevent this, but a future schema
+		// change or unique-constraint regression could let it slip.
+		if canonicalSeasonID != 0 && ep.SeasonID != canonicalSeasonID {
+			slog.Warn("episode season_id mismatch — data may be corrupt",
+				"media_item_id", mediaItemID,
+				"requested_season", seasonNum,
+				"canonical_season_id", canonicalSeasonID,
+				"episode_id", ep.ID,
+				"episode_season_id", ep.SeasonID,
+				"episode_number", ep.Number,
+				"episode_title", ep.Title)
 		}
 		episodes = append(episodes, ep)
 	}
@@ -1134,6 +1181,52 @@ func (q *Queries) GetContinueWatchingByProfile(ctx context.Context, profileID in
 // ============================================================
 // Enriched Media Item (with TMDB fields)
 // ============================================================
+
+// ListGenres returns the distinct genre names present in the library,
+// optionally narrowed to a single media type (e.g. "movie" or "show").
+// An empty mediaType returns every genre referenced by any media item.
+// Sorted alphabetically. Used by the browse-page dropdown so the genre
+// list is stable across pagination/sort changes.
+//
+// Only genres that have at least one matching item are returned —
+// orphan rows in the genres table (no media_genres references) are
+// excluded so the dropdown never offers a filter that returns zero
+// results.
+func (q *Queries) ListGenres(ctx context.Context, mediaType string) ([]string, error) {
+	var (
+		rows pgx.Rows
+		err  error
+	)
+	if mediaType == "" {
+		rows, err = q.pool.Query(ctx, `
+			SELECT DISTINCT g.name
+			FROM genres g
+			JOIN media_genres mg ON mg.genre_id = g.id
+			ORDER BY g.name`)
+	} else {
+		rows, err = q.pool.Query(ctx, `
+			SELECT DISTINCT g.name
+			FROM genres g
+			JOIN media_genres mg ON mg.genre_id = g.id
+			JOIN media_items m  ON m.id = mg.media_item_id
+			WHERE m.type = $1
+			ORDER BY g.name`, mediaType)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
 
 // GetMediaGenresBatch returns genre names for multiple media items in a single query.
 // Returns a map of mediaItemID → []string (genre names).
