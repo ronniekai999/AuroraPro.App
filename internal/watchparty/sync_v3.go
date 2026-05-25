@@ -213,6 +213,15 @@ func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc
 	if existing, ok := ps.Participants[userID]; ok {
 		ps.roomConns[userID] = sc
 		existing.LastSeen = time.Now()
+		// 2026-05-25 — if this is the host reconnecting within the
+		// grace window after their WS dropped, clear the disconnect
+		// marker so the background ender goroutine no-ops on its
+		// next check. Without this clear, a host who reload-recovers
+		// at 89s would still see their party reaped at 90s.
+		if userID == ps.HostUserID && ps.HostDisconnectedAt != nil {
+			slog.Info("v3: host reconnected within grace window", "code", code, "elapsed_ms", time.Since(*ps.HostDisconnectedAt).Milliseconds())
+			ps.HostDisconnectedAt = nil
+		}
 		slog.Info("v3: participant reconnected (room)", "code", code, "user_id", userID)
 		return ps, nil
 	}
@@ -323,11 +332,16 @@ func (m *Manager) LeavePartyV3Sync(code string, userID int64) {
 // `leave-party` message still uses LeavePartyV3Room (no conn check)
 // because that's a deliberate user action.
 //
-// nil sc behaves like LeavePartyV3Room (always proceeds) — kept for
-// callers that don't have a SafeConn handle (e.g. tests).
+// 2026-05-25 — defer-cleanup callers now route through the GRACEFUL
+// path so host disconnects don't immediately reap the party. See
+// LeavePartyV3RoomGraceful for the grace-period semantics. Explicit
+// leave-party messages still use the immediate path.
+//
+// nil sc behaves like LeavePartyV3RoomGraceful (always proceeds) —
+// kept for callers that don't have a SafeConn handle (e.g. tests).
 func (m *Manager) LeavePartyV3RoomIfConn(code string, userID int64, sc *SafeConn) error {
 	if sc == nil {
-		return m.LeavePartyV3Room(code, userID)
+		return m.LeavePartyV3RoomGraceful(code, userID)
 	}
 	m.mu.RLock()
 	ps, exists := m.parties[code]
@@ -343,7 +357,131 @@ func (m *Manager) LeavePartyV3RoomIfConn(code string, userID int64, sc *SafeConn
 		return nil
 	}
 	ps.mu.Unlock()
-	return m.LeavePartyV3Room(code, userID)
+	return m.LeavePartyV3RoomGraceful(code, userID)
+}
+
+// LeavePartyV3RoomGraceful is the implicit-disconnect variant of
+// LeavePartyV3Room. For guests it behaves identically (remove from
+// participants, broadcast participant-left). For the HOST it does NOT
+// immediately end the party — instead it:
+//   1. Removes the room conn (so broadcasts don't try to write to it)
+//   2. Sets ps.HostDisconnectedAt = now
+//   3. Spawns a goroutine that ends the party after HostDisconnectGracePeriod
+//      IF and ONLY IF HostDisconnectedAt is still set at that point
+//      (i.e. host hasn't reconnected via JoinPartyV3Room)
+//
+// 2026-05-25 — added in response to "guests can't join, party died at
+// 90s" production diagnosis. Host's WS hit a proxy/idle timeout; before
+// this change, that immediately ended the entire party. Now the host
+// has HostDisconnectGracePeriod to reconnect (via reload, network
+// recovery, etc.) before guests get kicked.
+func (m *Manager) LeavePartyV3RoomGraceful(code string, userID int64) error {
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	ps.mu.Lock()
+	participant, ok := ps.Participants[userID]
+	if !ok {
+		ps.mu.Unlock()
+		return nil
+	}
+	isHost := ps.HostUserID == userID
+	username := participant.Username
+
+	if isHost {
+		// Don't delete the Participant entry — we want the host slot
+		// to remain reserved during the grace window so JoinPartyV3Room
+		// takes the "reconnect" path (which clears HostDisconnectedAt).
+		// We DO drop the room conn so broadcasts don't write to a dead
+		// pipe.
+		delete(ps.roomConns, userID)
+		now := time.Now()
+		ps.HostDisconnectedAt = &now
+		slog.Info("v3: host room disconnect — starting grace timer", "code", code, "grace_period", HostDisconnectGracePeriod)
+		ps.mu.Unlock()
+
+		// Spawn a one-shot ender. Captures the *PartyState pointer +
+		// the timestamp by value so a colliding code-reuse (party
+		// ended, same code re-issued to a different party within 90s)
+		// can't accidentally end the new party — we compare pointer
+		// identity in checkHostGraceExpiry rather than re-looking-up
+		// by code.
+		go m.checkHostGraceExpiry(code, ps, now)
+		return nil
+	}
+
+	// Non-host: same as the immediate variant — fully remove + announce.
+	_ = m.leaveVoiceLocked(ps, userID)
+	delete(ps.Participants, userID)
+	delete(ps.roomConns, userID)
+	delete(ps.syncConns, userID)
+	if ps.dbID > 0 && m.queries != nil {
+		if err := m.queries.UpdateParticipantLeft(context.Background(), ps.dbID, userID); err != nil {
+			slog.Warn("v3: update participant left failed", "err", err, "code", code)
+		}
+	}
+	m.broadcastToRoomPeersLocked(ps, map[string]interface{}{
+		"type": "participant-left",
+		"payload": map[string]interface{}{
+			"user_id":  userID,
+			"username": username,
+		},
+	})
+	ps.mu.Unlock()
+	return nil
+}
+
+// checkHostGraceExpiry runs in a background goroutine after the host's
+// room WS drops. After HostDisconnectGracePeriod, it checks if the host
+// has reconnected (HostDisconnectedAt cleared by JoinPartyV3Room) and
+// ends the party only if not.
+//
+// Two staleness guards:
+//   1. `expectedPS` is the pointer to the PartyState we captured at
+//      schedule time. If the party already ended and the code was
+//      re-issued to a different PartyState, the m.parties lookup
+//      below would surface the NEW one — comparing pointer identity
+//      stops us from accidentally ending it.
+//   2. `expectedDisconnectTime` distinguishes back-to-back disconnects
+//      of the SAME party (host dropped → reconnected → dropped again).
+//      Only the LATEST disconnect's goroutine should be the one to
+//      finally end the party.
+func (m *Manager) checkHostGraceExpiry(code string, expectedPS *PartyState, expectedDisconnectTime time.Time) {
+	time.Sleep(HostDisconnectGracePeriod)
+
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return // party already ended through some other path
+	}
+	if ps != expectedPS {
+		// Code was recycled to a different party in the meantime —
+		// our timer doesn't own that one.
+		return
+	}
+
+	ps.mu.Lock()
+	if ps.HostDisconnectedAt == nil {
+		// Host reconnected within the grace window — nothing to do.
+		ps.mu.Unlock()
+		slog.Info("v3: host grace timer found host reconnected", "code", code)
+		return
+	}
+	if !ps.HostDisconnectedAt.Equal(expectedDisconnectTime) {
+		// A more recent disconnect supersedes us; the newer goroutine
+		// owns the timer.
+		ps.mu.Unlock()
+		return
+	}
+	ps.mu.Unlock()
+
+	slog.Info("v3: host grace period expired without reconnect, ending party", "code", code)
+	_ = m.endPartyInternal(code, ps)
 }
 
 // LeavePartyV3Room removes the participant entirely, mirroring V2's

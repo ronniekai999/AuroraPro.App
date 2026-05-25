@@ -28,6 +28,15 @@ export type OutboundRoomMessage =
   | { type: 'reaction'; payload: { emoji: string; abs_ms?: number } }
   | { type: 'ready'; payload: { ready: boolean } }
   | { type: 'leave-party' }
+  // 2026-05-25 — application-level keepalive. Server's gorilla/websocket
+  // already does protocol-level PING/PONG control frames, but those
+  // don't always reset upstream-proxy idle counters (Cloudflare on
+  // non-Enterprise plans was the specific offender — observed at
+  // aurorapro.app where the host's room WS hit a hard 90s timeout
+  // because PING control frames never reached the origin's
+  // SetReadDeadline reset path). Sending a data frame every 25s keeps
+  // every reasonable proxy's idle counter at zero. Server no-ops it.
+  | { type: 'heartbeat' }
   // Phase 4.6 — voice mesh signaling (rides the room socket).
   | { type: 'voice-join' }
   | { type: 'voice-leave' }

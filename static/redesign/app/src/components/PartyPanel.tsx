@@ -66,8 +66,24 @@ export function PartyPanel({
           <p className="text-white text-sm font-semibold truncate">
             {state.partyName || (state.mediaTitle ? `Watching ${state.mediaTitle}` : 'Watch Party')}
           </p>
-          <p className="text-white/40 text-xs mt-0.5">
-            {state.code ? `Code: ${state.code}` : 'Joining…'}
+          <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">
+            <span>{state.code ? `Code: ${state.code}` : 'Joining…'}</span>
+            {/* 2026-05-25 — connection status badge. Shows when the
+                room socket is reconnecting after an unexpected close
+                (e.g. proxy idle timeout, brief network blip). The
+                server's 90s host-disconnect grace period gives us up
+                to ~5 backoff attempts (1+2+4+8+16=31s) before guests
+                get kicked, so most outages are invisible to the UI
+                except for this badge briefly flickering. */}
+            {state.code && state.reconnecting && (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-medium border border-amber-500/30"
+                title="Lost connection to the party — trying to reconnect"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                Reconnecting…
+              </span>
+            )}
             {state.code && (
               <button
                 onClick={() => {
