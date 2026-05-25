@@ -5777,18 +5777,31 @@ export default function App() {
       setHomeLoading(true)
       setHomeError(null)
       try {
-        // Core rails — required. Discover + AnchorRails are
-        // personalization rails that fail soft (LLM disabled, cold
-        // start, etc.); we wrap them in inner try/catch so the
-        // base rails always render even if recommender is down.
-        const [recent, movies, shows, discover, anchor] = await Promise.all([
+        // QA 2026-05-25 — the original effect awaited all five fetches
+        // (core + discover + anchor) in one Promise.all. discover/
+        // anchor were wrapped in `.catch(() => [])` so individual
+        // failures were tolerated, BUT a HANGING discover (production
+        // observed: /api/me/discover stuck pending after a cold-load
+        // 503 retry) kept Promise.all from settling — even though
+        // .catch only catches REJECTIONS, not stalls. Result: rails
+        // array never set, Home page showed only Continue Watching
+        // until the user navigated away and back.
+        //
+        // New shape:
+        //   1. Await ONLY the three core rails. These must succeed for
+        //      the home to be useful.
+        //   2. Render rails immediately with the core trio.
+        //   3. Fire discover + anchor with their own timeouts, race
+        //      against a deadline, and splice into rails when they
+        //      land. If they never land, the user keeps the core
+        //      experience instead of staring at Continue Watching.
+        const [recent, movies, shows] = await Promise.all([
           listRecent(12, ac.signal),
           listMedia({ type: 'movie', perPage: 20, sortBy: 'rating', signal: ac.signal }),
           listMedia({ type: 'show', perPage: 20, sortBy: 'rating', signal: ac.signal }),
-          getDiscoverRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
-          getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
         ])
         if (cancelled) return
+
         // Only set the rails-derived hero when the personalized pool
         // hasn't supplied one. Read via ref to avoid closure
         // staleness reporting the pool as empty after the hero fetch
@@ -5797,8 +5810,49 @@ export default function App() {
           const hero = (recent[0] || movies[0] || null) as Media | null
           if (hero) setHomeHero(hero)
         }
-        // Rail order: Recently Added → Continue Watching (prepended
-        // elsewhere) → Discover → "Because You Watched X" → top-rated.
+
+        // Build the core rail set (no personalized yet). Order is the
+        // same as the final shape so the personalized splice below
+        // can insert between Recently Added and Top Rated Movies
+        // without re-ordering.
+        const coreRails: NonNullable<HomeViewProps['rails']> = [
+          // Recently Added blends movies + shows so the See All
+          // can't honestly map to a single browse page — leave the
+          // affordance off rather than pick one arbitrarily.
+          { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const },
+          // Top Rated rails map cleanly to /movies and /shows with
+          // sortBy=rating (the default), so the See All button takes
+          // the user to the full Top Rated catalog.
+          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const,
+            seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
+          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const,
+            seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
+        ]
+        setHomeRails(coreRails)
+        // Core rails are visible. Clear the loading state now so the
+        // spinner doesn't linger waiting on the personalized rails.
+        setHomeLoading(false)
+
+        // Phase 2: personalized rails. Race against a 12s deadline so
+        // a hung discover endpoint doesn't permanently leave the home
+        // page personalization-less from the user's perspective
+        // (timeout simply yields an empty result, same code path as
+        // the existing .catch). The fetches themselves still honor
+        // the AbortController, so navigating away cancels them.
+        const personalizedDeadline = new Promise<{ discover: never[]; anchor: never[] }>(resolve =>
+          setTimeout(() => resolve({ discover: [], anchor: [] }), 12000),
+        )
+        const personalizedFetch = Promise.all([
+          getDiscoverRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
+          getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
+        ]).then(([d, a]) => ({ discover: d, anchor: a }))
+
+        const { discover, anchor } = await Promise.race([
+          personalizedFetch,
+          personalizedDeadline,
+        ])
+        if (cancelled) return
+
         const personalizedRails = [
           ...(discover.length > 0
             ? discover
@@ -5811,25 +5865,31 @@ export default function App() {
                 .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const }))
             : []),
         ]
+
+        if (personalizedRails.length === 0) {
+          // Nothing to splice in — keep the core rails as-is. This is
+          // the path the 12s timeout took, or recommender returned
+          // empty (cold-start, LLM disabled).
+          return
+        }
+
+        // Splice the personalized rails between Recently Added (index
+        // 0) and Top Rated Movies (index 1 in the core set). Same
+        // visual order the old code produced.
         setHomeRails([
-          // Recently Added blends movies + shows so the See All
-          // can't honestly map to a single browse page — leave the
-          // affordance off rather than pick one arbitrarily.
-          { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const },
+          coreRails[0],
           ...personalizedRails,
-          // Top Rated rails map cleanly to /movies and /shows with
-          // sortBy=rating (the default), so the See All button takes
-          // the user to the full Top Rated catalog.
-          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const,
-            seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
-          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const,
-            seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
+          ...coreRails.slice(1),
         ])
       } catch (err) {
         if (cancelled) return
         if (err && (err as Error).name === 'AbortError') return
         setHomeError(err instanceof Error ? err.message : 'Unknown error')
       } finally {
+        // Note: setHomeLoading(false) for the success path now runs
+        // earlier, right after the core rails land. This finally
+        // block still covers the error path (catch above sets
+        // homeError; we want the spinner off).
         if (!cancelled) setHomeLoading(false)
       }
     })()
