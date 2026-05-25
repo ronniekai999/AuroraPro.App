@@ -898,6 +898,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const extendSuppression = (ms = 150) => {
     applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + ms)
   }
+  // 2026-05-25 deep-debug (High #3) — gate PR #81's race-recovery
+  // requestPlay() so it fires at most once per player-bind. Reset
+  // below in a target-identity useEffect when fileId/mediaItemId
+  // changes. See the recovery block in the play/pause/seek useEffect
+  // for the full rationale.
+  const hostBroadcastRecoveryFiredRef = useRef<boolean>(false)
+  useEffect(() => {
+    hostBroadcastRecoveryFiredRef.current = false
+  }, [target?.fileId, target?.mediaItemId])
   useEffect(() => {
     if (!target || !party) return
     const vid = videoRef.current
@@ -948,10 +957,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // Combined with the new time-sync clock-offset correction (below),
     // expected steady-state drift drops to 300-600ms — meaningfully
     // better than Plex/Jellyfin's typical 1-2s baseline.
+    // 2026-05-25 deep-debug (Medium #5) — Plex / Jellyfin both stay
+    // under 5% rate-adjust because vocal formants shift audibly above
+    // that (chipmunk effect on dialogue, slowdown sounds drugged on
+    // ease-back). PR #82's 6% was already verging on perceptible on
+    // dialogue-heavy SD content (Drake & Josh tests). Pull back to 5%
+    // — closes 1s of drift in ~20s instead of ~17s. If users still
+    // see persistent drift, prefer dropping DRIFT_HARD_MS further so
+    // the snap path takes over; never raise these above 1.05.
     const DRIFT_IGNORE_MS = 150
     const DRIFT_HARD_MS = 1800
-    const RATE_UP = 1.06
-    const RATE_DN = 0.94
+    const RATE_UP = 1.05
+    const RATE_DN = 0.95
     const id = window.setInterval(() => {
       // Host doesn't pull from server tick (it IS the source of truth).
       if (party.isHost) return
@@ -1070,8 +1087,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // already playing locally AND the party doesn't yet know,
     // re-broadcast. This catches the race and any other timing edge
     // that suppressed the initial play.
+    //
+    // 2026-05-25 deep-debug (High #3) — gate the recovery behind a
+    // per-target ref. Without this, unrelated parent re-renders (a
+    // chat message arrives in PartyPanel, a participant joins, a
+    // reaction overlay state ticks) re-run this useEffect (`party` is
+    // a fresh inline-object literal in App.tsx on every render), and
+    // re-fire requestPlay between the original wire-send and the
+    // server's first tick. Server is idempotent on request-play so
+    // those are mostly waste, BUT: if the host seeks inside that
+    // window before the sync WS is open, `pendingSyncIntentRef` in
+    // useParty buffers the seek (last-write-wins), and the next
+    // recovery fire overwrites the buffered seek with request-play.
+    // Seek is lost. The ref resets only when target identity changes
+    // (new movie/episode), so a single recovery per player-bind.
     if (party.isHost && !vid.paused && !party.isPlaying && !isApplyingRemote() &&
+        !hostBroadcastRecoveryFiredRef.current &&
         (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)) {
+      hostBroadcastRecoveryFiredRef.current = true
       party.requestPlay()
     }
 
@@ -1561,6 +1594,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   const vid = videoRef.current
                   const t = party.tickRef.current
                   if (!vid || !t) return
+                  // 2026-05-25 deep-debug (Medium #4) — media-match guard.
+                  // tickRef can outlive the party that produced it (it's
+                  // a ref, not state, so `party-ended` → setState(
+                  // INITIAL_STATE) doesn't clear it). If the user joined
+                  // a new party but kept the previous player open, the
+                  // raw click would snap to the OLD party's projected
+                  // position on the NEW party's media — confusing seek.
+                  // The steady-state drift loop has the same guard at
+                  // VideoPlayer.tsx ~941; mirror it here.
+                  if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
                   // Apply same clock-offset + extrapolation logic as
                   // the steady-state drift loop so a manual click
                   // lands on EXACTLY where the loop is targeting.

@@ -1855,7 +1855,19 @@ func (m *Manager) HandleSyncHeartbeat(code string, userID int64, currentTimeMs i
 // calculateCurrentPosition returns the authoritative playback position in ms,
 // accounting for time elapsed since PlayingSince if currently playing.
 // ps.mu must be held.
+//
+// 2026-05-25 deep-debug (High #1) — V3 awareness. For V3 parties, the
+// canonical position is `ps.CurrentAbsMs()` (anchor + wall-clock elapsed
+// when Running, anchor alone when Paused). The V2-only `IsPlaying +
+// PlayingSince + CurrentTimeMs` path returned a stale frozen position
+// for V3 mid-stream joiners — the BuildPartyStateMessage fix made the
+// joined payload's `is_playing` correct, but `current_time_ms` would
+// still be the resume-offset from 10 minutes ago. Prefer the V3
+// anchor when Running is true; fall through to V2 semantics otherwise.
 func (m *Manager) calculateCurrentPosition(ps *PartyState) int64 {
+	if ps.Running {
+		return ps.CurrentAbsMs()
+	}
 	if !ps.IsPlaying || ps.PlayingSince == nil {
 		return ps.CurrentTimeMs
 	}
@@ -3031,6 +3043,19 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 		playAt = time.Now().UnixMilli()
 	}
 
+	// 2026-05-25 — `is_playing` must reflect the V3 `Running` field, not
+	// the V2 `IsPlaying`. V3's HandleRequestPlay (sync_v3.go:706) calls
+	// setAnchorLocked(true) which sets ps.Running=true via the anchor
+	// path but NEVER touches ps.IsPlaying — the V2 field was left as the
+	// initial false from CreateParty. Result: a guest joining mid-stream
+	// received party-state{is_playing:false} even though the host was
+	// actively playing, so the client's auto-open-player useEffect
+	// (App.tsx) bailed on the !party.state.isPlaying guard and the guest
+	// saw the panel but no video. OR'ing covers the transitional period
+	// where both V2 and V3 are maintained in parallel (per the comment at
+	// manager.go:288 — "Step 5 of the execution plan removes V2").
+	isPlayingForClient := ps.IsPlaying || ps.Running
+
 	return map[string]interface{}{
 		"type": "party-state",
 		"payload": map[string]interface{}{
@@ -3043,7 +3068,7 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 				"media_poster":       ps.MediaPoster,
 				"party_name":         ps.PartyName,
 				"current_time_ms":    m.calculateCurrentPosition(ps),
-				"is_playing":         ps.IsPlaying,
+				"is_playing":         isPlayingForClient,
 				"group_state":        string(ps.GroupState),
 				"revision":           ps.StateRevision,
 				"play_at_server_ms":  playAt,
@@ -3094,6 +3119,12 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(snapshot))
 	for _, ps := range snapshot {
 		ps.mu.Lock()
+		// 2026-05-25 deep-debug (Medium #1) — same V2/V3 OR as
+		// BuildPartyStateMessage so the public listing endpoint
+		// (/api/parties/active) reports a V3 mid-stream party as
+		// "is_playing: true". Without this, a third-party joining
+		// via the listing UI saw an active party as paused and
+		// might have decided not to bother.
 		result = append(result, map[string]interface{}{
 			"code":               ps.Code,
 			"host_user_id":       ps.HostUserID,
@@ -3102,7 +3133,7 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 			"media_poster":       ps.MediaPoster,
 			"participant_count":  len(ps.Participants),
 			"max_participants":   ps.MaxParticipants,
-			"is_playing":         ps.IsPlaying,
+			"is_playing":         ps.IsPlaying || ps.Running,
 			"current_time_ms":    m.calculateCurrentPosition(ps),
 			"created_at":         ps.CreatedAt.Format(time.RFC3339),
 			"scheduled_start_at": ps.ScheduledStartAt,
