@@ -9,8 +9,13 @@
 //   - Voice mesh controls (mute/talk)
 //   - Reactions overlay (floating-emoji animation across video)
 //   - Ready-state UI ("I'm Ready" button + spoiler-free gate)
-//   - Reaction picker (sendReaction is wired but no UI to fire it)
 //   - Hand-off / promote-to-host
+//
+// 2026-05-25 — added reaction picker next to the chat send button.
+// The picker also lives in the player header (VideoPlayer.tsx), but
+// users naturally look for emoji reactions next to the chat UI — the
+// "panel looks great but where are reactions?" feedback. Both
+// locations send through the same party.sendReaction action.
 //
 // The panel reads from `useParty().state` and dispatches via the
 // action methods (sendChat, leave). It does not own party state.
@@ -18,6 +23,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import type { VoiceState } from '@/lib/voice'
+import { ReactionPicker } from './ReactionOverlay'
 
 interface PartyPanelProps {
   state: PartyState
@@ -25,6 +31,10 @@ interface PartyPanelProps {
   onSendChat: (msg: string) => void
   onLeave: () => void
   onClose: () => void
+  // 2026-05-25 — reaction picker handler. Optional so the panel still
+  // renders if the host hasn't wired up reactions (which would be a
+  // bug, but the panel shouldn't crash on a missing handler).
+  onSendReaction?: (emoji: string) => void
   // Phase 4.6 — voice mesh.
   voice?: VoiceState
   onJoinVoice?: () => void
@@ -36,6 +46,7 @@ interface PartyPanelProps {
 
 export function PartyPanel({
   state, currentUserId, onSendChat, onLeave, onClose,
+  onSendReaction,
   voice, onJoinVoice, onLeaveVoice, onToggleVoiceMute,
   onSendReady,
 }: PartyPanelProps) {
@@ -301,7 +312,17 @@ export function PartyPanel({
 
       {/* Composer */}
       <div className="px-4 py-3 border-t border-white/[0.06]">
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          {/* 2026-05-25 — reaction picker. Renders only when the parent
+              wired up onSendReaction. placement="left" anchors the
+              popover to the picker's LEFT edge so it grows rightward
+              into the chat-input space rather than off the panel's
+              left edge / behind the sidebar (M3 from PR #83 review).
+              Positioned BEFORE the input so the popover doesn't cover
+              the Send button when open. */}
+          {onSendReaction && state.roomConnected && (
+            <ReactionPicker onSend={onSendReaction} placement="left" />
+          )}
           <input
             type="text"
             placeholder={state.roomConnected ? 'Send a message…' : 'Connecting…'}

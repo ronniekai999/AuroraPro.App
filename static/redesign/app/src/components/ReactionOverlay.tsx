@@ -129,12 +129,23 @@ export function ReactionOverlay({ events }: Props) {
 // fires uniformly for everyone.
 interface PickerProps {
   onSend: (emoji: string) => void
+  // 2026-05-25 deep-debug (M3) — controls which edge of the trigger
+  // button the popover anchors to. The 9-emoji × ~56px-each popover
+  // is ~512px wide; the player-header use case (right-aligned in a
+  // wide toolbar) needs `right-0` so the popover grows leftward and
+  // doesn't escape the viewport. The PartyPanel use case (leftmost
+  // in a ~384px panel) needs `left-0` so the popover grows
+  // rightward into the empty chat-input space rather than off the
+  // panel's left edge / under the sidebar. Default 'right' preserves
+  // VideoPlayer's existing visual.
+  placement?: 'left' | 'right'
 }
 
 const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
-export function ReactionPicker({ onSend }: PickerProps) {
+export function ReactionPicker({ onSend, placement = 'right' }: PickerProps) {
   const [open, setOpen] = useState(false)
+  const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
   return (
     <div className="relative">
       <button
@@ -145,7 +156,7 @@ export function ReactionPicker({ onSend }: PickerProps) {
         😂
       </button>
       {open && (
-        <div className="absolute bottom-full right-0 mb-1 bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex gap-1 z-20">
+        <div className={`absolute bottom-full ${popoverAnchor} mb-1 bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex gap-1 z-20`}>
           {QUICK_EMOJI.map(e => (
             <button
               key={e}

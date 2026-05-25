@@ -283,12 +283,29 @@ export function useParty(): UseParty {
   // 2026-05-25 — stop time-sync interval. Called on sync-WS close so a
   // dead socket doesn't keep firing send() into a closed FD (it would
   // throw silently but still burn CPU). Re-armed on next openSyncSocket.
+  //
+  // 2026-05-25 deep-debug (Medium #2) — do NOT reset clockOffsetRef /
+  // rttRef here. The drift loop in VideoPlayer.tsx continues running
+  // during the sync-WS-down window (it polls tickRef + clockOffsetRef
+  // on a 250ms interval). If we zero the offset during teardown, the
+  // drift loop's `correctedNow = Date.now() + 0` computation suddenly
+  // operates without skew correction for a few hundred ms. A guest
+  // with significant clock skew + pre-existing real drift could see
+  // the apparent drift cross DRIFT_HARD_MS, triggering a visible
+  // hard-snap that's purely an artifact of the offset reset (not real
+  // drift). Instead, reset in openSyncSocket's onopen — the offset
+  // stays current right up until the new socket replaces it, and the
+  // new burst overwrites it within ~250ms.
+  //
+  // Previously this also called timeSyncBurstDoneRef.current = false
+  // which the onopen burst block needs; that flag is now reset
+  // explicitly in onopen alongside the EMA refs (single canonical
+  // reset point).
   const stopTimeSync = useCallback(() => {
     if (timeSyncTimerRef.current) {
       clearInterval(timeSyncTimerRef.current)
       timeSyncTimerRef.current = null
     }
-    timeSyncBurstDoneRef.current = false
   }, [])
 
   const closeSockets = useCallback(() => {
@@ -654,6 +671,26 @@ export function useParty(): UseParty {
       roomWsRef.current = null
       stopHeartbeat()
 
+      // 2026-05-25 deep-debug (High #2) — force-close + null the sync
+      // socket synchronously here. The sync socket's own onclose fires
+      // asynchronously when its TCP RST arrives (typically tens-of-ms
+      // later than the room's close, since they share a backend
+      // connection lifecycle). If a room-WS reconnect succeeds in
+      // that window, the party-state arrival's
+      //   `if (!syncWsRef.current && activeCodeRef.current) openSyncSocket(...)`
+      // guard sees a stale-but-not-null ref → never opens the new
+      // sync socket. Chat works, ticks/seeks/plays are dead until
+      // the user manually rejoins. Pre-PR-#80 the room-WS itself
+      // failed before reconnect could succeed, masking this; PR #80
+      // made room reconnect reliable enough that this race actually
+      // triggers in practice.
+      if (syncWsRef.current) {
+        try { syncWsRef.current.close() } catch { /* defensive */ }
+        syncWsRef.current = null
+        setStatePatch({ syncConnected: false })
+        stopTimeSync()
+      }
+
       // Suppress reconnect when the user explicitly left.
       if (userInitiatedLeaveRef.current) {
         setStatePatch({ roomConnected: false, reconnecting: false })
@@ -758,15 +795,24 @@ export function useParty(): UseParty {
         const m: OutboundSyncMessage = { type: 'time-sync', payload }
         try { ws.send(JSON.stringify(m)) } catch { /* defensive */ }
       }
-      if (!timeSyncBurstDoneRef.current) {
-        timeSyncBurstDoneRef.current = true
-        // 5-shot burst at 250ms spacing. First fires immediately.
-        sendTimeSync()
-        for (let i = 1; i < 5; i++) {
-          setTimeout(sendTimeSync, i * 250)
-        }
-      }
+      // 2026-05-25 deep-debug (round 2, M1) — only reset rttRef, NOT
+      // clockOffsetRef. The first-sample-raw guard in handleSyncMessage
+      // (case 'time-sync-response') keys on `rttRef.current === 0`,
+      // not on clockOffset. Zeroing clockOffset here opens a ~50-300ms
+      // window where the drift loop sees clockOffset=0 against a stale
+      // tick from the previous session, which could push apparent
+      // drift across DRIFT_HARD_MS for a guest with significant clock
+      // skew + pre-existing real drift in the same direction. Leaving
+      // the previous session's offset untouched gives the drift loop
+      // a stable (if slightly stale) reading until the first new
+      // time-sync response lands and overwrites it cleanly.
       stopTimeSync()
+      rttRef.current = 0
+      timeSyncBurstDoneRef.current = true
+      sendTimeSync() // first sample, fires immediately
+      for (let i = 1; i < 5; i++) {
+        setTimeout(sendTimeSync, i * 250)
+      }
       timeSyncTimerRef.current = setInterval(sendTimeSync, 30_000)
     }
     ws.onmessage = ev => {

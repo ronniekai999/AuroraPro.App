@@ -108,7 +108,11 @@ func (m *Manager) stateSnapshotLocked(ps *PartyState) map[string]interface{} {
 			"revision":          ps.StateRevision,
 			"group_state":       string(ps.GroupState),
 			"current_time_ms":   ps.CurrentTimeMs,
-			"is_playing":        ps.IsPlaying,
+			// 2026-05-25 — V3 OR for consistency with BuildPartyStateMessage.
+			// V2-only message that the redesign client doesn't currently
+			// consume, but keep the contract aligned so a future client
+			// doesn't silently regress to "host is paused" mid-stream.
+			"is_playing":        ps.IsPlaying || ps.Running,
 			"play_at_server_ms": playAt,
 			"server_now_ms":     time.Now().UnixMilli(),
 			"participants":      participants,

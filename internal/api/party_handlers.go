@@ -551,7 +551,11 @@ func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState) map[str
 		"media_title":        ps.MediaTitle,
 		"media_poster":       ps.MediaPoster,
 		"current_time_ms":    ps.CurrentTimeMs,
-		"is_playing":         ps.IsPlaying,
+		// 2026-05-25 — V3 OR (same contract as BuildPartyStateMessage /
+		// ActiveParties). The pre-join detail endpoint was showing
+		// V3-only parties as paused, so the join UI claimed "Host is
+		// paused" even when actively playing.
+		"is_playing":         ps.IsPlaying || ps.Running,
 		"is_active":          true,
 		"participant_count":  len(ps.Participants),
 		"max_participants":   ps.MaxParticipants,

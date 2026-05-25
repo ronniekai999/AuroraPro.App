@@ -7058,7 +7058,7 @@ export default function App() {
             resumePositionMs: resumeMs,
           } : prev)
         }}
-        onSendReaction={party.state.code ? party.sendReaction : undefined}
+        onSendReaction={party.state.code && party.state.roomConnected ? party.sendReaction : undefined}
         onFallbackToTranscode={() => {
           // Re-emit current target with forceTranscode=true. The
           // player's mediaErrorFallbackTriedRef prevents an infinite
@@ -7092,6 +7092,7 @@ export default function App() {
           state={party.state}
           currentUserId={user.id}
           onSendChat={party.sendChat}
+          onSendReaction={party.sendReaction}
           onLeave={() => { party.leave(); setPartyPanelOpen(false) }}
           onClose={() => setPartyPanelOpen(false)}
           voice={party.voice}
