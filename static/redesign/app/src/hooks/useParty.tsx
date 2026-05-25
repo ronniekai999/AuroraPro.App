@@ -44,7 +44,7 @@ import {
   type ReactionEvent,
   type TickPayload,
 } from '@/lib/party'
-import { apiFetch, getAccessToken } from '@/lib/api'
+import { apiFetch, getAccessToken, refreshAccessToken } from '@/lib/api'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
 
 // 2026-05-25 — room-socket keepalive cadence. Server's gorilla/websocket
@@ -612,17 +612,33 @@ export function useParty(): UseParty {
       setStatePatch({ roomConnected: false, reconnecting: true })
       reconnectTimerRef.current = setTimeout(() => {
         reconnectTimerRef.current = null
-        // Pull a fresh token at each attempt — the access token may
-        // have rotated during the outage.
-        const freshToken = getAccessToken()
-        const code = activeCodeRef.current
-        if (!code || !freshToken) {
-          setStatePatch({ reconnecting: false })
-          return
-        }
-        // Re-enter via the ref so the function picks up the latest
-        // closure (rather than capturing a stale version of itself).
-        openRoomSocketRef.current?.(code, freshToken)
+        // 2026-05-25 — REFRESH BEFORE RECONNECT. The access token has a
+        // 15-min lifetime (api.ts TokenResponse / AccessTokenExpiry
+        // server-side); watch parties commonly run longer than that,
+        // and `?token=` is part of the WS upgrade URL — once expired,
+        // every reconnect attempt 401s at the upgrade and the WS
+        // closes immediately. We watched this kill the M76PQA party:
+        // host's WS dropped ~12min in, all 5 reconnect attempts
+        // failed against the expired token, server's 90s host-grace
+        // expired, server broadcast `party-ended` to the guest, and
+        // both clients lost party state while the HLS player kept
+        // playing (player has its own scoped token, independent of
+        // auth). Refreshing here is a 200-300ms no-op when the token
+        // is still valid (server returns same exp) and rescues the
+        // reconnect when it's expired. Awaited inside the timer so
+        // backoff timing still gates the actual WS open.
+        void (async () => {
+          await refreshAccessToken().catch(() => false)
+          const freshToken = getAccessToken()
+          const code = activeCodeRef.current
+          if (!code || !freshToken) {
+            setStatePatch({ reconnecting: false })
+            return
+          }
+          // Re-enter via the ref so the function picks up the latest
+          // closure (rather than capturing a stale version of itself).
+          openRoomSocketRef.current?.(code, freshToken)
+        })()
       }, delay)
     }
 

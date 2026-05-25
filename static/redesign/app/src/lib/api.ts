@@ -199,6 +199,17 @@ let refreshInFlight: Promise<boolean> | null = null
 // than a spinner that never resolves.
 const REFRESH_TIMEOUT_MS = 15000
 
+// Public refresh wrapper for callers that don't go through apiFetch — e.g.
+// the watch-party WS reconnect loop in useParty.tsx, which can't rely on
+// apiFetch's 401-retry path because the JWT is in the URL (?token=...)
+// and a stale token gets rejected at the WS upgrade. Returns true on
+// successful refresh + token store, false otherwise. Safe to call
+// concurrently; coalesces with in-flight apiFetch refreshes via the
+// same `refreshInFlight` promise.
+export async function refreshAccessToken(): Promise<boolean> {
+  return tryRefresh()
+}
+
 async function tryRefresh(): Promise<boolean> {
   // Coalesce simultaneous refresh attempts so a wave of parallel 401s
   // triggers exactly one refresh call. Subsequent callers await the
