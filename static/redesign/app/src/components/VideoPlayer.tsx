@@ -365,6 +365,27 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [cast.status.connected])
 
+  // QA 2026-05-25 — disable every TextTrack on the <video>. Called
+  // after a new HLS manifest or direct-play source loads so any
+  // DEFAULT=YES subtitle group baked into the master playlist
+  // (especially forced-foreign tracks added by ffmpeg's subtitle
+  // pass-through) doesn't auto-show before the user picks one.
+  //
+  // The QA report flagged "Ladies First defaulted to 'SPA SUBRIP
+  // Forced'" — that's the m3u8 marking a Spanish forced track as
+  // DEFAULT, and hls.js/the browser dutifully enabling it. Our
+  // player manages subtitles via the picker + applySubtitle (which
+  // already loops + disables others); this sweep is the missing
+  // initial-state-reset so the picker's "Off" choice is honored
+  // when the user hasn't touched anything.
+  const disableAllTextTracks = (vid: HTMLVideoElement) => {
+    try {
+      for (let i = 0; i < vid.textTracks.length; i++) {
+        vid.textTracks[i].mode = 'disabled'
+      }
+    } catch { /* defensive */ }
+  }
+
   // M10 Phase 4.5 — apply a subtitle track. Server exposes per-track
   // VTT extraction at /api/stream/{fileId}/subtitles/{index}?type=...
   // (V1 uses the same path). We add a <track> element with the URL
@@ -546,14 +567,27 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // list. Different media items have different sub layouts;
           // a sub index from movie A may map to no track (or worse,
           // the wrong language) in episode B.
+          //
+          // QA 2026-05-25 — also defensive-disable any auto-selected
+          // TextTrack the browser promoted from the file's embedded
+          // subs. Done on BOTH loadedmetadata and canplay so the
+          // tracks are caught regardless of which event populates
+          // textTracks first (browser-dependent — Chromium promotes
+          // at loadedmetadata, some others at canplay).
           const newSubs = info.subtitles || []
-          if (subToRestore >= 0 && newSubs.some(s => s.index === subToRestore)) {
-            const onCanPlayForSub = () => {
-              applySubtitle(subToRestore)
-              vid.removeEventListener('canplay', onCanPlayForSub)
-            }
-            vid.addEventListener('canplay', onCanPlayForSub)
+          const onLoadedMetadata = () => {
+            disableAllTextTracks(vid)
           }
+          const onCanPlayForSub = () => {
+            disableAllTextTracks(vid)
+            if (subToRestore >= 0 && newSubs.some(s => s.index === subToRestore)) {
+              applySubtitle(subToRestore)
+            }
+            vid.removeEventListener('canplay', onCanPlayForSub)
+            vid.removeEventListener('loadedmetadata', onLoadedMetadata)
+          }
+          vid.addEventListener('loadedmetadata', onLoadedMetadata)
+          vid.addEventListener('canplay', onCanPlayForSub)
           try { await vid.play() } catch { /* autoplay-blocked, user clicks play */ }
           return
         }
@@ -643,6 +677,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // Audit H1 (Phase 4.5 final-6) — only reapply if the
           // saved index is present in the NEW track list. See the
           // direct-play branch above for the rationale.
+          //
+          // QA 2026-05-25 — disable any DEFAULT=YES subtitle group
+          // the m3u8 master might have included (e.g. SPA forced
+          // tracks from foreign-film source files). Our picker is
+          // the source of truth for subs; the m3u8's hint is just
+          // metadata.
+          disableAllTextTracks(vid)
           const newSubsHls = info.subtitles || []
           if (subToRestore >= 0 && newSubsHls.some(s => s.index === subToRestore)) {
             applySubtitle(subToRestore)

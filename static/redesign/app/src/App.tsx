@@ -1386,6 +1386,20 @@ function BrowseView({
 // Each card owns its own image-failure state so a broken thumbnail
 // renders the same placeholder as a missing one (instead of an
 // 80px hole).
+//
+// QA 2026-05-25 — placeholder upgraded from a generic person icon
+// to first+last initials on a tinted background. The icon-only
+// fallback made a row of imageless cast (e.g. older shows where
+// TMDB doesn't have headshots) look like a row of identical blanks;
+// initials at least disambiguate visually.
+function castInitials(name: string): string {
+  if (!name) return '?'
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return '?'
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+}
+
 function CastCard({ member }: { member: { id: number; name: string; profile_path?: string; character?: string; role_type: string } }) {
   const [imgFailed, setImgFailed] = useState(false)
   const showImg = !!member.profile_path && !imgFailed
@@ -1400,8 +1414,11 @@ function CastCard({ member }: { member: { id: number; name: string; profile_path
           onError={() => setImgFailed(true)}
         />
       ) : (
-        <div className="w-[80px] h-[80px] rounded-full bg-white/[0.05] border border-white/10 mb-2 mx-auto flex items-center justify-center">
-          <Icon name="user" size={28} className="text-white/30" />
+        <div
+          className="w-[80px] h-[80px] rounded-full bg-gradient-to-br from-purple-500/20 to-fuchsia-500/15 border border-white/10 mb-2 mx-auto flex items-center justify-center text-white/80 text-xl font-semibold"
+          aria-label={`${member.name} avatar placeholder`}
+        >
+          {castInitials(member.name)}
         </div>
       )}
       <div className="text-white/90 text-xs font-medium truncate">{member.name}</div>
@@ -2244,8 +2261,17 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
               {!searching && searchResults.length === 0 && searchQ.trim() && <p className="text-white/40 text-sm">No matches.</p>}
               {searchResults.map(r => (
                 <div key={`${r.media_type}-${r.tmdb_id}`} className="flex items-center gap-3 p-2 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04]">
-                  <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden">
-                    {r.poster_path && <img src={tmdbPosterURL(r.poster_path)} alt="" className="w-full h-full object-cover" />}
+                  {/* QA 2026-05-25 — explicit placeholder for entries
+                      with no TMDB poster (older + obscure titles).
+                      Previously rendered as an empty box; now shows
+                      a film/TV glyph centered in the same frame, so
+                      the row layout stays consistent. */}
+                  <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
+                    {r.poster_path ? (
+                      <img src={tmdbPosterURL(r.poster_path)} alt="" className="w-full h-full object-cover" />
+                    ) : (
+                      <Icon name={r.media_type === 'tv' ? 'tv' : 'film'} size={20} className="text-white/25" />
+                    )}
                   </div>
                   <div className="flex-1 min-w-0">
                     <p className="text-white/90 text-sm font-medium truncate">{r.title}{r.year ? ` (${r.year})` : ''}</p>
@@ -3828,16 +3854,20 @@ function ManualMatchModal({ target, onClose, onMatched }: {
           {!searching && q.trim() && results.length === 0 && <p className="text-white/40 text-sm">No candidates.</p>}
           {results.map(r => (
             <div key={`${r.source}-${r.id}`} className="flex items-center gap-3 p-2 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] border border-white/[0.04]">
-              <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden">
+              <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
                 {/* Audit L3 (Phase 5.3 audit-8) — TMDB posters are
                     relative paths (need CDN prefix); TVDB
-                    image_url is a full URL (render directly). */}
-                {r.poster_path && (
+                    image_url is a full URL (render directly).
+                    QA 2026-05-25 — explicit glyph fallback for
+                    posterless candidates. */}
+                {r.poster_path ? (
                   <img
                     src={r.source === 'tvdb' ? r.poster_path : tmdbPosterURL(r.poster_path)}
                     alt=""
                     className="w-full h-full object-cover"
                   />
+                ) : (
+                  <Icon name="film" size={20} className="text-white/25" />
                 )}
               </div>
               <div className="flex-1 min-w-0">
@@ -4380,8 +4410,8 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                     <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Uptime</p>
                     <p className="text-white/90">{stats.uptime}</p>
                   </div>
-                  <div>
-                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Memory</p>
+                  <div title="Aurora's Go process RSS after the last GC. FFmpeg transcoders run as separate subprocesses and aren't counted here. PostgreSQL runs in its own container with its own memory budget.">
+                    <p className="text-white/40 text-xs uppercase tracking-wide mb-1 cursor-help">Memory <span className="text-white/30">ⓘ</span></p>
                     <p className="text-white/90">{stats.memory_alloc_mb} MB</p>
                   </div>
                   <div>
@@ -4665,11 +4695,18 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
     const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1)
     return `${(n / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
   }
-  const tiles = stats && isAdmin
+  type StatTile = { label: string; value: string; icon: string; tone: string; hint?: string }
+  const tiles: StatTile[] = stats && isAdmin
     ? [
       { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', tone: 'ok' },
       { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', tone: stats.disk_free_gb < 10 ? 'warn' : 'ok' },
-      { label: 'Memory', value: `${stats.memory_alloc_mb} MB`, icon: 'zap', tone: 'ok' },
+      // QA 2026-05-25 — Memory shows the Go process's RSS, which on
+      // a 65 TB media server reads suspiciously small (~10 MB) until
+      // you know FFmpeg + PostgreSQL aren't counted. The hint surfaces
+      // that context on hover instead of requiring the user to dig
+      // into the metric definition.
+      { label: 'Memory', value: `${stats.memory_alloc_mb} MB`, icon: 'zap', tone: 'ok',
+        hint: "Aurora's Go process RSS after the last GC. FFmpeg transcoders run as separate subprocesses and aren't counted here. PostgreSQL runs in its own container with its own memory budget." },
       { label: 'Library Size', value: fmtBytes(stats.total_file_size_bytes), icon: 'film', tone: 'ok' },
       // QA BUG-002 — label as "Files" not "Titles" so users
       // don't read this as conflicting with the Movies/Shows
@@ -4710,7 +4747,11 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
         {!isAdmin && <p className="text-white/40 text-sm col-span-full">Server status is admin-only.</p>}
         {isAdmin && !stats && <p className="text-white/40 text-sm col-span-full">Loading stats…</p>}
         {tiles.map(stat => (
-          <div key={stat.label} className="glass-panel rounded-xl p-3">
+          <div
+            key={stat.label}
+            title={stat.hint}
+            className={`glass-panel rounded-xl p-3 ${stat.hint ? 'cursor-help' : ''}`}
+          >
             <div className="flex items-center gap-3">
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
                 stat.tone === 'warn' ? 'bg-amber-500/10 text-amber-400' :
@@ -4720,7 +4761,10 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
                 <Icon name={stat.icon} size={16} />
               </div>
               <div className="min-w-0">
-                <p className="text-white/50 text-xs">{stat.label}</p>
+                <p className="text-white/50 text-xs flex items-center gap-1">
+                  {stat.label}
+                  {stat.hint && <span className="text-white/30 text-[10px]">ⓘ</span>}
+                </p>
                 <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
             </div>
