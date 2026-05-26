@@ -70,6 +70,30 @@ export interface ServerMediaItem {
   // hero rerank picks and discover-rail items; the field is omitempty
   // on the Go side so it's absent on non-personalized responses.
   reason?: string
+
+  // AI re-matcher fields (migration 026, internal/matching). Populated
+  // on the admin /flagged endpoint when the matcher has evaluated the
+  // item. All fields are omitempty on the Go side — their presence
+  // signals "AI has touched this row." Distinct from a confirmed
+  // match (which lives in match_status); these fields are the
+  // matcher's audit trail + pending suggestion.
+  //
+  // - ai_suggested_tmdb_id present + ai_match_confidence ≥
+  //   AI_MATCH_AUTO_THRESHOLD (default 90, configured server-side):
+  //   matcher already auto-promoted via EnrichByTMDBID; the suggestion
+  //   here is the audit trail.
+  // - ai_suggested_tmdb_id present + confidence below threshold:
+  //   sub-threshold pick awaiting human approval (one-click via the
+  //   existing /api/media/{id}/match endpoint).
+  // - All fields absent except ai_match_ran_at: matcher evaluated and
+  //   either found no TMDB candidates or the LLM explicitly rejected
+  //   (tmdb_id=0).
+  ai_suggested_tmdb_id?: number
+  ai_suggested_title?: string
+  ai_suggested_year?: number
+  ai_match_confidence?: number
+  ai_match_reasoning?: string
+  ai_match_ran_at?: string // ISO timestamp
 }
 
 export interface PaginatedResponse<T> {
@@ -1094,6 +1118,32 @@ export interface SessionDiagnostic {
 }
 export async function diagnoseSession(id: string, signal?: AbortSignal): Promise<SessionDiagnostic> {
   return apiFetch<SessionDiagnostic>(`/api/admin/sessions/${encodeURIComponent(id)}/diagnose`, { signal })
+}
+
+// AI re-matcher backfill controls (migration 026, internal/matching).
+// Status returns the current/last job's progress; start kicks off a
+// new sweep over items where ai_match_ran_at IS NULL. Both endpoints
+// require admin auth (gated server-side via the /api/admin route group).
+export interface AIRematchJobStatus {
+  job_id?: string
+  started_at: string
+  finished_at?: string  // zero-time "0001-01-01..." while still running
+  total: number
+  processed: number
+  matched: number       // count auto-promoted
+  suggested: number     // count with sub-threshold suggestion stored
+  failed: number
+  cancelled?: boolean
+}
+export interface AIRematchStatusResponse {
+  enabled: boolean
+  job?: AIRematchJobStatus
+}
+export async function getAIRematchStatus(signal?: AbortSignal): Promise<AIRematchStatusResponse> {
+  return apiFetch<AIRematchStatusResponse>('/api/admin/flagged/ai-rematch/status', { signal })
+}
+export async function startAIRematch(): Promise<{ job_id: string }> {
+  return apiFetch<{ job_id: string }>('/api/admin/flagged/ai-rematch', { method: 'POST' })
 }
 
 // /api/admin/flagged returns ServerMediaItem records flagged via
