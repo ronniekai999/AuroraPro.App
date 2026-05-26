@@ -40,6 +40,26 @@ type LLMConfig struct {
 	BackfillWorkers int           // parallel backfill goroutines
 	BackfillBatch   int           // items per Ollama batch
 	HTTPTimeout     time.Duration // per-request budget
+
+	// AI-driven re-matching for items the heuristic enricher flagged as
+	// 'needs_review' (TMDB confidence 50..84). See internal/matching.
+	//
+	// AIMatchAutoThreshold is the LLM-confidence floor at which an item
+	// auto-promotes to match_status='matched' via the existing
+	// EnrichByTMDBID path. Default 90 — strictly higher than the heuristic
+	// AutoMatchThreshold default (85) because the LLM's self-reported
+	// score is less calibrated and we want a conservative bar before
+	// changing user-visible state without operator approval. Env:
+	// AI_MATCH_AUTO_THRESHOLD.
+	//
+	// AIMatchRatePerSec throttles the background backfill so a large
+	// flagged queue doesn't saturate Ollama (which would slow down search
+	// and the recommender stack sharing the same model). Default 1/sec.
+	// LLM-call latency dominates this in practice, so the rate limit is a
+	// floor that mostly matters on fast local models. Env:
+	// AI_MATCH_RATE_PER_SEC.
+	AIMatchAutoThreshold int
+	AIMatchRatePerSec    float64
 }
 
 // WatchPartyConfig controls the group-watch sync protocol. Exposing these
@@ -351,6 +371,9 @@ func Load() (*Config, error) {
 			// ctx (discoverBudget = 60s). See llm/client.go for the
 			// rationale; keep this in sync with that default.
 			HTTPTimeout: 70 * time.Second,
+			// AI matcher defaults — see field comments above.
+			AIMatchAutoThreshold: 90,
+			AIMatchRatePerSec:    1.0,
 		},
 		WatchParty: WatchPartyConfig{
 			HeartbeatInterval: 500 * time.Millisecond,
@@ -879,6 +902,20 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("LLM_HTTP_TIMEOUT_SEC"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil && i > 0 {
 			cfg.LLM.HTTPTimeout = time.Duration(i) * time.Second
+		}
+	}
+	// AI matcher (internal/matching). Env-only, matching the
+	// MATCH_AUTO_THRESHOLD precedent — operators tune via Docker env vars,
+	// not the admin UI. Adding to the settings table is one line in
+	// applyLLMOverrides if a future need arises.
+	if v := os.Getenv("AI_MATCH_AUTO_THRESHOLD"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 && i <= 100 {
+			cfg.LLM.AIMatchAutoThreshold = i
+		}
+	}
+	if v := os.Getenv("AI_MATCH_RATE_PER_SEC"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			cfg.LLM.AIMatchRatePerSec = f
 		}
 	}
 
