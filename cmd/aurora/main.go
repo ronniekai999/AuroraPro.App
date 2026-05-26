@@ -25,6 +25,7 @@ import (
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/logging"
+	"github.com/aurora-media/aurora/internal/matching"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/recommender"
@@ -240,10 +241,16 @@ func main() {
 	// When LLM_ENABLED=false (or Ollama is unreachable at startup) we leave
 	// `embedder` nil so the scanner hooks below skip embedding silently and
 	// the rest of the system keeps working with trigram search only.
+	//
+	// 2026-05-25 — also constructs the AI re-matcher and its backfill
+	// worker (internal/matching). Both are nil-guarded by the inline hook
+	// helpers below, so disabling LLM cleanly disables this subsystem too.
 	var embedder *embedding.Embedder
 	var semanticSearcher *search.Searcher
 	var heroRecommender *recommender.Hero
 	var llmClient *llm.Client
+	var aiMatcher *matching.AIMatcher
+	var aiBackfill *matching.Backfiller
 	if cfg.LLM.Enabled {
 		// Apply any DB-stored overrides on top of env/yaml config. Precedence:
 		// DB row (existing, even if empty) > env > yaml default. The "existing
@@ -280,9 +287,25 @@ func main() {
 		semanticSearcher = search.New(llmClient, queries)
 		heroRecommender = recommender.New(queries, llmClient)
 
+		// AI re-matcher for items the heuristic enricher flagged as
+		// 'needs_review'. The matcher reuses LLM_CHAT_MODEL (same model
+		// as semantic-search rerank — single tuning surface) and
+		// promotes items to 'matched' when self-reported confidence
+		// clears AI_MATCH_AUTO_THRESHOLD.
+		aiMatcher = matching.NewAIMatcher(llmClient, tmdbClient, enricher, queries, cfg.LLM.AIMatchAutoThreshold)
+		aiBackfill = matching.NewBackfiller(aiMatcher, queries, cfg.LLM.AIMatchRatePerSec)
+
 		// One-shot backfill of any items missing/outdated embeddings. Runs in
 		// the background so it doesn't block HTTP startup; ctx cancel stops it.
 		go embedder.RunBackfill(ctx)
+
+		// One-shot AI re-match sweep over any currently-flagged items
+		// that haven't been LLM-evaluated yet. Idempotent — cheap COUNT
+		// first, exits immediately on an empty queue. Cancels with ctx
+		// on SIGTERM. The inline OnNewItem hook below covers
+		// newly-flagged items going forward; this one drains the
+		// pre-existing backlog.
+		go aiBackfill.Run(ctx)
 	} else {
 		slog.Info("LLM disabled (LLM_ENABLED=false); skipping embedding subsystem")
 	}
@@ -320,6 +343,77 @@ func main() {
 		}
 	}
 
+	// AI matcher inline queue. The enricher's TMDB heuristic puts ~10-20%
+	// of newly-scanned items into 'needs_review' (50..84 confidence band);
+	// for those, we want the LLM matcher to run as a second-pass so the
+	// operator sees an AI suggestion immediately on the flagged page.
+	//
+	// CRITICAL: the matcher LLM call takes 3-30s. Running it inline on
+	// the scanner goroutine would catastrophically stall scan throughput
+	// for libraries with many flagged items — a 10k-item scan with 1k
+	// flagged would add hours. The bounded channel + single worker
+	// goroutine decouples scan latency from match latency: scans push
+	// itemIDs (cheap), the worker drains at whatever pace Ollama allows.
+	//
+	// Capacity 256 + drop-oldest semantics: if the scan out-runs the
+	// matcher (typical), newer items take priority. The backfill goroutine
+	// above will catch the dropped items on its next pass (it scans for
+	// ai_match_ran_at IS NULL, so anything not yet evaluated gets a turn).
+	// Single worker (not a pool) so concurrent LLM calls don't drown the
+	// shared chat model used by search rerank / recommender.
+	//
+	// Shutdown semantics (deep-debugger Bug 1.1 fix): the worker exits
+	// on `<-ctx.Done()`, no channel close needed. Producers also gate on
+	// ctx so a SIGTERM during a busy scan doesn't keep enqueueing into a
+	// drained worker. Dropped-on-shutdown items get picked up by the next
+	// boot's backfill via the ai_match_ran_at IS NULL filter.
+	type aiMatchJob struct{ itemID int64 }
+	var aiMatchQueue chan aiMatchJob
+	enqueueAIMatch := func(item *models.MediaItem) {} // no-op fallback when AI disabled
+	if aiMatcher != nil {
+		aiMatchQueue = make(chan aiMatchJob, 256)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					slog.Info("ai-match inline worker: shutdown")
+					return
+				case job := <-aiMatchQueue:
+					// Re-fetch the item so we observe the post-enrichment
+					// match_status. If a concurrent manual match flipped
+					// it to 'matched' between enqueue and now, the
+					// matcher's own early-return guard (ai_matcher.go
+					// matchStatusMatched check) will skip the LLM call.
+					it, err := queries.GetMediaItem(ctx, job.itemID)
+					if err != nil || it == nil {
+						continue
+					}
+					if _, err := aiMatcher.Match(ctx, it); err != nil {
+						slog.Warn("inline ai-match failed",
+							"item_id", it.ID, "title", it.Title, "error", err)
+					}
+				}
+			}
+		}()
+		enqueueAIMatch = func(item *models.MediaItem) {
+			// Gate enqueue on ctx so shutdown doesn't keep stuffing the
+			// channel after the worker has exited. The channel buffer
+			// (256) absorbs the normal scan burst; the default case
+			// drops on overflow with the backfill safety net.
+			select {
+			case <-ctx.Done():
+				return
+			case aiMatchQueue <- aiMatchJob{itemID: item.ID}:
+			default:
+				// Queue full → backfill worker will catch this item on
+				// its next sweep (the WHERE clause it pages on includes
+				// any flagged item with ai_match_ran_at IS NULL).
+				slog.Warn("ai-match queue full, deferring to backfill",
+					"item_id", item.ID, "title", item.Title)
+			}
+		}
+	}
+
 	// Phase 2: Hook scanner into enricher so new items get TMDB metadata inline
 	scanner.OnNewItem = func(ctx context.Context, item *models.MediaItem) {
 		score, err := enricher.EnrichMediaItem(ctx, item)
@@ -329,6 +423,14 @@ func main() {
 			slog.Info("enriched new item", "item", item.Title, "confidence", score)
 		}
 		embedItem(ctx, item)
+		// Second-pass AI matcher for items that landed in 'needs_review'
+		// (heuristic confidence 50..84). The thresholds here mirror the
+		// enricher's defaults; the matcher itself doesn't filter on score
+		// because OnNewItemByID/OnNewItemByTVDBID never reach here (those
+		// produce 'matched' items directly and skip the AI second-pass).
+		if score >= cfg.TMDB.ReviewThreshold && score < cfg.TMDB.AutoMatchThreshold {
+			enqueueAIMatch(item)
+		}
 	}
 
 	// NFO support: when an .nfo file provides an explicit TMDB ID, skip search
@@ -616,7 +718,12 @@ func main() {
 		EmbeddingEnabled: cfg.LLM.Enabled && embedder != nil,
 		EmbeddingVersion: embedding.CurrentVersion,
 		LLMClient:        llmClient,
-		RootCtx:          ctx, // server-lifecycle ctx for background goroutines spawned in handlers
+		// aiBackfill is nil when LLM is disabled OR matching subsystem
+		// failed to construct. Router's nil check converts that to a
+		// 503 from the rematch endpoints — same shape as the
+		// embedding-status endpoint's nil-handling.
+		AIBackfill: aiBackfillIface(aiBackfill),
+		RootCtx:    ctx, // server-lifecycle ctx for background goroutines spawned in handlers
 	})
 
 	// HTTP Server
@@ -826,6 +933,21 @@ func findStaticDir() string {
 	}
 
 	return ""
+}
+
+// aiBackfillIface converts a possibly-nil *matching.Backfiller to a
+// possibly-nil api.AIBackfillController interface value. Go's interface
+// semantics require this dance: passing a typed-nil pointer to an
+// interface-typed field produces a non-nil interface holding a nil
+// pointer (the "famous nil interface gotcha"). The api package's nil
+// check on AIBackfillController would then fail, the handler would
+// dereference nil, and we'd panic. Explicit conversion via this helper
+// preserves "matcher disabled → interface is nil" semantics.
+func aiBackfillIface(b *matching.Backfiller) api.AIBackfillController {
+	if b == nil {
+		return nil
+	}
+	return b
 }
 
 // semanticAdapter wraps *search.Searcher and discards the ParsedQuery so it

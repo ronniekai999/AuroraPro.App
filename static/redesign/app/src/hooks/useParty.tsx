@@ -45,6 +45,7 @@ import {
   type TickPayload,
 } from '@/lib/party'
 import { apiFetch, getAccessToken, refreshAccessToken } from '@/lib/api'
+import { cacheLastParty } from '@/lib/lastParty'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
 
 // 2026-05-25 — room-socket keepalive cadence. Server's gorilla/websocket
@@ -179,8 +180,18 @@ export interface UseParty {
   rttRef: React.MutableRefObject<number>
 }
 
-export function useParty(): UseParty {
+// 2026-05-25 — useParty now accepts the current user id so it can
+// scope the last-party localStorage cache (lib/lastParty.ts) to the
+// signed-in user. Optional — when undefined, caching is skipped and the
+// modal's "Recently in" pill simply won't render. Callers that already
+// have user.id should pass it (App.tsx does).
+export function useParty(currentUserId?: number): UseParty {
   const [state, setState] = useState<PartyState>(INITIAL_STATE)
+  // Track the latest userId in a ref so the leave callback's stable
+  // identity doesn't capture a stale id when the user logs in/out
+  // mid-session. Also avoids re-creating callbacks every render.
+  const currentUserIdRef = useRef<number | undefined>(currentUserId)
+  currentUserIdRef.current = currentUserId
   const roomWsRef = useRef<WebSocket | null>(null)
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
@@ -325,6 +336,24 @@ export function useParty(): UseParty {
   }, [stopHeartbeat, stopTimeSync, cancelReconnect])
 
   const leave = useCallback(() => {
+    // 2026-05-25 — stash the just-left party in localStorage BEFORE
+    // we wipe React state, so the join-modal's "Recently in" pill has
+    // something to surface for accidental-leave recovery. Scoped to
+    // currentUserId so logging out + back in as a different user
+    // doesn't leak the prior user's history. Quick-parties die
+    // server-side immediately on host-leave; the rejoin attempt will
+    // 404 and the pill self-clears. For guests + persistent rooms,
+    // the rejoin actually works.
+    const userId = currentUserIdRef.current
+    if (userId && state.code) {
+      cacheLastParty({
+        userId,
+        code: state.code,
+        partyName: state.partyName,
+        mediaTitle: state.mediaTitle,
+        wasHost: state.hostUserId === userId,
+      })
+    }
     // Mark this as user-initiated FIRST so any pending close handlers
     // know not to attempt reconnect. Without this flag, calling leave()
     // would trigger closeSockets() → onclose fires → reconnect loop
@@ -349,7 +378,7 @@ export function useParty(): UseParty {
     // play/pause from the previous party doesn't replay against
     // the next one when its sync socket opens.
     pendingSyncIntentRef.current = null
-  }, [closeSockets])
+  }, [closeSockets, state.code, state.partyName, state.mediaTitle, state.hostUserId])
 
   const handleRoomMessage = useCallback((raw: string) => {
     let msg: InboundRoomMessage
@@ -415,6 +444,25 @@ export function useParty(): UseParty {
               ? []
               : prev.recentReactions,
         }))
+        // 2026-05-25 — refresh the last-party cache with the
+        // server-authoritative values. This catches the "user
+        // refreshed the tab mid-party" case: on the next page load,
+        // the modal's Recently in pill knows where to send them. We
+        // read from `inner` directly (not React state) because the
+        // setStatePatch above is async and we want the latest server
+        // truth.
+        {
+          const userId = currentUserIdRef.current
+          if (userId && inner.code) {
+            cacheLastParty({
+              userId,
+              code: inner.code,
+              partyName: inner.party_name,
+              mediaTitle: inner.media_title,
+              wasHost: inner.host_user_id === userId,
+            })
+          }
+        }
         // First party-state arrival is the cue to open the sync
         // socket. openSyncOnce is idempotent via the syncWsRef
         // guard.

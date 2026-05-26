@@ -754,12 +754,18 @@ func (q *Queries) FindMediaItemByTitle(ctx context.Context, libraryID int64, med
 
 func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem, error) {
 	item := &models.MediaItem{}
+	// 2026-05-25 — match_status added to the projection so callers can
+	// distinguish 'matched' vs 'needs_review' vs unset. The AI re-matcher
+	// inline worker needs this to skip items that a concurrent ManualMatch
+	// flipped to 'matched' between enqueue and processing (deep-debugger
+	// Bug 7.1). COALESCE because pre-Phase-2 rows may have NULL status.
+	var matchStatus *string
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), added_at, updated_at
+		`SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes, content_rating, COALESCE(poster_path,''), COALESCE(backdrop_path,''), match_status, added_at, updated_at
 		 FROM media_items WHERE id = $1`, id,
 	).Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
 		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
-		&item.PosterPath, &item.BackdropPath,
+		&item.PosterPath, &item.BackdropPath, &matchStatus,
 		&item.AddedAt, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -767,6 +773,9 @@ func (q *Queries) GetMediaItem(ctx context.Context, id int64) (*models.MediaItem
 			return nil, nil
 		}
 		return nil, fmt.Errorf("get media item: %w", err)
+	}
+	if matchStatus != nil {
+		item.MatchStatus = *matchStatus
 	}
 	return item, nil
 }
@@ -820,11 +829,19 @@ func (q *Queries) SetMatchStatus(ctx context.Context, itemID int64, status strin
 }
 
 func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaItem, error) {
+	// AI-match suggestion columns (migration 026) are scanned into pointer
+	// fields on MediaItem — NULL distinguishes "AI never ran on this item"
+	// from "AI ran but the LLM returned 0 confidence". The admin UI uses the
+	// presence of ai_suggested_tmdb_id to render a one-click "Accept
+	// suggestion" button that hits the existing ManualMatch endpoint.
 	rows, err := q.pool.Query(ctx,
 		`SELECT m.id, m.library_id, m.type, m.title, m.sort_title, m.year,
 		        m.overview, m.rating, m.runtime_minutes, m.content_rating,
 		        COALESCE(m.poster_path,''), COALESCE(m.backdrop_path,''),
 		        m.added_at, m.updated_at,
+		        m.ai_suggested_tmdb_id, COALESCE(m.ai_suggested_title, ''),
+		        COALESCE(m.ai_suggested_year, 0), m.ai_match_confidence,
+		        COALESCE(m.ai_match_reasoning, ''), m.ai_match_ran_at,
 		        COALESCE(
 		            (SELECT mf.path FROM media_files mf WHERE mf.media_item_id = m.id ORDER BY mf.id LIMIT 1),
 		            (SELECT ef.path FROM episode_files ef
@@ -849,6 +866,9 @@ func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaIte
 			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
 			&item.PosterPath, &item.BackdropPath,
 			&item.AddedAt, &item.UpdatedAt,
+			&item.AISuggestedTMDBID, &item.AISuggestedTitle,
+			&item.AISuggestedYear, &item.AIMatchConfidence,
+			&item.AIMatchReasoning, &item.AIMatchRanAt,
 			&item.FilePath,
 		); err != nil {
 			return nil, fmt.Errorf("scan review item: %w", err)

@@ -52,6 +52,17 @@ export function PartyPanel({
 }: PartyPanelProps) {
   const [draft, setDraft] = useState('')
   const chatRef = useRef<HTMLDivElement | null>(null)
+  // 2026-05-25 — host-aware leave confirmation. The host clicking
+  // "Leave" actually ENDS the party server-side (manager.go:1489-1493
+  // — explicit leave-party from the host triggers endPartyInternal
+  // immediately, kicking all guests). Until this guard, the button
+  // was labeled "Leave Party" for everyone with no warning, leading
+  // to surprised hosts wondering why their movie night ended.
+  //
+  // Guests get the silent button (their leave is non-destructive —
+  // party continues, others stay).
+  const isHost = !!currentUserId && currentUserId === state.hostUserId
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
 
   // Auto-scroll chat to bottom on new messages — only if the user
   // was already near the bottom, so a user scrolled up reading
@@ -341,12 +352,53 @@ export function PartyPanel({
             Send
           </button>
         </div>
+        {/* 2026-05-25 — host sees "End Party" with a confirm dialog
+            since their leave kicks every guest; guest sees the silent
+            "Leave Party" since their leave is non-destructive. */}
         <button
-          onClick={onLeave}
+          onClick={() => {
+            if (isHost) {
+              setShowLeaveConfirm(true)
+            } else {
+              onLeave()
+            }
+          }}
           className="w-full mt-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm transition-colors"
         >
-          Leave Party
+          {isHost ? 'End Party' : 'Leave Party'}
         </button>
+        {showLeaveConfirm && (
+          <div
+            className="fixed inset-0 z-[80] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={() => setShowLeaveConfirm(false)}
+          >
+            <div
+              className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6"
+              onClick={e => e.stopPropagation()}
+            >
+              <h2 className="text-white text-base font-semibold mb-2">End the party?</h2>
+              <p className="text-white/60 text-sm mb-5 leading-snug">
+                You're the host. Leaving will end the party for everyone
+                {state.participants.length > 1 && ` (${state.participants.length - 1} other ${state.participants.length === 2 ? 'guest' : 'guests'})`}
+                . The join code <span className="text-purple-300 font-mono">{state.code}</span> will stop working.
+              </p>
+              <div className="flex gap-2 justify-end">
+                <button
+                  onClick={() => setShowLeaveConfirm(false)}
+                  className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
+                >
+                  Keep watching
+                </button>
+                <button
+                  onClick={() => { setShowLeaveConfirm(false); onLeave() }}
+                  className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
+                >
+                  End party
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Phase 4.6 — highlight reel link. Always visible while in
             a party; the server auto-generates the reel from the
             ongoing party's reactions. If the party is too young /

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/logging"
+	"github.com/aurora-media/aurora/internal/matching"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/streaming"
@@ -47,6 +49,14 @@ type AdminHandler struct {
 	// Phase 6 — optional LLM client handle so the admin UI can toggle the
 	// hot-reloadable debug flag without a restart. nil when LLM is disabled.
 	llmClient *llm.Client
+
+	// 2026-05-25 — AI re-matcher backfill control. Wired via
+	// SetAIBackfill from main.go when the matching subsystem is enabled.
+	// Nil here means "AI matching not configured" → admin endpoints
+	// return 503. Interface-typed (not *matching.Backfiller) so the api
+	// package doesn't depend on internal/matching — the api → matching
+	// edge would mirror the existing api → llm one but adds nothing.
+	aiBackfill AIBackfillController
 
 	// 2026-05-16 — database URL for the Backup endpoint. Set via
 	// SetDatabaseURL after construction (avoids growing the constructor
@@ -115,6 +125,29 @@ func (h *AdminHandler) SetEmbeddingInfo(enabled bool, currentVersion int16) {
 // Diagnostics toggle can flip Debug() at runtime without a restart.
 func (h *AdminHandler) SetLLMClient(c *llm.Client) {
 	h.llmClient = c
+}
+
+// AIBackfillController is the minimal contract the admin handler needs
+// from the AI re-matcher's backfill worker. *matching.Backfiller
+// satisfies this directly — the interface exists so future tests can
+// stub the backfill controller without spinning a real Ollama and TMDB
+// dependency tree.
+//
+// StartJob: kick off a manual sweep; returns the job id, or
+// matching.ErrJobInProgress if one's already running.
+//
+// JobStatus: snapshot of the most recent job (active or last
+// finished). Returns nil if no job has ever run.
+type AIBackfillController interface {
+	StartJob(ctx context.Context) (string, error)
+	JobStatus() *matching.JobStatus
+}
+
+// SetAIBackfill wires the AI re-matcher backfill controller. Called from
+// main.go when the matching subsystem is enabled; without it the
+// AIRematch* handlers return 503.
+func (h *AdminHandler) SetAIBackfill(c AIBackfillController) {
+	h.aiBackfill = c
 }
 
 // LLMSettings is the admin-UI representation of the LLM block.
@@ -716,6 +749,10 @@ func (h *AdminHandler) Logs(w http.ResponseWriter, r *http.Request) {
 }
 
 // FlaggedItems returns media items with match_status = 'needs_review'.
+// Response items include the AI matcher's suggestion fields (populated
+// when the matching subsystem has evaluated the item) so the admin UI
+// can render a one-click "Accept suggestion" affordance that hits the
+// existing ManualMatch endpoint with the suggested TMDB id.
 func (h *AdminHandler) FlaggedItems(w http.ResponseWriter, r *http.Request) {
 	items, err := h.queries.GetItemsNeedingReview(r.Context())
 	if err != nil {
@@ -726,6 +763,55 @@ func (h *AdminHandler) FlaggedItems(w http.ResponseWriter, r *http.Request) {
 		items = []*models.MediaItem{}
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// AIRematchStart kicks off a manual AI re-match sweep over the flagged
+// queue. Returns 202 Accepted with the job id immediately; the actual
+// work runs in a background goroutine. The endpoint is idempotent in the
+// "single active job" sense: a second call while one is running returns
+// 409 Conflict rather than spawning a duplicate, so the operator's
+// double-clicks don't fan out into N parallel sweeps stomping each other
+// on Ollama.
+//
+// 503 when AI matching is not configured (LLM_ENABLED=false or matcher
+// construction failed at boot). Distinct from 500 so the operator
+// can immediately see the cause from the status code.
+func (h *AdminHandler) AIRematchStart(w http.ResponseWriter, r *http.Request) {
+	if h.aiBackfill == nil {
+		writeError(w, http.StatusServiceUnavailable, "AI matching is not enabled")
+		return
+	}
+	jobID, err := h.aiBackfill.StartJob(r.Context())
+	if errors.Is(err, matching.ErrJobInProgress) {
+		writeError(w, http.StatusConflict, "an AI re-match job is already in progress")
+		return
+	}
+	if err != nil {
+		slog.Warn("ai rematch: start failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to start AI rematch")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": jobID})
+}
+
+// AIRematchStatus reports the most recent (active or last finished)
+// backfill job's progress. Returns {enabled:false} when AI matching is
+// not configured, and an empty object {enabled:true} when no job has
+// run yet — admin UI can render "Never run" without a 404.
+func (h *AdminHandler) AIRematchStatus(w http.ResponseWriter, r *http.Request) {
+	if h.aiBackfill == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	status := h.aiBackfill.JobStatus()
+	if status == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": true,
+		"job":     status,
+	})
 }
 
 // PurgeImageCache clears the TMDB image cache.

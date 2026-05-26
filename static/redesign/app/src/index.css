@@ -188,12 +188,24 @@
   animation: shimmer 2s infinite;
 }
 
+/* 2026-05-26 — fill-mode: forwards added to both finite animations
+   below. Without it, animation-fill-mode defaults to "none" and the
+   element snaps BACK to its un-animated state after completion. For
+   .animate-fade-in on the hero <img>, the un-animated state is the
+   keyframes' "from" (opacity: 0, translateY(10px)) — so any React
+   re-render that re-applied the class would leave the backdrop
+   invisible. Observed in production QA: hero backdrop stuck at
+   opacity:0 on multiple page loads, only visible after manually
+   forcing opacity:1 via DevTools. "forwards" holds the "to" state
+   (opacity:1) after the animation completes, so the backdrop stays
+   visible even if re-rendered. Same reasoning applies to slideIn —
+   defense in depth before its first user complaint. */
 .animate-slide-in {
-  animation: slideIn 0.3s ease-out;
+  animation: slideIn 0.3s ease-out forwards;
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.4s ease-out;
+  animation: fadeIn 0.4s ease-out forwards;
 }
 
 /* Phase 6 — Custom scrollbar (Aurora-themed).

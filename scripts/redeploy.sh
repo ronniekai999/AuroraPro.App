@@ -31,6 +31,8 @@
 #   ./scripts/redeploy.sh --skip-npm       # reuse existing static/v2/ build
 #   ./scripts/redeploy.sh --skip-frontend  # alias for --skip-npm
 #   ./scripts/redeploy.sh --no-restart     # build + install but don't restart aurora
+#   ./scripts/redeploy.sh --allow-stale    # deploy even if HEAD is behind origin
+#                                           # (skips the safety check — rarely needed)
 #   ./scripts/redeploy.sh -h               # this help text
 #
 # Exit codes:
@@ -63,10 +65,12 @@ step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
 # ── Argument parsing ─────────────────────────────────────────────
 SKIP_FRONTEND=false
 RESTART=true
+ALLOW_STALE=false
 for arg in "$@"; do
     case "$arg" in
         --skip-npm|--skip-frontend) SKIP_FRONTEND=true ;;
         --no-restart) RESTART=false ;;
+        --allow-stale) ALLOW_STALE=true ;;
         -h|--help)
             # Print the header comment up to (but not including) the
             # END HELP sentinel. Drift-resistant: adding lines to the
@@ -89,6 +93,57 @@ done
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 PROJECT_DIR=$(cd -- "$SCRIPT_DIR/.." &>/dev/null && pwd)
 cd "$PROJECT_DIR"
+
+# ── Staleness guard ──────────────────────────────────────────────
+# 2026-05-26 — added after a real-world regression: operator ran
+# redeploy.sh from a clone that was MANY commits behind origin/main,
+# which silently rebuilt + deployed an OLD SPA bundle on top of what
+# the auto-updater had just installed (auto-updater ran from
+# /var/lib/aurora/source which DOES stay current). The result was a
+# missing-glow / missing-watch-party-modal regression in production
+# even though every Go build and npm build "succeeded."
+#
+# The fix: refuse to deploy if HEAD is behind origin/<remote-tracking
+# branch>. The operator gets a clear error pointing them at `git
+# pull`. `--allow-stale` is the escape hatch for the (rare) case
+# where you genuinely need to deploy old code (e.g., rolling back
+# a bad commit via a stale checkout, or testing a pre-merge branch).
+#
+# Skipped when:
+#   - The repo has no upstream branch configured (e.g., a fresh
+#     clone via tarball — no origin to compare against).
+#   - `git fetch` fails (offline laptop, GitHub down). We log a
+#     warning rather than failing; the operator made an informed
+#     choice to deploy without checking origin.
+#
+# Done EARLY (before build) so a stale operator wastes zero time
+# rebuilding the wrong source.
+if $ALLOW_STALE; then
+    warn "Skipping staleness check (--allow-stale)"
+elif ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    warn "Not a git repo — can't check staleness against origin"
+else
+    UPSTREAM=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo "")
+    if [ -z "$UPSTREAM" ]; then
+        warn "No upstream tracking branch — skipping staleness check (consider 'git branch --set-upstream-to=origin/main')"
+    else
+        info "Checking $UPSTREAM for upstream commits..."
+        if ! git -C "$PROJECT_DIR" fetch --quiet "$(echo "$UPSTREAM" | cut -d/ -f1)" "$(echo "$UPSTREAM" | cut -d/ -f2-)" 2>/dev/null; then
+            warn "git fetch failed (offline?) — skipping staleness check"
+        else
+            BEHIND=$(git -C "$PROJECT_DIR" rev-list --count "HEAD..$UPSTREAM" 2>/dev/null || echo 0)
+            if [ "$BEHIND" -gt 0 ]; then
+                error "Your local checkout is $BEHIND commit(s) behind $UPSTREAM. Deploying now would build OLD code on top of whatever the auto-updater has already shipped — exactly the regression this guard was added to prevent.
+
+To fix:
+  git -C $PROJECT_DIR pull            # bring local up to date, then re-run
+  # or, if you genuinely need to deploy old code (rare):
+  $0 --allow-stale ${*:+\"$*\"}" 4
+            fi
+            ok "Local HEAD matches $UPSTREAM"
+        fi
+    fi
+fi
 
 # ── Preflight ────────────────────────────────────────────────────
 echo ""

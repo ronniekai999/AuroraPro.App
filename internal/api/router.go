@@ -92,6 +92,7 @@ type RouterDeps struct {
 	EmbeddingEnabled bool                 // for the admin dashboard's coverage card
 	EmbeddingVersion int16                // current embedding.CurrentVersion at boot
 	LLMClient        *llm.Client          // optional — admin debug toggle target (Phase 6)
+	AIBackfill       AIBackfillController // optional — enables /admin/flagged/ai-rematch endpoints
 	// RootCtx is the server-lifecycle context. Handlers that spawn long-
 	// lived background goroutines (e.g. ARR dispatch) parent off this so
 	// graceful shutdown stops them. May be nil; handlers must tolerate it.
@@ -309,6 +310,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	profileH := NewProfileHandler(deps.Queries)
 	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.DirectPlay, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
+	if deps.AIBackfill != nil {
+		adminH.SetAIBackfill(deps.AIBackfill)
+	}
 	// Auto-updater endpoints. Handler is stateless beyond the
 	// status-file path and unit name, both fixed by install.sh.
 	systemH := NewSystemHandler()
@@ -637,6 +641,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/settings", adminH.UpdateSettings)
 				r.Get("/logs", adminH.Logs)
 				r.Get("/flagged", adminH.FlaggedItems)
+				// AI re-matcher (migration 026 + internal/matching).
+				// POST is fire-and-forget — the LLM sweep runs in a
+				// detached goroutine outside the 60s admin timeout
+				// applied to this route group; the endpoint just
+				// returns the job id. GET reports progress.
+				r.Post("/flagged/ai-rematch", adminH.AIRematchStart)
+				r.Get("/flagged/ai-rematch/status", adminH.AIRematchStatus)
 				r.Get("/embedding-status", adminH.EmbeddingStatus)
 				r.Get("/llm", adminH.GetLLMSettings)
 				r.Put("/llm", adminH.UpdateLLMSettings)

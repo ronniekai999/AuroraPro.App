@@ -116,6 +116,28 @@ type MediaItem struct {
 	// watch history. Used by the frontend to render a "Because you watched X"
 	// caption when no LLM-generated Reason is available. Never persisted.
 	NearestAnchor *AnchorRef `json:"nearest_anchor,omitempty"`
+
+	// AI-match suggestion (migration 026). Populated by the AI matcher
+	// (internal/matching) for items in match_status='needs_review'. The
+	// matcher always sets AIMatchRanAt after it evaluates an item so the
+	// backfill worker doesn't re-process it; the other fields are populated
+	// only when the LLM returned a real suggestion. When confidence ≥
+	// AI_MATCH_AUTO_THRESHOLD the matcher promotes the item via
+	// EnrichByTMDBID (sets match_status='matched') and the suggestion fields
+	// stay as an audit trail.
+	//
+	// Surfaced to the admin UI via the FlaggedItems endpoint so the operator
+	// can one-click-approve sub-threshold suggestions via the existing
+	// ManualMatch handler. Pointer types where the absence of a value
+	// matters: AISuggestedTMDBID==nil means "evaluated, no candidate fit"
+	// vs the integer-zero case "TMDB id literally 0" (unreachable in TMDB
+	// but defended against in the parser).
+	AISuggestedTMDBID *int       `json:"ai_suggested_tmdb_id,omitempty"`
+	AISuggestedTitle  string     `json:"ai_suggested_title,omitempty"`
+	AISuggestedYear   int        `json:"ai_suggested_year,omitempty"`
+	AIMatchConfidence *int       `json:"ai_match_confidence,omitempty"`
+	AIMatchReasoning  string     `json:"ai_match_reasoning,omitempty"`
+	AIMatchRanAt      *time.Time `json:"ai_match_ran_at,omitempty"`
 }
 
 // AnchorRef is a lightweight reference to a watched anchor item — just
