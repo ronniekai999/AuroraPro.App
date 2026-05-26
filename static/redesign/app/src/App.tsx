@@ -104,6 +104,7 @@ import {
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
+import { PartyHubModal } from '@/components/PartyHubModal'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
@@ -5125,10 +5126,16 @@ export default function App() {
   const [playerLoading, setPlayerLoading] = useState(false)
 
   // M10 Phase 4 — watch party state.
-  const party = useParty()
+  // 2026-05-25 — pass user.id so the hook can scope its last-party
+  // localStorage cache (lib/lastParty.ts) per signed-in user. Without
+  // this, logging out and back in as a different user would surface
+  // the prior user's "Recently in" pill.
+  // user is tri-valued (null | false | ApiUser); narrow to id only
+  // when actually logged in so the hook's cache key isn't keyed on
+  // undefined-but-truthy values.
+  const party = useParty(user && typeof user === 'object' ? user.id : undefined)
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
   const [partyJoinPrompt, setPartyJoinPrompt] = useState(false)
-  const [partyJoinCode, setPartyJoinCode] = useState('')
   // Phase 5 — add-to-watchlist dialog. Opened from DetailView. The
   // dialog fetches the active profile's watchlists on open + lets
   // the user pick one or create a new list inline.
@@ -7231,60 +7238,23 @@ export default function App() {
         </div>
       )}
 
-      {/* Join-party prompt. */}
-      {partyJoinPrompt && (
-        <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6">
-            <h2 className="text-white text-lg font-semibold mb-2">Join a Watch Party</h2>
-            <p className="text-white/50 text-sm mb-4">Enter the 6-character party code your host shared.</p>
-            <input
-              type="text"
-              autoFocus
-              maxLength={6}
-              value={partyJoinCode}
-              onChange={e => setPartyJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && partyJoinCode.length === 6) {
-                  void (async () => {
-                    const r = await party.join(partyJoinCode)
-                    if (r.ok) {
-                      setPartyJoinPrompt(false)
-                      setPartyJoinCode('')
-                      setPartyPanelOpen(true)
-                    }
-                  })()
-                }
-              }}
-              placeholder="ABC123"
-              className="w-full px-4 py-3 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-center text-2xl tracking-[0.4em] font-mono uppercase focus:outline-none focus:bg-white/[0.06]"
-            />
-            {party.state.error && (
-              <p className="text-red-400 text-sm mt-3">{party.state.error}</p>
-            )}
-            <div className="mt-4 flex gap-2 justify-end">
-              <button
-                onClick={() => { setPartyJoinPrompt(false); setPartyJoinCode('') }}
-                className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                disabled={partyJoinCode.length !== 6 || party.state.joining}
-                onClick={async () => {
-                  const r = await party.join(partyJoinCode)
-                  if (r.ok) {
-                    setPartyJoinPrompt(false)
-                    setPartyJoinCode('')
-                    setPartyPanelOpen(true)
-                  }
-                }}
-                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {party.state.joining ? 'Joining…' : 'Join'}
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Watch Party hub — replaces the old "type a 6-character code"
+          modal. Three sections: Recently in (localStorage cache), My
+          Rooms (persistent rooms via /api/rooms), Enter a code. See
+          PartyHubModal.tsx for the rationale. */}
+      {partyJoinPrompt && user && typeof user === 'object' && (
+        <PartyHubModal
+          currentUserId={user.id}
+          onClose={() => setPartyJoinPrompt(false)}
+          onJoin={async (joinCode) => {
+            const r = await party.join(joinCode)
+            if (r.ok) {
+              setPartyJoinPrompt(false)
+              setPartyPanelOpen(true)
+            }
+            return r
+          }}
+        />
       )}
 
       {contextMenu && (
