@@ -43,6 +43,9 @@ import {
   diagnoseSession,
   type SessionDiagnostic,
   listFlaggedItems,
+  getAIRematchStatus,
+  startAIRematch,
+  type AIRematchJobStatus,
   getAdminLLM,
   updateAdminLLM,
   getAdminOAuth,
@@ -3807,33 +3810,191 @@ function AdminFlaggedTab(_props: { onSelect: (id: number) => void }) {
   const [err, setErr] = useState<string | null>(null)
   // Phase 5.3 — manual-match modal state.
   const [matchTarget, setMatchTarget] = useState<ServerMediaItem | null>(null)
+  // 2026-05-26 — AI re-matcher job status. Polled while a job is
+  // active so the operator sees live progress; falls back to
+  // single-shot fetch when no job is running. acceptingId tracks the
+  // item whose Accept-suggestion button is in flight so we can show
+  // a per-row spinner state rather than a global one.
+  const [aiJob, setAiJob] = useState<AIRematchJobStatus | null>(null)
+  const [aiEnabled, setAiEnabled] = useState<boolean>(true)
+  const [aiStarting, setAiStarting] = useState(false)
+  const [acceptingId, setAcceptingId] = useState<number | null>(null)
+
   const reload = useCallback(async () => {
     try { setItems(await listFlaggedItems()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload() }, [reload])
+
+  // Pull job status on mount + poll every 5s while a job is active.
+  // We stop polling once finished_at is non-zero (job complete) to
+  // avoid background traffic when the operator leaves the page open.
+  useEffect(() => {
+    let cancelled = false
+    let timer: number | null = null
+    const fetchOnce = async () => {
+      try {
+        const s = await getAIRematchStatus()
+        if (cancelled) return
+        setAiEnabled(s.enabled)
+        setAiJob(s.job ?? null)
+        const active = s.job && (!s.job.finished_at || s.job.finished_at.startsWith('0001'))
+        if (active) {
+          // Refresh the items list too — newly-suggested rows appear
+          // in the response as the worker progresses.
+          void reload()
+          timer = window.setTimeout(() => void fetchOnce(), 5000)
+        }
+      } catch { /* ignore — non-fatal panel */ }
+    }
+    void fetchOnce()
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
+  }, [reload])
+
+  const startJob = useCallback(async () => {
+    setAiStarting(true)
+    try {
+      await startAIRematch()
+      // Immediately fetch status so the progress card appears
+      const s = await getAIRematchStatus()
+      setAiJob(s.job ?? null)
+    } catch (e) {
+      window.alert('Failed to start AI rematch: ' + (e instanceof Error ? e.message : 'unknown'))
+    } finally { setAiStarting(false) }
+  }, [])
+
+  // Accept the AI's suggestion for one item — one click reuses the
+  // existing /api/media/{id}/match endpoint with the suggested TMDB
+  // id, which is exactly what the operator would do in the manual
+  // match modal (just without the search step). Optimistically drops
+  // the item from the local list; reload() catches the
+  // server-authoritative state on the next pass.
+  const acceptSuggestion = useCallback(async (item: ServerMediaItem) => {
+    if (!item.ai_suggested_tmdb_id) return
+    setAcceptingId(item.id)
+    try {
+      await manualMatch(item.id, { tmdb_id: item.ai_suggested_tmdb_id, type: item.type })
+      setItems(prev => prev ? prev.filter(i => i.id !== item.id) : prev)
+    } catch (e) {
+      window.alert('Accept failed: ' + (e instanceof Error ? e.message : 'unknown'))
+    } finally { setAcceptingId(null) }
+  }, [])
+
+  const jobActive = !!aiJob && (!aiJob.finished_at || aiJob.finished_at.startsWith('0001'))
+  const jobProgress = aiJob && aiJob.total > 0 ? Math.round((aiJob.processed / aiJob.total) * 100) : 0
+
   return (
     <div className="glass-panel rounded-xl p-5">
-      <h3 className="text-white font-semibold mb-3">Flagged Items</h3>
-      <p className="text-white/40 text-xs mb-4">Media files that the scanner couldn't auto-match against a TMDB/TVDB record. Use "Match" to manually link the right entry.</p>
+      <div className="flex items-start justify-between gap-4 mb-3">
+        <div className="min-w-0">
+          <h3 className="text-white font-semibold">Flagged Items</h3>
+          <p className="text-white/40 text-xs mt-1">
+            Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
+            The AI matcher auto-promotes high-confidence picks and suggests sub-threshold
+            ones for one-click approval below. Use "Match" to manually search if neither
+            applies.
+          </p>
+        </div>
+        {aiEnabled && (
+          <button
+            onClick={() => void startJob()}
+            disabled={aiStarting || jobActive}
+            title={jobActive ? 'A rematch job is already running' : 'Re-evaluate every flagged item with AI'}
+            className="px-3 py-1.5 rounded-md bg-purple-600/80 hover:bg-purple-500 text-white text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+          >
+            {aiStarting ? 'Starting…' : jobActive ? 'AI sweep running' : 'Re-match with AI'}
+          </button>
+        )}
+      </div>
+
+      {/* AI job progress card — shown while a job is active OR for ~30s
+          after completion so the operator sees the final result.
+          Counts: processed/total + matched (auto-promoted) + suggested
+          (sub-threshold, awaiting approval) + failed (LLM/parse errors). */}
+      {aiJob && (
+        <div className="mb-4 p-3 rounded-lg bg-purple-500/[0.05] border border-purple-500/20">
+          <div className="flex items-center justify-between mb-1.5">
+            <p className="text-purple-200 text-xs font-medium">
+              {jobActive ? `AI re-matching… ${aiJob.processed}/${aiJob.total}` : `AI sweep complete (${aiJob.processed}/${aiJob.total})`}
+            </p>
+            <p className="text-white/50 text-[10px]">
+              auto-matched <span className="text-emerald-300 font-mono">{aiJob.matched}</span>
+              {' · '}
+              suggested <span className="text-purple-300 font-mono">{aiJob.suggested}</span>
+              {aiJob.failed > 0 && <>{' · '}failed <span className="text-amber-300 font-mono">{aiJob.failed}</span></>}
+            </p>
+          </div>
+          <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-purple-500 to-purple-400 transition-all"
+              style={{ width: `${jobProgress}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {err && <p className="text-red-300 text-sm">{err}</p>}
       {items === null && <p className="text-white/40 text-sm">Loading…</p>}
       {items && items.length === 0 && <p className="text-white/40 text-sm">Nothing flagged — your library is clean.</p>}
-      {items && items.map(it => (
-        <div key={it.id} className="flex items-start gap-3 py-2 border-b border-white/[0.04] last:border-0">
-          <span className="text-amber-400 text-xs uppercase font-semibold flex-shrink-0">{it.match_status || 'flagged'}</span>
-          <div className="min-w-0 flex-1">
-            <p className="text-white/90 text-sm font-medium truncate">{it.title}{it.year ? ` (${it.year})` : ''}</p>
-            <p className="text-white/40 text-xs truncate">{it.file_path}</p>
+      {items && items.map(it => {
+        const hasSuggestion = !!it.ai_suggested_tmdb_id
+        const confidence = it.ai_match_confidence ?? 0
+        const evaluated = !!it.ai_match_ran_at
+        return (
+          <div key={it.id} className="py-3 border-b border-white/[0.04] last:border-0">
+            <div className="flex items-start gap-3">
+              <span className="text-amber-400 text-xs uppercase font-semibold flex-shrink-0">{it.match_status || 'flagged'}</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-white/90 text-sm font-medium truncate">{it.title}{it.year ? ` (${it.year})` : ''}</p>
+                <p className="text-white/40 text-xs truncate">{it.file_path}</p>
+              </div>
+              <button
+                onClick={() => setMatchTarget(it)}
+                className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded flex-shrink-0"
+              >
+                Match
+              </button>
+            </div>
+            {/* AI suggestion strip — only when the matcher has a real
+                pick to surface. Evaluated-with-no-suggestion items get
+                a quieter inline note further down. */}
+            {hasSuggestion && (
+              <div className="ml-[88px] mt-2 p-2.5 rounded-md bg-purple-500/[0.07] border border-purple-500/20 flex items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-purple-200/90 text-xs">
+                    <span className="font-semibold">AI suggests:</span>{' '}
+                    <span className="text-white/85">
+                      {it.ai_suggested_title || `TMDB ${it.ai_suggested_tmdb_id}`}
+                      {it.ai_suggested_year ? ` (${it.ai_suggested_year})` : ''}
+                    </span>
+                    <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-200 text-[10px] font-mono">
+                      {confidence}% confident
+                    </span>
+                  </p>
+                  {it.ai_match_reasoning && (
+                    <p className="text-white/55 text-[11px] mt-1 leading-snug">{it.ai_match_reasoning}</p>
+                  )}
+                </div>
+                <button
+                  disabled={acceptingId === it.id}
+                  onClick={() => void acceptSuggestion(it)}
+                  className="px-3 py-1.5 rounded-md bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-100 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+                >
+                  {acceptingId === it.id ? 'Accepting…' : 'Accept'}
+                </button>
+              </div>
+            )}
+            {/* Evaluated but no pick — quieter inline note so the
+                operator knows AI tried and gave up (vs hasn't tried yet). */}
+            {evaluated && !hasSuggestion && (
+              <p className="ml-[88px] mt-2 text-white/35 text-[11px] italic">
+                AI evaluated — no candidate fit
+                {it.ai_match_reasoning ? `: ${it.ai_match_reasoning}` : '.'}
+              </p>
+            )}
           </div>
-          <button
-            onClick={() => setMatchTarget(it)}
-            className="px-3 py-1.5 bg-white/[0.05] hover:bg-white/[0.1] text-white/80 text-xs rounded"
-          >
-            Match
-          </button>
-        </div>
-      ))}
+        )
+      })}
       {matchTarget && (
         <ManualMatchModal
           target={matchTarget}
