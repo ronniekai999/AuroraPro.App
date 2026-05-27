@@ -141,6 +141,21 @@ interface VideoPlayerProps {
   // content with `forceTranscode=true` on the target. Parent
   // updates the target accordingly; play effect re-runs.
   onFallbackToTranscode?: () => void
+  // 2026-05-27 — Forward-seek session rebuild. Aurora's transcoder is
+  // sequential (segments past the current FFmpeg output position
+  // aren't on disk), so a normal forward-seek past the buffered range
+  // would stall hls.js indefinitely. The old behavior clamped the
+  // seek to the buffered edge and toasted "Still transcoding to that
+  // point — try again in a moment." Now: when this callback is wired,
+  // the player asks the parent to tear down + re-create the HLS
+  // session anchored at the new `start_sec` (mirroring the
+  // onChangeAudioTrack path), so the user can scrub anywhere. The
+  // parent should NOT wire this when in a watch party (party seek
+  // broadcasts assume same-session timing; a unilateral session
+  // rebuild on the host would drift the guests). Argument is in real-
+  // file seconds (the absolute media position, NOT video element
+  // currentTime), matching what the scrubber emits to onSeek.
+  onSeekRebuild?: (newStartSec: number) => void
 }
 
 // Pick a file to play from the available list.
@@ -185,7 +200,7 @@ export function pickFile(
   return files[0]
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode }: VideoPlayerProps) {
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
@@ -1840,20 +1855,62 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   // range stalls hls.js indefinitely (the
                   // transcoder is sequential; segments past the
                   // current FFmpeg output position aren't on disk
-                  // yet). Detect by checking if the requested local
-                  // sec exceeds the buffered-range end. Clamp to a
-                  // safe spot just inside the buffered range and
-                  // surface a status hint so the user understands
-                  // why the seek didn't jump all the way.
+                  // yet). Two paths:
+                  //
+                  // 2026-05-27 (preferred) — if onSeekRebuild is
+                  // wired AND this player isn't participating in a
+                  // watch-party sync for THIS media, ask the parent
+                  // to tear down + re-create the session anchored at
+                  // the requested seconds. The play effect handles
+                  // teardown / re-init the same way it does for
+                  // audio-track switches. This is the Plex / Jellyfin
+                  // pattern.
+                  //
+                  // The party gate (deep-debug M1) is intentionally
+                  // narrow: blocked ONLY when the local target IS the
+                  // party-tracked media. A user who joined a party
+                  // but is currently watching something else locally
+                  // can still rebuild — no guest is mirroring this
+                  // stream so there's nothing to drift.
+                  //
+                  // Deep-debug H2 — boundary tolerance: a 0.5s slack
+                  // ensures near-edge clicks (where users intend a
+                  // forward jump but click exactly on the buffered
+                  // edge) still trigger the rebuild instead of
+                  // landing on the stall point.
+                  //
+                  // Fallback (legacy) — clamp the seek to the buffered
+                  // edge and toast a status hint. Reachable in two
+                  // cases now: (a) when no onSeekRebuild handler is
+                  // wired (defensive — App always wires it today),
+                  // and (b) when party-sync is active for this media
+                  // (host rebuild would desync guests; tracked as a
+                  // follow-up). See App.tsx where the player is
+                  // mounted for the rebuild wiring.
                   const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
-                  if (safeBufferedEnd > 0 && localSec > safeBufferedEnd) {
+                  const isPartySyncingThisMedia = !!party
+                    && party.partyMediaItemId !== undefined
+                    && target?.mediaItemId === party.partyMediaItemId
+                  if (safeBufferedEnd > 0 && localSec >= safeBufferedEnd - 0.5) {
+                    if (onSeekRebuild && !isPartySyncingThisMedia) {
+                      // No interim status — the play effect's
+                      // teardown immediately re-sets status to
+                      // 'Loading…' (deep-debug M2: 'Jumping to that
+                      // point…' would only flash for one render
+                      // frame because both setStatus calls batch
+                      // together, so it's not worth setting).
+                      onSeekRebuild(sec)
+                      return
+                    }
                     try {
                       // Land 1s back from the buffered edge to
                       // avoid landing right at the boundary where
                       // hls.js stalls waiting for the next segment.
                       vid.currentTime = Math.max(0, safeBufferedEnd - 1)
                     } catch { /* defensive */ }
-                    setStatus('Still transcoding to that point — try again in a moment')
+                    setStatus(isPartySyncingThisMedia
+                      ? 'Forward-seek past buffer blocked while syncing with the party'
+                      : 'Still transcoding to that point — try again in a moment')
                     return
                   }
                   try {

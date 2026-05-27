@@ -261,7 +261,7 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization, resume }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -277,6 +277,16 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   // the empty reason line when we're below the watch-history threshold.
   // null = unknown / not yet loaded.
   personalization?: HeroPersonalization | null
+  // 2026-05-27 — Continue Watching resume bundle for the current hero.
+  // When set, the primary CTA reads "Resume at MM:SS" (or "Resume S2E5
+  // · MM:SS" for shows) and calls `resume.onPlay(resume.item)` instead
+  // of the fresh `onPlay(hero)`. Mirrors the DetailView pattern. The
+  // discriminated `{ item, onPlay }` bundle makes partial wiring a
+  // type error (same rationale as DetailViewProps.resume).
+  resume?: {
+    item: ContinueWatchingItem
+    onPlay: (c: ContinueWatchingItem) => void
+  }
 }) {
   // useState MUST be called before any conditional return so hook
   // ordering stays stable across renders (Rules of Hooks).
@@ -412,12 +422,59 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
             <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
           )}
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => onPlay(hero)}
-              className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
-            >
-              <Icon name="play" size={18} /> Play
-            </button>
+            {/* 2026-05-27 — Resume-aware primary CTA. When the hero
+                has a CW match, click resumes at the saved position via
+                resume.onPlay (which threads through to App's
+                handlePlayContinue). Otherwise the classic Play button
+                starts fresh via onPlay(hero). The DetailView's "From
+                start" affordance still works because handlePlay itself
+                stays unmodified — only the Hero's call site decides
+                between fresh and resume. Same discriminated-bundle
+                pattern as DetailViewProps.resume.
+
+                Deep-debug H1 — stale-closure guard: the click handler
+                checks `resume.item.media_item_id === hero.id` before
+                dispatching so a mid-flight hero rotation between the
+                user's hover and click doesn't end up resuming the
+                NEW hero with the OLD CW record. If the identities
+                no longer match, fall through to the fresh-play path
+                for whatever's currently visible.
+
+                Deep-debug M5 — sub-second guard: a 5s threshold on
+                position_ms hides "Resume at 0:00" labels for users
+                who opened-then-immediately-closed a title. The
+                server's `position_ms > 0` filter alone wasn't enough
+                because brief opens save ~100-2000ms of progress
+                that's effectively "fresh." */}
+            {resume && resume.item.position_ms >= 5000 ? (
+              <button
+                onClick={() => {
+                  if (resume.item.media_item_id !== hero.id) {
+                    onPlay(hero) // hero rotated mid-click; play fresh instead
+                    return
+                  }
+                  resume.onPlay(resume.item)
+                }}
+                // Deep-debug M4 — visual differentiator: indigo tint
+                // (vs purple Play) + a clock icon prefix so users
+                // scanning the Hero can tell at a glance that this
+                // button resumes rather than restarts. Same shape
+                // and glow weight to keep it readable as the primary
+                // CTA.
+                className="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+                title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
+                aria-label={formatResumeAriaLabel(resume.item)}
+              >
+                <Icon name="clock" size={16} /> {formatResumeLabel(resume.item)}
+              </button>
+            ) : (
+              <button
+                onClick={() => onPlay(hero)}
+                className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+              >
+                <Icon name="play" size={18} /> Play
+              </button>
+            )}
             <button
               onClick={() => onInfo(hero)}
               className="flex items-center gap-2 px-6 py-3 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20"
@@ -1029,8 +1086,20 @@ interface HomeViewProps {
   // per render; callback toggles membership when the user clicks +.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
+  // 2026-05-27 — Hero resume awareness. When the hero media has a CW
+  // record (position_ms > 0), App passes the matched ContinueWatchingItem
+  // here so HeroSection can label its primary CTA "Resume at MM:SS"
+  // instead of "Play" — matching the DetailView Resume CTA shipped in
+  // PR #97. Bundled with its handler in a discriminated `heroResume`
+  // shape (same pattern as DetailView's `resume`) so partial wiring is
+  // a type error. Undefined = no CW match for the current hero, render
+  // the classic Play button.
+  heroResume?: {
+    item: ContinueWatchingItem
+    onPlay: (c: ContinueWatchingItem) => void
+  }
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1046,6 +1115,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         onRefreshHero={onRefreshHero}
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
+        resume={heroResume}
       />
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
@@ -7133,6 +7203,22 @@ export default function App() {
               heroPersonalization={heroPersonalization}
               libraryIds={libraryIds}
               onToggleLib={handleToggleLib}
+              // 2026-05-27 — Hero resume bundle. Same lookup as
+              // DetailView's `resume`: find the user's CW record for
+              // the current hero (movie OR show) with position_ms > 0.
+              // When present, HeroSection swaps its primary CTA from
+              // "Play" to "Resume at MM:SS" (or "Resume S2E5 · MM:SS"
+              // for shows) and dispatches handlePlayContinue with the
+              // matched record. Resolved via an IIFE so the lookup
+              // sits inline at the call site and re-runs naturally
+              // when continueItems or homeHero changes.
+              heroResume={(() => {
+                if (!homeHero) return undefined
+                const item = continueItems.find(c =>
+                  c.media_item_id === homeHero.id && c.position_ms > 0,
+                )
+                return item ? { item, onPlay: handlePlayContinue } : undefined
+              })()}
               onNavigate={(v, opts) => {
                 // QA 2026-05-25 — "See All" deep-link to a browse
                 // page with an explicit sort. If the destination's
@@ -7386,6 +7472,23 @@ export default function App() {
           // player's mediaErrorFallbackTriedRef prevents an infinite
           // loop if transcode also fails.
           setPlayerTarget(prev => prev ? { ...prev, forceTranscode: true } : prev)
+        }}
+        onSeekRebuild={(newStartSec) => {
+          // 2026-05-27 — Forward-seek past buffer. Same teardown +
+          // re-init pattern as onChangeAudioTrack: mutate the target
+          // with a fresh resumePositionMs, which retriggers the play
+          // effect inside VideoPlayer and creates a new HLS session
+          // anchored at the new position.
+          //
+          // This handler is a pure target-mutator — the player has
+          // already gated invocation on the party-sync check
+          // (refined in deep-debug M1 to "is this exact media being
+          // party-synced"). Any future caller that invokes this
+          // handler outside the player must apply its own gate.
+          setPlayerTarget(prev => prev ? {
+            ...prev,
+            resumePositionMs: Math.max(0, Math.floor(newStartSec * 1000)),
+          } : prev)
         }}
         party={party.state.code ? {
           isHost: party.state.hostUserId === user.id,
