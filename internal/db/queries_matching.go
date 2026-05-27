@@ -128,6 +128,71 @@ func (q *Queries) GetFlaggedWithoutAISuggestion(ctx context.Context, limit int) 
 	return items, rows.Err()
 }
 
+// GetFlaggedPendingAutoPromote returns flagged items that the AI matcher
+// previously evaluated with a confidence at or above `minConfidence` (the
+// auto-promote threshold) and produced a TMDB id — but the item is still
+// in `needs_review`. This is the "auto-promote attempted but EnrichByTMDBID
+// failed" case: the matcher's persist-then-promote flow saved the
+// suggestion before the enrichment attempt, so a transient TMDB hiccup
+// (rate-limit, 404 on the specific id, network blip) leaves a stuck
+// high-confidence row that the operator has to manually accept.
+//
+// The backfill's retry pass calls this to surface those rows and re-attempt
+// EnrichByTMDBID. No LLM call is needed for the retry — the AI's pick is
+// already cached on the row; we just need TMDB to cooperate this time.
+//
+// Returns *models.MediaItem with the suggestion fields populated so the
+// caller can pass them straight to EnrichByTMDBID without another query.
+// Paged by id for deterministic iteration; rows that successfully promote
+// flip to match_status='matched' and drop out of the predicate naturally.
+func (q *Queries) GetFlaggedPendingAutoPromote(ctx context.Context, minConfidence int, limit int) ([]*models.MediaItem, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT m.id, m.library_id, m.type, m.title, m.sort_title,
+		       COALESCE(m.year, 0), COALESCE(m.overview, ''),
+		       COALESCE(m.rating, 0), COALESCE(m.runtime_minutes, 0),
+		       COALESCE(m.content_rating, ''),
+		       COALESCE(m.poster_path, ''), COALESCE(m.backdrop_path, ''),
+		       m.added_at, m.updated_at,
+		       m.ai_suggested_tmdb_id, COALESCE(m.ai_suggested_title, ''),
+		       COALESCE(m.ai_suggested_year, 0), m.ai_match_confidence,
+		       COALESCE(m.ai_match_reasoning, ''), m.ai_match_ran_at
+		FROM media_items m
+		WHERE m.match_status = 'needs_review'
+		  AND m.ai_match_ran_at IS NOT NULL
+		  AND m.ai_suggested_tmdb_id IS NOT NULL
+		  AND m.ai_match_confidence >= $1
+		ORDER BY m.id ASC
+		LIMIT $2`,
+		minConfidence, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get flagged pending auto-promote: %w", err)
+	}
+	defer rows.Close()
+
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
+			&item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+			&item.AISuggestedTMDBID, &item.AISuggestedTitle,
+			&item.AISuggestedYear, &item.AIMatchConfidence,
+			&item.AIMatchReasoning, &item.AIMatchRanAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan pending auto-promote: %w", err)
+		}
+		item.MatchStatus = "needs_review"
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 // UpdateAISuggestion persists the matcher's verdict and bumps
 // ai_match_ran_at = NOW(). MUST be called with a non-nil u; pass
 // MarkAIEvaluated for the "evaluated but no suggestion" path so a prior

@@ -3922,6 +3922,14 @@ function AdminFlaggedTab(_props: { onSelect: (id: number) => void }) {
               {' · '}
               suggested <span className="text-purple-300 font-mono">{aiJob.suggested}</span>
               {aiJob.failed > 0 && <>{' · '}failed <span className="text-amber-300 font-mono">{aiJob.failed}</span></>}
+              {/* Retry pass: items where confidence ≥ threshold but
+                  EnrichByTMDBID failed at eval time. Server tries
+                  again with no new LLM call. Only render the counter
+                  when the pass actually touched something so jobs
+                  with no stuck items don't show a noisy "+0 retry". */}
+              {(aiJob.retried ?? 0) > 0 && (
+                <>{' · '}retry-recovered <span className="text-emerald-300 font-mono">{aiJob.retry_matched ?? 0}</span><span className="text-white/30">/{aiJob.retried}</span></>
+              )}
             </p>
           </div>
           <div className="h-1 rounded-full bg-white/[0.06] overflow-hidden">
