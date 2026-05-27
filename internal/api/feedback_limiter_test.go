@@ -7,6 +7,8 @@ package api
 import (
 	"testing"
 	"time"
+
+	"github.com/aurora-media/aurora/internal/config"
 )
 
 func TestFeedbackLimiterAllowUntilCap(t *testing.T) {
@@ -134,4 +136,74 @@ func TestFeedbackLimiterEvictExpiredLocked(t *testing.T) {
 	if _, ok := l.bucket[3]; !ok {
 		t.Error("user 3 should have survived (fresh)")
 	}
+}
+
+// 2026-05-27 — Test that NewFeedbackHandler resolves the env-tunable
+// fields correctly: explicit cfg wins, zero falls back to default,
+// negative is treated as zero (fall back to default).
+func TestNewFeedbackHandlerResolvesTunables(t *testing.T) {
+	t.Run("explicit values used", func(t *testing.T) {
+		cfg := config.BugReportConfig{
+			Enabled:              false, // skip goroutine spawn
+			RateLimitMax:         10,
+			RateLimitWindow:      2 * time.Hour,
+			AttachmentTTL:        7 * 24 * time.Hour,
+			JanitorSweepInterval: 30 * time.Minute,
+		}
+		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		if h.submitLimiter.rate != 10 {
+			t.Errorf("rate: got %d, want 10", h.submitLimiter.rate)
+		}
+		if h.submitLimiter.window != 2*time.Hour {
+			t.Errorf("window: got %v, want 2h", h.submitLimiter.window)
+		}
+		if h.effectiveTTL != 7*24*time.Hour {
+			t.Errorf("TTL: got %v, want 7d", h.effectiveTTL)
+		}
+		if h.effectiveSweepInterval != 30*time.Minute {
+			t.Errorf("sweep: got %v, want 30m", h.effectiveSweepInterval)
+		}
+	})
+	t.Run("zeros fall back to defaults", func(t *testing.T) {
+		cfg := config.BugReportConfig{Enabled: false} // all tunables zero
+		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		if h.submitLimiter.rate != defaultFeedbackRateMax {
+			t.Errorf("rate: got %d, want default %d", h.submitLimiter.rate, defaultFeedbackRateMax)
+		}
+		if h.submitLimiter.window != defaultFeedbackRateWindow {
+			t.Errorf("window: got %v, want default %v", h.submitLimiter.window, defaultFeedbackRateWindow)
+		}
+		if h.effectiveTTL != defaultAttachmentTTL {
+			t.Errorf("TTL: got %v, want default %v", h.effectiveTTL, defaultAttachmentTTL)
+		}
+		if h.effectiveSweepInterval != defaultJanitorSweepInterval {
+			t.Errorf("sweep: got %v, want default %v", h.effectiveSweepInterval, defaultJanitorSweepInterval)
+		}
+	})
+	t.Run("negative values fall back to defaults", func(t *testing.T) {
+		// Deep-debug #6 — covers all four tunables, including
+		// JanitorSweepInterval (omitted in the earlier version
+		// where its absence would have been the only field whose
+		// mishandling could panic the janitor goroutine).
+		cfg := config.BugReportConfig{
+			Enabled:              false,
+			RateLimitMax:         -1,
+			RateLimitWindow:      -time.Hour,
+			AttachmentTTL:        -time.Hour,
+			JanitorSweepInterval: -time.Hour,
+		}
+		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		if h.submitLimiter.rate != defaultFeedbackRateMax {
+			t.Errorf("negative rate should fall back to default; got %d", h.submitLimiter.rate)
+		}
+		if h.submitLimiter.window != defaultFeedbackRateWindow {
+			t.Errorf("negative window should fall back to default; got %v", h.submitLimiter.window)
+		}
+		if h.effectiveTTL != defaultAttachmentTTL {
+			t.Errorf("negative TTL should fall back to default; got %v", h.effectiveTTL)
+		}
+		if h.effectiveSweepInterval != defaultJanitorSweepInterval {
+			t.Errorf("negative sweep interval should fall back to default; got %v", h.effectiveSweepInterval)
+		}
+	})
 }

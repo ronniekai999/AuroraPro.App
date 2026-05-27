@@ -48,6 +48,19 @@ type BugReportConfig struct {
 	GitHubToken   string // PAT with Issues:write + Contents:read scope (or full `repo` for private repos)
 	GitHubRepo    string // "owner/repo", e.g. "your-org/aurora-bug-reports"
 	PublicBaseURL string // e.g. "https://aurora.example.com" (no trailing slash)
+
+	// 2026-05-27 — Operational tunables. Defaults match the values
+	// shipped as bare constants in Phase 3; operators only need to
+	// touch these for non-default policies (heavily-shared deploys
+	// that want stricter throttling, or low-volume deploys that
+	// want longer attachment retention).
+	//
+	// All four accept zero as "use the default" so partially-set
+	// configs don't fall off a cliff.
+	RateLimitMax         int           // max submits per user per window. Env: BUG_REPORT_RATE_LIMIT_MAX (default 5)
+	RateLimitWindow      time.Duration // duration of the rate-limit window. Env: BUG_REPORT_RATE_LIMIT_WINDOW_HOURS (default 1h)
+	AttachmentTTL        time.Duration // janitor: delete attachments older than this. Env: BUG_REPORT_ATTACHMENT_TTL_DAYS (default 30d)
+	JanitorSweepInterval time.Duration // janitor: how often to sweep. Env: BUG_REPORT_JANITOR_INTERVAL_HOURS (default 1h)
 }
 
 // LLMConfig governs the local-LLM sidecar used for semantic search and
@@ -1011,6 +1024,56 @@ func applyEnvOverrides(cfg *Config) {
 			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL points to a loopback / private address — GitHub's image proxy can't fetch attachments from there",
 				"url", trimmed,
 				"hint", "set this to your externally-reachable Aurora URL")
+		}
+	}
+	// 2026-05-27 — Operational tunables for the bug-report feature.
+	// All optional; each leaves the field at zero (= use default
+	// downstream) when unset. Parsed as integers in plain units
+	// (count, hours, days) so the env-var values are operator-friendly.
+	//
+	// Deep-debug #1/#2/#3 — each input is range-checked against a
+	// sane upper bound. The bounds protect against:
+	//   - time.Duration overflow when the int is multiplied by a
+	//     unit constant (time.Duration is int64 nanoseconds; the
+	//     multiplication overflows around ~292 years' worth of any
+	//     unit). Negative-overflow values would silently fall back
+	//     to defaults without operator notice.
+	//   - memory bombs (RATE_LIMIT_MAX=1_000_000 → ~24 MB per
+	//     limiter call × 10k user cap = real DoS surface).
+	// Out-of-range values WARN + skip; same observability as
+	// non-positive values.
+	const (
+		maxRateLimitMax    = 10_000   // 10k submits/window is absurd but caps the per-user-slice memory
+		maxRateLimitWindow = 24 * 7   // 1 week
+		maxAttachmentTTL   = 365 * 10 // 10 years (operator opts in to compliance-grade retention)
+		maxJanitorInterval = 24 * 7   // 1 week
+	)
+	if v := os.Getenv("BUG_REPORT_RATE_LIMIT_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= maxRateLimitMax {
+			cfg.BugReport.RateLimitMax = n
+		} else {
+			slog.Warn("BUG_REPORT_RATE_LIMIT_MAX must be a positive integer ≤ "+strconv.Itoa(maxRateLimitMax), "value", v)
+		}
+	}
+	if v := os.Getenv("BUG_REPORT_RATE_LIMIT_WINDOW_HOURS"); v != "" {
+		if h, err := strconv.Atoi(v); err == nil && h > 0 && h <= maxRateLimitWindow {
+			cfg.BugReport.RateLimitWindow = time.Duration(h) * time.Hour
+		} else {
+			slog.Warn("BUG_REPORT_RATE_LIMIT_WINDOW_HOURS must be a positive integer (hours) ≤ "+strconv.Itoa(maxRateLimitWindow), "value", v)
+		}
+	}
+	if v := os.Getenv("BUG_REPORT_ATTACHMENT_TTL_DAYS"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil && d > 0 && d <= maxAttachmentTTL {
+			cfg.BugReport.AttachmentTTL = time.Duration(d) * 24 * time.Hour
+		} else {
+			slog.Warn("BUG_REPORT_ATTACHMENT_TTL_DAYS must be a positive integer (days) ≤ "+strconv.Itoa(maxAttachmentTTL), "value", v)
+		}
+	}
+	if v := os.Getenv("BUG_REPORT_JANITOR_INTERVAL_HOURS"); v != "" {
+		if h, err := strconv.Atoi(v); err == nil && h > 0 && h <= maxJanitorInterval {
+			cfg.BugReport.JanitorSweepInterval = time.Duration(h) * time.Hour
+		} else {
+			slog.Warn("BUG_REPORT_JANITOR_INTERVAL_HOURS must be a positive integer (hours) ≤ "+strconv.Itoa(maxJanitorInterval), "value", v)
 		}
 	}
 }

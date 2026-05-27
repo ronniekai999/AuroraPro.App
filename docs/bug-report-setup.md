@@ -62,6 +62,36 @@ BUG_REPORT_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 BUG_REPORT_PUBLIC_BASE_URL=https://aurora.example.com
 ```
 
+### Optional tunables
+
+Override any of these if the defaults don't fit your deployment.
+Invalid values (non-integer, ≤ 0, or **out of range — see the upper
+bounds below**) fall back to the default + log a WARN at startup.
+
+```bash
+# Max bug-reports a single user can file per window. Default 5.
+# Max accepted value: 10000. Lower for heavily-shared deploys;
+# raise for trusted small ones. (Memory is ~24 bytes × this × 10k
+# users worst-case, so the upper bound protects against operator-
+# typo memory bombs.)
+BUG_REPORT_RATE_LIMIT_MAX=5
+
+# Window length in hours for the rate limit. Default 1. Max
+# accepted: 168 (1 week).
+BUG_REPORT_RATE_LIMIT_WINDOW_HOURS=1
+
+# Days an attachment lives on disk before the janitor sweeps it.
+# Default 30. Max accepted: 3650 (10 years). Raise for compliance-
+# heavy deploys that need longer retention; lower to reclaim disk
+# faster. (Upper bound protects against time.Duration overflow.)
+BUG_REPORT_ATTACHMENT_TTL_DAYS=30
+
+# Janitor sweep cadence in hours. Default 1. Max accepted: 168
+# (1 week). Bigger interval = lower CPU/IO cost but stale files
+# sit on disk longer.
+BUG_REPORT_JANITOR_INTERVAL_HOURS=1
+```
+
 Restart Aurora to pick up the env changes.
 
 ## Step 3 — Verify
