@@ -150,7 +150,7 @@ func TestNewFeedbackHandlerResolvesTunables(t *testing.T) {
 			AttachmentTTL:        7 * 24 * time.Hour,
 			JanitorSweepInterval: 30 * time.Minute,
 		}
-		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		h := NewFeedbackHandler(nil, cfg, t.TempDir(), "")
 		if h.submitLimiter.rate != 10 {
 			t.Errorf("rate: got %d, want 10", h.submitLimiter.rate)
 		}
@@ -166,7 +166,7 @@ func TestNewFeedbackHandlerResolvesTunables(t *testing.T) {
 	})
 	t.Run("zeros fall back to defaults", func(t *testing.T) {
 		cfg := config.BugReportConfig{Enabled: false} // all tunables zero
-		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		h := NewFeedbackHandler(nil, cfg, t.TempDir(), "")
 		if h.submitLimiter.rate != defaultFeedbackRateMax {
 			t.Errorf("rate: got %d, want default %d", h.submitLimiter.rate, defaultFeedbackRateMax)
 		}
@@ -192,7 +192,7 @@ func TestNewFeedbackHandlerResolvesTunables(t *testing.T) {
 			AttachmentTTL:        -time.Hour,
 			JanitorSweepInterval: -time.Hour,
 		}
-		h := NewFeedbackHandler(nil, cfg, t.TempDir())
+		h := NewFeedbackHandler(nil, cfg, t.TempDir(), "")
 		if h.submitLimiter.rate != defaultFeedbackRateMax {
 			t.Errorf("negative rate should fall back to default; got %d", h.submitLimiter.rate)
 		}

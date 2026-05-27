@@ -1898,6 +1898,53 @@ export interface BugReportInput {
   description: string
   name?: string // free-form display name, prefilled from user.email
   attachment?: File
+  // 2026-05-27 — Auto-collected browser-side context. submitBugReport
+  // captures these from window/navigator if the caller doesn't supply
+  // them, so callers can either explicitly override (e.g. for tests)
+  // or pass undefined and let the helper handle it. Server appends
+  // them as a collapsed <details> block in the issue body.
+  context?: BugReportClientContext
+}
+
+export interface BugReportClientContext {
+  url?: string
+  viewport?: string
+  devicePixelRatio?: string
+  userAgent?: string
+  language?: string
+  clientTime?: string
+}
+
+// collectClientContext gathers browser-side facts useful for triage
+// without any network calls. Defensive against running in non-browser
+// environments (SSR / tests) — each field is optional and falls back
+// to undefined when window/navigator are missing.
+//
+// Deep-debug M1 — every field is guarded to avoid producing literal
+// "undefined" or "0x0" strings. Optional chaining alone returns
+// `undefined` which then string-concatenates as the literal text
+// "undefined"; downstream the server can't distinguish that from a
+// real value. Each return field is either a sensible string or
+// truly omitted.
+export function collectClientContext(): BugReportClientContext {
+  if (typeof window === 'undefined') return {}
+  const w = window
+  const n = w.navigator as Navigator | undefined
+  const ctx: BugReportClientContext = {}
+  if (w.location?.pathname) {
+    ctx.url = w.location.pathname + (w.location.search || '')
+  }
+  if (typeof w.innerWidth === 'number' && typeof w.innerHeight === 'number'
+    && w.innerWidth > 0 && w.innerHeight > 0) {
+    ctx.viewport = `${w.innerWidth}x${w.innerHeight}`
+  }
+  if (typeof w.devicePixelRatio === 'number' && w.devicePixelRatio > 0) {
+    ctx.devicePixelRatio = String(w.devicePixelRatio)
+  }
+  if (n?.userAgent) ctx.userAgent = n.userAgent
+  if (n?.language) ctx.language = n.language
+  ctx.clientTime = new Date().toISOString()
+  return ctx
 }
 
 export async function submitBugReport(
@@ -1909,6 +1956,18 @@ export async function submitBugReport(
   fd.append('description', input.description)
   if (input.name) fd.append('name', input.name)
   if (input.attachment) fd.append('attachment', input.attachment, input.attachment.name)
+  // 2026-05-27 — Context fields. Default to collectClientContext() so
+  // every report gets the browser-side env block without each caller
+  // having to remember; explicit `input.context` overrides per call.
+  // Each field is optional on the server too — empty strings get
+  // omitted from the rendered <details> block.
+  const ctx = input.context ?? collectClientContext()
+  if (ctx.url) fd.append('client_url', ctx.url)
+  if (ctx.viewport) fd.append('client_viewport', ctx.viewport)
+  if (ctx.devicePixelRatio) fd.append('client_dpr', ctx.devicePixelRatio)
+  if (ctx.userAgent) fd.append('client_user_agent', ctx.userAgent)
+  if (ctx.language) fd.append('client_language', ctx.language)
+  if (ctx.clientTime) fd.append('client_time', ctx.clientTime)
   // Use apiFetchResponse directly so we control the body type (don't
   // let apiFetch JSON-encode the FormData). Browser sets the proper
   // multipart/form-data; boundary header automatically when body is
