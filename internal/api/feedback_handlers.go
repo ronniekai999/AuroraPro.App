@@ -36,10 +36,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/config"
 	"github.com/aurora-media/aurora/internal/feedback"
 )
@@ -75,7 +77,30 @@ type FeedbackHandler struct {
 	submitLimiter          *feedbackLimiter
 	effectiveTTL           time.Duration
 	effectiveSweepInterval time.Duration
+	// 2026-05-27 — PAT health state. Updated at startup and on a
+	// 6-hour cadence by runHealthChecks. atomic.Value carries
+	// *patHealth (nil = not yet checked); admin operators see the
+	// most recent state via GET /api/feedback/config so an expired
+	// or revoked PAT surfaces immediately instead of only on the
+	// first user-attempted Submit.
+	tokenHealth atomic.Value // *patHealth
 }
+
+// patHealth is the snapshot stored in FeedbackHandler.tokenHealth.
+// Never mutated after construction — replaced atomically. nil
+// pointer means "not yet checked" (first run pending).
+type patHealth struct {
+	Healthy   bool      // true when the most recent Validate succeeded
+	CheckedAt time.Time // when the check ran
+	Reason    string    // human-readable error message; empty when Healthy
+}
+
+// healthCheckInterval — how often to re-validate the PAT. 6h
+// balances "catch expiry within a reasonable window" against "don't
+// thrash GitHub's API quota." A user-driven Submit triggers a fresh
+// CreateIssue call regardless, so the background check is purely
+// for operator-facing observability.
+const healthCheckInterval = 6 * time.Hour
 
 // Limits chosen to match GitHub's API constraints and the existing
 // MaxBytesReader precedent in helpers.go.
@@ -197,16 +222,117 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		} else {
 			h.client = client
 		}
-		// Janitor + limiter sweep run only when the feature is enabled
-		// (no point sweeping a directory nothing writes to / no submit
-		// traffic to throttle) AND when a ctx is provided (otherwise
-		// no graceful-shutdown signal).
+		// Janitor + limiter sweep + health-check run only when the
+		// feature is enabled AND a ctx is provided (otherwise no
+		// graceful-shutdown signal).
 		if ctx != nil {
 			go h.runJanitor(ctx)
 			go h.submitLimiter.runSweep(ctx)
+			// 2026-05-27 — PAT health check. Only starts when we
+			// actually have a client (cfg.Enabled + valid token/repo
+			// pair); without a client there's nothing to validate.
+			if h.client != nil {
+				go h.runHealthChecks(ctx)
+			}
 		}
 	}
 	return h
+}
+
+// runHealthChecks validates the configured PAT at startup and then
+// on a 6-hour cadence. Result lands in h.tokenHealth so admin
+// operators see it via GET /api/feedback/config. Logs at WARN on
+// failure (so the issue shows up in operator logs even if no admin
+// is watching the API), INFO on the first successful check + on
+// recovery from a failed state.
+//
+// The goroutine exits when ctx is cancelled. Same lifecycle pattern
+// as runJanitor + runSweep.
+func (h *FeedbackHandler) runHealthChecks(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	// Initial check on startup. Brief delay so we don't race
+	// against the rest of Aurora's startup (DB pool, etc.).
+	select {
+	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+	// Deep-debug M2 — wrap EACH iteration in panic recovery so a
+	// single panic doesn't permanently kill the health checker.
+	// Previously the recover was on the goroutine boundary which
+	// silently downgraded "checker stalled" to "checker dead" —
+	// admin operators would see `CheckedAt` stuck at the panic
+	// time with no further signal. Per-iteration recovery means
+	// the next tick still runs.
+	runOne := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("feedback health check: panic recovered — retrying on next tick",
+					"recover", r)
+			}
+		}()
+		h.checkTokenHealth(ctx)
+	}
+	runOne()
+	ticker := time.NewTicker(healthCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			runOne()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// checkTokenHealth runs a single Validate call and updates
+// h.tokenHealth atomically. Idempotent; safe to call from any
+// goroutine.
+func (h *FeedbackHandler) checkTokenHealth(ctx context.Context) {
+	// Short timeout — health checks shouldn't hold sockets for long.
+	// The Validate request itself runs through the SSRF-guarded
+	// http.Client with its own timeout, so this is belt-and-
+	// suspenders.
+	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	prev, _ := h.tokenHealth.Load().(*patHealth)
+	now := time.Now()
+	var next *patHealth
+	if err := h.client.Validate(checkCtx); err != nil {
+		next = &patHealth{Healthy: false, CheckedAt: now, Reason: err.Error()}
+		// Deep-debug M3 — log WARN only on TRANSITIONS (first
+		// failure or reason-change), not every 6h while the PAT
+		// stays broken. Most alerting platforms dedupe, but log
+		// volume is real on busy log aggregators and a "broken
+		// PAT" condition gets one alert + the operator deals with
+		// it; subsequent failures are noise. Recovery still logs
+		// INFO via the success branch.
+		shouldWarn := prev == nil || prev.Healthy || prev.Reason != err.Error()
+		if shouldWarn {
+			slog.Warn("feedback PAT health check failed",
+				"reason", err.Error(),
+				"repo", h.cfg.GitHubRepo,
+				"hint", "rotate the PAT or check BUG_REPORT_GITHUB_REPO")
+		}
+	} else {
+		next = &patHealth{Healthy: true, CheckedAt: now}
+		// Log INFO only on the FIRST success or when recovering
+		// from a failed state — avoids spamming logs every 6h for
+		// healthy deployments.
+		if prev == nil {
+			slog.Info("feedback PAT health check: initial validation succeeded",
+				"repo", h.cfg.GitHubRepo)
+		} else if !prev.Healthy {
+			slog.Info("feedback PAT health check: recovered",
+				"repo", h.cfg.GitHubRepo,
+				"prior_reason", prev.Reason)
+		}
+	}
+	h.tokenHealth.Store(next)
 }
 
 // runJanitor sweeps <cacheDir> every h.effectiveSweepInterval and
@@ -446,8 +572,18 @@ func (l *feedbackLimiter) runSweep(ctx context.Context) {
 
 // FeedbackConfigResponse is what GET /api/feedback/config returns to
 // authed users. The frontend gates the launcher button on `enabled`.
+//
+// 2026-05-27 — TokenHealthy / TokenHealthReason are populated ONLY
+// when the requester is an admin (claims.Role == "admin"). Pointer
+// on TokenHealthy distinguishes "checked false" from "not yet
+// checked" (no value sent); regular users always see both fields
+// omitted via `omitempty` because admins shouldn't share PAT
+// diagnostics with the rest of the user base.
 type FeedbackConfigResponse struct {
-	Enabled bool `json:"enabled"`
+	Enabled              bool   `json:"enabled"`
+	TokenHealthy         *bool  `json:"token_healthy,omitempty"`
+	TokenHealthReason    string `json:"token_health_reason,omitempty"`
+	TokenHealthCheckedAt string `json:"token_health_checked_at,omitempty"`
 }
 
 // GetConfig — GET /api/feedback/config
@@ -456,14 +592,30 @@ type FeedbackConfigResponse struct {
 // the feature is off (the entire response is small and cheap; safe
 // to fetch once per session). Authed because we don't expose
 // feature-flag state to the public.
+//
+// 2026-05-27 — Admin requesters also see PAT-health diagnostics so
+// they can act on token expiry / revocation before users hit the
+// submit-time 5xx. Regular users get the omitempty fields blank.
 func (h *FeedbackHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, FeedbackConfigResponse{
+	resp := FeedbackConfigResponse{
 		// Operator may set Enabled=true but forget the token — that
 		// case STILL reports enabled to the frontend. The submit
 		// handler then 503s on first attempt, which is the right
 		// failure mode (admin sees the misconfiguration immediately).
 		Enabled: h.cfg.Enabled,
-	})
+	}
+	claims := auth.GetClaims(r.Context())
+	if claims != nil && claims.Role == "admin" {
+		if hp, ok := h.tokenHealth.Load().(*patHealth); ok && hp != nil {
+			healthy := hp.Healthy
+			resp.TokenHealthy = &healthy
+			if !healthy {
+				resp.TokenHealthReason = hp.Reason
+			}
+			resp.TokenHealthCheckedAt = hp.CheckedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // FeedbackSubmitResponse is returned to the frontend after a

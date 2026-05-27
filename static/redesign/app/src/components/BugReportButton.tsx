@@ -32,9 +32,23 @@ interface Props {
   // Component stays mounted so the modal can outlive the visibility
   // change — see file-level comment.
   hidden?: boolean
+  // 2026-05-27 — PAT health diagnostics, populated by the server
+  // only for admin requesters. Forwarded to the modal so the
+  // amber warning banner can render when the configured GitHub
+  // token is expired / revoked / missing scope. Undefined for
+  // non-admins.
+  tokenHealthy?: boolean
+  tokenHealthReason?: string
+  // 2026-05-27 (deep-debug M1) — App-provided callback to refresh
+  // the bug-report config. The server's health check updates
+  // tokenHealthy every 6h on its own ticker; the frontend would
+  // otherwise hold whatever value was returned at login forever.
+  // We trigger a refetch on modal-open so an admin who opens the
+  // modal hours after login sees the current health state.
+  onRefreshConfig?: () => void
 }
 
-export function BugReportButton({ prefillName, onToast, hidden }: Props) {
+export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, tokenHealthReason, onRefreshConfig }: Props) {
   const [modalOpen, setModalOpen] = useState(false)
 
   const handleSubmitted = (result: BugReportSubmitResult) => {
@@ -61,7 +75,16 @@ export function BugReportButton({ prefillName, onToast, hidden }: Props) {
     <>
       <button
         type="button"
-        onClick={() => setModalOpen(true)}
+        onClick={() => {
+          // Deep-debug M1 — refresh config so the modal's
+          // admin-only PAT health banner reflects the latest
+          // server-side check (the 6h background ticker may have
+          // updated tokenHealthy since the user logged in). Fire-
+          // and-forget; the modal still opens immediately and
+          // re-renders when the new config lands.
+          onRefreshConfig?.()
+          setModalOpen(true)
+        }}
         title="Report a bug or share feedback"
         aria-label="Report a bug"
         // 2026-05-27 (deep-debug Phase 2 #1) — data-screenshot-exclude
@@ -100,6 +123,8 @@ export function BugReportButton({ prefillName, onToast, hidden }: Props) {
           prefillName={prefillName}
           onClose={() => setModalOpen(false)}
           onSubmitted={handleSubmitted}
+          tokenHealthy={tokenHealthy}
+          tokenHealthReason={tokenHealthReason}
         />
       )}
     </>

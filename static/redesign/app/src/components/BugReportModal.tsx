@@ -44,6 +44,13 @@ interface Props {
   // Called on successful submission with the GH issue link/number so
   // the parent can pop a toast deep-linking to the issue.
   onSubmitted: (result: BugReportSubmitResult) => void
+  // 2026-05-27 — PAT health diagnostics, populated only when the
+  // requester is an admin. When tokenHealthy === false, the modal
+  // renders an amber banner above the form with the reason so the
+  // admin can act on the misconfig before users hit the submit-time
+  // 5xx. Undefined for non-admins / pre-first-check.
+  tokenHealthy?: boolean
+  tokenHealthReason?: string
 }
 
 // Match server-side limits (internal/api/feedback_handlers.go) so the
@@ -64,7 +71,7 @@ const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,video/webm,video/mp4'
 // expiry; user can also stop early via the in-recording UI.
 const MAX_RECORDING_MS = 30_000
 
-export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
+export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy, tokenHealthReason }: Props) {
   const [name, setName] = useState(prefillName ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -795,6 +802,23 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
             Help us improve Aurora — this opens a GitHub issue with the details below.
           </p>
         </div>
+
+        {/* 2026-05-27 — Admin-only PAT health banner. The server
+            populates tokenHealthy only for admin requesters, so this
+            banner can't render for regular users. Amber matches the
+            existing PII warning so admins see "operator action needed"
+            as a distinct visual class from form-error red. */}
+        {tokenHealthy === false && (
+          <div
+            className="mx-6 mt-4 rounded-lg bg-amber-500/10 border border-amber-500/40 px-3 py-2 text-amber-200 text-xs"
+            role="alert"
+          >
+            <strong>Admin notice — GitHub token issue:</strong>{' '}
+            {tokenHealthReason || 'The configured PAT failed its most recent health check.'}{' '}
+            Users won't be able to submit bug reports until this is resolved. See{' '}
+            <code className="text-amber-100">docs/bug-report-setup.md</code>.
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
           {/* Name. Deep-debug #7 — label clarifies that the value

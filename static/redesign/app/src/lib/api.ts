@@ -1870,6 +1870,18 @@ export function withToken(url: string): string {
 
 export interface BugReportConfig {
   enabled: boolean
+  // 2026-05-27 — PAT health diagnostics. Server populates these
+  // ONLY when the requester is an admin (claims.Role == "admin");
+  // regular users get them omitted. Used by the BugReportModal
+  // to show an amber banner to admins when the configured GitHub
+  // PAT is expired / revoked / missing scope.
+  //
+  // token_healthy is a tri-state: undefined = not yet checked OR
+  // not an admin; true = recent Validate succeeded; false = recent
+  // Validate failed (reason populated).
+  token_healthy?: boolean
+  token_health_reason?: string
+  token_health_checked_at?: string // RFC3339
 }
 
 export async function getBugReportConfig(signal?: AbortSignal): Promise<BugReportConfig> {

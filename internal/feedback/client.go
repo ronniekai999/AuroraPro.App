@@ -31,10 +31,10 @@ const githubAPIHost = "https://api.github.com"
 // Client posts issues to a GitHub repository via the official REST API
 // using a Personal Access Token. Created once at server startup.
 type Client struct {
-	token    string
-	repo     string // "owner/repo"
-	http     *http.Client
-	apiHost  string // overridable for tests; "" → githubAPIHost
+	token   string
+	repo    string // "owner/repo"
+	http    *http.Client
+	apiHost string // overridable for tests; "" → githubAPIHost
 }
 
 // CreateIssueRequest is the subset of GitHub's issue body fields the
@@ -146,6 +146,75 @@ func (c *Client) CreateIssue(ctx context.Context, req CreateIssueRequest) (*Crea
 		return nil, fmt.Errorf("feedback: github validation failure: %s", string(respBody))
 	default:
 		return nil, fmt.Errorf("feedback: github returned %d", resp.StatusCode)
+	}
+}
+
+// Validate verifies the configured PAT can reach the configured
+// repo. Returns nil if the token is healthy; otherwise returns a
+// user-facing error describing the most likely cause.
+//
+// Implementation: GET /repos/{owner}/{repo} is a cheap read that
+// proves four things at once — (1) network reachability,
+// (2) token authenticates (not 401), (3) token has at least read
+// access to the repo (not 403/404), (4) the configured repo string
+// resolves. It does NOT prove the token can WRITE issues; that
+// failure would surface as a 403 on the first actual submission
+// with a clear error message via CreateIssue. The trade-off is
+// acceptable because:
+//   - GitHub doesn't expose a "dry-run create-issue" endpoint
+//   - issue-write scope is a superset of repo-read for the
+//     fine-grained PATs Aurora's docs recommend
+//   - the alternative (creating + deleting a real test issue) is
+//     noisy and produces audit-log churn
+//
+// Used by FeedbackHandler at startup + on a periodic re-check to
+// surface PAT expiry / revocation to admin operators via the
+// /api/feedback/config endpoint.
+func (c *Client) Validate(ctx context.Context) error {
+	if c == nil {
+		return errors.New("feedback: client not configured")
+	}
+	host := c.apiHost
+	if host == "" {
+		host = githubAPIHost
+	}
+	url := fmt.Sprintf("%s/repos/%s", host, c.repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("feedback: build validation request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", "Aurora-Media-Server/bug-report-validate")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("feedback: validation request: %w", err)
+	}
+	defer resp.Body.Close()
+	// Drain a small portion of the body so the connection can be
+	// returned to the pool cleanly. Don't need to parse — only the
+	// status code matters here.
+	_, _ = io.CopyN(io.Discard, resp.Body, 4*1024)
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusUnauthorized:
+		return errors.New("token rejected by GitHub (401) — generate a fresh PAT")
+	case http.StatusForbidden:
+		// Could be rate-limit OR scope insufficient. Distinguish on
+		// the rate-limit headers (same logic as CreateIssue).
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" ||
+			resp.Header.Get("Retry-After") != "" {
+			return errors.New("GitHub API rate limit exceeded — health check will retry later")
+		}
+		return errors.New("token lacks read access to the repo (403) — check PAT scope: needs Issues:write + Contents:read (or full `repo` for classic PATs)")
+	case http.StatusNotFound:
+		return fmt.Errorf("repo %q not found or invisible to the token (404) — check BUG_REPORT_GITHUB_REPO", c.repo)
+	default:
+		return fmt.Errorf("GitHub returned %d during validation", resp.StatusCode)
 	}
 }
 
