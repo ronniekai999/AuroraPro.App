@@ -1,3 +1,5 @@
+import { getDiagnosticBuffer } from './diagnosticBuffer'
+
 // Aurora V2 — API client.
 //
 // Talks to the same Go backend that powers V1 (aurora_pro.html). Reuses
@@ -1863,6 +1865,11 @@ export function withToken(url: string): string {
 //
 // Backed by /api/feedback. Off by default on the server; the frontend
 // gates the launcher button on `enabled` from getBugReportConfig().
+//
+// 2026-05-27 — Diagnostic buffer (console + network ring buffers)
+// is read via getDiagnosticBuffer() on submit. Imported at the top
+// so the bundler resolves it; the buffer itself is installed at app
+// boot from main.tsx.
 // When enabled, submitBugReport posts a multipart form with the
 // user's title + description (+ optional file attachment) and the
 // server creates a GitHub issue. Returns the public issue URL the
@@ -1968,6 +1975,24 @@ export async function submitBugReport(
   if (ctx.userAgent) fd.append('client_user_agent', ctx.userAgent)
   if (ctx.language) fd.append('client_language', ctx.language)
   if (ctx.clientTime) fd.append('client_time', ctx.clientTime)
+  // 2026-05-27 — Diagnostic buffer payload. Reads the in-memory
+  // ring buffers from lib/diagnosticBuffer (installed at app boot in
+  // main.tsx). Each is JSON-encoded as a separate multipart field;
+  // server-side renders them into the GH issue body's <details>
+  // block. Wrapped in try/catch so a buffer-read failure can never
+  // block the submission itself.
+  try {
+    const diag = getDiagnosticBuffer()
+    if (diag.console.length > 0) {
+      fd.append('client_console', JSON.stringify(diag.console))
+    }
+    if (diag.network.length > 0) {
+      fd.append('client_network', JSON.stringify(diag.network))
+    }
+  } catch {
+    // Best-effort — submission still goes through without the
+    // diagnostic block.
+  }
   // Use apiFetchResponse directly so we control the body type (don't
   // let apiFetch JSON-encode the FormData). Browser sets the proper
   // multipart/form-data; boundary header automatically when body is

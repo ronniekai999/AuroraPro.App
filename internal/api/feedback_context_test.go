@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildIssueBodyOmitsEmptyEnvironment(t *testing.T) {
-	body := buildIssueBody("hello", "", "", "", 0, "", environmentContext{})
+	body := buildIssueBody("hello", "", "", "", 0, "", environmentContext{}, nil, nil)
 	if strings.Contains(body, "Environment") {
 		t.Errorf("expected no Environment section when all env fields empty; got body:\n%s", body)
 	}
@@ -22,7 +22,7 @@ func TestBuildIssueBodyRendersEnvironmentSection(t *testing.T) {
 		userAgent:     "Mozilla/5.0",
 		serverVersion: "abc1234",
 		serverTime:    "2026-05-27T18:00:00Z",
-	})
+	}, nil, nil)
 	if !strings.Contains(body, "<details>") {
 		t.Error("expected collapsed <details> block in body")
 	}
@@ -49,7 +49,7 @@ func TestBuildIssueBodyEscapesBackticksInEnv(t *testing.T) {
 	body := buildIssueBody("hello", "", "", "", 0, "", environmentContext{
 		url:       "/x", // trigger the <details> block via client context
 		userAgent: "Evil`backtick`UA",
-	})
+	}, nil, nil)
 	// Single backtick in the value, so renderCodeSpan should pick
 	// a double-backtick fence.
 	want := "``Evil`backtick`UA``"
@@ -130,7 +130,7 @@ func TestBuildIssueBodyOmitsBlockWhenOnlyServerFieldsSet(t *testing.T) {
 	body := buildIssueBody("hello", "", "", "", 0, "", environmentContext{
 		serverVersion: "abc1234",
 		serverTime:    "2026-05-27T18:00:00Z",
-	})
+	}, nil, nil)
 	if strings.Contains(body, "<details>") {
 		t.Errorf("expected no <details> block when only server fields set; body:\n%s", body)
 	}
@@ -160,13 +160,13 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 	// 2026-05-27 — Files at-or-under the Camo limit get the
 	// `![attachment](...)` inline embed. Above it: link only + note.
 	t.Run("small image gets inline embed", func(t *testing.T) {
-		body := buildIssueBody("hi", "", "", "https://x/a.png", 1_000_000, "image/png", environmentContext{})
+		body := buildIssueBody("hi", "", "", "https://x/a.png", 1_000_000, "image/png", environmentContext{}, nil, nil)
 		if !strings.Contains(body, "![attachment](https://x/a.png)") {
 			t.Errorf("expected inline embed for small image; body:\n%s", body)
 		}
 	})
 	t.Run("big image skips embed and adds note", func(t *testing.T) {
-		body := buildIssueBody("hi", "", "", "https://x/a.png", 6_500_000, "image/png", environmentContext{})
+		body := buildIssueBody("hi", "", "", "https://x/a.png", 6_500_000, "image/png", environmentContext{}, nil, nil)
 		if strings.Contains(body, "![attachment]") {
 			t.Errorf("expected NO inline embed for big image; body:\n%s", body)
 		}
@@ -178,7 +178,7 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 		// Covers both .webm (transcode fallback) and .mp4 (transcode
 		// success — the new common case post WebM→MP4 conversion).
 		for _, mime := range []string{"video/webm", "video/mp4"} {
-			body := buildIssueBody("hi", "", "", "https://x/a", 500_000, mime, environmentContext{})
+			body := buildIssueBody("hi", "", "", "https://x/a", 500_000, mime, environmentContext{}, nil, nil)
 			if strings.Contains(body, "![attachment]") {
 				t.Errorf("mime=%s: expected NO inline embed for video; body:\n%s", mime, body)
 			}
@@ -191,7 +191,7 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 		// Whether or not we embed, the link itself should always render
 		// so triagers can click through.
 		for _, size := range []int64{500_000, 10_000_000} {
-			body := buildIssueBody("hi", "", "", "https://x/a.png", size, "image/png", environmentContext{})
+			body := buildIssueBody("hi", "", "", "https://x/a.png", size, "image/png", environmentContext{}, nil, nil)
 			if !strings.Contains(body, "**Attachment:** https://x/a.png") {
 				t.Errorf("size=%d: expected attachment link; body:\n%s", size, body)
 			}
@@ -202,7 +202,7 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 		// render) AND not show the oversize note. Link-only is the
 		// right behavior; a 0-byte upload is probably already a
 		// usability problem upstream.
-		body := buildIssueBody("hi", "", "", "https://x/a.png", 0, "image/png", environmentContext{})
+		body := buildIssueBody("hi", "", "", "https://x/a.png", 0, "image/png", environmentContext{}, nil, nil)
 		if strings.Contains(body, "![attachment]") {
 			t.Errorf("expected no embed for 0-byte file; body:\n%s", body)
 		}
@@ -218,7 +218,7 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 		// image/* and video/*) shouldn't accidentally fall into the
 		// embed branch. Defensive against future safeExtension
 		// whitelist expansion.
-		body := buildIssueBody("hi", "", "", "https://x/log.pdf", 500_000, "application/pdf", environmentContext{})
+		body := buildIssueBody("hi", "", "", "https://x/log.pdf", 500_000, "application/pdf", environmentContext{}, nil, nil)
 		if strings.Contains(body, "![attachment]") {
 			t.Errorf("expected no embed for PDF; body:\n%s", body)
 		}

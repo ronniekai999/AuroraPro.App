@@ -27,6 +27,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -851,7 +852,7 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// server fills its own version + a trusted server timestamp.
 	// Each client field is sanitized + length-capped. All optional;
 	// the `<details>` block renders only when at least one field
-	// has a value (handled by environmentContext.hasAny).
+	// has a value (handled by environmentContext.hasClientContext).
 	env := environmentContext{
 		url:              sanitizeContextField(r.FormValue("client_url")),
 		viewport:         sanitizeContextField(r.FormValue("client_viewport")),
@@ -863,10 +864,19 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		serverTime:       time.Now().UTC().Format(time.RFC3339),
 	}
 
+	// 2026-05-27 — Diagnostic buffer (console + network breadcrumbs
+	// captured by the SPA's in-memory ring buffer). Each field is
+	// JSON-encoded by the frontend; parseDiagnosticEntries validates,
+	// caps lengths, and drops malformed entries silently so a
+	// malicious client can't blow up the issue body or smuggle
+	// markdown injection.
+	consoleEntries := parseConsoleEntries(r.FormValue("client_console"))
+	networkEntries := parseNetworkEntries(r.FormValue("client_network"))
+
 	// Build the issue body. Putting submitter context (name + Aurora
 	// username) at the bottom keeps the user's description the lede
 	// for triagers reading on GitHub.
-	body := buildIssueBody(desc, name, claims.Username, attachmentURL, attachmentSize, attachmentMime, env)
+	body := buildIssueBody(desc, name, claims.Username, attachmentURL, attachmentSize, attachmentMime, env, consoleEntries, networkEntries)
 
 	// Use the request's context so a client disconnect aborts the
 	// in-flight GitHub call cleanly.
@@ -1381,7 +1391,7 @@ func mimeForAttachment(name string) string {
 // every line) so any internal Markdown the user wrote still renders,
 // but it's visually enclosed and clearly delimited from server-
 // composed content.
-func buildIssueBody(description, name, username, attachmentURL string, attachmentSize int64, attachmentMime string, env environmentContext) string {
+func buildIssueBody(description, name, username, attachmentURL string, attachmentSize int64, attachmentMime string, env environmentContext, consoleEntries []consoleEntry, networkEntries []networkEntry) string {
 	var b strings.Builder
 	// User description as a quoted block. Any line they wrote (incl.
 	// `---`, `#`, `>`, etc.) is rendered inside the quote so they
@@ -1475,6 +1485,38 @@ func buildIssueBody(description, name, username, attachmentURL string, attachmen
 		// look redundant to triagers).
 		writeKV("Client time (browser clock)", env.clientTime)
 		writeKV("Server time (Aurora UTC)", env.serverTime)
+		b.WriteString("</details>\n\n")
+	}
+	// 2026-05-27 — Diagnostic buffer. Two separate `<details>` blocks
+	// so triagers can expand console + network independently. Both
+	// are collapsed by default (the user description stays the lede).
+	// Rendered as fenced code blocks for monospace alignment in the
+	// markdown view; ``` is the outer fence + ` for any tick inside
+	// the rendered content gets handled by the fence width.
+	if len(consoleEntries) > 0 {
+		b.WriteString("<details>\n")
+		b.WriteString(fmt.Sprintf("<summary>Console log (%d most recent entries)</summary>\n\n", len(consoleEntries)))
+		b.WriteString("```\n")
+		for _, e := range consoleEntries {
+			// Format: "[ts] LEVEL: message" — easy to grep + diff.
+			fmt.Fprintf(&b, "[%s] %-5s %s\n", e.ts, strings.ToUpper(e.level), e.message)
+		}
+		b.WriteString("```\n")
+		b.WriteString("</details>\n\n")
+	}
+	if len(networkEntries) > 0 {
+		b.WriteString("<details>\n")
+		b.WriteString(fmt.Sprintf("<summary>Network log (%d most recent requests)</summary>\n\n", len(networkEntries)))
+		b.WriteString("| Time | Method | URL | Status | Duration | Size |\n")
+		b.WriteString("|---|---|---|---|---|---|\n")
+		for _, e := range networkEntries {
+			// Table cell — escape pipe characters so a URL with `|`
+			// doesn't break the column layout. URLs with `|` are rare
+			// but possible in OData / query-string DSLs.
+			urlCell := strings.ReplaceAll(e.url, "|", "\\|")
+			fmt.Fprintf(&b, "| %s | %s | `%s` | %d | %dms | %s |\n",
+				e.ts, e.method, urlCell, e.status, e.durationMs, humanizeSize(e.responseSize))
+		}
 		b.WriteString("</details>\n\n")
 	}
 	// Distinctive HTML-comment fence that user content can't easily
@@ -1628,4 +1670,243 @@ func renderCodeSpan(s string) string {
 		pad = " "
 	}
 	return fence + pad + s + pad + fence
+}
+
+// 2026-05-27 — Diagnostic buffer parsing.
+//
+// The SPA's lib/diagnosticBuffer maintains in-memory ring buffers of
+// console + network events and JSON-encodes them into the multipart
+// fields `client_console` / `client_network` on every submission.
+// Server-side we validate + cap so a malicious or buggy client can't:
+//
+//   - blow up the GitHub issue body (65 KiB hard cap)
+//   - smuggle markdown injection (the fenced code-block render below
+//     traps `\n\n```\n` from a console message and breaks the layout
+//     — guarded by stripping backtick fences and limiting per-entry
+//     length)
+//   - exhaust memory (entry-count and per-field char caps)
+
+// consoleEntry mirrors the frontend ConsoleEntry shape. All fields
+// are normalized + truncated at parse time.
+type consoleEntry struct {
+	ts      string `json:"ts"`
+	level   string `json:"level"`
+	message string `json:"message"`
+}
+
+// UnmarshalJSON handles the field-rename gymnastics — frontend ships
+// camelCase but Go's default JSON decoder needs explicit tags. Custom
+// unmarshal lets us re-cap the message defensively in case the
+// frontend ever stops trimming.
+func (c *consoleEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		TS      string `json:"ts"`
+		Level   string `json:"level"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.ts = sanitizeDiagnosticString(raw.TS, 64)
+	// Deep-debug L — allow-list the level. Frontend only ships the
+	// 5 console methods (log/info/warn/error/debug); a malicious or
+	// buggy client could ship `info<script>` or `fake-level`. Cosmetic
+	// (rendered inside a fenced code block) but tightens the contract.
+	c.level = normalizeConsoleLevel(raw.Level)
+	c.message = sanitizeDiagnosticString(raw.Message, maxConsoleMessageChars)
+	return nil
+}
+
+// normalizeConsoleLevel maps an arbitrary client-supplied level to one
+// of the 5 console methods we care about. Unknown values fall back to
+// "log" — the issue body still renders the message, just at a default
+// severity.
+func normalizeConsoleLevel(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "log", "info", "warn", "error", "debug":
+		return strings.ToLower(strings.TrimSpace(raw))
+	default:
+		return "log"
+	}
+}
+
+type networkEntry struct {
+	ts           string `json:"ts"`
+	method       string `json:"method"`
+	url          string `json:"url"`
+	status       int    `json:"status"`
+	durationMs   int    `json:"durationMs"`
+	responseSize int64  `json:"responseSize"`
+}
+
+func (n *networkEntry) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		TS           string `json:"ts"`
+		Method       string `json:"method"`
+		URL          string `json:"url"`
+		Status       int    `json:"status"`
+		DurationMs   int    `json:"durationMs"`
+		ResponseSize int64  `json:"responseSize"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	n.ts = sanitizeDiagnosticString(raw.TS, 64)
+	n.method = sanitizeDiagnosticString(strings.ToUpper(raw.Method), 16)
+	n.url = sanitizeDiagnosticString(raw.URL, maxNetworkURLChars)
+	n.status = clampInt(raw.Status, 0, 999)
+	n.durationMs = clampInt(raw.DurationMs, 0, 3600_000)         // cap at 1h
+	n.responseSize = clampInt64(raw.ResponseSize, 0, 1<<40)      // 1 TiB
+	return nil
+}
+
+const (
+	maxConsoleEntries      = 200
+	maxNetworkEntries      = 100
+	maxConsoleMessageChars = 1024
+	maxNetworkURLChars     = 500
+)
+
+// parseConsoleEntries decodes the client's JSON-encoded console
+// buffer, validates each entry, caps the slice at maxConsoleEntries
+// (keeps the most-recent — assumes the frontend sent oldest-first,
+// which lib/diagnosticBuffer does). Returns an empty slice on any
+// JSON-decode failure so the rest of the issue body still lands.
+func parseConsoleEntries(raw string) []consoleEntry {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	// Soft cap on the input size before unmarshal — defends against a
+	// gigabyte JSON blob crashing the parser. 200 entries * 1 KB +
+	// JSON overhead ≈ 250 KB max legitimate; 1 MiB is a generous
+	// ceiling.
+	if len(raw) > 1<<20 {
+		return nil
+	}
+	var entries []consoleEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil
+	}
+	if len(entries) > maxConsoleEntries {
+		// Tail-keep the most recent.
+		entries = entries[len(entries)-maxConsoleEntries:]
+	}
+	// Filter out empties. After normalizeConsoleLevel coerces every
+	// level to one of 5 known values (defaulting to "log"), the only
+	// reliable signal that an entry is real is a non-empty message.
+	// Catches: JSON `null` array elements, zero-value structs from
+	// sanitization rejecting every field, frontend bugs shipping bare
+	// `{}` entries.
+	out := make([]consoleEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.message == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// parseNetworkEntries — same shape as parseConsoleEntries, but for the
+// network buffer. Caps at maxNetworkEntries.
+func parseNetworkEntries(raw string) []networkEntry {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 1<<20 {
+		return nil
+	}
+	var entries []networkEntry
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return nil
+	}
+	if len(entries) > maxNetworkEntries {
+		entries = entries[len(entries)-maxNetworkEntries:]
+	}
+	out := make([]networkEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.url == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// sanitizeDiagnosticString — like sanitizeContextField but with two
+// extra protections for diagnostic content:
+//   1. Strip backtick FENCES (``` and ```) that would break out of
+//      the issue body's code-block render. Single backticks are
+//      preserved (they're inside the code block, not closing it).
+//   2. Hard rune-cap at the supplied limit (sanitizeContextField
+//      caps at 500; diagnostic content has larger caps).
+func sanitizeDiagnosticString(v string, maxRunes int) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	// Strip control chars + Unicode line separators (same set as
+	// sanitizeContextField). Tabs preserved.
+	v = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' && r != '\n' {
+			return -1
+		}
+		// U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR, U+FEFF BOM
+		switch r {
+		case '\u2028', '\u2029', '\uFEFF':
+			return -1
+		}
+		return r
+	}, v)
+	// Strip triple-backtick fences. Replace with HTML entity so the
+	// content is still visible but can't close our outer ``` fence.
+	v = strings.ReplaceAll(v, "```", "ʼʼʼ")
+	if utf8.RuneCountInString(v) > maxRunes {
+		runes := []rune(v)
+		v = string(runes[:maxRunes]) + "…"
+	}
+	return v
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func clampInt64(v, lo, hi int64) int64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// humanizeSize formats bytes as a short human string for the network
+// log table. Returns "—" for zero (Content-Length absent), avoiding
+// a misleading "0 B" that suggests we measured an empty response.
+func humanizeSize(n int64) string {
+	if n <= 0 {
+		return "—"
+	}
+	const (
+		KB = 1024
+		MB = KB * 1024
+	)
+	switch {
+	case n >= MB:
+		return fmt.Sprintf("%.1f MB", float64(n)/MB)
+	case n >= KB:
+		return fmt.Sprintf("%.1f KB", float64(n)/KB)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }

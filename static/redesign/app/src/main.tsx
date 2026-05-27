@@ -3,6 +3,17 @@ import { BrowserRouter } from 'react-router'
 import './index.css'
 import App from './App.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
+
+// 2026-05-27 — Install the diagnostic buffer as early as possible so
+// the bug-report flow can attach "what was happening before the user
+// clicked Report" (last 200 console messages + last 100 fetch
+// requests + uncaught errors). Must run BEFORE any other module is
+// imported that touches window.fetch / console — that's what the
+// top-of-file placement guarantees. installDiagnosticBuffer() is
+// idempotent + try/catch-wrapped internally; nothing here can break
+// app startup even if the patches throw on an exotic browser.
+installDiagnosticBuffer()
 
 // Audit M4 fix (Phase 8) — basename is derived from Vite's
 // `import.meta.env.BASE_URL` instead of hardcoded "/v2". This makes
