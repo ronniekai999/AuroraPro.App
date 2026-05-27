@@ -1532,6 +1532,26 @@ func (m *Manager) EndParty(code string, userID int64) error {
 func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	ps.mu.Lock()
 
+	// 2026-05-26 — diagnostic snapshot for "why did my party end?" reports.
+	// Without this, journalctl shows only "ending stale watch party" or
+	// "host grace period expired" with no context for what state the
+	// party was actually in. A live user report ("I joined as a guest,
+	// laptop died, party ended even though I wasn't host") could not be
+	// proven or disproven from logs — we couldn't tell whether the host
+	// also disconnected, whether participants were stale, or which code
+	// path triggered the end. This single-line snapshot makes future
+	// post-mortems possible without redoing the investigation each time.
+	var (
+		endParticipantCount  = len(ps.Participants)
+		endRoomConnCount     = len(ps.roomConns)
+		endSyncConnCount     = len(ps.syncConns)
+		endHostDisconnectAge time.Duration
+		endHostConnected     = ps.roomConns[ps.HostUserID] != nil
+	)
+	if ps.HostDisconnectedAt != nil {
+		endHostDisconnectAge = time.Since(*ps.HostDisconnectedAt)
+	}
+
 	// M9 — snapshot the data we need for the highlight reel BEFORE the
 	// lock is held for teardown. We launch generation after the lock
 	// release so ffmpeg doesn't block other party operations. Best-
@@ -1539,6 +1559,19 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
 	mediaItemIDForReel := ps.MediaItemID
+
+	slog.Info("watch party ending — diagnostic snapshot",
+		"code", code,
+		"host_user_id", ps.HostUserID,
+		"is_persistent_room", ps.IsRoomPersistent,
+		"participants_remaining", endParticipantCount,
+		"room_conns_open", endRoomConnCount,
+		"sync_conns_open", endSyncConnCount,
+		"host_room_conn_alive", endHostConnected,
+		"host_disconnected_for", endHostDisconnectAge.Round(time.Second),
+		"created_at", ps.CreatedAt.Format(time.RFC3339),
+		"age", time.Since(ps.CreatedAt).Round(time.Second),
+	)
 
 	// Cancel any in-flight schedule timer. A scheduled party that gets
 	// ended (host clicks "Cancel", or stale-cleanup fires) shouldn't
