@@ -247,6 +247,25 @@
   scrollbar-color: rgba(168, 85, 247, 0.45) transparent;
 }
 
+/* ====================================================================
+   Media cards
+   --------------------------------------------------------------------
+   .media-card             — original card (legacy callers, in-place
+                              usages outside the main home rails)
+   .media-card-cinema      — 2026-05-27 redesign: poster + designed
+                              "shelf" below for title/meta/reason, with
+                              stronger always-on purple halo + bigger
+                              jewel-tone corner badges. Used by the home
+                              MediaRail. Same external API as the legacy
+                              card (renders an <img>, optional progress,
+                              optional reason caption) so the rest of
+                              the home-rail flow doesn't change.
+   .rail-container         — glassy frame wrapping a whole rail (title +
+                              cards), with a decorative header row that
+                              uses horizontal divider lines on either
+                              side of the rail's title.
+   ==================================================================== */
+
 /* Media card hover effect */
 .media-card {
   position: relative;
@@ -388,6 +407,217 @@
 .rail-scroll > * {
   scroll-snap-align: start;
   flex-shrink: 0;
+}
+
+/* ====================================================================
+   .rail-container — wraps a whole home rail (header + cards).
+   Glassy bg + outer halo so the rail reads as a contained shelf rather
+   than free-floating cards on the page background. Padding leaves room
+   for the cards' own hover lift without clipping. The decorative
+   horizontal divider lines on either side of the rail title are pure
+   ::before / ::after on .rail-header — no extra DOM nodes needed.
+   ==================================================================== */
+.rail-container {
+  background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
+  border: 1px solid var(--glow-border);
+  border-radius: 18px;
+  box-shadow: var(--glow-halo);
+  padding: 18px 20px 22px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  margin-bottom: 28px;
+}
+.rail-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.rail-header .rail-icon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(168, 85, 247, 0.18);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  color: #d8b4fe;
+}
+.rail-header .rail-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.95);
+  white-space: nowrap;
+}
+/* Divider line that fills the space between title and the See-All chevron. */
+.rail-header .rail-spacer {
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%);
+}
+.rail-header .rail-see-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.8rem;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+.rail-header .rail-see-all:hover { color: #d8b4fe; }
+
+/* ====================================================================
+   .media-card-cinema — the new card design used inside .rail-container.
+   Same outer shape semantics as .media-card (rounded box, poster fills
+   most of it, hover lift) but with:
+     - Always-on purple halo so cards read as "luminous" against the
+       rail's dark glass — the legacy .media-card only glows on hover.
+     - Designed shelf below the poster instead of bare text — title,
+       star+year+genre meta, and (when present) the LLM "reason"
+       caption.
+     - Larger top-corner badges so they read on a glance without a
+       hover, and with a jewel-toned diamond for the AI-matched signal.
+   ==================================================================== */
+.media-card-cinema {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
+  border: 1px solid var(--glow-border);
+  box-shadow: var(--glow-halo);
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+}
+.media-card-cinema:hover {
+  transform: translateY(-6px);
+  border-color: var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong);
+}
+.media-card-cinema .poster-wrap {
+  position: relative;
+  padding: 8px 8px 0;
+  border-radius: 14px 14px 0 0;
+  overflow: hidden;
+}
+.media-card-cinema .poster-img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 9px;
+  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.media-card-cinema:hover .poster-img { transform: scale(1.04); }
+
+/* Larger "+" / library badge — sits in poster top-left. Filled
+   purple when item is in the user's library, glass-blurred dark
+   neutral otherwise. */
+.media-card-cinema .lib-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(10, 8, 18, 0.65);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  transition: background 0.2s, border-color 0.2s, transform 0.2s;
+  z-index: 3;
+  cursor: pointer;
+}
+.media-card-cinema .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
+.media-card-cinema .lib-badge.in-lib {
+  background: linear-gradient(135deg, #a855f7, #7e22ce);
+  border-color: rgba(220, 200, 255, 0.6);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.45);
+}
+
+/* AI-matched diamond — jewel-style top-right badge. Only renders when
+   the recommender attached an LLM reason (item.reason). Visual cue
+   only; hover surfaces the reason text via the title attribute. */
+.media-card-cinema .ai-gem {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(216, 180, 254, 0.85), rgba(168, 85, 247, 0.85));
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fffbe6;
+  box-shadow: 0 0 14px rgba(216, 180, 254, 0.5);
+  z-index: 3;
+  pointer-events: none;
+}
+.media-card-cinema .ai-gem svg { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.55)); }
+
+/* Shelf: title + meta + reason. The shelf is INSIDE the card chrome
+   (not a separate column under the poster) so the whole card reads as
+   one designed object. */
+.media-card-cinema .shelf {
+  padding: 12px 14px 14px;
+}
+.media-card-cinema .shelf .title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.96);
+  line-height: 1.2;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.media-card-cinema .shelf .meta {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.45);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+}
+.media-card-cinema .shelf .meta .star { color: #facc15; font-weight: 600; display: inline-flex; align-items: center; gap: 2px; }
+.media-card-cinema .shelf .meta .sep  { color: rgba(255, 255, 255, 0.2); }
+.media-card-cinema .shelf .reason {
+  margin-top: 6px;
+  font-size: 0.7rem;
+  font-style: italic;
+  color: rgba(216, 180, 254, 0.7);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Progress bar — shared shape with the legacy card so existing CSS
+   logic keeps working. Positioned in the poster wrap (above the
+   shelf) the same way the legacy card uses it. */
+.media-card-cinema .progress-bar {
+  position: absolute;
+  bottom: 0;
+  left: 8px;
+  right: 8px;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 0 0 9px 9px;
+  overflow: hidden;
+}
+.media-card-cinema .progress-bar .progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #a855f7, #d8b4fe);
 }
 
 /* Badge */

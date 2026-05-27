@@ -234,6 +234,14 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
     // Feather name; keeping it here lets call sites use the standard
     // name verbatim.
     'log-out': <><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" /></>,
+    // Diamond/sparkle for the AI-matched gem badge on .media-card-cinema.
+    // Solid fill so it reads as a jewel against the gradient bg.
+    sparkle: <path d="M12 2L13.5 8.5 20 10 13.5 11.5 12 18 10.5 11.5 4 10 10.5 8.5z" fill="currentColor" />,
+    // Generic compass/planet for the rail-container header. Used as a
+    // default decorative glyph next to the rail title; rails with their
+    // own dedicated icon (e.g. Continue Watching) can pass a different
+    // name via the new MediaRail `icon` prop.
+    compass: <><circle cx="12" cy="12" r="10" /><polygon points="16 8 14 14 8 16 10 10 16 8" fill="currentColor" stroke="none" /></>,
   }
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -431,12 +439,32 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   )
 }
 
-/* ─────────────────────── MEDIA RAIL ─────────────────────── */
-function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll }: {
+/* ─────────────────────── MEDIA RAIL ───────────────────────
+ * 2026-05-27 — Aurora Cinema Card redesign.
+ *
+ * The rail is now wrapped in a glassy .rail-container with a decorative
+ * header (icon + title + divider line + See-All), and each card uses the
+ * new .media-card-cinema class — same external API as the legacy card
+ * (poster, optional progress bar, optional library-toggle, optional LLM
+ * reason caption) but with a designed shelf for title/meta/reason and
+ * larger jewel-tone corner badges. Visual reference: the operator's
+ * "Concept B — Aurora Cinema Card" mockup in chat history.
+ *
+ * Landscape aspect is preserved for callers that pass aspect='landscape'
+ * (e.g. Continue Watching cards). They use the legacy poster geometry
+ * but with the new shelf, since the only difference is the image's
+ * aspect-ratio. */
+// onPlay is still accepted for backward compatibility with callers
+// (HomeView etc.) but the new cinema card design no longer renders a
+// hover-only Play CTA — clicking the card opens detail where Play
+// is the primary CTA. Keeping the prop in the type avoids touching
+// every call site; ignoring it via destructure-rest avoids the
+// unused-var lint.
+function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon = 'compass' }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
-  onPlay: (m: Media) => void
+  onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
   // Phase 5.2 parity — right-click on a card opens the context
   // menu (Mark Watched / Clear Progress / Add to Watchlist /
@@ -457,119 +485,103 @@ function MediaRail({ title, items, onSelect, onPlay, aspect = 'poster', onCardCo
   // for them) skip it; "Top Rated Movies" etc. wire it to navigate
   // to the right browse view with the matching sort.
   onSeeAll?: () => void
+  // Optional Icon name for the decorative glyph next to the rail
+  // title. Defaults to 'compass' for the generic case; specific
+  // rails can pass their own (e.g. 'clock' for Continue Watching,
+  // 'sparkle' for AI-curated Discover rails).
+  icon?: string
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   return (
-    <section className="mb-10">
-      <div className="flex items-center justify-between mb-4 px-1">
-        <h2 className="text-white text-xl font-semibold">{title}</h2>
+    <section className="rail-container">
+      <div className="rail-header">
+        <span className="rail-icon"><Icon name={icon} size={16} /></span>
+        <h2 className="rail-title">{title}</h2>
+        <span className="rail-spacer" aria-hidden="true" />
         {onSeeAll && (
-          <button
-            onClick={onSeeAll}
-            className="flex items-center gap-1 text-white/40 hover:text-purple-400 text-sm transition-colors"
-          >
-            See All <Icon name="chevronRight" size={16} />
+          <button onClick={onSeeAll} className="rail-see-all">
+            See All <Icon name="chevronRight" size={14} />
           </button>
         )}
       </div>
-      <div
-        ref={scrollRef}
-        className="rail-scroll scrollbar-hide"
-      >
-        {items.map((item) => (
-          <div
-            key={item.id}
-            className={`media-card ${aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}`}
-            onClick={() => onSelect(item)}
-            onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
-            // When the recommender attached a per-pick reason (Discover
-            // rails, Hero picks), surface it as a native hover tooltip so
-            // the user can see WHY this title was picked for them — same
-            // text shown italic on the Hero, just lifted up here for the
-            // grid cards. Empty / undefined reason → no title attribute,
-            // browser shows no tooltip.
-            title={item.reason || undefined}
-          >
-            <div className={`relative overflow-hidden rounded-xl ${aspect === 'poster' ? 'aspect-[2/3]' : 'aspect-video'}`}>
-              <img
-                src={item.poster}
-                alt={item.title}
-                className="w-full h-full object-cover"
-                loading="lazy"
-              />
-              {/* My Library + button — top-left. Filled purple ✓ when
-                  saved, outlined + when not. stopPropagation so the
-                  click toggles the library entry without also opening
-                  the detail view. */}
-              {onToggleLib && (() => {
-                const isInLib = !!libraryIds?.has(item.id)
-                return (
+      <div ref={scrollRef} className="rail-scroll scrollbar-hide">
+        {items.map((item) => {
+          const isInLib = !!libraryIds?.has(item.id)
+          const widthClass = aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'
+          return (
+            <div
+              key={item.id}
+              className={`media-card-cinema ${widthClass}`}
+              onClick={() => onSelect(item)}
+              onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              title={item.reason || undefined}
+            >
+              <div className="poster-wrap">
+                <img
+                  src={item.poster}
+                  alt={item.title}
+                  className="poster-img"
+                  loading="lazy"
+                  style={aspect === 'landscape' ? { aspectRatio: '16 / 9' } : undefined}
+                />
+                {/* + / ✓ library badge. stopPropagation so the click
+                    toggles the library entry without opening detail. */}
+                {onToggleLib && (
                   <button
                     onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
                     title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
                     aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
-                    className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
-                      isInLib
-                        ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
-                        : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
-                    }`}
+                    className={`lib-badge ${isInLib ? 'in-lib' : ''}`}
                   >
-                    {isInLib ? '✓' : '+'}
+                    <Icon name={isInLib ? 'check' : 'plus'} size={16} />
                   </button>
-                )
-              })()}
-              {/* ✨ indicator in the top-right corner when this card has
-                  an LLM reason — without it, the user has no way to know
-                  there's a tooltip to hover for. */}
-              {item.reason && (
-                <div className="absolute top-2 right-2 px-1.5 py-0.5 rounded-md bg-purple-500/30 backdrop-blur-sm border border-purple-400/40 text-purple-100 text-[10px] font-medium flex items-center gap-1 pointer-events-none">
-                  <span aria-hidden="true">✨</span>
-                  <span className="sr-only">{item.reason}</span>
-                </div>
-              )}
-              {/* Progress bar */}
-              {item.progress !== undefined && item.progress > 0 && (
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
-                </div>
-              )}
-              {/* Hover actions */}
-              <div className="card-actions">
-                <button
-                  className="action-btn"
-                  onClick={(e) => { e.stopPropagation(); onPlay(item) }}
-                >
-                  <Icon name="play" size={18} />
-                </button>
-                <button
-                  className="action-btn"
-                  onClick={(e) => { e.stopPropagation(); onSelect(item) }}
-                >
-                  <Icon name="info" size={18} />
-                </button>
-              </div>
-            </div>
-            <div className="mt-2 px-1">
-              <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
-              <div className="flex items-center gap-2 mt-0.5">
-                {/* Phase 5.3 final QA — only render the star when
-                    we actually have a rating. Continue Watching
-                    cards always have rating=0 (the progress endpoint
-                    doesn't return TMDB rating), and any unrated
-                    catalog item would otherwise show "★ 0" — a
-                    visible lie. */}
-                {item.rating > 0 && (
-                  <span className="text-yellow-400 text-xs font-semibold flex items-center gap-0.5">
-                    <Icon name="star" size={10} className="fill-yellow-400" /> {item.rating.toFixed(1)}
-                  </span>
                 )}
-                {item.year > 0 && <span className="text-white/40 text-xs">{item.year}</span>}
-                {item.genre && <span className="text-white/40 text-xs">{item.genre}</span>}
+                {/* AI-matched gem — appears only when the recommender
+                    attached an LLM reason. Decorative; reason text is
+                    shown explicitly in the shelf below + via tooltip. */}
+                {item.reason && (
+                  <div className="ai-gem" aria-hidden="true">
+                    <Icon name="sparkle" size={14} />
+                  </div>
+                )}
+                {/* Progress bar — only when progress > 0 (e.g.
+                    Continue Watching rail). */}
+                {item.progress !== undefined && item.progress > 0 && (
+                  <div className="progress-bar">
+                    <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
+                  </div>
+                )}
+              </div>
+              <div className="shelf">
+                <div className="title">{item.title}</div>
+                <div className="meta">
+                  {/* Star only when we actually have a rating
+                      (Continue Watching = rating=0). Avoids visible
+                      "★ 0" lie. */}
+                  {item.rating > 0 && (
+                    <>
+                      <span className="star"><Icon name="star" size={10} className="fill-yellow-400" /> {item.rating.toFixed(1)}</span>
+                      {(item.year > 0 || item.genre) && <span className="sep">·</span>}
+                    </>
+                  )}
+                  {item.year > 0 && (
+                    <>
+                      <span>{item.year}</span>
+                      {item.genre && <span className="sep">·</span>}
+                    </>
+                  )}
+                  {item.genre && <span>{item.genre}</span>}
+                </div>
+                {item.reason && (
+                  <div className="reason" aria-label={`Why: ${item.reason}`}>
+                    {item.reason}
+                  </div>
+                )}
               </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </section>
   )
