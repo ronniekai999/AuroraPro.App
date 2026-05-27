@@ -51,6 +51,12 @@ export function BugReportButton({ prefillName, onToast }: Props) {
         onClick={() => setModalOpen(true)}
         title="Report a bug or share feedback"
         aria-label="Report a bug"
+        // 2026-05-27 (deep-debug Phase 2 #1) — data-screenshot-exclude
+        // signals to the in-modal html2canvas Capture flow that this
+        // element should NOT appear in the screenshot. The Capture
+        // handler's ignoreElements predicate filters on this attribute
+        // so the bug-report meta-UI doesn't leak into bug evidence.
+        data-screenshot-exclude="true"
         className="fixed bottom-4 left-4 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
