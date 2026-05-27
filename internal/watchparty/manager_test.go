@@ -512,7 +512,27 @@ func TestHandleChat_TooLong(t *testing.T) {
 	}
 }
 
-func TestHandleChat_HTMLSanitization(t *testing.T) {
+// TestHandleChat_StoresRawContent verifies that chat messages are
+// persisted exactly as the user typed them (modulo whitespace trim).
+// Renamed from TestHandleChat_HTMLSanitization in 2026-05-26 along
+// with the removal of server-side html.EscapeString:
+//
+//   - The escape step produced a visible bug where apostrophes were
+//     persisted as `&#39;` and rendered literally by React (whose JSX
+//     text-child rendering already escapes HTML metacharacters, so the
+//     server-side escape was double-encoding).
+//
+//   - XSS defense is preserved at render time: every chat-message
+//     render site in the SPA uses `{m.message}` as a JSX text child
+//     (verified by grep — no dangerouslySetInnerHTML on chat). React
+//     turns `<script>alert(1)</script>` into the visible literal
+//     string, no code execution. Store-raw + render-escape is the
+//     canonical pattern; store-escape + render-escape was the bug.
+//
+// We KEEP an XSS payload in the input here as a smoke test that the
+// server doesn't crash, log noise, or otherwise mangle the message —
+// it should arrive at the storage layer byte-for-byte.
+func TestHandleChat_StoresRawContent(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
@@ -530,20 +550,31 @@ func TestHandleChat_HTMLSanitization(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.HandleChat("ABCDEF", 1, "host", `<script>alert("xss")</script>`)
-	if err != nil {
-		t.Fatalf("HandleChat failed: %v", err)
+	// Cases: apostrophe (the user-reported bug), HTML (verifies we don't
+	// re-introduce server escaping), and a leading/trailing space (verifies
+	// the only mutation is TrimSpace).
+	cases := []struct {
+		name, input, want string
+	}{
+		{"apostrophe", "I'm at 1:52", "I'm at 1:52"},
+		{"raw_html_payload", `<script>alert("xss")</script>`, `<script>alert("xss")</script>`},
+		{"trim_whitespace", "  hello  ", "hello"},
 	}
-
-	ps.mu.Lock()
-	msg := ps.ChatHistory[0].Message
-	ps.mu.Unlock()
-
-	if strings.Contains(msg, "<script>") {
-		t.Errorf("message should be HTML-escaped, got: %s", msg)
-	}
-	if !strings.Contains(msg, "&lt;script&gt;") {
-		t.Errorf("message should contain escaped HTML, got: %s", msg)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ps.mu.Lock()
+			ps.ChatHistory = ps.ChatHistory[:0]
+			ps.mu.Unlock()
+			if err := m.HandleChat("ABCDEF", 1, "host", c.input); err != nil {
+				t.Fatalf("HandleChat failed: %v", err)
+			}
+			ps.mu.Lock()
+			got := ps.ChatHistory[0].Message
+			ps.mu.Unlock()
+			if got != c.want {
+				t.Errorf("input=%q got=%q want=%q", c.input, got, c.want)
+			}
+		})
 	}
 }
 
