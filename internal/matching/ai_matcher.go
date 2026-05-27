@@ -264,6 +264,67 @@ func (m *AIMatcher) markEvaluated(ctx context.Context, itemID int64, reason stri
 	}
 }
 
+// RetryAutoPromote re-attempts the EnrichByTMDBID call for an item whose
+// AI suggestion is at-or-above the auto-promote threshold but never made
+// it past 'needs_review' status. This is the recovery path for the bug
+// the operator hit on aurorapro.app: a 95%-confident Sneetches pick
+// sat as a "suggested" row because TMDB returned an error during the
+// original auto-promote attempt, and the matcher never tried again.
+//
+// No LLM call — the AI's pick is already cached on the row. We trust
+// what the LLM said (it cleared the threshold once; nothing has changed
+// about the item or the candidate set). We just need TMDB to cooperate.
+//
+// Returns (true, nil) when the promote succeeded (item is now matched).
+// Returns (false, nil) when we declined to retry (concurrent ManualMatch
+// already matched the row, or the item's suggestion fields are no longer
+// auto-eligible — e.g. operator manually lowered the confidence column).
+// Returns (false, err) when EnrichByTMDBID failed again — caller logs
+// and moves on. The row stays flagged with its suggestion intact, so
+// the operator can still manually accept (or the next boot's retry pass
+// will try once more if TMDB has recovered).
+func (m *AIMatcher) RetryAutoPromote(ctx context.Context, item *models.MediaItem) (bool, error) {
+	if m == nil || m.enricher == nil {
+		return false, fmt.Errorf("ai matcher: enricher not configured")
+	}
+	if item == nil || item.AISuggestedTMDBID == nil || *item.AISuggestedTMDBID <= 0 {
+		return false, nil // nothing to retry against
+	}
+	confidence := 0
+	if item.AIMatchConfidence != nil {
+		confidence = *item.AIMatchConfidence
+	}
+	if confidence < m.autoThreshold {
+		return false, nil // no longer eligible (e.g. threshold raised since)
+	}
+
+	// Concurrent-match defense — same shape as Match()'s pre-promote
+	// guard. If a ManualMatch landed between query and now we MUST
+	// NOT overwrite it. Re-fetch since the queue-paged copy may be
+	// stale (the predicate matched at fetch-time but the row could
+	// have flipped seconds later via the manual-match UI).
+	current, err := m.queries.GetMediaItem(ctx, item.ID)
+	if err == nil && current != nil && current.MatchStatus == matchStatusMatched {
+		slog.Info("ai matcher: retry skipped, item matched concurrently",
+			"item_id", item.ID, "tmdb_id", *item.AISuggestedTMDBID)
+		return false, nil
+	}
+
+	tmdbID := *item.AISuggestedTMDBID
+	if _, err := m.enricher.EnrichByTMDBID(ctx, item, tmdbID, string(item.Type)); err != nil {
+		// Don't unstamp ai_match_ran_at on retry failure — the
+		// suggestion is still valid, just unfilled. Operator can
+		// manually accept; the next backfill retry pass will try
+		// once more (boot-bounded so it doesn't loop forever).
+		return false, fmt.Errorf("retry enrich: %w", err)
+	}
+	slog.Info("ai matcher: retry auto-promoted",
+		"actor", "ai_matcher",
+		"item_id", item.ID, "title", item.Title,
+		"tmdb_id", tmdbID, "confidence", confidence)
+	return true, nil
+}
+
 // fetchCandidates queries TMDB for up to aiMatchCandidateMax candidates
 // for the item. Mirrors the enricher's title-then-no-year retry (see
 // enricher.go:136 and :216) — if the year-constrained search returns
