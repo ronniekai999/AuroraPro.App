@@ -7887,13 +7887,17 @@ export default function App() {
         <BugReportButton
           prefillName={user.username}
           onToast={addToast}
-          // 2026-05-27 — `serverOpen || notifOpen` gating dropped
-          // (was holistic deep-debug H2 fix for the old bottom-left
-          // position; those panels open from the sidebar at
-          // `left-[252px]` and don't conflict with bottom-right
-          // anymore). Player still hides the launcher because the
-          // full-screen player overlay needs uncluttered UI.
-          hidden={!!playerTarget}
+          // 2026-05-27 (PR #107 follow-up — deep-debug H1/M1):
+          // Restored serverOpen / notifOpen and added partyPanelOpen.
+          // The previous PR's reasoning "panels anchor LEFT" is only
+          // true on desktop — at the md breakpoint both panels span
+          // `left-2 right-2` (full viewport width), covering the
+          // bottom-right launcher at z-45 > z-40. PartyPanel is a
+          // right-edge drawer at z-70 that covers the launcher on
+          // every viewport when open. Hiding the launcher in these
+          // cases is the cheap, correct fix — the admin can close
+          // the panel and reopen the bug-report flow.
+          hidden={!!playerTarget || serverOpen || notifOpen || partyPanelOpen}
           // 2026-05-27 — PAT health diagnostics. Server populates
           // these fields only for admin requesters; the modal shows
           // a warning banner when token_healthy === false.
