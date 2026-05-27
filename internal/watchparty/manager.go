@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"html"
 	"log/slog"
 	"math/big"
 	"os"
@@ -1909,8 +1908,28 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 		return fmt.Errorf("not a participant in this party")
 	}
 
-	// Sanitize message
-	sanitized := html.EscapeString(message)
+	// Trim leading/trailing whitespace; otherwise store the message as-is.
+	//
+	// 2026-05-26 — REMOVED html.EscapeString here. It was producing a real
+	// user-visible bug: typing "I'm at 1:52" landed in the chat panel as
+	// "I&#39;m at 1:52" because the frontend renders messages via React's
+	// `{m.message}` (a JSX text child, which renders the string literally
+	// and escapes HTML metacharacters at render time). Server-side
+	// escaping plus React's render-time escaping double-encodes — the
+	// `&#39;` from html.EscapeString gets shown as the literal text
+	// `&#39;`, not as an apostrophe.
+	//
+	// XSS defense is still in place: every chat-message render site uses
+	// `{m.message}` as a JSX text child, never dangerouslySetInnerHTML
+	// (grepped the SPA — only ui/chart.tsx uses dHTML, and only for CSS,
+	// not for chat). React's text-child escaping turns <script>alert(1)
+	// </script> into the visible string "<script>alert(1)</script>" — no
+	// code execution. Store-raw + render-escape is the canonical pattern;
+	// the prior store-escape + render-escape was the bug.
+	stored := strings.TrimSpace(message)
+	if stored == "" {
+		return fmt.Errorf("empty message")
+	}
 
 	// Generate message ID
 	msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), userID)
@@ -1919,7 +1938,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 		ID:        msgID,
 		UserID:    userID,
 		Username:  username,
-		Message:   sanitized,
+		Message:   stored,
 		Timestamp: time.Now(),
 	}
 
