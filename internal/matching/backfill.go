@@ -59,7 +59,19 @@ type JobStatus struct {
 	Matched    int       `json:"matched"`   // count auto-promoted to match_status='matched'
 	Suggested  int       `json:"suggested"` // count where LLM returned a sub-threshold suggestion
 	Failed     int       `json:"failed"`    // count where the matcher errored
-	Cancelled  bool      `json:"cancelled,omitempty"`
+
+	// Retry-pass stats (added 2026-05-26 after the Sneetches bug). The
+	// retry pass scans rows where ai_match_confidence >= threshold but
+	// match_status is still 'needs_review' — the auto-promote was
+	// attempted at evaluation time and EnrichByTMDBID failed (transient
+	// TMDB error). Retried = items the pass touched; RetryMatched =
+	// items that successfully promoted on the retry. The difference is
+	// items where TMDB STILL failed (likely a permanent issue with that
+	// id — operator can investigate or manually match).
+	Retried      int `json:"retried,omitempty"`
+	RetryMatched int `json:"retry_matched,omitempty"`
+
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // Backfiller owns the rate-limited background sweep over flagged items
@@ -265,9 +277,12 @@ func (b *Backfiller) runLoop(ctx context.Context, total int, jobID string) {
 		fetchFailures = 0
 
 		if len(items) == 0 {
-			slog.Info("ai match backfill: complete",
+			slog.Info("ai match backfill: eval pass complete",
 				"job_id", jobID, "processed", processed,
 				"elapsed", time.Since(start).Round(time.Second))
+			// Eval pass done — run the retry pass for stuck high-
+			// confidence items, then return.
+			b.runRetryPass(ctx, jobID, ticker, start)
 			return
 		}
 		for _, it := range items {
@@ -285,6 +300,71 @@ func (b *Backfiller) runLoop(ctx context.Context, total int, jobID string) {
 				slog.Info("ai match backfill: progress",
 					"job_id", jobID, "processed", processed, "of", total,
 					"elapsed", time.Since(start).Round(time.Second))
+			}
+		}
+	}
+}
+
+// runRetryPass walks rows where the AI matcher previously produced an
+// auto-eligible suggestion but the EnrichByTMDBID call failed at
+// evaluation time, leaving the row stuck in 'needs_review'. Re-attempts
+// EnrichByTMDBID with no new LLM call — the AI's pick is already
+// cached on the row. Each pass is naturally bounded (no fan-out, just
+// pages through the predicate until empty), so a permanently-bad TMDB
+// id can't loop us forever: we try once, log the failure, move on,
+// and the operator sees the row in the Flagged tab to manually handle.
+//
+// The pass uses the SAME ticker as the eval pass so the rate-limit
+// applies to combined matcher activity. Cooperatively cancels on
+// ctx.Done() just like the main loop.
+func (b *Backfiller) runRetryPass(ctx context.Context, jobID string, ticker *time.Ticker, start time.Time) {
+	threshold := b.matcher.AutoThreshold()
+	var fetchFailures int
+	for {
+		if ctx.Err() != nil {
+			slog.Info("ai match retry pass: cancelled",
+				"job_id", jobID, "elapsed", time.Since(start).Round(time.Second))
+			return
+		}
+		items, err := b.queries.GetFlaggedPendingAutoPromote(ctx, threshold, pageSize)
+		if err != nil {
+			fetchFailures++
+			if fetchFailures >= maxFetchFailures {
+				slog.Error("ai match retry pass: too many fetch failures, giving up",
+					"job_id", jobID, "failures", fetchFailures, "last_error", err)
+				return
+			}
+			wait := baseFetchBackoff << (fetchFailures - 1)
+			if wait > maxFetchBackoff || wait <= 0 {
+				wait = maxFetchBackoff
+			}
+			slog.Warn("ai match retry pass: fetch failed, backing off",
+				"job_id", jobID, "attempt", fetchFailures, "error", err, "wait", wait)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+				continue
+			}
+		}
+		fetchFailures = 0
+
+		if len(items) == 0 {
+			slog.Info("ai match backfill: retry pass complete",
+				"job_id", jobID, "elapsed", time.Since(start).Round(time.Second))
+			return
+		}
+		for _, it := range items {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			promoted, err := b.matcher.RetryAutoPromote(ctx, it)
+			b.updateRetryStats(jobID, promoted, err)
+			if err != nil {
+				slog.Warn("ai match retry pass: enrich still failing",
+					"job_id", jobID, "item_id", it.ID, "title", it.Title, "error", err)
 			}
 		}
 	}
@@ -318,6 +398,25 @@ func (b *Backfiller) updateStats(jobID string, sug *Suggestion, err error) {
 	}
 	if sug.TMDBID > 0 {
 		b.job.Suggested++
+	}
+}
+
+// updateRetryStats bumps the retry-pass counters. Same jobID guard as
+// updateStats. Failed retries are tracked implicitly as (Retried -
+// RetryMatched) so the admin UI can show "tried N, X succeeded" without
+// needing a separate counter. We INTENTIONALLY don't bump Failed here —
+// the retry pass operating on rows the eval pass already counted
+// (failed at eval-time too would have been bumped then). Keeping them
+// separate avoids double-counting in dashboards.
+func (b *Backfiller) updateRetryStats(jobID string, promoted bool, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.job == nil || b.job.JobID != jobID {
+		return
+	}
+	b.job.Retried++
+	if promoted && err == nil {
+		b.job.RetryMatched++
 	}
 }
 

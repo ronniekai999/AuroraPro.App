@@ -1133,6 +1133,15 @@ export interface AIRematchJobStatus {
   matched: number       // count auto-promoted
   suggested: number     // count with sub-threshold suggestion stored
   failed: number
+  // Retry-pass counters (server-side: backfill scans rows where AI
+  // confidence ≥ threshold but match_status is still 'needs_review' and
+  // re-attempts EnrichByTMDBID). retried = items touched in retry pass;
+  // retry_matched = items that promoted on retry. Difference = items
+  // where TMDB is still failing (likely permanent — operator handles).
+  // omitempty on the Go side, so both fields can be absent on a job
+  // that ran before the retry-pass feature shipped.
+  retried?: number
+  retry_matched?: number
   cancelled?: boolean
 }
 export interface AIRematchStatusResponse {
