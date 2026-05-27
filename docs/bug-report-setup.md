@@ -170,8 +170,9 @@ remain on disk until the Phase 3 janitor sweeps them (30-day TTL).
   server endpoint, GitHub issue creation, attachment hosting, this
   doc.
 - **Phase 2:** "Capture this page" button in the modal (in-browser
-  screenshot via html2canvas, lazy-loaded chunk) + PII warning
-  before capture.
+  screenshot via html-to-image, lazy-loaded chunk; previously
+  html2canvas, swapped in PR #105 for smaller bundle + active
+  maintenance) + PII warning before capture.
 - **Phase 3:** "Record screen" button (MediaRecorder +
   getDisplayMedia, 30s cap, WebM output, floating Stop pill while
   the modal is hidden) + per-user rate limit (5 submits / hour) +

@@ -25,10 +25,15 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { submitBugReport, type BugReportSubmitResult } from '@/lib/api'
 
-// html2canvas is loaded lazily in handleCapture to keep the main
-// bundle slim (the library is ~140KB minified / ~50KB gzipped). Most
-// users never click Capture, so they shouldn't pay that cost on first
-// paint.
+// 2026-05-27 — Capture library: html-to-image (active fork) replaces
+// html2canvas (last release Dec 2021, 1100+ open issues). html-to-image
+// uses SVG `<foreignObject>` to serialize the DOM and renders via a
+// HTMLImageElement → canvas pipeline; smaller bundle (~10 KB gzipped
+// vs html2canvas's ~50 KB) and modern Promise API. The trade-off is
+// that some CSS features render slightly differently — we capture only
+// the visible viewport via a fully-laid-out clone, so the practical
+// impact for screenshotting Aurora's pages is minimal. Lazy-loaded so
+// the chunk only ships when a user clicks Capture.
 
 interface Props {
   // Prefill the "Your name" field. Should be the user's DISPLAY
@@ -66,11 +71,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   const [attachment, setAttachment] = useState<File | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 2026-05-27 (Phase 2) — `capturing` is true while html2canvas is
-  // rasterizing the page. The modal panel goes opacity:0 +
-  // pointer-events:none (NOT visibility:hidden — that drops the
-  // modal from the a11y tree and confuses screen readers per
-  // deep-debug #10/#11). aria-busy signals async work.
+  // 2026-05-27 (Phase 2) — `capturing` is true while the screenshot
+  // library (html-to-image since the 2026-05-27 swap; was
+  // html2canvas) is rasterizing the page. The modal panel goes
+  // opacity:0 + pointer-events:none (NOT visibility:hidden — that
+  // drops the modal from the a11y tree and confuses screen readers
+  // per deep-debug #10/#11). aria-busy signals async work.
   const [capturing, setCapturing] = useState(false)
   // Status announced to screen readers via aria-live (deep-debug #10).
   const [captureAnnounce, setCaptureAnnounce] = useState('')
@@ -244,11 +250,11 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
     setAttachmentWithPreview(file)
   }
 
-  // 2026-05-27 (Phase 2) — "Capture this page" handler.
+  // 2026-05-27 — "Capture this page" handler.
   //
   // Flow:
-  //   1. Lazy-load html2canvas FIRST so a load failure doesn't leave
-  //      the modal mid-hide. (deep-debug Phase 2 #7)
+  //   1. Lazy-load html-to-image FIRST so a load failure doesn't
+  //      leave the modal mid-hide. (deep-debug Phase 2 #7)
   //   2. Set `capturing` → modal panel goes opacity:0 +
   //      pointer-events:none (NOT visibility:hidden — opacity keeps
   //      the modal in the a11y tree so screen readers don't lose
@@ -258,17 +264,28 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   //      fires first (deep-debug Phase 2 #8 — RAF is throttled to
   //      ~1/sec in backgrounded tabs and may never fire if the user
   //      switches away).
-  //   4. Call html2canvas on document.body, CAPPED to the visible
-  //      viewport (deep-debug Phase 2 #3 — full-document capture
-  //      OOMs on long-scroll pages). Scale capped at 2 to bound
-  //      worst-case canvas bytes.
-  //   5. Convert canvas → PNG Blob → File → set as attachment.
+  //   4. Call html-to-image's `toBlob` on document.body. We pass a
+  //      `filter` callback (analogue of html2canvas's
+  //      `ignoreElements`) that excludes any element with
+  //      `data-screenshot-exclude="true"`. The library serializes
+  //      via SVG `<foreignObject>` so the captured PNG already
+  //      matches what the user sees — no separate scale/window
+  //      args needed. Pixel ratio is auto-detected and capped here
+  //      to 2 so a 4K Retina display doesn't produce a >25 MB blob.
+  //   5. Result is a Blob (PNG by default). Build a File, set as
+  //      attachment.
   //   6. Restore modal interactivity.
   //
   // Failure modes handled: chunk fetch error (caught + clear toast),
-  // toBlob null (rare browser quirk), oversize PNG (clear error),
-  // user closes modal mid-capture (mountedRef bail), capture canceled
-  // by a newer click (capturingRef + mountedRef check).
+  // null blob (rare browser quirk + lib's failure mode), oversize
+  // PNG (clear error), user closes modal mid-capture (mountedRef
+  // bail), capture canceled by a newer click (capturingRef +
+  // mountedRef check).
+  //
+  // 2026-05-27 — Migrated from html2canvas to html-to-image (active
+  // fork; ~5x smaller chunk). The library's API is single-call:
+  // `toBlob(node, options)` returns a Blob directly instead of
+  // html2canvas's two-step canvas → toBlob pattern.
   const handleCapture = async () => {
     setError(null)
     // Deep-debug Phase 2 #7 — load the library BEFORE the modal
@@ -276,22 +293,22 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
     // visible so the user sees the error without a confusing
     // "modal disappeared" flash.
     setCaptureAnnounce('Loading capture library…')
-    let html2canvas: typeof import('html2canvas').default
+    let toBlob: typeof import('html-to-image').toBlob
     try {
-      const mod = await import('html2canvas')
-      html2canvas = mod.default
+      const mod = await import('html-to-image')
+      toBlob = mod.toBlob
     } catch (err) {
       if (!mountedRef.current) return
       setCaptureAnnounce('')
       setError('Couldn\'t load the screenshot library. Try uploading a screenshot from disk instead.')
-      console.warn('[Aurora] html2canvas chunk load failed', err)
+      console.warn('[Aurora] html-to-image chunk load failed', err)
       return
     }
     if (!mountedRef.current) return
     setCapturing(true)
     setCaptureAnnounce('Capturing screenshot…')
     try {
-      // Wait for hide to paint. Use Promise.race against a 200ms
+      // Wait for hide to paint. Promise.race against a 200ms
       // setTimeout so a backgrounded tab (RAF throttled / paused)
       // doesn't hang the handler indefinitely. Deep-debug Phase 2 #8.
       await Promise.race([
@@ -301,45 +318,63 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
         new Promise<void>(r => setTimeout(r, 200)),
       ])
       if (!mountedRef.current) return
-      const canvas = await html2canvas(document.body, {
-        // Don't print html2canvas's verbose console output in prod.
-        logging: false,
-        // Try to use CORS-enabled <img> requests so cross-origin
-        // images render in the screenshot. Most Aurora image
-        // rendering goes through /api/images/ (same-origin) but a
-        // handful of usages go direct to image.tmdb.org via
-        // tmdbPosterURL(); those <img>s carry crossOrigin="anonymous"
-        // so html2canvas can include them via this CORS refetch.
-        useCORS: true,
-        // 2026-05-27 (deep-debug Phase 2 #3) — capture ONLY the
-        // visible viewport. Without these explicit window/x/y/scale
-        // bounds, html2canvas captures the full document.body which
-        // OOMs on long-scroll pages (Movies/Discover grids) at
-        // 1920×8000+ at DPR=2 = >240MB raw RGBA. Scale capped at 2
-        // for the same reason — Retina captures stay crisp but
-        // can't escalate to 3x or higher.
-        windowWidth: window.innerWidth,
-        windowHeight: window.innerHeight,
-        x: window.scrollX,
-        y: window.scrollY,
-        width: window.innerWidth,
-        height: window.innerHeight,
-        scale: Math.min(window.devicePixelRatio || 1, 2),
-        // 2026-05-27 (deep-debug Phase 2 #1) — filter on a stable
-        // attribute (data-screenshot-exclude) rather than ref-based
-        // identity. The Phase 1 BugReportButton sets this attribute
-        // so the floating launcher doesn't show up in screenshots
-        // (it's not a descendant of the modal overlay; ref-based
-        // filtering missed it). Any future fixed/floating element
-        // can opt out the same way.
-        ignoreElements: el =>
-          el === rootRef.current?.parentElement ||
-          el instanceof HTMLElement && el.dataset.screenshotExclude === 'true',
+      // Deep-debug C1/H2 — bound the capture to the visible
+      // viewport. Without `width`/`height`/`canvasWidth`/
+      // `canvasHeight`, html-to-image captures `document.body`'s
+      // full layout-rect (often 8,000-30,000px on long-scroll
+      // Movies/Discover grids). At pixelRatio=2 that exceeds the
+      // 16384px canvas cap and produces an unusable squashed
+      // capture; it ALSO causes the library to re-fetch every
+      // off-screen <img> via its internal serialization (200+ TMDB
+      // poster requests on a typical grid). Bounding to viewport
+      // fixes both — capture is crisp, only visible images are
+      // re-fetched. `style.transform` shifts the cloned body by
+      // the current scroll offset so the visible portion lands at
+      // origin in the output canvas.
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      // Deep-debug H3 — clamp pixelRatio to [1, 2]. Sub-1 ratios
+      // happen on Windows browsers at < 100% display scale and
+      // some Android Chrome configs; without the floor we'd
+      // produce sub-resolution captures. Ceiling at 2 keeps the
+      // worst-case canvas under the 25 MB attachment cap.
+      const pixelRatio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
+      // Deep-debug M1 — the `filter` predicate runs on every
+      // descendant including Text/Comment nodes (despite the
+      // library's TS signature claiming HTMLElement). The
+      // `instanceof HTMLElement` guard handles this correctly;
+      // simplifying to `!node.dataset.screenshotExclude` would
+      // crash on Text nodes whose `dataset` is undefined.
+      const blob = await toBlob(document.body, {
+        pixelRatio,
+        width: vw,
+        height: vh,
+        canvasWidth: vw,
+        canvasHeight: vh,
+        style: {
+          transform: `translate(-${window.scrollX}px, -${window.scrollY}px)`,
+          transformOrigin: 'top left',
+        },
+        // Skip excluded elements (launcher, modal overlay, toast,
+        // reaction overlay). True = keep, false = skip (inverse of
+        // html2canvas's ignoreElements).
+        filter: (node) =>
+          !(node instanceof HTMLElement
+            && node.dataset.screenshotExclude === 'true'),
+        // Deep-debug H1 — `skipFonts: true` prevents the library
+        // from fetching @font-face binaries (Aurora's CSS @imports
+        // Inter + Space Grotesk from Google Fonts). Without this,
+        // every Capture click pings fonts.googleapis.com +
+        // fonts.gstatic.com — adds 200ms-2s latency and silently
+        // fails on offline / corporate-proxy users. The DOM is
+        // already painted with the user's chosen font; the
+        // captured PNG matches what they see on screen via the
+        // browser's font cache (NOT via re-embedding the font in
+        // the SVG). Worst case on a system that hasn't loaded
+        // the font: capture falls back to the next stack font,
+        // which is fine for bug-report screenshots.
+        skipFonts: true,
       })
-      if (!mountedRef.current) return
-      const blob = await new Promise<Blob | null>(res =>
-        canvas.toBlob(b => res(b), 'image/png'),
-      )
       if (!mountedRef.current) return
       if (!blob) {
         setError('Capture failed: the browser could not encode the screenshot.')
@@ -394,7 +429,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   // the shared AbortController, then closes the modal.
   //
   // Phase 2 — Cancel is GATED OUT during capture (deep-debug Phase 2
-  // #5/#13) because html2canvas has no abort API; clicking Cancel
+  // #5/#13) because the screenshot library has no abort API
+  // (true of both html2canvas and html-to-image); clicking Cancel
   // mid-capture used to unmount the modal but leave the async work
   // running, then setState fire on a dead component.
   //
@@ -714,8 +750,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
       // in the a11y tree (screen readers retain orientation) and the
       // focus trap doesn't lose its anchor. aria-busy on the panel
       // announces the async work. data-screenshot-exclude carries the
-      // ignoreElements signal so html2canvas filters us out by
-      // attribute (matches the launcher's opt-out).
+      // opt-out signal so the screenshot library (html-to-image's
+      // `filter` callback) excludes us by attribute (matches the
+      // launcher's opt-out — same attribute, same semantic).
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-fade-in"
       style={capturing || recording ? { opacity: 0, pointerEvents: 'none' } : undefined}
       data-screenshot-exclude="true"
@@ -850,7 +887,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               >
                 {capturing ? (
                   // Phase 2 (deep-debug #15) — inline spinner during
-                  // capture (covers both lazy-import + html2canvas
+                  // capture (covers both lazy-import + library
                   // rasterize). Without this, the button looks
                   // disabled with no visible progress on slow
                   // connections.
@@ -991,8 +1028,9 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                 so a slow GitHub can be aborted (the AbortController
                 cancels the in-flight fetch via handleCancel).
                 Phase 2 (deep-debug #5/#13) — also disabled during
-                capture because html2canvas has no abort API and the
-                modal can't safely unmount mid-capture.
+                capture because the screenshot library has no abort
+                API (true of both html2canvas and html-to-image) and
+                the modal can't safely unmount mid-capture.
                 Phase 3 — also disabled during screen recording so
                 the user goes through the Stop button (which fires
                 the proper onstop handler) rather than dismissing
