@@ -448,7 +448,7 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
                 server's `position_ms > 0` filter alone wasn't enough
                 because brief opens save ~100-2000ms of progress
                 that's effectively "fresh." */}
-            {resume && resume.item.position_ms >= 5000 ? (
+            {resume && isResumable(resume.item) ? (
               <button
                 onClick={() => {
                   if (resume.item.media_item_id !== hero.id) {
@@ -519,12 +519,19 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
 // is the primary CTA. Keeping the prop in the type avoids touching
 // every call site; ignoring it via destructure-rest avoids the
 // unused-var lint.
-function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon = 'compass' }: {
+function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon = 'compass', resolveResume }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
+  // 2026-05-27 — Per-card resume resolver. Caller passes a function
+  // that returns a click handler when the item has a Continue
+  // Watching match worth resuming (caller decides — typically only
+  // wired for the Continue Watching rail so partial-watches on
+  // other rails don't sprout resume pills). MediaRail invokes this
+  // per-card and forwards the result to MediaCardCinema's onResume.
+  resolveResume?: (m: Media) => (() => void) | undefined
   // Phase 5.2 parity — right-click on a card opens the context
   // menu (Mark Watched / Clear Progress / Add to Watchlist /
   // Refresh Metadata for admins).
@@ -575,6 +582,7 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
             onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
             className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
             aspect={aspect}
+            onResume={resolveResume?.(item)}
           />
         ))}
       </div>
@@ -1100,12 +1108,33 @@ interface HomeViewProps {
     item: ContinueWatchingItem
     onPlay: (c: ContinueWatchingItem) => void
   }
+  // 2026-05-27 — Continue Watching one-click resume affordance.
+  // When set, the home Continue Watching rail's cards each get a
+  // Resume pill on hover; click on the pill calls onPlay with the
+  // matched record, bypassing detail. Card click still opens detail
+  // (preserves the "click → detail → act" pattern for non-CW
+  // interactions like "I want to see the description"). Discriminated
+  // bundle so partial wiring is a type error. Wired ONLY on the
+  // home CW rail — other rails (Top Rated, Discover, etc.) don't
+  // sprout resume pills even if the user has progress on a title
+  // they happen to contain.
+  cwResume?: {
+    items: ContinueWatchingItem[]
+    onPlay: (c: ContinueWatchingItem) => void
+  }
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
   const effectiveRails = rails ?? []
+  // Deep-debug H3 — keep the latest cwResume bundle in a ref so the
+  // Resume pill click handler resolves the freshest ContinueWatchingItem
+  // at click-time (not render-time). Without this, a mid-hover
+  // continueItems refresh would still dispatch the stale match
+  // captured when the rail mapped.
+  const cwResumeRef = useRef(cwResume)
+  useEffect(() => { cwResumeRef.current = cwResume }, [cwResume])
 
   return (
     <div className="animate-fade-in">
@@ -1142,15 +1171,41 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
       )}
       {effectiveRails.map((rail, i) => {
         if (rail.items.length === 0) return null
-        // 2028-05-28 (deep-debug Bug C) — the railPlay interceptor that
-        // resumed Continue Watching at position_ms/episode_id was removed
-        // along with `onPlayContinue` / `continueItems` props. The cinema
-        // card has no hover Play CTA for it to attach to (the card click
-        // opens detail, where Play is the primary action). Resume from
-        // the saved position needs a dedicated detail-side hookup; tracked
-        // as a separate follow-up so this cleanup pass stays scoped.
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
+          : undefined
+        // 2026-05-27 — Resume pill wiring. ONLY the Continue Watching
+        // rail (rail.kind === 'continue-watching') gets the per-card
+        // resume resolver. Other rails leave it undefined so
+        // partial-watch matches on Top Rated / Discover / etc. don't
+        // sprout pills (per design — those rails are discovery-focused,
+        // not action-focused).
+        //
+        // Deep-debug H3 — the click handler resolves the match from
+        // `cwResumeRef.current` at click-time (NOT render-time) so a
+        // mid-hover continueItems refresh (e.g. another device just
+        // watched 2 minutes and the server's position_ms jumped)
+        // doesn't dispatch a stale ContinueWatchingItem. isResumable
+        // also runs at click-time so a record that fell below the
+        // threshold between render and click correctly no-ops.
+        const resolveResume = rail.kind === 'continue-watching' && cwResume
+          ? (m: Media) => {
+              // Render-time check: if there's no resumable record
+              // RIGHT NOW, don't show a pill (saves rendering it
+              // only to have the click no-op).
+              if (!cwResume.items.some(c => c.media_item_id === m.id && isResumable(c))) {
+                return undefined
+              }
+              return () => {
+                // Click-time re-lookup against the latest data.
+                const latest = cwResumeRef.current
+                if (!latest) return
+                const match = latest.items.find(
+                  c => c.media_item_id === m.id && isResumable(c),
+                )
+                if (match) latest.onPlay(match)
+              }
+            }
           : undefined
         return (
           <MediaRail
@@ -1163,6 +1218,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
             libraryIds={libraryIds}
             onToggleLib={onToggleLib}
             onSeeAll={seeAllHandler}
+            resolveResume={resolveResume}
           />
         )
       })}
@@ -1416,10 +1472,26 @@ function CastCard({ member }: { member: { id: number; name: string; profile_path
 }
 
 /* ─────────────────────── DETAIL VIEW ─────────────────────── */
-// 2026-05-27 — Continue Watching resume helpers. Local to DetailView
-// (only consumer) but module-level so they're hoisted out of the render
-// path and unit-testable in isolation if we ever add a test for them.
+// 2026-05-27 — Continue Watching resume helpers. Used by Hero,
+// DetailView, the home CW rail, and the Library CW grid. Module-
+// level so each call site shares the same threshold and format
+// rules (deep-debug Phase-2 M1 — was duplicated in 4 places, drifted
+// once already).
 //
+// RESUME_THRESHOLD_MS — the floor below which we treat a CW entry as
+// "not really started" (user opened then immediately closed). Set to
+// 5s based on UX observation: <5s is virtually always a misclick, and
+// "Resume at 0:00" reads as a UI bug. Single source of truth.
+const RESUME_THRESHOLD_MS = 5000
+
+// isResumable — true when a Continue Watching record represents
+// meaningful playback worth offering Resume for. All call sites that
+// gate Resume UI (Hero label, card pill, detail view CTA) should use
+// this helper rather than open-coding the threshold check.
+function isResumable(c: ContinueWatchingItem | undefined | null): c is ContinueWatchingItem {
+  return !!c && c.position_ms >= RESUME_THRESHOLD_MS
+}
+
 // formatResumeTime: takes a position in ms and returns a colon-separated
 // MM:SS for sub-hour resumes or H:MM:SS for longer ones. Zero-pads
 // minutes/seconds so the string stays a fixed width per duration class
@@ -2002,24 +2074,28 @@ function DetailView({
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-function LibraryView({ library, continueItems, onSelect, onToggleLib }: {
+function LibraryView({ library, continueItems, onSelect, onToggleLib, onPlayContinue }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
-  // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` and
-  // `onPlayContinue?` props. They were kept "for backward compat" after
-  // the cinema card swap removed the hover Play CTA, but neither is
-  // consumed in LibraryView — Continue Watching cards open detail on
-  // click (same as Saved). Resume-from-position is tracked as a separate
-  // follow-up. Call sites must also drop the matching `onPlay=` /
-  // `onPlayContinue=` JSX attrs.
   onToggleLib: (m: Media) => void
+  // 2026-05-27 — Continue Watching one-click resume in the
+  // LibraryView CW grid. When set, each CW card gets a Resume pill
+  // on hover (same pattern as the home CW rail). Optional so the
+  // type stays compatible with callers that don't wire it.
+  onPlayContinue?: (c: ContinueWatchingItem) => void
 }) {
   const [filter, setFilter] = useState<'all' | 'movie' | 'show'>('all')
   const filteredLibrary = filter === 'all'
     ? library
     : library.filter(m => (filter === 'show' ? (m.type === 'show' || m.type === 'anime') : m.type === filter))
   const libraryIds = useMemo(() => new Set(library.map(m => m.id)), [library])
+  // Deep-debug H3 — latest-continueItems ref so the Resume pill
+  // click handler resolves the freshest record at click-time, not
+  // render-time. Without this, a mid-hover refetch (e.g. cross-tab
+  // playback updated position_ms) would dispatch a stale record.
+  const continueItemsRef = useRef(continueItems)
+  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
 
   return (
     <div className="animate-fade-in">
@@ -2111,6 +2187,22 @@ function LibraryView({ library, continueItems, onSelect, onToggleLib }: {
               // `m` here carries it on m.progress, so no per-card
               // wrapper needed. Rating=0 is also from mapContinueToMedia
               // and the card's meta-star guard hides the star.
+              // 2026-05-27 — Resume pill: one click on the pill
+              // resumes via App's handlePlayContinue (threaded
+              // through as onPlayContinue prop). Shared RESUME_THRESHOLD
+              // via isResumable() — same gate as Hero, home CW rail,
+              // DetailView. Deep-debug H3 — read continueItems via
+              // ref at click-time so a mid-hover refresh doesn't
+              // dispatch a stale record.
+              const resumeHandler = onPlayContinue && isResumable(c)
+                ? () => {
+                    const latest = continueItemsRef.current.find(
+                      x => x.media_item_id === c.media_item_id
+                        && x.episode_id === c.episode_id,
+                    )
+                    if (latest && isResumable(latest)) onPlayContinue(latest)
+                  }
+                : undefined
               return (
                 <MediaCardCinema
                   key={`${c.media_item_id}-${c.episode_id ?? ''}`}
@@ -2119,6 +2211,7 @@ function LibraryView({ library, continueItems, onSelect, onToggleLib }: {
                   libraryIds={libraryIds}
                   onToggleLib={() => onToggleLib(m)}
                   subtitle={sub}
+                  onResume={resumeHandler}
                 />
               )
             })}
@@ -6712,6 +6805,17 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
+  // identity unless continueItems OR handlePlayContinue changes (both
+  // already memoized upstream). Without this, the inline object
+  // literal at the HomeView render would create a fresh reference
+  // every App render, defeating any future React.memo on the
+  // HomeView/MediaRail/MediaCardCinema tree.
+  const homeCwResumeBundle = useMemo(
+    () => ({ items: continueItems, onPlay: handlePlayContinue }),
+    [continueItems, handlePlayContinue],
+  )
+
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
   const handlePlayFile = useCallback((m: Media, fileId: number) => {
@@ -7268,11 +7372,24 @@ export default function App() {
               // when continueItems or homeHero changes.
               heroResume={(() => {
                 if (!homeHero) return undefined
+                // isResumable replaces the bare `position_ms > 0` check
+                // so the Hero matches every other surface's threshold
+                // (deep-debug H2: was an asymmetry — Hero was the only
+                // site already using the 5s gate; detail/CW lookups
+                // were on > 0).
                 const item = continueItems.find(c =>
-                  c.media_item_id === homeHero.id && c.position_ms > 0,
+                  c.media_item_id === homeHero.id && isResumable(c),
                 )
                 return item ? { item, onPlay: handlePlayContinue } : undefined
               })()}
+              // 2026-05-27 — Continue Watching one-click resume on
+              // the home CW rail. HomeView scopes the resume pill
+              // to rail.kind === 'continue-watching'; this prop
+              // just supplies the lookup data + handler.
+              // Deep-debug M2 — memoized so HomeView / MediaRail can
+              // benefit from React.memo in the future without the
+              // bundle re-creating fresh references every render.
+              cwResume={homeCwResumeBundle}
               onNavigate={(v, opts) => {
                 // QA 2026-05-25 — "See All" deep-link to a browse
                 // page with an explicit sort. If the destination's
@@ -7342,6 +7459,9 @@ export default function App() {
               continueItems={continueItems}
               onSelect={handleSelect}
               onToggleLib={handleToggleLib}
+              // 2026-05-27 — Continue Watching one-click resume on
+              // the LibraryView CW grid (mirrors home CW rail).
+              onPlayContinue={handlePlayContinue}
             />
           )}
           {view === 'detail' && selectedMedia && (
@@ -7391,11 +7511,14 @@ export default function App() {
               // `find` therefore returns either the single matching
               // row or undefined; no merge/sort/dedup needed here.
               //
-              // `position_ms > 0` guards against completed-and-not-
-              // cleared entries that could flash a stale Resume label.
+              // isResumable replaces the bare `position_ms > 0` check
+              // for parity with Hero / home CW rail / Library CW grid
+              // (deep-debug H2 — was the only call site still on > 0,
+              // which surfaced "Resume" on detail for sub-5s progress
+              // even though no other surface offered the affordance).
               resume={(() => {
                 const item = continueItems.find(c =>
-                  c.media_item_id === selectedMedia.id && c.position_ms > 0,
+                  c.media_item_id === selectedMedia.id && isResumable(c),
                 )
                 return item ? { item, onPlay: handlePlayContinue } : undefined
               })()}
