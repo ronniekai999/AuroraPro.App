@@ -108,6 +108,7 @@ import {
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyHubModal } from '@/components/PartyHubModal'
+import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
@@ -451,16 +452,9 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
  *
  * The rail is now wrapped in a glassy .rail-container with a decorative
  * header (icon + title + divider line + See-All), and each card uses the
- * new .media-card-cinema class — same external API as the legacy card
- * (poster, optional progress bar, optional library-toggle, optional LLM
- * reason caption) but with a designed shelf for title/meta/reason and
- * larger jewel-tone corner badges. Visual reference: the operator's
- * "Concept B — Aurora Cinema Card" mockup in chat history.
- *
- * Landscape aspect is preserved for callers that pass aspect='landscape'
- * (e.g. Continue Watching cards). They use the legacy poster geometry
- * but with the new shelf, since the only difference is the image's
- * aspect-ratio. */
+ * new <MediaCardCinema> component (extracted 2028-05-28 so grid views
+ * can share the design too). Landscape aspect is preserved for callers
+ * that pass aspect='landscape' (e.g. Continue Watching cards). */
 // onPlay is still accepted for backward compatibility with callers
 // (HomeView etc.) but the new cinema card design no longer renders a
 // hover-only Play CTA — clicking the card opens detail where Play
@@ -513,93 +507,18 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
         )}
       </div>
       <div ref={scrollRef} className="rail-scroll scrollbar-hide">
-        {items.map((item) => {
-          const isInLib = !!libraryIds?.has(item.id)
-          const widthClass = aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'
-          return (
-            <div
-              key={item.id}
-              className={`media-card-cinema ${widthClass}`}
-              onClick={() => onSelect(item)}
-              onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
-              title={item.reason || undefined}
-            >
-              <div className="poster-wrap">
-                <img
-                  src={item.poster}
-                  alt={item.title}
-                  className="poster-img"
-                  loading="lazy"
-                  style={aspect === 'landscape' ? { aspectRatio: '16 / 9' } : undefined}
-                />
-                {/* + / ✓ library badge. stopPropagation so the click
-                    toggles the library entry without opening detail. */}
-                {onToggleLib && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
-                    title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
-                    aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
-                    className={`lib-badge ${isInLib ? 'in-lib' : ''}`}
-                  >
-                    <Icon name={isInLib ? 'check' : 'plus'} size={16} />
-                  </button>
-                )}
-                {/* AI-matched gem — appears only when the recommender
-                    attached an LLM reason. Decorative; reason text is
-                    shown explicitly in the shelf below + via tooltip. */}
-                {item.reason && (
-                  <div className="ai-gem" aria-hidden="true">
-                    <Icon name="sparkle" size={14} />
-                  </div>
-                )}
-                {/* Progress bar — only when progress > 0 (e.g.
-                    Continue Watching rail). */}
-                {item.progress !== undefined && item.progress > 0 && (
-                  <div className="progress-bar">
-                    <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
-                  </div>
-                )}
-              </div>
-              <div className="shelf">
-                {/* 2026-05-27 (deep-debug Bug 16) — title=full title so
-                    the browser tooltip surfaces titles that get truncated
-                    by .title's ellipsis. Without this, long titles like
-                    "The Curious Incident of the Dog in the Night-Time"
-                    were unreadable in full. The outer card's title attr
-                    is the AI reason; this inner title attr is the actual
-                    title (browser picks the nearest one for the tooltip
-                    when the user hovers the title text itself). */}
-                <div className="title" title={item.title}>{item.title}</div>
-                <div className="meta">
-                  {/* Star only when we actually have a rating
-                      (Continue Watching = rating=0). Avoids visible
-                      "★ 0" lie. */}
-                  {item.rating > 0 && (
-                    <>
-                      <span className="star"><Icon name="star" size={10} className="fill-yellow-400" /> {item.rating.toFixed(1)}</span>
-                      {(item.year > 0 || item.genre) && <span className="sep">·</span>}
-                    </>
-                  )}
-                  {item.year > 0 && (
-                    <>
-                      <span>{item.year}</span>
-                      {item.genre && <span className="sep">·</span>}
-                    </>
-                  )}
-                  {item.genre && <span>{item.genre}</span>}
-                </div>
-                {/* 2026-05-27 (deep-debug Bug 18) — dropped the
-                    aria-label, which isn't reliably announced on a
-                    non-interactive div (NVDA/JAWS frequently ignore it).
-                    The visible text IS the reason; no extra labeling
-                    needed. Use <p> for semantic correctness. */}
-                {item.reason && (
-                  <p className="reason">{item.reason}</p>
-                )}
-              </div>
-            </div>
-          )
-        })}
+        {items.map((item) => (
+          <MediaCardCinema
+            key={item.id}
+            item={item}
+            onSelect={() => onSelect(item)}
+            onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+            libraryIds={libraryIds}
+            onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+            className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
+            aspect={aspect}
+          />
+        ))}
       </div>
     </section>
   )
@@ -1092,11 +1011,13 @@ interface HomeViewProps {
   loading?: boolean
   error?: string | null
   onRetry?: () => void
-  // The rail remaps ContinueWatchingItem → UIMedia for rendering,
-  // but App's onPlayContinue handler needs the original record for
-  // position_ms + episode_id. Thread the originals through here.
-  continueItems?: ContinueWatchingItem[]
-  onPlayContinue?: (c: ContinueWatchingItem) => void
+  // 2028-05-28 (deep-debug Bug C) — `continueItems` and `onPlayContinue`
+  // were dead after the cinema-card swap removed the rail's hover Play CTA.
+  // They previously fed a `railPlay` interceptor that resumed Continue
+  // Watching cards at the saved position_ms / episode_id; with no Play CTA
+  // for the interceptor to attach to, the props are unreachable. Resume
+  // now happens via card-click → detail view → Play; tracked as a separate
+  // follow-up.
   onCardContext?: (e: React.MouseEvent, m: Media) => void
   // Phase 5.3 — hero reason + refresh + pause hooks.
   heroReason?: string
@@ -1110,7 +1031,7 @@ interface HomeViewProps {
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, continueItems, onPlayContinue, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1150,17 +1071,13 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
       )}
       {effectiveRails.map((rail, i) => {
         if (rail.items.length === 0) return null
-        // Intercept Play on the Continue Watching rail so it resumes
-        // at position_ms with the correct episode_id. Key on
-        // rail.kind (not the user-visible title) so renaming or
-        // localizing the title doesn't silently break resume.
-        const railPlay = (rail.kind === 'continue-watching' && onPlayContinue && continueItems)
-          ? (m: Media) => {
-              const orig = continueItems.find(c => c.media_item_id === m.id)
-              if (orig) onPlayContinue(orig)
-              else onPlay(m)
-            }
-          : onPlay
+        // 2028-05-28 (deep-debug Bug C) — the railPlay interceptor that
+        // resumed Continue Watching at position_ms/episode_id was removed
+        // along with `onPlayContinue` / `continueItems` props. The cinema
+        // card has no hover Play CTA for it to attach to (the card click
+        // opens detail, where Play is the primary action). Resume from
+        // the saved position needs a dedicated detail-side hookup; tracked
+        // as a separate follow-up so this cleanup pass stays scoped.
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
           : undefined
@@ -1170,7 +1087,6 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, cont
             title={rail.title}
             items={rail.items}
             onSelect={onSelect}
-            onPlay={railPlay}
             aspect={rail.aspect}
             onCardContext={onCardContext}
             libraryIds={libraryIds}
@@ -1189,7 +1105,7 @@ function BrowseView({
   items, title, subtitle, total, sortBy, onSortChange,
   genreFilter, onGenreChange, availableGenres,
   onLoadMore, isLoadingMore,
-  onSelect, onPlay, onCardContext,
+  onSelect, onCardContext,
   libraryIds, onToggleLib,
 }: {
   items: Media[]
@@ -1222,7 +1138,11 @@ function BrowseView({
   onLoadMore: () => void
   isLoadingMore: boolean
   onSelect: (m: Media) => void
-  onPlay: (m: Media) => void
+  // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` prop.
+  // It was kept "for backward compat" after the cinema-card swap removed
+  // the hover Play CTA, but no consumer in BrowseView reads it; leaving
+  // it in the type implied a behavior that never fired and confused
+  // future readers. Call sites must also drop `onPlay={handlePlay}`.
   onCardContext?: (e: React.MouseEvent, m: Media) => void
   // My Library + button on cards. Same contract as MediaRail.
   libraryIds?: Set<number>
@@ -1324,58 +1244,19 @@ function BrowseView({
         </div>
       </div>
 
-      {/* Grid */}
+      {/* Grid — 2028-05-28 switched from inline .media-card to the shared
+          <MediaCardCinema/> component so Movies/TV Shows browse views
+          match the home rails' design tokens (halo, badges, shelf, reason). */}
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
         {filtered.map((item) => (
-          <div
+          <MediaCardCinema
             key={item.id}
-            className="media-card group"
-            onClick={() => onSelect(item)}
-            onContextMenu={onCardContext ? (e) => onCardContext(e, item) : undefined}
-          >
-            <div className="relative aspect-[2/3] overflow-hidden rounded-xl">
-              <img src={item.poster} alt={item.title} className="w-full h-full object-cover" loading="lazy" />
-              {/* My Library + button — same contract as MediaRail. */}
-              {onToggleLib && (() => {
-                const isInLib = !!libraryIds?.has(item.id)
-                return (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
-                    title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
-                    aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
-                    className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
-                      isInLib
-                        ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
-                        : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
-                    }`}
-                  >
-                    {isInLib ? '✓' : '+'}
-                  </button>
-                )
-              })()}
-              <div className="card-actions">
-                <button className="action-btn" onClick={(e) => { e.stopPropagation(); onPlay(item) }}>
-                  <Icon name="play" size={16} />
-                </button>
-              </div>
-              {item.progress !== undefined && item.progress > 0 && (
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
-                </div>
-              )}
-            </div>
-            <div className="mt-2">
-              <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
-              <div className="flex items-center gap-2 mt-0.5">
-                {item.rating > 0 && (
-                  <span className="text-yellow-400 text-xs flex items-center gap-0.5">
-                    <Icon name="star" size={10} className="fill-yellow-400" /> {item.rating.toFixed(1)}
-                  </span>
-                )}
-                {item.year > 0 && <span className="text-white/40 text-xs">{item.year}</span>}
-              </div>
-            </div>
-          </div>
+            item={item}
+            onSelect={() => onSelect(item)}
+            onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+            libraryIds={libraryIds}
+            onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+          />
         ))}
       </div>
 
@@ -1936,12 +1817,17 @@ function DetailView({
 // Continue Watching section. Saved items are the headline; Continue
 // Watching appears below as a secondary surface. Saved state lives
 // in App-level `library` and is persisted to localStorage.
-function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue, onToggleLib }: {
+function LibraryView({ library, continueItems, onSelect, onToggleLib }: {
   library: Media[]
   continueItems: ContinueWatchingItem[]
   onSelect: (m: Media) => void
-  onPlay: (m: Media) => void
-  onPlayContinue: (c: ContinueWatchingItem) => void
+  // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` and
+  // `onPlayContinue?` props. They were kept "for backward compat" after
+  // the cinema card swap removed the hover Play CTA, but neither is
+  // consumed in LibraryView — Continue Watching cards open detail on
+  // click (same as Saved). Resume-from-position is tracked as a separate
+  // follow-up. Call sites must also drop the matching `onPlay=` /
+  // `onPlayContinue=` JSX attrs.
   onToggleLib: (m: Media) => void
 }) {
   const [filter, setFilter] = useState<'all' | 'movie' | 'show'>('all')
@@ -2002,47 +1888,21 @@ function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue,
       ) : filteredLibrary.length === 0 ? (
         <p className="text-white/40 text-sm">No {filter === 'movie' ? 'movies' : 'TV shows'} saved.</p>
       ) : (
+        // 2028-05-28 — Saved library grid converted to <MediaCardCinema/>
+        // so My Library matches the home rails. The library is a closed
+        // set (every card IS in the library) so onToggleLib here is
+        // always a "remove" — MediaCardCinema renders the filled-purple
+        // ✓ state because libraryIds.has(m.id) is always true. The
+        // click on the badge triggers onToggleLib which fires the remove.
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5 mb-12">
           {filteredLibrary.map((m) => (
-            <div key={m.id} className="media-card group" onClick={() => onSelect(m)}>
-              <div className="relative aspect-[2/3] overflow-hidden rounded-xl">
-                {m.poster ? (
-                  <img src={m.poster} alt={m.title} className="w-full h-full object-cover" loading="lazy" />
-                ) : (
-                  <div className="w-full h-full bg-white/5 flex items-center justify-center">
-                    <Icon name="movie" size={32} className="text-white/20" />
-                  </div>
-                )}
-                {/* Remove button — top-left, always filled-purple here
-                    since by definition every card on this view is in
-                    the library. Mirrors the + button on other surfaces
-                    but reads as a remove-confirm. */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); onToggleLib(m) }}
-                  title="Remove from My Library"
-                  aria-label={`Remove ${m.title} from My Library`}
-                  className="absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm bg-purple-500/90 hover:bg-red-500/90 hover:border-red-300/60 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40 transition-all z-10"
-                >
-                  ✓
-                </button>
-                <div className="card-actions">
-                  <button className="action-btn" onClick={(e) => { e.stopPropagation(); onPlay(m) }}>
-                    <Icon name="play" size={16} />
-                  </button>
-                </div>
-              </div>
-              <div className="mt-2">
-                <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{m.title}</h3>
-                <div className="flex items-center gap-2 mt-0.5">
-                  {m.rating > 0 && (
-                    <span className="text-yellow-400 text-xs flex items-center gap-0.5">
-                      <Icon name="star" size={10} className="fill-yellow-400" /> {m.rating.toFixed(1)}
-                    </span>
-                  )}
-                  {m.year > 0 && <span className="text-white/40 text-xs">{m.year}</span>}
-                </div>
-              </div>
-            </div>
+            <MediaCardCinema
+              key={m.id}
+              item={m}
+              onSelect={() => onSelect(m)}
+              libraryIds={libraryIds}
+              onToggleLib={() => onToggleLib(m)}
+            />
           ))}
         </div>
       )}
@@ -2060,53 +1920,21 @@ function LibraryView({ library, continueItems, onSelect, onPlay, onPlayContinue,
               const m = mapContinueToMedia(c)
               const sub = c.type === 'show' && c.season_number && c.episode_number
                 ? `S${c.season_number}E${c.episode_number}`
-                : (c.year ? String(c.year) : '')
+                : (c.year ? String(c.year) : undefined)
+              // mapContinueToMedia already normalizes progress to 0..1
+              // (api.ts:1689 divides by 100 — server emits 0-100). The
+              // `m` here carries it on m.progress, so no per-card
+              // wrapper needed. Rating=0 is also from mapContinueToMedia
+              // and the card's meta-star guard hides the star.
               return (
-                <div key={`${c.media_item_id}-${c.episode_id ?? ''}`} className="media-card group relative" onClick={() => onSelect(m)}>
-                  <div className="relative aspect-[2/3] overflow-hidden rounded-xl">
-                    {m.poster ? (
-                      <img src={m.poster} alt={c.title} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full bg-white/5 flex items-center justify-center">
-                        <Icon name="movie" size={32} className="text-white/20" />
-                      </div>
-                    )}
-                    {/* + button on Continue Watching cards too — same as
-                        elsewhere. The user might want to save a movie
-                        they're partway through. */}
-                    {(() => {
-                      const isInLib = libraryIds.has(m.id)
-                      return (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); onToggleLib(m) }}
-                          title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
-                          aria-label={isInLib ? `Remove ${m.title} from My Library` : `Add ${m.title} to My Library`}
-                          className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
-                            isInLib
-                              ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
-                              : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
-                          }`}
-                        >
-                          {isInLib ? '✓' : '+'}
-                        </button>
-                      )
-                    })()}
-                    <div className="card-actions">
-                      <button className="action-btn" onClick={(e) => { e.stopPropagation(); onPlayContinue(c) }}>
-                        <Icon name="play" size={16} />
-                      </button>
-                    </div>
-                    {c.percent_complete > 0 && (
-                      <div className="progress-bar">
-                        <div className="progress-fill" style={{ width: `${Math.min(100, c.percent_complete * 100)}%` }} />
-                      </div>
-                    )}
-                  </div>
-                  <div className="mt-2">
-                    <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{c.title}</h3>
-                    <span className="text-white/40 text-xs">{sub}</span>
-                  </div>
-                </div>
+                <MediaCardCinema
+                  key={`${c.media_item_id}-${c.episode_id ?? ''}`}
+                  item={m}
+                  onSelect={() => onSelect(m)}
+                  libraryIds={libraryIds}
+                  onToggleLib={() => onToggleLib(m)}
+                  subtitle={sub}
+                />
               )
             })}
           </div>
@@ -2672,8 +2500,9 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
         </div>
 
         {/* Phase 5 — Quality preference. Drives pickFile in handlePlay
-            and handlePlayContinue. Default 'auto' = prefer 1080p,
-            fall back to whatever exists. */}
+            (handlePlayContinue was removed 2028-05-28; see the tombstone
+            comment in App near `handleRefreshMetadata`). Default 'auto' =
+            prefer 1080p, fall back to whatever exists. */}
         <div className="glass-panel rounded-xl p-6">
           <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="play" size={18} className="text-purple-400" />
@@ -2846,10 +2675,13 @@ function ProfilesAndWatchlistsCard() {
 /* ─────────────────────── SEARCH VIEW ─────────────────────── */
 // SearchView — debounced 300ms per keystroke (the semantic path is
 // LLM-routed and not free).
-function SearchView({ query, onSelect, onPlay, libraryIds, onToggleLib }: {
+function SearchView({ query, onSelect, libraryIds, onToggleLib }: {
   query: string
   onSelect: (m: Media) => void
-  onPlay: (m: Media) => void
+  // 2028-05-28 (deep-debug Bug C) — dropped the dead `onPlay?` prop. The
+  // cinema card has no hover Play CTA for it to attach to, and the
+  // SearchView body never read it; leaving it in the type implied a
+  // behavior that never fired. Call site must also drop `onPlay={handlePlay}`.
   // My Library + button — same contract as MediaRail / BrowseView.
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
@@ -2932,48 +2764,17 @@ function SearchView({ query, onSelect, onPlay, libraryIds, onToggleLib }: {
           <p className="text-white/40 text-sm mt-1">Try a different search term</p>
         </div>
       ) : (
+        // 2028-05-28 — Search results converted to <MediaCardCinema/>
+        // for consistency with the rest of the app.
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
           {results.map(item => (
-            <div key={item.id} className="media-card" onClick={() => onSelect(item)}>
-              <div className="relative aspect-[2/3] overflow-hidden rounded-xl">
-                {item.poster ? (
-                  <img src={item.poster} alt={item.title} className="w-full h-full object-cover" />
-                ) : (
-                  <div className="w-full h-full bg-white/5 flex items-center justify-center">
-                    <Icon name="movie" size={32} className="text-white/20" />
-                  </div>
-                )}
-                {/* My Library + button — same contract / styling / z-10 as
-                    the other card surfaces. Lets users save a search result
-                    without needing to open the detail view first. */}
-                {onToggleLib && (() => {
-                  const isInLib = !!libraryIds?.has(item.id)
-                  return (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onToggleLib(item) }}
-                      title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
-                      aria-label={isInLib ? `Remove ${item.title} from My Library` : `Add ${item.title} to My Library`}
-                      className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
-                        isInLib
-                          ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
-                          : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
-                      }`}
-                    >
-                      {isInLib ? '✓' : '+'}
-                    </button>
-                  )
-                })()}
-                <div className="card-actions">
-                  <button className="action-btn" onClick={(e) => { e.stopPropagation(); void onPlay(item) }}>
-                    <Icon name="play" size={16} />
-                  </button>
-                </div>
-              </div>
-              <div className="mt-2">
-                <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{item.title}</h3>
-                <span className="text-white/40 text-xs">{item.year || ''}{item.genre ? ' · ' + item.genre : ''}</span>
-              </div>
-            </div>
+            <MediaCardCinema
+              key={item.id}
+              item={item}
+              onSelect={() => onSelect(item)}
+              libraryIds={libraryIds}
+              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+            />
           ))}
         </div>
       )}
@@ -6581,63 +6382,17 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, view, selectedMedia])
 
-  // Continue Watching resume — resolves the file the same way
-  // handlePlay does (the rail response doesn't carry file_id) but
-  // threads position_ms through to the player.
-  const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
-    setPlayerLoading(true)
-    try {
-      let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
-      try {
-        // Guard against null / non-object shapes that JSON.parse can
-        // return when localStorage was tampered with.
-        const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
-        if (raw && typeof raw === 'object') {
-          const prefs = raw as Record<string, unknown>
-          if (prefs.preferred_quality === '4k') preferQuality = '4k'
-          else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
-        }
-      } catch { /* ignore */ }
-      if (c.type === 'show' && c.episode_id) {
-        // Find the specific episode's file. We don't have it cached;
-        // list episodes of this season, find the matching ep.
-        if (!c.season_number) throw new Error('Episode missing season number')
-        const eps = await getEpisodes(c.media_item_id, c.season_number)
-        const ep = eps.find(e => e.id === c.episode_id)
-        if (!ep) throw new Error('Episode not found')
-        const file = pickFile(ep.files as EpisodeFile[] | undefined, preferQuality)
-        if (!file) throw new Error('Episode has no files')
-        setPlayerTarget({
-          mediaItemId: c.media_item_id,
-          fileId: file.id,
-          fileType: 'episode',
-          episodeId: ep.id,
-          title: c.title,
-          subtitle: `S${c.season_number}E${c.episode_number ?? ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
-          resumePositionMs: c.position_ms,
-        })
-      } else {
-        // Movie — same path as handlePlay but with resume position.
-        const files = await getMediaFiles(c.media_item_id)
-        const file = pickFile(files, preferQuality)
-        if (!file) throw new Error('No file available to play')
-        setPlayerTarget({
-          mediaItemId: c.media_item_id,
-          fileId: file.id,
-          fileType: 'media',
-          title: c.title,
-          subtitle: c.year ? String(c.year) : undefined,
-          resumePositionMs: c.position_ms,
-        })
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to resume'
-      const id = nextToastId()
-      setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
-    } finally {
-      setPlayerLoading(false)
-    }
-  }, [nextToastId])
+  // 2028-05-28 (deep-debug Bug C) — Continue Watching resume handler
+  // (`handlePlayContinue`) removed alongside `onPlayContinue` props on
+  // HomeView + LibraryView. The cinema-card swap took out the hover Play
+  // CTA the handler used to attach to, so it was orphaned (noUnusedLocals
+  // would fail the build if left).
+  //
+  // The deleted handler called pickFile against the resolved episode/movie
+  // file and threaded `resumePositionMs: c.position_ms` into setPlayerTarget.
+  // See git blame on this comment for the previous implementation when the
+  // follow-up Continue Watching resume restore lands (likely via a
+  // detail-view "Resume at MM:SS" CTA when position_ms > 0).
 
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
@@ -7129,8 +6884,6 @@ export default function App() {
               loading={homeLoading}
               error={homeError}
               onRetry={requestHomeReload}
-              onPlayContinue={handlePlayContinue}
-              continueItems={continueItems}
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
               onRefreshHero={() => void reloadHeroPool(true)}
@@ -7175,7 +6928,6 @@ export default function App() {
                   onLoadMore={handleLoadMoreMovies}
                   isLoadingMore={moviesLoadingMore}
                   onSelect={handleSelect}
-                  onPlay={handlePlay}
                   onCardContext={openCardContextMenu}
                   libraryIds={libraryIds}
                   onToggleLib={handleToggleLib}
@@ -7197,7 +6949,6 @@ export default function App() {
                   onLoadMore={handleLoadMoreShows}
                   isLoadingMore={showsLoadingMore}
                   onSelect={handleSelect}
-                  onPlay={handlePlay}
                   onCardContext={openCardContextMenu}
                   libraryIds={libraryIds}
                   onToggleLib={handleToggleLib}
@@ -7208,8 +6959,6 @@ export default function App() {
               library={library}
               continueItems={continueItems}
               onSelect={handleSelect}
-              onPlay={handlePlay}
-              onPlayContinue={handlePlayContinue}
               onToggleLib={handleToggleLib}
             />
           )}
@@ -7247,7 +6996,7 @@ export default function App() {
               onPlayFile={handlePlayFile}
             />
           )}
-          {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} onPlay={handlePlay} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
+          {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
           {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} />}
           {view === 'collections' && (
             <CollectionsView

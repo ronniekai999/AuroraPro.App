@@ -1686,7 +1686,16 @@ export function mapContinueToMedia(c: ContinueWatchingItem): UIMedia {
     description: c.episode_title
       ? `S${c.season_number}E${c.episode_number}${c.episode_title ? ' — ' + c.episode_title : ''}`
       : '',
-    progress: c.percent_complete > 0 ? c.percent_complete : undefined,
+    // 2028-05-28 (deep-debug Bug B) — server emits percent_complete in
+    // the 0-100 range (internal/db/queries_phase4.go:641 multiplies the
+    // position/duration ratio by 100). The UI Media.progress contract
+    // (and MediaCardCinema's `progress * 100%` width math) expects 0-1.
+    // Pre-PR the inline render did `progress * 100` on the rail and
+    // `Math.min(100, c.percent_complete * 100)` in LibraryView — both
+    // wrong in subtle directions. Normalize here at the source: divide
+    // by 100, clamp to [0, 1], and the downstream `progress * 100%`
+    // math produces a correct bar width. Every reader becomes simpler.
+    progress: c.percent_complete > 0 ? Math.min(1, c.percent_complete / 100) : undefined,
   }
 }
 
