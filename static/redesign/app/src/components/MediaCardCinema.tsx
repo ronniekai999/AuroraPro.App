@@ -65,6 +65,16 @@ export interface MediaCardCinemaProps {
   // overlaps the AI gem when both are present (collections typically
   // don't carry a reason so the conflict is rare).
   topRightOverlay?: React.ReactNode
+  // 2026-05-27 — Continue Watching one-click resume affordance.
+  // When set, a small "Resume" pill appears at the bottom-right of
+  // the poster on hover / focus. Click on the pill resumes; click
+  // anywhere else on the card still opens detail (preserves the
+  // "click → detail → act" design language for the rest of the
+  // surfaces). Caller decides whether to provide it — typically
+  // only the Continue Watching rail / grid wire this so a
+  // partially-watched title that ALSO appears in (e.g.) Top Rated
+  // doesn't get a Resume pill there.
+  onResume?: () => void
 }
 
 // ─── Inlined SVG icons (decorative — wrapped in aria-hidden) ───
@@ -114,7 +124,7 @@ function MovieSvg() {
 
 export function MediaCardCinema({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
-  className = '', subtitle, aspect = 'poster', topRightOverlay,
+  className = '', subtitle, aspect = 'poster', topRightOverlay, onResume,
 }: MediaCardCinemaProps) {
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
@@ -182,6 +192,33 @@ export function MediaCardCinema({
             unusual; when it happens the X takes precedence (it's the
             actionable control). */}
         {topRightOverlay}
+        {/* 2026-05-27 — Resume pill. Caller-supplied onResume keeps
+            the component generic; rail/grid components decide whether
+            to wire it per-card. Bottom-right of poster, above the
+            progress bar (which carries CW state visually). Hidden
+            until card hover/focus so it doesn't compete with the
+            poster art on first paint. e.stopPropagation prevents the
+            card's onClick (open detail) from firing alongside. */}
+        {onResume && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onResume() }}
+            className="resume-pill"
+            // Deep-debug L2 — only aria-label (no title) so NVDA /
+            // VoiceOver don't double-announce. The aria-label carries
+            // the title context; visible "Resume" text is the label
+            // sighted users see.
+            aria-label={`Resume ${item.title}`}
+          >
+            {/* Play triangle — same visual cue as Hero / DetailView.
+                Deep-debug L1 — 3-point polygon (auto-closes), matches
+                Hero/detail rendering exactly. */}
+            <svg width={10} height={10} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <polygon points="5 3 19 12 5 21" />
+            </svg>
+            Resume
+          </button>
+        )}
         {/* Progress bar — only when progress > 0. */}
         {item.progress !== undefined && item.progress > 0 && (
           <div className="progress-bar">

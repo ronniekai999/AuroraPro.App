@@ -666,6 +666,66 @@
   background: linear-gradient(90deg, #a855f7, #d8b4fe);
 }
 
+/* 2026-05-27 — Resume pill (one-click resume from Continue Watching
+   cards). Bottom-right of the poster, above the 3px progress bar
+   (positioned at bottom: 14px). Hidden until card hover/focus so it
+   doesn't compete with the poster art on first paint. Click on pill
+   resumes; click on card opens detail (event.stopPropagation in JSX
+   prevents both from firing).
+
+   Deep-debug C1 — `pointer-events: none` on the base + `auto` on the
+   visible states is critical for touch devices: without it, the
+   invisible pill intercepts taps on the bottom-right of the card
+   and silently fires Resume instead of opening detail (no :hover on
+   touch). Mirrors the established .card-actions pattern in this
+   file. Adds outline on :focus-visible (deep-debug H1) so keyboard
+   users get a distinct ring on top of the dark indigo gradient. */
+.media-card-cinema .resume-pill {
+  position: absolute;
+  bottom: 14px;
+  right: 10px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 9999px;
+  background: linear-gradient(135deg, #6366f1, #4338ca);
+  border: 1px solid rgba(165, 180, 252, 0.5);
+  box-shadow: 0 4px 12px rgba(67, 56, 202, 0.5);
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.media-card-cinema:hover .resume-pill,
+.media-card-cinema:focus-within .resume-pill,
+.media-card-cinema .resume-pill:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+.media-card-cinema .resume-pill:hover {
+  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.65);
+  transform: translateY(0) scale(1.04);
+}
+.media-card-cinema .resume-pill:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+/* Reduced motion — drop the slide-in but keep the fade. */
+@media (prefers-reduced-motion: reduce) {
+  .media-card-cinema .resume-pill {
+    transform: none;
+    transition: opacity 0.18s ease;
+  }
+}
+
 /* Badge */
 .badge-glass {
   display: inline-flex;
