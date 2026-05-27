@@ -7887,7 +7887,13 @@ export default function App() {
         <BugReportButton
           prefillName={user.username}
           onToast={addToast}
-          hidden={!!playerTarget || serverOpen || notifOpen}
+          // 2026-05-27 — `serverOpen || notifOpen` gating dropped
+          // (was holistic deep-debug H2 fix for the old bottom-left
+          // position; those panels open from the sidebar at
+          // `left-[252px]` and don't conflict with bottom-right
+          // anymore). Player still hides the launcher because the
+          // full-screen player overlay needs uncluttered UI.
+          hidden={!!playerTarget}
           // 2026-05-27 — PAT health diagnostics. Server populates
           // these fields only for admin requesters; the modal shows
           // a warning banner when token_healthy === false.
