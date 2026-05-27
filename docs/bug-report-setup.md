@@ -131,37 +131,50 @@ use a Cloudflare Tunnel) to fix.
 Set `BUG_REPORT_ENABLED=false` (or unset all four vars) and restart.
 The launcher button disappears immediately on the next user session.
 Already-filed issues remain in GitHub; already-uploaded attachments
-remain on disk until you manually delete them or the Phase 3 janitor
-lands.
+remain on disk until the Phase 3 janitor sweeps them (30-day TTL).
 
-## What ships in Phase 1 vs later
+## Capabilities across phases (all in current build)
 
-- **Phase 1 (this PR):** flag, button, modal, file upload from disk,
-  server endpoint, GitHub issue creation, attachment hosting, this doc.
+- **Phase 1:** flag, launcher button, modal, file upload from disk,
+  server endpoint, GitHub issue creation, attachment hosting, this
+  doc.
 - **Phase 2:** "Capture this page" button in the modal (in-browser
-  screenshot via html2canvas) + PII warning before capture.
-- **Phase 3:** Live screen recording (MediaRecorder + getDisplayMedia,
-  30s cap) + per-user rate limit + 30-day attachment janitor.
+  screenshot via html2canvas, lazy-loaded chunk) + PII warning
+  before capture.
+- **Phase 3:** "Record screen" button (MediaRecorder +
+  getDisplayMedia, 30s cap, WebM output, floating Stop pill while
+  the modal is hidden) + per-user rate limit (5 submits / hour) +
+  30-day automatic attachment janitor.
 
-### Phase 1 operational notes
+### Operational notes
 
-The Phase 1 MVP intentionally **does not** include per-user rate
-limiting — that's deferred to Phase 3. While enabled, any authenticated
-user can submit reports in rapid succession, which would:
+**Rate limit:** in-process, per-user-ID, 5 submits per hour. When a
+user exceeds the cap, `/api/feedback` returns HTTP 429 with a
+`Retry-After` header. The frontend surfaces the server's error
+message in the modal so the user sees how long to wait. State lives
+in memory (not the DB) — restarting Aurora resets all counters.
 
-- Drain the GitHub PAT's primary rate budget (5,000 requests/hour) OR
-  trip the secondary "abuse detection" limiter (~30/min sustained),
-  breaking the feature for everyone for an hour.
-- Fill the attachment cache dir at `<ImageDir>/bug-reports/` until
-  disk-full takes Aurora's other image caches offline.
+**Attachment janitor:** a background goroutine sweeps
+`<ImageDir>/bug-reports/` once per hour and deletes files older than
+30 days. Runs only when `BUG_REPORT_ENABLED=true`. The goroutine
+exits cleanly via the server-lifecycle context on graceful shutdown.
+Logs at INFO when files are removed (count + TTL); WARN on individual
+file delete failures (typically permission issues).
 
-For Aurora deploys serving more than a small trusted user base (e.g.
-non-family/friends environments) BEFORE Phase 3 lands, consider:
+**Screen recording:**
 
-- Adding a CDN- or reverse-proxy-level rate limit on `/api/feedback`
-  (e.g. nginx `limit_req`, Caddy `rate_limit`, Cloudflare WAF).
-- Periodically checking disk usage of `<ImageDir>/bug-reports/` and
-  manually pruning old files until the Phase 3 janitor lands.
-
-Phase 3 will add `auth.RateLimiter`-backed per-user throttling (default
-5 submits / user / hour) and a 30-day automatic attachment janitor.
+- Browser support: Chrome / Edge / Firefox / Safari 16.4+. Modal
+  surfaces a clear error on unsupported browsers.
+- The user picks WHICH screen / window / tab to share via the
+  browser's native picker — Aurora has no say. The PII warning
+  reinforces that whatever they pick lands in the GitHub issue.
+- 30-second hard cap. The floating Stop pill shows a live countdown.
+  When auto-stop fires or the user clicks Stop (or the browser's
+  native "Stop sharing" bar), the resulting `.webm` becomes the
+  attachment.
+- Audio is NOT captured (we explicitly request video-only) to skip
+  the second permission prompt and avoid accidentally recording
+  whatever the user is listening to.
+- File size: a 30s VP9 capture at 1080p averages 3-8 MB. Files over
+  the 25 MB attachment cap are rejected in the same path as
+  oversized disk uploads.

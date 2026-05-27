@@ -1925,6 +1925,21 @@ export async function submitBugReport(
         if (typeof nested === 'string') message = nested
       }
     }
+    // Phase 3 (deep-debug L4) — on 429, prefer the Retry-After
+    // header for a human-readable wait time. The server's text
+    // already includes the seconds, but a human "wait 30 minutes"
+    // is more readable than "wait 1800 seconds." Format only when
+    // the header parses cleanly; otherwise fall through.
+    if (res.status === 429) {
+      const ra = res.headers.get('Retry-After')
+      const secs = ra ? parseInt(ra, 10) : NaN
+      if (Number.isFinite(secs) && secs > 0) {
+        const minutes = Math.ceil(secs / 60)
+        message = `Too many bug reports — please wait ${
+          minutes >= 1 ? `${minutes} minute${minutes === 1 ? '' : 's'}` : `${secs} seconds`
+        } before submitting again.`
+      }
+    }
     throw new APIError(res.status, message, body)
   }
   return (await parseBody()) as BugReportSubmitResult
