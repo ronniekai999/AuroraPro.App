@@ -14,6 +14,7 @@ import {
   type Collection,
   type ServerMediaItem,
 } from '@/lib/api'
+import { MediaCardCinema } from '@/components/MediaCardCinema'
 
 interface Props {
   isAdmin: boolean
@@ -120,79 +121,59 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
             </p>
           </div>
         ) : (
+          // 2028-05-28 — Collections detail grid converted to the
+          // shared <MediaCardCinema/>. The admin "remove from
+          // collection" X is passed through as topRightOverlay so the
+          // card's own JSX stays the same shape as every other surface.
+          // Note that ServerMediaItem uses `poster_path` (not the UI
+          // Media's `poster`), so we map the prop here.
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
             {items.map((m) => (
-              <div
+              <MediaCardCinema
                 key={m.id}
-                className="media-card group cursor-pointer"
-                onClick={() => onOpenMedia(m.id)}
-              >
-                <div className="relative aspect-[2/3] overflow-hidden rounded-xl">
-                  <img
-                    src={posterURL(m.poster_path)}
-                    alt={m.title}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                  {/* QA BUG-007 — Add-to-Library + button, matching
-                      the affordance present on every other card surface
-                      (Movies / Shows / Search / Home rails). Top-left
-                      placement intentional: top-right is reserved for
-                      the admin remove-from-collection X below. */}
-                  {onToggleLib && (() => {
-                    const isInLib = !!libraryIds?.has(m.id)
-                    return (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onToggleLib(m) }}
-                        title={isInLib ? 'In My Library — click to remove' : 'Add to My Library'}
-                        aria-label={isInLib ? `Remove ${m.title} from My Library` : `Add ${m.title} to My Library`}
-                        className={`absolute top-2 left-2 w-7 h-7 rounded-full flex items-center justify-center text-sm font-bold backdrop-blur-sm transition-all z-10 ${
-                          isInLib
-                            ? 'bg-purple-500/90 hover:bg-purple-400 text-white border border-purple-300/60 shadow-lg shadow-purple-900/40'
-                            : 'bg-black/40 hover:bg-purple-500/80 text-white/80 hover:text-white border border-white/25 hover:border-purple-300/60'
-                        }`}
-                      >
-                        {isInLib ? '✓' : '+'}
-                      </button>
-                    )
-                  })()}
-                  {isAdmin && (
-                    <button
-                      onClick={async (e) => {
-                        e.stopPropagation()
-                        if (!window.confirm(`Remove "${m.title}" from this collection?`)) return
-                        try {
-                          await removeFromCollection(selected, m.id)
-                          setItems((prev) => prev.filter((x) => x.id !== m.id))
-                          // Audit L4 fix — decrement the cached
-                          // item_count on the parent list so the
-                          // detail-view → back-to-list path doesn't
-                          // show a stale count.
-                          setCollections((prev) =>
-                            prev?.map((c) =>
-                              c.id === selected
-                                ? { ...c, item_count: Math.max(0, (c.item_count ?? 1) - 1) }
-                                : c,
-                            ) ?? null,
-                          )
-                        } catch (err) {
-                          window.alert('Remove failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                        }
-                      }}
-                      className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 hover:bg-red-500/80 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs"
-                      title="Remove from collection"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-                <div className="mt-2">
-                  <h3 className="text-white/90 text-sm font-medium leading-tight line-clamp-2 min-h-[2.5em]">{m.title}</h3>
-                  {m.year && (
-                    <span className="text-white/40 text-xs">{m.year}</span>
-                  )}
-                </div>
-              </div>
+                item={{
+                  id: m.id,
+                  title: m.title,
+                  poster: posterURL(m.poster_path),
+                  year: m.year,
+                  // ServerMediaItem doesn't carry a UI-friendly rating
+                  // on this endpoint — leave undefined so the star
+                  // hides via the existing meta guard.
+                }}
+                onSelect={() => onOpenMedia(m.id)}
+                libraryIds={libraryIds}
+                onToggleLib={onToggleLib ? () => onToggleLib(m) : undefined}
+                topRightOverlay={isAdmin && (
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation()
+                      if (!window.confirm(`Remove "${m.title}" from this collection?`)) return
+                      try {
+                        await removeFromCollection(selected, m.id)
+                        setItems((prev) => prev.filter((x) => x.id !== m.id))
+                        // Audit L4 fix — decrement the cached
+                        // item_count on the parent list so the
+                        // detail-view → back-to-list path doesn't
+                        // show a stale count.
+                        setCollections((prev) =>
+                          prev?.map((c) =>
+                            c.id === selected
+                              ? { ...c, item_count: Math.max(0, (c.item_count ?? 1) - 1) }
+                              : c,
+                          ) ?? null,
+                        )
+                      } catch (err) {
+                        window.alert('Remove failed: ' + (err instanceof Error ? err.message : 'unknown'))
+                      }
+                    }}
+                    title="Remove from collection"
+                    aria-label={`Remove ${m.title} from collection`}
+                    className="absolute top-3 right-3 z-[4] w-7 h-7 rounded-full bg-black/65 hover:bg-red-500/80 text-white text-xs flex items-center justify-center border border-white/15 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                  >
+                    ×
+                  </button>
+                )}
+              />
             ))}
           </div>
         )}

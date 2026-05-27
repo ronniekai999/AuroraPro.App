@@ -563,6 +563,19 @@
   border-color: rgba(220, 200, 255, 0.6);
   box-shadow: 0 0 12px rgba(168, 85, 247, 0.45);
 }
+/* 2028-05-28 (deep-debug Bug D) — destructive hover cue when the badge is
+   already in the in-lib state. Without this, the generic .lib-badge:hover
+   rule (purple translucent fill) overrides the in-lib gradient on hover
+   and gives a misleading "add" signal even though the click will remove
+   the title from the library. The .in-lib qualifier raises specificity
+   above the generic rule and recolors to red so the destructive action
+   reads clearly. */
+.media-card-cinema .lib-badge.in-lib:hover {
+  background: linear-gradient(135deg, #f87171, #b91c1c);
+  border-color: rgba(255, 200, 200, 0.6);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
+  transform: scale(1.06);
+}
 
 /* AI-matched diamond — jewel-style top-right badge. Only renders when
    the recommender attached an LLM reason (item.reason). Visual cue
