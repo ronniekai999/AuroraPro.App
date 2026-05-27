@@ -20,6 +20,7 @@ import {
   manualMatch,
   listContinueWatching,
   listRequests,
+  getBugReportConfig,
   mapContinueToMedia,
   tmdbPosterURL,
   searchMedia,
@@ -108,6 +109,7 @@ import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
+import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
@@ -5541,6 +5543,11 @@ export default function App() {
   // mapped to UIMedia) because handlePlay needs position_ms to
   // seed resume.
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
+  // 2026-05-27 — Bug-report Phase 1. Off by default; flipped to true
+  // when the server's /api/feedback/config returns enabled=true. The
+  // BugReportButton (bottom-left) renders only when this is true so a
+  // misconfigured deploy doesn't dangle a non-functional UI element.
+  const [bugReportEnabled, setBugReportEnabled] = useState(false)
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
 
@@ -6966,6 +6973,43 @@ export default function App() {
     // the Resume label freshens without re-fetching home rails).
   }, [user, retryNonce, cwReloadNonce, activeProfileId])
 
+  // 2026-05-27 — Bug-report feature-flag probe. Single fetch on user
+  // login; the flag is server-config-driven (env var only) so it
+  // doesn't change while the SPA is mounted. Failures leave the flag
+  // off so a broken /api/feedback/config doesn't dangle a non-
+  // functional UI element.
+  //
+  // Dep keys off the logged-in user's numeric id (deep-debug #9) so
+  // cross-tab token-refresh events that recreate the user object
+  // identity for the same logged-in account don't trigger a redundant
+  // refetch. The user state union is `User | null | false`, so we
+  // can't safely use `user?.id` (TS rightly rejects it because
+  // `false.id` is nonsense). Pulling the id out via a guard keeps
+  // the dep clean.
+  //
+  // Single cancellation mechanism: AbortController only (deep-debug
+  // #20 — dropped the manual `cancelled` flag that was redundant
+  // with `signal.aborted` checks).
+  // TS already narrows `user && ...` to the User branch (the union
+  // is User | null | false; null and false are both falsy), so the
+  // truthy check alone gives us `user.id` safely.
+  const userIdForBugReport = user ? user.id : undefined
+  useEffect(() => {
+    if (!userIdForBugReport) return
+    const ac = new AbortController()
+    getBugReportConfig(ac.signal)
+      .then(cfg => {
+        if (ac.signal.aborted) return
+        setBugReportEnabled(!!cfg?.enabled)
+      })
+      .catch(err => {
+        if (err && (err as Error).name === 'AbortError') return
+        // Non-fatal — the launcher just stays hidden.
+        console.warn('[Aurora] bug-report config fetch failed', err)
+      })
+    return () => { ac.abort() }
+  }, [userIdForBugReport])
+
   // Requests list — lazy-fetch on first visit to the tab.
   useEffect(() => {
     if (!user || view !== 'requests' || requestsList !== null) return
@@ -7671,6 +7715,19 @@ export default function App() {
           onClose={handleIdentifyClose}
           onMatched={handleIdentifyMatched}
         />
+      )}
+
+      {/* 2026-05-27 — Bug-report launcher (Phase 1 MVP). Gated on the
+          server-side BUG_REPORT_ENABLED env var so a misconfigured
+          deploy doesn't dangle a non-functional button.
+          - Hidden while the video player is open so it doesn't
+            overlay playback controls (deep-debug #21).
+          - prefillName uses the user's display username, NOT email,
+            so a public-repo deploy doesn't leak emails into issue
+            bodies that anyone with repo read access can see
+            (deep-debug #7). */}
+      {bugReportEnabled && !playerTarget && (
+        <BugReportButton prefillName={user.username} onToast={addToast} />
       )}
 
       {/* Toast */}
