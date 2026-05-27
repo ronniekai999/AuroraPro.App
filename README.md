@@ -153,6 +153,7 @@ Aurora has no Docker support in this repo — it's a bare-metal install.
 - **Watch parties**: Synchronized playback, reactions overlay, WebRTC voice
 - **Semantic search**: Local LLM embeddings via Ollama (optional)
 - **Requests**: Radarr / Sonarr integration for end-user requests
+- **Bug reporting** (optional): in-app launcher that files GitHub issues with screenshot / 30s screen-recording attachments — see [`docs/bug-report-setup.md`](docs/bug-report-setup.md) for the PAT-generation walkthrough
 - **Admin**: Built-in backup + restore, user management, integrations UI
 
 ## License

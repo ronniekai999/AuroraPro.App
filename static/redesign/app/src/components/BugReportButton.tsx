@@ -1,11 +1,19 @@
 // BugReportButton — floating bottom-left launcher for the bug-report
-// modal. Hidden when the operator hasn't enabled the feature flag.
+// modal. Hidden when the operator hasn't enabled the feature flag,
+// AND visually hidden when other surfaces compete for bottom-left
+// real estate (video player, server status panel, notifications
+// panel).
 //
-// Visual treatment: small subtle pill so it doesn't compete with
-// primary content. Hover reveals a slightly larger glow. Same low-key
-// approach as the upgrade-to-pro button patterns common in SaaS apps.
-// Sits at z-[40] — above page content, below modals (z-[60-80]) and
-// the sidebar drawer.
+// The launcher button itself toggles visibility via `display: none`
+// while `hidden` is true — but the COMPONENT stays mounted, and so
+// does its `modalOpen` state. This is important for the screen-
+// recording flow: a watch-party event that opens the player mid-
+// recording would have unmounted us under the old gate, silently
+// killing the in-flight recording. Now the modal stays mounted and
+// the recording completes normally. (Holistic deep-debug M1.)
+//
+// Visual treatment: small subtle pill. z-[40] — above page content,
+// below modals (z-[60-80]) and the sidebar drawer.
 
 import { useState } from 'react'
 import { BugReportModal } from './BugReportModal'
@@ -19,9 +27,14 @@ interface Props {
   // Receives the message + a 'success' type; if the toast widget
   // doesn't natively support links, the URL is appended in plain text.
   onToast: (message: string, type: 'success' | 'error' | 'info') => void
+  // Hide the launcher pill while another bottom-left / fullscreen
+  // surface is open (video player, server status, notifications).
+  // Component stays mounted so the modal can outlive the visibility
+  // change — see file-level comment.
+  hidden?: boolean
 }
 
-export function BugReportButton({ prefillName, onToast }: Props) {
+export function BugReportButton({ prefillName, onToast, hidden }: Props) {
   const [modalOpen, setModalOpen] = useState(false)
 
   const handleSubmitted = (result: BugReportSubmitResult) => {
@@ -57,6 +70,10 @@ export function BugReportButton({ prefillName, onToast }: Props) {
         // handler's ignoreElements predicate filters on this attribute
         // so the bug-report meta-UI doesn't leak into bug evidence.
         data-screenshot-exclude="true"
+        // Holistic deep-debug H2/M1 — `display: none` (not
+        // conditional unmount) when `hidden` so the modal state
+        // persists across player open/close events.
+        style={hidden ? { display: 'none' } : undefined}
         className="fixed bottom-4 left-4 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
       >
         {/* Inline SVG so the button has zero icon-component dependency.

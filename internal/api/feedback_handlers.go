@@ -154,9 +154,11 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 }
 
 // runJanitor sweeps <cacheDir> every janitorSweepInterval and deletes
-// files older than attachmentTTL. Logs deletion counts at INFO so
-// operators can see the cadence; logs individual delete failures at
-// WARN. The goroutine exits when ctx is cancelled (server shutdown).
+// files older than attachmentTTL. Logs a startup INFO line so
+// operators can confirm the goroutine spawned (holistic deep-debug
+// L4); subsequent sweep summaries log INFO when >= 10 files removed,
+// DEBUG otherwise to keep low-traffic deploys out of operator logs.
+// The goroutine exits when ctx is cancelled (server shutdown).
 //
 // Why sweep on a ticker (not on every Submit): bug-report traffic is
 // bursty (clustered around new releases). A submit-time sweep would
@@ -170,6 +172,10 @@ func (h *FeedbackHandler) runJanitor(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	slog.Info("feedback janitor: started",
+		"sweep_interval", janitorSweepInterval.String(),
+		"ttl", attachmentTTL.String(),
+		"cache_dir", h.cacheDir)
 	h.sweepAttachments()
 	ticker := time.NewTicker(janitorSweepInterval)
 	defer ticker.Stop()
@@ -347,6 +353,13 @@ func (l *feedbackLimiter) runSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Holistic deep-debug L4 — startup INFO so operators can confirm
+	// the goroutine spawned. The per-tick body is silent (eviction
+	// is just bookkeeping).
+	slog.Info("feedback limiter: sweep started",
+		"sweep_interval", limiterSweepInterval.String(),
+		"rate", l.rate,
+		"window", l.window.String())
 	ticker := time.NewTicker(limiterSweepInterval)
 	defer ticker.Stop()
 	for {

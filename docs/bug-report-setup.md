@@ -88,8 +88,9 @@ To smoke-test the full flow:
   `<PUBLIC_BASE_URL>/api/feedback/attachments/<uuid>.<ext>`.
   The UUID is a 128-bit random hex string — anyone with the URL can
   view the attachment, same security model as Aurora's existing
-  party-share-image endpoint. Phase 3 will add a 30-day janitor; for
-  now, attachments stay forever until you manually clean them.
+  party-share-image endpoint. Attachments are automatically swept by
+  the Phase 3 janitor goroutine after 30 days (see Operational notes
+  below); no manual cleanup is required in steady state.
 
 ## Troubleshooting
 
