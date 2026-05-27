@@ -33,6 +33,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,6 +79,15 @@ type FeedbackHandler struct {
 	submitLimiter          *feedbackLimiter
 	effectiveTTL           time.Duration
 	effectiveSweepInterval time.Duration
+	// 2026-05-27 — Pre-resolved absolute path to ffmpeg from the
+	// startup probe in NewFeedbackHandler. Used for WebM remux
+	// post-processing (MediaRecorder produces WebM files without
+	// duration metadata, leaving them unseekable in browser players).
+	// Empty when ffmpeg isn't in PATH — remuxWebM short-circuits
+	// and the original file is served as-is (degraded but not
+	// broken). Cached at startup to avoid exec.LookPath on every
+	// .webm upload. (Deep-debug Style fix.)
+	ffmpegPath string
 	// 2026-05-27 — Aurora server version (git SHA from build flags).
 	// Threaded from RouterDeps.Version so the auto-collected
 	// environment context in each issue body can stamp the
@@ -225,6 +235,20 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 	if sweep <= 0 {
 		sweep = defaultJanitorSweepInterval
 	}
+	// 2026-05-27 — Startup ffmpeg probe (deep-debug Low). Logs
+	// once at INFO when found, WARN when missing, so the operator
+	// sees the status at boot instead of discovering it through
+	// per-submission warnings later. ffmpeg is also required by
+	// the transcode subsystem so a missing binary indicates a
+	// broader deploy issue worth surfacing.
+	ffmpegPath := ""
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		ffmpegPath = p
+		slog.Info("feedback: ffmpeg probe succeeded — WebM remux enabled", "path", p)
+	} else if cfg.Enabled {
+		slog.Warn("feedback: ffmpeg not in PATH — WebM uploads will be served as-is (unseekable in some browsers)",
+			"hint", "install ffmpeg to enable Matroska container repair for screen recordings")
+	}
 	h := &FeedbackHandler{
 		cfg:                    cfg,
 		cacheDir:               filepath.Join(imageDir, "bug-reports"),
@@ -232,6 +256,7 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		effectiveTTL:           ttl,
 		effectiveSweepInterval: sweep,
 		serverVersion:          strings.TrimSpace(serverVersion),
+		ffmpegPath:             ffmpegPath,
 	}
 	if cfg.Enabled {
 		client, err := feedback.New(cfg.GitHubToken, cfg.GitHubRepo)
@@ -430,7 +455,13 @@ func (h *FeedbackHandler) sweepAttachments() {
 		// Only sweep files whose names match the whitelisted shape so
 		// a misplaced operator file (e.g. README.txt) doesn't get
 		// nuked. Same whitelist as the public-serve route uses.
-		if !isValidAttachmentName(entry.Name()) {
+		//
+		// Deep-debug M1 — also sweep `<uuid>.<ext>.remux.tmp`
+		// orphans. These are left behind when ffmpeg completes the
+		// container rewrite but the process dies (SIGTERM during
+		// deploy, OOM) before os.Rename can atomically replace the
+		// original. Without this, the orphans accumulate forever.
+		if !isValidAttachmentName(entry.Name()) && !isRemuxTmp(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -973,7 +1004,131 @@ func (h *FeedbackHandler) saveAttachment(fh *multipart.FileHeader) (string, erro
 		_ = os.Remove(full)
 		return "", fmt.Errorf("close attachment: %w", err)
 	}
+	// 2026-05-27 — WebM remux. MediaRecorder produces WebM files
+	// without a Duration field in the EBML header (it doesn't know
+	// the total duration when streaming starts), leaving them
+	// playable from t=0 but unseekable AND occasionally rejected by
+	// browser-tab default video players ("not playable" — exact
+	// user-reported symptom). A cheap `ffmpeg -c copy` stream-copy
+	// pass rewrites the container with computed duration + cues.
+	// No re-encode, ~instant for 30s clips, and ffmpeg is already
+	// required by Aurora's transcode pipeline so it's in PATH on
+	// every deploy.
+	//
+	// Failure modes (ffmpeg missing, corrupted source, write
+	// failure) are non-fatal: log a WARN and serve the original
+	// file. Users can still download via Right-click → Save As
+	// and play in a desktop player. The bug-report flow shouldn't
+	// fail just because a single video container is rough.
+	if strings.EqualFold(filepath.Ext(name), ".webm") {
+		if err := remuxWebM(h.ffmpegPath, full); err != nil {
+			slog.Warn("feedback: webm remux failed; serving original",
+				"file", name,
+				"error", err)
+		}
+	}
 	return name, nil
+}
+
+// remuxTmpSuffix is the extension appended to the in-flight tmp
+// file during WebM remux. Exported as a constant so the janitor
+// can sweep orphaned tmp files left by a process killed between
+// ffmpeg completion and os.Rename.
+const remuxTmpSuffix = ".remux.tmp"
+
+// remuxTimeout caps a single remux invocation. Stream-copy on a
+// 30s WebM finishes in ~tens of ms; 30s is a generous ceiling
+// that defends against a pathological input (corrupted EBML,
+// "container bomb") hanging the Submit handler indefinitely.
+// (Deep-debug H1.)
+const remuxTimeout = 30 * time.Second
+
+// remuxWebM rewrites a WebM file in-place with valid container
+// metadata (Duration, Cues) via `ffmpeg -c copy`. This is a
+// stream-copy operation — no re-encoding, just container
+// rewriting. Atomic via tmp file + rename so a mid-flight failure
+// can't corrupt the original.
+//
+// Why ffmpeg and not a pure-Go EBML rewriter: Aurora's deploy
+// already requires ffmpeg for HLS transcoding. Adding a 200-line
+// Go Matroska parser to fix one field would be more code surface
+// + maintenance risk than this subprocess call. If a future deploy
+// needs to avoid ffmpeg, the function returns cleanly when ffmpeg
+// isn't in PATH — the original file ships, the bug-report flow
+// doesn't fail.
+//
+// ffmpegPath: pre-resolved absolute path from NewFeedbackHandler's
+// startup probe. Empty means ffmpeg is not available — return early.
+func remuxWebM(ffmpegPath, path string) error {
+	if ffmpegPath == "" {
+		return fmt.Errorf("ffmpeg not available")
+	}
+	tmp := path + remuxTmpSuffix
+	// Deep-debug H1 — bounded timeout via exec.CommandContext.
+	// Without this, a hung ffmpeg blocks the Submit handler forever
+	// (cmd.Run() doesn't observe request context, and Submit's
+	// downstream GitHub-POST timeout doesn't help — it sits after
+	// remux). 30s is generous for stream-copy.
+	ctx, cancel := context.WithTimeout(context.Background(), remuxTimeout)
+	defer cancel()
+	// `-fflags +genpts` regenerates presentation timestamps so the
+	// Duration field is computed. `-c copy` is stream-copy (no
+	// re-encode). `-f webm` forces the output format regardless of
+	// extension sniffing.
+	cmd := exec.CommandContext(ctx, ffmpegPath,
+		"-y",
+		"-loglevel", "error",
+		"-fflags", "+genpts",
+		"-i", path,
+		"-c", "copy",
+		"-f", "webm",
+		tmp,
+	)
+	// Deep-debug M2 — capture stderr into a bounded buffer so the
+	// WARN log carries the actual cause (was discarded). 4 KiB cap
+	// since `-loglevel error` keeps output minimal even on failure;
+	// a corrupted EBML rarely produces more than a few hundred bytes.
+	var stderr boundedBuffer
+	stderr.cap = 4096
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(tmp)
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("ffmpeg timed out after %s: %s", remuxTimeout, stderr.String())
+		}
+		return fmt.Errorf("ffmpeg: %w: %s", err, stderr.String())
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// boundedBuffer is an io.Writer that captures at most `cap` bytes;
+// further writes are silently dropped. Used to capture ffmpeg's
+// stderr without unbounded memory exposure if a misbehaving binary
+// floods the channel.
+type boundedBuffer struct {
+	buf []byte
+	cap int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	remaining := b.cap - len(b.buf)
+	if remaining <= 0 {
+		return len(p), nil
+	}
+	if len(p) > remaining {
+		b.buf = append(b.buf, p[:remaining]...)
+	} else {
+		b.buf = append(b.buf, p...)
+	}
+	return len(p), nil
+}
+
+func (b *boundedBuffer) String() string {
+	return strings.TrimSpace(string(b.buf))
 }
 
 // newAttachmentID generates a 128-bit random hex string (32 chars).
@@ -1025,6 +1180,23 @@ func isValidAttachmentName(name string) bool {
 		return true
 	}
 	return false
+}
+
+// isRemuxTmp recognizes orphaned `<uuid>.<ext>.remux.tmp` files left
+// behind when the ffmpeg-based WebM remux completed but the process
+// died before the atomic rename could replace the original. The
+// janitor sweeps these on the same TTL as real attachments.
+//
+// Conservative shape check (must end with the suffix AND the base
+// before it must look like a valid attachment) so an operator's
+// `.remux.tmp` file dropped accidentally into the cache dir doesn't
+// get nuked.
+func isRemuxTmp(name string) bool {
+	if !strings.HasSuffix(name, remuxTmpSuffix) {
+		return false
+	}
+	base := strings.TrimSuffix(name, remuxTmpSuffix)
+	return isValidAttachmentName(base)
 }
 
 // mimeForAttachment maps the extension to a Content-Type. Used for
