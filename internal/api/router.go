@@ -148,7 +148,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// so that long-running streaming and WebSocket connections are not killed.
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.Server.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		ExposedHeaders:   []string{"Link", "X-Search-Mode"},
 		AllowCredentials: true,
@@ -410,7 +410,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// Handler 404s when the feature flag is off OR the requested
 		// filename doesn't match the whitelisted shape, so this route
 		// is inert until an operator enables BUG_REPORT_ENABLED.
+		//
+		// 2026-05-27 — Register HEAD too. Chrome and Safari issue
+		// HEAD before GET when loading video/audio inline (they need
+		// Content-Type, Content-Length, and Accept-Ranges before
+		// committing to the media pipeline). Without an explicit HEAD
+		// route, the HEAD request doesn't match this GET-only route
+		// and chi routes it elsewhere — in our config it ends up
+		// hitting one of the authed groups that returns 401, which
+		// makes browsers refuse to play. http.ServeContent inside
+		// ServeAttachment handles HEAD correctly (writes the headers
+		// without the body).
 		r.Get("/api/feedback/attachments/{name}", feedbackH.ServeAttachment)
+		r.Head("/api/feedback/attachments/{name}", feedbackH.ServeAttachment)
 
 		// M4 — magic-link landing lookup. Unauthenticated by design so the
 		// /p/{code} page can render basic context (party name, "room
