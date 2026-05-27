@@ -175,12 +175,16 @@ func TestBuildIssueBodyEmbedGate(t *testing.T) {
 		}
 	})
 	t.Run("video always skips embed", func(t *testing.T) {
-		body := buildIssueBody("hi", "", "", "https://x/a.webm", 500_000, "video/webm", environmentContext{})
-		if strings.Contains(body, "![attachment]") {
-			t.Errorf("expected NO inline embed for video; body:\n%s", body)
-		}
-		if !strings.Contains(body, "video attachment") {
-			t.Errorf("expected video note; body:\n%s", body)
+		// Covers both .webm (transcode fallback) and .mp4 (transcode
+		// success — the new common case post WebM→MP4 conversion).
+		for _, mime := range []string{"video/webm", "video/mp4"} {
+			body := buildIssueBody("hi", "", "", "https://x/a", 500_000, mime, environmentContext{})
+			if strings.Contains(body, "![attachment]") {
+				t.Errorf("mime=%s: expected NO inline embed for video; body:\n%s", mime, body)
+			}
+			if !strings.Contains(body, "click the link above to play") {
+				t.Errorf("mime=%s: expected 'click the link above to play' copy; body:\n%s", mime, body)
+			}
 		}
 	})
 	t.Run("attachment link always present", func(t *testing.T) {
@@ -244,6 +248,15 @@ func TestRemuxWebMMissingFfmpeg(t *testing.T) {
 	// helper must return a clean error without panicking. The
 	// caller logs WARN and serves the original file.
 	if err := remuxWebM("", "/tmp/whatever.webm"); err == nil {
+		t.Error("expected non-nil error when ffmpegPath is empty")
+	}
+}
+
+func TestTranscodeWebmToMp4MissingFfmpeg(t *testing.T) {
+	// 2026-05-27 — Same contract as remuxWebM: clean error
+	// (no panic) when ffmpegPath is empty so saveAttachment can
+	// fall back to the WebM remux tier without exploding.
+	if err := transcodeWebmToMp4("", "/tmp/src.webm", "/tmp/dst.mp4"); err == nil {
 		t.Error("expected non-nil error when ffmpegPath is empty")
 	}
 }
