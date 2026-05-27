@@ -855,7 +855,15 @@ func frontendHeaders(next http.Handler) http.Handler {
 				"worker-src blob:; "+
 				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 				"font-src 'self' https://fonts.gstatic.com; "+
-				"img-src 'self' https://image.tmdb.org data:; "+
+				// 2026-05-27 — `blob:` added for img-src so the bug-report
+				// modal can preview captured screenshots and disk-uploaded
+				// images via URL.createObjectURL. Blob URLs are scoped to
+				// the page's origin + document lifecycle; an attacker can't
+				// inject a blob URL pointing at malicious content without
+				// already running script in the user's session (in which
+				// case CSP can't help). `media-src` below already allows
+				// blob: for the video preview path; this completes the pair.
+				"img-src 'self' https://image.tmdb.org data: blob:; "+
 				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net; "+
 				"media-src 'self' blob:; "+
 				"frame-ancestors 'none'")

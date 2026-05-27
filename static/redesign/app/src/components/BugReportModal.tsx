@@ -937,7 +937,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   <line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
                 Choose file
-                <span className="text-white/40 font-normal">· File</span>
+                {/* 2026-05-27 — dropped the "· File" suffix (redundant
+                    with the button label). Format hints now appear only
+                    on Capture (· PNG) and Record (· WebM 30s) where they
+                    actually convey new info. */}
               </button>
               {/* Phase 2 — "Capture this page" button. Briefly hides
                   the modal so the screenshot doesn't include the form
