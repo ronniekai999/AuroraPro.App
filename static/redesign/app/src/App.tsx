@@ -244,7 +244,14 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
     compass: <><circle cx="12" cy="12" r="10" /><polygon points="16 8 14 14 8 16 10 10 16 8" fill="currentColor" stroke="none" /></>,
   }
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+    // 2026-05-27 (deep-debug Bug 19) — aria-hidden because icons are
+    // almost always decorative; the surrounding button/link carries the
+    // accessible name via aria-label or visible text. Without this,
+    // screen readers announce "graphic" alongside the button label
+    // ("Add to library, graphic"). The very rare exception (an icon-only
+    // control with no aria-label or text companion) is an a11y bug at
+    // the call site, not something this component should paper over.
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
       {icons[name] || null}
     </svg>
   )
@@ -554,7 +561,15 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
                 )}
               </div>
               <div className="shelf">
-                <div className="title">{item.title}</div>
+                {/* 2026-05-27 (deep-debug Bug 16) — title=full title so
+                    the browser tooltip surfaces titles that get truncated
+                    by .title's ellipsis. Without this, long titles like
+                    "The Curious Incident of the Dog in the Night-Time"
+                    were unreadable in full. The outer card's title attr
+                    is the AI reason; this inner title attr is the actual
+                    title (browser picks the nearest one for the tooltip
+                    when the user hovers the title text itself). */}
+                <div className="title" title={item.title}>{item.title}</div>
                 <div className="meta">
                   {/* Star only when we actually have a rating
                       (Continue Watching = rating=0). Avoids visible
@@ -573,10 +588,13 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
                   )}
                   {item.genre && <span>{item.genre}</span>}
                 </div>
+                {/* 2026-05-27 (deep-debug Bug 18) — dropped the
+                    aria-label, which isn't reliably announced on a
+                    non-interactive div (NVDA/JAWS frequently ignore it).
+                    The visible text IS the reason; no extra labeling
+                    needed. Use <p> for semantic correctness. */}
                 {item.reason && (
-                  <div className="reason" aria-label={`Why: ${item.reason}`}>
-                    {item.reason}
-                  </div>
+                  <p className="reason">{item.reason}</p>
                 )}
               </div>
             </div>
@@ -3832,48 +3850,68 @@ function AdminFlaggedTab(_props: { onSelect: (id: number) => void }) {
   const [aiStarting, setAiStarting] = useState(false)
   const [acceptingId, setAcceptingId] = useState<number | null>(null)
 
+  // 2026-05-27 (deep-debug Bug 1 fix) — polling refs lifted out of the
+  // mount-only effect so startJob can restart the recursive chain.
+  // Previously the polling chain only kicked off if a job was active at
+  // mount time. Clicking "Re-match with AI" later created a job but no
+  // setTimeout existed to advance it — the progress card froze at the
+  // initial snapshot. Now both the mount effect AND startJob route
+  // through pollOnce(), which schedules itself recursively when the
+  // server reports an active job.
+  const pollTimerRef = useRef<number | null>(null)
+  const pollCancelledRef = useRef(false)
+
   const reload = useCallback(async () => {
     try { setItems(await listFlaggedItems()) }
     catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
   }, [])
   useEffect(() => { void reload() }, [reload])
 
-  // Pull job status on mount + poll every 5s while a job is active.
-  // We stop polling once finished_at is non-zero (job complete) to
-  // avoid background traffic when the operator leaves the page open.
-  useEffect(() => {
-    let cancelled = false
-    let timer: number | null = null
-    const fetchOnce = async () => {
-      try {
-        const s = await getAIRematchStatus()
-        if (cancelled) return
-        setAiEnabled(s.enabled)
-        setAiJob(s.job ?? null)
-        const active = s.job && (!s.job.finished_at || s.job.finished_at.startsWith('0001'))
-        if (active) {
-          // Refresh the items list too — newly-suggested rows appear
-          // in the response as the worker progresses.
-          void reload()
-          timer = window.setTimeout(() => void fetchOnce(), 5000)
-        }
-      } catch { /* ignore — non-fatal panel */ }
-    }
-    void fetchOnce()
-    return () => { cancelled = true; if (timer) window.clearTimeout(timer) }
+  const pollOnce = useCallback(async () => {
+    try {
+      const s = await getAIRematchStatus()
+      if (pollCancelledRef.current) return
+      setAiEnabled(s.enabled)
+      setAiJob(s.job ?? null)
+      const active = s.job && (!s.job.finished_at || s.job.finished_at.startsWith('0001'))
+      if (active) {
+        // Refresh the items list too — newly-suggested rows appear
+        // in the response as the worker progresses.
+        void reload()
+        // Clear any prior timer before scheduling, so a click during a
+        // running poll doesn't fan out into multiple parallel chains.
+        if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current)
+        pollTimerRef.current = window.setTimeout(() => void pollOnce(), 5000)
+      }
+    } catch { /* ignore — non-fatal panel */ }
   }, [reload])
+
+  // Pull job status on mount + start polling if a job is already active.
+  // The recursive chain in pollOnce keeps going until finished_at is set.
+  useEffect(() => {
+    pollCancelledRef.current = false
+    void pollOnce()
+    return () => {
+      pollCancelledRef.current = true
+      if (pollTimerRef.current) {
+        window.clearTimeout(pollTimerRef.current)
+        pollTimerRef.current = null
+      }
+    }
+  }, [pollOnce])
 
   const startJob = useCallback(async () => {
     setAiStarting(true)
     try {
       await startAIRematch()
-      // Immediately fetch status so the progress card appears
-      const s = await getAIRematchStatus()
-      setAiJob(s.job ?? null)
+      // Re-enter the poll chain so the progress card advances. Without
+      // this call the first setTimeout never gets scheduled and the
+      // operator sees a frozen progress bar (deep-debug Bug 1).
+      void pollOnce()
     } catch (e) {
       window.alert('Failed to start AI rematch: ' + (e instanceof Error ? e.message : 'unknown'))
     } finally { setAiStarting(false) }
-  }, [])
+  }, [pollOnce])
 
   // Accept the AI's suggestion for one item — one click reuses the
   // existing /api/media/{id}/match endpoint with the suggested TMDB
@@ -3894,6 +3932,14 @@ function AdminFlaggedTab(_props: { onSelect: (id: number) => void }) {
 
   const jobActive = !!aiJob && (!aiJob.finished_at || aiJob.finished_at.startsWith('0001'))
   const jobProgress = aiJob && aiJob.total > 0 ? Math.round((aiJob.processed / aiJob.total) * 100) : 0
+  // 2026-05-27 (deep-debug Bug 2) — distinguish eval pass from retry
+  // pass for the operator. Bar hits 100% when processed === total (eval
+  // pass done), but the retry pass keeps running afterwards bumping
+  // Retried/RetryMatched without advancing Processed. Without this
+  // label the progress card looks "stuck at 100% while running" — a
+  // confusing UX. The retry pass typically lasts seconds; this label
+  // explains why the bar is frozen while the job is still active.
+  const inRetryPhase = jobActive && aiJob && aiJob.total > 0 && aiJob.processed >= aiJob.total
 
   return (
     <div className="glass-panel rounded-xl p-5">
@@ -3927,7 +3973,11 @@ function AdminFlaggedTab(_props: { onSelect: (id: number) => void }) {
         <div className="mb-4 p-3 rounded-lg bg-purple-500/[0.05] border border-purple-500/20">
           <div className="flex items-center justify-between mb-1.5">
             <p className="text-purple-200 text-xs font-medium">
-              {jobActive ? `AI re-matching… ${aiJob.processed}/${aiJob.total}` : `AI sweep complete (${aiJob.processed}/${aiJob.total})`}
+              {jobActive
+                ? (inRetryPhase
+                    ? `AI retry pass running… (${aiJob.retried ?? 0} re-attempted)`
+                    : `AI re-matching… ${aiJob.processed}/${aiJob.total}`)
+                : `AI sweep complete (${aiJob.processed}/${aiJob.total})`}
             </p>
             <p className="text-white/50 text-[10px]">
               auto-matched <span className="text-emerald-300 font-mono">{aiJob.matched}</span>
@@ -7366,7 +7416,15 @@ export default function App() {
                 } else if (reason === 'prompt') {
                   message = 'Microphone permission needed — click Allow in the browser prompt to join voice.'
                 } else if (reason === 'device') {
-                  message = 'Microphone permission OK, but the device is unavailable. Another app may be using it.'
+                  // 2026-05-27 (deep-debug Bug 12) — the browser reports
+                  // "granted" but getUserMedia still threw NotAllowedError.
+                  // Most likely (a) macOS/Windows mic privacy blocking the
+                  // browser at the OS level (Permissions API can't see
+                  // this), or (b) another app holds the mic exclusively.
+                  // Mention BOTH so the user can troubleshoot either path
+                  // — the original "device unavailable" copy missed the OS
+                  // case entirely.
+                  message = 'Microphone permission OK in the browser, but the audio stream was blocked. Check your operating system privacy settings, or close any other app that may have the microphone open.'
                 } else {
                   // Permissions API not supported (older Safari) or query
                   // failed — fall back to the original wording.
@@ -7375,6 +7433,12 @@ export default function App() {
               }
               setToasts(prev => [...prev, { id, message, type: 'error' }])
               // Also surface to console for users / support to inspect.
+              // The err here is a DOMException from getUserMedia, which
+              // carries only {name, message, code} — no tokens, no
+              // internal URLs. Safe to log. If anyone wraps this err with
+              // extra context in the future (e.g. iceServers URL, session
+              // token), audit that the new fields are safe to log here
+              // before merging.
               // eslint-disable-next-line no-console
               console.warn('[Aurora Voice] join failed', { name: (err as Error)?.name, reason, err })
             })

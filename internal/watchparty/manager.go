@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
@@ -1961,6 +1962,23 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 	// the prior store-escape + render-escape was the bug.
 	stored := strings.TrimSpace(message)
 	if stored == "" {
+		return fmt.Errorf("empty message")
+	}
+	// 2026-05-27 (deep-debug Bug 9 fix) — TrimSpace uses unicode.IsSpace
+	// which catches NBSP/tab/newline but NOT zero-width chars (U+200B
+	// Zero-Width Space, U+FEFF BOM, U+2060 Word Joiner). A user could
+	// send a chat of only ZWSPs and get a visually-empty bubble that
+	// fills the ring buffer + counts against rate-limit budgets. Require
+	// at least one printable, non-space rune. Short-circuits on the first
+	// good rune so the per-call cost is negligible.
+	hasPrintable := false
+	for _, r := range stored {
+		if unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			hasPrintable = true
+			break
+		}
+	}
+	if !hasPrintable {
 		return fmt.Errorf("empty message")
 	}
 
