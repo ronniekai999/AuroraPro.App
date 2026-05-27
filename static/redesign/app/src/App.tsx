@@ -1345,6 +1345,36 @@ function CastCard({ member }: { member: { id: number; name: string; profile_path
 }
 
 /* ─────────────────────── DETAIL VIEW ─────────────────────── */
+// 2028-05-28 — Continue Watching resume helpers. Local to DetailView
+// (only consumer) but module-level so they're hoisted out of the render
+// path and unit-testable in isolation if we ever add a test for them.
+//
+// formatResumeTime: takes a position in ms and returns a colon-separated
+// MM:SS for sub-hour resumes or H:MM:SS for longer ones. Zero-pads
+// minutes/seconds so the string stays a fixed width per duration class
+// (4:07 not 4:7, 1:02:03 not 1:2:3).
+function formatResumeTime(positionMs: number): string {
+  const totalSec = Math.max(0, Math.floor(positionMs / 1000))
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`
+}
+// formatResumeLabel: builds the human-readable label for the Resume
+// button. Movies get "Resume at MM:SS"; shows get "Resume S2E5 · MM:SS"
+// so the user sees which episode the click will resume (a show with
+// progress on multiple episodes could surprise them otherwise — though
+// the rail itself dedups by media_item_id, so this is mostly belt +
+// suspenders).
+function formatResumeLabel(c: ContinueWatchingItem): string {
+  const time = formatResumeTime(c.position_ms)
+  if (c.type === 'show' && c.season_number && c.episode_number) {
+    return `Resume S${c.season_number}E${c.episode_number} · ${time}`
+  }
+  return `Resume at ${time}`
+}
+
 interface DetailViewProps {
   media: Media
   onBack: () => void
@@ -1384,6 +1414,15 @@ interface DetailViewProps {
   // Clicking a chip plays that specific file (4K version, alt cut, etc.).
   files?: MediaFile[]
   onPlayFile?: (m: Media, fileId: number) => void
+  // 2028-05-28 — Continue Watching resume restore. When this media has
+  // a partial-watch progress entry, App threads the matched
+  // ContinueWatchingItem in via `resumeItem` and the resume handler via
+  // `onPlayContinue`. DetailView then renders a "Resume at MM:SS" CTA
+  // alongside Play (which keeps its from-start behavior, so users who
+  // want to restart still can). When `resumeItem` is undefined, the
+  // Resume CTA hides — same Play-only behavior as before.
+  resumeItem?: ContinueWatchingItem
+  onPlayContinue?: (c: ContinueWatchingItem) => void
 }
 function DetailView({
   media, onBack, onPlay, onToggleLib, inLibrary,
@@ -1394,6 +1433,7 @@ function DetailView({
   onRefreshMetadata,
   onIdentify,
   files, onPlayFile,
+  resumeItem, onPlayContinue,
 }: DetailViewProps) {
   // Prefer real metadata when available — overview, runtime, rating
   // straight from the server. Falls back to whatever the lightweight
@@ -1534,18 +1574,50 @@ function DetailView({
                 from wrapping inside individual pills on narrow
                 viewports. */}
             <div className="flex items-center gap-3 flex-wrap">
-              <button
-                onClick={() => onPlay(media)}
-                // Tint background + glow with the poster's dominant
-                // color (falls back to Aurora purple).
-                style={{
-                  backgroundColor: palette.accent,
-                  boxShadow: `0 0 24px ${palette.glow}`,
-                }}
-                className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap"
-              >
-                <Icon name="play" size={16} /> Play
-              </button>
+              {/* 2028-05-28 — Continue Watching resume CTA. When the
+                  parent threads a `resumeItem` for this media, Resume
+                  replaces Play as the primary action and a smaller
+                  "From start" secondary appears next to it (Plex /
+                  Netflix pattern). Without `resumeItem`, only the
+                  classic Play renders — same as before the restore. */}
+              {resumeItem && onPlayContinue ? (
+                <>
+                  <button
+                    onClick={() => onPlayContinue(resumeItem)}
+                    // Same palette/glow as Play so the visual weight
+                    // signals "primary CTA" — Resume just inherits the
+                    // role here.
+                    style={{
+                      backgroundColor: palette.accent,
+                      boxShadow: `0 0 24px ${palette.glow}`,
+                    }}
+                    className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap"
+                    title={`Resume from your last position (${formatResumeTime(resumeItem.position_ms)})`}
+                  >
+                    <Icon name="play" size={16} /> {formatResumeLabel(resumeItem)}
+                  </button>
+                  <button
+                    onClick={() => onPlay(media)}
+                    className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 whitespace-nowrap"
+                    title="Restart from the beginning"
+                  >
+                    <Icon name="skipBack" size={16} /> From start
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => onPlay(media)}
+                  // Tint background + glow with the poster's dominant
+                  // color (falls back to Aurora purple).
+                  style={{
+                    backgroundColor: palette.accent,
+                    boxShadow: `0 0 24px ${palette.glow}`,
+                  }}
+                  className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap"
+                >
+                  <Icon name="play" size={16} /> Play
+                </button>
+              )}
               <button
                 onClick={() => onToggleLib(media)}
                 className={`h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all border whitespace-nowrap ${
@@ -6382,17 +6454,73 @@ export default function App() {
     return () => { cancelled = true; ac.abort() }
   }, [user, view, selectedMedia])
 
-  // 2028-05-28 (deep-debug Bug C) — Continue Watching resume handler
-  // (`handlePlayContinue`) removed alongside `onPlayContinue` props on
-  // HomeView + LibraryView. The cinema-card swap took out the hover Play
-  // CTA the handler used to attach to, so it was orphaned (noUnusedLocals
-  // would fail the build if left).
+  // 2028-05-28 — Continue Watching resume handler. Restored after the
+  // Bug C cleanup pass deleted it (see git blame on PR #95 for the
+  // tombstone that lived here).
   //
-  // The deleted handler called pickFile against the resolved episode/movie
-  // file and threaded `resumePositionMs: c.position_ms` into setPlayerTarget.
-  // See git blame on this comment for the previous implementation when the
-  // follow-up Continue Watching resume restore lands (likely via a
-  // detail-view "Resume at MM:SS" CTA when position_ms > 0).
+  // The new wiring is detail-view-driven: when the user opens detail
+  // for a partially-watched title, App-level `continueItems` is scanned
+  // for a match and the corresponding ContinueWatchingItem is threaded
+  // into DetailView as `resumeItem`. DetailView renders a "Resume at
+  // MM:SS" CTA that calls this handler with the matched record, so the
+  // server-side position_ms / episode_id flow into setPlayerTarget the
+  // same way handlePlay does for a fresh start. Movies and shows share
+  // the same code path; the episode_id branch fetches the episode's
+  // file (the CW response doesn't carry it inline).
+  const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
+    setPlayerLoading(true)
+    try {
+      let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+      try {
+        // Guard against null / non-object shapes that JSON.parse can
+        // return when localStorage was tampered with.
+        const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+        if (raw && typeof raw === 'object') {
+          const prefs = raw as Record<string, unknown>
+          if (prefs.preferred_quality === '4k') preferQuality = '4k'
+          else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+        }
+      } catch { /* ignore */ }
+      if (c.type === 'show' && c.episode_id) {
+        // Find the specific episode's file. We don't have it cached;
+        // list episodes of this season, find the matching ep.
+        if (!c.season_number) throw new Error('Episode missing season number')
+        const eps = await getEpisodes(c.media_item_id, c.season_number)
+        const ep = eps.find(e => e.id === c.episode_id)
+        if (!ep) throw new Error('Episode not found')
+        const file = pickFile(ep.files as EpisodeFile[] | undefined, preferQuality)
+        if (!file) throw new Error('Episode has no files')
+        setPlayerTarget({
+          mediaItemId: c.media_item_id,
+          fileId: file.id,
+          fileType: 'episode',
+          episodeId: ep.id,
+          title: c.title,
+          subtitle: `S${c.season_number}E${c.episode_number ?? ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
+          resumePositionMs: c.position_ms,
+        })
+      } else {
+        // Movie — same path as handlePlay but with resume position.
+        const files = await getMediaFiles(c.media_item_id)
+        const file = pickFile(files, preferQuality)
+        if (!file) throw new Error('No file available to play')
+        setPlayerTarget({
+          mediaItemId: c.media_item_id,
+          fileId: file.id,
+          fileType: 'media',
+          title: c.title,
+          subtitle: c.year ? String(c.year) : undefined,
+          resumePositionMs: c.position_ms,
+        })
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to resume'
+      const id = nextToastId()
+      setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
+    } finally {
+      setPlayerLoading(false)
+    }
+  }, [nextToastId])
 
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
@@ -6994,6 +7122,19 @@ export default function App() {
               onIdentify={user.role === 'admin' ? handleIdentify : undefined}
               files={detailFiles}
               onPlayFile={handlePlayFile}
+              // 2028-05-28 — Continue Watching resume. If the user has
+              // partial progress on this media (movie OR a specific
+              // episode of a show), find the matching CW record and
+              // thread it into DetailView so the Resume CTA renders.
+              // We look at ALL of continueItems (not just the deduped
+              // one from the home rail) so a show with progress on
+              // S2E3 still gets a Resume button when the user opens
+              // detail directly. `undefined` when no match — DetailView
+              // hides the CTA and renders the classic Play button.
+              resumeItem={continueItems.find(c =>
+                c.media_item_id === selectedMedia.id && c.position_ms > 0,
+              )}
+              onPlayContinue={handlePlayContinue}
             />
           )}
           {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
