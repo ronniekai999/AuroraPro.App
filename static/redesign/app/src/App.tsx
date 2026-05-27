@@ -21,6 +21,7 @@ import {
   listContinueWatching,
   listRequests,
   getBugReportConfig,
+  type BugReportConfig,
   mapContinueToMedia,
   tmdbPosterURL,
   searchMedia,
@@ -5646,11 +5647,11 @@ export default function App() {
   // mapped to UIMedia) because handlePlay needs position_ms to
   // seed resume.
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
-  // 2026-05-27 — Bug-report Phase 1. Off by default; flipped to true
-  // when the server's /api/feedback/config returns enabled=true. The
-  // BugReportButton (bottom-left) renders only when this is true so a
-  // misconfigured deploy doesn't dangle a non-functional UI element.
-  const [bugReportEnabled, setBugReportEnabled] = useState(false)
+  // 2026-05-27 — Bug-report config. Holds the full server response so
+  // the BugReportButton + modal can both gate on `enabled` AND surface
+  // admin-only token-health diagnostics (added 2026-05-27 PAT health
+  // check). The BugReportButton renders only when `enabled` is true.
+  const [bugReportConfig, setBugReportConfig] = useState<BugReportConfig | null>(null)
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
 
@@ -7108,13 +7109,29 @@ export default function App() {
   // is User | null | false; null and false are both falsy), so the
   // truthy check alone gives us `user.id` safely.
   const userIdForBugReport = user ? user.id : undefined
+  // Deep-debug M1 — on-demand refresh callable so the launcher can
+  // re-fetch when the user opens the modal. The server's PAT
+  // health check updates every 6h on its own ticker; without the
+  // on-demand refresh an admin who stays logged in past a token
+  // expiry never sees the banner until next login. Stable identity
+  // via useCallback so the BugReportButton's `onRefreshConfig`
+  // prop reference doesn't churn.
+  const refreshBugReportConfig = useCallback(() => {
+    if (!userIdForBugReport) return
+    getBugReportConfig()
+      .then(cfg => setBugReportConfig(cfg))
+      .catch(err => {
+        if (err && (err as Error).name === 'AbortError') return
+        console.warn('[Aurora] bug-report config refresh failed', err)
+      })
+  }, [userIdForBugReport])
   useEffect(() => {
     if (!userIdForBugReport) return
     const ac = new AbortController()
     getBugReportConfig(ac.signal)
       .then(cfg => {
         if (ac.signal.aborted) return
-        setBugReportEnabled(!!cfg?.enabled)
+        setBugReportConfig(cfg)
       })
       .catch(err => {
         if (err && (err as Error).name === 'AbortError') return
@@ -7866,11 +7883,17 @@ export default function App() {
           - Component itself also hides when admin panels open
             (Server / Notifications at z-[45] cover the launcher
             on mobile — holistic deep-debug H2). */}
-      {bugReportEnabled && (
+      {bugReportConfig?.enabled && (
         <BugReportButton
           prefillName={user.username}
           onToast={addToast}
           hidden={!!playerTarget || serverOpen || notifOpen}
+          // 2026-05-27 — PAT health diagnostics. Server populates
+          // these fields only for admin requesters; the modal shows
+          // a warning banner when token_healthy === false.
+          tokenHealthy={bugReportConfig.token_healthy}
+          tokenHealthReason={bugReportConfig.token_health_reason}
+          onRefreshConfig={refreshBugReportConfig}
         />
       )}
 
