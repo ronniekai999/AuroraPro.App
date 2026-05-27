@@ -1857,3 +1857,75 @@ export function withToken(url: string): string {
   const sep = url.includes('?') ? '&' : '?'
   return url + sep + 'token=' + encodeURIComponent(t)
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Bug-report (Phase 1 MVP)
+//
+// Backed by /api/feedback. Off by default on the server; the frontend
+// gates the launcher button on `enabled` from getBugReportConfig().
+// When enabled, submitBugReport posts a multipart form with the
+// user's title + description (+ optional file attachment) and the
+// server creates a GitHub issue. Returns the public issue URL the
+// toast deep-links to.
+
+export interface BugReportConfig {
+  enabled: boolean
+}
+
+export async function getBugReportConfig(signal?: AbortSignal): Promise<BugReportConfig> {
+  return apiFetch<BugReportConfig>('/api/feedback/config', { signal })
+}
+
+export interface BugReportSubmitResult {
+  issue_url: string
+  issue_number: number
+}
+
+export interface BugReportInput {
+  title: string
+  description: string
+  name?: string // free-form display name, prefilled from user.email
+  attachment?: File
+}
+
+export async function submitBugReport(
+  input: BugReportInput,
+  signal?: AbortSignal,
+): Promise<BugReportSubmitResult> {
+  const fd = new FormData()
+  fd.append('title', input.title)
+  fd.append('description', input.description)
+  if (input.name) fd.append('name', input.name)
+  if (input.attachment) fd.append('attachment', input.attachment, input.attachment.name)
+  // Use apiFetchResponse directly so we control the body type (don't
+  // let apiFetch JSON-encode the FormData). Browser sets the proper
+  // multipart/form-data; boundary header automatically when body is
+  // a FormData instance.
+  const res = await apiFetchResponse('/api/feedback', {
+    method: 'POST',
+    body: fd,
+    signal,
+  })
+  const ct = res.headers.get('content-type') || ''
+  const parseBody = async (): Promise<unknown> => {
+    if (ct.includes('application/json')) {
+      try { return await res.json() } catch { return null }
+    }
+    return await res.text()
+  }
+  if (!res.ok) {
+    const body = await parseBody()
+    let message = `HTTP ${res.status}`
+    if (body && typeof body === 'object' && 'error' in body) {
+      const errField = (body as Record<string, unknown>).error
+      if (typeof errField === 'string') {
+        message = errField
+      } else if (errField && typeof errField === 'object' && 'message' in errField) {
+        const nested = (errField as Record<string, unknown>).message
+        if (typeof nested === 'string') message = nested
+      }
+    }
+    throw new APIError(res.status, message, body)
+  }
+  return (await parseBody()) as BugReportSubmitResult
+}

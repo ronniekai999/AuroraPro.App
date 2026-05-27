@@ -327,6 +327,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
 	}
+	// Bug-report (Phase 1 MVP). Constructor returns a handler even
+	// when the feature is disabled — its routes self-gate via
+	// cfg.Enabled so misconfiguration shows up as a 404/503 rather
+	// than a startup panic. The image cache dir is reused for
+	// attachment storage under <ImageDir>/bug-reports/.
+	feedbackH := NewFeedbackHandler(deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir)
 	partyH := NewPartyHandler(
 		deps.PartyManager,
 		deps.Queries,
@@ -394,6 +400,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// Cached on disk so repeated social-media-crawler hits don't
 		// re-render the image.
 		r.Get("/api/parties/{code}/share-image.png", partyShareH.ServeShareImage)
+
+		// Bug-report attachments (public — the filename is a 128-bit
+		// random hex string which serves as the access token, same
+		// shape as the party share-image route above). Allows GitHub's
+		// image proxy to render the attachment in the issue body.
+		// Handler 404s when the feature flag is off OR the requested
+		// filename doesn't match the whitelisted shape, so this route
+		// is inert until an operator enables BUG_REPORT_ENABLED.
+		r.Get("/api/feedback/attachments/{name}", feedbackH.ServeAttachment)
 
 		// M4 — magic-link landing lookup. Unauthenticated by design so the
 		// /p/{code} page can render basic context (party name, "room
@@ -697,6 +712,18 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/", requestH.List)
 				r.Post("/", requestH.Create)
 				r.Delete("/{id}", requestH.Delete)
+			})
+
+			// Bug report (Phase 1 MVP). Both routes are authed — we
+			// don't expose feature-flag state to anonymous users, and
+			// only authed users can submit issues (so the username
+			// appears in the GitHub issue for triage).
+			// The public attachment-serve route is wired separately
+			// above in the unauthenticated block.
+			r.Route("/api/feedback", func(r chi.Router) {
+				r.Use(middleware.Timeout(60 * time.Second))
+				r.Get("/config", feedbackH.GetConfig)
+				r.Post("/", feedbackH.Submit)
 			})
 
 			// Watch Party (REST endpoints)

@@ -26,6 +26,28 @@ type Config struct {
 	Requests   RequestsConfig
 	WatchParty WatchPartyConfig
 	LLM        LLMConfig
+	BugReport  BugReportConfig
+}
+
+// BugReportConfig controls the in-app "Report a Bug" feature. When
+// disabled (default), the frontend hides the launcher button and the
+// backend rejects /api/feedback submissions with 404. Operators turn it
+// on by setting BUG_REPORT_ENABLED=true and providing a GitHub PAT +
+// repo + public-base URL.
+//
+// Why env-var-only (not server_settings DB): the GitHub PAT has write
+// access to the repo; server_settings stores values as plaintext today,
+// so DB storage is the wrong layer until encryption-at-rest lands.
+//
+// PublicBaseURL is the externally-reachable URL of this Aurora deploy
+// (e.g. "https://aurora.example.com"). Used to build absolute attachment
+// URLs that GitHub's image proxy can fetch when rendering the issue
+// body. Must NOT include a trailing slash.
+type BugReportConfig struct {
+	Enabled       bool
+	GitHubToken   string // PAT with Issues:write + Contents:read scope (or full `repo` for private repos)
+	GitHubRepo    string // "owner/repo", e.g. "your-org/aurora-bug-reports"
+	PublicBaseURL string // e.g. "https://aurora.example.com" (no trailing slash)
 }
 
 // LLMConfig governs the local-LLM sidecar used for semantic search and
@@ -944,6 +966,26 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("AURORA_TURN_CREDENTIAL"); v != "" {
 		cfg.WatchParty.VoiceTURNCredential = v
+	}
+
+	// Bug-report feature (in-app "Report a Bug" → creates GitHub issue).
+	// Off by default; operators opt in by setting all four env vars.
+	// Missing GITHUB_TOKEN / GITHUB_REPO / PUBLIC_BASE_URL while
+	// BUG_REPORT_ENABLED=true is a misconfiguration — handlers return
+	// 503 with a clear message rather than panicking, so the operator
+	// sees the problem on first submission attempt.
+	if v := os.Getenv("BUG_REPORT_ENABLED"); v != "" {
+		cfg.BugReport.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	if v := os.Getenv("BUG_REPORT_GITHUB_TOKEN"); v != "" {
+		cfg.BugReport.GitHubToken = v
+	}
+	if v := os.Getenv("BUG_REPORT_GITHUB_REPO"); v != "" {
+		cfg.BugReport.GitHubRepo = v
+	}
+	if v := os.Getenv("BUG_REPORT_PUBLIC_BASE_URL"); v != "" {
+		// Strip trailing slash to keep attachment URL composition simple.
+		cfg.BugReport.PublicBaseURL = strings.TrimRight(v, "/")
 	}
 }
 
