@@ -1,8 +1,10 @@
-// BugReportButton — floating bottom-left launcher for the bug-report
+// BugReportButton — floating bottom-RIGHT launcher for the bug-report
 // modal. Hidden when the operator hasn't enabled the feature flag,
-// AND visually hidden when other surfaces compete for bottom-left
-// real estate (video player, server status panel, notifications
-// panel).
+// AND visually hidden when other surfaces compete for the
+// bottom-right / right-edge real estate (video player, server status
+// panel, notifications panel, party drawer). PR #107 moved this
+// from bottom-LEFT (where the sidebar buried it at higher z); PR
+// #107 follow-up restored mobile/party gating per deep-debug.
 //
 // The launcher button itself toggles visibility via `display: none`
 // while `hidden` is true — but the COMPONENT stays mounted, and so
@@ -13,7 +15,11 @@
 // the recording completes normally. (Holistic deep-debug M1.)
 //
 // Visual treatment: small subtle pill. z-[40] — above page content,
-// below modals (z-[60-80]) and the sidebar drawer.
+// below modals (z-[60-80]), party drawer (z-[70]), server/notif
+// panels (z-[45]), and the toast column (z-[200]). Position is
+// `right-6, bottom: max(5rem, 5rem + safe-area-inset-bottom)` so
+// the pill clears the toast column AND the iOS home-indicator
+// gesture region.
 
 import { useState } from 'react'
 import { BugReportModal } from './BugReportModal'
@@ -27,10 +33,11 @@ interface Props {
   // Receives the message + a 'success' type; if the toast widget
   // doesn't natively support links, the URL is appended in plain text.
   onToast: (message: string, type: 'success' | 'error' | 'info') => void
-  // Hide the launcher pill while another bottom-left / fullscreen
-  // surface is open (video player, server status, notifications).
-  // Component stays mounted so the modal can outlive the visibility
-  // change — see file-level comment.
+  // Hide the launcher pill while another full-screen / right-edge
+  // surface is open (video player, server status panel, notif
+  // panel, watch-party drawer). Component stays mounted so the
+  // modal can outlive the visibility change — see file-level
+  // comment.
   hidden?: boolean
   // 2026-05-27 — PAT health diagnostics, populated by the server
   // only for admin requesters. Forwarded to the modal so the
@@ -93,23 +100,30 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
         // handler's ignoreElements predicate filters on this attribute
         // so the bug-report meta-UI doesn't leak into bug evidence.
         data-screenshot-exclude="true"
-        // Holistic deep-debug H2/M1 — `display: none` (not
-        // conditional unmount) when `hidden` so the modal state
-        // persists across player open/close events.
-        style={hidden ? { display: 'none' } : undefined}
-        // 2026-05-27 — Moved from bottom-left to bottom-right. The
-        // original `bottom-4 left-4` position landed at viewport
-        // x≈16, INSIDE the left sidebar's 252px footprint, where
-        // the higher-z sidebar nav items (Settings / Notifications)
-        // visually covered the launcher pill. bottom-right keeps the
-        // launcher away from the sidebar AND away from the
-        // ServerPanel/NotificationPanel (which open at `left-[252px]`
-        // on desktop). Toasts also live bottom-right at z-[200] but
-        // stack from `bottom-6` upward — the launcher at `bottom-4`
-        // sits BELOW the toast column so they don't collide. The
-        // `right-6` aligns the right edge of the launcher with the
-        // right edge of the toast column for visual rhythm.
-        className="fixed bottom-4 right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
+        // 2026-05-27 — Bottom-right launcher. Original `bottom-4
+        // left-4` was buried behind the left sidebar; bottom-right
+        // keeps the launcher in clear space.
+        //
+        // PR #107 follow-up (deep-debug M2/M3):
+        // - `bottom: 5rem` (was `bottom-4`) so the launcher sits
+        //   ABOVE the toast column (`bottom-6 right-6`, toasts ~52px
+        //   tall stacking upward to ~y=76). Previous `bottom-4`
+        //   placed the pill at y=16-50 which overlapped toasts by
+        //   ~24px; toasts win on z (200 vs 40) and would temporarily
+        //   bury the launcher on every notification.
+        // - Inline `bottom` resolves to `max(5rem, 5rem + safe-area)`
+        //   so on iOS Safari the home-indicator gesture region
+        //   (bottom 8-15px) doesn't steal taps. The wider Aurora UI
+        //   doesn't handle safe-area yet; the launcher does because
+        //   it's the lowest-Y interactive element on the right.
+        // - Holistic deep-debug H2/M1 retained — `display: none`
+        //   (not conditional unmount) when `hidden` so the modal
+        //   state persists across player open/close events.
+        style={{
+          bottom: 'max(5rem, calc(5rem + env(safe-area-inset-bottom, 0px)))',
+          ...(hidden ? { display: 'none' } : {}),
+        }}
+        className="fixed right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
             Bug icon = stylized beetle with antennae and legs (Feather's
