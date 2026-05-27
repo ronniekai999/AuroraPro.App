@@ -152,6 +152,19 @@ const (
 	// via BUG_REPORT_ATTACHMENT_TTL_DAYS / BUG_REPORT_JANITOR_INTERVAL_HOURS.
 	defaultAttachmentTTL        = 30 * 24 * time.Hour
 	defaultJanitorSweepInterval = time.Hour
+
+	// 2026-05-27 — GitHub Camo (the image proxy that serves embedded
+	// issue-body images) rejects images > ~5 MB. Embeds above this
+	// limit render as the broken-image icon for everyone viewing the
+	// issue, even though the underlying file at our serve endpoint
+	// returns 200 OK with the correct Content-Type. So: gate the
+	// inline `![attachment](...)` Markdown at 4.5 MB (buffer below
+	// Camo's threshold). Files above the cap still get a clickable
+	// hyperlink + a friendly note explaining that they need to click
+	// the link to view. Videos (.webm, .mp4) ALWAYS skip the embed —
+	// GitHub doesn't render `![](video.webm)` as a player anyway, so
+	// the embed would always show broken for them.
+	camoEmbedMaxBytes = 4_500_000
 	// Background sweep cadence for the rate-limiter map — same
 	// pattern as auth.RateLimiter. Prevents the map from accumulating
 	// permanent entries for users who submitted once and never came
@@ -724,6 +737,8 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// budget on parts that get discarded.
 	var attachmentURL string
 	var savedAttachmentName string // tracked for failure-path cleanup (deep-debug #10)
+	var attachmentSize int64
+	var attachmentMime string
 	if r.MultipartForm != nil && len(r.MultipartForm.File["attachment"]) > 1 {
 		writeError(w, http.StatusBadRequest, "only one attachment is allowed per report")
 		return
@@ -762,6 +777,8 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		attachmentURL = h.cfg.PublicBaseURL + "/api/feedback/attachments/" + savedName
+		attachmentSize = fh.Size
+		attachmentMime = mimeForAttachment(savedName)
 	}
 
 	// Phase 3 (deep-debug Phase 3 H1) — per-user rate limit moved to
@@ -806,7 +823,7 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// Build the issue body. Putting submitter context (name + Aurora
 	// username) at the bottom keeps the user's description the lede
 	// for triagers reading on GitHub.
-	body := buildIssueBody(desc, name, claims.Username, attachmentURL, env)
+	body := buildIssueBody(desc, name, claims.Username, attachmentURL, attachmentSize, attachmentMime, env)
 
 	// Use the request's context so a client disconnect aborts the
 	// in-flight GitHub call cleanly.
@@ -1052,7 +1069,7 @@ func mimeForAttachment(name string) string {
 // every line) so any internal Markdown the user wrote still renders,
 // but it's visually enclosed and clearly delimited from server-
 // composed content.
-func buildIssueBody(description, name, username, attachmentURL string, env environmentContext) string {
+func buildIssueBody(description, name, username, attachmentURL string, attachmentSize int64, attachmentMime string, env environmentContext) string {
 	var b strings.Builder
 	// User description as a quoted block. Any line they wrote (incl.
 	// `---`, `#`, `>`, etc.) is rendered inside the quote so they
@@ -1067,9 +1084,35 @@ func buildIssueBody(description, name, username, attachmentURL string, env envir
 		b.WriteString("**Attachment:** ")
 		b.WriteString(attachmentURL)
 		b.WriteString("\n\n")
-		b.WriteString("![attachment](")
-		b.WriteString(attachmentURL)
-		b.WriteString(")\n\n")
+		// 2026-05-27 — Conditionally embed via `![](...)`. GitHub Camo
+		// (the image proxy that serves embedded issue-body images)
+		// rejects images > ~5 MB; the embed shows a broken-image icon
+		// for everyone viewing the issue. Files above the cap get the
+		// hyperlink only + a friendly note. Videos (.webm, .mp4)
+		// always skip — GitHub doesn't render video embeds in issue
+		// bodies anyway, the embed would always be broken.
+		//
+		// Deep-debug M6 — explicit `image/` whitelist (was
+		// `!isVideo` blacklist). If safeExtension's whitelist ever
+		// grows beyond images + videos (e.g. .pdf, .log), those
+		// non-image MIME types would no longer accidentally fall
+		// into the embed branch and produce broken Camo renders.
+		isImage := strings.HasPrefix(attachmentMime, "image/")
+		isVideo := strings.HasPrefix(attachmentMime, "video/")
+		canEmbed := isImage && attachmentSize > 0 && attachmentSize <= camoEmbedMaxBytes
+		switch {
+		case canEmbed:
+			b.WriteString("![attachment](")
+			b.WriteString(attachmentURL)
+			b.WriteString(")\n\n")
+		case isVideo:
+			b.WriteString("_(video attachment — click the link above to download and view)_\n\n")
+		case isImage && attachmentSize > camoEmbedMaxBytes:
+			b.WriteString(fmt.Sprintf(
+				"_(image is %.1f MB, above GitHub's ~5 MB inline-embed limit — click the link above to view full size)_\n\n",
+				float64(attachmentSize)/1024/1024,
+			))
+		}
 	}
 	// 2026-05-27 — Auto-collected environment context. Collapsed
 	// `<details>` block so the issue body stays scannable but

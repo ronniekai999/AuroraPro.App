@@ -65,6 +65,104 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024 // 25 MiB
 // (users can still pick anything); the server is the source of truth.
 const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,video/webm,video/mp4'
 
+// 2026-05-27 — Threshold above which image attachments get compressed
+// client-side BEFORE upload. GitHub's Camo image proxy refuses to
+// serve embedded issue-body images > ~5 MB, so the inline preview
+// would otherwise show a broken-image icon for every triager
+// reviewing the report. 4 MB triggers compression; the encoded
+// output is accepted as long as it fits the server-side embed gate
+// (4.5 MB). Videos are NOT compressed here (would require a heavy
+// FFmpeg-in-the-browser dep) — the server-side embed gate handles
+// the GitHub-render path for videos by skipping the embed entirely.
+const COMPRESS_TRIGGER_BYTES = 4 * 1024 * 1024 // 4 MB — start compressing above this
+// Deep-debug M5 — accept compressed output up to the server's embed
+// gate (4.5 MB) rather than the trigger (4 MB). Previously a JPEG
+// output of e.g. 4.2 MB was REJECTED because it exceeded the
+// trigger, so the un-compressed original (could be 25 MB) shipped
+// instead — wasting bandwidth and missing the embed gate. The
+// embed-gate threshold matches the server's camoEmbedMaxBytes
+// constant in internal/api/feedback_handlers.go.
+const COMPRESS_ACCEPT_BYTES = 4_500_000 // 4.5 MB — accept anything that fits the embed gate
+
+// Max dimension for compressed images. 1920px wide covers virtually
+// all triage use cases (UI screenshots, error dialogs); details
+// remain legible without producing massive blob URLs. If the source
+// is already smaller in both dimensions, dimensions are preserved.
+const COMPRESS_MAX_DIM = 1920
+
+// compressImageIfLarge re-encodes an image File at lower resolution
+// and/or JPEG-quality so the resulting blob is small enough to embed
+// in a GitHub issue. Strategy:
+//   1. Load the source via blob URL + an <img> element.
+//   2. Draw to a canvas at min(natural, MAX_DIM) — proportional scale.
+//   3. canvas.toBlob('image/png') first (preserves transparency).
+//   4. If still > threshold, fall back to JPEG @ quality 0.85.
+// Returns the original file unchanged on any failure (loader error,
+// canvas tainted, encoder returned null) — better to ship a too-big
+// file than refuse the user's submission.
+//
+// Skipped for non-images (videos, etc.) — they bypass and return
+// the input unchanged.
+async function compressImageIfLarge(file: File): Promise<File> {
+  if (!file.type.startsWith('image/')) return file
+  if (file.size <= COMPRESS_TRIGGER_BYTES) return file
+  try {
+    const srcURL = URL.createObjectURL(file)
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image()
+        el.onload = () => resolve(el)
+        el.onerror = () => reject(new Error('image load failed'))
+        el.src = srcURL
+      })
+      // Compute target dimensions — proportional scale to fit
+      // MAX_DIM in the larger axis.
+      const ratio = Math.min(1, COMPRESS_MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight))
+      const w = Math.round(img.naturalWidth * ratio)
+      const h = Math.round(img.naturalHeight * ratio)
+      const canvas = document.createElement('canvas')
+      canvas.width = w
+      canvas.height = h
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return file
+      ctx.drawImage(img, 0, 0, w, h)
+      // Deep-debug M3 — strip ANY existing extension and replace
+      // with the canonical one for the encoded format. The previous
+      // regex (`/\.(png|webp)$/i`) only matched a small allow-list,
+      // so a file named `cat.HEIC` or `screenshot` (no ext) kept the
+      // wrong extension and confused the server-side safeExtension
+      // check. `/\.[^.]+$/` matches the last dot + extension OR
+      // nothing (the empty match still works with replace).
+      const baseName = file.name.replace(/\.[^.]+$/, '')
+      // First pass: PNG (preserves transparency).
+      const png = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/png'))
+      if (png && png.size <= COMPRESS_ACCEPT_BYTES) {
+        return new File([png], `${baseName}.png`, { type: 'image/png' })
+      }
+      // Second pass: JPEG @ 85%. Drops transparency but covers the
+      // realistic abuse case (huge full-resolution Retina PNGs).
+      // Deep-debug M5 — accept anything ≤ COMPRESS_ACCEPT_BYTES
+      // (4.5 MB, matches server embed gate) rather than the 4 MB
+      // trigger; previously a 4.2 MB JPEG was rejected here and
+      // the un-compressed (often 10-25 MB) original shipped instead.
+      const jpeg = await new Promise<Blob | null>(res => canvas.toBlob(res, 'image/jpeg', 0.85))
+      if (jpeg && jpeg.size <= COMPRESS_ACCEPT_BYTES) {
+        return new File([jpeg], `${baseName}.jpg`, { type: 'image/jpeg' })
+      }
+      // Both passes still too big — return original. The server-side
+      // embed gate will skip the inline render but keep the link.
+      return file
+    } finally {
+      URL.revokeObjectURL(srcURL)
+    }
+  } catch {
+    // Anything went wrong → ship the original. Server still accepts
+    // the upload (up to 25 MB cap) and the link still works in the
+    // issue body; only the inline render is degraded.
+    return file
+  }
+}
+
 // Phase 3 — screen-recording hard cap. WebM at ~1080p with VP9
 // averages 1-3 MB/sec, so 30s stays well under the 25 MB attachment
 // cap with headroom for high-motion frames. Auto-stop on timer
@@ -78,6 +176,14 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   const [attachment, setAttachment] = useState<File | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 2026-05-27 — Post-submit success state. When non-null, the modal
+  // body is replaced with a thank-you panel showing the issue number
+  // (NOT a link — the GitHub repo is private and the URL would be a
+  // login-wall for users without repo access). Previously the modal
+  // closed and opened the issue URL in a new tab, which 404'd for
+  // most users. The parent's onSubmitted still fires so a subtle
+  // toast can confirm the submission.
+  const [submittedResult, setSubmittedResult] = useState<BugReportSubmitResult | null>(null)
   // 2026-05-27 (Phase 2) — `capturing` is true while the screenshot
   // library (html-to-image since the 2026-05-27 swap; was
   // html2canvas) is rasterizing the page. The modal panel goes
@@ -140,6 +246,14 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   // the input value (otherwise the picker still shows the old
   // filename even when state.attachment is null). Deep-debug #26.
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // 2026-05-27 (deep-debug H2) — monotonic ID for attachment-set
+  // operations. compressImageIfLarge takes 1-3s on big inputs; if
+  // the user clicks Capture or picks a new file mid-compression,
+  // the older promise resolves and overwrites the newer attachment
+  // unless we gate on the operation ID. Each call to
+  // beginAttachmentOp() returns a fresh ID; the result-set is
+  // applied only when the ID still matches the latest.
+  const attachmentOpRef = useRef(0)
   // Title-input ref for auto-focus on mount. Deep-debug #5.
   const titleInputRef = useRef<HTMLInputElement>(null)
   // Modal root ref for focus-trap. Deep-debug #5.
@@ -243,10 +357,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     setAttachment(file)
   }
 
-  const handleAttachmentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0] ?? null
-    if (file && file.size > MAX_ATTACHMENT_BYTES) {
-      setError(`Attachment exceeds 25 MB (got ${(file.size / 1024 / 1024).toFixed(1)} MB).`)
+  const handleAttachmentChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.files?.[0] ?? null
+    if (raw && raw.size > MAX_ATTACHMENT_BYTES) {
+      setError(`Attachment exceeds 25 MB (got ${(raw.size / 1024 / 1024).toFixed(1)} MB).`)
       // Clear the picker so the user has to pick again — without this,
       // the file name keeps showing even though we're refusing it.
       e.target.value = ''
@@ -254,6 +368,23 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       return
     }
     setError(null)
+    if (!raw) {
+      setAttachmentWithPreview(null)
+      return
+    }
+    // 2026-05-27 — Compress huge images before they hit the wire so the
+    // resulting GitHub-issue embed actually renders (Camo refuses
+    // images > ~5 MB). compressImageIfLarge is a no-op for files
+    // already small enough or for video MIME types.
+    //
+    // Deep-debug H2 — capture our operation ID before the async
+    // compression; only apply the result if we're still the latest
+    // attachment-set operation. Without this, a slow compression
+    // can overwrite a faster Capture / re-pick performed during
+    // the wait.
+    const opId = ++attachmentOpRef.current
+    const file = await compressImageIfLarge(raw)
+    if (!mountedRef.current || opId !== attachmentOpRef.current) return
     setAttachmentWithPreview(file)
   }
 
@@ -396,11 +527,23 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         setCaptureAnnounce('Capture too large.')
         return
       }
-      const file = new File(
+      const rawFile = new File(
         [blob],
         `aurora-screenshot-${Date.now()}.png`,
         { type: 'image/png' },
       )
+      // 2026-05-27 — Run captured screenshots through the same
+      // compression pass as disk uploads. html-to-image at
+      // pixelRatio=2 on a 4K viewport can still produce >4 MB PNGs
+      // that won't render in the GitHub issue embed via Camo.
+      // compressImageIfLarge is a no-op when already small enough.
+      //
+      // Deep-debug H2 — operation-ID guard so a slow Capture
+      // compression can't overwrite a newer disk pick / Capture
+      // that landed during the wait.
+      const opId = ++attachmentOpRef.current
+      const file = await compressImageIfLarge(rawFile)
+      if (!mountedRef.current || opId !== attachmentOpRef.current) return
       setAttachmentWithPreview(file)
       setCaptureAnnounce('Screenshot attached.')
       // Reset the file picker so the user can clear-and-pick again
@@ -426,6 +569,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   // stale filename. Phase 2: also revokes the captured-screenshot
   // preview URL via the shared helper.
   const handleClearAttachment = () => {
+    // Deep-debug H2 — bump the op ID so any in-flight compression
+    // promise no-ops when it resolves (would otherwise restore the
+    // attachment the user just cleared).
+    attachmentOpRef.current++
     setAttachmentWithPreview(null)
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
@@ -732,8 +879,23 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         name: name.trim() || undefined,
         attachment: attachment ?? undefined,
       }, ac.signal)
-      onSubmitted(result)
-      onClose()
+      // 2026-05-27 — Switch the modal body to the success view instead
+      // of closing + opening the GitHub URL in a new tab. The repo is
+      // private; the URL is a login wall for users without repo
+      // access. The parent's onSubmitted still fires so the App-level
+      // toast confirms the submission, but the modal stays open with
+      // a thank-you and the issue number for reference. User closes
+      // explicitly via Done.
+      //
+      // Deep-debug H1 — both the in-modal state update AND the
+      // parent's onSubmitted are guarded by mountedRef. If the
+      // modal unmounts during the await window (external trigger:
+      // parent route change, error boundary), the toast for a
+      // disengaged user is suppressed.
+      if (mountedRef.current) {
+        setSubmittedResult(result)
+        onSubmitted(result)
+      }
     } catch (err) {
       // Aborts are user-initiated (Cancel); don't surface them as
       // errors. AbortError comes from fetch when signal.aborted.
@@ -788,27 +950,85 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
         aria-labelledby="bug-report-title"
         aria-busy={capturing || submitting || recording}
       >
-        {/* Header */}
+        {/* Header — transforms into a success state once the report
+            lands. The submittedResult path replaces the "Bug Report"
+            chip with a green "Reported" chip and swaps the title +
+            subtitle accordingly. Same header structure so the modal
+            doesn't visually jump. */}
         <div className="px-6 pt-6 pb-4 border-b border-white/[0.04]">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 mb-3">
-            <span className="text-rose-200 text-xs font-medium uppercase tracking-wider">
-              Bug Report
-            </span>
-          </div>
-          <h2 id="bug-report-title" className="text-white text-2xl font-bold font-display">
-            Report a Bug
-          </h2>
-          <p className="text-white/50 text-sm mt-1">
-            Help us improve Aurora — this opens a GitHub issue with the details below.
-          </p>
+          {submittedResult ? (
+            <>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 mb-3">
+                <span className="text-emerald-200 text-xs font-medium uppercase tracking-wider">
+                  Reported · #{submittedResult.issue_number}
+                </span>
+              </div>
+              <h2 id="bug-report-title" className="text-white text-2xl font-bold font-display">
+                Thanks — got it!
+              </h2>
+              <p className="text-white/50 text-sm mt-1">
+                Your report was filed as issue <span className="font-mono text-white/70">#{submittedResult.issue_number}</span>. The Aurora team will take a look.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 mb-3">
+                <span className="text-rose-200 text-xs font-medium uppercase tracking-wider">
+                  Bug Report
+                </span>
+              </div>
+              <h2 id="bug-report-title" className="text-white text-2xl font-bold font-display">
+                Report a Bug
+              </h2>
+              <p className="text-white/50 text-sm mt-1">
+                Help us improve Aurora — this opens a GitHub issue with the details below.
+              </p>
+            </>
+          )}
         </div>
+
+        {/* Success view body — replaces the form once the report
+            lands. Single Done button closes the modal; we deliberately
+            do NOT include a link to the GitHub issue because the
+            repo is private (the URL is a login wall for users
+            without repo access). The issue number is the user's
+            reference for follow-up via chat / email. */}
+        {submittedResult && (
+          <div className="px-6 py-6 space-y-4">
+            <div className="flex items-start gap-3">
+              {/* Checkmark glyph */}
+              <div className="shrink-0 w-10 h-10 rounded-full bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-300">
+                <svg width={20} height={20} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+              </div>
+              <div className="text-white/80 text-sm">
+                <p>Submitted. Aurora's team will triage from here.</p>
+                <p className="text-white/50 text-xs mt-1">
+                  Reference: <span className="font-mono text-white/70">issue #{submittedResult.issue_number}</span>
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                autoFocus
+                className="px-5 py-2.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 2026-05-27 — Admin-only PAT health banner. The server
             populates tokenHealthy only for admin requesters, so this
             banner can't render for regular users. Amber matches the
             existing PII warning so admins see "operator action needed"
-            as a distinct visual class from form-error red. */}
-        {tokenHealthy === false && (
+            as a distinct visual class from form-error red. Hidden
+            after submit lands so the success view stays clean. */}
+        {!submittedResult && tokenHealthy === false && (
           <div
             className="mx-6 mt-4 rounded-lg bg-amber-500/10 border border-amber-500/40 px-3 py-2 text-amber-200 text-xs"
             role="alert"
@@ -820,7 +1040,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+        {!submittedResult && <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
           {/* Name. Deep-debug #7 — label clarifies that the value
               is visible in the public GitHub issue. */}
           <div>
@@ -1127,7 +1347,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
               {submitting ? 'Submitting…' : 'Submit Report'}
             </button>
           </div>
-        </form>
+        </form>}
       </div>
     </div>
     {/* Phase 3 deep-debug H4/M2 — Floating Stop pill rendered via
