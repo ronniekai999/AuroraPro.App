@@ -52,20 +52,29 @@ import (
 // tries to submit.
 //
 // Phase 3 added two background-state pieces:
-//   - submitLimiter: simple per-user-ID rate limiter (5 / hour by
-//     default) to protect the shared GitHub PAT and the local
-//     attachment cache from individual users in tight loops.
-//   - janitor: a goroutine that sweeps <cacheDir>/<uuid>.{png,jpg,
-//     jpeg,webp,webm,mp4} older than the TTL on a 1-hour cadence.
-//     Started by NewFeedbackHandler when the feature is enabled and
-//     stopped via the rootCtx Aurora passes at startup (matches the
-//     existing graceful-shutdown pattern used by request dispatch
-//     and the AI matcher backfill).
+//   - submitLimiter: per-user-ID rate limiter (default 5/hour;
+//     env-tunable via BUG_REPORT_RATE_LIMIT_MAX +
+//     BUG_REPORT_RATE_LIMIT_WINDOW_HOURS).
+//   - janitor: goroutine that sweeps <cacheDir>/<uuid>.{png,jpg,
+//     jpeg,webp,webm,mp4} older than the TTL (default 30d;
+//     env-tunable via BUG_REPORT_ATTACHMENT_TTL_DAYS) on a 1-hour
+//     cadence (default; env-tunable via
+//     BUG_REPORT_JANITOR_INTERVAL_HOURS). Started by
+//     NewFeedbackHandler when the feature is enabled; stopped via
+//     the rootCtx Aurora passes at startup (matches the existing
+//     graceful-shutdown pattern).
+//
+// effectiveTTL / effectiveSweepInterval are computed at handler
+// construction so the running goroutine has stable values for its
+// lifetime even if config changes (it would require a restart
+// anyway — Aurora doesn't hot-reload config).
 type FeedbackHandler struct {
-	cfg           config.BugReportConfig
-	client        *feedback.Client
-	cacheDir      string // absolute path to <Cache.ImageDir>/bug-reports
-	submitLimiter *feedbackLimiter
+	cfg                    config.BugReportConfig
+	client                 *feedback.Client
+	cacheDir               string // absolute path to <Cache.ImageDir>/bug-reports
+	submitLimiter          *feedbackLimiter
+	effectiveTTL           time.Duration
+	effectiveSweepInterval time.Duration
 }
 
 // Limits chosen to match GitHub's API constraints and the existing
@@ -83,30 +92,38 @@ const (
 	// (30 d) which made delete-and-replace effectively impossible.
 	attachmentCacheControl = "public, max-age=3600, s-maxage=86400"
 
-	// Phase 3 — per-user rate limit on Submit. 5 reports/hour matches
-	// the operational-notes guidance in docs/bug-report-setup.md.
-	// Lower than GitHub's secondary "abuse" limiter (~30/min) so a
-	// single user can't trip global throttling for everyone else.
-	feedbackRateMax    = 5
-	feedbackRateWindow = time.Hour
+	// Phase 3 — per-user rate limit on Submit. Defaults: 5
+	// reports/hour matches the operational-notes guidance in
+	// docs/bug-report-setup.md. Lower than GitHub's secondary "abuse"
+	// limiter (~30/min) so a single user can't trip global
+	// throttling for everyone else. Operators can override via
+	// BUG_REPORT_RATE_LIMIT_MAX / BUG_REPORT_RATE_LIMIT_WINDOW_HOURS.
+	defaultFeedbackRateMax    = 5
+	defaultFeedbackRateWindow = time.Hour
 	// Caps the per-user-ID map size so a federated/compromised-account
 	// flood can't grow unbounded memory. Mirrors auth.RateLimiter's
-	// maxVisitors design. With 5 timestamps * ~24 bytes each * 10k
-	// users = ~1.2 MB worst-case. Eviction kicks in at insert time
-	// when the cap is hit. (Phase 3 deep-debug H2.)
+	// maxVisitors design. Worst-case memory ≈ RateLimitMax timestamps
+	// × ~24 bytes × 10k users; with the default 5 timestamps that's
+	// ~1.2 MB, with the env-cap of 10k timestamps it's ~2.4 GB.
+	// (Hence the upper-bound checks on RateLimitMax in config.go.)
+	// Eviction kicks in at insert time when this cap is hit.
+	// (Phase 3 deep-debug H2.) Not env-tunable because it's a
+	// memory-safety floor, not a policy decision.
 	feedbackLimiterMaxUsers = 10_000
 
-	// Phase 3 — attachment janitor TTL + sweep cadence. 30 days
-	// matches the issue body's expected freshness window (an
-	// embedded GitHub issue image older than that almost certainly
-	// references a closed/abandoned report). Sweep every hour so
-	// disk doesn't fill between cadences on busy deploys.
-	attachmentTTL        = 30 * 24 * time.Hour
-	janitorSweepInterval = time.Hour
+	// Phase 3 — attachment janitor defaults. 30 days matches the
+	// issue body's expected freshness window (an embedded GitHub
+	// issue image older than that almost certainly references a
+	// closed/abandoned report). Sweep every hour so disk doesn't
+	// fill between cadences on busy deploys. Operators can override
+	// via BUG_REPORT_ATTACHMENT_TTL_DAYS / BUG_REPORT_JANITOR_INTERVAL_HOURS.
+	defaultAttachmentTTL        = 30 * 24 * time.Hour
+	defaultJanitorSweepInterval = time.Hour
 	// Background sweep cadence for the rate-limiter map — same
 	// pattern as auth.RateLimiter. Prevents the map from accumulating
 	// permanent entries for users who submitted once and never came
-	// back. (Phase 3 deep-debug M1.)
+	// back. (Phase 3 deep-debug M1.) Not env-tunable — purely
+	// internal bookkeeping.
 	limiterSweepInterval = time.Minute
 )
 
@@ -125,10 +142,49 @@ const (
 // works but the janitor doesn't start — useful for unit tests that
 // don't want a background goroutine churning the filesystem.
 func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDir string) *FeedbackHandler {
+	// Resolve each tunable: explicit positive cfg value wins; zero
+	// or negative falls back to default.
+	//
+	// Deep-debug #5 — negative non-zero values WARN here for
+	// parity with the env-parse path (which also warns on
+	// non-positive input). Today only env populates these fields,
+	// so the WARN is theoretical until a future config source
+	// (YAML, CLI flag) bypasses the env-parse layer. Belt-and-
+	// suspenders against silent operator misconfig.
+	rateMax := cfg.RateLimitMax
+	if rateMax < 0 {
+		slog.Warn("BugReport.RateLimitMax is negative; falling back to default", "value", rateMax)
+	}
+	if rateMax <= 0 {
+		rateMax = defaultFeedbackRateMax
+	}
+	rateWindow := cfg.RateLimitWindow
+	if rateWindow < 0 {
+		slog.Warn("BugReport.RateLimitWindow is negative; falling back to default", "value", rateWindow)
+	}
+	if rateWindow <= 0 {
+		rateWindow = defaultFeedbackRateWindow
+	}
+	ttl := cfg.AttachmentTTL
+	if ttl < 0 {
+		slog.Warn("BugReport.AttachmentTTL is negative; falling back to default", "value", ttl)
+	}
+	if ttl <= 0 {
+		ttl = defaultAttachmentTTL
+	}
+	sweep := cfg.JanitorSweepInterval
+	if sweep < 0 {
+		slog.Warn("BugReport.JanitorSweepInterval is negative; falling back to default", "value", sweep)
+	}
+	if sweep <= 0 {
+		sweep = defaultJanitorSweepInterval
+	}
 	h := &FeedbackHandler{
-		cfg:           cfg,
-		cacheDir:      filepath.Join(imageDir, "bug-reports"),
-		submitLimiter: newFeedbackLimiter(feedbackRateMax, feedbackRateWindow),
+		cfg:                    cfg,
+		cacheDir:               filepath.Join(imageDir, "bug-reports"),
+		submitLimiter:          newFeedbackLimiter(rateMax, rateWindow),
+		effectiveTTL:           ttl,
+		effectiveSweepInterval: sweep,
 	}
 	if cfg.Enabled {
 		client, err := feedback.New(cfg.GitHubToken, cfg.GitHubRepo)
@@ -153,12 +209,13 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 	return h
 }
 
-// runJanitor sweeps <cacheDir> every janitorSweepInterval and deletes
-// files older than attachmentTTL. Logs a startup INFO line so
-// operators can confirm the goroutine spawned (holistic deep-debug
-// L4); subsequent sweep summaries log INFO when >= 10 files removed,
-// DEBUG otherwise to keep low-traffic deploys out of operator logs.
-// The goroutine exits when ctx is cancelled (server shutdown).
+// runJanitor sweeps <cacheDir> every h.effectiveSweepInterval and
+// deletes files older than h.effectiveTTL (both env-tunable, default
+// 1h / 30d). Logs a startup INFO line so operators can confirm the
+// goroutine spawned (holistic deep-debug L4); subsequent sweep
+// summaries log INFO when >= 10 files removed, DEBUG otherwise to
+// keep low-traffic deploys out of operator logs. The goroutine
+// exits when ctx is cancelled (server shutdown).
 //
 // Why sweep on a ticker (not on every Submit): bug-report traffic is
 // bursty (clustered around new releases). A submit-time sweep would
@@ -172,12 +229,25 @@ func (h *FeedbackHandler) runJanitor(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Deep-debug #4 — defense-in-depth recover. time.NewTicker
+	// panics on a non-positive interval; config-resolution catches
+	// the documented paths today, but a future config source could
+	// produce sub-second-but-positive overflow corner cases that
+	// reach here. A panic in this goroutine should be logged + the
+	// goroutine should exit cleanly, NOT crash the Aurora process.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("feedback janitor: panic recovered — janitor exiting",
+				"panic", r,
+				"sweep_interval", h.effectiveSweepInterval.String())
+		}
+	}()
 	slog.Info("feedback janitor: started",
-		"sweep_interval", janitorSweepInterval.String(),
-		"ttl", attachmentTTL.String(),
+		"sweep_interval", h.effectiveSweepInterval.String(),
+		"ttl", h.effectiveTTL.String(),
 		"cache_dir", h.cacheDir)
 	h.sweepAttachments()
-	ticker := time.NewTicker(janitorSweepInterval)
+	ticker := time.NewTicker(h.effectiveSweepInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -190,9 +260,9 @@ func (h *FeedbackHandler) runJanitor(ctx context.Context) {
 }
 
 // sweepAttachments scans h.cacheDir and removes files older than
-// attachmentTTL. Failures (missing dir, read errors) are logged and
-// the function returns cleanly — janitor lifecycle MUST NOT crash
-// the parent goroutine on transient FS issues.
+// h.effectiveTTL (env-tunable). Failures (missing dir, read errors)
+// are logged and the function returns cleanly — janitor lifecycle
+// MUST NOT crash the parent goroutine on transient FS issues.
 func (h *FeedbackHandler) sweepAttachments() {
 	entries, err := os.ReadDir(h.cacheDir)
 	if err != nil {
@@ -203,7 +273,7 @@ func (h *FeedbackHandler) sweepAttachments() {
 		}
 		return
 	}
-	cutoff := time.Now().Add(-attachmentTTL)
+	cutoff := time.Now().Add(-h.effectiveTTL)
 	var removed, kept int
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -239,12 +309,12 @@ func (h *FeedbackHandler) sweepAttachments() {
 		slog.Info("feedback janitor: swept attachments",
 			"removed", removed,
 			"kept", kept,
-			"ttl", attachmentTTL.String())
+			"ttl", h.effectiveTTL.String())
 	} else if removed > 0 {
 		slog.Debug("feedback janitor: swept attachments",
 			"removed", removed,
 			"kept", kept,
-			"ttl", attachmentTTL.String())
+			"ttl", h.effectiveTTL.String())
 	}
 }
 
