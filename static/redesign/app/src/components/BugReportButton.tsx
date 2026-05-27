@@ -59,23 +59,12 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
   const [modalOpen, setModalOpen] = useState(false)
 
   const handleSubmitted = (result: BugReportSubmitResult) => {
-    // Deep-debug #6 — the toast widget renders message text as
-    // inert text (not auto-linkified), so a URL in the toast is a
-    // dead string the user has ~3s to memorize. Open the issue in
-    // a new tab immediately so the user can verify the report
-    // landed; the toast becomes a confirmation rather than the
-    // only access path.
-    //
-    // Use 'noopener,noreferrer' so the new tab can't access this
-    // window's window.opener (security best practice for any
-    // user-driven new-tab open).
-    try {
-      window.open(result.issue_url, '_blank', 'noopener,noreferrer')
-    } catch {
-      // Popup blocker / browser refusal — fall through to the toast
-      // text so the URL is at least visible somewhere.
-    }
-    onToast(`Bug reported — issue #${result.issue_number} created. Opened in a new tab.`, 'success')
+    // 2026-05-27 — Dropped the window.open(issue_url) — Aurora's
+    // upstream GitHub repo is private, so the URL was a login wall
+    // for most users. The modal now shows an in-modal thank-you
+    // panel with the issue number; this toast is the subtle
+    // confirmation that backs it up.
+    onToast(`Bug reported — issue #${result.issue_number} created. Thanks!`, 'success')
   }
 
   return (
