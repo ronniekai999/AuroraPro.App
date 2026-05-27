@@ -303,8 +303,18 @@ func (m *AIMatcher) RetryAutoPromote(ctx context.Context, item *models.MediaItem
 	// NOT overwrite it. Re-fetch since the queue-paged copy may be
 	// stale (the predicate matched at fetch-time but the row could
 	// have flipped seconds later via the manual-match UI).
+	//
+	// 2026-05-27 (deep-debug Bug 6 fix) — surface the GetMediaItem
+	// err instead of swallowing it. The whole point of this check is
+	// to prevent overwriting a concurrent ManualMatch; treating an
+	// unreachable DB as "safe to proceed" defeats that. Caller logs
+	// the err and the retry pass will try again on the next backfill
+	// run (when the DB is hopefully back).
 	current, err := m.queries.GetMediaItem(ctx, item.ID)
-	if err == nil && current != nil && current.MatchStatus == matchStatusMatched {
+	if err != nil {
+		return false, fmt.Errorf("retry pre-check: %w", err)
+	}
+	if current != nil && current.MatchStatus == matchStatusMatched {
 		slog.Info("ai matcher: retry skipped, item matched concurrently",
 			"item_id", item.ID, "tmdb_id", *item.AISuggestedTMDBID)
 		return false, nil

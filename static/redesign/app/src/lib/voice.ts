@@ -399,13 +399,28 @@ export function createVoiceController(opts: CreateOptions): VoiceController {
       try {
         if (navigator.permissions && (navigator.permissions as Permissions).query) {
           // 'microphone' isn't in lib.dom yet on all TS configs, hence the cast.
-          const status = await (navigator.permissions as Permissions).query({ name: 'microphone' as PermissionName })
-          if (status.state === 'denied') {
+          // 2026-05-27 (deep-debug Bug 11) — renamed local var from `status`
+          // to `permState` to avoid shadowing the outer `status` (the voice
+          // controller's user-facing status string set on line 386 above).
+          // Block-scope wouldn't have caused a bug since the inner is only
+          // used here, but the shadow is a footgun for future edits.
+          const permState = await (navigator.permissions as Permissions).query({ name: 'microphone' as PermissionName })
+          if (permState.state === 'denied') {
             richErr.reason = 'denied'      // explicit deny — needs settings change
-          } else if (status.state === 'prompt') {
+          } else if (permState.state === 'prompt') {
             richErr.reason = 'prompt'      // user dismissed/closed prompt without choosing
-          } else if (status.state === 'granted') {
-            richErr.reason = 'device'      // perm OK but device unavailable
+          } else if (permState.state === 'granted') {
+            // 2026-05-27 (deep-debug Bug 12) — "granted" here is ambiguous:
+            // the browser-level permission is OK, but getUserMedia STILL
+            // threw NotAllowedError. Could be (a) the OS-level mic privacy
+            // setting denied the browser (macOS/Windows hold this OUTSIDE
+            // the browser's permission state), or (b) the mic device is in
+            // use by another app, or (c) hardware-not-present. The
+            // Permissions API can't see (a). We use 'device' as the reason
+            // tag but the toast wording in App.tsx now mentions BOTH OS
+            // settings AND device-in-use so the user can troubleshoot
+            // either path.
+            richErr.reason = 'device'
           }
         }
       } catch { /* Permissions API not supported (Safari < 16) — leave reason undefined */ }

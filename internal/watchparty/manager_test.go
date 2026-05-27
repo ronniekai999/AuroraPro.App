@@ -487,6 +487,51 @@ func TestHandleChat_EmptyMessage(t *testing.T) {
 	}
 }
 
+// TestHandleChat_RejectsInvisibleOnly verifies the deep-debug Bug 9 fix:
+// messages that contain ONLY non-printable / zero-width chars (which
+// survive unicode.IsSpace and thus TrimSpace) must be rejected so they
+// don't fill the ring buffer with visually-empty bubbles. We cover the
+// common offenders: BOM (U+FEFF), Zero-Width Space (U+200B), Word
+// Joiner (U+2060). The test ALSO ensures normal NBSP/space behavior
+// still works (covered by the EmptyMessage test above with regular
+// space, and StoresRawContent's trim case).
+func TestHandleChat_RejectsInvisibleOnly(t *testing.T) {
+	m := mockPartyManager()
+
+	ps := &PartyState{
+		Code:         "ABCDEF",
+		HostUserID:   1,
+		Participants: make(map[int64]*Participant),
+		conns:        make(map[int64]*SafeConn),
+		ChatHistory:  make([]ChatMessage, 0, chatHistoryMax),
+		Settings:     PartySettings{AllowChat: true},
+		CreatedAt:    time.Now(),
+	}
+	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	cases := []struct {
+		name, input string
+	}{
+		{"zero_width_space", "\u200b"},
+		{"zero_width_space_repeated", "\u200b\u200b\u200b"},
+		{"byte_order_mark", "\ufeff"},
+		{"word_joiner", "\u2060"},
+		{"mixed_invisibles", "\u200b\ufeff\u2060"},
+		{"invisibles_around_space", " \u200b \u200b "},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := m.HandleChat("ABCDEF", 1, "host", c.input)
+			if err == nil {
+				t.Errorf("invisible-only message %q should be rejected", c.input)
+			}
+		})
+	}
+}
+
 func TestHandleChat_TooLong(t *testing.T) {
 	m := mockPartyManager()
 
@@ -559,6 +604,8 @@ func TestHandleChat_StoresRawContent(t *testing.T) {
 		{"apostrophe", "I'm at 1:52", "I'm at 1:52"},
 		{"raw_html_payload", `<script>alert("xss")</script>`, `<script>alert("xss")</script>`},
 		{"trim_whitespace", "  hello  ", "hello"},
+		// Mixed printable + non-printable should keep the printable run intact.
+		{"keeps_visible_with_zwsp", "hi\u200bthere", "hi\u200bthere"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
