@@ -298,7 +298,17 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       // pull focus back to the modal root. Not a full container-
       // walking trap, but enough to prevent escape into background
       // content for screen-reader users.
-      if (e.key === 'Tab' && rootRef.current) {
+      //
+      // 2026-05-27 (deep-debug H1) — skip the trap during recording.
+      // The modal is `visibility: hidden`; its descendants are
+      // querySelectorAll-visible but not actually focusable, so the
+      // first/last focus targets are unreachable. The only focusable
+      // element on screen during recording is the portal'd Stop
+      // button at document.body root — Tab/Shift+Tab should let the
+      // browser cycle naturally to/from that button (which is the
+      // only candidate, so focus stays put). Trapping into a hidden
+      // subtree would silently steal focus into nowhere.
+      if (e.key === 'Tab' && rootRef.current && !recordingRef.current) {
         const focusable = rootRef.current.querySelectorAll<HTMLElement>(
           'a, button, input, textarea, select, [tabindex]:not([tabindex="-1"])',
         )
@@ -914,16 +924,35 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
   return (
     <>
     <div
-      // Phase 2 (deep-debug #10/#11): hide via opacity + pointer-events
-      // instead of visibility:hidden during capture. Keeps the modal
-      // in the a11y tree (screen readers retain orientation) and the
-      // focus trap doesn't lose its anchor. aria-busy on the panel
-      // announces the async work. data-screenshot-exclude carries the
-      // opt-out signal so the screenshot library (html-to-image's
-      // `filter` callback) excludes us by attribute (matches the
-      // launcher's opt-out — same attribute, same semantic).
+      // 2026-05-27 — Two-tier hide strategy:
+      //
+      // CAPTURE (200ms-ish flash while html-to-image rasterizes the
+      // page): `opacity: 0 + pointerEvents: none`. Keeps the modal
+      // in the a11y tree so screen readers retain orientation
+      // (deep-debug #10/#11) — the captureAnnounce live-region
+      // tells them what's happening; pulling the modal entirely
+      // would lose the dialog landmark mid-flow.
+      //
+      // RECORDING (up to 30s, user actively interacts with the
+      // page they're recording): `visibility: hidden`. True full
+      // hide — no paint, no layout effect on backdrop-filter, no
+      // a11y tree entry, no pointer events. opacity:0 alone left
+      // the backdrop-blur visibly washing the page underneath on
+      // some browsers, and the user reported "the bug report
+      // doesn't minimize." visibility:hidden is unambiguous.
+      // The Stop pill is portal'd to document.body so it stays
+      // visible even when the modal subtree is hidden.
+      //
+      // data-screenshot-exclude carries the html-to-image opt-out
+      // (`filter` predicate matches launcher + modal + toasts).
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-fade-in"
-      style={capturing || recording ? { opacity: 0, pointerEvents: 'none' } : undefined}
+      style={
+        recording
+          ? { visibility: 'hidden' }
+          : capturing
+            ? { opacity: 0, pointerEvents: 'none' }
+            : undefined
+      }
       data-screenshot-exclude="true"
       onClick={() => {
         // Click-outside also blocked during capture / recording /
@@ -1352,23 +1381,65 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     </div>
     {/* Phase 3 deep-debug H4/M2 — Floating Stop pill rendered via
         a portal to document.body so it escapes the modal overlay's
-        opacity:0 + pointer-events:none during recording. Without
-        the portal, the pill was inside the focus-trap query and the
-        Tab cycle missed it (it sits outside the modal panel ref).
-        With the portal, focus moves to the pill on mount and Tab
-        leaves it alone (no other focusable in body). */}
+        visibility:hidden during recording. Without the portal, the
+        pill was inside the focus-trap query and the Tab cycle
+        missed it (it sits outside the modal panel ref). With the
+        portal, focus moves to the pill on mount and Tab leaves it
+        alone (no other focusable in body).
+
+        2026-05-27 — Moved from bottom-center to TOP-CENTER and
+        scaled up so the user has clear visual confirmation
+        recording is active. The previous bottom-center placement
+        was at the edge of the viewport — easy to miss on tall
+        screens or when the user is focused on reproducing the bug
+        in the middle of the page. Top-center puts the indicator
+        in their peripheral vision regardless of where on screen
+        they're working. Pulsing red dot + countdown leaves no
+        ambiguity. */}
     {recording && typeof document !== 'undefined' && createPortal(
-      <button
-        type="button"
-        onClick={handleStopRecording}
+      // Deep-debug H2 — z-[210] sits ABOVE the search palette
+      // (z-[200]), toasts (z-[200]), and every other Aurora overlay.
+      // Background-page interaction is the whole point during
+      // recording, but if the user accidentally opens ⌘K palette
+      // or fires a toast during their 30s window, the Stop control
+      // must remain visible.
+      // Deep-debug S8 — role="status" with aria-live so SR users
+      // hear the "Recording · Xs left" countdown periodically.
+      // Deep-debug L6 — border-rose-500/80 (was /50) so the widget
+      // edge meets WCAG 1.4.11 3:1 non-text contrast on the
+      // near-black widget background.
+      <div
         data-screenshot-exclude="true"
-        aria-label="Stop screen recording"
-        autoFocus
-        className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[80] inline-flex items-center gap-2 px-5 py-3 rounded-full bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium shadow-2xl animate-pulse"
+        role="status"
+        aria-live="polite"
+        className="fixed top-4 left-1/2 -translate-x-1/2 z-[210] inline-flex items-center gap-3 px-4 py-2.5 rounded-full bg-[#0a0a0f] border border-rose-500/80 shadow-2xl"
       >
-        <span aria-hidden="true" className="inline-block w-3 h-3 bg-white rounded-sm" />
-        Stop recording · {Math.ceil(recordingRemainingMs / 1000)}s
-      </button>,
+        {/* Pulsing red dot — the universal "recording active" cue.
+            Deep-debug L5 — motion-safe: prefix so users with
+            prefers-reduced-motion get the solid red dot without the
+            ping animation. The static dot + countdown text still
+            carry the recording-state meaning. */}
+        <span aria-hidden="true" className="relative inline-flex items-center justify-center w-3 h-3">
+          <span className="absolute inset-0 rounded-full bg-rose-500 motion-safe:animate-ping opacity-75" />
+          <span className="relative inline-block w-3 h-3 rounded-full bg-rose-500" />
+        </span>
+        <span className="text-white text-sm font-medium tabular-nums">
+          {/* Deep-debug M3 — clamp at 1 so the countdown never
+              shows "0s left" between the last tick and the
+              recorder.stop() callback firing. */}
+          Recording · {Math.max(1, Math.ceil(recordingRemainingMs / 1000))}s left
+        </span>
+        <button
+          type="button"
+          onClick={handleStopRecording}
+          aria-label="Stop screen recording"
+          autoFocus
+          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors"
+        >
+          <span aria-hidden="true" className="inline-block w-2.5 h-2.5 bg-white rounded-sm" />
+          Stop
+        </button>
+      </div>,
       document.body,
     )}
     </>
