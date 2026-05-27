@@ -1337,17 +1337,27 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             )}
           </div>
 
-          {/* PII warning — only when an attachment is selected
-              (deep-debug #25). Without an attachment there's no
-              screenshot/recording to warn about. */}
-          {attachment && (
-            <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-amber-200 text-xs">
-              <strong>Heads-up:</strong> screenshots and recordings may show
-              personal data (your library, currently playing media, profile
-              info). Issues are filed to the Aurora repository — review what
-              you're attaching before submitting.
-            </div>
-          )}
+          {/* PII warning — visible always (was attachment-only). The
+              diagnostic buffer (last 200 console messages + 100
+              network requests) is auto-attached to every submission
+              starting 2026-05-27, so users should be aware even when
+              they don't add a screenshot/recording. Captured data
+              skips request bodies and headers; sensitive URL params
+              (tokens, passwords, api keys, etc.) are redacted before
+              capture. */}
+          <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-amber-200 text-xs">
+            <strong>Heads-up:</strong> every report includes a recent
+            console + network log (last few minutes) for triage. Sensitive
+            URL params (tokens, passwords, API keys) are redacted before
+            attaching, and bodies/headers are never captured.
+            {attachment && (
+              <>
+                {' '}Screenshots and recordings may also show personal data
+                (your library, currently playing media, profile info) —
+                review what you're attaching before submitting.
+              </>
+            )}
+          </div>
 
           {/* Error — aria-live so screen readers announce validation
               failures + server errors. */}
