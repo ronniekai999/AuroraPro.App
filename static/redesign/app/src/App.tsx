@@ -5145,7 +5145,11 @@ function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: 
   }, [toasts, onRemove])
 
   return (
-    <div className="fixed bottom-6 right-6 z-[200] flex flex-col gap-3">
+    // 2026-05-27 (holistic deep-debug H1) — opt out of html2canvas
+    // bug-report captures. Toasts are transient meta-UI, not the
+    // page content the user is trying to demo, so they shouldn't
+    // leak into bug evidence. Matches the launcher + modal opt-out.
+    <div className="fixed bottom-6 right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
       {toasts.map(t => (
         <div key={t.id} className="toast">
           <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
@@ -7723,17 +7727,28 @@ export default function App() {
         />
       )}
 
-      {/* 2026-05-27 — Bug-report launcher (Phase 1 MVP). Gated on the
-          server-side BUG_REPORT_ENABLED env var so a misconfigured
-          deploy doesn't dangle a non-functional button.
-          - Hidden while the video player is open so it doesn't
-            overlay playback controls (deep-debug #21).
+      {/* 2026-05-27 — Bug-report launcher. Gated on the server-side
+          BUG_REPORT_ENABLED env var so a misconfigured deploy doesn't
+          dangle a non-functional button.
           - prefillName uses the user's display username, NOT email,
             so a public-repo deploy doesn't leak emails into issue
-            bodies that anyone with repo read access can see
-            (deep-debug #7). */}
-      {bugReportEnabled && !playerTarget && (
-        <BugReportButton prefillName={user.username} onToast={addToast} />
+            bodies that anyone with repo read access can see (deep-
+            debug #7).
+          - `hidden` props (was: gate on `!playerTarget`) — moved
+            INTO the component so the modal stays mounted across
+            player open/close events. This keeps an in-flight screen
+            recording or capture from being silently aborted if a
+            watch-party teleports the user into the host's player
+            mid-recording (holistic deep-debug M1).
+          - Component itself also hides when admin panels open
+            (Server / Notifications at z-[45] cover the launcher
+            on mobile — holistic deep-debug H2). */}
+      {bugReportEnabled && (
+        <BugReportButton
+          prefillName={user.username}
+          onToast={addToast}
+          hidden={!!playerTarget || serverOpen || notifOpen}
+        />
       )}
 
       {/* Toast */}

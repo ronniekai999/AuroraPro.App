@@ -735,7 +735,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
         className="w-full max-w-[560px] bg-[#0a0a0f] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-modal="true"
+        // Holistic deep-debug M2 — drop aria-modal during recording
+        // so screen-reader virtual cursor can reach the portal'd
+        // Stop pill (rendered to document.body, outside this
+        // subtree). When recording ends and the modal returns to
+        // its normal modal-overlay role, aria-modal goes back on.
+        aria-modal={recording ? undefined : true}
         aria-labelledby="bug-report-title"
         aria-busy={capturing || submitting || recording}
       >
@@ -869,16 +874,13 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                   (user chooses what to share); we display the
                   remaining time so they know when auto-stop fires. */}
               {recording ? (
-                <button
-                  type="button"
-                  onClick={handleStopRecording}
-                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-600/30 hover:bg-rose-600/40 border border-rose-500/40 text-rose-100 text-xs font-medium transition-colors animate-pulse"
-                  title="Stop recording now (otherwise auto-stops at 30s)"
-                >
-                  {/* Solid square = stop glyph. */}
-                  <span aria-hidden="true" className="inline-block w-2.5 h-2.5 bg-rose-100 rounded-sm" />
-                  Stop · {Math.ceil(recordingRemainingMs / 1000)}s
-                </button>
+                // Holistic deep-debug S1 — during recording the modal
+                // is opacity:0 + pointer-events:none, so an in-modal
+                // Stop button is invisible AND unreachable. The
+                // portal'd floating Stop pill at the bottom of the
+                // viewport is the canonical Stop control while
+                // recording. Nothing to render here.
+                null
               ) : (
                 <button
                   type="button"

@@ -101,6 +101,11 @@ export function ReactionOverlay({ events }: Props) {
       <div
         aria-hidden="true"
         className="fixed pointer-events-none z-[65] inset-0 overflow-hidden"
+        // 2026-05-27 (holistic deep-debug H1) — exclude from
+        // BugReport screenshot capture. Floating emoji reactions
+        // from other party members are transient meta-UI and would
+        // leak others' reaction trails into a public GitHub issue.
+        data-screenshot-exclude="true"
       >
         {active.map(r => (
           <div

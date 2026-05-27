@@ -985,7 +985,33 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("BUG_REPORT_PUBLIC_BASE_URL"); v != "" {
 		// Strip trailing slash to keep attachment URL composition simple.
-		cfg.BugReport.PublicBaseURL = strings.TrimRight(v, "/")
+		trimmed := strings.TrimRight(v, "/")
+		cfg.BugReport.PublicBaseURL = trimmed
+		// 2026-05-27 (holistic deep-debug M3) — warn on suspicious
+		// values at startup so the operator sees the misconfig
+		// immediately instead of discovering broken issue-body
+		// image previews later. Scheme must be http or https; host
+		// must not be loopback because GitHub's image proxy can't
+		// reach those.
+		lower := strings.ToLower(trimmed)
+		switch {
+		case strings.HasPrefix(lower, "http://"):
+			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL uses HTTP — issue body image URLs will be HTTP forever, even if you upgrade to HTTPS later",
+				"url", trimmed)
+		case strings.HasPrefix(lower, "https://"):
+			// happy path
+		default:
+			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL is missing a scheme (expected http:// or https://) — attachment URLs will be malformed",
+				"url", trimmed)
+		}
+		if strings.Contains(lower, "://localhost") ||
+			strings.Contains(lower, "://127.") ||
+			strings.Contains(lower, "://[::1]") ||
+			strings.Contains(lower, "://0.0.0.0") {
+			slog.Warn("BUG_REPORT_PUBLIC_BASE_URL points to a loopback / private address — GitHub's image proxy can't fetch attachments from there",
+				"url", trimmed,
+				"hint", "set this to your externally-reachable Aurora URL")
+		}
 	}
 }
 
