@@ -1,14 +1,16 @@
-// BugReportModal — Phases 1 + 2.
+// BugReportModal — Phases 1 + 2 + 3.
 //
 // Centered overlay modal with a focused 4-field form: name (prefilled
 // from user's display username so emails don't leak into public/
 // triage view), title, description, optional attachment from disk OR
-// from a live "Capture this page" screenshot (Phase 2). On submit,
-// POSTs multipart to /api/feedback; on success, shows the returned
-// issue URL as a clickable toast deep-link.
+// from a live "Capture this page" screenshot (Phase 2) OR from a
+// "Record screen" capture via MediaRecorder + getDisplayMedia (Phase
+// 3, 30s cap, WebM). On submit, POSTs multipart to /api/feedback; on
+// success, shows the returned issue URL as a clickable toast
+// deep-link.
 //
 // Pattern mirrors CollectionsModal.tsx (same z-[70], click-outside,
-// submitting/error flags). Phase 3 will add live screen recording.
+// submitting/error flags).
 //
 // Accessibility (deep-debug #5):
 //   - Escape closes the modal (unless submitting; matches the
@@ -20,6 +22,7 @@
 //     validation failures
 
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { submitBugReport, type BugReportSubmitResult } from '@/lib/api'
 
 // html2canvas is loaded lazily in handleCapture to keep the main
@@ -49,6 +52,12 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024 // 25 MiB
 // Setting this in the file <input> accept attribute is just a hint
 // (users can still pick anything); the server is the source of truth.
 const ATTACHMENT_ACCEPT = 'image/png,image/jpeg,image/webp,video/webm,video/mp4'
+
+// Phase 3 — screen-recording hard cap. WebM at ~1080p with VP9
+// averages 1-3 MB/sec, so 30s stays well under the 25 MB attachment
+// cap with headroom for high-motion frames. Auto-stop on timer
+// expiry; user can also stop early via the in-recording UI.
+const MAX_RECORDING_MS = 30_000
 
 export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   const [name, setName] = useState(prefillName ?? '')
@@ -84,6 +93,21 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   // re-binding on every render. Deep-debug Phase 2 #5.
   const capturingRef = useRef(capturing)
   useEffect(() => { capturingRef.current = capturing }, [capturing])
+  // Phase 3 — screen recording. Mirrors the capturing flow: a
+  // recording in flight gates Escape/Cancel/click-outside the same
+  // way capture does. Live remainingMs powers the countdown shown
+  // on the Stop button.
+  const [recording, setRecording] = useState(false)
+  const [recordingRemainingMs, setRecordingRemainingMs] = useState(MAX_RECORDING_MS)
+  const recordingRef = useRef(recording)
+  useEffect(() => { recordingRef.current = recording }, [recording])
+  // Imperative state for the active recorder + media stream + auto-
+  // stop timer. Refs because their identity churn shouldn't trigger
+  // re-renders.
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const mediaStreamRef = useRef<MediaStream | null>(null)
+  const recordingTimerRef = useRef<number | null>(null)
+  const recordingCountdownRef = useRef<number | null>(null)
   // Phase 2 — mounted flag so post-await state-sets in handleCapture
   // bail when the modal has been closed mid-flight. Deep-debug
   // Phase 2 #5.
@@ -129,12 +153,16 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
     // react-hooks/exhaustive-deps lint rule.
     const opener = openerRef.current
     const onKeyDown = (e: KeyboardEvent) => {
-      // Phase 2 — also block Escape while a capture is in flight so
-      // the modal doesn't unmount mid-capture and leave async work
-      // running on a dead component. The capture's own mountedRef
-      // guards still catch the case if the parent closes us, but
-      // it's cheaper to prevent the unmount.
-      if (e.key === 'Escape' && !submittingRef.current && !capturingRef.current) {
+      // Phase 2/3 — block Escape while a capture OR recording is in
+      // flight so the modal doesn't unmount mid-flight and leave
+      // async work running on a dead component. mountedRef guards
+      // also catch the case if the parent closes us, but it's
+      // cheaper to prevent the unmount.
+      if (e.key === 'Escape'
+        && !submittingRef.current
+        && !capturingRef.current
+        && !recordingRef.current
+      ) {
         e.stopPropagation()
         onClose()
         return
@@ -185,14 +213,17 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   // mirrors the current value so the unmount cleanup can revoke
   // whatever is live without re-revoking via a state-keyed effect
   // (deep-debug Phase 2 #14).
+  //
+  // Phase 3 (deep-debug L5) — also create previews for video/* so
+  // recorded WebM attachments get a visible <video> thumbnail. Image
+  // previews use <img>, video previews use a native <video> element
+  // (no canvas-render needed; the browser handles it).
   const setAttachmentWithPreview = (file: File | null) => {
     setAttachmentPreviewURL(prev => {
       if (prev) URL.revokeObjectURL(prev)
-      // Only image/* gets a preview thumbnail. Video would need a
-      // canvas-render step we don't do in MVP.
-      const next = file && file.type.startsWith('image/')
-        ? URL.createObjectURL(file)
-        : null
+      const next = file && (
+        file.type.startsWith('image/') || file.type.startsWith('video/')
+      ) ? URL.createObjectURL(file) : null
       previewURLRef.current = next
       return next
     })
@@ -365,16 +396,267 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   // Phase 2 — Cancel is GATED OUT during capture (deep-debug Phase 2
   // #5/#13) because html2canvas has no abort API; clicking Cancel
   // mid-capture used to unmount the modal but leave the async work
-  // running, then setState fire on a dead component. The
-  // "Capturing…" button text plus the disabled file input + capture
-  // button make it clear the modal is locked briefly.
+  // running, then setState fire on a dead component.
+  //
+  // Phase 3 — also gated out during recording for the same reason
+  // (MediaRecorder has a stop API, but the user-facing Stop button
+  // is right next to Cancel in the UI; gating Cancel forces the
+  // intent through Stop and avoids the half-recorded blob arriving
+  // on a dead component).
   const handleCancel = () => {
-    if (capturingRef.current) return
+    if (capturingRef.current || recordingRef.current) return
     if (submittingRef.current) {
       submitAcRef.current?.abort()
     }
     onClose()
   }
+
+  // Phase 3 — Screen recording.
+  //
+  // Flow:
+  //   1. Click "Record screen" → request getDisplayMedia (user picks
+  //      a screen/window/tab to share via the browser's native
+  //      picker)
+  //   2. Spin up a MediaRecorder, accumulate Blob chunks, start a
+  //      30s auto-stop timer + countdown
+  //   3. User clicks Stop early OR timer fires → stop the recorder
+  //   4. onstop: assemble chunks into a WebM File, set as attachment,
+  //      release the media tracks
+  //
+  // Browser support: Firefox/Chrome/Edge/Safari 16.4+. getDisplayMedia
+  // requires HTTPS in production (works on http://localhost for dev).
+  // On unsupported browsers we surface a clear toast and gracefully
+  // hide the Record button.
+  //
+  // PII: the OS-level screen picker is the privacy gate — the user
+  // explicitly picks WHICH screen/window/tab to share. Aurora doesn't
+  // get to choose. Our PII banner reinforces that whatever they pick
+  // becomes the issue body.
+  const stopRecordingTimers = () => {
+    if (recordingTimerRef.current !== null) {
+      window.clearTimeout(recordingTimerRef.current)
+      recordingTimerRef.current = null
+    }
+    if (recordingCountdownRef.current !== null) {
+      window.clearInterval(recordingCountdownRef.current)
+      recordingCountdownRef.current = null
+    }
+  }
+
+  // Release the MediaStream tracks so the browser stops the
+  // "this app is sharing your screen" indicator promptly.
+  const releaseMediaStream = () => {
+    if (mediaStreamRef.current) {
+      for (const track of mediaStreamRef.current.getTracks()) {
+        try { track.stop() } catch { /* defensive */ }
+      }
+      mediaStreamRef.current = null
+    }
+  }
+
+  const handleStartRecording = async () => {
+    setError(null)
+    // Phase 3 (deep-debug M6) — re-entrancy guard. The browser's
+    // OS picker is modal to the tab, so a normal double-click can't
+    // get here twice, but a programmatic re-invocation (test runner,
+    // misbehaving extension) could. Bail if a recording is already
+    // active or starting.
+    if (recordingRef.current) return
+    // Feature detection — Safari < 16.4 and some restricted contexts
+    // don't have getDisplayMedia at all. Better to bail before we
+    // confuse the user with a permission flow that doesn't exist.
+    if (typeof navigator === 'undefined'
+      || !navigator.mediaDevices?.getDisplayMedia
+      || typeof MediaRecorder === 'undefined'
+    ) {
+      setError('Screen recording isn\'t supported in this browser. Try Chrome, Edge, Firefox, or Safari 16.4+.')
+      return
+    }
+    setCaptureAnnounce('Requesting screen-share permission…')
+    let stream: MediaStream
+    try {
+      // Always request video; audio is opt-in and many browsers
+      // require an explicit user gesture for it. We DON'T request
+      // audio here — for a bug-report flow, silent video is
+      // sufficient and skips the extra permission prompt.
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 15 }, // 15fps is plenty for UI bug repro
+        audio: false,
+      })
+    } catch (err) {
+      if (!mountedRef.current) return
+      // User canceled the screen picker → no error toast, just bail.
+      // NotAllowedError is the canonical "user denied" signal.
+      const name = err instanceof Error ? err.name : ''
+      if (name === 'NotAllowedError' || name === 'AbortError') {
+        return
+      }
+      setError(err instanceof Error
+        ? `Screen recording failed to start: ${err.message}`
+        : 'Screen recording failed to start.')
+      return
+    }
+    if (!mountedRef.current) {
+      // Race: user closed the modal during the permission prompt.
+      // Release tracks and bail.
+      for (const t of stream.getTracks()) try { t.stop() } catch { /* defensive */ }
+      return
+    }
+    mediaStreamRef.current = stream
+    // Prefer VP9 (smaller, better quality); fall back to VP8 then
+    // unspecified WebM which lets the browser pick. Test isType-
+    // Supported because Safari doesn't support VP9 yet.
+    let mimeType = 'video/webm;codecs=vp9'
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = 'video/webm;codecs=vp8'
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = 'video/webm'
+      }
+    }
+    const chunks: Blob[] = []
+    let recorder: MediaRecorder
+    try {
+      // Phase 3 (deep-debug L6) — bitrate cap. Default Chrome bitrate
+      // on a 4K screen can be 8-10 Mbps which over 30s exceeds the
+      // 25 MB attachment cap. 2.5 Mbps × 30s ≈ 9 MB worst-case;
+      // plenty for 15fps UI bug repro and stays comfortably inside
+      // the cap.
+      recorder = new MediaRecorder(stream, {
+        mimeType,
+        videoBitsPerSecond: 2_500_000,
+      })
+    } catch (err) {
+      releaseMediaStream()
+      setError(err instanceof Error
+        ? `Recorder init failed: ${err.message}`
+        : 'Recorder init failed.')
+      return
+    }
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) chunks.push(e.data)
+    }
+    recorder.onstop = () => {
+      stopRecordingTimers()
+      releaseMediaStream()
+      mediaRecorderRef.current = null
+      if (!mountedRef.current) return
+      setRecording(false)
+      setRecordingRemainingMs(MAX_RECORDING_MS)
+      const blob = new Blob(chunks, { type: mimeType.startsWith('video/webm') ? 'video/webm' : mimeType })
+      if (blob.size === 0) {
+        setError('Recording produced no data — try again.')
+        setCaptureAnnounce('Recording failed: no data captured.')
+        return
+      }
+      if (blob.size > MAX_ATTACHMENT_BYTES) {
+        setError(`Recording too large (${(blob.size / 1024 / 1024).toFixed(1)} MB > 25 MB cap). Try a shorter recording.`)
+        setCaptureAnnounce('Recording too large.')
+        return
+      }
+      const file = new File(
+        [blob],
+        `aurora-recording-${Date.now()}.webm`,
+        { type: 'video/webm' },
+      )
+      setAttachmentWithPreview(file)
+      setCaptureAnnounce('Recording attached.')
+      // Reset the file picker so the user can clear-and-pick again
+      // without their previous recording still showing as selected.
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ''
+      }
+    }
+    // 2026-05-27 — listen for the user clicking the browser's
+    // native "Stop sharing" button (which we can't intercept). When
+    // the video track ends from any path, stop the recorder so
+    // onstop fires and we finalize the blob.
+    //
+    // Phase 3 (deep-debug M3) — `{ once: true }` so the listener
+    // self-removes after firing. Avoids accumulating dead
+    // listeners across multiple record sessions in the same modal
+    // instance.
+    const videoTrack = stream.getVideoTracks()[0]
+    if (videoTrack) {
+      videoTrack.addEventListener('ended', () => {
+        if (mediaRecorderRef.current?.state === 'recording') {
+          try { mediaRecorderRef.current.stop() } catch { /* defensive */ }
+        }
+      }, { once: true })
+    }
+    // Phase 3 (deep-debug H3) — call recorder.start() BEFORE the
+    // setRecording(true) so a thrown start() doesn't leave the
+    // modal in a stuck "recording but no recorder" state. If start
+    // throws, we release the stream and surface a toast.
+    try {
+      // L9 — pass a 1000ms timeslice so we get periodic chunks.
+      // Without a timeslice, MediaRecorder emits a single chunk at
+      // stop time. Periodic chunks bound memory growth during long
+      // captures and let a future "show progress" UI sample partial
+      // size as the recording proceeds.
+      recorder.start(1000)
+    } catch (err) {
+      releaseMediaStream()
+      mediaRecorderRef.current = null
+      setError(err instanceof Error
+        ? `Recorder failed to start: ${err.message}`
+        : 'Recorder failed to start.')
+      setCaptureAnnounce('Recording failed to start.')
+      return
+    }
+    mediaRecorderRef.current = recorder
+    setRecording(true)
+    setRecordingRemainingMs(MAX_RECORDING_MS)
+    setCaptureAnnounce('Recording started — up to 30 seconds.')
+    // 30s auto-stop timer.
+    recordingTimerRef.current = window.setTimeout(() => {
+      if (mediaRecorderRef.current?.state === 'recording') {
+        try { mediaRecorderRef.current.stop() } catch { /* defensive */ }
+      }
+    }, MAX_RECORDING_MS)
+    // Countdown ticker (1Hz) for the Stop button label.
+    const startedAt = Date.now()
+    recordingCountdownRef.current = window.setInterval(() => {
+      if (!mountedRef.current) return
+      const elapsed = Date.now() - startedAt
+      const remaining = Math.max(0, MAX_RECORDING_MS - elapsed)
+      setRecordingRemainingMs(remaining)
+      if (remaining <= 0 && recordingCountdownRef.current !== null) {
+        window.clearInterval(recordingCountdownRef.current)
+        recordingCountdownRef.current = null
+      }
+    }, 1000)
+  }
+
+  const handleStopRecording = () => {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      try { mediaRecorderRef.current.stop() } catch { /* defensive */ }
+    }
+  }
+
+  // Cleanup recording state on unmount (defensive — onstop is the
+  // normal-flow finalization, but a forced unmount via the parent
+  // should also stop the recorder, kill the timers, and release the
+  // OS-level screen-share so the browser drops the "this app is
+  // sharing your screen" indicator immediately.
+  //
+  // Phase 3 deep-debug L8 — empty deps are intentional: the cleanup
+  // body reads from refs (mediaRecorderRef, the ref-shaped timers
+  // managed by stopRecordingTimers, and the stream managed by
+  // releaseMediaStream). None of those values participate in render
+  // identity, so re-running this effect on every render would just
+  // be wasted work. The eslint-disable suppresses the
+  // react-hooks/exhaustive-deps lint warning that wants to add the
+  // closure-captured functions to deps — adding them would NOT
+  // change behavior (the functions are stable closures over the
+  // same refs) but would force re-binding every render.
+  useEffect(() => () => {
+    stopRecordingTimers()
+    if (mediaRecorderRef.current?.state === 'recording') {
+      try { mediaRecorderRef.current.stop() } catch { /* defensive */ }
+    }
+    releaseMediaStream()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -425,6 +707,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
   }
 
   return (
+    <>
     <div
       // Phase 2 (deep-debug #10/#11): hide via opacity + pointer-events
       // instead of visibility:hidden during capture. Keeps the modal
@@ -434,13 +717,17 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
       // ignoreElements signal so html2canvas filters us out by
       // attribute (matches the launcher's opt-out).
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-md p-4 animate-fade-in"
-      style={capturing ? { opacity: 0, pointerEvents: 'none' } : undefined}
+      style={capturing || recording ? { opacity: 0, pointerEvents: 'none' } : undefined}
       data-screenshot-exclude="true"
       onClick={() => {
-        // Click-outside also blocked during capture (matches Escape
-        // / Cancel gating) so the modal can't unmount while async
-        // work is still running.
-        if (!submittingRef.current && !capturingRef.current) onClose()
+        // Click-outside also blocked during capture / recording /
+        // submit (matches Escape / Cancel gating) so the modal can't
+        // unmount while async work is still running.
+        if (
+          !submittingRef.current
+          && !capturingRef.current
+          && !recordingRef.current
+        ) onClose()
       }}
     >
       <div
@@ -450,7 +737,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="bug-report-title"
-        aria-busy={capturing || submitting}
+        aria-busy={capturing || submitting || recording}
       >
         {/* Header */}
         <div className="px-6 pt-6 pb-4 border-b border-white/[0.04]">
@@ -480,7 +767,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               value={name}
               onChange={e => setName(e.target.value)}
               maxLength={MAX_NAME_LEN}
-              disabled={submitting || capturing}
+              disabled={submitting || capturing || recording}
               placeholder="So we can credit you in the issue thread"
               className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
             />
@@ -499,7 +786,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               onChange={e => setTitle(e.target.value)}
               maxLength={MAX_TITLE_LEN}
               required
-              disabled={submitting || capturing}
+              disabled={submitting || capturing || recording}
               placeholder="e.g. Continue Watching card jumps to wrong episode"
               className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50"
             />
@@ -519,7 +806,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               onChange={e => setDescription(e.target.value)}
               maxLength={MAX_DESC_LEN}
               required
-              disabled={submitting || capturing}
+              disabled={submitting || capturing || recording}
               rows={6}
               placeholder="What did you expect to happen? What actually happened? Steps to reproduce?"
               className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder-white/30 focus:outline-none focus:border-purple-500/60 transition-colors disabled:opacity-50 resize-y min-h-[120px]"
@@ -541,7 +828,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                 type="file"
                 accept={ATTACHMENT_ACCEPT}
                 onChange={handleAttachmentChange}
-                disabled={submitting || capturing}
+                disabled={submitting || capturing || recording}
                 className="block flex-1 min-w-0 text-sm text-white/80 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-purple-600/20 file:text-purple-200 hover:file:bg-purple-600/30 file:cursor-pointer disabled:opacity-50"
               />
               {/* Phase 2 — "Capture this page" button. Briefly hides
@@ -552,7 +839,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               <button
                 type="button"
                 onClick={handleCapture}
-                disabled={submitting || capturing}
+                disabled={submitting || capturing || recording}
                 title="Capture a screenshot of the visible page area"
                 className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -576,9 +863,40 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                 )}
                 {capturing ? 'Capturing…' : 'Capture this page'}
               </button>
+              {/* Phase 3 — Record screen. Stop button shown while
+                  recording with a live countdown; auto-stops at 30s.
+                  The browser's screen-picker is the privacy gate
+                  (user chooses what to share); we display the
+                  remaining time so they know when auto-stop fires. */}
+              {recording ? (
+                <button
+                  type="button"
+                  onClick={handleStopRecording}
+                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-rose-600/30 hover:bg-rose-600/40 border border-rose-500/40 text-rose-100 text-xs font-medium transition-colors animate-pulse"
+                  title="Stop recording now (otherwise auto-stops at 30s)"
+                >
+                  {/* Solid square = stop glyph. */}
+                  <span aria-hidden="true" className="inline-block w-2.5 h-2.5 bg-rose-100 rounded-sm" />
+                  Stop · {Math.ceil(recordingRemainingMs / 1000)}s
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStartRecording}
+                  disabled={submitting || capturing || recording}
+                  title="Record up to 30 seconds of your screen"
+                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <circle cx="12" cy="12" r="3" fill="currentColor" />
+                  </svg>
+                  Record screen
+                </button>
+              )}
             </div>
             <p className="text-white/30 text-[10px] mt-1">
-              Use Capture to take a screenshot of the visible page area — the form will hide briefly.
+              Use Capture for a screenshot or Record screen for up to 30 seconds of video — the form will hide briefly for capture.
             </p>
             {/* Phase 2 (deep-debug #4) — PRE-capture PII notice. Shown
                 always above the controls so the user understands what
@@ -594,16 +912,25 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               <div className="mt-2 flex items-start gap-3 p-2 rounded-lg bg-white/[0.03] border border-white/[0.06]">
                 {/* Phase 2 — thumbnail preview when the attachment is
                     an image (captured screenshot OR uploaded PNG/JPG).
-                    Lets the user visually confirm what they're about to
-                    publish to GitHub. Videos skip the preview because
-                    we'd need a canvas-render step. */}
-                {attachmentPreviewURL && (
+                    Phase 3 (deep-debug L5) — also preview video/* via
+                    a native <video> element so recorded WebM has the
+                    same "verify before submit" UX as captured PNGs.
+                    The browser handles the thumbnail render natively;
+                    no canvas step needed. */}
+                {attachmentPreviewURL && attachment?.type.startsWith('video/') ? (
+                  <video
+                    src={attachmentPreviewURL}
+                    muted
+                    playsInline
+                    className="w-20 h-12 object-cover rounded border border-white/[0.08] shrink-0 bg-black"
+                  />
+                ) : attachmentPreviewURL ? (
                   <img
                     src={attachmentPreviewURL}
                     alt="Attachment preview"
                     className="w-20 h-12 object-cover rounded border border-white/[0.08] shrink-0"
                   />
-                )}
+                ) : null}
                 <div className="flex-1 min-w-0">
                   <p className="text-white/70 text-xs truncate">{attachment.name}</p>
                   <p className="text-white/40 text-[10px]">
@@ -614,7 +941,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                 <button
                   type="button"
                   onClick={handleClearAttachment}
-                  disabled={submitting}
+                  disabled={submitting || capturing || recording}
                   className="text-white/40 hover:text-rose-300 transition-colors disabled:opacity-50 self-start"
                   aria-label="Remove attachment"
                   title="Remove attachment"
@@ -663,11 +990,15 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
                 cancels the in-flight fetch via handleCancel).
                 Phase 2 (deep-debug #5/#13) — also disabled during
                 capture because html2canvas has no abort API and the
-                modal can't safely unmount mid-capture. */}
+                modal can't safely unmount mid-capture.
+                Phase 3 — also disabled during screen recording so
+                the user goes through the Stop button (which fires
+                the proper onstop handler) rather than dismissing
+                the modal with a half-recorded blob. */}
             <button
               type="button"
               onClick={handleCancel}
-              disabled={capturing}
+              disabled={capturing || recording}
               className="px-4 py-2 rounded-lg text-white/70 hover:text-white hover:bg-white/[0.05] transition-colors text-sm disabled:opacity-40 disabled:cursor-not-allowed"
             >
               Cancel
@@ -679,7 +1010,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
               // the capture is mid-flight (would attach the previous
               // file or null, with the captured screenshot landing
               // after the request was already sent).
-              disabled={submitting || capturing}
+              disabled={submitting || capturing || recording}
               className="px-5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? 'Submitting…' : 'Submit Report'}
@@ -688,5 +1019,27 @@ export function BugReportModal({ prefillName, onClose, onSubmitted }: Props) {
         </form>
       </div>
     </div>
+    {/* Phase 3 deep-debug H4/M2 — Floating Stop pill rendered via
+        a portal to document.body so it escapes the modal overlay's
+        opacity:0 + pointer-events:none during recording. Without
+        the portal, the pill was inside the focus-trap query and the
+        Tab cycle missed it (it sits outside the modal panel ref).
+        With the portal, focus moves to the pill on mount and Tab
+        leaves it alone (no other focusable in body). */}
+    {recording && typeof document !== 'undefined' && createPortal(
+      <button
+        type="button"
+        onClick={handleStopRecording}
+        data-screenshot-exclude="true"
+        aria-label="Stop screen recording"
+        autoFocus
+        className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[80] inline-flex items-center gap-2 px-5 py-3 rounded-full bg-rose-600 hover:bg-rose-500 text-white text-sm font-medium shadow-2xl animate-pulse"
+      >
+        <span aria-hidden="true" className="inline-block w-3 h-3 bg-white rounded-sm" />
+        Stop recording · {Math.ceil(recordingRemainingMs / 1000)}s
+      </button>,
+      document.body,
+    )}
+    </>
   )
 }

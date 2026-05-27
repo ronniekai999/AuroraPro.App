@@ -1,18 +1,26 @@
 // feedback_handlers.go — in-app "Report a Bug" submission.
 //
 // Routes:
-//   GET  /api/feedback/config          (authed) → {enabled: bool}
-//   POST /api/feedback                 (authed) → multipart submit
-//   GET  /api/feedback/attachments/{name} (public) → uploaded asset
+//
+//	GET  /api/feedback/config          (authed) → {enabled: bool}
+//	POST /api/feedback                 (authed) → multipart submit
+//	GET  /api/feedback/attachments/{name} (public) → uploaded asset
 //
 // The attachment endpoint is intentionally unauthenticated: the
 // filename UUID is the access token (same shape as the existing
 // /api/parties/{code}/share-image.png pattern). This lets GitHub's
 // image proxy fetch the asset when rendering the issue body.
 //
-// Phase 1 MVP scope: file upload from disk only (no browser screenshot
-// capture, no screen recording, no rate limit, no janitor). Phases 2-3
-// layer those on without touching this file's request/response shape.
+// Phase 1 MVP: file upload from disk only.
+// Phase 2: in-browser screenshot capture via html2canvas (frontend
+// only — no server changes needed; captured PNG flows through this
+// same multipart endpoint).
+// Phase 3 (this file): per-user rate limit on Submit + 30-day
+// attachment janitor that sweeps abandoned uploads off disk. (.webm
+// uploads from the new screen-recorder use the SAME multipart
+// endpoint as captured PNGs — no new server-side handling needed
+// because .webm was already on the safeExtension whitelist from
+// Phase 1.)
 package api
 
 import (
@@ -27,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,10 +50,22 @@ import (
 // client != nil and return 503 with a clear message rather than
 // panicking, so misconfiguration shows up the first time someone
 // tries to submit.
+//
+// Phase 3 added two background-state pieces:
+//   - submitLimiter: simple per-user-ID rate limiter (5 / hour by
+//     default) to protect the shared GitHub PAT and the local
+//     attachment cache from individual users in tight loops.
+//   - janitor: a goroutine that sweeps <cacheDir>/<uuid>.{png,jpg,
+//     jpeg,webp,webm,mp4} older than the TTL on a 1-hour cadence.
+//     Started by NewFeedbackHandler when the feature is enabled and
+//     stopped via the rootCtx Aurora passes at startup (matches the
+//     existing graceful-shutdown pattern used by request dispatch
+//     and the AI matcher backfill).
 type FeedbackHandler struct {
-	cfg      config.BugReportConfig
-	client   *feedback.Client
-	cacheDir string // absolute path to <Cache.ImageDir>/bug-reports
+	cfg           config.BugReportConfig
+	client        *feedback.Client
+	cacheDir      string // absolute path to <Cache.ImageDir>/bug-reports
+	submitLimiter *feedbackLimiter
 }
 
 // Limits chosen to match GitHub's API constraints and the existing
@@ -61,6 +82,32 @@ const (
 	// caches (CDN) can hold for a day. Was `public, max-age=2592000`
 	// (30 d) which made delete-and-replace effectively impossible.
 	attachmentCacheControl = "public, max-age=3600, s-maxage=86400"
+
+	// Phase 3 — per-user rate limit on Submit. 5 reports/hour matches
+	// the operational-notes guidance in docs/bug-report-setup.md.
+	// Lower than GitHub's secondary "abuse" limiter (~30/min) so a
+	// single user can't trip global throttling for everyone else.
+	feedbackRateMax    = 5
+	feedbackRateWindow = time.Hour
+	// Caps the per-user-ID map size so a federated/compromised-account
+	// flood can't grow unbounded memory. Mirrors auth.RateLimiter's
+	// maxVisitors design. With 5 timestamps * ~24 bytes each * 10k
+	// users = ~1.2 MB worst-case. Eviction kicks in at insert time
+	// when the cap is hit. (Phase 3 deep-debug H2.)
+	feedbackLimiterMaxUsers = 10_000
+
+	// Phase 3 — attachment janitor TTL + sweep cadence. 30 days
+	// matches the issue body's expected freshness window (an
+	// embedded GitHub issue image older than that almost certainly
+	// references a closed/abandoned report). Sweep every hour so
+	// disk doesn't fill between cadences on busy deploys.
+	attachmentTTL        = 30 * 24 * time.Hour
+	janitorSweepInterval = time.Hour
+	// Background sweep cadence for the rate-limiter map — same
+	// pattern as auth.RateLimiter. Prevents the map from accumulating
+	// permanent entries for users who submitted once and never came
+	// back. (Phase 3 deep-debug M1.)
+	limiterSweepInterval = time.Minute
 )
 
 // NewFeedbackHandler wires the handler. When cfg.Enabled is true but
@@ -70,10 +117,18 @@ const (
 // imageDir comes from cfg.Cache.ImageDir; we create a "bug-reports"
 // subdirectory under it on first use so a stale install doesn't fail
 // on the first attachment.
-func NewFeedbackHandler(cfg config.BugReportConfig, imageDir string) *FeedbackHandler {
+//
+// Phase 3 — when enabled AND ctx is non-nil, starts the attachment-
+// janitor goroutine that exits cleanly when ctx is cancelled (matches
+// Aurora's existing graceful-shutdown pattern: RouterDeps.RootCtx is
+// the server-lifecycle context). When ctx is nil, the handler still
+// works but the janitor doesn't start — useful for unit tests that
+// don't want a background goroutine churning the filesystem.
+func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDir string) *FeedbackHandler {
 	h := &FeedbackHandler{
-		cfg:      cfg,
-		cacheDir: filepath.Join(imageDir, "bug-reports"),
+		cfg:           cfg,
+		cacheDir:      filepath.Join(imageDir, "bug-reports"),
+		submitLimiter: newFeedbackLimiter(feedbackRateMax, feedbackRateWindow),
 	}
 	if cfg.Enabled {
 		client, err := feedback.New(cfg.GitHubToken, cfg.GitHubRepo)
@@ -86,8 +141,224 @@ func NewFeedbackHandler(cfg config.BugReportConfig, imageDir string) *FeedbackHa
 		} else {
 			h.client = client
 		}
+		// Janitor + limiter sweep run only when the feature is enabled
+		// (no point sweeping a directory nothing writes to / no submit
+		// traffic to throttle) AND when a ctx is provided (otherwise
+		// no graceful-shutdown signal).
+		if ctx != nil {
+			go h.runJanitor(ctx)
+			go h.submitLimiter.runSweep(ctx)
+		}
 	}
 	return h
+}
+
+// runJanitor sweeps <cacheDir> every janitorSweepInterval and deletes
+// files older than attachmentTTL. Logs deletion counts at INFO so
+// operators can see the cadence; logs individual delete failures at
+// WARN. The goroutine exits when ctx is cancelled (server shutdown).
+//
+// Why sweep on a ticker (not on every Submit): bug-report traffic is
+// bursty (clustered around new releases). A submit-time sweep would
+// either thrash during a burst or skip cleanup entirely during the
+// long gaps. The 1-hour cadence is plenty for a 30-day TTL — even on
+// a busy deploy, at most 1h of stale files accumulate between sweeps.
+func (h *FeedbackHandler) runJanitor(ctx context.Context) {
+	// Run one sweep at startup so a long-stopped server doesn't wait
+	// an extra hour before pruning. Bail early if ctx is already
+	// cancelled (test cleanup races).
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepAttachments()
+	ticker := time.NewTicker(janitorSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			h.sweepAttachments()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// sweepAttachments scans h.cacheDir and removes files older than
+// attachmentTTL. Failures (missing dir, read errors) are logged and
+// the function returns cleanly — janitor lifecycle MUST NOT crash
+// the parent goroutine on transient FS issues.
+func (h *FeedbackHandler) sweepAttachments() {
+	entries, err := os.ReadDir(h.cacheDir)
+	if err != nil {
+		// Missing directory is the steady state until the first
+		// upload — not worth logging as a warning.
+		if !os.IsNotExist(err) {
+			slog.Warn("feedback janitor: read dir failed", "dir", h.cacheDir, "error", err)
+		}
+		return
+	}
+	cutoff := time.Now().Add(-attachmentTTL)
+	var removed, kept int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		// Only sweep files whose names match the whitelisted shape so
+		// a misplaced operator file (e.g. README.txt) doesn't get
+		// nuked. Same whitelist as the public-serve route uses.
+		if !isValidAttachmentName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			slog.Warn("feedback janitor: stat failed", "file", entry.Name(), "error", err)
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			kept++
+			continue
+		}
+		full := filepath.Join(h.cacheDir, entry.Name())
+		if err := os.Remove(full); err != nil {
+			slog.Warn("feedback janitor: remove failed", "file", entry.Name(), "error", err)
+			continue
+		}
+		removed++
+	}
+	// Phase 3 deep-debug L3 — log at DEBUG for routine sweeps so
+	// busy deploys don't get an INFO line every hour. INFO is
+	// reserved for substantive removals (>= 10 files) which signal
+	// real activity worth seeing in operator logs.
+	if removed >= 10 {
+		slog.Info("feedback janitor: swept attachments",
+			"removed", removed,
+			"kept", kept,
+			"ttl", attachmentTTL.String())
+	} else if removed > 0 {
+		slog.Debug("feedback janitor: swept attachments",
+			"removed", removed,
+			"kept", kept,
+			"ttl", attachmentTTL.String())
+	}
+}
+
+// feedbackLimiter is a per-user-ID rate limiter for the Submit
+// endpoint. Inline (vs. reusing auth.RateLimiter) because that
+// limiter keys on IP and we want user-scoped throttling — a single
+// user behind NAT shouldn't share a budget with their household's
+// other Aurora users.
+//
+// Token-bucket-style: each user gets `rate` tokens in `window`. When
+// a request lands, we prune expired timestamps from their slice; if
+// the remaining count is below `rate`, append now() and allow. Else
+// reject.
+//
+// Memory bound: capped at `maxUsers` entries via insert-time
+// eviction (Phase 3 deep-debug H2). A background sweep goroutine
+// (Phase 3 deep-debug M1) prunes stale entries every
+// limiterSweepInterval so users who submitted once and left don't
+// occupy slots forever.
+type feedbackLimiter struct {
+	mu       sync.Mutex
+	bucket   map[int64][]time.Time // userID → timestamps within the window
+	rate     int
+	window   time.Duration
+	maxUsers int
+}
+
+func newFeedbackLimiter(rate int, window time.Duration) *feedbackLimiter {
+	return &feedbackLimiter{
+		bucket:   make(map[int64][]time.Time),
+		rate:     rate,
+		window:   window,
+		maxUsers: feedbackLimiterMaxUsers,
+	}
+}
+
+// allow returns (true, _) if the user is under the rate cap and
+// records the request. Returns (false, retryAfter) otherwise, with
+// retryAfter set to the duration until the oldest in-window
+// timestamp falls off.
+func (l *feedbackLimiter) allow(userID int64) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+	hits := l.bucket[userID]
+	// Prune expired timestamps. Allocate a fresh slice (Phase 3
+	// deep-debug L7) instead of reusing `hits[:0]` — the in-place
+	// aliasing was technically correct but creates a footgun if a
+	// future caller ever holds a reference to the slice (e.g. for
+	// metrics). The allocation cost is trivial (rate=5 elements).
+	var pruned []time.Time
+	if len(hits) > 0 {
+		pruned = make([]time.Time, 0, len(hits))
+		for _, t := range hits {
+			if t.After(cutoff) {
+				pruned = append(pruned, t)
+			}
+		}
+	}
+	if len(pruned) >= l.rate {
+		// Retry-After = how long until the oldest hit ages out.
+		retryAfter := pruned[0].Add(l.window).Sub(now)
+		if retryAfter < time.Second {
+			retryAfter = time.Second // floor for the HTTP header value
+		}
+		l.bucket[userID] = pruned
+		return false, retryAfter
+	}
+	// Phase 3 deep-debug H2 — bound the map size before inserting a
+	// new user. Mirrors auth.RateLimiter's pattern: when at the cap,
+	// evict any expired entries inline first, then drop the oldest
+	// remaining if still over.
+	if _, exists := l.bucket[userID]; !exists && len(l.bucket) >= l.maxUsers {
+		l.evictExpiredLocked(cutoff)
+		if len(l.bucket) >= l.maxUsers {
+			// Random eviction — map iteration order is unspecified
+			// in Go, which gives us effective randomness suitable for
+			// a DoS-defense layer (any victim is acceptable).
+			for k := range l.bucket {
+				delete(l.bucket, k)
+				break
+			}
+		}
+	}
+	pruned = append(pruned, now)
+	l.bucket[userID] = pruned
+	return true, 0
+}
+
+// evictExpiredLocked removes entries whose newest timestamp is
+// before `cutoff`. Caller must hold l.mu.
+func (l *feedbackLimiter) evictExpiredLocked(cutoff time.Time) {
+	for uid, hits := range l.bucket {
+		if len(hits) == 0 || !hits[len(hits)-1].After(cutoff) {
+			delete(l.bucket, uid)
+		}
+	}
+}
+
+// runSweep periodically evicts users whose most-recent submit is
+// older than the rate-limit window. Lifecycle parented off ctx so
+// the goroutine exits cleanly on graceful shutdown — same pattern
+// as runJanitor. (Phase 3 deep-debug M1.)
+func (l *feedbackLimiter) runSweep(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	ticker := time.NewTicker(limiterSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			l.mu.Lock()
+			l.evictExpiredLocked(time.Now().Add(-l.window))
+			l.mu.Unlock()
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // FeedbackConfigResponse is what GET /api/feedback/config returns to
@@ -236,6 +507,28 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		attachmentURL = h.cfg.PublicBaseURL + "/api/feedback/attachments/" + savedName
+	}
+
+	// Phase 3 (deep-debug Phase 3 H1) — per-user rate limit moved to
+	// AFTER input validation + attachment save, immediately before the
+	// GitHub POST. The limiter protects the shared PAT; the PAT is
+	// only invoked by CreateIssue, so charging a token for invalid
+	// requests (empty title, oversized body, bad MIME) would let a
+	// user with a buggy client lock themselves out without ever
+	// actually contacting GitHub. The attachment save above can't be
+	// undone cheaply if we reject here, so we accept that cost in
+	// exchange for the simpler "1 token per real GitHub attempt"
+	// invariant — the orphan-cleanup path runs the same way it does
+	// on a GH POST failure.
+	if allowed, retryAfter := h.submitLimiter.allow(claims.UserID); !allowed {
+		// Clean up the orphan attachment if we wrote one above.
+		if savedAttachmentName != "" {
+			_ = os.Remove(filepath.Join(h.cacheDir, savedAttachmentName))
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
+		writeError(w, http.StatusTooManyRequests,
+			fmt.Sprintf("too many bug reports — please wait %d seconds before submitting again", int(retryAfter.Seconds())))
+		return
 	}
 
 	// Build the issue body. Putting submitter context (name + Aurora
@@ -474,7 +767,7 @@ func mimeForAttachment(name string) string {
 // escaped before splicing into the Markdown so a crafted name /
 // description / username can't:
 //   - break out of the `by **<name>**` bold and inject following text
-//   - break out of the `(Aurora user: ` ``<u>`` `)` code span
+//   - break out of the `(Aurora user: ` “<u>“ `)` code span
 //   - inject a fake "Submitted via Aurora bug-report" footer in their
 //     description (the divider sentinel is an HTML comment, not a
 //     bare `---\n`, so user `---\n` in their description doesn't

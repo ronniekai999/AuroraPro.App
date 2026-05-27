@@ -327,12 +327,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
 	}
-	// Bug-report (Phase 1 MVP). Constructor returns a handler even
-	// when the feature is disabled — its routes self-gate via
-	// cfg.Enabled so misconfiguration shows up as a 404/503 rather
-	// than a startup panic. The image cache dir is reused for
-	// attachment storage under <ImageDir>/bug-reports/.
-	feedbackH := NewFeedbackHandler(deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir)
+	// Bug-report (Phase 1+). Constructor returns a handler even when
+	// the feature is disabled — its routes self-gate via cfg.Enabled
+	// so misconfiguration shows up as a 404/503 rather than a startup
+	// panic. The image cache dir is reused for attachment storage
+	// under <ImageDir>/bug-reports/. RootCtx threads through so the
+	// Phase 3 attachment-janitor goroutine exits cleanly on graceful
+	// shutdown.
+	feedbackH := NewFeedbackHandler(deps.RootCtx, deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir)
 	partyH := NewPartyHandler(
 		deps.PartyManager,
 		deps.Queries,
