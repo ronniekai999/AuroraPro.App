@@ -675,13 +675,30 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     setCaptureAnnounce('Requesting screen-share permission…')
     let stream: MediaStream
     try {
-      // Always request video; audio is opt-in and many browsers
-      // require an explicit user gesture for it. We DON'T request
-      // audio here — for a bug-report flow, silent video is
-      // sufficient and skips the extra permission prompt.
+      // 2026-05-27 — getDisplayMedia constraints tuned for browser-
+      // tab playback compatibility:
+      //
+      // - `{ max: 1920 } / { max: 1080 } @ { max: 30 }` instead of
+      //   the previous `frameRate: 15` hint. Without `{ max: … }`,
+      //   Chrome treats the value as a preference and may capture
+      //   at native screen resolution + 60fps — verified: a Retina
+      //   recording came in at 3420x1972 @ 60fps despite our 15fps
+      //   request. Chrome's direct-URL .webm player chokes on 4K@60
+      //   even though VLC handles it. 1080p@30 is universally
+      //   playable across browsers and produces smaller files.
+      //
+      // - `audio: true` (was `false`) so the screen-share picker
+      //   offers the "Share tab audio" / "Share system audio" toggle.
+      //   The user opts in via the picker — no extra permission
+      //   prompt from our side. Silent video was insufficient for
+      //   audio bugs (chat/voice issues, video playback glitches).
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 15 }, // 15fps is plenty for UI bug repro
-        audio: false,
+        video: {
+          width: { max: 1920 },
+          height: { max: 1080 },
+          frameRate: { max: 30 },
+        },
+        audio: true,
       })
     } catch (err) {
       if (!mountedRef.current) return
@@ -703,12 +720,19 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       return
     }
     mediaStreamRef.current = stream
-    // Prefer VP9 (smaller, better quality); fall back to VP8 then
-    // unspecified WebM which lets the browser pick. Test isType-
-    // Supported because Safari doesn't support VP9 yet.
-    let mimeType = 'video/webm;codecs=vp9'
+    // 2026-05-27 (deep-debug H1) — INCLUDE opus in the codec string.
+    // MediaRecorder silently DROPS the audio track if the mimeType
+    // doesn't declare an audio codec, even when the stream has
+    // audio tracks AND audio:true was requested. The result was a
+    // perfectly captured WebM with no sound — exactly the user-
+    // reported symptom. Cascade now: VP9+Opus → VP8+Opus →
+    // unspecified WebM (browser picks both codecs). Tested:
+    // - Chrome 140+: vp9+opus
+    // - Firefox 110+: vp9+opus
+    // - Safari 16.4+: vp8+opus (no VP9)
+    let mimeType = 'video/webm;codecs="vp9,opus"'
     if (!MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = 'video/webm;codecs=vp8'
+      mimeType = 'video/webm;codecs="vp8,opus"'
       if (!MediaRecorder.isTypeSupported(mimeType)) {
         mimeType = 'video/webm'
       }
@@ -716,14 +740,16 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     const chunks: Blob[] = []
     let recorder: MediaRecorder
     try {
-      // Phase 3 (deep-debug L6) — bitrate cap. Default Chrome bitrate
-      // on a 4K screen can be 8-10 Mbps which over 30s exceeds the
-      // 25 MB attachment cap. 2.5 Mbps × 30s ≈ 9 MB worst-case;
-      // plenty for 15fps UI bug repro and stays comfortably inside
-      // the cap.
+      // Bitrate caps stay under the 25 MB attachment cap.
+      // - Video: 2.5 Mbps × 30s ≈ 9.4 MB worst-case at 1080p/30fps
+      //   (the source constraint above caps both axes).
+      // - Audio: 96 kbps × 30s ≈ 360 KB. Explicit so a browser
+      //   default of 128 kbps doesn't sneak past the cap.
+      // Combined worst-case ~ 9.8 MB — comfortable headroom.
       recorder = new MediaRecorder(stream, {
         mimeType,
         videoBitsPerSecond: 2_500_000,
+        audioBitsPerSecond: 96_000,
       })
     } catch (err) {
       releaseMediaStream()

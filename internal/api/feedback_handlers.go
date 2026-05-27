@@ -1075,12 +1075,24 @@ func remuxWebM(ffmpegPath, path string) error {
 	// Duration field is computed. `-c copy` is stream-copy (no
 	// re-encode). `-f webm` forces the output format regardless of
 	// extension sniffing.
+	//
+	// 2026-05-27 — `-metadata:s:v:0 alpha_mode=` strips the
+	// ALPHA_MODE=1 flag MediaRecorder sets when recording from a
+	// window (the captured frames don't actually carry alpha — it's
+	// a metadata-only artifact). Chrome's direct-URL .webm player
+	// rejects videos flagged with alpha_mode if the codec doesn't
+	// produce alpha data, while VLC ignores the flag. Empty value
+	// to ffmpeg means "remove this tag." Defensive against future
+	// MediaRecorder quirks; works alongside the frontend's
+	// 1920x1080 @ 30fps constraint which avoids most compatibility
+	// issues at the source.
 	cmd := exec.CommandContext(ctx, ffmpegPath,
 		"-y",
 		"-loglevel", "error",
 		"-fflags", "+genpts",
 		"-i", path,
 		"-c", "copy",
+		"-metadata:s:v:0", "alpha_mode=",
 		"-f", "webm",
 		tmp,
 	)
