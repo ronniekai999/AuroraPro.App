@@ -385,7 +385,31 @@ export function createVoiceController(opts: CreateOptions): VoiceController {
     } catch (err) {
       status = 'Mic blocked'
       notify()
-      throw err
+      // 2026-05-26 — re-throw with a richer reason. Original code lost
+      // the distinction between several real-world failure modes:
+      //   - browser prompt outstanding (user hasn't clicked yet)
+      //   - browser-level permission denied (site explicitly blocked)
+      //   - OS-level mic denied to the browser (macOS / Windows settings)
+      //   - device in use by another app / no device present
+      // The Permissions API tells us which of the first three. The
+      // throw still carries the original err for upstream logging;
+      // we tag a `reason` field so the toast component can pick the
+      // right copy without re-querying.
+      const richErr = err as Error & { reason?: string }
+      try {
+        if (navigator.permissions && (navigator.permissions as Permissions).query) {
+          // 'microphone' isn't in lib.dom yet on all TS configs, hence the cast.
+          const status = await (navigator.permissions as Permissions).query({ name: 'microphone' as PermissionName })
+          if (status.state === 'denied') {
+            richErr.reason = 'denied'      // explicit deny — needs settings change
+          } else if (status.state === 'prompt') {
+            richErr.reason = 'prompt'      // user dismissed/closed prompt without choosing
+          } else if (status.state === 'granted') {
+            richErr.reason = 'device'      // perm OK but device unavailable
+          }
+        }
+      } catch { /* Permissions API not supported (Safari < 16) — leave reason undefined */ }
+      throw richErr
     }
     localStream = stream
     enabled = true

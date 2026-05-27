@@ -7334,13 +7334,37 @@ export default function App() {
           onJoinVoice={() => {
             party.joinVoice().catch(err => {
               const id = nextToastId()
-              setToasts(prev => [...prev, {
-                id,
-                message: err instanceof Error && err.name === 'NotAllowedError'
-                  ? 'Microphone blocked — allow access in your browser to join voice.'
-                  : 'Microphone unavailable.',
-                type: 'error',
-              }])
+              // 2026-05-26 — copy now distinguishes real-world failure modes
+              // using the `reason` tag the voice controller attaches via the
+              // Permissions API. The original "Microphone blocked — allow
+              // access in your browser" was misleading for users who HAD
+              // granted browser permission but were blocked at the OS level
+              // (macOS Privacy & Security → Microphone → Browser unchecked):
+              // they kept toggling the browser prompt while the real fix
+              // was in System Settings.
+              const reason = (err as { reason?: string })?.reason
+              let message = 'Microphone unavailable. Check that no other app is using it.'
+              if (err instanceof Error && err.name === 'NotAllowedError') {
+                if (reason === 'denied') {
+                  // Browser-API state is "denied" — could be browser-level
+                  // (site-blocked) OR OS-level (browser-not-in-allowlist).
+                  // The OS one is the surprise; spell it out so the user
+                  // doesn't bounce off the browser prompt.
+                  message = 'Microphone blocked. Allow it in your browser AND in System Settings → Privacy → Microphone (your browser must be checked).'
+                } else if (reason === 'prompt') {
+                  message = 'Microphone permission needed — click Allow in the browser prompt to join voice.'
+                } else if (reason === 'device') {
+                  message = 'Microphone permission OK, but the device is unavailable. Another app may be using it.'
+                } else {
+                  // Permissions API not supported (older Safari) or query
+                  // failed — fall back to the original wording.
+                  message = 'Microphone blocked — allow access in your browser to join voice.'
+                }
+              }
+              setToasts(prev => [...prev, { id, message, type: 'error' }])
+              // Also surface to console for users / support to inspect.
+              // eslint-disable-next-line no-console
+              console.warn('[Aurora Voice] join failed', { name: (err as Error)?.name, reason, err })
             })
           }}
           onLeaveVoice={party.leaveVoice}
