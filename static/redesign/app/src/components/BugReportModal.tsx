@@ -884,19 +884,61 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
 
           {/* Attachment */}
           <div>
-            <label htmlFor="bug-attachment" className="block text-white/80 text-sm font-medium mb-1">
+            {/* Deep-debug L5 — label htmlFor points at the visible
+                trigger button (not the sr-only file input), so
+                clicking the label focuses the actual visible control
+                instead of an invisible element. */}
+            <label htmlFor="bug-attachment-trigger" className="block text-white/80 text-sm font-medium mb-1">
               Screenshot or recording <span className="text-white/40">(optional, max 25 MB)</span>
             </label>
+            {/* 2026-05-27 polish — three matching outlined buttons in a
+                consistent row. Native file <input> is hidden behind a
+                custom-styled "Choose file" button so all three options
+                share the same visual treatment (previously the native
+                input rendered the browser's ugly "Choose File / No
+                f...sen" with truncated label). Each button now carries
+                a small format hint to differentiate
+                (File / PNG / WebM 30s).
+                Deep-debug M2 — tabIndex={-1} + aria-hidden so the
+                hidden input doesn't double-up the tab stop. The
+                styled button below is the sole keyboard/AT entry
+                point. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ATTACHMENT_ACCEPT}
+              onChange={handleAttachmentChange}
+              disabled={submitting || capturing || recording}
+              tabIndex={-1}
+              aria-hidden="true"
+              className="sr-only"
+            />
             <div className="flex items-center gap-2 flex-wrap">
-              <input
-                id="bug-attachment"
-                ref={fileInputRef}
-                type="file"
-                accept={ATTACHMENT_ACCEPT}
-                onChange={handleAttachmentChange}
+              {/* Custom-styled file-picker trigger. Matches Capture /
+                  Record visually. Forwards click to the hidden native
+                  <input> so the browser's picker still opens.
+                  Deep-debug M3 — aria-haspopup="dialog" so AT users
+                  hear that activation opens a file-picker dialog
+                  (the native input carries that semantic implicitly;
+                  the custom button has to declare it). */}
+              <button
+                id="bug-attachment-trigger"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
                 disabled={submitting || capturing || recording}
-                className="block flex-1 min-w-0 text-sm text-white/80 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-purple-600/20 file:text-purple-200 hover:file:bg-purple-600/30 file:cursor-pointer disabled:opacity-50"
-              />
+                title="Upload a screenshot or recording from your device"
+                aria-haspopup="dialog"
+                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {/* Upload glyph */}
+                <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="17 8 12 3 7 8" />
+                  <line x1="12" y1="3" x2="12" y2="15" />
+                </svg>
+                Choose file
+                <span className="text-white/40 font-normal">· File</span>
+              </button>
               {/* Phase 2 — "Capture this page" button. Briefly hides
                   the modal so the screenshot doesn't include the form
                   itself, then sets the captured image as the
@@ -928,6 +970,7 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   </svg>
                 )}
                 {capturing ? 'Capturing…' : 'Capture this page'}
+                {!capturing && <span className="text-white/40 font-normal">· PNG</span>}
               </button>
               {/* Phase 3 — Record screen. Stop button shown while
                   recording with a live countdown; auto-stops at 30s.
@@ -950,11 +993,12 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                   title="Record up to 30 seconds of your screen"
                   className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] text-white/80 text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-rose-400">
                     <circle cx="12" cy="12" r="9" />
                     <circle cx="12" cy="12" r="3" fill="currentColor" />
                   </svg>
                   Record screen
+                  <span className="text-white/40 font-normal">· WebM 30s</span>
                 </button>
               )}
             </div>

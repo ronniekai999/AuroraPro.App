@@ -5243,7 +5243,15 @@ function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: 
     // bug-report captures. Toasts are transient meta-UI, not the
     // page content the user is trying to demo, so they shouldn't
     // leak into bug evidence. Matches the launcher + modal opt-out.
-    <div className="fixed bottom-6 right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
+    //
+    // 2026-05-27 polish pass — `bottom-[5.5rem]` (was `bottom-6`)
+    // so the toast column stacks ABOVE the bug-report launcher pill
+    // (which sits at `bottom-5` = 1.25rem in BugReportButton).
+    // Previously the launcher was at `bottom: 5rem` to clear the
+    // toast column; that flipped the natural "launcher in corner,
+    // toasts stack above" pattern users expect. Now the launcher
+    // owns the corner and toasts respect it.
+    <div className="fixed bottom-[5.5rem] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
       {toasts.map(t => (
         <div key={t.id} className="toast">
           <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${

@@ -38,6 +38,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -77,6 +78,13 @@ type FeedbackHandler struct {
 	submitLimiter          *feedbackLimiter
 	effectiveTTL           time.Duration
 	effectiveSweepInterval time.Duration
+	// 2026-05-27 — Aurora server version (git SHA from build flags).
+	// Threaded from RouterDeps.Version so the auto-collected
+	// environment context in each issue body can stamp the
+	// version the user was running. Empty when build flags don't
+	// supply it (dev mode); treated as missing and omitted from
+	// the context block.
+	serverVersion string
 	// 2026-05-27 — PAT health state. Updated at startup and on a
 	// 6-hour cadence by runHealthChecks. atomic.Value carries
 	// *patHealth (nil = not yet checked); admin operators see the
@@ -166,7 +174,7 @@ const (
 // the server-lifecycle context). When ctx is nil, the handler still
 // works but the janitor doesn't start — useful for unit tests that
 // don't want a background goroutine churning the filesystem.
-func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDir string) *FeedbackHandler {
+func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDir, serverVersion string) *FeedbackHandler {
 	// Resolve each tunable: explicit positive cfg value wins; zero
 	// or negative falls back to default.
 	//
@@ -210,6 +218,7 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		submitLimiter:          newFeedbackLimiter(rateMax, rateWindow),
 		effectiveTTL:           ttl,
 		effectiveSweepInterval: sweep,
+		serverVersion:          strings.TrimSpace(serverVersion),
 	}
 	if cfg.Enabled {
 		client, err := feedback.New(cfg.GitHubToken, cfg.GitHubRepo)
@@ -628,10 +637,21 @@ type FeedbackSubmitResponse struct {
 // Submit — POST /api/feedback (multipart/form-data)
 //
 // Form fields:
-//   - title        (required, <= maxFeedbackTitleLen)
-//   - description  (required, <= maxFeedbackDescLen)
-//   - name         (optional, <= maxFeedbackNameLen — used for context)
-//   - attachment   (optional file, <= maxFeedbackAttachment)
+//   - title              (required, <= maxFeedbackTitleLen)
+//   - description        (required, <= maxFeedbackDescLen)
+//   - name               (optional, <= maxFeedbackNameLen — used for context)
+//   - attachment         (optional file, <= maxFeedbackAttachment)
+//   - client_url         (optional, <= 500 chars — page URL where the bug was hit)
+//   - client_viewport    (optional, <= 500 chars — "1920x1080")
+//   - client_dpr         (optional, <= 500 chars — devicePixelRatio)
+//   - client_user_agent  (optional, <= 500 chars — navigator.userAgent)
+//   - client_language    (optional, <= 500 chars — navigator.language)
+//   - client_time        (optional, <= 500 chars — ISO 8601, user-clock time)
+//
+// The auto-collected client_* fields land in a collapsed `<details>`
+// block at the bottom of the issue body so triagers can expand to
+// see env context without it dominating the report. Each is
+// length-capped + control-char-stripped server-side (sanitizeContextField).
 //
 // Errors:
 //   - 404 if the feature flag is off
@@ -766,10 +786,27 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 2026-05-27 — Auto-collected environment context. Client sends
+	// browser-side facts (URL, viewport, UA, language, client time);
+	// server fills its own version + a trusted server timestamp.
+	// Each client field is sanitized + length-capped. All optional;
+	// the `<details>` block renders only when at least one field
+	// has a value (handled by environmentContext.hasAny).
+	env := environmentContext{
+		url:              sanitizeContextField(r.FormValue("client_url")),
+		viewport:         sanitizeContextField(r.FormValue("client_viewport")),
+		devicePixelRatio: sanitizeContextField(r.FormValue("client_dpr")),
+		userAgent:        sanitizeContextField(r.FormValue("client_user_agent")),
+		language:         sanitizeContextField(r.FormValue("client_language")),
+		clientTime:       sanitizeContextField(r.FormValue("client_time")),
+		serverVersion:    h.serverVersion,
+		serverTime:       time.Now().UTC().Format(time.RFC3339),
+	}
+
 	// Build the issue body. Putting submitter context (name + Aurora
 	// username) at the bottom keeps the user's description the lede
 	// for triagers reading on GitHub.
-	body := buildIssueBody(desc, name, claims.Username, attachmentURL)
+	body := buildIssueBody(desc, name, claims.Username, attachmentURL, env)
 
 	// Use the request's context so a client disconnect aborts the
 	// in-flight GitHub call cleanly.
@@ -1015,7 +1052,7 @@ func mimeForAttachment(name string) string {
 // every line) so any internal Markdown the user wrote still renders,
 // but it's visually enclosed and clearly delimited from server-
 // composed content.
-func buildIssueBody(description, name, username, attachmentURL string) string {
+func buildIssueBody(description, name, username, attachmentURL string, env environmentContext) string {
 	var b strings.Builder
 	// User description as a quoted block. Any line they wrote (incl.
 	// `---`, `#`, `>`, etc.) is rendered inside the quote so they
@@ -1034,6 +1071,57 @@ func buildIssueBody(description, name, username, attachmentURL string) string {
 		b.WriteString(attachmentURL)
 		b.WriteString(")\n\n")
 	}
+	// 2026-05-27 — Auto-collected environment context. Collapsed
+	// `<details>` block so the issue body stays scannable but
+	// triagers can expand to see the URL / viewport / browser /
+	// Aurora version / etc. Frontend sends client-side facts
+	// (URL, viewport, UA); server fills in its own version + a
+	// trusted timestamp so the user can't spoof either.
+	//
+	// Deep-debug H2 — gate on client-supplied fields only so a
+	// stripped-down POST (curl, third-party client) doesn't get a
+	// near-empty Environment block containing just server-stamped
+	// fields. The server values are still rendered when client
+	// values trigger the block; they're additive, not the trigger.
+	//
+	// Deep-debug L4 — Aurora version surfaced in the <summary>
+	// itself so triagers see it without needing to expand.
+	if env.hasClientContext() {
+		b.WriteString("<details>\n")
+		if env.serverVersion != "" {
+			b.WriteString("<summary>Environment (auto-collected) — Aurora ")
+			b.WriteString(renderCodeSpan(env.serverVersion))
+			b.WriteString("</summary>\n\n")
+		} else {
+			b.WriteString("<summary>Environment (auto-collected)</summary>\n\n")
+		}
+		writeKV := func(k, v string) {
+			if v == "" {
+				return
+			}
+			b.WriteString("- **")
+			b.WriteString(k)
+			b.WriteString(":** ")
+			// Deep-debug H1 — dynamic-fence code span via
+			// renderCodeSpan handles any backtick content safely
+			// (older escapeBacktick produced broken markdown for
+			// values containing `).
+			b.WriteString(renderCodeSpan(v))
+			b.WriteString("\n")
+		}
+		writeKV("Aurora version", env.serverVersion)
+		writeKV("URL", env.url)
+		writeKV("Viewport", env.viewport)
+		writeKV("Device pixel ratio", env.devicePixelRatio)
+		writeKV("Browser", env.userAgent)
+		writeKV("Language", env.language)
+		// Deep-debug L3 — disambiguate client vs server time (useful
+		// for diagnosing clock-drift bugs; otherwise the two fields
+		// look redundant to triagers).
+		writeKV("Client time (browser clock)", env.clientTime)
+		writeKV("Server time (Aurora UTC)", env.serverTime)
+		b.WriteString("</details>\n\n")
+	}
 	// Distinctive HTML-comment fence that user content can't easily
 	// reproduce (we strip HTML from the description's blockquote
 	// rendering anyway). Triagers can grep for `aurora-footer` to
@@ -1046,11 +1134,81 @@ func buildIssueBody(description, name, username, attachmentURL string) string {
 		b.WriteString("**")
 	}
 	if username != "" && username != name {
-		b.WriteString(" (Aurora user: `")
-		b.WriteString(escapeBacktick(username))
-		b.WriteString("`)")
+		b.WriteString(" (Aurora user: ")
+		// Deep-debug H1 — dynamic-fence code span via renderCodeSpan.
+		// The previous `…` + escapeBacktick approach produced broken
+		// markdown when usernames contained `; rare but real.
+		b.WriteString(renderCodeSpan(username))
+		b.WriteString(")")
 	}
 	return b.String()
+}
+
+// environmentContext bundles the auto-collected environment fields
+// rendered into the `<details>` block at the bottom of the issue
+// body. Client-side fields (URL, viewport, UA, language, client_time)
+// come from the frontend; server-side fields (serverVersion,
+// serverTime) are filled by the Submit handler so they can't be
+// spoofed by the client.
+type environmentContext struct {
+	url              string
+	viewport         string
+	devicePixelRatio string
+	userAgent        string
+	language         string
+	clientTime       string
+	serverVersion    string
+	serverTime       string
+}
+
+// hasClientContext reports whether at least one CLIENT-supplied field
+// is populated. Used to gate the `<details>` block in the issue body
+// so a stripped-down POST (e.g. curl, third-party client) doesn't
+// produce a near-empty Environment section containing just
+// server-stamped fields. Deep-debug H2 — previous hasAny() also
+// counted serverTime, which is always set, so the block always
+// rendered and contradicted the docstring.
+func (e environmentContext) hasClientContext() bool {
+	return e.url != "" || e.viewport != "" || e.devicePixelRatio != "" ||
+		e.userAgent != "" || e.language != "" || e.clientTime != ""
+}
+
+// sanitizeContextField bounds a single client-supplied context value:
+// trims whitespace, rejects control chars, caps length. Each field is
+// rendered inside a CommonMark code span (renderCodeSpan handles
+// backtick safety), but a 10MB user-agent header would still bloat
+// the issue. Cap at 500 RUNES — generous for real values, restrictive
+// for abuse.
+//
+// Deep-debug H3 — rune-bounded cap (not byte-bounded). Byte truncation
+// at 500 bytes can split a multibyte UTF-8 sequence (4-byte emoji,
+// 3-byte CJK), corrupting the trailing characters. Rune-bounded
+// truncation is always valid UTF-8.
+//
+// Also strips Unicode line separators (U+2028, U+2029) and the
+// byte-order mark (U+FEFF) — these are technically > 0x20 but render
+// as line breaks / hidden whitespace and could break the single-line
+// markdown rendering.
+func sanitizeContextField(v string) string {
+	v = strings.TrimSpace(v)
+	if utf8.RuneCountInString(v) > 500 {
+		runes := []rune(v)
+		v = string(runes[:500])
+	}
+	// Strip control characters + Unicode line separators that would
+	// mangle the markdown render. Tab is preserved (legitimate
+	// whitespace inside user-agent strings).
+	v = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\t' {
+			return -1
+		}
+		switch r {
+		case 0x2028, 0x2029, 0xFEFF: // line sep, para sep, BOM
+			return -1
+		}
+		return r
+	}, v)
+	return v
 }
 
 // escapeMarkdownInline escapes the characters that could let a
@@ -1077,11 +1235,42 @@ func escapeMarkdownInline(s string) string {
 	return r.Replace(s)
 }
 
-// escapeBacktick is used for content rendered inside a code span.
-// Code spans only need the surrounding backticks escaped; nothing
-// else is parsed. If the username contains a backtick, we lengthen
-// the surrounding fence is too fiddly; just escape with a backslash
-// before each backtick (renders verbatim).
-func escapeBacktick(s string) string {
-	return strings.ReplaceAll(s, "`", "\\`")
+// renderCodeSpan emits a CommonMark inline code span around `s` that
+// safely handles backtick content. Dynamic fence: choose `n` backticks
+// such that the value contains NO run of `n` backticks. Per CommonMark
+// spec, a code span opened with `n` backticks closes only on a run of
+// exactly `n` backticks. Adds a leading/trailing space when the value
+// starts or ends with a backtick (CommonMark trims a single such space
+// when rendering, so the code span content is unchanged).
+//
+// Deep-debug H1 — the previous backslash-escape approach (\`) does
+// NOT work for single-backtick code spans because CommonMark doesn't
+// process backslash escapes inside them. A value of `Evil\`UA` ended
+// up as `<code>Evil\</code>UA` (the first inner backtick closed the
+// span). Dynamic fencing is the spec-correct fix and matches how
+// every CommonMark implementation (GitHub, GitLab, pandoc, etc.)
+// renders code spans.
+func renderCodeSpan(s string) string {
+	// Find the longest run of backticks in s.
+	maxRun := 0
+	cur := 0
+	for _, r := range s {
+		if r == '`' {
+			cur++
+			if cur > maxRun {
+				maxRun = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	fence := strings.Repeat("`", maxRun+1)
+	pad := ""
+	// Leading / trailing backtick or space needs a space buffer so the
+	// opener / closer fences aren't merged with the content's
+	// backticks.
+	if len(s) > 0 && (s[0] == '`' || s[len(s)-1] == '`') {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
 }

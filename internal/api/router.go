@@ -334,7 +334,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// under <ImageDir>/bug-reports/. RootCtx threads through so the
 	// Phase 3 attachment-janitor goroutine exits cleanly on graceful
 	// shutdown.
-	feedbackH := NewFeedbackHandler(deps.RootCtx, deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir)
+	feedbackH := NewFeedbackHandler(deps.RootCtx, deps.Cfg.BugReport, deps.Cfg.Cache.ImageDir, deps.Version)
 	partyH := NewPartyHandler(
 		deps.PartyManager,
 		deps.Queries,
