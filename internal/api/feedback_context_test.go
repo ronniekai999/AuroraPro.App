@@ -235,3 +235,65 @@ func TestSanitizeContextFieldStripsLineSeparators(t *testing.T) {
 		t.Errorf("expected joined content; got %q", got)
 	}
 }
+
+// 2026-05-27 — Tests for the WebM remux helpers introduced to fix
+// MediaRecorder's missing-Duration metadata bug.
+
+func TestRemuxWebMMissingFfmpeg(t *testing.T) {
+	// When ffmpegPath is empty (startup probe found no ffmpeg), the
+	// helper must return a clean error without panicking. The
+	// caller logs WARN and serves the original file.
+	if err := remuxWebM("", "/tmp/whatever.webm"); err == nil {
+		t.Error("expected non-nil error when ffmpegPath is empty")
+	}
+}
+
+func TestIsRemuxTmp(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		// Real tmp leftovers from the remux path.
+		{"abcdef0123456789abcdef0123456789.webm.remux.tmp", true},
+		// Other valid attachment with the suffix → also recognized.
+		{"abcdef0123456789abcdef0123456789.mp4.remux.tmp", true},
+		// Real attachment (no suffix) → NOT a tmp orphan.
+		{"abcdef0123456789abcdef0123456789.webm", false},
+		// Random file with the suffix but no valid attachment base.
+		{"README.remux.tmp", false},
+		// Operator's note file unrelated to remux.
+		{"hello.txt", false},
+		// Suffix-only (degenerate).
+		{".remux.tmp", false},
+	}
+	for _, c := range cases {
+		if got := isRemuxTmp(c.name); got != c.want {
+			t.Errorf("isRemuxTmp(%q) = %v; want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBoundedBufferCapsWrites(t *testing.T) {
+	b := boundedBuffer{cap: 10}
+	// Write less than cap.
+	n, err := b.Write([]byte("hello"))
+	if err != nil || n != 5 {
+		t.Fatalf("first Write: n=%d err=%v", n, err)
+	}
+	if b.String() != "hello" {
+		t.Errorf("after first Write: got %q", b.String())
+	}
+	// Write that overflows the cap. The Writer reports the full
+	// length consumed (so callers don't error out), but only the
+	// portion that fits is retained.
+	n, err = b.Write([]byte("world!!!extra"))
+	if err != nil {
+		t.Fatalf("second Write returned err=%v", err)
+	}
+	if n != len("world!!!extra") {
+		t.Errorf("second Write should report full byte count consumed; got %d", n)
+	}
+	if len(b.buf) != b.cap {
+		t.Errorf("buffer should be capped at %d, got %d", b.cap, len(b.buf))
+	}
+}
