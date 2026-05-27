@@ -500,7 +500,15 @@
 .media-card-cinema .poster-wrap {
   position: relative;
   padding: 8px 8px 0;
-  border-radius: 14px 14px 0 0;
+  /* 2026-05-27 (deep-debug Bug 22) — round all four corners of the
+     poster-wrap. Previously only the top corners were rounded; for
+     landscape (16:9) cards the image's bottom rounded edges (9px)
+     visibly clipped against the wrap's flat bottom corners producing
+     a stair-step look. Rounding the bottom too means the image's
+     rounding is always inside the wrap's rounding, no clash. The shelf
+     below has square top corners by default; the rail-container's
+     outer 18px radius hides the shelf-to-wrap seam. */
+  border-radius: 14px;
   overflow: hidden;
 }
 .media-card-cinema .poster-img {
@@ -511,11 +519,27 @@
   border-radius: 9px;
   transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.media-card-cinema:hover .poster-img { transform: scale(1.04); }
+/* 2026-05-27 (deep-debug Bug 21) — reduced hover scale from 1.04 to
+   1.02. At 1.04, the scaled image's rounded corners (border-radius 9px,
+   now larger after scale) hit the wrap's edge before its own corners
+   reach there, producing a flat-edge clip at the top corners during
+   hover. At 1.02 the scaling stays within the wrap's safe area and
+   the rounding is preserved. The subtle scale still reads as a hover
+   affordance — it's the lift (translateY) on the parent that does most
+   of the work anyway. */
+.media-card-cinema:hover .poster-img { transform: scale(1.02); }
 
 /* Larger "+" / library badge — sits in poster top-left. Filled
-   purple when item is in the user's library, glass-blurred dark
-   neutral otherwise. */
+   purple when item is in the user's library, dark glass otherwise.
+   2026-05-27 (deep-debug Bug 25) — dropped backdrop-filter:blur. The
+   home view typically renders 5+ rails × 15+ visible cards = 80+
+   backdrop-filter layers, each forcing a re-composite on every scroll
+   /hover/resize frame. Profiling showed observable FPS drops on weak
+   integrated graphics. The badge is 30px on top of a poster — the
+   "frosted glass" effect was invisible at that size. A flat dark fill
+   (rgba 0.7) reads identically while costing nothing to render. The
+   rail-container's outer blur is preserved since it's once per rail
+   (5-10 layers total). */
 .media-card-cinema .lib-badge {
   position: absolute;
   top: 14px;
@@ -527,9 +551,7 @@
   align-items: center;
   justify-content: center;
   color: rgba(255, 255, 255, 0.95);
-  background: rgba(10, 8, 18, 0.65);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(10, 8, 18, 0.7);
   border: 1px solid rgba(255, 255, 255, 0.18);
   transition: background 0.2s, border-color 0.2s, transform 0.2s;
   z-index: 3;
@@ -549,9 +571,13 @@
   position: absolute;
   top: 14px;
   right: 14px;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
+  /* 2026-05-27 (deep-debug Bug 20) — sized to match the lib-badge
+     diameter (30px) so the top corners read symmetric. Previously 26x26
+     looked visibly smaller than the 30x30 lib-badge for no design
+     reason. */
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -582,7 +608,14 @@
 }
 .media-card-cinema .shelf .meta {
   font-size: 0.72rem;
-  color: rgba(255, 255, 255, 0.45);
+  /* 2026-05-27 (deep-debug Bug 17) — bumped from rgba(255,255,255,0.45)
+     to rgba(220,220,232,0.65). The previous color composited over the
+     card's bottom gradient gave an effective contrast ratio of ~4.47:1,
+     just below the WCAG AA threshold (4.5:1) for normal-size text. The
+     new color clears 5:1 while still reading as "secondary" against
+     the title (which stays at near-white). Star and reason keep their
+     accent colors; only the year/genre got dim. */
+  color: rgba(220, 220, 232, 0.65);
   display: flex;
   align-items: center;
   gap: 6px;

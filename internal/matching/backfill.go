@@ -320,6 +320,22 @@ func (b *Backfiller) runLoop(ctx context.Context, total int, jobID string) {
 func (b *Backfiller) runRetryPass(ctx context.Context, jobID string, ticker *time.Ticker, start time.Time) {
 	threshold := b.matcher.AutoThreshold()
 	var fetchFailures int
+
+	// 2026-05-27 (deep-debug Bug 5 fix) — per-session attempted-id set.
+	// Without this, a row whose EnrichByTMDBID permanently fails (bad
+	// TMDB id, TMDB outage longer than this run) stays in the query's
+	// predicate forever — successful promotes flip the row to
+	// match_status='matched' and drop out, failed promotes don't update
+	// any field, so the same page keeps coming back. The "naturally
+	// bounded" claim in the original header comment was wrong.
+	//
+	// In-memory set is fine for the bounded scope of one backfill run:
+	// (a) eval pass is bounded by len(needs-eval rows), (b) retry pass
+	// is now bounded by len(retry-eligible rows) — each retried row is
+	// either promoted (gone from predicate) or in `attempted` (skipped).
+	// Memory: int64 = 8 bytes, 10k retries = 80 KB. Negligible.
+	attempted := make(map[int64]struct{})
+
 	for {
 		if ctx.Err() != nil {
 			slog.Info("ai match retry pass: cancelled",
@@ -349,17 +365,30 @@ func (b *Backfiller) runRetryPass(ctx context.Context, jobID string, ticker *tim
 		}
 		fetchFailures = 0
 
-		if len(items) == 0 {
+		// Filter out items we've already tried this session. If the
+		// remaining set is empty AND the raw page was non-empty, we've
+		// exhausted retry-eligible work — every remaining row is one
+		// we couldn't promote and we'd just keep cycling through them.
+		fresh := items[:0]
+		for _, it := range items {
+			if _, seen := attempted[it.ID]; !seen {
+				fresh = append(fresh, it)
+			}
+		}
+		if len(fresh) == 0 {
 			slog.Info("ai match backfill: retry pass complete",
-				"job_id", jobID, "elapsed", time.Since(start).Round(time.Second))
+				"job_id", jobID,
+				"persistent_failures", len(attempted),
+				"elapsed", time.Since(start).Round(time.Second))
 			return
 		}
-		for _, it := range items {
+		for _, it := range fresh {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 			}
+			attempted[it.ID] = struct{}{} // record BEFORE the call so failures don't slip past
 			promoted, err := b.matcher.RetryAutoPromote(ctx, it)
 			b.updateRetryStats(jobID, promoted, err)
 			if err != nil {
