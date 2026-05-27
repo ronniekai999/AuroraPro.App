@@ -2315,7 +2315,12 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                       the row layout stays consistent. */}
                   <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
                     {r.poster_path ? (
-                      <img src={tmdbPosterURL(r.poster_path)} alt="" className="w-full h-full object-cover" />
+                      // crossOrigin so the BugReport screenshot
+                      // capture (html2canvas with useCORS) can
+                      // include this image in the canvas without
+                      // tainting it. TMDB serves Access-Control-
+                      // Allow-Origin: * so the request succeeds.
+                      <img src={tmdbPosterURL(r.poster_path)} alt="" crossOrigin="anonymous" className="w-full h-full object-cover" />
                     ) : (
                       <Icon name={r.media_type === 'tv' ? 'tv' : 'film'} size={20} className="text-white/25" />
                     )}
@@ -2405,7 +2410,7 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                 aria-label={hasOverview ? `${req.title}, click to ${isExpanded ? 'hide' : 'show'} overview` : undefined}
               >
                 <div className="w-[70px] h-[105px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
-                  {poster ? <img src={poster} alt={req.title} className="w-full h-full object-cover" /> : null}
+                  {poster ? <img src={poster} alt={req.title} crossOrigin="anonymous" className="w-full h-full object-cover" /> : null}
                 </div>
                 <div className="flex-1 min-w-0">
                   <h3 className="text-white text-sm font-semibold truncate">{req.title}{req.year ? ` (${req.year})` : ''}</h3>
@@ -4141,6 +4146,7 @@ function ManualMatchModal({ target, onClose, onMatched }: {
                   <img
                     src={r.source === 'tvdb' ? r.poster_path : tmdbPosterURL(r.poster_path)}
                     alt=""
+                    crossOrigin="anonymous"
                     className="w-full h-full object-cover"
                   />
                 ) : (
