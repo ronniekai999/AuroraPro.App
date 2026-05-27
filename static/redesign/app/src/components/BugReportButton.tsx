@@ -97,7 +97,19 @@ export function BugReportButton({ prefillName, onToast, hidden, tokenHealthy, to
         // conditional unmount) when `hidden` so the modal state
         // persists across player open/close events.
         style={hidden ? { display: 'none' } : undefined}
-        className="fixed bottom-4 left-4 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
+        // 2026-05-27 — Moved from bottom-left to bottom-right. The
+        // original `bottom-4 left-4` position landed at viewport
+        // x≈16, INSIDE the left sidebar's 252px footprint, where
+        // the higher-z sidebar nav items (Settings / Notifications)
+        // visually covered the launcher pill. bottom-right keeps the
+        // launcher away from the sidebar AND away from the
+        // ServerPanel/NotificationPanel (which open at `left-[252px]`
+        // on desktop). Toasts also live bottom-right at z-[200] but
+        // stack from `bottom-6` upward — the launcher at `bottom-4`
+        // sits BELOW the toast column so they don't collide. The
+        // `right-6` aligns the right edge of the launcher with the
+        // right edge of the toast column for visual rhythm.
+        className="fixed bottom-4 right-6 z-[40] inline-flex items-center gap-2 px-3 py-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.08] hover:border-white/[0.15] text-white/60 hover:text-white text-xs font-medium transition-all backdrop-blur-md shadow-lg"
       >
         {/* Inline SVG so the button has zero icon-component dependency.
             Bug icon = stylized beetle with antennae and legs (Feather's
