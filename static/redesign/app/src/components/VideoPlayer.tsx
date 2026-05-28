@@ -200,6 +200,46 @@ export function pickFile(
   return files[0]
 }
 
+// 2026-05-28 — Lift subtitle cues clear of the bottom control bar.
+//
+// With native <track> rendering AND our custom controls (the native
+// `controls` attribute is removed — see the <video> below), the
+// browser doesn't raise cues above the control overlay the way it
+// does for native controls. So a low cue (e.g. Elf's "TO THE BIG
+// CITY") renders right behind the scrubber. We pin every cue to
+// line 90 with snapToLines=false → the cue box sits at ~90% of the
+// video height (≈10% up from the bottom), which clears the ~80px
+// control bar at any window size, while still reading as a normal
+// bottom-anchored subtitle when controls are hidden.
+//
+// Aurora's text tracks are extracted from SRT/embedded subs and
+// carry no authored positioning, so overriding `line` never fights
+// an author's intentional top-of-frame sign placement for our
+// content. Wrapped per-cue in try/catch because a few engines throw
+// on out-of-range line values for cues with unusual settings.
+const CUE_LINE_PERCENT = 90
+function liftCuesAboveControls(tt: TextTrack | null | undefined): void {
+  if (!tt || !tt.cues) return
+  for (let i = 0; i < tt.cues.length; i++) {
+    const cue = tt.cues[i] as VTTCue
+    try {
+      // Only adjust cues still at the default (auto) position so we
+      // don't stomp any cue that DID carry explicit placement.
+      if (cue.line === 'auto') {
+        cue.snapToLines = false
+        // lineAlign='end' anchors the BOTTOM of the cue box at
+        // CUE_LINE_PERCENT, so multi-line cues grow UPWARD (away from
+        // the controls) instead of downward off the bottom edge.
+        // Deep-debug M1 — without this, a 2-3 line cue at line=90 with
+        // the default 'start' align would push its tail under the
+        // scrubber / past the rounded bottom.
+        cue.lineAlign = 'end'
+        cue.line = CUE_LINE_PERCENT
+      }
+    } catch { /* engine rejected the assignment — leave this cue as-is */ }
+  }
+}
+
 export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -670,6 +710,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           tt.mode = 'showing'
         }
       }
+      // 2026-05-28 — Lift cues above the control bar now that they're
+      // parsed (initialCueCount confirms the list is populated).
+      liftCuesAboveControls(tt)
       // Re-check cue count after the browser's parser has had a
       // chance to populate the cue list. Only surface an error if
       // BOTH readings are 0 (i.e., the cue list is truly empty,
@@ -686,11 +729,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           setSubError(`"${trackLabel}" loaded but has no cues — possible format mismatch`)
         } else if (initialCueCount === 0 && finalCueCount > 0) {
           // Browser populated cues after the load event — log so we
-          // know the race exists for this browser/file combo.
+          // know the race exists for this browser/file combo, and
+          // lift them now (the load-event lift saw an empty list).
           console.info('[Aurora.sub] cues arrived after load event', {
             trackIndex: index,
             finalCueCount,
           })
+          liftCuesAboveControls(track.track)
         }
         // Issue #139 — second-chance check: if mode is STILL not
         // 'showing' 150ms after our re-assertion, something else is
@@ -1856,9 +1901,26 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // mousemove (which also un-hides the controls via the handler
       // above). Matches Plex/Netflix/YouTube behavior.
       style={{ cursor: controlsVisible ? 'auto' : 'none' }}
-      className="fixed inset-0 z-[60] bg-black/95 flex items-center justify-center"
+      className="fixed inset-0 z-[60] bg-black flex items-center justify-center"
     >
-      <div className="relative w-full h-full flex flex-col">
+      {/* 2026-05-28 — Player shell. WINDOWED (not browser-fullscreen):
+          a centered card capped below the viewport so there's a clear
+          black margin all around (the `bg-black` backdrop shows
+          through), with rounded corners + a soft ring so it reads as
+          an intentional theater surface rather than a chrome-less
+          takeover. FULLSCREEN: fills the viewport edge-to-edge (the
+          card chrome would look wrong against the screen bezel).
+          The backdrop's `items-center justify-center` centers the
+          capped card automatically. The <video> inside still uses
+          object-contain, so the picture letterboxes within the card —
+          margins you see are (card inset) + (aspect letterbox). */}
+      <div
+        className={
+          fullscreen
+            ? 'relative w-full h-full flex flex-col'
+            : 'relative w-full h-full max-w-[94vw] max-h-[88vh] flex flex-col rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10'
+        }
+      >
         {/* Top bar */}
         <div className="flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent z-10">
           <div>
@@ -1930,7 +1992,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 {subError && (
                   <div
                     role="status"
-                    className="absolute bottom-full right-0 mb-1 px-2 py-1 bg-red-500/15 border border-red-500/40 text-red-200 rounded text-xs whitespace-nowrap pointer-events-none"
+                    // top-full (opens downward) — this pill is anchored
+                    // to a TOP-BAR button; opening upward (bottom-full)
+                    // would clip against the windowed card's
+                    // overflow-hidden (#98).
+                    className="absolute top-full right-0 mt-1 px-2 py-1 bg-red-500/15 border border-red-500/40 text-red-200 rounded text-xs whitespace-nowrap pointer-events-none"
                   >
                     {subError}
                   </div>
@@ -2023,7 +2089,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             )}
             {/* M10 Phase 4.5 — reaction picker (party only). */}
             {onSendReaction && (
-              <ReactionPicker onSend={onSendReaction} />
+              // vertical="down" — top-bar trigger; opening upward would
+              // clip against the windowed card's overflow-hidden (#98).
+              <ReactionPicker onSend={onSendReaction} vertical="down" />
             )}
             <button
               onClick={onClose}
