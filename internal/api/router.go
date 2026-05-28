@@ -735,17 +735,21 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// The public attachment-serve route is wired separately
 			// above in the unauthenticated block.
 			r.Route("/api/feedback", func(r chi.Router) {
-				// 2026-05-27 — Bumped 60s → 120s. A bug report POST can
-				// run: 9 MB upload (~15-30s) + WebM→MP4 transcode
-				// (~10-30s) + GitHub API call (caps at 60s in the
-				// handler). The previous 60s ceiling left almost no
-				// budget for GitHub once upload + transcode finished,
-				// and a slow GitHub minute pushed the user past the
-				// chi cancel. 120s matches the http.Server.WriteTimeout
-				// so chi cancels before the connection-level write
-				// timeout fires (gives the handler a clean cancellation
-				// path instead of a torn-down connection).
-				r.Use(middleware.Timeout(120 * time.Second))
+				// 2026-05-27 — Bumped 60s → 100s. Real envelope: 9 MB
+				// upload (~15-30s) + WebM→MP4 transcode (~10-30s) +
+				// GitHub API call (caps at 60s in the handler). The
+				// previous 60s ceiling left almost no budget for
+				// GitHub once upload + transcode finished, and a slow
+				// GitHub minute pushed the user past the chi cancel.
+				//
+				// Why 100s, not 120s: http.Server.WriteTimeout is 120s
+				// and covers the ENTIRE write phase from header read to
+				// response done. If chi.Timeout == WriteTimeout, a
+				// handler that runs to the deadline has zero budget
+				// left to write the 504 response body before the
+				// connection-level timeout truncates it. 20s of
+				// headroom is generous for the ~200-byte error body.
+				r.Use(middleware.Timeout(100 * time.Second))
 				r.Get("/config", feedbackH.GetConfig)
 				r.Post("/", feedbackH.Submit)
 			})
