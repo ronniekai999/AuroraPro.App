@@ -1843,8 +1843,14 @@ func (n *networkEntry) UnmarshalJSON(data []byte) error {
 }
 
 const (
-	maxConsoleEntries      = 200
-	maxNetworkEntries      = 100
+	// 2026-05-28 (Issue #131 follow-up) — bumped 200/100 → 500/300 to
+	// match the SPA's diagnosticBuffer cap. Long viewing sessions
+	// were burying the meaningful requests under background-poll
+	// noise; SPA-side noise filter (lib/diagnosticBuffer.ts
+	// shouldFilterNetworkEntry) does the real work, the cap bump
+	// just gives us headroom for the surviving signal entries.
+	maxConsoleEntries      = 500
+	maxNetworkEntries      = 300
 	maxConsoleMessageChars = 1024
 	maxNetworkURLChars     = 500
 )
@@ -1860,9 +1866,10 @@ func parseConsoleEntries(raw string) []consoleEntry {
 		return nil
 	}
 	// Soft cap on the input size before unmarshal — defends against a
-	// gigabyte JSON blob crashing the parser. 200 entries * 1 KB +
-	// JSON overhead ≈ 250 KB max legitimate; 1 MiB is a generous
-	// ceiling.
+	// gigabyte JSON blob crashing the parser. With the post-Issue-#131
+	// caps (500 entries × 1 KB message + ~80 B overhead), max
+	// legitimate payload is ~550 KB — 1 MiB ceiling has comfortable
+	// headroom.
 	if len(raw) > 1<<20 {
 		return nil
 	}

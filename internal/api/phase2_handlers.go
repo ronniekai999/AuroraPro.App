@@ -1569,6 +1569,16 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 }
 
 // ServeSubtitle extracts and serves a specific subtitle track as WebVTT.
+//
+// Query params:
+//   - type=movie|episode|media — disambiguates ID collisions.
+//   - start=<sec> — resume offset (Issue #131). When > 0, every cue
+//     timestamp is shifted by -start seconds so the player's HLS
+//     time domain (currentTime=0 corresponds to file-time=start)
+//     matches the subtitle cue domain. Without this, cues fire
+//     `start` seconds late or never (when past EOF). The shifted
+//     VTT is cached separately from the raw extracted VTT keyed by
+//     (fileID, trackIdx, start).
 func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
 	if err != nil {
@@ -1589,6 +1599,31 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Issue #131 — resume offset for cue-time shift. Clamp to a sane
+	// range: negative = ignore (same as 0); insanely large = also
+	// ignore (defensive; would just produce an empty VTT). 24 hours
+	// is way longer than any media file.
+	startSec, _ := strconv.Atoi(r.URL.Query().Get("start"))
+	if startSec < 0 || startSec > 24*3600 {
+		startSec = 0
+	}
+
+	// Issue #131 — small helper that applies the resume shift before
+	// serving. Falls back to the raw VTT path on shift failure so a
+	// disk-cache hiccup doesn't break subtitle playback entirely.
+	serve := func(vttPath string) {
+		if startSec > 0 {
+			shifted, err := streaming.ShiftVTTCues(vttPath, startSec, h.subCache)
+			if err == nil {
+				vttPath = shifted
+			} else {
+				slog.Warn("subtitle cue-shift failed; serving unshifted",
+					"error", err, "vtt", vttPath, "start_sec", startSec)
+			}
+		}
+		streaming.ServeSubtitle(w, r, vttPath)
+	}
+
 	// External subtitle (index >= 1000)
 	if trackIdx >= 1000 {
 		external := streaming.FindExternalSubtitles(filePath)
@@ -1601,12 +1636,12 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 						writeError(w, http.StatusInternalServerError, "subtitle conversion failed")
 						return
 					}
-					streaming.ServeSubtitle(w, r, vttPath)
+					serve(vttPath)
 					return
 				}
 				// VTT files can be served directly
 				if ext.Codec == "vtt" {
-					streaming.ServeSubtitle(w, r, ext.Title)
+					serve(ext.Title)
 					return
 				}
 				// ASS, SSA, and other formats: convert to VTT via ffmpeg
@@ -1615,7 +1650,7 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusInternalServerError, "subtitle conversion failed")
 					return
 				}
-				streaming.ServeSubtitle(w, r, vttPath)
+				serve(vttPath)
 				return
 			}
 		}
@@ -1651,7 +1686,7 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	streaming.ServeSubtitle(w, r, vttPath)
+	serve(vttPath)
 }
 
 // ============================================================
