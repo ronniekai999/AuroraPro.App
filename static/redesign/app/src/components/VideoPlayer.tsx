@@ -435,6 +435,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     } catch { /* defensive */ }
   }
 
+  // Issue #137 — return true if ANY text track on the video element
+  // is currently in 'showing' or 'hidden' mode. Used by enforceNoAutoSub
+  // to skip disableAllTextTracks when nothing needs disabling — that
+  // skip is what breaks the SUBTITLE_TRACK_SWITCH feedback loop where
+  // hls.js fires the event, we disable, the disable changes a track
+  // mode, hls.js fires the event again, etc.
+  const anyTextTrackEnabled = (vid: HTMLVideoElement): boolean => {
+    try {
+      for (let i = 0; i < vid.textTracks.length; i++) {
+        if (vid.textTracks[i].mode !== 'disabled') return true
+      }
+    } catch { /* defensive */ }
+    return false
+  }
+
   // M10 Phase 4.5 — apply a subtitle track. Server exposes per-track
   // VTT extraction at /api/stream/{fileId}/subtitles/{index}?type=...
   // (V1 uses the same path). We add a <track> element with the URL
@@ -942,20 +957,51 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // the picker, a level-switch SUBTITLE_TRACK_SWITCH event
           // would silently wipe the user's selection mid-playback.
           if (currentSubIndexRef.current >= 0) {
-            // Issue #135 — log when hls.js wanted to disable but we
-            // skipped because the user has an active pick. This is
-            // the load-bearing race we always worried about; if it
-            // EVER appears in a bug report alongside "no subs", the
-            // bug isn't this branch (we returned).
             console.info('[Aurora.sub] hls.js sub-event ignored (user has pick)', {
               eventName,
               userPickedIndex: currentSubIndexRef.current,
             })
             return
           }
-          console.info('[Aurora.sub] hls.js sub-event forced off', { eventName })
-          try { hls.subtitleTrack = -1 } catch { /* defensive */ }
-          disableAllTextTracks(vid)
+          // Issue #137 — guard the assignment to break the infinite
+          // feedback loop with hls.js. Without this guard, setting
+          // `hls.subtitleTrack = -1` causes hls.js to fire another
+          // SUBTITLE_TRACK_SWITCH event (because the value changed),
+          // which re-invokes this handler, which sets -1 again, etc.
+          // The user's bug report #137 captured 500 identical
+          // "forced off" entries in 2 milliseconds — the loop also
+          // ran `disableAllTextTracks(vid)` continuously, which
+          // disabled the user's freshly-injected <track> element
+          // mode='showing' BEFORE the browser could render its cues.
+          // That was THE bug behind "subtitles don't load on Elf"
+          // across issues #131, #133, #135, #137.
+          //
+          // The guard is two-part:
+          //   1. Skip the hls.subtitleTrack setter when already -1
+          //      (avoids the re-fire from hls.js's setter).
+          //   2. Skip disableAllTextTracks when no track is enabled
+          //      (cheaper; also avoids needless mode='disabled'
+          //      assignments that some browsers also event-emit).
+          const currentHlsTrack = hls.subtitleTrack
+          const someTrackEnabled = anyTextTrackEnabled(vid)
+          if (currentHlsTrack === -1 && !someTrackEnabled) {
+            // Already in target state — no-op. The handler will be
+            // invoked many times (especially on SUBTITLE_TRACKS_UPDATED
+            // at manifest parse) but only does work when there's
+            // actually a track to disable.
+            return
+          }
+          console.info('[Aurora.sub] hls.js sub-event forced off', {
+            eventName,
+            wasHlsTrack: currentHlsTrack,
+            hadEnabledTextTrack: someTrackEnabled,
+          })
+          if (currentHlsTrack !== -1) {
+            try { hls.subtitleTrack = -1 } catch { /* defensive */ }
+          }
+          if (someTrackEnabled) {
+            disableAllTextTracks(vid)
+          }
         }
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => enforceNoAutoSub('SUBTITLE_TRACKS_UPDATED'))
         hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, () => enforceNoAutoSub('SUBTITLE_TRACK_SWITCH'))
