@@ -67,9 +67,16 @@ func New(token, repo string) (*Client, error) {
 	return &Client{
 		token: token,
 		repo:  repo,
-		// 30s budget is plenty — GitHub typically responds in <1s. Any
-		// longer means the user's browser has likely given up too.
-		http: newGuardedHTTPClient(30 * time.Second),
+		// 2026-05-27 — Bumped 30s → 90s. The http.Client.Timeout is a
+		// HARD floor on the whole Do() call; it fires regardless of the
+		// outer ctx the caller supplies. The Submit handler now layers
+		// a 60s WithTimeout on h.outboundCtx(), so the effective ceiling
+		// is min(60s outer ctx, 90s inner client) = 60s — which is what
+		// the handler advertises. Setting the inner client below the
+		// outer ctx would silently cap the headroom. 90s leaves enough
+		// margin that future handler-level changes don't have to touch
+		// this file too.
+		http: newGuardedHTTPClient(90 * time.Second),
 	}, nil
 }
 
