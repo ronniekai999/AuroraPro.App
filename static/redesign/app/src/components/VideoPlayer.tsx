@@ -589,21 +589,80 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // error then. The diagnostic log still emits immediately for the
     // bug-report trail.
     track.addEventListener('load', () => {
+      // Deep-debug H1 — stale-track guard. The VTT fetch is async; by
+      // the time the load event fires, the user may have already
+      // moved to a different sub or turned them off, in which case
+      // applySubtitle has REMOVED this track from the DOM and
+      // possibly attached a NEW one. Without this guard, the new
+      // track's mode would get force-disabled below (the loop sets
+      // every track that ISN'T `tt` to 'disabled', but `tt` here is
+      // the orphan that no longer matches what the user wants).
+      //
+      // Symptom: user picks track A, picks track B before A's VTT
+      // loads, track B briefly shows then disappears as A's load
+      // handler fires and overwrites the modes.
+      const isStale =
+        currentSubIndexRef.current !== index ||
+        activeTrackRef.current !== track
       const tt = track.track
       const initialCueCount = tt?.cues?.length ?? -1
+      const initialMode = tt?.mode
       console.info('[Aurora.sub] <track> load event fired', {
         trackIndex: index,
         initialCueCount,
-        textTrackMode: tt?.mode,
+        textTrackMode: initialMode,
         textTrackKind: tt?.kind,
         textTrackLabel: tt?.label,
+        stale: isStale,
       })
+      if (isStale) {
+        // Don't touch any modes — the user has moved on.
+        return
+      }
+      // Issue #139 — Chrome/Blink resets track.mode after the VTT
+      // load completes. The browser's HTML-spec internal "default
+      // mode" logic re-runs on cue-list finalization, considering
+      // user preferences + group-default semantics, and may flip
+      // our explicitly-set 'showing' back to 'hidden'.
+      //
+      // Observed in bug #139's diagnostic capture:
+      //   T+0   : track.mode = 'showing' (our promote() set it)
+      //   T+150 : load event fires, track.mode = 'hidden'   ← spec-allowed reset
+      //
+      // 'hidden' parses cues into track.cues but does NOT render
+      // them — exactly the "subtitles don't load" symptom. Force it
+      // back to 'showing' explicitly here, BEFORE the user notices.
+      // Defense-in-depth: also re-disable any other text track that
+      // may have been re-enabled in the same reset pass.
+      //
+      // Deep-debug S1 — guard mode writes so we only assign when the
+      // value actually differs. Avoids spurious `change` events on
+      // already-correct tracks (defense in depth against any future
+      // event-loop pattern like #138).
+      if (tt && tt.mode !== 'showing') {
+        console.info('[Aurora.sub] re-asserting mode=showing post-load', {
+          trackIndex: index,
+          wasMode: initialMode,
+        })
+        const vidEl = videoRef.current
+        if (vidEl) {
+          for (let i = 0; i < vidEl.textTracks.length; i++) {
+            const desired = vidEl.textTracks[i] === tt ? 'showing' : 'disabled'
+            if (vidEl.textTracks[i].mode !== desired) {
+              vidEl.textTracks[i].mode = desired
+            }
+          }
+        } else {
+          tt.mode = 'showing'
+        }
+      }
       // Re-check cue count after the browser's parser has had a
       // chance to populate the cue list. Only surface an error if
       // BOTH readings are 0 (i.e., the cue list is truly empty,
       // not just not-yet-populated).
       setTimeout(() => {
         const finalCueCount = track.track?.cues?.length ?? -1
+        const finalMode = track.track?.mode
         if (finalCueCount === 0) {
           console.warn('[Aurora.sub] <track> loaded but produced zero cues', {
             trackIndex: index,
@@ -617,6 +676,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           console.info('[Aurora.sub] cues arrived after load event', {
             trackIndex: index,
             finalCueCount,
+          })
+        }
+        // Issue #139 — second-chance check: if mode is STILL not
+        // 'showing' 150ms after our re-assertion, something else is
+        // fighting us. Surface as a warning so the next bug report
+        // shows the pattern (and we know to look for a different
+        // race source — possibly hls.js group-default logic still
+        // running on a delayed tick).
+        if (currentSubIndexRef.current === index && finalMode !== 'showing') {
+          console.warn('[Aurora.sub] track mode reverted post-reassertion', {
+            trackIndex: index,
+            finalMode,
+            userPickedIndex: currentSubIndexRef.current,
           })
         }
       }, 150)
