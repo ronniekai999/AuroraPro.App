@@ -73,6 +73,109 @@ func ProbeSubtitles(ctx context.Context, filePath string) ([]models.SubtitleTrac
 	return tracks, nil
 }
 
+// ProbeSeekKeyframe returns the video keyframe timestamp (seconds) that
+// ffmpeg's input seek (`-ss <target>` before `-i`) will land on for the
+// given file — i.e. the largest keyframe PTS that is <= target.
+//
+// Why this matters (Issue #141): input seek can only start a stream at a
+// keyframe, so it rounds the requested resume position DOWN to the
+// nearest preceding keyframe. With -copyts/-start_at_zero that keyframe
+// becomes the HLS stream's t=0. The subtitle cue-shift must use this
+// keyframe time, not the requested target, or every cue lands up to one
+// GOP early ("subtitles ahead of audio").
+//
+// On any probe failure (no video stream, ffprobe missing, parse error)
+// it returns the target unchanged: callers then shift by the requested
+// position, which is the pre-#141 behavior — slightly off, but never
+// worse than before, and never blocks subtitle serving. Failures are
+// swallowed deliberately (no error return) because there is no caller
+// action that differs from the fallback.
+//
+// Known limitation (open-GOP H.264): `-skip_frame nokey` reports ALL
+// I-frames, but ffmpeg's input seek lands on the seekable IDR. If a
+// non-IDR I-frame sits between the IDR and target, this returns the
+// closer non-IDR frame, shifting cues by up to the IDR↔I gap (sub-GOP,
+// ~1-2s) in the SAFE direction (cues slightly late, not early). Most
+// remux-tier content is closed-GOP/all-IDR so this rarely bites; the
+// error is still smaller than the pre-#141 full-GOP error.
+func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) float64 {
+	if target <= 0 {
+		return target
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	// Read a window ending just past the target. A 16s window
+	// comfortably exceeds any sane GOP (typically 2-10s).
+	// -skip_frame nokey makes the decoder emit ONLY keyframes, so the
+	// output is the set of keyframes in [keyframe<=from, ~target]. We
+	// then take the max keyframe <= target.
+	from := target - 16
+	if from < 0 {
+		from = 0
+	}
+	// `start%end` interval form. Read slightly past the target so a
+	// keyframe sitting right at the boundary is included in the scan;
+	// the strict filter below (kfMatchEpsilon) decides which ones
+	// actually count.
+	interval := fmt.Sprintf("%.3f%%%.3f", from, target+0.5)
+
+	cmd := exec.CommandContext(ctx, "ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-skip_frame", "nokey",
+		"-read_intervals", interval,
+		"-show_entries", "frame=pts_time,best_effort_timestamp_time",
+		"-print_format", "json",
+		filePath,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return target // probe failed → fall back to requested target
+	}
+
+	var probe struct {
+		Frames []struct {
+			PTSTime    string `json:"pts_time"`
+			BestEffort string `json:"best_effort_timestamp_time"`
+		} `json:"frames"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return target
+	}
+
+	// ffmpeg's input seek lands on the largest keyframe with PTS <=
+	// target. The epsilon ONLY absorbs float-print jitter for a
+	// keyframe that is nominally AT the target (e.g. prints as
+	// 9.999983 or 10.000017) — it must NOT be wide enough to admit
+	// the next GOP's keyframe, or we'd shift cues the wrong way and
+	// push subtitles slightly BEHIND the audio. 2ms is comfortably
+	// below any real GOP gap.
+	const kfMatchEpsilon = 0.002
+	best := -1.0
+	for _, f := range probe.Frames {
+		// Prefer pts_time; fall back to best_effort when pts_time is
+		// "N/A" (some containers).
+		ts := f.PTSTime
+		if ts == "" || ts == "N/A" {
+			ts = f.BestEffort
+		}
+		v, perr := strconv.ParseFloat(ts, 64)
+		if perr != nil {
+			continue
+		}
+		if v <= target+kfMatchEpsilon && v > best {
+			best = v
+		}
+	}
+	if best < 0 {
+		// No keyframe found in the window — shouldn't happen (the
+		// window starts before target), but fall back safely.
+		return target
+	}
+	return best
+}
+
 // ExtractSubtitleVTT extracts a subtitle track and converts it to WebVTT format.
 // Returns the path to the generated .vtt file.
 func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, cacheDir string) (string, error) {
@@ -173,21 +276,30 @@ func formatVTTTimestamp(sec float64) string {
 }
 
 // ShiftVTTCues reads vttPath and writes a NEW VTT file with every cue
-// timestamp shifted by -startSec seconds. Cues that become fully
+// timestamp shifted by -offsetSec seconds. Cues that become fully
 // negative (end < 0 after the shift) are dropped — they're already
 // "in the past" relative to the resume point. Cues that straddle zero
 // (start < 0 < end) are clamped: start := 0, end stays.
 //
-// The output is cached at <cacheDir>/<hash>_shift<startSec>.vtt. If
-// startSec <= 0, returns vttPath unchanged (no shift needed).
+// The output is cached at <cacheDir>/<hash>_shift<offset>.vtt. If
+// offsetSec <= 0, returns vttPath unchanged (no shift needed).
 //
 // This exists because the HLS transcode uses -ss to seek the input,
-// so the player's currentTime=0 corresponds to file-time=startSec.
+// so the player's currentTime=0 corresponds to file-time=offsetSec.
 // Sidecar VTT cues use ORIGINAL file timestamps, so without the shift
 // every cue would fire at the wrong moment (or never, if past EOF).
 // Reported as Aurora Issue #131 (subtitles invisible after resume).
-func ShiftVTTCues(vttPath string, startSec int, cacheDir string) (string, error) {
-	if startSec <= 0 {
+//
+// 2026-05-28 (Issue #141) — offsetSec is now a float64 and MUST be the
+// actual keyframe time the player's t=0 maps to, NOT the requested
+// resume position. `-ss <startSec>` placed before `-i` is an INPUT
+// seek: ffmpeg lands on the nearest keyframe ≤ startSec, and
+// -copyts/-start_at_zero make THAT keyframe the HLS t=0. Shifting by
+// the raw startSec (which can be up to one GOP after the keyframe)
+// placed every cue ~2-3s too early — "subtitles ahead of audio".
+// Callers must pass ProbeSeekKeyframe(startSec), not startSec.
+func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, error) {
+	if offsetSec <= 0 {
 		return vttPath, nil
 	}
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
@@ -203,11 +315,14 @@ func ShiftVTTCues(vttPath string, startSec int, cacheDir string) (string, error)
 		return "", fmt.Errorf("stat vtt source: %w", err)
 	}
 
-	// Cache key: hash of (vttPath, startSec). Keep the source filename
-	// stem so the cached file is debuggable on disk.
-	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", vttPath, startSec)))
+	// Cache key: hash of (vttPath, offset rounded to ms). Keep the
+	// source filename stem so the cached file is debuggable on disk.
+	// Round to milliseconds for the key so float jitter from the
+	// keyframe probe doesn't fragment the cache.
+	offsetMs := int64(offsetSec*1000 + 0.5)
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", vttPath, offsetMs)))
 	stem := strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath))
-	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%ds_%x.vtt", stem, startSec, h[:6]))
+	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%dms_%x.vtt", stem, offsetMs, h[:6]))
 
 	// Cache hit: existing shifted file newer than the source.
 	if outInfo, err := os.Stat(outPath); err == nil && outInfo.Size() > 0 && outInfo.ModTime().After(srcInfo.ModTime()) {
@@ -254,7 +369,7 @@ func ShiftVTTCues(vttPath string, startSec int, cacheDir string) (string, error)
 		return "", fmt.Errorf("read vtt: %w", err)
 	}
 
-	startOffset := float64(startSec)
+	startOffset := offsetSec
 
 	// emitBlock writes a slice of lines + a trailing blank-line
 	// separator (the block boundary). Empty blocks are skipped.

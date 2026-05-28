@@ -1619,17 +1619,44 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	// what was the resolved codec? was a shift requested? what was
 	// the size of the served VTT? did the shift fail silently? With
 	// these in journalctl we can diagnose without redeploying.
+	// Issue #141 — `remux=1` signals the active HLS session is REMUXING
+	// (-c:v copy). This determines the subtitle cue-shift offset:
+	//
+	//   Remux:     input seek (-ss before -i) can't start mid-GOP, so
+	//              the stream's t=0 is the KEYFRAME at-or-before
+	//              startSec. The audio still begins ~startSec, but
+	//              hls.js anchors currentTime to the earliest PTS (the
+	//              video keyframe). Shift cues by that keyframe.
+	//   Transcode: the decoder accurate-seeks and discards up to
+	//              startSec, so t=0 ≈ startSec. Shift cues by startSec.
+	//
+	// Verified empirically by ffprobing seg_000 of both paths: remux
+	// seg starts at the keyframe PTS, transcode seg starts at startSec.
+	// Getting this wrong inverts the bug (cues land a GOP early OR
+	// late), which is exactly the #141 regression risk.
+	isRemux := r.URL.Query().Get("remux") == "1"
 	serve := func(vttPath string) {
 		served := vttPath
 		shiftErr := error(nil)
+		shiftOffset := 0.0
 		if startSec > 0 {
-			shifted, err := streaming.ShiftVTTCues(vttPath, startSec, h.subCache)
+			if isRemux {
+				// Remux: shift by the keyframe the input seek lands on.
+				// ProbeSeekKeyframe falls back to startSec on any probe
+				// failure, so this never regresses below pre-#141.
+				shiftOffset = streaming.ProbeSeekKeyframe(r.Context(), filePath, float64(startSec))
+			} else {
+				// Transcode (or unknown): accurate seek lands on
+				// startSec; shift by it directly.
+				shiftOffset = float64(startSec)
+			}
+			shifted, err := streaming.ShiftVTTCues(vttPath, shiftOffset, h.subCache)
 			if err == nil {
 				served = shifted
 			} else {
 				shiftErr = err
 				slog.Warn("subtitle cue-shift failed; serving unshifted",
-					"error", err, "vtt", vttPath, "start_sec", startSec)
+					"error", err, "vtt", vttPath, "start_sec", startSec, "shift_offset", shiftOffset)
 			}
 		}
 		var byteSize int64
@@ -1641,6 +1668,9 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 			"track_idx", trackIdx,
 			"file_type", fileType,
 			"start_sec", startSec,
+			"is_remux", isRemux,
+			"shift_offset", shiftOffset,
+			"keyframe_gap", float64(startSec)-shiftOffset,
 			"shifted", startSec > 0 && shiftErr == nil,
 			"vtt_path", served,
 			"vtt_bytes", byteSize,

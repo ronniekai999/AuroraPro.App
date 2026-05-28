@@ -205,6 +205,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const startSecRef = useRef<number>(0)
+  // Issue #141 — true when the active HLS session is REMUXING (-c:v
+  // copy), false when full-transcoding. Drives the subtitle cue-shift
+  // offset: remux can't accurate-seek so the stream's t=0 is the
+  // keyframe BEFORE startSec; transcode accurate-seeks so t=0 ≈
+  // startSec. The server needs to know which to align cues correctly.
+  // Stays false for direct-play (startSecRef is 0 there, so no shift
+  // is requested at all).
+  const sessionRemuxRef = useRef<boolean>(false)
   const [status, setStatus] = useState<string>('Loading…')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   // M10 Phase 4.5 — surface audio/sub tracks from /api/stream/info so
@@ -527,8 +535,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // seconds late — or never, when past EOF. The server endpoint
     // ignores start=0, so this is safe to always send.
     const startSec = startSecRef.current
+    // Issue #141 — tell the server whether this session is REMUXING.
+    // It picks the cue-shift offset accordingly: keyframe-≤-startSec
+    // for remux (input seek can't land mid-GOP), raw startSec for
+    // transcode (accurate seek lands exactly on startSec). Only
+    // meaningful when startSec>0; direct-play keeps startSec=0 and
+    // sends neither param (cues already match native currentTime).
     const trackURL = `/api/stream/${target.fileId}/subtitles/${index}?type=${target.fileType}` +
-      (startSec > 0 ? `&start=${startSec}` : '')
+      (startSec > 0 ? `&start=${startSec}${sessionRemuxRef.current ? '&remux=1' : ''}` : '')
     const track = document.createElement('track')
     track.kind = 'subtitles'
     track.src = withToken(trackURL)
@@ -913,6 +927,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         }
         sessionIdRef.current = session.session_id
         startSecRef.current = session.start_sec ?? 0
+        // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
+        // already folds in forceTranscode). The subtitle endpoint uses
+        // this to pick the cue-shift offset: keyframe for remux, raw
+        // startSec for transcode.
+        sessionRemuxRef.current = sessionReq.remux
         setStatus(
           stream.decision === 'direct_stream'
             ? `Remux · ${stream.container ?? 'hls'}`
