@@ -144,13 +144,23 @@ interface PickerProps {
   // panel's left edge / under the sidebar. Default 'right' preserves
   // VideoPlayer's existing visual.
   placement?: 'left' | 'right'
+  // 2026-05-28 — vertical open direction. 'up' (default) opens the
+  // popover above the trigger via `bottom-full` — correct for the
+  // PartyPanel use case where the trigger sits at the bottom of the
+  // chat panel. 'down' opens below via `top-full` — needed for the
+  // VideoPlayer TOP-BAR trigger: the windowed player is now a
+  // centered card with `overflow-hidden`, so an upward popover from
+  // a top-edge button gets clipped. Opening downward into the card
+  // body (like the adjacent Audio/CC menus) avoids the clip.
+  vertical?: 'up' | 'down'
 }
 
 const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
-export function ReactionPicker({ onSend, placement = 'right' }: PickerProps) {
+export function ReactionPicker({ onSend, placement = 'right', vertical = 'up' }: PickerProps) {
   const [open, setOpen] = useState(false)
   const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
+  const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'
   return (
     <div className="relative">
       <button
@@ -161,7 +171,7 @@ export function ReactionPicker({ onSend, placement = 'right' }: PickerProps) {
         😂
       </button>
       {open && (
-        <div className={`absolute bottom-full ${popoverAnchor} mb-1 bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex gap-1 z-20`}>
+        <div className={`absolute ${popoverV} ${popoverAnchor} bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex gap-1 z-20`}>
           {QUICK_EMOJI.map(e => (
             <button
               key={e}
