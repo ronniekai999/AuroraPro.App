@@ -1475,7 +1475,39 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// both -f hls and -f segment) adds ~1.4s initial PTS offset, which
 		// desynchronizes subtitle cue times from the video PTS timeline.
 		args = []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", "disabled"}
+	} else if startSec > 0 {
+		// 2026-05-28 — Resume + full-transcode: use the same -copyts /
+		// -start_at_zero pattern as the remux path. With +genpts and
+		// make_zero, the input -ss seek lands video at the preceding
+		// keyframe (file-PTS ~startSec-N) and audio at the next packet
+		// (file-PTS ~startSec). make_zero then shifts both so the
+		// MINIMUM PTS is 0 — video starts at 0, audio starts at N
+		// (the keyframe gap). HLS playback shows N seconds of silent
+		// video before audio catches up. -copyts + -start_at_zero
+		// preserves the A/V relative timing across the seek and aligns
+		// both streams to PTS=0 together (same fix the remux path
+		// already proved out). Reported as Issue #131 on Finding Nemo.
+		//
+		// Deep-debug H3 fix — keep +discardcorrupt. The original
+		// non-resume path included it for a reason: protects FFmpeg
+		// from crashing on damaged source pixel-rows (rare but real
+		// on imperfectly-ripped MKVs). The mid-stream auto-restart
+		// path (EnsureVariant → resumeFromSec = startSec + segs*dur)
+		// flows through this branch too, and that path was DESIGNED
+		// for the case where the source has corruption — losing the
+		// flag here would make restart-from-crash re-crash immediately.
+		// Adding -vsync vfr (== -fps_mode vfr on FFmpeg 5+) keeps the
+		// hardware-encoder path tolerant of frame-drop after the seek.
+		args = []string{
+			"-fflags", "+discardcorrupt",
+			"-copyts", "-start_at_zero",
+			"-avoid_negative_ts", "disabled",
+		}
 	} else {
+		// Fresh start (startSec=0): both streams already begin at file
+		// PTS=0, so +genpts is safe and helps normalise any source-side
+		// gaps. The make_zero is a no-op here but kept for symmetry
+		// with the previous behavior.
 		args = []string{
 			"-fflags", "+genpts+discardcorrupt",
 			"-avoid_negative_ts", "make_zero",

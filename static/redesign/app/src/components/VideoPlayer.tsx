@@ -446,9 +446,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setCurrentSubIndex(index)
     if (index < 0) return
     // Inject a <track> child.
+    // Issue #131 — pass the active session's resume offset so the server
+    // shifts every cue timestamp by -start_sec. Without this, the VTT
+    // uses original-file timestamps but the player's currentTime is
+    // HLS-relative (0 = resume point), so every cue fires `startSec`
+    // seconds late — or never, when past EOF. The server endpoint
+    // ignores start=0, so this is safe to always send.
+    const startSec = startSecRef.current
+    const trackURL = `/api/stream/${target.fileId}/subtitles/${index}?type=${target.fileType}` +
+      (startSec > 0 ? `&start=${startSec}` : '')
     const track = document.createElement('track')
     track.kind = 'subtitles'
-    track.src = withToken(`/api/stream/${target.fileId}/subtitles/${index}?type=${target.fileType}`)
+    track.src = withToken(trackURL)
     track.default = true
     const meta = availableSubs.find(s => s.index === index)
     if (meta?.language) track.srclang = meta.language

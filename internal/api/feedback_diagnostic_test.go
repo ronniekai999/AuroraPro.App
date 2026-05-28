@@ -64,9 +64,11 @@ func TestParseConsoleEntriesHappyPath(t *testing.T) {
 }
 
 func TestParseConsoleEntriesTailKeepsMostRecent(t *testing.T) {
-	// Build 250 entries — should be capped at 200 keeping the LAST 200.
-	entries := make([]map[string]any, 0, 250)
-	for i := 0; i < 250; i++ {
+	// Build maxConsoleEntries+100 entries — should be capped at
+	// maxConsoleEntries keeping the LAST batch.
+	total := maxConsoleEntries + 100
+	entries := make([]map[string]any, 0, total)
+	for i := 0; i < total; i++ {
 		entries = append(entries, map[string]any{
 			"ts":      "2026-05-27T18:00:00Z",
 			"level":   "log",
@@ -78,12 +80,15 @@ func TestParseConsoleEntriesTailKeepsMostRecent(t *testing.T) {
 	if len(got) != maxConsoleEntries {
 		t.Fatalf("expected cap at %d, got %d", maxConsoleEntries, len(got))
 	}
-	// First retained entry should be msg-50 (250 - 200 = 50).
-	if got[0].message != "msg-50" {
-		t.Errorf("tail-keep wrong: first entry msg=%q want msg-50", got[0].message)
+	// First retained entry should be msg-(total - maxConsoleEntries).
+	firstKept := total - maxConsoleEntries
+	wantFirst := "msg-" + itoa(firstKept)
+	if got[0].message != wantFirst {
+		t.Errorf("tail-keep wrong: first entry msg=%q want %s", got[0].message, wantFirst)
 	}
-	if got[len(got)-1].message != "msg-249" {
-		t.Errorf("tail-keep wrong: last entry msg=%q want msg-249", got[len(got)-1].message)
+	wantLast := "msg-" + itoa(total-1)
+	if got[len(got)-1].message != wantLast {
+		t.Errorf("tail-keep wrong: last entry msg=%q want %s", got[len(got)-1].message, wantLast)
 	}
 }
 
@@ -163,8 +168,9 @@ func TestParseNetworkEntriesHappyPath(t *testing.T) {
 }
 
 func TestParseNetworkEntriesTailKeepsMostRecent(t *testing.T) {
-	entries := make([]map[string]any, 0, 150)
-	for i := 0; i < 150; i++ {
+	total := maxNetworkEntries + 100
+	entries := make([]map[string]any, 0, total)
+	for i := 0; i < total; i++ {
 		entries = append(entries, map[string]any{
 			"ts":           "x",
 			"method":       "GET",
@@ -179,11 +185,14 @@ func TestParseNetworkEntriesTailKeepsMostRecent(t *testing.T) {
 	if len(got) != maxNetworkEntries {
 		t.Fatalf("expected cap at %d, got %d", maxNetworkEntries, len(got))
 	}
-	if got[0].url != "/u/50" {
-		t.Errorf("tail-keep wrong: first url %q want /u/50", got[0].url)
+	firstKept := total - maxNetworkEntries
+	wantFirst := "/u/" + itoa(firstKept)
+	if got[0].url != wantFirst {
+		t.Errorf("tail-keep wrong: first url %q want %s", got[0].url, wantFirst)
 	}
-	if got[len(got)-1].url != "/u/149" {
-		t.Errorf("tail-keep wrong: last url %q want /u/149", got[len(got)-1].url)
+	wantLast := "/u/" + itoa(total-1)
+	if got[len(got)-1].url != wantLast {
+		t.Errorf("tail-keep wrong: last url %q want %s", got[len(got)-1].url, wantLast)
 	}
 }
 

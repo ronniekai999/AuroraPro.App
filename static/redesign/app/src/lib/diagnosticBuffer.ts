@@ -52,13 +52,66 @@ interface DiagnosticSnapshot {
 
 // Ring buffer caps. Console gets more entries because each is tiny;
 // network capped lower because each entry includes a URL (potentially
-// 100s of bytes) and we want to bound the payload size at ~50 KB.
-const CONSOLE_MAX = 200
-const NETWORK_MAX = 100
+// 100s of bytes).
+//
+// 2026-05-28 (Issue #131 follow-up) — bumped from 200/100 to 500/300.
+// A real-world bug report submitted after a ~90s viewing session had
+// its ring buffer dominated by background polling (library scan-status
+// × 4 endpoints every 4s = 60 entries/min, plus keepalives + progress
+// PUTs) — the HLS segment and VTT requests that would have explained
+// the bug were already gone. The bump alone isn't enough though —
+// see NOISY_URL_PATTERNS below for the paired filter on
+// high-frequency low-signal endpoints. Together: bigger buffer +
+// less noise = more useful diagnostics per report.
+const CONSOLE_MAX = 500
+const NETWORK_MAX = 300
 
 // Per-entry caps so a single huge log line can't dominate the buffer.
 const CONSOLE_MESSAGE_MAX = 1024  // chars
 const NETWORK_URL_MAX = 500       // chars
+
+// 2026-05-28 — Filter for high-frequency, low-information network
+// requests. These are background polls / progress / keepalives that
+// fire constantly during normal use and crowd out the requests we
+// actually want when debugging (HLS segments, VTT loads, API
+// failures). Patterns match the path component of the URL (case-
+// insensitive); query strings don't participate.
+//
+// Conservative list — only filter URLs that:
+//   1. Fire on a fixed interval (poll), not in response to user action
+//   2. Almost never error in normal operation (a 4xx/5xx would matter,
+//      but matters even more in context, not in isolation)
+//   3. Carry no body-shape info the triager could use
+//
+// If a request matches AND its status is in the 2xx range, it's
+// suppressed. Errors (any 4xx/5xx, or status=0 from network failure)
+// are ALWAYS recorded — that's the case where an otherwise-noisy
+// endpoint suddenly matters.
+const NOISY_URL_PATTERNS: RegExp[] = [
+  /\/api\/libraries\/\d+\/scan\/status$/i,         // library scan polling
+  /\/api\/stream\/sessions\/[a-f0-9]+\/keepalive$/i, // HLS keepalive
+  /\/api\/progress\/\d+$/i,                        // watch progress PUTs
+  /\/api\/me\/hero\/status$/i,                     // hero rotation poll
+  /\/api\/admin\/sessions$/i,                      // admin session poll
+  /\/api\/admin\/system\/update\/status$/i,        // updater poll
+]
+
+// shouldFilterNetworkEntry returns true when an entry is high-volume
+// background noise that the bug reporter shouldn't bother recording.
+// Errors (4xx/5xx/0) are NEVER filtered — those are exactly the cases
+// where an otherwise-noisy endpoint becomes signal.
+function shouldFilterNetworkEntry(url: string, status: number): boolean {
+  // Always keep errors regardless of URL pattern.
+  if (status === 0 || status >= 400) return false
+  // Strip query string for matching; some noisy endpoints include
+  // session IDs in query (e.g. ?sessionId=…) that we don't want
+  // breaking the pattern match.
+  const pathOnly = url.split('?', 1)[0]
+  for (const re of NOISY_URL_PATTERNS) {
+    if (re.test(pathOnly)) return true
+  }
+  return false
+}
 
 // Query parameters that almost certainly carry sensitive data.
 // Redacted in captured URLs before storing in the network buffer.
@@ -277,16 +330,22 @@ function installFetchInterceptor(): void {
     try {
       const res = await originalFetch(input, init)
       try {
-        const lenHeader = res.headers.get('content-length')
-        const size = lenHeader ? parseInt(lenHeader, 10) || 0 : 0
-        pushBounded(networkBuffer, {
-          ts,
-          method,
-          url: redactURL(urlStr),
-          status: res.status,
-          durationMs: Math.round(performance.now() - startMs),
-          responseSize: size,
-        }, NETWORK_MAX)
+        // 2026-05-28 (Issue #131) — drop high-frequency, low-info
+        // background polls from the buffer when they succeed.
+        // Errors (4xx/5xx) are NEVER filtered — those are exactly
+        // when the noisy endpoint becomes signal.
+        if (!shouldFilterNetworkEntry(urlStr, res.status)) {
+          const lenHeader = res.headers.get('content-length')
+          const size = lenHeader ? parseInt(lenHeader, 10) || 0 : 0
+          pushBounded(networkBuffer, {
+            ts,
+            method,
+            url: redactURL(urlStr),
+            status: res.status,
+            durationMs: Math.round(performance.now() - startMs),
+            responseSize: size,
+          }, NETWORK_MAX)
+        }
       } catch {
         // Recording failed; the actual fetch succeeded so we still
         // return the response below.
