@@ -453,6 +453,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     if (!vid) return
     // Mirror to ref so hls.js event listeners see the latest pick.
     currentSubIndexRef.current = index
+    // Issue #135 — diagnostic logging. The console.warn calls are
+    // intentional and load-bearing: the bug reporter's diagnostic
+    // buffer captures `warn` entries, and <track> requests bypass
+    // the fetch interceptor entirely. Without instrumentation, a
+    // failing subtitle is fully invisible to triagers (we hit this
+    // exact situation on Elf — subrip codec passes the bitmap
+    // filter, the <track> apparently loads (no error event), but
+    // no cues display). Every step now emits a log entry so we
+    // can pinpoint which one breaks.
+    // Issue #135 (deep-debug L1) — happy-path entries use console.info
+    // so DevTools doesn't paint the whole picker yellow during normal
+    // use; the diagnostic buffer captures both info and warn so bug
+    // reports get the same data either way. console.warn is reserved
+    // for actual problem signals (errors, races, hls.js conflicts).
+    console.info('[Aurora.sub] applySubtitle called', {
+      requestedIndex: index,
+      target: { fileId: target.fileId, fileType: target.fileType },
+      startSec: startSecRef.current,
+      currentTime: vid.currentTime,
+      vidDuration: vid.duration,
+      existingTextTracks: vid.textTracks.length,
+    })
     // Remove any existing track first.
     if (activeTrackRef.current) {
       try {
@@ -463,7 +485,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       activeTrackRef.current = null
     }
     setCurrentSubIndex(index)
-    if (index < 0) return
+    if (index < 0) {
+      console.info('[Aurora.sub] subtitles turned OFF (index=-1)')
+      return
+    }
     // Clear any prior error before kicking off the new request.
     setSubError(null)
     // Deep-debug M3 — short-circuit if the caller somehow picked a
@@ -471,15 +496,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // that bypasses the picker filter). The server would 400 and our
     // <track> error handler would catch it, but skipping the round-
     // trip is cheaper + gives a more specific error message.
-    if (index >= 0) {
-      const pickedMeta = availableSubs.find(s => s.index === index)
-      if (pickedMeta?.bitmap) {
-        console.warn('[Aurora] subtitle pick blocked: bitmap format', { trackIndex: index })
-        setSubError('Bitmap subtitles need burn-in (not yet supported in the picker)')
-        setCurrentSubIndex(-1)
-        currentSubIndexRef.current = -1
-        return
-      }
+    const pickedMeta = availableSubs.find(s => s.index === index)
+    if (pickedMeta?.bitmap) {
+      console.warn('[Aurora.sub] pick blocked: bitmap format', { trackIndex: index, codec: pickedMeta?.codec })
+      setSubError('Bitmap subtitles need burn-in (not yet supported in the picker)')
+      setCurrentSubIndex(-1)
+      currentSubIndexRef.current = -1
+      return
     }
     // Inject a <track> child.
     // Issue #131 — pass the active session's resume offset so the server
@@ -495,20 +518,30 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     track.kind = 'subtitles'
     track.src = withToken(trackURL)
     track.default = true
-    const meta = availableSubs.find(s => s.index === index)
+    const meta = pickedMeta // already looked up above
     if (meta?.language) track.srclang = meta.language
     if (meta?.title || meta?.language) track.label = meta.title || meta.language || `Sub ${index}`
+    const trackLabel = meta?.title || meta?.language || `Sub ${index}`
+    console.info('[Aurora.sub] <track> created', {
+      trackIndex: index,
+      codec: meta?.codec,
+      bitmap: meta?.bitmap,
+      label: trackLabel,
+      // Safe to log: trackURL is built BEFORE withToken() is applied
+      // (the token only enters track.src below via withToken(trackURL)).
+      // withToken is pure and doesn't mutate the input string, so the
+      // logged URL stays token-free. NOTE: redactURL in
+      // diagnosticBuffer only runs on the NETWORK buffer, NOT the
+      // console buffer — don't rely on it as a backstop for console
+      // logs. (Deep-debug M4.)
+      url: trackURL,
+    })
     // Issue #133 — surface load failures. <track> swallows fetch
     // errors silently by default; without this handler a 4xx
     // response from the server produces no UI feedback at all.
-    // Logging via console.warn is intentional: the diagnostic
-    // buffer captures console messages, so future bug reports
-    // will include the URL + reason even though <track> requests
-    // bypass our fetch interceptor.
-    const trackLabel = meta?.title || meta?.language || `Sub ${index}`
     track.addEventListener('error', () => {
       const msg = `Couldn't load "${trackLabel}" subtitle track`
-      console.warn('[Aurora] subtitle track load failed', {
+      console.warn('[Aurora.sub] <track> error event fired', {
         trackIndex: index,
         url: trackURL,
         label: trackLabel,
@@ -525,6 +558,54 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       } catch { /* defensive */ }
       if (activeTrackRef.current === track) activeTrackRef.current = null
     })
+    // Issue #135 — log when the <track>'s underlying TextTrack
+    // populates. This tells us if the VTT was fetched + parsed
+    // successfully. cues.length === 0 with no error event means
+    // either the VTT was empty after our cue-shift OR the browser's
+    // WebVTT parser rejected the body silently (mistuned BOM /
+    // malformed timestamps / wrong content-type).
+    //
+    // Deep-debug H1 — the `load` event fires when the network fetch
+    // completes, but `track.track.cues` populates on a SEPARATE
+    // microtask in some Chromium / Safari versions. Reading cues
+    // synchronously can return 0 even when cues are about to arrive,
+    // producing a false-positive toast. Defer the cue-count check by
+    // 150ms (well past the typical microtask flush) and only set the
+    // error then. The diagnostic log still emits immediately for the
+    // bug-report trail.
+    track.addEventListener('load', () => {
+      const tt = track.track
+      const initialCueCount = tt?.cues?.length ?? -1
+      console.info('[Aurora.sub] <track> load event fired', {
+        trackIndex: index,
+        initialCueCount,
+        textTrackMode: tt?.mode,
+        textTrackKind: tt?.kind,
+        textTrackLabel: tt?.label,
+      })
+      // Re-check cue count after the browser's parser has had a
+      // chance to populate the cue list. Only surface an error if
+      // BOTH readings are 0 (i.e., the cue list is truly empty,
+      // not just not-yet-populated).
+      setTimeout(() => {
+        const finalCueCount = track.track?.cues?.length ?? -1
+        if (finalCueCount === 0) {
+          console.warn('[Aurora.sub] <track> loaded but produced zero cues', {
+            trackIndex: index,
+            initialCueCount,
+            finalCueCount,
+          })
+          setSubError(`"${trackLabel}" loaded but has no cues — possible format mismatch`)
+        } else if (initialCueCount === 0 && finalCueCount > 0) {
+          // Browser populated cues after the load event — log so we
+          // know the race exists for this browser/file combo.
+          console.info('[Aurora.sub] cues arrived after load event', {
+            trackIndex: index,
+            finalCueCount,
+          })
+        }
+      }, 150)
+    })
     vid.appendChild(track)
     activeTrackRef.current = track
     // Poll until the browser has promoted our <track> into
@@ -534,12 +615,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const promote = () => {
       tries++
       if (track.track) {
+        const modes: string[] = []
         for (let i = 0; i < vid.textTracks.length; i++) {
           vid.textTracks[i].mode = vid.textTracks[i] === track.track ? 'showing' : 'disabled'
+          modes.push(`[${i}]=${vid.textTracks[i].mode}`)
         }
+        console.info('[Aurora.sub] track promoted + mode set', {
+          tries,
+          totalTracks: vid.textTracks.length,
+          modes: modes.join(' '),
+        })
         return
       }
       if (tries < 30) setTimeout(promote, 33)
+      else console.warn('[Aurora.sub] track.track never populated after 30 polls (~1s)')
     }
     promote()
   }, [target, availableSubs])
@@ -842,18 +931,34 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // This is the event hls.js uses to re-promote DEFAULT tracks
         // after parsing the subtitle playlist, which is what was
         // sneaking past our MANIFEST_PARSED disable.
-        const enforceNoAutoSub = () => {
+        // eventName parameter (not `event`, to avoid cognitive collision
+        // with hls.js's event-object arg) identifies which hls.js event
+        // fired. The hls.js callback args are intentionally discarded —
+        // the data payload is large and we don't use any of its fields.
+        const enforceNoAutoSub = (eventName: string) => {
           // CRITICAL: read via ref. This listener is registered once
           // per play effect and would capture a stale closure value.
           // If we read stale -1 here after the user picks a sub via
           // the picker, a level-switch SUBTITLE_TRACK_SWITCH event
           // would silently wipe the user's selection mid-playback.
-          if (currentSubIndexRef.current >= 0) return // user picked one
+          if (currentSubIndexRef.current >= 0) {
+            // Issue #135 — log when hls.js wanted to disable but we
+            // skipped because the user has an active pick. This is
+            // the load-bearing race we always worried about; if it
+            // EVER appears in a bug report alongside "no subs", the
+            // bug isn't this branch (we returned).
+            console.info('[Aurora.sub] hls.js sub-event ignored (user has pick)', {
+              eventName,
+              userPickedIndex: currentSubIndexRef.current,
+            })
+            return
+          }
+          console.info('[Aurora.sub] hls.js sub-event forced off', { eventName })
           try { hls.subtitleTrack = -1 } catch { /* defensive */ }
           disableAllTextTracks(vid)
         }
-        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, enforceNoAutoSub)
-        hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, enforceNoAutoSub)
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => enforceNoAutoSub('SUBTITLE_TRACKS_UPDATED'))
+        hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, () => enforceNoAutoSub('SUBTITLE_TRACK_SWITCH'))
 
         // Error handling — basic. V1's full ladder is in Phase 2.5.
         // We do the standard hls.js advisories: media errors → try

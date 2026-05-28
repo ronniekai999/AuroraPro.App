@@ -576,12 +576,54 @@ func BurnInBitmapArgs(streamIndex int, scaleFilter string) []string {
 }
 
 // IsBitmapSubtitle returns true if the codec is a bitmap-based subtitle format.
+//
+// Issue #135 — extended the list defensively. FFmpeg's codec_name for the
+// same source can vary by version; we want to catch every variant so the
+// frontend bitmap filter doesn't leak through and the ServeSubtitle 400
+// guard fires the moment a bitmap track is requested. If a new codec
+// variant slips through, the new subtitle-served slog.Info will reveal it.
 func IsBitmapSubtitle(codec string) bool {
 	switch strings.ToLower(codec) {
-	case "hdmv_pgs_subtitle", "pgssub", "pgs",
-		"dvd_subtitle", "dvdsub", "vobsub",
-		"dvb_subtitle", "dvbsub",
-		"xsub":
+	// PGS (Blu-ray): hdmv_pgs_subtitle (modern), pgssub (older), pgs (alias)
+	case "hdmv_pgs_subtitle", "pgssub", "pgs", "pgs_subtitle":
+		return true
+	// VobSub (DVD)
+	case "dvd_subtitle", "dvdsub", "vobsub":
+		return true
+	// DVB (broadcast)
+	case "dvb_subtitle", "dvbsub":
+		return true
+	// xsub (DivX bitmap subs)
+	case "xsub":
+		return true
+	// hdmv_text_subtitle is text-based per name but FFmpeg's webvtt
+	// converter rejects it as "unsupported source codec" — treat as
+	// bitmap to keep it out of the picker until we add a real converter.
+	case "hdmv_text_subtitle":
+		return true
+	}
+	return false
+}
+
+// IsTextSubtitle returns true if the codec is a text-based subtitle format
+// that we know FFmpeg can convert to WebVTT cleanly. Used as a SECONDARY
+// check by the frontend so an unrecognized codec name (neither in the
+// bitmap list nor here) is shown to the user with a "may not work"
+// indicator instead of silently failing.
+//
+// Issue #135 — added because Elf's "eng" subrip should obviously work but
+// didn't, and we want the picker to tell the user "this should work" vs
+// "this is unknown territory" so future bug reports include the codec
+// name in the user's complaint.
+func IsTextSubtitle(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "subrip", "srt",
+		"ass", "ssa",
+		"webvtt", "vtt",
+		"mov_text",
+		"text", "subviewer", "subviewer1",
+		"eia_608", "eia_708",
+		"microdvd":
 		return true
 	}
 	return false
