@@ -33,6 +33,7 @@ import (
 	"io"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -294,6 +295,19 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		}
 	}
 	return h
+}
+
+// isNetTimeout reports whether err is a network-level timeout (TLS
+// handshake timeout, dial timeout, etc.) that wraps to a net.Error
+// with Timeout() == true. context.DeadlineExceeded / Canceled are
+// checked separately by callers — this only catches the transport
+// layer's own timeouts that don't necessarily wrap a context error.
+func isNetTimeout(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
 }
 
 // outboundCtx returns the parent context for outbound calls that
@@ -934,10 +948,39 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		// useful next step. A timeout is recoverable (retry); other
 		// failures (auth, repo permission, GitHub 5xx) usually aren't
 		// from the user's side and warrant a "contact admin" prompt.
-		slog.Warn("feedback issue create failed", "error", err, "user_id", claims.UserID)
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		//
+		// Deep-debug PR #126 M2: catches all timeout-like errors —
+		// stdlib ctx deadline, *url.Error wrapping a net.Error.Timeout()
+		// (TLS handshake / dial timeouts that bubble up as plain
+		// *net.OpError), and the SSRF resolver's transport timeouts.
+		// C2: also check r.Context().Err() so if chi already cancelled
+		// the request we don't try to write a response twice (chi v5
+		// writes its own 504 in a defer after the handler returns).
+		// H2 + S1: message wording covers both "GitHub took too long"
+		// and "Aurora server shutting down" (both produce
+		// context.Canceled / DeadlineExceeded against rootCtx).
+		classification := "upstream"
+		isTimeout := errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, context.Canceled) ||
+			isNetTimeout(err)
+		if isTimeout {
+			classification = "timeout"
+		}
+		slog.Warn("feedback issue create failed",
+			"error", err,
+			"classification", classification,
+			"user_id", claims.UserID)
+		// If chi already cancelled the request context, don't bother
+		// writing a body — chi's deferred WriteHeader(504) will fire
+		// after we return, and our statusCapture would silently drop
+		// one of the two writes anyway. Returning early keeps the
+		// response stream clean.
+		if r.Context().Err() != nil {
+			return
+		}
+		if isTimeout {
 			writeError(w, http.StatusGatewayTimeout,
-				"bug report submission timed out talking to GitHub — please try again in a moment")
+				"bug report submission timed out — please try again in a moment")
 		} else {
 			writeError(w, http.StatusBadGateway,
 				"bug report submission failed — please try again later or contact your administrator")
