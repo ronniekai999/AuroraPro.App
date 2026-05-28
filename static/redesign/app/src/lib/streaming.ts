@@ -78,6 +78,13 @@ export interface SubtitleTrack {
   title?: string
   codec?: string
   forced?: boolean
+  // Issue #133 — server marks bitmap-format subs (PGS/VobSub/DVB)
+  // with bitmap=true. These can't be converted to WebVTT text, so
+  // the player picker filters them out — the server's
+  // /api/stream/{id}/subtitles/{idx} endpoint returns 400 for
+  // them, which the <track> element swallows silently and looks
+  // like "subtitles don't work" to the user.
+  bitmap?: boolean
 }
 
 export interface CreateSessionRequest {
