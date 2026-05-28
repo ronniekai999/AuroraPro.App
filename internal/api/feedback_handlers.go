@@ -28,6 +28,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -80,6 +81,13 @@ type FeedbackHandler struct {
 	submitLimiter          *feedbackLimiter
 	effectiveTTL           time.Duration
 	effectiveSweepInterval time.Duration
+	// 2026-05-27 — Server-lifecycle context. Used as the parent for the
+	// outbound GitHub POST so the call survives client disconnect (we've
+	// already saved the attachment by that point — bailing on the GH
+	// call would leak the file). Cancelled at server shutdown so
+	// in-flight POSTs unwind cleanly. Falls back to context.Background
+	// when nil (test setup).
+	rootCtx context.Context
 	// 2026-05-27 — Pre-resolved absolute path to ffmpeg from the
 	// startup probe in NewFeedbackHandler. Used for WebM remux
 	// post-processing (MediaRecorder produces WebM files without
@@ -258,6 +266,7 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		effectiveSweepInterval: sweep,
 		serverVersion:          strings.TrimSpace(serverVersion),
 		ffmpegPath:             ffmpegPath,
+		rootCtx:                ctx, // may be nil in test setup; outboundCtx() handles fallback
 	}
 	if cfg.Enabled {
 		client, err := feedback.New(cfg.GitHubToken, cfg.GitHubRepo)
@@ -285,6 +294,20 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		}
 	}
 	return h
+}
+
+// outboundCtx returns the parent context for outbound calls that
+// should outlive the inbound HTTP request (e.g. the GitHub POST after
+// the attachment has been saved to disk). Falls back to
+// context.Background when rootCtx wasn't supplied (test setup) so the
+// handler still works in isolation. Cancellation of the returned
+// context happens only at server shutdown — callers must layer a
+// WithTimeout on top.
+func (h *FeedbackHandler) outboundCtx() context.Context {
+	if h.rootCtx != nil {
+		return h.rootCtx
+	}
+	return context.Background()
 }
 
 // runHealthChecks validates the configured PAT at startup and then
@@ -878,9 +901,15 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// for triagers reading on GitHub.
 	body := buildIssueBody(desc, name, claims.Username, attachmentURL, attachmentSize, attachmentMime, env, consoleEntries, networkEntries)
 
-	// Use the request's context so a client disconnect aborts the
-	// in-flight GitHub call cleanly.
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// 2026-05-27 — Use a fresh context (not r.Context()) for the GitHub
+	// call. By this point we've already accepted the upload + saved the
+	// attachment, so a client disconnect shouldn't abort the upstream
+	// POST — the user already paid the cost of uploading, and the
+	// janitor would just clean up the orphan if we bailed. 60s timeout
+	// (up from 30s) gives GitHub real headroom; its API can stall in
+	// the 30-50s range during minor incidents and we want to ride
+	// those out rather than burn the user's report.
+	ctx, cancel := context.WithTimeout(h.outboundCtx(), 60*time.Second)
 	defer cancel()
 
 	resp, err := h.client.CreateIssue(ctx, feedback.CreateIssueRequest{
@@ -900,9 +929,19 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		// message instead of echoing GitHub's raw response body or
 		// internal error strings. Detail is logged at WARN so admins
 		// can debug from the server log.
+		//
+		// 2026-05-27 — Classify timeout-vs-other so the user gets a
+		// useful next step. A timeout is recoverable (retry); other
+		// failures (auth, repo permission, GitHub 5xx) usually aren't
+		// from the user's side and warrant a "contact admin" prompt.
 		slog.Warn("feedback issue create failed", "error", err, "user_id", claims.UserID)
-		writeError(w, http.StatusBadGateway,
-			"bug report submission failed — please try again later or contact your administrator")
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			writeError(w, http.StatusGatewayTimeout,
+				"bug report submission timed out talking to GitHub — please try again in a moment")
+		} else {
+			writeError(w, http.StatusBadGateway,
+				"bug report submission failed — please try again later or contact your administrator")
+		}
 		return
 	}
 

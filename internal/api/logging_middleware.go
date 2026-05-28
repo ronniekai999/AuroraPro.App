@@ -12,14 +12,42 @@ import (
 )
 
 // statusCapture wraps http.ResponseWriter to capture the status code.
+//
+// 2026-05-27 — Tracks whether WriteHeader has already been forwarded
+// to the underlying writer so a second call (e.g. a handler that wrote
+// an error after its context was cancelled by chi.Timeout and the
+// connection was already torn down) doesn't trigger Go's "superfluous
+// response.WriteHeader" warning. The underlying writer would no-op the
+// second call anyway; we just stop the spurious log line.
 type statusCapture struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (sc *statusCapture) WriteHeader(code int) {
+	if sc.wroteHeader {
+		// Already sent — drop the duplicate to avoid the stdlib
+		// warning. Keep sc.status as the FIRST status (matches what
+		// the client actually saw) instead of overwriting.
+		return
+	}
+	sc.wroteHeader = true
 	sc.status = code
 	sc.ResponseWriter.WriteHeader(code)
+}
+
+// Write makes sure sc.wroteHeader flips to true the implicit way:
+// calling Write without an explicit WriteHeader call causes net/http
+// to write 200 OK first. We mirror that so a subsequent explicit
+// WriteHeader call also gets suppressed.
+func (sc *statusCapture) Write(b []byte) (int, error) {
+	if !sc.wroteHeader {
+		sc.wroteHeader = true
+		// sc.status stays at the constructor default (200) — same
+		// behavior as net/http's implicit-200 path.
+	}
+	return sc.ResponseWriter.Write(b)
 }
 
 // Hijack implements http.Hijacker, required for WebSocket upgrades.
