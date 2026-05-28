@@ -217,6 +217,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const [audioMenuOpen, setAudioMenuOpen] = useState(false)
   const [subsMenuOpen, setSubsMenuOpen] = useState(false)
   const [currentSubIndex, setCurrentSubIndex] = useState<number>(-1) // -1 = off
+  // Issue #133 — transient error string for the subtitle picker.
+  // Set when a <track> element fails to load (server 4xx, network,
+  // or VTT parse failure). Auto-clears after 4s. Without surfacing,
+  // every failure was completely invisible to the user (toggle the
+  // sub, nothing visible changes).
+  const [subError, setSubError] = useState<string | null>(null)
   // Mirror of `currentSubIndex` for use inside hls.js event listeners
   // that are registered once per play effect and would otherwise see
   // a stale closure value. Updated whenever applySubtitle / the reset
@@ -240,6 +246,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // realDurationSec is the source-file duration from streamInfo.
   // Falls back to vid.duration when not provided.
   const [realDurationSec, setRealDurationSec] = useState(0)
+  // Issue #133 (deep-debug H1+M1) — ref mirror of realDurationSec for
+  // the progress reporter to read INSIDE its setInterval callback.
+  // Reading state from the effect's closure forced us to put
+  // realDurationSec in the effect's dep array, which on HLS-fallback
+  // (server didn't return duration_ms) caused the interval to tear
+  // down + recreate on EVERY durationchange event from hls.js — the
+  // playlist-length value grows continuously during transcode, so the
+  // 10s progress timer reset constantly and the user's progress never
+  // got saved. The ref pattern also closes a smaller race where
+  // serverDurationRef.current goes true *before* setRealDurationSec
+  // commits, briefly leaving the fallback branch active.
+  const realDurationSecRef = useRef(0)
+  useEffect(() => { realDurationSecRef.current = realDurationSec }, [realDurationSec])
   const [volume, setVolume] = useState(1)
   const [muted, setMuted] = useState(false)
   const [fullscreen, setFullscreen] = useState(false)
@@ -445,6 +464,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
     setCurrentSubIndex(index)
     if (index < 0) return
+    // Clear any prior error before kicking off the new request.
+    setSubError(null)
+    // Deep-debug M3 — short-circuit if the caller somehow picked a
+    // bitmap track (deep-link, session-restore, or a future caller
+    // that bypasses the picker filter). The server would 400 and our
+    // <track> error handler would catch it, but skipping the round-
+    // trip is cheaper + gives a more specific error message.
+    if (index >= 0) {
+      const pickedMeta = availableSubs.find(s => s.index === index)
+      if (pickedMeta?.bitmap) {
+        console.warn('[Aurora] subtitle pick blocked: bitmap format', { trackIndex: index })
+        setSubError('Bitmap subtitles need burn-in (not yet supported in the picker)')
+        setCurrentSubIndex(-1)
+        currentSubIndexRef.current = -1
+        return
+      }
+    }
     // Inject a <track> child.
     // Issue #131 — pass the active session's resume offset so the server
     // shifts every cue timestamp by -start_sec. Without this, the VTT
@@ -462,6 +498,33 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const meta = availableSubs.find(s => s.index === index)
     if (meta?.language) track.srclang = meta.language
     if (meta?.title || meta?.language) track.label = meta.title || meta.language || `Sub ${index}`
+    // Issue #133 — surface load failures. <track> swallows fetch
+    // errors silently by default; without this handler a 4xx
+    // response from the server produces no UI feedback at all.
+    // Logging via console.warn is intentional: the diagnostic
+    // buffer captures console messages, so future bug reports
+    // will include the URL + reason even though <track> requests
+    // bypass our fetch interceptor.
+    const trackLabel = meta?.title || meta?.language || `Sub ${index}`
+    track.addEventListener('error', () => {
+      const msg = `Couldn't load "${trackLabel}" subtitle track`
+      console.warn('[Aurora] subtitle track load failed', {
+        trackIndex: index,
+        url: trackURL,
+        label: trackLabel,
+      })
+      setSubError(msg)
+      // Roll back UI selection so the picker reflects "off" rather
+      // than "stuck on a track that isn't actually rendering."
+      setCurrentSubIndex(-1)
+      currentSubIndexRef.current = -1
+      // Remove the dead track element so a subsequent retry doesn't
+      // try to reuse it.
+      try {
+        if (track.parentNode) track.parentNode.removeChild(track)
+      } catch { /* defensive */ }
+      if (activeTrackRef.current === track) activeTrackRef.current = null
+    })
     vid.appendChild(track)
     activeTrackRef.current = track
     // Poll until the browser has promoted our <track> into
@@ -542,7 +605,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         const stream = info.stream
         // M10 Phase 4.5 — expose tracks for the picker.
         setAvailableAudio(info.audio_tracks || [])
-        setAvailableSubs(info.subtitles || [])
+        // Issue #133 — filter out bitmap-format subtitles (PGS/VobSub/
+        // DVB) before showing in the picker. The server can't convert
+        // these to WebVTT and returns 400 from
+        // /api/stream/{id}/subtitles/{idx}, which the <track> element
+        // swallows silently — user toggles "eng", nothing visible
+        // changes. Common on Blu-ray rips: Elf 2003 has PGS as its
+        // primary English track, so toggling it appeared to do
+        // nothing. Bitmap subs CAN still be burned in via the
+        // pre-play setup; that path uses a different code path so
+        // filtering the in-player picker doesn't lose functionality.
+        // The backend already marks these with `bitmap: true` in
+        // /api/stream/info/{id} (phase2_handlers.go:1447).
+        setAvailableSubs((info.subtitles || []).filter(s => !s.bitmap))
         // Phase 7 — capture REAL source-file duration from the
         // server. This is what the custom controls' time display
         // shows; without it the user only sees the growing HLS
@@ -1426,6 +1501,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }
 
+  // Issue #133 — auto-clear the subtitle-error toast after 4s so the
+  // picker UI doesn't get stuck in an error state. The user can also
+  // dismiss it by picking another track (applySubtitle clears it
+  // explicitly at the start of every attempt).
+  useEffect(() => {
+    if (!subError) return
+    const id = window.setTimeout(() => setSubError(null), 4000)
+    return () => window.clearTimeout(id)
+  }, [subError])
+
   // Audit H2 — pre-emptive token refresh during long playback. Aurora's
   // access tokens last 15 minutes; we refresh every 12 to keep a buffer.
   // The refresh is silent (apiFetch background path) and updates
@@ -1446,6 +1531,17 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // cadence (aurora_pro.html:4651). Skips when paused or no duration
   // is known yet. Adds back the server-side -ss offset so the stored
   // position is in source-file coordinates, not hls.js coordinates.
+  //
+  // Issue #133 — duration source: PREFER the server-provided
+  // realDurationSec over vid.duration. vid.duration is the HLS EVENT
+  // playlist length, which GROWS as ffmpeg produces segments — it's
+  // not the file duration. Using it gives inflated progress
+  // percentages on the Continue Watching home rail (and everywhere
+  // else that reads percent_complete) until ffmpeg catches up to
+  // end-of-file (which, for a slow transcode of a long movie, may
+  // never happen in a single viewing session). The custom controls'
+  // time display already uses realDurationSec; the progress saver
+  // was the missed spot.
   useEffect(() => {
     if (!target) return
     const id = window.setInterval(() => {
@@ -1453,7 +1549,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       if (!vid || vid.paused) return
       const offsetMs = (startSecRef.current ?? 0) * 1000
       const posMs = Math.round(vid.currentTime * 1000) + offsetMs
-      const durMs = Math.round((vid.duration || 0) * 1000) + offsetMs
+      // realDurationSec is the FULL file duration (from
+      // /api/stream/info/{id}.stream.duration_ms). It's NOT
+      // offset-shifted, so no +offsetMs. Read via ref so the
+      // setInterval closure always sees the latest value WITHOUT
+      // forcing the effect to retear on every change (which on
+      // HLS-fallback would happen on every durationchange and
+      // defer the 10s timer indefinitely — deep-debug H1).
+      // Fall back to the old playlist-length math only if the
+      // server didn't return a duration (legacy/missing-probe case
+      // — serverDurationRef.current is FALSE).
+      let durMs: number
+      const realDur = realDurationSecRef.current
+      if (serverDurationRef.current && realDur > 0) {
+        durMs = Math.round(realDur * 1000)
+      } else {
+        durMs = Math.round((vid.duration || 0) * 1000) + offsetMs
+      }
       if (durMs <= 0) return
       void reportProgress(target.mediaItemId, {
         position_ms: posMs,
@@ -1568,6 +1680,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 <track> element. */}
             {availableSubs.length > 0 && (
               <div className="relative">
+                {/* Issue #133 — transient error pill rendered above
+                    the CC button when a subtitle track fails to
+                    load. Auto-dismisses after 4s via the effect on
+                    subError. role="status" so screen readers
+                    announce it as a polite update. */}
+                {subError && (
+                  <div
+                    role="status"
+                    className="absolute bottom-full right-0 mb-1 px-2 py-1 bg-red-500/15 border border-red-500/40 text-red-200 rounded text-xs whitespace-nowrap pointer-events-none"
+                  >
+                    {subError}
+                  </div>
+                )}
                 <button
                   onClick={() => { setSubsMenuOpen(o => !o); setAudioMenuOpen(false) }}
                   className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
