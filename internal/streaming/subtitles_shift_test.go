@@ -6,6 +6,7 @@
 package streaming
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -444,5 +445,68 @@ func TestFormatVTTTimestamp(t *testing.T) {
 		if got != c.want {
 			t.Errorf("formatVTTTimestamp(%v) = %q; want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// Issue #141 — fractional offset (the keyframe time is rarely a whole
+// second). Verify cues shift by the exact float, not a rounded int.
+func TestShiftVTTCuesFractionalOffset(t *testing.T) {
+	dir := t.TempDir()
+	src := writeTempVTT(t, dir, "in.vtt", strings.Join([]string{
+		"WEBVTT",
+		"",
+		"00:13:36.000 --> 00:13:38.000",
+		"dialogue",
+		"",
+	}, "\n"))
+	// Requested resume was 816s (13:36) but the keyframe ffmpeg lands
+	// on is 813.5s. Shifting by 813.5 (not 816) keeps the cue aligned
+	// with where the A/V actually starts. 816.0 - 813.5 = 2.5s, so the
+	// cue at file-time 816 should land at HLS-time 2.5, NOT 0.
+	got, err := ShiftVTTCues(src, 813.5, dir)
+	if err != nil {
+		t.Fatalf("shift err: %v", err)
+	}
+	data, _ := os.ReadFile(got)
+	out := string(data)
+	if !strings.Contains(out, "00:00:02.500 --> 00:00:04.500") {
+		t.Errorf("expected cue shifted by 813.5 to land at 00:02.500; got:\n%s", out)
+	}
+}
+
+// Issue #141 — a fractional offset must NOT collide in the cache with a
+// nearby whole-second offset; the key is rounded to ms.
+func TestShiftVTTCuesFractionalOffsetCacheKey(t *testing.T) {
+	dir := t.TempDir()
+	src := writeTempVTT(t, dir, "in.vtt", "WEBVTT\n\n00:00:20.000 --> 00:00:22.000\nhi\n")
+	a, err := ShiftVTTCues(src, 813.5, dir)
+	if err != nil {
+		t.Fatalf("shift 813.5: %v", err)
+	}
+	b, err := ShiftVTTCues(src, 814.0, dir)
+	if err != nil {
+		t.Fatalf("shift 814.0: %v", err)
+	}
+	if a == b {
+		t.Errorf("distinct offsets should produce distinct cache files; both = %q", a)
+	}
+}
+
+// Issue #141 — ProbeSeekKeyframe contract on degenerate inputs. Real
+// keyframe probing against a media file is covered by the integration
+// path (and would require a fixture); here we lock the fallback
+// behavior that guarantees no regression below pre-#141.
+func TestProbeSeekKeyframeFallbacks(t *testing.T) {
+	// target <= 0 returns target unchanged without probing.
+	if got := ProbeSeekKeyframe(context.Background(), "/nonexistent.mkv", 0); got != 0 {
+		t.Errorf("target=0 should return 0, got %v", got)
+	}
+	if got := ProbeSeekKeyframe(context.Background(), "/nonexistent.mkv", -5); got != -5 {
+		t.Errorf("negative target should pass through, got %v", got)
+	}
+	// A nonexistent file → ffprobe fails → fall back to the requested
+	// target (never worse than pre-#141 behavior).
+	if got := ProbeSeekKeyframe(context.Background(), "/nonexistent-aurora-test.mkv", 816); got != 816 {
+		t.Errorf("probe failure should fall back to target 816, got %v", got)
 	}
 }
