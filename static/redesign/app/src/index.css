@@ -433,6 +433,12 @@
   gap: 14px;
   margin-bottom: 10px;
 }
+/* 2026-05-27 — Per-rail icon chip with tint variants. The base rule
+   handles ONLY layout (size, shape, alignment); each [data-tint=...]
+   block owns its own colors. railIconFor() always resolves to a tint
+   so the data-tint attribute is present on every render — there's no
+   "naked" fallback to worry about.
+   Adding a new tint = one block here + one entry in railIconFor(). */
 .rail-header .rail-icon {
   flex-shrink: 0;
   width: 28px;
@@ -441,9 +447,39 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* Border thickness comes from the base rule; tint blocks override
+     background + border-color + color. */
+  border: 1px solid transparent;
+}
+.rail-header .rail-icon[data-tint="purple"] {
   background: rgba(168, 85, 247, 0.18);
-  border: 1px solid rgba(168, 85, 247, 0.4);
+  border-color: rgba(168, 85, 247, 0.4);
   color: #d8b4fe;
+}
+.rail-header .rail-icon[data-tint="teal"] {
+  background: rgba(45, 212, 191, 0.16);
+  border-color: rgba(45, 212, 191, 0.4);
+  color: #5eead4;
+}
+.rail-header .rail-icon[data-tint="amber"] {
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fcd34d;
+}
+.rail-header .rail-icon[data-tint="pink"] {
+  background: rgba(236, 72, 153, 0.16);
+  border-color: rgba(236, 72, 153, 0.4);
+  color: #f9a8d4;
+}
+.rail-header .rail-icon[data-tint="rose"] {
+  background: rgba(244, 63, 94, 0.16);
+  border-color: rgba(244, 63, 94, 0.4);
+  color: #fda4af;
+}
+.rail-header .rail-icon[data-tint="indigo"] {
+  background: rgba(99, 102, 241, 0.16);
+  border-color: rgba(99, 102, 241, 0.4);
+  color: #a5b4fc;
 }
 .rail-header .rail-title {
   font-size: 1.05rem;
