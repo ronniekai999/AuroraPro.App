@@ -122,7 +122,6 @@ import { CalendarView } from '@/components/CalendarView'
 import { GamificationCard } from '@/components/GamificationCard'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
-import { extractPalette, DEFAULT_PALETTE } from '@/lib/themeFromImage'
 import { useParty } from '@/hooks/useParty'
 
 /* ─────────────────────── TYPES ─────────────────────── */
@@ -1705,15 +1704,12 @@ function DetailView({
   const rating = detail?.rating ?? media.rating
   const realPoster = detail ? posterURL(detail.poster_path) : media.poster
   const realBackdrop = detail ? backdropURL(detail.backdrop_path) : (media.backdrop || media.poster)
-  // Extract a dominant color from the poster for accent tinting.
-  // Silently falls back to the default Aurora purple on failure.
-  const [palette, setPalette] = useState(DEFAULT_PALETTE)
-  useEffect(() => {
-    if (!realPoster) return
-    let cancelled = false
-    extractPalette(realPoster).then(p => { if (!cancelled) setPalette(p) })
-    return () => { cancelled = true }
-  }, [realPoster])
+  // 2026-05-28 — Removed poster-derived accent tinting of the primary
+  // CTA. Deriving the button color from the artwork made the action
+  // bar a different color on every title (green on Drake & Josh, red
+  // elsewhere) and clashed with Aurora's purple brand. The primary
+  // now uses a fixed Aurora purple for a consistent, professional bar
+  // on every page — see the action buttons below.
   const realGenre = (detail?.genres && detail.genres[0]) || media.genre
   // QA BUG-013 — TMDB's TV detail returns per-episode runtime, not
   // the series total. Append "/ep" for any episodic type (shows AND
@@ -1854,14 +1850,11 @@ function DetailView({
                 <>
                   <button
                     onClick={() => resume.onPlay(resume.item)}
-                    // Same palette/glow as Play so the visual weight
-                    // signals "primary CTA" — Resume just inherits the
-                    // role here.
-                    style={{
-                      backgroundColor: palette.accent,
-                      boxShadow: `0 0 24px ${palette.glow}`,
-                    }}
-                    className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap"
+                    // PRIMARY CTA — fixed Aurora purple + purple glow.
+                    // The single loud button in the bar; identical on
+                    // every title so the page reads consistent and
+                    // on-brand (no per-poster color).
+                    className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap bg-purple-600 hover:bg-purple-500 shadow-[0_0_24px_rgba(168,85,247,0.45)]"
                     title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                     aria-label={formatResumeAriaLabel(resume.item)}
                   >
@@ -1883,26 +1876,31 @@ function DetailView({
               ) : (
                 <button
                   onClick={() => onPlay(media)}
-                  // Tint background + glow with the poster's dominant
-                  // color (falls back to Aurora purple).
-                  style={{
-                    backgroundColor: palette.accent,
-                    boxShadow: `0 0 24px ${palette.glow}`,
-                  }}
-                  className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap"
+                  // PRIMARY CTA — fixed Aurora purple + purple glow
+                  // (consistent on every title; see Resume above).
+                  className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap bg-purple-600 hover:bg-purple-500 shadow-[0_0_24px_rgba(168,85,247,0.45)]"
                 >
                   <Icon name="play" size={16} /> Play
                 </button>
               )}
               <button
                 onClick={() => onToggleLib(media)}
-                className={`h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all border whitespace-nowrap ${
+                // SECONDARY (ghost). When saved, the only accent is a
+                // purple check — it signals state without becoming a
+                // second solid color competing with the primary CTA.
+                // Hovering a saved item reveals the red "remove" intent
+                // across the whole pill (group-hover).
+                className={`group h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all border whitespace-nowrap ${
                   inLibrary
-                    ? 'bg-purple-600/20 border-purple-500/40 text-purple-300 hover:bg-red-500/20 hover:border-red-500/40 hover:text-red-400'
+                    ? 'bg-white/[0.05] border-white/[0.08] text-white/85 hover:bg-red-500/15 hover:border-red-500/30 hover:text-red-300'
                     : 'bg-white/10 border-white/10 text-white hover:bg-white/15'
                 }`}
               >
-                <Icon name={inLibrary ? 'check' : 'plus'} size={16} />
+                <Icon
+                  name={inLibrary ? 'check' : 'plus'}
+                  size={16}
+                  className={inLibrary ? 'text-purple-400 group-hover:text-red-300' : ''}
+                />
                 {inLibrary ? 'In Library' : 'Add to Library'}
               </button>
               {onAddToWatchlist && (
@@ -1920,17 +1918,26 @@ function DetailView({
                   onClick={() => onStartParty(media)}
                   disabled={inParty}
                   title={inParty ? 'Already in a party. Leave first to start a new one.' : 'Start a watch party'}
-                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-200 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                  // SECONDARY (ghost) — was emerald-tinted; neutralized
+                  // so the bar has a single accent (the purple primary).
+                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   <Icon name="users" size={16} />
                   {inParty ? 'In Party' : 'Watch Party'}
                 </button>
               )}
+              {/* UTILITY group (admin metadata tools). Set apart with a
+                  divider and rendered at the lowest visual weight —
+                  these aren't viewer actions, so they shouldn't compete
+                  with Play/Library/Party. Only shown to admins. */}
+              {(onRefreshMetadata || onIdentify) && (
+                <div className="w-px h-6 bg-white/10 mx-1 self-center" aria-hidden="true" />
+              )}
               {onRefreshMetadata && (
                 <button
                   onClick={() => onRefreshMetadata(media)}
                   title="Re-fetch metadata from TMDB/TVDB (auto-match)"
-                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 whitespace-nowrap"
+                  className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.05] text-white/55 hover:text-white/80 whitespace-nowrap"
                 >
                   <Icon name="refresh" size={16} />
                   Refresh
@@ -1940,7 +1947,9 @@ function DetailView({
                 <button
                   onClick={() => onIdentify(media)}
                   title="Manually search TMDB/TVDB and pick the correct match"
-                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-200 whitespace-nowrap"
+                  // Was amber-tinted; neutralized to the same muted
+                  // utility style as Refresh.
+                  className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.05] text-white/55 hover:text-white/80 whitespace-nowrap"
                 >
                   <Icon name="info" size={16} />
                   Identify
