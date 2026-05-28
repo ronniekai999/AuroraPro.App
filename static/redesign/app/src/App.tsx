@@ -2499,12 +2499,41 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                       the row layout stays consistent. */}
                   <div className="w-[50px] h-[75px] rounded bg-white/5 flex-shrink-0 overflow-hidden flex items-center justify-center">
                     {r.poster_path ? (
-                      // crossOrigin so the BugReport screenshot
-                      // capture (html2canvas with useCORS) can
-                      // include this image in the canvas without
-                      // tainting it. TMDB serves Access-Control-
-                      // Allow-Origin: * so the request succeeds.
-                      <img src={tmdbPosterURL(r.poster_path)} alt="" crossOrigin="anonymous" className="w-full h-full object-cover" />
+                      // 2026-05-27 — Dropped crossOrigin="anonymous".
+                      // The previous comment claimed "TMDB serves
+                      // Access-Control-Allow-Origin: * so the request
+                      // succeeds" — that's only true for popular
+                      // posters whose CloudFront edge cached the
+                      // CORS-headered response first. For lower-traffic
+                      // posters, an earlier non-CORS request can cache
+                      // a response WITHOUT the header, and every
+                      // subsequent crossorigin request fails (visible
+                      // as broken alt-text in the card; verified on
+                      // "In the City (2026)" 2026-05-27). Without the
+                      // attribute the image always loads in normal
+                      // viewing; the trade-off is that bug-report
+                      // screenshots won't include the poster pixels
+                      // (it'll render as an empty square), which is
+                      // acceptable since the screenshot's purpose is
+                      // UI state, not pixel-perfect imagery.
+                      // onError hides the broken-image icon if the
+                      // image genuinely 404s; the wrapper's bg-white/5
+                      // backdrop takes over so the row layout stays
+                      // consistent.
+                      <img
+                        // Deep-debug M1 — key the img on src so React
+                        // unmounts/remounts when poster_path changes
+                        // for the same row. Without this, the onError
+                        // handler's direct DOM mutation (style.display
+                        // = 'none') would persist across a re-render
+                        // with a new src, hiding a perfectly good
+                        // poster.
+                        key={r.poster_path}
+                        src={tmdbPosterURL(r.poster_path)}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                      />
                     ) : (
                       <Icon name={r.media_type === 'tv' ? 'tv' : 'film'} size={20} className="text-white/25" />
                     )}
@@ -2593,8 +2622,49 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                 aria-expanded={hasOverview ? isExpanded : undefined}
                 aria-label={hasOverview ? `${req.title}, click to ${isExpanded ? 'hide' : 'show'} overview` : undefined}
               >
-                <div className="w-[70px] h-[105px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
-                  {poster ? <img src={poster} alt={req.title} crossOrigin="anonymous" className="w-full h-full object-cover" /> : null}
+                <div className="w-[70px] h-[105px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5 flex items-center justify-center">
+                  {/* Layout invariant: the img and the fallback div
+                      are mutually-exclusive flex siblings — only one
+                      is `display: flex/block` at a time. Don't add a
+                      third sibling here without rewiring the onError
+                      handler's nextElementSibling lookup. */}
+                  {poster ? (
+                    // 2026-05-27 — Dropped crossOrigin="anonymous"
+                    // (see RequestsView search row above for full
+                    // rationale; tl;dr: TMDB's edge cache occasionally
+                    // serves responses without the CORS header so the
+                    // crossorigin request fails for less-popular
+                    // posters, which is exactly what showed up on
+                    // "In the City (2026)" — broken alt-text rendered
+                    // in the card). alt="" so the card doesn't echo
+                    // the title twice (the <h3> below already shows
+                    // it). onError swaps in the film/tv glyph from
+                    // the no-poster path.
+                    <img
+                      // Deep-debug M1 — key on src so a future
+                      // poster_path update remounts the img and
+                      // resets the inline display:none mutation.
+                      key={poster}
+                      src={poster}
+                      alt=""
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        const img = e.currentTarget as HTMLImageElement
+                        img.style.display = 'none'
+                        // Reveal the fallback glyph we always render
+                        // below the img (hidden when img is visible).
+                        const fallback = img.nextElementSibling as HTMLElement | null
+                        if (fallback) fallback.style.display = 'flex'
+                      }}
+                    />
+                  ) : null}
+                  <div
+                    className="w-full h-full items-center justify-center"
+                    style={{ display: poster ? 'none' : 'flex' }}
+                    aria-hidden="true"
+                  >
+                    <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={22} className="text-white/25" />
+                  </div>
                 </div>
                 <div className="flex-1 min-w-0">
                   <h3 className="text-white text-sm font-semibold truncate">{req.title}{req.year ? ` (${req.year})` : ''}</h3>
@@ -4327,11 +4397,21 @@ function ManualMatchModal({ target, onClose, onMatched }: {
                     QA 2026-05-25 — explicit glyph fallback for
                     posterless candidates. */}
                 {r.poster_path ? (
+                  // 2026-05-27 — Dropped crossOrigin="anonymous" for
+                  // the same reason as RequestsView (TMDB's CDN
+                  // intermittently serves responses without the CORS
+                  // header for less-popular posters). The onError
+                  // handler hides the broken image so the bg-white/5
+                  // wrapper shows through instead of broken alt-text.
                   <img
+                    // Deep-debug M1 — key on src so a future
+                    // poster_path update remounts the img and
+                    // resets the inline display:none mutation.
+                    key={r.poster_path}
                     src={r.source === 'tvdb' ? r.poster_path : tmdbPosterURL(r.poster_path)}
                     alt=""
-                    crossOrigin="anonymous"
                     className="w-full h-full object-cover"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
                   />
                 ) : (
                   <Icon name="film" size={20} className="text-white/25" />
