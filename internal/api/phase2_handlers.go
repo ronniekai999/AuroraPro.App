@@ -1611,17 +1611,41 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	// Issue #131 — small helper that applies the resume shift before
 	// serving. Falls back to the raw VTT path on shift failure so a
 	// disk-cache hiccup doesn't break subtitle playback entirely.
+	//
+	// Issue #135 — instrument every served subtitle with structured
+	// logs so we can correlate frontend warnings with server-side
+	// behavior in bug reports. The user's Elf subtitle "loaded"
+	// (no <track> error) but produced no cues; this log answers:
+	// what was the resolved codec? was a shift requested? what was
+	// the size of the served VTT? did the shift fail silently? With
+	// these in journalctl we can diagnose without redeploying.
 	serve := func(vttPath string) {
+		served := vttPath
+		shiftErr := error(nil)
 		if startSec > 0 {
 			shifted, err := streaming.ShiftVTTCues(vttPath, startSec, h.subCache)
 			if err == nil {
-				vttPath = shifted
+				served = shifted
 			} else {
+				shiftErr = err
 				slog.Warn("subtitle cue-shift failed; serving unshifted",
 					"error", err, "vtt", vttPath, "start_sec", startSec)
 			}
 		}
-		streaming.ServeSubtitle(w, r, vttPath)
+		var byteSize int64
+		if info, statErr := os.Stat(served); statErr == nil {
+			byteSize = info.Size()
+		}
+		slog.Info("subtitle served",
+			"file_id", fileID,
+			"track_idx", trackIdx,
+			"file_type", fileType,
+			"start_sec", startSec,
+			"shifted", startSec > 0 && shiftErr == nil,
+			"vtt_path", served,
+			"vtt_bytes", byteSize,
+		)
+		streaming.ServeSubtitle(w, r, served)
 	}
 
 	// External subtitle (index >= 1000)
