@@ -1339,16 +1339,14 @@ func (m *Manager) fireScheduledStart(code string) {
 	now := time.Now()
 
 	ps.mu.Lock()
-	// Dedup guard: if StartedAt is already set, the party already started
-	// (either via manual play or a previous timer fire); don't double-fire.
-	if ps.StartedAt != nil {
+	// Dedup guard: skip if the party already started — a prior timer fire set
+	// StartedAt, or a manual host play set HasEverPlayed (HandleRequestPlay does
+	// not touch StartedAt). Checking both avoids a stray "party-starting"
+	// broadcast and a redundant play when the host beats the countdown.
+	if ps.StartedAt != nil || ps.HasEverPlayed {
 		ps.mu.Unlock()
 		return
 	}
-	ps.StartedAt = &now
-	// Clear the cancel hook — timer has fired, cancellation is moot.
-	ps.scheduleCancel = nil
-	dbID := ps.dbID
 
 	// Broadcast "party-starting" so all clients show the "Starting now!"
 	// notification before playback engages. Includes server_now_ms so
@@ -1370,12 +1368,27 @@ func (m *Manager) fireScheduledStart(code string) {
 	// mutated the dead V2 tri-state and never started the tick loop, so V3
 	// clients showed "Starting now!" and then sat paused at the anchor forever
 	// — the entire host-scheduled countdown was a no-op for real clients. See
-	// audit H6. (If SpoilerFreeStart is on and a non-host participant hasn't
-	// readied up, HandleRequestPlay returns a "waiting for: …" error and
-	// playback holds — identical semantics to the host pressing play manually.)
+	// audit H6.
+	//
+	// Mark the party started ONLY after a successful play (audit H6 follow-up).
+	// HandleRequestPlay can return without engaging playback — the
+	// SpoilerFreeStart readiness gate returns a "waiting for: …" error, or the
+	// party may have just ended — and stamping StartedAt / persisting
+	// MarkPartyStarted before that would record a false start the dedup guard
+	// then makes permanent, with no retry. On failure we leave StartedAt nil so
+	// a later manual host play (which doesn't consult StartedAt) still works and
+	// nothing persists a bogus start time.
 	if err := m.HandleRequestPlay(code, ps.HostUserID); err != nil {
-		slog.Warn("scheduled-start play failed", "code", code, "error", err)
+		slog.Warn("scheduled-start play did not engage; party left unstarted (retryable)", "code", code, "error", err)
+		return
 	}
+
+	ps.mu.Lock()
+	ps.StartedAt = &now
+	// Clear the cancel hook — timer has fired, cancellation is moot.
+	ps.scheduleCancel = nil
+	dbID := ps.dbID
+	ps.mu.Unlock()
 
 	// Persist started_at outside any lock. Best-effort; in-memory state
 	// is authoritative for live behavior.
