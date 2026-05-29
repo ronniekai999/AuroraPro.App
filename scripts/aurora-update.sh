@@ -238,6 +238,20 @@ else
     log "WARN: AURORA_EXPECTED_REMOTE not set in aurora.env — skipping origin verification (re-run install.sh to fix)"
 fi
 
+# ── Transport security (deep-debug H12) ───────────────────────────
+# The updater builds + installs the fetched code as ROOT, so a plaintext
+# git transport (http:// or git://) that a network attacker can MITM is
+# unauthenticated root RCE. https:// and ssh are authenticated + encrypted;
+# file:// is local (no network). Refuse anything plaintext.
+ORIGIN_URL="$(git remote get-url origin 2>/dev/null || echo "")"
+case "$ORIGIN_URL" in
+    http://*|git://*)
+        write_status misconfigured "Refusing to auto-update over an unencrypted remote ('$ORIGIN_URL'): a network attacker could MITM the update and run code as root. Switch origin to https:// or ssh: git -C $SOURCE_DIR remote set-url origin https://..."
+        log "insecure remote transport '$ORIGIN_URL' — refusing"
+        exit 1
+        ;;
+esac
+
 # ── Fetch + check ─────────────────────────────────────────────────
 write_status checking "Checking origin/$BRANCH for new commits"
 
@@ -259,6 +273,37 @@ if [ "$OLD_SHA" = "$NEW_SHA" ]; then
 fi
 
 log "Update available: $OLD_SHA → $NEW_SHA on $BRANCH"
+
+# ── Commit-signature verification (deep-debug H12) ────────────────
+# When AURORA_UPDATE_REQUIRE_SIGNED=true, the fetched tip MUST carry a valid
+# signature from a trusted key before we build + install it as root — the
+# control that stops a compromised/hijacked origin or a malicious force-push
+# from shipping attacker code to every install. Trust root is either SSH
+# signing (AURORA_UPDATE_ALLOWED_SIGNERS -> an allowed_signers file) or GPG
+# (import the maintainer's public key into root's keyring). Default (false)
+# preserves today's behavior for repos that don't sign yet, but logs a loud
+# warning so the trust gap is visible.
+if [ "${AURORA_UPDATE_REQUIRE_SIGNED:-false}" = "true" ] || [ "${AURORA_UPDATE_REQUIRE_SIGNED:-false}" = "1" ]; then
+    VERIFY_OK=1
+    if [ -n "${AURORA_UPDATE_ALLOWED_SIGNERS:-}" ]; then
+        if [ ! -r "$AURORA_UPDATE_ALLOWED_SIGNERS" ]; then
+            write_status failed "AURORA_UPDATE_REQUIRE_SIGNED is on but AURORA_UPDATE_ALLOWED_SIGNERS ('$AURORA_UPDATE_ALLOWED_SIGNERS') is missing or unreadable — refusing to build unverified code." "$OLD_SHA" "$NEW_SHA"
+            log "allowed-signers file unreadable: $AURORA_UPDATE_ALLOWED_SIGNERS"
+            exit 1
+        fi
+        git -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$AURORA_UPDATE_ALLOWED_SIGNERS" verify-commit "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
+    else
+        git verify-commit "origin/$BRANCH" >>"$LOG_FILE" 2>&1 || VERIFY_OK=0
+    fi
+    if [ "$VERIFY_OK" -ne 1 ]; then
+        write_status failed "Commit-signature verification FAILED for origin/$BRANCH ($NEW_SHA) — refusing to build + install unverified code as root. Check the maintainer's signing key / AURORA_UPDATE_ALLOWED_SIGNERS." "$OLD_SHA" "$NEW_SHA"
+        log "verify-commit FAILED for $NEW_SHA — refusing update"
+        exit 1
+    fi
+    log "commit signature verified for $NEW_SHA"
+else
+    log "WARN: AURORA_UPDATE_REQUIRE_SIGNED not enabled — building UNVERIFIED code from origin/$BRANCH ($NEW_SHA); a compromised origin or MITM could run code as root. Set AURORA_UPDATE_REQUIRE_SIGNED=true with a trusted signing key to harden. (deep-debug H12)"
+fi
 
 # ── Working-tree cleanliness ──────────────────────────────────────
 # If somebody (operator, prior failed merge) left dirty files in
