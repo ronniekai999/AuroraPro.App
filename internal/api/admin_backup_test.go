@@ -581,6 +581,95 @@ func TestRestoreRejectsTinyValidPrefix(t *testing.T) {
 	}
 }
 
+// TestPgConnEnv pins the 2026-05-29 (MED) fix that keeps the DB password
+// out of pg_dump/psql/pg_restore argv. pgConnEnv must (a) strip the
+// password from the conninfo it returns for argv, and (b) hand that
+// password back via a PGPASSWORD env entry — while leaving every other
+// connection parameter (host, port, user, dbname, sslmode, etc.) intact.
+func TestPgConnEnv(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          string
+		wantURL     string // exact redacted conninfo expected on argv
+		wantEnv     []string
+		wantNoPwArg bool // redacted URL must not contain the secret
+	}{
+		{
+			name:        "full uri with password",
+			in:          "postgres://aurora:s3cr3t@db.example.com:5432/aurora?sslmode=require",
+			wantURL:     "postgres://aurora@db.example.com:5432/aurora?sslmode=require",
+			wantEnv:     []string{"PGPASSWORD=s3cr3t"},
+			wantNoPwArg: true,
+		},
+		{
+			name:        "postgresql scheme alias",
+			in:          "postgresql://u:p@h/d",
+			wantURL:     "postgresql://u@h/d",
+			wantEnv:     []string{"PGPASSWORD=p"},
+			wantNoPwArg: true,
+		},
+		{
+			// Password with URL-special characters must round-trip
+			// through PGPASSWORD verbatim (decoded), and the redacted
+			// URL must not leak it.
+			name:        "password with special chars is percent-decoded in env",
+			in:          "postgres://user:p%40ss%2Fword%3A@host:5432/db",
+			wantURL:     "postgres://user@host:5432/db",
+			wantEnv:     []string{"PGPASSWORD=p@ss/word:"},
+			wantNoPwArg: true,
+		},
+		{
+			// No password embedded → nothing to hide, URL unchanged,
+			// no env override.
+			name:    "user only, no password",
+			in:      "postgres://aurora@db.example.com/aurora",
+			wantURL: "postgres://aurora@db.example.com/aurora",
+			wantEnv: nil,
+		},
+		{
+			// No userinfo at all (user comes from PGUSER/env).
+			name:    "no userinfo",
+			in:      "postgres://db.example.com/aurora",
+			wantURL: "postgres://db.example.com/aurora",
+			wantEnv: nil,
+		},
+		{
+			// Not a URL (libpq key=value conninfo) — returned unchanged
+			// rather than mangled. Aurora doesn't use this form, but the
+			// fallback must be safe.
+			name:    "non-url conninfo passthrough",
+			in:      "host=db.example.com user=aurora password=s3cr3t dbname=aurora",
+			wantURL: "host=db.example.com user=aurora password=s3cr3t dbname=aurora",
+			wantEnv: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotURL, gotEnv := pgConnEnv(tc.in)
+			if gotURL != tc.wantURL {
+				t.Errorf("redacted URL:\n  want %q\n  got  %q", tc.wantURL, gotURL)
+			}
+			if len(gotEnv) != len(tc.wantEnv) {
+				t.Fatalf("env len: want %v, got %v", tc.wantEnv, gotEnv)
+			}
+			for i := range tc.wantEnv {
+				if gotEnv[i] != tc.wantEnv[i] {
+					t.Errorf("env[%d]: want %q, got %q", i, tc.wantEnv[i], gotEnv[i])
+				}
+			}
+			if tc.wantNoPwArg {
+				// The whole point: the secret must never appear on argv.
+				if strings.Contains(gotURL, "s3cr3t") ||
+					strings.Contains(gotURL, "p@ss") ||
+					strings.Contains(gotURL, "p%40ss") ||
+					strings.Contains(gotURL, ":p@") {
+					t.Errorf("redacted URL still contains the password: %q", gotURL)
+				}
+			}
+		})
+	}
+}
+
 // TestRestoreRejectsRandomGarbage — non-pg_dump uploads should fail
 // fast with a clear "expected PGDMP" message rather than crashing
 // pg_restore mid-stream.

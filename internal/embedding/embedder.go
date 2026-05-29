@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/db"
@@ -120,9 +122,22 @@ func (e *Embedder) EmbedItem(ctx context.Context, item *models.MediaItem) error 
 }
 
 // RunBackfill walks every media item that lacks an embedding (or has an
-// outdated version) and embeds it in batches. Designed to run as a background
-// goroutine from main.go — it returns when there's nothing left to do, and
-// respects ctx cancellation between batches.
+// outdated version) and embeds it. Designed to run as a background goroutine
+// from main.go — it returns when there's nothing left to do, and respects ctx
+// cancellation between waves.
+//
+// Concurrency (MED med-integration #2): work is processed in WAVES. Each wave
+// fetches up to workers*batch candidates in one query (ordered by id ASC) and
+// then runs up to `workers` embedBatch calls in parallel — one Ollama/Cloud
+// HTTP round-trip per goroutine — so the expensive embedding step actually
+// scales with the configured worker count. We deliberately keep a SINGLE
+// serial fetcher: FetchEmbeddingCandidates has no claim/cursor (it re-selects
+// rows WHERE embedding IS NULL OR version < current, LIMIT N), so it only
+// advances because the previous rows are no longer pending once written. We
+// must therefore wait for an entire wave's writes to commit before fetching
+// the next wave; otherwise concurrent fetches would re-select the same lowest
+// IDs and re-embed them N times (wasted Ollama/Cloud calls). With workers==1
+// this reduces to the original one-batch-per-iteration loop.
 //
 // Safe to invoke on every startup: if everything is up-to-date it returns
 // immediately after a single COUNT query.
@@ -159,12 +174,28 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 		return d
 	}
 
+	// Defensive clamp: New() already forces workers/batch to sane positives,
+	// but RunBackfill must not deadlock or busy-loop if an Embedder is ever
+	// built via a struct literal that bypasses New(). A zero waveSize would
+	// make runWave construct a zero-capacity semaphore (deadlock), so pin both
+	// to a minimum of 1 here.
+	workers := e.workers
+	if workers < 1 {
+		workers = 1
+	}
+	batch := e.batch
+	if batch < 1 {
+		batch = 1
+	}
+	// One wave fetches at most this many candidates, then fans them out across
+	// up to `workers` concurrent embedBatch calls (one HTTP round-trip each).
+	waveSize := workers * batch
 	for {
 		if ctx.Err() != nil {
 			slog.Info("embedding backfill: cancelled", "embedded", done, "remaining", pending-done)
 			return
 		}
-		candidates, err := e.q.FetchEmbeddingCandidates(ctx, CurrentVersion, e.batch)
+		candidates, err := e.q.FetchEmbeddingCandidates(ctx, CurrentVersion, waveSize)
 		if err != nil {
 			failures++
 			if failures >= maxFailures {
@@ -185,16 +216,23 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 		if len(candidates) == 0 {
 			break
 		}
-		if err := e.embedBatch(ctx, candidates); err != nil {
+		// Split the wave into batch-sized chunks and embed them concurrently.
+		// Each chunk holds DISTINCT item IDs (the fetch returned a single
+		// ordered window), so the parallel embedBatch calls never contend on
+		// the same rows. We wait for the whole wave before fetching again so
+		// the cursor-free fetch query advances past these rows.
+		embedded, waveErr := e.runWave(ctx, candidates, workers, batch)
+		done += embedded
+		if waveErr != nil {
 			failures++
 			if failures >= maxFailures {
 				slog.Error("embedding backfill: too many batch failures, giving up",
-					"failures", failures, "embedded", done, "last_error", err)
+					"failures", failures, "embedded", done, "last_error", waveErr)
 				return
 			}
 			wait := backoffDelay()
-			slog.Warn("embedding backfill: batch failed, backing off",
-				"error", err, "size", len(candidates), "attempt", failures, "wait", wait)
+			slog.Warn("embedding backfill: wave failed, backing off",
+				"error", waveErr, "wave_size", len(candidates), "attempt", failures, "wait", wait)
 			select {
 			case <-ctx.Done():
 				return
@@ -202,16 +240,83 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 			}
 			continue
 		}
-		// Successful batch — reset the failure counter so transient blips
+		// Successful wave — reset the failure counter so transient blips
 		// don't accumulate toward the give-up threshold.
 		failures = 0
-		done += int64(len(candidates))
-		if done%(int64(e.batch)*10) == 0 || done >= pending {
+		// Use the clamped `batch` (not e.batch) so this modulus can never
+		// divide by zero on the defensive bypass-New() path.
+		if done%(int64(batch)*10) == 0 || done >= pending {
 			slog.Info("embedding backfill: progress",
 				"embedded", done, "of", pending, "elapsed", time.Since(start).Round(time.Second))
 		}
 	}
 	slog.Info("embedding backfill: complete", "embedded", done, "elapsed", time.Since(start).Round(time.Second))
+}
+
+// runWave embeds a single wave of candidates by splitting it into batch-sized
+// chunks and running up to e.workers embedBatch calls concurrently. It returns
+// the number of items embedded across the chunks that SUCCEEDED (so the caller
+// can keep an accurate running total even when one chunk fails) and the first
+// error any chunk reported (nil if all chunks succeeded). All goroutines are
+// joined before returning, so no work outlives this call.
+//
+// The chunks share no item IDs (the caller passed one ordered fetch window),
+// so concurrent embedBatch calls never race on the same media_items row. The
+// only shared state here is the atomic counter and the once-guarded error.
+//
+// workers and batch are passed in (already clamped to >= 1 by the caller) so
+// the chunk size and concurrency bound stay consistent with the wave size.
+func (e *Embedder) runWave(ctx context.Context, candidates []*db.EmbeddingCandidate, workers, batch int) (int64, error) {
+	var (
+		embedded atomic.Int64
+		wg       sync.WaitGroup
+		errOnce  sync.Once
+		firstErr error
+	)
+	// Bound concurrency to `workers` even if the wave holds more chunks than
+	// that (it won't under normal sizing, but stay robust to odd batch/worker
+	// ratios). The caller guarantees workers >= 1.
+	sem := make(chan struct{}, workers)
+	for _, r := range chunkRanges(len(candidates), batch) {
+		chunk := candidates[r[0]:r[1]]
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(chunk []*db.EmbeddingCandidate) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := e.embedBatch(ctx, chunk); err != nil {
+				errOnce.Do(func() { firstErr = err })
+				return
+			}
+			embedded.Add(int64(len(chunk)))
+		}(chunk)
+	}
+	wg.Wait()
+	return embedded.Load(), firstErr
+}
+
+// chunkRanges partitions [0,n) into consecutive [start,end) half-open ranges of
+// at most `batch` items each. The ranges are gap-free and non-overlapping, so
+// concatenating the slices they describe reconstructs the original exactly —
+// the property runWave relies on to embed every candidate once and only once.
+// A non-positive batch is treated as 1 to avoid a zero-step infinite loop.
+func chunkRanges(n, batch int) [][2]int {
+	if batch < 1 {
+		batch = 1
+	}
+	if n <= 0 {
+		return nil
+	}
+	ranges := make([][2]int, 0, (n+batch-1)/batch)
+	for start := 0; start < n; start += batch {
+		end := start + batch
+		if end > n {
+			end = n
+		}
+		ranges = append(ranges, [2]int{start, end})
+	}
+	return ranges
 }
 
 // embedBatch sends one Ollama call for the whole batch, then writes results

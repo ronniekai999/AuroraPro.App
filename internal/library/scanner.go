@@ -189,8 +189,20 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		}
 	}
 
-	// Phase 2: Process files concurrently with bounded goroutines
-	sem := make(chan struct{}, s.cfg.Workers)
+	// Phase 2: Process files concurrently with bounded goroutines.
+	//
+	// MED (med-integration #1) — clamp the worker count to a sane minimum.
+	// A zero-capacity semaphore (Workers==0) deadlocks: `sem <- struct{}{}`
+	// blocks waiting for a receiver, but the receiving goroutine only runs
+	// after the send completes, so the first file hangs the scan forever. A
+	// negative Workers value panics in make(). Default to 1 (serial) when the
+	// configured value is non-positive so the scan always makes progress.
+	workers := s.cfg.Workers
+	if workers <= 0 {
+		slog.Warn("scanner workers misconfigured (<=0); defaulting to 1", "configured", s.cfg.Workers)
+		workers = 1
+	}
+	sem := make(chan struct{}, workers)
 	var scannedCount atomic.Int64
 	var newCount atomic.Int64
 	var wg sync.WaitGroup
