@@ -58,6 +58,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -69,6 +70,57 @@ import (
 // Used by Restore to validate the upload before doing anything
 // destructive. See PostgreSQL source: src/bin/pg_dump/pg_backup_archiver.h.
 var pgDumpCustomMagic = []byte("PGDMP")
+
+// pgConnEnv derives the libpq connection info for pg_dump/psql/pg_restore
+// from a postgres:// URL while keeping the password OUT of the command-
+// line arguments.
+//
+// 2026-05-29 audit (MED) — previously we passed the full conninfo
+// (postgres://user:PASSWORD@host/db) as an argv element to pg_dump / psql
+// / pg_restore. argv is world-readable via `ps` / /proc/<pid>/cmdline, so
+// the DB password leaked to any local user for the lifetime of the child
+// process. libpq reads the password from the PGPASSWORD environment
+// variable instead, which is not exposed in `ps` and (on Linux) is
+// root-only via /proc/<pid>/environ.
+//
+// The fix is intentionally minimal and behavior-preserving: we strip ONLY
+// the password from the userinfo of the URL and hand it back via
+// PGPASSWORD. Every other connection parameter (host, port, user, dbname,
+// sslmode and any other query params) stays in the redacted URL exactly as
+// before, so the connection target is unchanged — we are not re-deriving
+// each component into a separate PG* variable (which would risk dropping
+// sslmode / application_name / etc. on some libpq versions). url.User /
+// url.String round-trip preserves percent-encoding of the username.
+//
+// Returns:
+//   - redactedURL: the same conninfo with the password removed from the
+//     userinfo. Safe to place on argv.
+//   - env: the extra environment entries to append to cmd.Env (a single
+//     "PGPASSWORD=..." entry, or nil when the URL carries no password —
+//     e.g. .pgpass / peer auth, in which case there is nothing to hide).
+//
+// If the input does not parse as a URL (e.g. a libpq key=value conninfo
+// string, which Aurora does not use), it is returned unchanged with a nil
+// env. That preserves the previous behavior for that form rather than
+// silently breaking the connection; the URL form that Aurora actually uses
+// is fully covered.
+func pgConnEnv(databaseURL string) (redactedURL string, env []string) {
+	u, err := url.Parse(databaseURL)
+	if err != nil || u.User == nil {
+		return databaseURL, nil
+	}
+	password, hasPassword := u.User.Password()
+	if !hasPassword {
+		// No password embedded in the URL — nothing leaks via argv, so
+		// leave it untouched.
+		return databaseURL, nil
+	}
+	// Rebuild the userinfo with the username only; url.String() will
+	// re-encode it (and the rest of the URL) correctly.
+	redacted := *u
+	redacted.User = url.User(u.User.Username())
+	return redacted.String(), []string{"PGPASSWORD=" + password}
+}
 
 // Backup handles GET /api/admin/backup — streams a gzipped pg_dump of the
 // Aurora database. Long-running (10s to several minutes depending on
@@ -135,8 +187,13 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 	//
 	// pg_dump reads the DATABASE_URL via the conninfo string argument.
 	// We pass it as the last positional arg; pg_dump auto-detects URI form.
+	//
+	// 2026-05-29 audit (MED): keep the password out of argv. pgConnEnv
+	// returns the conninfo with the password stripped (safe for `ps`) plus
+	// a PGPASSWORD env entry that libpq reads instead. See pgConnEnv.
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
+	dumpURL, pgEnv := pgConnEnv(h.databaseURL)
 	cmd := exec.CommandContext(ctx, "pg_dump",
 		"--format=custom",
 		"--compress=6",
@@ -153,8 +210,11 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 		"--quote-all-identifiers",
 		"--exclude-table-data=refresh_tokens",
 		"--exclude-table-data=scan_progress",
-		h.databaseURL,
+		dumpURL,
 	)
+	// Inherit the process environment and append PGPASSWORD so libpq picks
+	// up the credential without it ever appearing on the command line.
+	cmd.Env = append(os.Environ(), pgEnv...)
 
 	// Stderr is captured into a bounded buffer so non-zero exits log
 	// the actual pg_dump error message (e.g., "version mismatch",
@@ -649,12 +709,18 @@ BEGIN
 END
 $do$;
 `
+	// 2026-05-29 audit (MED): derive a password-free conninfo for both
+	// the wipe (psql) and the restore (pg_restore) below; the password
+	// travels via PGPASSWORD in cmd.Env so it never lands on argv. See
+	// pgConnEnv.
+	connURL, pgEnv := pgConnEnv(h.databaseURL)
 	wipeCmd := exec.CommandContext(ctx, "psql",
 		"--quiet",
 		"--set", "ON_ERROR_STOP=on",
 		"-c", wipeSQL,
-		h.databaseURL,
+		connURL,
 	)
+	wipeCmd.Env = append(os.Environ(), pgEnv...)
 	var wipeStderr strings.Builder
 	wipeCmd.Stderr = &limitedStringWriter{w: &wipeStderr, max: 16 * 1024}
 	if err := wipeCmd.Run(); err != nil {
@@ -691,8 +757,10 @@ $do$;
 	//                          extension-owner privilege we don't have).
 	//                          This is the flag that obsoletes the old
 	//                          line-filter pipeline.
-	//   --dbname=DATABASE_URL → connect via libpq URI; pg_restore knows
-	//                          this form.
+	//   --dbname=<conninfo>  → connect via libpq URI; pg_restore knows
+	//                          this form. The URI here is password-free
+	//                          (pgConnEnv strips it); the password is
+	//                          supplied via PGPASSWORD in cmd.Env.
 	//
 	// Note: --no-publications / --no-subscriptions are applied on the
 	// pg_dump side (see Backup) so they never end up in the archive.
@@ -701,14 +769,19 @@ $do$;
 	// a dump from a different source — pg_restore doesn't ship those
 	// flags consistently across versions, so we rely on the dump-side
 	// filter instead.
+	//
+	// 2026-05-29 audit (MED): --dbname carries the password-free conninfo
+	// (connURL, derived above); the password is supplied via PGPASSWORD in
+	// cmd.Env so it is not exposed on argv. See pgConnEnv.
 	restoreCmd := exec.CommandContext(ctx, "pg_restore",
 		"--single-transaction",
 		"--no-owner",
 		"--no-privileges",
 		"--no-comments",
-		"--dbname="+h.databaseURL,
+		"--dbname="+connURL,
 		tmpPath,
 	)
+	restoreCmd.Env = append(os.Environ(), pgEnv...)
 	var restoreStderr strings.Builder
 	restoreCmd.Stderr = &limitedStringWriter{w: &restoreStderr, max: 16 * 1024}
 

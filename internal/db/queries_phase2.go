@@ -257,7 +257,18 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 		}
 		dupSeasons = append(dupSeasons, s)
 	}
+	// MED audit fix: check the cursor error after iterating. A mid-stream
+	// cursor failure (e.g. dropped connection) ends rows.Next() early with a
+	// PARTIAL dupSeasons slice; without this check the merge would proceed and
+	// silently leave the un-iterated seasons (and their episodes/files/
+	// watch_progress) pointing at the about-to-be-deleted duplicate, losing
+	// them to the FK CASCADE on DELETE FROM media_items. Returning here lets the
+	// deferred tx.Rollback abort the whole merge atomically.
+	seasonsErr := rows.Err()
 	rows.Close()
+	if seasonsErr != nil {
+		return fmt.Errorf("iterate dup seasons: %w", seasonsErr)
+	}
 
 	for _, ds := range dupSeasons {
 		// Check if canonical already has this season number.
@@ -291,7 +302,16 @@ func (q *Queries) MergeMediaItems(ctx context.Context, canonicalID, duplicateID 
 				}
 				dupEps = append(dupEps, e)
 			}
+			// MED audit fix: same cursor-error guard as the seasons loop
+			// above. A partial dupEps slice from a mid-stream cursor failure
+			// would otherwise let the merge delete the duplicate season (and
+			// CASCADE-delete its un-reassigned episodes / episode_files /
+			// watch_progress). Return to trigger the deferred tx.Rollback.
+			epRowsErr := epRows.Err()
 			epRows.Close()
+			if epRowsErr != nil {
+				return fmt.Errorf("iterate dup episodes: %w", epRowsErr)
+			}
 
 			for _, de := range dupEps {
 				var canonEpID int64

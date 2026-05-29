@@ -350,6 +350,73 @@ if ! git merge --ff-only "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
     exit 1
 fi
 
+# ── Cross-script deploy lock (audit MED) ─────────────────────────
+# redeploy.sh (the manual deploy helper) takes a NON-blocking flock
+# on /var/lock/aurora-deploy.lock to serialize its rebuild+install
+# +atomic-swap against US. Until now this updater never acquired
+# that lock, so a root auto-update could interleave with a manual
+# redeploy and corrupt /opt/aurora/static (one script's
+# `mv static.new static` landing mid-`cp` of the other). Acquire the
+# SAME lock here, around the mutating build → install → atomic-swap
+# → restart window. We take it just before the build (the read-only
+# fetch/idle path above stays lock-free so the <1 s no-op case never
+# contends) and hold it until process exit (released by the EXIT
+# trap below + the kernel on fd close), matching redeploy.sh's hold
+# duration so neither script can swap static while the other is
+# restarting/rolling back.
+#
+# Non-blocking by design: if redeploy.sh (or a queued sibling) holds
+# the lock, we DON'T fail the update — we log + write a benign status
+# and skip THIS run cleanly. The timer fires again in 5 min, by which
+# point the other deploy has almost certainly finished. fd 9 matches
+# redeploy.sh's choice (high enough to avoid stdin/out/err 0,1,2).
+#
+# set -euo pipefail safety: every fallible command below is tested by
+# `if`/`!`, which both exempts it from `set -e` AND prevents the ERR
+# trap from firing a spurious `failed` status on a lock we chose to
+# skip. We run as root, so a plain `touch` suffices (redeploy.sh
+# needs sudo); /var/lock is world-writable + sticky on Linux.
+LOCK_FILE=/var/lock/aurora-deploy.lock
+LOCK_HELD=false
+if ! command -v flock >/dev/null 2>&1; then
+    # No flock (non-Linux / minimal image). redeploy.sh already
+    # assumes flock on the Linux target, so this is belt-and-
+    # suspenders: warn that the cross-script guard is unavailable and
+    # proceed (systemd's Type=oneshot still serializes the updater
+    # against itself; only a concurrent manual redeploy.sh is unguarded).
+    log "WARN: flock not found — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
+elif ! touch "$LOCK_FILE" 2>>"$LOG_FILE"; then
+    log "WARN: could not create/open $LOCK_FILE — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
+# `exec 9>` is tested by `if !` so a redirection failure (e.g. fd in
+# use, FS gone read-only between the touch and here) is caught HERE —
+# it does not trip `set -e`/the ERR trap into a spurious `failed`.
+# On success the open fd persists for the rest of the script.
+elif ! exec 9>"$LOCK_FILE"; then
+    log "WARN: could not open $LOCK_FILE on fd 9 — proceeding WITHOUT the cross-script deploy lock; a concurrent ./scripts/redeploy.sh could race /opt/aurora/static. (audit MED)"
+else
+    if ! flock -n 9; then
+        # Another deploy (redeploy.sh, or a queued aurora-update) holds
+        # the lock. Skip cleanly — NOT a failure. Use `idle` so the
+        # admin UI doesn't flash an alarming "failed" for a transient,
+        # self-healing condition; the next timer tick retries.
+        write_status idle "Skipped this update: another deploy holds $LOCK_FILE (likely a manual redeploy.sh). Will retry on the next timer tick." "$OLD_SHA" "$NEW_SHA"
+        log "deploy lock $LOCK_FILE held by another process — skipping this run"
+        exec 9>&- 2>/dev/null || true
+        exit 0
+    fi
+    LOCK_HELD=true
+    log "acquired deploy lock $LOCK_FILE (fd 9)"
+fi
+
+# Release the deploy lock on ANY exit. Closing fd 9 drops the flock;
+# the kernel also does this on process exit, but explicit is safer
+# (matches redeploy.sh). The ERR trap only reports+exits, so this
+# single EXIT trap for cleanup is sufficient and runs after it (e.g.
+# on a `set -e` abort, on_error's `exit 1` fires this). Guarded on
+# LOCK_HELD so we never touch fd 9 when we didn't open it, and the
+# body always succeeds so it can't perturb the script's exit code.
+trap 'if [ "${LOCK_HELD:-false}" = true ]; then exec 9>&- 2>/dev/null || true; fi' EXIT
+
 # ── Build ─────────────────────────────────────────────────────────
 write_status building "Building Aurora frontend and binary" "$OLD_SHA" "$NEW_SHA"
 FRONTEND_TMP="$(mktemp -d)"

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -145,19 +146,66 @@ func (q *Queries) GetUserByOAuth(ctx context.Context, provider, subject string) 
 	return user, nil
 }
 
+// ErrOAuthIdentityConflict is returned by LinkOAuthToUser when the target user
+// already has a DIFFERENT non-empty OAuth identity set. The single
+// oauth_provider/oauth_subject column pair can hold exactly one identity, so we
+// refuse to silently overwrite an existing one (e.g. a second provider, or a
+// re-link to a different Google account, clobbering the first). The caller
+// should surface this to the user rather than treating the link as successful.
+var ErrOAuthIdentityConflict = errors.New("user already has a different oauth identity linked")
+
 // LinkOAuthToUser writes (provider, subject) onto an existing user row,
 // either because they signed in via OAuth using an email that matches
 // their local account (auto-link) or because they explicitly linked via
 // the settings UI. Returns error if the (provider, subject) pair would
 // collide with another user — protected by idx_users_oauth_identity.
+//
+// MED audit fix: this used to blindly overwrite oauth_provider/oauth_subject.
+// Because those are single-value columns, a second LinkOAuthToUser call (a
+// different provider, or the same provider with a different subject) would
+// silently clobber the first identity — breaking the original provider's
+// fast-path sign-in (GetUserByOAuth) with no error surfaced. We now only write
+// when the existing identity is empty OR already equals the incoming pair
+// (idempotent re-link); otherwise we return ErrOAuthIdentityConflict.
+//
+// NOTE: this is a contained mitigation, not true multi-provider support. Linking
+// more than one provider to a single account needs a separate oauth_identities
+// table (user_id, provider, subject) with its own unique constraint — a deferred
+// feature requiring a schema migration (intentionally not added here).
 func (q *Queries) LinkOAuthToUser(ctx context.Context, userID int64, provider, subject string) error {
-	_, err := q.pool.Exec(ctx,
+	// Conditional UPDATE: only proceed if the row has no identity yet, or the
+	// stored identity is exactly the one we're (re-)writing. The guard runs
+	// atomically inside the single statement so two concurrent links can't both
+	// pass a read-then-write check. The existing collision-with-another-user
+	// case is still caught by idx_users_oauth_identity (unique violation flows
+	// through the err path below).
+	tag, err := q.pool.Exec(ctx,
 		`UPDATE users SET oauth_provider = $1, oauth_subject = $2, updated_at = NOW()
-		 WHERE id = $3`,
+		 WHERE id = $3
+		   AND (
+		     oauth_provider IS NULL OR oauth_provider = ''
+		     OR (oauth_provider = $1 AND oauth_subject = $2)
+		   )`,
 		provider, subject, userID,
 	)
 	if err != nil {
 		return fmt.Errorf("link oauth to user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// The guarded UPDATE matched nothing: either the user doesn't exist, or
+		// they already have a different non-empty identity. Disambiguate so the
+		// caller gets a precise error instead of a silent no-op success.
+		var existingProvider, existingSubject *string
+		qErr := q.pool.QueryRow(ctx,
+			`SELECT oauth_provider, oauth_subject FROM users WHERE id = $1`, userID,
+		).Scan(&existingProvider, &existingSubject)
+		if qErr != nil {
+			if qErr == pgx.ErrNoRows {
+				return fmt.Errorf("link oauth to user: user %d not found", userID)
+			}
+			return fmt.Errorf("link oauth to user: %w", qErr)
+		}
+		return ErrOAuthIdentityConflict
 	}
 	return nil
 }
