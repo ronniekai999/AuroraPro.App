@@ -1153,6 +1153,15 @@ info "Writing $CONFIG_DIR/aurora.env..."
     if [ -n "$UPDATER_ORIGIN_URL" ]; then
         printf 'AURORA_EXPECTED_REMOTE=%s\n' "$UPDATER_ORIGIN_URL"
     fi
+    # deep-debug H12 — auto-updater supply-chain hardening. The updater always
+    # refuses plaintext (http://, git://) origins. Set REQUIRE_SIGNED=true (and
+    # ALLOWED_SIGNERS to an SSH allowed_signers file, or import the maintainer
+    # GPG key into root's keyring) to require a verified commit signature before
+    # the updater builds + installs as root. Default off so unsigned repos keep
+    # updating, with a loud warning in the update log.
+    printf '\n# Auto-updater commit-signature verification (deep-debug H12)\n'
+    printf 'AURORA_UPDATE_REQUIRE_SIGNED=%s\n' "${AURORA_UPDATE_REQUIRE_SIGNED:-false}"
+    printf 'AURORA_UPDATE_ALLOWED_SIGNERS=%s\n' "${AURORA_UPDATE_ALLOWED_SIGNERS:-}"
     # Optional TVDB via env override.
     if [ -n "${AURORA_TVDB_API_KEY:-}" ]; then
         printf '\n# TheTVDB credentials\n'
