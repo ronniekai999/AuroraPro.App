@@ -557,6 +557,18 @@ func (s *Scanner) enrichNewItem(ctx context.Context, item *models.MediaItem, fil
 // stored in the DB for this library. Any DB path not in the discovered set
 // is deleted. Returns the number of rows pruned.
 func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, discoveredFiles []string) (int64, error) {
+	// deep-debug H9 — refuse to prune when zero files were discovered. The
+	// canonical NFS/SMB failure leaves the mountpoint present-but-EMPTY, so
+	// collectVideoFiles returns ([], nil) — no error, so the walkFailed guard
+	// in ScanLibrary does NOT trip — and pruning against an empty set would
+	// delete every file row for the library. Treat zero-discovered as suspect,
+	// not authoritative: bail and keep the rows. A genuinely-emptied library
+	// just carries stale rows until a scan finds files again (or the operator
+	// removes it) — acceptable versus catastrophic, unattended data loss.
+	if len(discoveredFiles) == 0 {
+		slog.Warn("prune skipped: zero files discovered for library — refusing to delete all file rows (transient mount failure?)", "library", lib.Name)
+		return 0, nil
+	}
 	// Build a set of discovered paths for O(1) lookup
 	discovered := make(map[string]struct{}, len(discoveredFiles))
 	for _, fp := range discoveredFiles {

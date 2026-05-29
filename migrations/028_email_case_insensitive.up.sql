@@ -36,10 +36,11 @@ UPDATE users
    AND email <> ''
    AND email <> LOWER(email);
 
--- Case-insensitive uniqueness. Partial (email <> '') so OAuth users created
--- without a provider email — stored as '' — are unaffected (the legacy
--- column-level UNIQUE already governs that degenerate case). The index name
--- matches the isEmailUniqueConstraint() check in internal/api/oauth_handlers.go.
+-- Case-insensitive uniqueness. Partial (email <> '') so the index itself never
+-- collides empty-string rows; uniqueness for the degenerate empty-email case is
+-- already enforced by migration 001's column-level NOT NULL + UNIQUE on email,
+-- and the OAuth callback rejects empty provider emails before insert. The index
+-- name matches the isEmailUniqueConstraint() check in internal/api/oauth_handlers.go.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower
     ON users (LOWER(email))
  WHERE email IS NOT NULL AND email <> '';

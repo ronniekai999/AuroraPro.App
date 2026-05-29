@@ -509,21 +509,25 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 
-	// Validate the upload is actually restorable BEFORE the destructive wipe.
+	// Validate the upload is FULLY restorable BEFORE the destructive wipe.
 	// The leading-magic + min-size checks above only prove the first bytes
-	// look like a custom dump; `pg_restore --list` parses the archive header +
-	// table-of-contents and fails fast on a truncated, corrupt, or version-
-	// incompatible archive WITHOUT touching the database. Without this, a
-	// plausible-but-unrestorable upload wiped the schema and then failed in
-	// pg_restore, leaving the DB empty with no recovery point. deep-debug H8.
-	listCmd := exec.CommandContext(ctx, "pg_restore", "--list", tmpPath)
-	var listStderr strings.Builder
-	listCmd.Stderr = &limitedStringWriter{w: &listStderr, max: 16 * 1024}
-	if err := listCmd.Run(); err != nil {
-		stderrTail := strings.TrimSpace(listStderr.String())
-		slog.Warn("restore rejected: pg_restore --list could not read the archive (database NOT modified)",
+	// look like a custom dump, and `pg_restore --list` would only parse the
+	// header + table-of-contents — neither reads the compressed DATA blocks,
+	// so a dump truncated mid-data (a realistic interrupted-upload outcome)
+	// would pass and then fail AFTER the wipe, leaving the DB empty.
+	// `pg_restore -f /dev/null` decompresses and reads the ENTIRE archive to a
+	// throwaway script target WITHOUT connecting to the database, so a
+	// truncated / corrupt / version-incompatible archive is rejected with the
+	// DB still intact. Costs one extra full read of the archive — restores are
+	// rare and correctness beats speed here. deep-debug H8.
+	validateCmd := exec.CommandContext(ctx, "pg_restore", "-f", os.DevNull, tmpPath)
+	var validateStderr strings.Builder
+	validateCmd.Stderr = &limitedStringWriter{w: &validateStderr, max: 16 * 1024}
+	if err := validateCmd.Run(); err != nil {
+		stderrTail := strings.TrimSpace(validateStderr.String())
+		slog.Warn("restore rejected: archive is not fully readable by pg_restore (database NOT modified)",
 			"err", err, "stderr", stderrTail)
-		msg := "upload is not a readable pg_dump custom archive (pg_restore --list failed) — the database was NOT modified"
+		msg := "upload is not a complete, readable pg_dump custom archive (pg_restore validation failed) — the database was NOT modified"
 		if stderrTail != "" {
 			msg += ": " + stderrTail
 		}
