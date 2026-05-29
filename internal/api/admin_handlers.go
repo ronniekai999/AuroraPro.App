@@ -675,6 +675,16 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"requests_enabled": {func(v string) bool {
 			return v == "true" || v == "false"
 		}},
+		// Per-user media-request quota tuning (carve-out C). A request over
+		// either cap is held for admin approval rather than dispatched.
+		"requests_quota_active": {func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 1 && n <= 10000
+		}},
+		"requests_quota_daily": {func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 1 && n <= 10000
+		}},
 		// Audit M1 fix (Phase 8) — `ui_version` removed from allowed
 		// keys after V1 retirement. The router no longer reads it
 		// (readUIVersion + shouldServeV1 are gone), so accepting

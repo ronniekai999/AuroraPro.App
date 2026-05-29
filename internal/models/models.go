@@ -782,10 +782,11 @@ type LogEntry struct {
 
 // RequestStatus constants for the media request lifecycle.
 const (
-	RequestPending    = "pending"
-	RequestProcessing = "processing"
-	RequestAvailable  = "available"
-	RequestFailed     = "failed"
+	RequestPending         = "pending"
+	RequestPendingApproval = "pending_approval"
+	RequestProcessing      = "processing"
+	RequestAvailable       = "available"
+	RequestFailed          = "failed"
 )
 
 // Request represents a user's media request submitted through the Requests feature.
@@ -799,7 +800,7 @@ type Request struct {
 	PosterPath   string     `json:"poster_path"`
 	Overview     string     `json:"overview"`
 	Year         int        `json:"year"`
-	Status       string     `json:"status"` // pending, processing, available, failed
+	Status       string     `json:"status"` // pending, pending_approval, processing, available, failed
 	Quality1080p bool       `json:"quality_1080p"`
 	Quality4K    bool       `json:"quality_4k"`
 	ArrJobIDs    string     `json:"arr_job_ids"` // JSON or comma-sep IDs from Radarr/Sonarr (e.g. TVDB ID for TV)

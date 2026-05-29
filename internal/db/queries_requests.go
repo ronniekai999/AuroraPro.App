@@ -257,6 +257,68 @@ func (q *Queries) GetRequestCountByStatus(ctx context.Context, status string) (i
 	return count, nil
 }
 
+// CountActiveRequestsByUser returns the number of in-flight requests for a
+// user — those still pending, awaiting admin approval, or processing. Used by
+// the per-user active-request quota gate in the Create handler.
+func (q *Queries) CountActiveRequestsByUser(ctx context.Context, userID int64) (int, error) {
+	var count int
+	err := q.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM requests
+		 WHERE user_id = $1 AND status IN ('pending', 'processing', 'pending_approval')`,
+		userID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active requests by user: %w", err)
+	}
+	return count, nil
+}
+
+// CountUserRequestsSince returns the number of requests a user has submitted
+// at or after the given time. Used by the per-user rolling daily quota gate.
+func (q *Queries) CountUserRequestsSince(ctx context.Context, userID int64, since time.Time) (int, error) {
+	var count int
+	err := q.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM requests
+		 WHERE user_id = $1 AND requested_at >= $2`,
+		userID, since,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count user requests since: %w", err)
+	}
+	return count, nil
+}
+
+// GetPendingApprovalRequests returns all requests awaiting admin approval,
+// oldest first. Used by the admin approval-queue endpoint.
+func (q *Queries) GetPendingApprovalRequests(ctx context.Context) ([]models.Request, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT `+requestColumns+`
+		 FROM requests
+		 WHERE status = 'pending_approval'
+		 ORDER BY requested_at ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pending approval requests: %w", err)
+	}
+	defer rows.Close()
+
+	var requests []models.Request
+	for rows.Next() {
+		var r models.Request
+		err := rows.Scan(
+			&r.ID, &r.UserID, &r.MediaType, &r.TMDBID, &r.Title,
+			&r.PosterPath, &r.Overview, &r.Year, &r.Status,
+			&r.Quality1080p, &r.Quality4K, &r.ArrJobIDs, &r.ErrorMessage,
+			&r.RequestedAt, &r.ProcessedAt, &r.CompletedAt, &r.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan request row: %w", err)
+		}
+		requests = append(requests, r)
+	}
+	return requests, rows.Err()
+}
+
 // RequestExistsActive checks if a non-failed request already exists for this
 // user+media combination. Used to prevent duplicate requests.
 func (q *Queries) RequestExistsActive(ctx context.Context, userID int64, mediaType string, tmdbID int) (bool, error) {

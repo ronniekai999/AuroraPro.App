@@ -101,9 +101,11 @@ type RouterDeps struct {
 	//   LoginLimiter         — POST /api/auth/login + /register (credential surface; tight)
 	//   RefreshLimiter       — POST /api/auth/refresh + /logout (session-lifecycle churn; roomier)
 	//   ChangePasswordLimiter — POST /api/auth/change-password (authed, Argon2id-gated; modest cap)
+	//   RequestLimiter       — POST /api/requests (per-IP media-request flood cap)
 	LoginLimiter          *auth.RateLimiter
 	RefreshLimiter        *auth.RateLimiter
 	ChangePasswordLimiter *auth.RateLimiter
+	RequestLimiter        *auth.RateLimiter
 	Watcher               *library.Watcher
 	Enricher              *metadata.Enricher
 	ImgProxy              *metadata.ImageProxy
@@ -741,6 +743,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// The status read is plain-file I/O on update-status.json.
 				r.Post("/system/update", systemH.TriggerUpdate)
 				r.Get("/system/update/status", systemH.GetUpdateStatus)
+				// Media-request approval queue (carve-out C). Requests held by
+				// the per-user quota gate land in pending_approval; admins
+				// triage them here. Approve dispatches to ARR; deny fails it.
+				r.Get("/requests/pending", requestH.ListPendingApprovals)
+				r.Post("/requests/{id}/approve", requestH.ApproveRequest)
+				r.Post("/requests/{id}/deny", requestH.DenyRequest)
 			})
 			// 2026-05-16 — admin backup endpoint. Separate route because
 			// pg_dump can run for several minutes on a large catalog and
@@ -767,7 +775,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// but without RequireAdmin so regular users can search.
 				r.Get("/search", metaH.SearchTMDB)
 				r.Get("/", requestH.List)
-				r.Post("/", requestH.Create)
+				// Per-IP rate limit on request creation (carve-out C) so a
+				// single client can't flood the queue (and the per-user quota
+				// gate) faster than an admin can triage.
+				r.With(deps.RequestLimiter.Middleware).Post("/", requestH.Create)
 				r.Delete("/{id}", requestH.Delete)
 			})
 
