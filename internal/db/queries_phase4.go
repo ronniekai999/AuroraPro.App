@@ -554,12 +554,12 @@ func (q *Queries) GetLibraryCount(ctx context.Context) (int, error) {
 func (q *Queries) DeleteWatchProgress(ctx context.Context, userID, mediaItemID int64, episodeID *int64) error {
 	if episodeID != nil {
 		_, err := q.pool.Exec(ctx,
-			"DELETE FROM watch_progress WHERE user_id = $1 AND episode_id = $2",
+			"DELETE FROM watch_progress WHERE user_id = $1 AND episode_id = $2 AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)",
 			userID, *episodeID)
 		return err
 	}
 	_, err := q.pool.Exec(ctx,
-		"DELETE FROM watch_progress WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL",
+		"DELETE FROM watch_progress WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)",
 		userID, mediaItemID)
 	return err
 }

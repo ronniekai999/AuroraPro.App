@@ -1893,10 +1893,31 @@ func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusInternalServerError, "failed to resolve default profile")
 		return 0, false
 	}
-	if dp == nil {
-		return 0, true
+	if dp != nil {
+		return dp.ID, true
 	}
-	return dp.ID, true
+
+	// No default profile yet. This happens for an OAuth signup (the callback
+	// never creates a profile) or a password Register whose profile-create was
+	// swallowed as non-fatal — until the next restart's migrateDefaultProfiles
+	// runs. Migration 029 made watch_progress.profile_id NOT NULL, so we MUST
+	// resolve a real profile here or the first progress write 500s. Create the
+	// default on demand. deep-debug carve-out B.
+	name := "Default"
+	if u, uerr := h.queries.GetUserByID(r.Context(), userID); uerr == nil && u != nil && u.Username != "" {
+		name = u.Username
+	}
+	created, cerr := h.queries.CreateDefaultProfileForUser(r.Context(), userID, name)
+	if cerr != nil {
+		// Likely a race — a concurrent request created the default first (the
+		// one-default-per-user partial unique index rejects the second). Re-read.
+		if dp2, rerr := h.queries.GetDefaultProfile(r.Context(), userID); rerr == nil && dp2 != nil {
+			return dp2.ID, true
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create default profile")
+		return 0, false
+	}
+	return created.ID, true
 }
 
 // UpdateProgress reports playback position.

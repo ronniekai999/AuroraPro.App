@@ -1036,27 +1036,30 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 	if p.EpisodeID != nil {
 		_, err := q.pool.Exec(ctx, `
 			INSERT INTO watch_progress (user_id, media_item_id, episode_id, position_ms, duration_ms, completed, profile_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (user_id, episode_id) WHERE episode_id IS NOT NULL
+			VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+			ON CONFLICT (user_id, profile_id, episode_id) WHERE episode_id IS NOT NULL
 			DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-			             completed = EXCLUDED.completed, profile_id = COALESCE(EXCLUDED.profile_id, watch_progress.profile_id),
-			             updated_at = NOW()`,
+			             completed = EXCLUDED.completed, updated_at = NOW()`,
 			p.UserID, p.MediaItemID, p.EpisodeID, p.PositionMs, p.DurationMs, p.Completed, profileID)
 		return err
 	}
 
 	_, err := q.pool.Exec(ctx, `
 		INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, profile_id)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (user_id, media_item_id) WHERE episode_id IS NULL
+		VALUES ($1, $2, $3, $4, $5, COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+		ON CONFLICT (user_id, profile_id, media_item_id) WHERE episode_id IS NULL
 		DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-		             completed = EXCLUDED.completed, profile_id = COALESCE(EXCLUDED.profile_id, watch_progress.profile_id),
-		             updated_at = NOW()`,
+		             completed = EXCLUDED.completed, updated_at = NOW()`,
 		p.UserID, p.MediaItemID, p.PositionMs, p.DurationMs, p.Completed, profileID)
 	return err
 }
 
-// GetWatchProgress returns progress for a specific item/episode.
+// GetWatchProgress returns progress for a specific item/episode, scoped to the
+// user's DEFAULT profile. Deferred follow-up (deep-debug B, non-blocking): make
+// this read + DeleteWatchProgress honor an explicit non-default profile, gated
+// on multi-profile UI. Today no client sends an explicit profile, so writes
+// (via resolveProgressProfileID) and reads/deletes all consistently resolve to
+// the default profile — the asymmetry is dormant until profile-switching ships.
 func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int64, episodeID *int64) (*models.WatchProgress, error) {
 	var wp models.WatchProgress
 	var err error
@@ -1065,13 +1068,15 @@ func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int6
 	if episodeID != nil {
 		err = q.pool.QueryRow(ctx, `
 			SELECT id, user_id, media_item_id, episode_id, position_ms, duration_ms, completed, updated_at, profile_id
-			FROM watch_progress WHERE user_id = $1 AND episode_id = $2`,
+			FROM watch_progress WHERE user_id = $1 AND episode_id = $2
+			  AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)`,
 			userID, *episodeID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
 			&wp.PositionMs, &wp.DurationMs, &wp.Completed, &wp.UpdatedAt, &profileID)
 	} else {
 		err = q.pool.QueryRow(ctx, `
 			SELECT id, user_id, media_item_id, episode_id, position_ms, duration_ms, completed, updated_at, profile_id
-			FROM watch_progress WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL`,
+			FROM watch_progress WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL
+			  AND profile_id = (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)`,
 			userID, mediaItemID).Scan(&wp.ID, &wp.UserID, &wp.MediaItemID, &wp.EpisodeID,
 			&wp.PositionMs, &wp.DurationMs, &wp.Completed, &wp.UpdatedAt, &profileID)
 	}
