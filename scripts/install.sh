@@ -1182,10 +1182,11 @@ info "Writing $CONFIG_DIR/aurora.env..."
     # flow (Step 5) also pins this to https://<domain>.
     printf '\n# CORS / WebSocket allowed origins (comma-separated; same-origin always allowed)\n'
     if [ -n "${AURORA_DOMAIN:-}" ]; then
-        # Strip any scheme the operator may have included (e.g. https://host)
-        # so we never emit a malformed https://https://host origin; a bare
-        # host[:port] is expected.
+        # Strip any scheme (e.g. https://host) and trailing path the operator
+        # may have included so we emit a well-formed origin (bare host[:port]) —
+        # never https://https://host or https://host/path.
         DOMAIN_HOST="${AURORA_DOMAIN#*://}"
+        DOMAIN_HOST="${DOMAIN_HOST%%/*}"
         printf 'AURORA_ALLOWED_ORIGINS=https://%s\n' "$DOMAIN_HOST"
     else
         printf 'AURORA_ALLOWED_ORIGINS=http://localhost:*,https://localhost:*\n'
@@ -1572,6 +1573,11 @@ fi
 # STEP 5: Optional reverse proxy (HTTPS) — only if AURORA_DOMAIN is set
 # ══════════════════════════════════════════════════════════════════
 PROXY_DOMAIN="${AURORA_DOMAIN:-}"
+# deep-debug — normalize to a bare host[:port]: strip any scheme the operator
+# included (https://host) and any trailing path, so `certbot -d` and the CORS
+# origin written in this block are well-formed (no https://https://host).
+PROXY_DOMAIN="${PROXY_DOMAIN#*://}"
+PROXY_DOMAIN="${PROXY_DOMAIN%%/*}"
 PROXY_SETUP_OK=false
 
 if $SERVICE_OK && [ -n "$PROXY_DOMAIN" ]; then
