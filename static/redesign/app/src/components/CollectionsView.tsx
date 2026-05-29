@@ -213,12 +213,30 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
           </p>
         </div>
       ) : (
+        // Audit MED — collection cards were bare <div onClick> with no
+        // keyboard/AT affordance. Each card is now keyboard-operable
+        // (role=button + tabIndex), announced via aria-label, activates on
+        // Enter/Space, and shows a visible focus ring. We keep a
+        // <div role="button"> rather than a real <button> because the admin
+        // delete control below is itself a <button> — nesting <button>
+        // inside <button> is invalid HTML, whereas role="button" avoids
+        // that. The delete button stops propagation on BOTH click and keydown,
+        // so its activation never bubbles up to this card handler.
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
           {collections.map((c) => (
             <div
               key={c.id}
+              role="button"
+              tabIndex={0}
+              aria-label={`Open collection ${c.name}`}
               onClick={() => setSelected(c.id)}
-              className="cursor-pointer rounded-2xl border border-white/[0.06] overflow-hidden bg-gradient-to-br from-purple-900/30 via-[#0a0a0f] to-[#050505] hover:border-purple-500/40 transition-all group relative h-[180px] p-5 flex flex-col justify-end"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setSelected(c.id)
+                }
+              }}
+              className="cursor-pointer rounded-2xl border border-white/[0.06] overflow-hidden bg-gradient-to-br from-purple-900/30 via-[#0a0a0f] to-[#050505] hover:border-purple-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505] transition-all group relative h-[180px] p-5 flex flex-col justify-end"
             >
               {c.cover_path && (
                 <img
@@ -261,6 +279,7 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
                       window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
                     }
                   }}
+                  onKeyDown={(e) => e.stopPropagation()}
                   className="absolute top-3 right-3 w-7 h-7 rounded-full bg-black/40 hover:bg-red-500/80 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs z-10"
                   title="Delete collection"
                 >

@@ -179,7 +179,34 @@ export function createVoiceController(opts: CreateOptions): VoiceController {
     selfSpeaking = false
   }
 
+  // Med-fix (2026-05-29) — tear down a peer's existing meter (rAF loop
+  // + AudioContext) without touching the rest of the PeerEntry. Mirrors
+  // the meter-cleanup half of closePeer / stopLocalMeter.
+  const stopPeerMeter = (peer: PeerEntry) => {
+    if (peer.raf !== undefined) {
+      cancelAnimationFrame(peer.raf)
+      peer.raf = undefined
+    }
+    if (peer.audioCtx) {
+      try { void peer.audioCtx.close() } catch { /* noop */ }
+    }
+    peer.audioCtx = undefined
+    peer.analyser = undefined
+    peer.source = undefined
+  }
+
   const startPeerMeter = (peer: PeerEntry, stream: MediaStream, uid: number) => {
+    // Med-fix (2026-05-29) — pc.ontrack fires on EVERY track event,
+    // including ICE restarts / renegotiations (oniceconnectionstatechange
+    // 'failed' → createOffer({iceRestart:true}) above re-negotiates and
+    // re-fires ontrack). The old code created a fresh AudioContext +
+    // requestAnimationFrame loop each time and overwrote peer.audioCtx /
+    // peer.raf, orphaning the prior AudioContext (never closed) and
+    // leaving the prior rAF loop running forever (it reads peer.analyser
+    // every frame, which now points at the NEW analyser, so two loops
+    // would drive one analyser). Tear down any prior meter first so a
+    // re-fire replaces instead of leaks.
+    stopPeerMeter(peer)
     try {
       const ctx = new AudioContext()
       const src = ctx.createMediaStreamSource(stream)
