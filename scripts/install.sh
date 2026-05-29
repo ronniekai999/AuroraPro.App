@@ -1182,7 +1182,11 @@ info "Writing $CONFIG_DIR/aurora.env..."
     # flow (Step 5) also pins this to https://<domain>.
     printf '\n# CORS / WebSocket allowed origins (comma-separated; same-origin always allowed)\n'
     if [ -n "${AURORA_DOMAIN:-}" ]; then
-        printf 'AURORA_ALLOWED_ORIGINS=https://%s\n' "$AURORA_DOMAIN"
+        # Strip any scheme the operator may have included (e.g. https://host)
+        # so we never emit a malformed https://https://host origin; a bare
+        # host[:port] is expected.
+        DOMAIN_HOST="${AURORA_DOMAIN#*://}"
+        printf 'AURORA_ALLOWED_ORIGINS=https://%s\n' "$DOMAIN_HOST"
     else
         printf 'AURORA_ALLOWED_ORIGINS=http://localhost:*,https://localhost:*\n'
     fi

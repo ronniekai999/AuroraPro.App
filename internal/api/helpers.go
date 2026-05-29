@@ -282,16 +282,12 @@ func websocketOriginChecker(originAllowed func(string) bool) func(*http.Request)
 			// query param, so this isn't an open door.
 			return true
 		}
-		// Same-origin upgrades are always allowed: the SPA is served from the
-		// same host it connects back to, so the browser-set Origin host matches
-		// the request Host. CSWSH is a CROSS-origin attack, so allowing
-		// same-origin is safe — and it lets a self-hosted install work when
-		// reached by LAN IP or hostname without a wildcard origin allowlist
-		// (which is why we no longer default AURORA_ALLOWED_ORIGINS to '*').
-		// The browser sets Origin from the real page origin and JS cannot forge
-		// it, so an attacker page on another origin can't match r.Host.
-		// (deep-debug — CORS hardening)
-		if u, err := url.Parse(origin); err == nil && u.Host != "" && strings.EqualFold(u.Host, r.Host) {
+		// Same-origin upgrades are always allowed (single source of truth in
+		// httputil.SameOrigin, shared with the hub /ws checker): the SPA
+		// connects back to its own host, so a self-hosted LAN-IP/hostname
+		// install works without a wildcard origin allowlist. CSWSH is a
+		// cross-origin attack, so this is safe. (deep-debug — CORS hardening)
+		if httputil.SameOrigin(origin, r.Host) {
 			return true
 		}
 		if originAllowed == nil {

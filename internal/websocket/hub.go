@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-media/aurora/internal/httputil"
 	"github.com/gorilla/websocket"
 )
 
@@ -65,6 +66,13 @@ func NewHub(checkOrigin OriginChecker) *Hub {
 			origin := r.Header.Get("Origin")
 			if origin == "" {
 				return true // non-browser clients (e.g. curl) don't send Origin
+			}
+			// Same-origin upgrades are always allowed — single source of truth
+			// with the V3 party checker (httputil.SameOrigin). Without this, a
+			// non-wildcard origin allowlist would reject same-origin upgrades on
+			// a LAN-IP install. (deep-debug — CORS consistency)
+			if httputil.SameOrigin(origin, r.Host) {
+				return true
 			}
 			if checkOrigin == nil {
 				return false // deny by default if no checker configured
