@@ -39,8 +39,10 @@ export interface User {
 }
 
 export interface TokenResponse {
-  access_token: string
-  refresh_token: string
+  // deep-debug H10 — tokens now arrive as httpOnly cookies, not in the body;
+  // these are optional/absent for browser auth responses.
+  access_token?: string
+  refresh_token?: string
   expires_in: number
   user: User
 }

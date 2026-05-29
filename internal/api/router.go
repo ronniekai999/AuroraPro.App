@@ -299,7 +299,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// take effect without a restart. Returns 404 when OAuth not enabled.
 	oauthH := NewOAuthHandler(deps.Queries, deps.AuthSvc, deps.Activity)
 	authH.SetTokenVersionStore(tokenVerStore)
-	authH.SetSecureCookies(cfg.Server.SecureCookies) // deep-debug H10
+	authH.SetSecureCookies(cfg.Server.SecureCookies)  // deep-debug H10
+	oauthH.SetSecureCookies(cfg.Server.SecureCookies) // deep-debug H10 — OAuth login also sets cookies
 	libH := NewLibraryHandler(deps.Queries, deps.Scanner, deps.Hub, deps.Watcher, deps.Activity)
 	mediaH := NewMediaHandler(deps.Queries)
 	if deps.Semantic != nil {
