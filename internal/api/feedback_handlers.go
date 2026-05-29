@@ -1593,57 +1593,158 @@ func buildIssueBody(description, name, username, attachmentURL string, attachmen
 		writeKV("Server time (Aurora UTC)", env.serverTime)
 		b.WriteString("</details>\n\n")
 	}
-	// 2026-05-27 — Diagnostic buffer. Two separate `<details>` blocks
-	// so triagers can expand console + network independently. Both
-	// are collapsed by default (the user description stays the lede).
-	// Rendered as fenced code blocks for monospace alignment in the
-	// markdown view; ``` is the outer fence + ` for any tick inside
-	// the rendered content gets handled by the fence width.
-	if len(consoleEntries) > 0 {
-		b.WriteString("<details>\n")
-		b.WriteString(fmt.Sprintf("<summary>Console log (%d most recent entries)</summary>\n\n", len(consoleEntries)))
-		b.WriteString("```\n")
-		for _, e := range consoleEntries {
-			// Format: "[ts] LEVEL: message" — easy to grep + diff.
-			fmt.Fprintf(&b, "[%s] %-5s %s\n", e.ts, strings.ToUpper(e.level), e.message)
-		}
-		b.WriteString("```\n")
-		b.WriteString("</details>\n\n")
-	}
-	if len(networkEntries) > 0 {
-		b.WriteString("<details>\n")
-		b.WriteString(fmt.Sprintf("<summary>Network log (%d most recent requests)</summary>\n\n", len(networkEntries)))
-		b.WriteString("| Time | Method | URL | Status | Duration | Size |\n")
-		b.WriteString("|---|---|---|---|---|---|\n")
-		for _, e := range networkEntries {
-			// Table cell — escape pipe characters so a URL with `|`
-			// doesn't break the column layout. URLs with `|` are rare
-			// but possible in OData / query-string DSLs.
-			urlCell := strings.ReplaceAll(e.url, "|", "\\|")
-			fmt.Fprintf(&b, "| %s | %s | `%s` | %d | %dms | %s |\n",
-				e.ts, e.method, urlCell, e.status, e.durationMs, humanizeSize(e.responseSize))
-		}
-		b.WriteString("</details>\n\n")
-	}
+	// Build the server-stamped footer SEPARATELY so we can reserve its
+	// bytes against the issue-body cap before spending the remaining
+	// budget on diagnostics. The footer is load-bearing (it's how
+	// triagers authenticate a real submission + see the submitter), so
+	// it must never be the thing that gets truncated.
+	//
 	// Distinctive HTML-comment fence that user content can't easily
 	// reproduce (we strip HTML from the description's blockquote
 	// rendering anyway). Triagers can grep for `aurora-footer` to
 	// find authentic server-stamped submissions.
-	b.WriteString("\n<!-- aurora-footer -->\n---\n")
-	b.WriteString("_Submitted via Aurora bug-report_")
+	var fb strings.Builder
+	fb.WriteString("\n<!-- aurora-footer -->\n---\n")
+	fb.WriteString("_Submitted via Aurora bug-report_")
 	if name != "" {
-		b.WriteString(" by **")
-		b.WriteString(escapeMarkdownInline(name))
-		b.WriteString("**")
+		fb.WriteString(" by **")
+		fb.WriteString(escapeMarkdownInline(name))
+		fb.WriteString("**")
 	}
 	if username != "" && username != name {
-		b.WriteString(" (Aurora user: ")
+		fb.WriteString(" (Aurora user: ")
 		// Deep-debug H1 — dynamic-fence code span via renderCodeSpan.
 		// The previous `…` + escapeBacktick approach produced broken
 		// markdown when usernames contained `; rare but real.
-		b.WriteString(renderCodeSpan(username))
-		b.WriteString(")")
+		fb.WriteString(renderCodeSpan(username))
+		fb.WriteString(")")
 	}
+	footer := fb.String()
+
+	// 2026-05-29 (med-integration) — enforce the real 65 KiB issue-body
+	// hard cap that the parse-section docstring has always *claimed* but
+	// never enforced. Everything written to `b` so far (description,
+	// attachment link, environment block) plus the footer is treated as
+	// load-bearing and reserved; the diagnostics section gets whatever
+	// budget remains and is truncated to fit with a clear marker. A
+	// large-but-legitimate diagnostic buffer can no longer push the body
+	// past GitHub's 65536-byte limit and fail the whole submission.
+	diagBudget := maxIssueBodyBytes - b.Len() - len(footer)
+	b.WriteString(renderDiagnosticsBounded(consoleEntries, networkEntries, diagBudget))
+	b.WriteString(footer)
+	return b.String()
+}
+
+// renderDiagnosticsBounded renders the console + network `<details>`
+// blocks (each collapsed by default so the user description stays the
+// lede) into at most `budget` bytes. The console block is rendered as a
+// fenced code block for monospace alignment; the network block as a
+// markdown table.
+//
+// 2026-05-29 (med-integration) — the diagnostics section is the only
+// part of the issue body whose AGGREGATE size is effectively unbounded
+// (per-entry caps exist, but 500 console + 300 network entries dwarf
+// the rest of the body), so it's the part we truncate to keep the whole
+// body under GitHub's 65536-byte limit. Truncation is whole-block then
+// whole-entry: we never emit a half-written `<details>`/code-fence/table
+// that would corrupt the markdown render. A clear `…(truncated …)`
+// marker tells the triager entries were dropped.
+//
+// When budget is too small to fit even one block's scaffolding, we emit
+// nothing (the caller's frame + footer already fit under the cap, so an
+// empty diagnostics section keeps the body valid).
+func renderDiagnosticsBounded(consoleEntries []consoleEntry, networkEntries []networkEntry, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	var b strings.Builder
+
+	// remaining returns the bytes still available in the budget given
+	// what's already been committed to b.
+	remaining := func() int { return budget - b.Len() }
+
+	if len(consoleEntries) > 0 {
+		// Scaffolding (open tag + summary + fences + close) must fit
+		// with room for at least one line; otherwise skip the block
+		// rather than emit an empty/broken <details>.
+		const open = "<details>\n"
+		summary := fmt.Sprintf("<summary>Console log (%d most recent entries)</summary>\n\n", len(consoleEntries))
+		const fenceOpen = "```\n"
+		const fenceClose = "```\n"
+		const closeTag = "</details>\n\n"
+		// truncMarker is the line we append inside the code fence when
+		// we drop entries — sized into the budget below.
+		const truncMarker = "…(truncated — diagnostics exceeded the GitHub issue size limit)\n"
+		// Gate includes truncMarker so that even the worst case (block
+		// opens but the FIRST entry doesn't fit, forcing an immediate
+		// truncation marker) still fits within budget. Without the
+		// marker in the gate we could overflow by up to len(truncMarker)
+		// when the budget is only just larger than the bare scaffold.
+		scaffold := len(open) + len(summary) + len(fenceOpen) + len(fenceClose) + len(closeTag) + len(truncMarker)
+		if remaining() > scaffold {
+			b.WriteString(open)
+			b.WriteString(summary)
+			b.WriteString(fenceOpen)
+			// Reserve room for the closing fence + close tag (and, if
+			// we end up truncating, the marker) so the block always
+			// closes cleanly.
+			reserve := len(fenceClose) + len(closeTag)
+			truncated := false
+			for _, e := range consoleEntries {
+				// Format: "[ts] LEVEL: message" — easy to grep + diff.
+				line := fmt.Sprintf("[%s] %-5s %s\n", e.ts, strings.ToUpper(e.level), e.message)
+				// Need room for this line AND the closing scaffold; if
+				// truncating, also the marker. Account for the marker up
+				// front so the decision is stable.
+				if remaining()-reserve-len(truncMarker) < len(line) {
+					truncated = true
+					break
+				}
+				b.WriteString(line)
+			}
+			if truncated {
+				b.WriteString(truncMarker)
+			}
+			b.WriteString(fenceClose)
+			b.WriteString(closeTag)
+		}
+	}
+
+	if len(networkEntries) > 0 {
+		const open = "<details>\n"
+		summary := fmt.Sprintf("<summary>Network log (%d most recent requests)</summary>\n\n", len(networkEntries))
+		const header = "| Time | Method | URL | Status | Duration | Size |\n|---|---|---|---|---|---|\n"
+		const closeTag = "</details>\n\n"
+		const truncMarker = "\n_…(truncated — diagnostics exceeded the GitHub issue size limit)_\n"
+		// Marker included in the gate — see the console block above for
+		// why (worst case: block opens, first row doesn't fit).
+		scaffold := len(open) + len(summary) + len(header) + len(closeTag) + len(truncMarker)
+		if remaining() > scaffold {
+			b.WriteString(open)
+			b.WriteString(summary)
+			b.WriteString(header)
+			reserve := len(closeTag)
+			truncated := false
+			for _, e := range networkEntries {
+				// Table cell — escape pipe characters so a URL with `|`
+				// doesn't break the column layout. URLs with `|` are rare
+				// but possible in OData / query-string DSLs.
+				urlCell := strings.ReplaceAll(e.url, "|", "\\|")
+				row := fmt.Sprintf("| %s | %s | `%s` | %d | %dms | %s |\n",
+					e.ts, e.method, urlCell, e.status, e.durationMs, humanizeSize(e.responseSize))
+				if remaining()-reserve-len(truncMarker) < len(row) {
+					truncated = true
+					break
+				}
+				b.WriteString(row)
+			}
+			if truncated {
+				b.WriteString(truncMarker)
+			}
+			b.WriteString(closeTag)
+		}
+	}
+
 	return b.String()
 }
 
@@ -1785,7 +1886,10 @@ func renderCodeSpan(s string) string {
 // fields `client_console` / `client_network` on every submission.
 // Server-side we validate + cap so a malicious or buggy client can't:
 //
-//   - blow up the GitHub issue body (65 KiB hard cap)
+//   - blow up the GitHub issue body (65 KiB hard cap — enforced in
+//     buildIssueBody via maxIssueBodyBytes, which truncates the
+//     diagnostics section to fit; per-entry/per-field caps below bound
+//     a single entry but not the aggregate)
 //   - smuggle markdown injection (the fenced code-block render below
 //     traps `\n\n```\n` from a console message and breaks the layout
 //     — guarded by stripping backtick fences and limiting per-entry
@@ -1877,6 +1981,21 @@ const (
 	maxNetworkEntries      = 300
 	maxConsoleMessageChars = 1024
 	maxNetworkURLChars     = 500
+
+	// 2026-05-29 (med-integration) — GitHub's REST API rejects an issue
+	// `body` longer than 65536 bytes with a 422. The per-entry + per-
+	// field caps above bound a SINGLE diagnostic entry, but 500 console
+	// entries × ~1 KiB + 300 network rows easily blows past 64 KiB, so
+	// the assembled body needs its own ceiling. Previously the "65 KiB
+	// hard cap" was only a comment (see parse-section docstring) with no
+	// enforcement — a large-but-legitimate diagnostic buffer made the
+	// whole submission fail and the user lost their report. 64000 leaves
+	// ~1.5 KiB of headroom under GitHub's 65536 for the truncation
+	// marker + any multi-byte boundary slack. buildIssueBody enforces
+	// this by truncating the diagnostics section (the only unbounded-in-
+	// aggregate part); the user's description, attachment link, env block
+	// and footer are always preserved.
+	maxIssueBodyBytes = 64000
 )
 
 // parseConsoleEntries decodes the client's JSON-encoded console

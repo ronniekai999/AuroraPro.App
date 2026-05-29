@@ -126,6 +126,115 @@ const SENSITIVE_PARAMS = new Set([
   'sig', 'signature',
 ])
 
+// ── Console-message redaction ────────────────────────────────────────
+//
+// 2026-05-29 (med-integration) — captured CONSOLE output is shipped
+// verbatim to GitHub in the bug-report issue body. Network URLs were
+// already redacted (redactURL), but console messages were NOT — an app
+// that logs an Authorization header, a raw JWT, a Set-Cookie value, or
+// a `token=…` query string (common during auth debugging) would leak
+// that secret into a world-readable issue. Every captured console entry
+// now runs through redactConsoleMessage before it enters the buffer.
+//
+// Strategy: mask the VALUE, keep enough structure that the log is still
+// useful for triage (the key/scheme stays; only the secret becomes
+// `[REDACTED]`). Consistent with redactURL's privacy-over-completeness
+// stance — over-redaction (a false positive) is harmless; under-
+// redaction leaks a credential. Patterns are linear (no nested
+// quantifiers over overlapping classes) to avoid catastrophic
+// backtracking on adversarial input.
+
+const REDACTED = '[REDACTED]'
+
+// Header-style secrets whose values routinely contain spaces / `;` /
+// `=` (cookies, auth schemes). Quote-aware (deep-debug MED follow-up): a
+// QUOTED value (the one-line-JSON form `"authorization":"Bearer a b c"`)
+// matches only up to its closing quote so trailing sibling fields and the
+// closing brace survive — the value group preserves the quotes; an UNQUOTED
+// raw-header value (`authorization: Bearer <jwt>`, `set-cookie: a=b; Path=/`)
+// is redacted to end-of-line. Handling both here (rather than deferring the
+// quoted form to the param passes) keeps coverage self-contained, so these
+// header-only keys can't leak if they're absent from SENSITIVE_PARAMS.
+// Matched case-insensitively; the key + separator (+ quotes) are kept.
+const SENSITIVE_HEADER_RE =
+  /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token|x-csrf-token)(["']?\s*[:=]\s*)("(?:[^"\r\n])*"|'(?:[^'\r\n])*'|[^\r\n]*)/gi
+
+// Bare bearer scheme anywhere in the text (e.g. an object logged as
+// `{ Authorization: "Bearer eyJ…" }` after JSON.stringify, or a plain
+// "Bearer eyJ…" string). Keeps the scheme word, masks the credential.
+const BEARER_RE = /\b(bearer|basic)\s+[A-Za-z0-9\-._~+/]+=*/gi
+
+// JWTs anchored on the near-universal `eyJ` header prefix (base64url of
+// `{"`). Three dot-separated base64url segments. Anchoring on `eyJ`
+// keeps this from matching innocuous dotted identifiers / version
+// strings / file paths.
+const JWT_RE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
+
+// Assignment-context redaction for the SENSITIVE_PARAMS keys (token,
+// access_token, password, api_key, secret, …). Matches `key=value`,
+// `key: value`, and JSON `"key":"value"` forms. The value is a single
+// token (quoted, or a contiguous run with no whitespace / delimiter) —
+// header-style multi-token values are handled by SENSITIVE_HEADER_RE
+// above. Built from SENSITIVE_PARAMS so there's ONE source of truth.
+//
+// Keys are sorted longest-first so `access_token` wins over `token` and
+// the alternation doesn't match the shorter key against a longer one.
+// Sensitive key=value / "key":"value" redaction in THREE forms so a value
+// containing spaces (a quoted secret or a JSON string) is fully masked, not
+// just up to the first whitespace (deep-debug MED follow-up — the prior single
+// pattern stopped the value class at whitespace and leaked the tail).
+const SENSITIVE_PARAM_KEYS = Array.from(SENSITIVE_PARAMS)
+  .sort((a, b) => b.length - a.length)
+  .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) // escape regex metachars
+  .join('|')
+// 1. Double-quoted value: key [closing-key-quote] :|= " ...spaces... " — the
+//    inner class excludes only `"` so apostrophes inside survive; group 1
+//    keeps the prefix incl. the opening quote, group 2 the closing quote.
+const SENSITIVE_PARAM_DQ_RE = new RegExp(
+  `(\\b(?:${SENSITIVE_PARAM_KEYS})\\b["']?\\s*[:=]\\s*")[^"\\r\\n]*(")`,
+  'gi',
+)
+// 2. Single-quoted value — mirror of #1, excludes only `'`.
+const SENSITIVE_PARAM_SQ_RE = new RegExp(
+  `(\\b(?:${SENSITIVE_PARAM_KEYS})\\b["']?\\s*[:=]\\s*')[^'\\r\\n]*(')`,
+  'gi',
+)
+// 3. Unquoted token value (key=token): stops at the first delimiter. The value
+//    class excludes `[`/`]` so the pass is idempotent vs a `[REDACTED]`
+//    sentinel an earlier pass may have written.
+const SENSITIVE_PARAM_UQ_RE = new RegExp(
+  `(\\b(?:${SENSITIVE_PARAM_KEYS})\\b\\s*[:=]\\s*)(?:[^\\s,;&)"'}\\[\\]]+)`,
+  'gi',
+)
+
+// redactConsoleMessage masks credential-shaped content in a formatted
+// console string before it's buffered. Order matters: header + bearer +
+// JWT first (they may span what the param matcher would otherwise stop
+// at), then the assignment-context param keys. Wrapped so a pathological
+// input can never throw out of the interceptor — on any error we fall
+// back to a fully-masked sentinel rather than leak the raw string.
+function redactConsoleMessage(s: string): string {
+  try {
+    return s
+      .replace(SENSITIVE_HEADER_RE, (_m, key: string, sep: string, val: string) => {
+        // Quoted (JSON) value: keep the surrounding quotes and stop at the
+        // closing quote so trailing siblings survive; unquoted raw-header
+        // value: redact to end-of-line.
+        const q = val && (val[0] === '"' || val[0] === "'") ? val[0] : ''
+        return `${key}${sep}${q}${REDACTED}${q}`
+      })
+      .replace(BEARER_RE, (_m, scheme: string) => `${scheme} ${REDACTED}`)
+      .replace(JWT_RE, REDACTED)
+      .replace(SENSITIVE_PARAM_DQ_RE, (_m, pre: string, q: string) => `${pre}${REDACTED}${q}`)
+      .replace(SENSITIVE_PARAM_SQ_RE, (_m, pre: string, q: string) => `${pre}${REDACTED}${q}`)
+      .replace(SENSITIVE_PARAM_UQ_RE, (_m, pre: string) => `${pre}${REDACTED}`)
+  } catch {
+    // A regex engine should never throw on these linear patterns, but
+    // if it somehow does we must not buffer the unredacted original.
+    return '[redaction-error]'
+  }
+}
+
 // Module-level state. Lazy-initialized on first install.
 let installed = false
 const consoleBuffer: ConsoleEntry[] = []
@@ -189,9 +298,18 @@ function safeStringify(value: unknown): string {
 
 // formatConsoleArgs joins multi-arg calls the way the browser would
 // roughly display them (space-separated). Each arg is individually
-// stringified; the result is capped to CONSOLE_MESSAGE_MAX.
+// stringified; the result is REDACTED (med-integration — strip
+// bearer/JWT tokens, Authorization/Cookie values, and SENSITIVE_PARAMS
+// secrets before they enter the buffer) and then capped to
+// CONSOLE_MESSAGE_MAX.
+//
+// Redaction runs BEFORE the length cap so (a) a credential straddling
+// the cap boundary can't survive half-masked and (b) the inserted
+// `[REDACTED]` markers count against the cap. Every captured console
+// entry (interceptor + uncaught-error / unhandled-rejection handlers)
+// routes through here, so this is the single redaction chokepoint.
 function formatConsoleArgs(args: unknown[]): string {
-  const out = args.map(safeStringify).join(' ')
+  const out = redactConsoleMessage(args.map(safeStringify).join(' '))
   // Deep-debug M — Array.from splits by codepoint, not UTF-16 code unit,
   // so a 4-byte emoji at the boundary stays intact. `slice` on a string
   // would split the surrogate pair and leak through to backend.
@@ -442,6 +560,7 @@ export const _testing = {
     pushBounded(networkBuffer, entry, NETWORK_MAX)
   },
   redactURL,
+  redactConsoleMessage,
   safeStringify,
   consoleMax: CONSOLE_MAX,
   networkMax: NETWORK_MAX,
