@@ -1612,6 +1612,52 @@ export interface SetupStatus {
 export async function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
   return apiFetch<SetupStatus>('/api/auth/setup-status', { signal })
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Multi-provider OAuth account linking (audit carve-out D). Backed by
+// the authoritative oauth_identities table (migration 031). The
+// Connected Accounts card in Settings uses these to list, connect, and
+// disconnect providers for the signed-in user.
+
+export interface OAuthLinkedProvider {
+  provider: string
+  linkedAt: string
+}
+
+export interface OAuthLinksResponse {
+  // Providers already connected to this account.
+  linked: OAuthLinkedProvider[]
+  // Configured-and-enabled providers not yet linked — render a "Connect"
+  // button for each.
+  available: string[]
+  // True when the user also has a password (a non-OAuth sign-in method).
+  hasPassword: boolean
+  // True when at least one provider can currently be disconnected without
+  // locking the user out (mirrors the server's unlink lockout guard).
+  canUnlinkAny: boolean
+}
+
+export async function listOAuthLinks(signal?: AbortSignal): Promise<OAuthLinksResponse> {
+  return apiFetch<OAuthLinksResponse>('/api/auth/oauth/links', { signal })
+}
+
+// startOAuthLink begins LINK mode for a provider: the server sets a
+// server-side link-uid cookie and returns the provider auth URL, which we
+// navigate to. On return the callback attaches the identity and bounces back
+// to /?linked=<provider>. Unlike sign-in (which uses an <a href> on a public
+// route), linking is a POST on an authed route, so we fetch then navigate.
+export async function startOAuthLink(provider: string): Promise<void> {
+  const { auth_url } = await apiFetch<{ auth_url: string }>(
+    `/api/auth/oauth/${provider}/link`,
+    { method: 'POST' },
+  )
+  window.location.href = auth_url
+}
+
+export async function unlinkOAuth(provider: string): Promise<void> {
+  await apiFetch(`/api/auth/oauth/${provider}/link`, { method: 'DELETE' })
+}
+
 export interface RegisterRequest {
   username: string
   email: string

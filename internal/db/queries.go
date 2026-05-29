@@ -123,10 +123,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id int64) (*models.User, erro
 }
 
 // GetUserByOAuth resolves a (provider, subject) pair to a user. Returns
-// nil if no user has linked that OAuth identity. Used by the OAuth
-// callback handler for return visits — once a user has linked their
-// Google account, every subsequent sign-in hits this fast-path instead
-// of the linking-by-email flow.
+// nil if no user has linked that OAuth identity.
+//
+// Deprecated (migration 031): resolution now goes through
+// GetUserByOAuthIdentity against the authoritative oauth_identities table,
+// which supports multiple providers per user. This column-based lookup remains
+// only for back-compat / rollback safety and is no longer on the OAuth login
+// path. Do not add new callers.
 func (q *Queries) GetUserByOAuth(ctx context.Context, provider, subject string) (*models.User, error) {
 	user := &models.User{}
 	err := q.pool.QueryRow(ctx,
@@ -168,10 +171,12 @@ var ErrOAuthIdentityConflict = errors.New("user already has a different oauth id
 // when the existing identity is empty OR already equals the incoming pair
 // (idempotent re-link); otherwise we return ErrOAuthIdentityConflict.
 //
-// NOTE: this is a contained mitigation, not true multi-provider support. Linking
-// more than one provider to a single account needs a separate oauth_identities
-// table (user_id, provider, subject) with its own unique constraint — a deferred
-// feature requiring a schema migration (intentionally not added here).
+// Deprecated (migration 031): the oauth_identities table + AddOAuthIdentity now
+// provide the true multi-provider linking this function's header said was
+// deferred. AddOAuthIdentity is the link write-path for both auto-link-by-email
+// and explicit Settings linking. LinkOAuthToUser is retained only for
+// back-compat / rollback safety and is no longer called on the OAuth flow. Do
+// not add new callers.
 func (q *Queries) LinkOAuthToUser(ctx context.Context, userID int64, provider, subject string) error {
 	// Conditional UPDATE: only proceed if the row has no identity yet, or the
 	// stored identity is exactly the one we're (re-)writing. The guard runs
@@ -220,6 +225,12 @@ func (q *Queries) LinkOAuthToUser(ctx context.Context, userID int64, provider, s
 // bootstrapping still requires the password-based register flow, so the
 // operator chooses who admin is rather than the first random Google user
 // to discover the OAuth callback.
+//
+// Deprecated (migration 031): the Tier-3 new-user path now uses
+// CreateOAuthUserWithIdentity, which also inserts the authoritative
+// oauth_identities row in the same transaction so a new OAuth user always has a
+// table identity. This column-only insert is retained for back-compat /
+// rollback safety. Do not add new callers.
 func (q *Queries) CreateOAuthUser(ctx context.Context, username, email, avatarURL, provider, subject string) (*models.User, error) {
 	user := &models.User{}
 	err := q.pool.QueryRow(ctx,

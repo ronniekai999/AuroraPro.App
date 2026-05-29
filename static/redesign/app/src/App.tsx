@@ -71,6 +71,10 @@ import {
   getAllSettings,
   updateSettings,
   getSetupStatus,
+  listOAuthLinks,
+  startOAuthLink,
+  unlinkOAuth,
+  type OAuthLinksResponse,
   register,
   type ActivityEntry,
   type AdminUser,
@@ -2745,8 +2749,9 @@ function formatRequestDate(iso: string): string {
 interface SettingsViewProps {
   user?: ApiUser
   onLogout?: () => void
+  onToast?: (message: string, type?: Toast['type']) => void
 }
-function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) {
+function SettingsView({ user: settingsUser, onLogout, onToast }: SettingsViewProps = {}) {
   // Persist to localStorage under `aurora_prefs`. We capture the raw
   // parsed object in a ref and merge before each write so any keys
   // this component doesn't know about (e.g. legacy `volume`, `muted`)
@@ -3017,6 +3022,9 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
           </div>
         )}
 
+        {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
+        <ConnectedAccountsCard onToast={onToast} />
+
         <ProfilesAndWatchlistsCard />
 
         {/* Gamification: XP card + achievements grid. */}
@@ -3025,6 +3033,134 @@ function SettingsView({ user: settingsUser, onLogout }: SettingsViewProps = {}) 
           <GamificationCard />
         </div>
       </div>
+    </div>
+  )
+}
+
+// Human-readable provider labels for the Connected Accounts UI. Keys match
+// the provider Name() values on the Go side (oauth_*.go). A provider not in
+// this map falls back to a capitalized version of its key, so adding a new
+// provider server-side degrades gracefully without a frontend change.
+const OAUTH_PROVIDER_LABELS: Record<string, string> = {
+  google: 'Google',
+  discord: 'Discord',
+  twitch: 'Twitch',
+  facebook: 'Facebook',
+  twitter: 'X',
+}
+function oauthProviderLabel(p: string): string {
+  return OAUTH_PROVIDER_LABELS[p] ?? (p.charAt(0).toUpperCase() + p.slice(1))
+}
+
+// Connected accounts card — multi-provider OAuth linking (audit carve-out D).
+// Lists linked providers (with Disconnect) and available providers (with
+// Connect). Disconnect is disabled for the user's only sign-in method (no
+// password AND a single linked identity) so they can't lock themselves out —
+// mirrors the server's unlink lockout guard, which is the real enforcement.
+// On mount it also consumes a ?linked=<provider> marker left by the link-mode
+// callback redirect: shows a success toast and strips the param so a refresh
+// doesn't re-toast.
+function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?: Toast['type']) => void }) {
+  const [links, setLinks] = useState<OAuthLinksResponse | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  // Per-provider in-flight flag so a button shows "…" and can't double-fire.
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const reload = useCallback(async () => {
+    try {
+      setLinks(await listOAuthLinks())
+      setErr(null)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'failed to load')
+    }
+  }, [])
+  // Fetch on mount. The ?linked=<provider> success toast + param strip are
+  // handled once at the App level (so they fire regardless of the active
+  // view); by the time this card mounts the param is already gone, and this
+  // fetch reflects the freshly connected provider.
+  useEffect(() => { void reload() }, [reload])
+
+  const handleConnect = async (provider: string) => {
+    setBusy(provider)
+    try {
+      // Navigates away to the provider on success, so we don't clear busy.
+      await startOAuthLink(provider)
+    } catch (e) {
+      setBusy(null)
+      onToast?.(e instanceof Error ? e.message : `Couldn't connect ${oauthProviderLabel(provider)}`, 'error')
+    }
+  }
+
+  const handleDisconnect = async (provider: string) => {
+    if (!window.confirm(`Disconnect your ${oauthProviderLabel(provider)} account from Aurora?`)) return
+    setBusy(provider)
+    try {
+      await unlinkOAuth(provider)
+      onToast?.(`Disconnected your ${oauthProviderLabel(provider)} account.`, 'info')
+      await reload()
+    } catch (e) {
+      onToast?.(e instanceof Error ? e.message : `Couldn't disconnect ${oauthProviderLabel(provider)}`, 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // The only-sign-in-method case: no password and a single linked identity.
+  // Each Disconnect is disabled (with a tooltip) in this state. The server
+  // still enforces this with a 409, so the disable is a UX courtesy.
+  const onlySignInMethod = !!links && !links.hasPassword && links.linked.length <= 1
+
+  return (
+    <div className="glass-panel rounded-xl p-6">
+      <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+        <Icon name="key" size={18} className="text-purple-400" />
+        Connected Accounts
+      </h3>
+      <p className="text-white/40 text-xs mb-4">
+        Link OAuth providers to sign in to Aurora without a password.
+      </p>
+      {err && <p className="text-red-300 text-sm mb-3">{err}</p>}
+      {links === null && !err && <p className="text-white/40 text-sm">Loading…</p>}
+      {links && (
+        <div className="space-y-2">
+          {links.linked.map(l => (
+            <div key={l.provider} className="flex items-center justify-between py-2 border-b border-white/[0.03] last:border-0">
+              <div>
+                <p className="text-white/80 text-sm font-medium">{oauthProviderLabel(l.provider)}</p>
+                <p className="text-white/40 text-xs">
+                  Connected {new Date(l.linkedAt).toLocaleDateString()}
+                </p>
+              </div>
+              <button
+                onClick={() => void handleDisconnect(l.provider)}
+                disabled={onlySignInMethod || busy === l.provider}
+                title={onlySignInMethod ? 'This is your only way to sign in. Set a password or link another provider first.' : undefined}
+                className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {busy === l.provider ? '…' : 'Disconnect'}
+              </button>
+            </div>
+          ))}
+          {links.available.map(p => (
+            <div key={p} className="flex items-center justify-between py-2 border-b border-white/[0.03] last:border-0">
+              <div>
+                <p className="text-white/80 text-sm font-medium">{oauthProviderLabel(p)}</p>
+                <p className="text-white/40 text-xs">Not connected</p>
+              </div>
+              <button
+                onClick={() => void handleConnect(p)}
+                disabled={busy === p}
+                className="px-3 py-1.5 bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 rounded-lg text-purple-100 text-xs transition-colors disabled:opacity-40"
+              >
+                {busy === p ? '…' : 'Connect'}
+              </button>
+            </div>
+          ))}
+          {links.linked.length === 0 && links.available.length === 0 && (
+            <p className="text-white/40 text-sm">No OAuth providers are enabled on this server.</p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -6350,6 +6486,28 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user])
 
+  // OAuth link-mode return (audit carve-out D). The link-mode callback
+  // redirects to /?linked=<provider>, which the `/` → `/v2/` redirect
+  // preserves as ?linked=<provider> on the SPA. The user initiated the
+  // connect from Settings, so jump back there, surface a success toast, and
+  // strip the param so a refresh doesn't re-toast. ConnectedAccountsCard
+  // fetches the refreshed link list on its own mount, so it shows the newly
+  // connected provider without extra plumbing.
+  useEffect(() => {
+    if (!user) return
+    const params = new URLSearchParams(window.location.search)
+    const linked = params.get('linked')
+    if (!linked) return
+    addToast(`Connected your ${oauthProviderLabel(linked)} account.`, 'success')
+    setView('settings')
+    // Strip only the linked param, preserving any others + the path/hash.
+    params.delete('linked')
+    const qs = params.toString()
+    window.history.replaceState({}, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash)
+  // Run once when the user becomes available; the marker is single-use.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user])
+
   // Full state reset on logout. Must clear every per-user cache
   // (rails, library, detail, player, …) — on a shared browser, a
   // missed field briefly leaks the previous user's data to the next
@@ -7729,7 +7887,7 @@ export default function App() {
             />
           )}
           {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
-          {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} />}
+          {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} onToast={addToast} />}
           {view === 'collections' && (
             <CollectionsView
               isAdmin={user.role === 'admin'}

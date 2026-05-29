@@ -98,6 +98,19 @@ const (
 	// exchange time, not by JS. Cleared on callback regardless of
 	// outcome to enforce single-use.
 	oauthPKCEVerifierCookieName = "aurora_oauth_pkce"
+
+	// oauthLinkUIDCookieName carries the authenticated user's ID across the
+	// OAuth round-trip when the flow was started in LINK mode (the Settings
+	// "Connect <provider>" button, POST /oauth/{provider}/link) rather than
+	// login mode. Its presence is what tells Callback "this is a link, attach
+	// the identity to this existing user — do NOT issue new tokens."
+	//
+	// Security: the cookie is set SERVER-SIDE and HttpOnly, so an attacker
+	// cannot forge or read it from JS. Callback additionally cross-checks it
+	// against the caller's access cookie when that cookie is present on the
+	// callback path (defense in depth — see the Callback link branch). Carved
+	// out (carve-out D) — multi-provider linking.
+	oauthLinkUIDCookieName = "aurora_oauth_link_uid"
 )
 
 // OAuthHandler exposes the OAuth start + callback endpoints. Depends on
@@ -387,73 +400,28 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Exchange code for token.
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		// User declined consent. Render a friendly message rather than
-		// an error: declining is a normal user action.
-		h.renderError(w, "Sign-in cancelled. You can try again or log in with your password.")
-		return
-	}
-	exchangeCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-
-	// Phase D — PKCE handling. Audit M2 fix: ALWAYS clear the PKCE
-	// cookie, regardless of whether THIS provider needs PKCE. A
-	// prior Twitter Start that didn't complete may have left a
-	// verifier cookie hanging around; landing here for any callback
-	// is the right moment to single-use-consume it. Audit M3 fix:
-	// when the provider requires PKCE and the verifier is missing,
-	// fail fast with a specific error rather than letting the
-	// provider-side rejection (X: `code_verifier required`) bubble
-	// up as a generic "could not exchange code" message.
-	pkceVerifier := ""
-	if c, cerr := r.Cookie(oauthPKCEVerifierCookieName); cerr == nil {
-		pkceVerifier = c.Value
-	}
-	// Unconditional cookie-clear — single-use across all flows.
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthPKCEVerifierCookieName,
-		Value:    "",
-		Path:     "/api/auth/oauth/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
-		SameSite: http.SameSiteLaxMode,
-	})
-
-	exchangeOpts := []oauth2.AuthCodeOption{}
-	if pkce, ok := provider.(PKCEProvider); ok && pkce.WantsPKCE() {
-		if pkceVerifier == "" {
-			// Audit M3 — surface a specific, actionable message
-			// instead of waiting for the provider to reject the
-			// exchange. Most likely cause: the user cleared
-			// cookies / used a separate browser session / the
-			// 10-min PKCE TTL elapsed between Start and Callback.
-			slog.Warn("oauth callback: PKCE required but verifier cookie missing",
-				"provider", provider.Name())
-			h.renderError(w, "Authentication failed: your sign-in session timed out or cookies were cleared. Please start the sign-in flow again.")
-			return
-		}
-		exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(pkceVerifier))
-	}
-	token, err := cfg.Exchange(exchangeCtx, code, exchangeOpts...)
-	if err != nil {
-		slog.Warn("oauth callback: token exchange failed", "provider", provider.Name(), "error", err)
-		h.renderError(w, "Authentication failed: could not exchange code with the provider. Please try again.")
+	// LINK MODE branch. If Start was invoked via POST /oauth/{provider}/link
+	// (the Settings "Connect" button), it set oauthLinkUIDCookieName to the
+	// authenticated user's ID. Its presence means "attach this provider to that
+	// existing user" — NOT a login. We handle it entirely here and return; the
+	// login path below never runs for a link flow (no tokens issued).
+	if linkUID, isLink := h.readLinkUID(r); isLink {
+		h.handleLinkCallback(w, r, provider, cfg, linkUID)
 		return
 	}
 
-	// Fetch user info via the provider's implementation. Each provider
-	// normalizes its native response shape into OAuthProfile.
-	profile, err := provider.FetchUserInfo(exchangeCtx, cfg.Client(exchangeCtx, token))
-	if err != nil {
-		slog.Warn("oauth callback: userinfo fetch failed", "provider", provider.Name(), "error", err)
-		h.renderError(w, "Authentication failed: could not fetch profile from the provider.")
+	// Exchange code + fetch profile (shared with link mode via
+	// exchangeAndFetchProfile). Returns false after rendering the appropriate
+	// error page, so we just return.
+	profile, ok := h.exchangeAndFetchProfile(w, r, provider, cfg)
+	if !ok {
 		return
 	}
-	if profile.Subject == "" || profile.Email == "" {
-		slog.Warn("oauth callback: incomplete profile", "provider", provider.Name(), "subject", profile.Subject, "has_email", profile.Email != "")
+	// Login requires a usable email (Tier-2 auto-link + Tier-3 create both key
+	// off it). Link mode does NOT — see handleLinkCallback, which only requires
+	// a non-empty Subject.
+	if profile.Email == "" {
+		slog.Warn("oauth callback: incomplete profile", "provider", provider.Name(), "subject", profile.Subject, "has_email", false)
 		h.renderError(w, "Authentication failed: the provider did not return a complete profile.")
 		return
 	}
@@ -583,6 +551,100 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	h.renderSuccess(w, r, accessToken, refreshTokenStr, expiresAt, user, joinCode)
 }
 
+// clearOAuthCookie expires one of the path-scoped OAuth round-trip cookies
+// (state/provider/pkce/join/invite/link). Single-use enforcement: every
+// callback clears the cookies it consumed regardless of outcome. Centralized so
+// the Path/HttpOnly/Secure/SameSite attributes can't drift between call sites —
+// they MUST match the attributes used when the cookie was set or the browser
+// won't treat it as the same cookie to delete.
+func (h *OAuthHandler) clearOAuthCookie(w http.ResponseWriter, r *http.Request, name string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    "",
+		Path:     "/api/auth/oauth/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cookieSecureFor(r, h.secureCookies),
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// exchangeAndFetchProfile performs the provider code-exchange + userinfo fetch
+// shared by the login Callback and the link-mode callback. It handles the
+// declined-consent (empty code) case, the PKCE verifier cookie (read + single-
+// use clear + required-but-missing fast-fail), and validates that the provider
+// returned a non-empty Subject (the (provider, subject) anchor every flow
+// needs). It also single-use-clears the link-UID cookie so a login that finds a
+// stale link cookie (and an abandoned link flow) doesn't leave it lingering.
+//
+// On any failure it renders the appropriate error page and returns
+// (nil, false); callers just return. It intentionally does NOT enforce a
+// non-empty Email — that requirement is login-specific (X/Twitter use a
+// synthetic email and link mode never needs one), so the login Callback checks
+// Email itself after this returns.
+func (h *OAuthHandler) exchangeAndFetchProfile(w http.ResponseWriter, r *http.Request, provider Provider, cfg *oauth2.Config) (*OAuthProfile, bool) {
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		// User declined consent. Render a friendly message rather than an
+		// error: declining is a normal user action.
+		h.renderError(w, "Sign-in cancelled. You can try again or log in with your password.")
+		return nil, false
+	}
+	exchangeCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	// Phase D — PKCE handling. Audit M2 fix: ALWAYS clear the PKCE cookie,
+	// regardless of whether THIS provider needs PKCE. A prior Twitter Start
+	// that didn't complete may have left a verifier cookie hanging around;
+	// landing here for any callback is the right moment to single-use-consume
+	// it. Audit M3 fix: when the provider requires PKCE and the verifier is
+	// missing, fail fast with a specific error rather than letting the
+	// provider-side rejection (X: `code_verifier required`) bubble up as a
+	// generic "could not exchange code" message.
+	pkceVerifier := ""
+	if c, cerr := r.Cookie(oauthPKCEVerifierCookieName); cerr == nil {
+		pkceVerifier = c.Value
+	}
+	h.clearOAuthCookie(w, r, oauthPKCEVerifierCookieName)
+	// Also single-use-clear the link-UID cookie here. handleLinkCallback has
+	// already read it before delegating to this helper, and the login path
+	// reached here only because no valid link cookie was present — clearing it
+	// unconditionally guarantees a stale/garbage value can't survive a flow.
+	h.clearOAuthCookie(w, r, oauthLinkUIDCookieName)
+
+	exchangeOpts := []oauth2.AuthCodeOption{}
+	if pkce, ok := provider.(PKCEProvider); ok && pkce.WantsPKCE() {
+		if pkceVerifier == "" {
+			slog.Warn("oauth callback: PKCE required but verifier cookie missing",
+				"provider", provider.Name())
+			h.renderError(w, "Authentication failed: your sign-in session timed out or cookies were cleared. Please start the sign-in flow again.")
+			return nil, false
+		}
+		exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(pkceVerifier))
+	}
+	token, err := cfg.Exchange(exchangeCtx, code, exchangeOpts...)
+	if err != nil {
+		slog.Warn("oauth callback: token exchange failed", "provider", provider.Name(), "error", err)
+		h.renderError(w, "Authentication failed: could not exchange code with the provider. Please try again.")
+		return nil, false
+	}
+
+	// Fetch user info via the provider's implementation. Each provider
+	// normalizes its native response shape into OAuthProfile.
+	profile, err := provider.FetchUserInfo(exchangeCtx, cfg.Client(exchangeCtx, token))
+	if err != nil {
+		slog.Warn("oauth callback: userinfo fetch failed", "provider", provider.Name(), "error", err)
+		h.renderError(w, "Authentication failed: could not fetch profile from the provider.")
+		return nil, false
+	}
+	if profile.Subject == "" {
+		slog.Warn("oauth callback: incomplete profile (no subject)", "provider", provider.Name())
+		h.renderError(w, "Authentication failed: the provider did not return a complete profile.")
+		return nil, false
+	}
+	return profile, true
+}
+
 // resolveOAuthUser is the three-tier lookup: by OAuth identity (tier 1),
 // then by email auto-link if verified (tier 2), then create a new user
 // (tier 3). Returns (user, isNewUser, err). isNewUser=true ONLY when
@@ -605,8 +667,10 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 	// slipped past the email-collision anti-hijack safety net. deep-debug H1.
 	profile.Email = normalizeEmail(profile.Email)
 
-	// Tier 1: existing OAuth link.
-	if existing, lerr := h.queries.GetUserByOAuth(ctx, providerName, profile.Subject); lerr != nil {
+	// Tier 1: existing OAuth link. Resolves against the authoritative
+	// oauth_identities table (migration 031) so any of the user's linked
+	// providers hits this fast-path, not just their primary one.
+	if existing, lerr := h.queries.GetUserByOAuthIdentity(ctx, providerName, profile.Subject); lerr != nil {
 		return nil, false, fmt.Errorf("lookup by oauth: %w", lerr)
 	} else if existing != nil {
 		return existing, false, nil
@@ -620,8 +684,25 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 		if existing, lerr := h.queries.GetUserByEmail(ctx, profile.Email); lerr != nil {
 			return nil, false, fmt.Errorf("lookup by email: %w", lerr)
 		} else if existing != nil {
-			if lerr := h.queries.LinkOAuthToUser(ctx, existing.ID, providerName, profile.Subject); lerr != nil {
-				return nil, false, fmt.Errorf("link oauth: %w", lerr)
+			// Insert into the authoritative oauth_identities table. Map the
+			// two link sentinels to user-facing messages:
+			//   - ErrOAuthIdentityConflict: the identity already belongs to a
+			//     DIFFERENT Aurora user. Should be unreachable after the Tier-1
+			//     miss above (Tier 1 would have returned that user), but a
+			//     concurrent link could create it between the two queries — so
+			//     surface it rather than silently 500.
+			//   - ErrOAuthProviderAlreadyLinked: this email-matched user already
+			//     linked a different account for this provider. Tell them to
+			//     unlink it first from Settings.
+			if lerr := h.queries.AddOAuthIdentity(ctx, existing.ID, providerName, profile.Subject); lerr != nil {
+				switch {
+				case errors.Is(lerr, db.ErrOAuthIdentityConflict):
+					return nil, false, fmt.Errorf("this %s account is already linked to a different Aurora user", strings.Title(providerName))
+				case errors.Is(lerr, db.ErrOAuthProviderAlreadyLinked):
+					return nil, false, fmt.Errorf("your account already has a different %s account linked — unlink it first from Settings", strings.Title(providerName))
+				default:
+					return nil, false, fmt.Errorf("link oauth: %w", lerr)
+				}
 			}
 			// Re-load to get the updated OAuth fields on the returned struct.
 			updated, lerr := h.queries.GetUserByID(ctx, existing.ID)
@@ -664,7 +745,12 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 		if gerr != nil {
 			return nil, false, fmt.Errorf("generate username: %w", gerr)
 		}
-		newUser, cerr := h.queries.CreateOAuthUser(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject)
+		// CreateOAuthUserWithIdentity (migration 031) inserts the user AND its
+		// first oauth_identities row in one transaction, so a new OAuth user
+		// can never exist without an authoritative identity. The 23505
+		// email-vs-username disambiguation below still works: the underlying
+		// *pgconn.PgError from the user INSERT is propagated unchanged.
+		newUser, cerr := h.queries.CreateOAuthUserWithIdentity(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject)
 		if cerr == nil {
 			// Finalize the invite claim against the new user. Mirrors the
 			// password Register flow's atomic Claim → Create → Finalize
