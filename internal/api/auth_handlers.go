@@ -651,7 +651,11 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		// Drop any cached token_version so the next request bearing the
 		// deleted user's still-unexpired access token hits the DB and gets the
 		// fail-closed -1 sentinel immediately, rather than matching a stale
-		// cached value for up to the cache TTL. See audit H2.
+		// cached value for up to the cache TTL. See audit H2. (This narrows but
+		// does not atomically close the window: a Check racing between the
+		// DELETE commit and this call could refill the cache — but only ever
+		// with the DB-correct value, since its read is the source of truth, so
+		// the residual is identical to the normal TTL window.)
 		h.tokenVerStore.Invalidate(id)
 	}
 	if h.activity != nil {

@@ -351,6 +351,11 @@ func maskAPIKey(s string) string {
 // secret keys are added far more often than this rule is revisited; defaulting
 // to "mask" is the safe failure mode (a forgotten non-secret key shows masked,
 // which is harmless, vs. a forgotten secret key leaking raw).
+//
+// INVARIANT (audit H7 follow-up): no server_settings key that must be DISPLAYED
+// in cleartext may end in one of these suffixes — the broad "_secret"/"_token"
+// in particular. Today none do (all are credentials). If a non-secret key ever
+// needs such a suffix, rename the key rather than weakening this list.
 var secretSettingSuffixes = []string{
 	"_api_key", "_client_secret", "_secret", "_password", "_token", "_credential",
 }

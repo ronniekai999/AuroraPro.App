@@ -667,9 +667,9 @@ func main() {
 	// that enabling the requests feature at runtime via the admin panel — which
 	// flips arrClients.SetEnabled(true) without a restart — doesn't leave
 	// newly-created requests stuck in 'processing' forever with no poller. The
-	// monitor idles at the slow (60s) cadence when nothing is processing and
-	// no-ops when ARR is unconfigured, so an always-on monitor is cheap. See
-	// audit H5.
+	// monitor idles (slow 60s cadence, no ARR calls) whenever the feature is
+	// disabled — pollOnce early-returns on !Enabled() — or nothing is
+	// processing, so an always-on monitor is cheap. See audit H5.
 	requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner)
 	go requestMonitor.Start(ctx)
 
