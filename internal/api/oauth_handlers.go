@@ -206,7 +206,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   oauthStateCookieMaxAge,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -221,7 +221,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   oauthStateCookieMaxAge,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -248,7 +248,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 			Path:     "/api/auth/oauth/",
 			MaxAge:   oauthStateCookieMaxAge, // same lifetime as state — they must complete together
 			HttpOnly: true,
-			Secure:   r.TLS != nil,
+			Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
@@ -273,7 +273,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 				Path:     "/api/auth/oauth/",
 				MaxAge:   oauthStateCookieMaxAge,
 				HttpOnly: true,
-				Secure:   r.TLS != nil,
+				Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 				SameSite: http.SameSiteLaxMode,
 			})
 		} else {
@@ -306,7 +306,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 			Path:     "/api/auth/oauth/",
 			MaxAge:   oauthStateCookieMaxAge,
 			HttpOnly: true,
-			Secure:   r.TLS != nil,
+			Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 			SameSite: http.SameSiteLaxMode,
 		})
 	}
@@ -368,7 +368,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 	// Same for the provider cookie — single-use, clear on exit.
@@ -378,7 +378,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 	if gotState == "" || gotState != stateCookie.Value {
@@ -418,7 +418,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -474,7 +474,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -575,7 +575,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		Path:     "/api/auth/oauth/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
 		SameSite: http.SameSiteLaxMode,
 	})
 

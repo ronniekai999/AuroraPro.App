@@ -89,33 +89,42 @@ func GetDiskFreeGB(path string) float64 {
 
 // RouterDeps holds all dependencies needed by the router.
 type RouterDeps struct {
-	Cfg              *config.Config
-	AuthSvc          *auth.Service
-	Queries          *db.Queries
-	Scanner          *library.Scanner
-	Hub              *ws.Hub
-	AuthLimiter      *auth.RateLimiter
-	Watcher          *library.Watcher
-	Enricher         *metadata.Enricher
-	ImgProxy         *metadata.ImageProxy
-	Transcode        *streaming.TranscodeManager
-	DirectPlay       *streaming.DirectPlayRegistry
-	Activity         *ActivityLogger
-	RingLog          *logging.RingBufferHandler
-	Pool             *pgxpool.Pool
-	StartTime        time.Time
-	Version          string
-	StaticDir        string // Path to static files directory (e.g. "static")
-	ArrClients       *arr.ArrClients
-	PartyManager     *watchparty.Manager
-	Tmdb             *metadata.TMDBClient // optional — enables TMDB external_ids fallback for Sonarr lookup
-	Tvdb             *metadata.TVDBClient // optional — enables TVDB direct-search fallback for Sonarr lookup
-	Semantic         SemanticSearcher     // optional — enables natural-language /search when LLM is configured
-	HeroProv         HeroProvider         // optional — enables personalized /api/me/hero
-	EmbeddingEnabled bool                 // for the admin dashboard's coverage card
-	EmbeddingVersion int16                // current embedding.CurrentVersion at boot
-	LLMClient        *llm.Client          // optional — admin debug toggle target (Phase 6)
-	AIBackfill       AIBackfillController // optional — enables /admin/flagged/ai-rematch endpoints
+	Cfg     *config.Config
+	AuthSvc *auth.Service
+	Queries *db.Queries
+	Scanner *library.Scanner
+	Hub     *ws.Hub
+	// Rate limiters for the public/sensitive auth endpoints. Split into
+	// separate instances (audit MED — shared-budget starvation) so high-volume
+	// refresh traffic can't drain the budget that protects login/register from
+	// credential guessing. Each limiter owns its own per-IP bucket map.
+	//   LoginLimiter         — POST /api/auth/login + /register (credential surface; tight)
+	//   RefreshLimiter       — POST /api/auth/refresh + /logout (session-lifecycle churn; roomier)
+	//   ChangePasswordLimiter — POST /api/auth/change-password (authed, Argon2id-gated; modest cap)
+	LoginLimiter          *auth.RateLimiter
+	RefreshLimiter        *auth.RateLimiter
+	ChangePasswordLimiter *auth.RateLimiter
+	Watcher               *library.Watcher
+	Enricher              *metadata.Enricher
+	ImgProxy              *metadata.ImageProxy
+	Transcode             *streaming.TranscodeManager
+	DirectPlay            *streaming.DirectPlayRegistry
+	Activity              *ActivityLogger
+	RingLog               *logging.RingBufferHandler
+	Pool                  *pgxpool.Pool
+	StartTime             time.Time
+	Version               string
+	StaticDir             string // Path to static files directory (e.g. "static")
+	ArrClients            *arr.ArrClients
+	PartyManager          *watchparty.Manager
+	Tmdb                  *metadata.TMDBClient // optional — enables TMDB external_ids fallback for Sonarr lookup
+	Tvdb                  *metadata.TVDBClient // optional — enables TVDB direct-search fallback for Sonarr lookup
+	Semantic              SemanticSearcher     // optional — enables natural-language /search when LLM is configured
+	HeroProv              HeroProvider         // optional — enables personalized /api/me/hero
+	EmbeddingEnabled      bool                 // for the admin dashboard's coverage card
+	EmbeddingVersion      int16                // current embedding.CurrentVersion at boot
+	LLMClient             *llm.Client          // optional — admin debug toggle target (Phase 6)
+	AIBackfill            AIBackfillController // optional — enables /admin/flagged/ai-rematch endpoints
 	// RootCtx is the server-lifecycle context. Handlers that spawn long-
 	// lived background goroutines (e.g. ARR dispatch) parent off this so
 	// graceful shutdown stops them. May be nil; handlers must tolerate it.
@@ -465,10 +474,14 @@ func NewRouter(deps RouterDeps) http.Handler {
 		r.Route("/api/auth", func(r chi.Router) {
 			r.Use(middleware.Timeout(60 * time.Second))
 			r.Get("/setup-status", authH.SetupStatus) // public, no rate limit (read-only)
-			r.With(deps.AuthLimiter.Middleware).Post("/login", authH.Login)
-			r.With(deps.AuthLimiter.Middleware).Post("/register", authH.Register)
-			r.With(deps.AuthLimiter.Middleware).Post("/refresh", authH.Refresh)
-			r.With(deps.AuthLimiter.Middleware).Post("/logout", authH.Logout)
+			// Separate limiters per audit MED (shared-budget starvation): login
+			// and register share the credential-guessing budget; refresh and
+			// logout share a roomier session-lifecycle budget so token rotation
+			// can't starve the login budget (and vice-versa).
+			r.With(deps.LoginLimiter.Middleware).Post("/login", authH.Login)
+			r.With(deps.LoginLimiter.Middleware).Post("/register", authH.Register)
+			r.With(deps.RefreshLimiter.Middleware).Post("/refresh", authH.Refresh)
+			r.With(deps.RefreshLimiter.Middleware).Post("/logout", authH.Logout)
 			// Phase 3 → Phase A refactor: provider-agnostic OAuth.
 			// {provider} is resolved against OAuthHandler's registry
 			// at request time (currently: "google"; future: "discord",
@@ -490,8 +503,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Rate-limited: change-password verifies the current password
 				// with Argon2id (~100ms/attempt) but is still brute-forceable
 				// over the access-token lifetime (~10 min) by a stolen-token
-				// attacker. Cap attempts the same way as login/refresh.
-				r.With(deps.AuthLimiter.Middleware).Post("/change-password", authH.ChangePassword)
+				// attacker. Its own limiter (audit MED) so it doesn't share a
+				// budget with login/refresh.
+				r.With(deps.ChangePasswordLimiter.Middleware).Post("/change-password", authH.ChangePassword)
 			})
 		})
 

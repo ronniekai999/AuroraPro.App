@@ -110,6 +110,47 @@ func (rl *RateLimiter) allow(ip string) bool {
 	return v.count <= rl.rate
 }
 
+// normalizeClientKey turns a request's RemoteAddr ("ip:port" for TCP) into the
+// bucket key the rate limiter counts against.
+//
+// 2026-05-29 audit (BE-M, IPv6 bypass) — keying on the full host let an IPv6
+// attacker who controls a routed /64 (the standard end-user allocation) rotate
+// the low 64 bits on every request, minting a fresh key each time and bypassing
+// the limit entirely. We normalize per address family:
+//   - IPv4: key on the full /32 (each host is its own bucket, as before).
+//   - IPv6: mask to the /64 routing prefix so an entire end-site allocation
+//     shares one bucket and can't rotate its way around the limit.
+//
+// The port is always stripped (it varies per connection and must never be part
+// of the key). If the host can't be parsed as an IP — e.g. a malformed
+// RemoteAddr — we fall back to the cleaned host string so the request is still
+// counted (fail-closed: an unparseable peer still consumes budget rather than
+// getting a free pass).
+func normalizeClientKey(remoteAddr string) string {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Not an IP literal — key on the raw host so it still counts.
+		return host
+	}
+
+	// IPv4 (including IPv4-mapped IPv6 like ::ffff:1.2.3.4): key on the full
+	// address. To4() is non-nil for both forms; normalize to the dotted-quad
+	// string so the two spellings of the same address share a bucket.
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+
+	// IPv6: mask to the /64 prefix. CIDRMask(64, 128) zeroes the host bits so
+	// every address in the allocation collapses to one key.
+	masked := ip.Mask(net.CIDRMask(64, 128))
+	return masked.String() + "/64"
+}
+
 // Middleware returns a chi-compatible middleware that rate limits by IP
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,12 +159,13 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		// because Aurora's router does not run chi.middleware.RealIP — any
 		// proxy-header trust would let a remote attacker forge a unique IP
 		// per request and bypass the limiter entirely.
-		ip := r.RemoteAddr
-		if host, _, err := net.SplitHostPort(ip); err == nil {
-			ip = host
-		}
+		//
+		// normalizeClientKey strips the port and collapses an IPv6 /64 to a
+		// single bucket (audit BE-M, IPv6 bypass) so a /64 holder can't rotate
+		// the host bits to dodge the limit.
+		key := normalizeClientKey(r.RemoteAddr)
 
-		if !rl.allow(ip) {
+		if !rl.allow(key) {
 			httputil.WriteError(w, http.StatusTooManyRequests, "rate limit exceeded, try again later")
 			return
 		}

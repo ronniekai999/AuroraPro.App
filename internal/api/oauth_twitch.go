@@ -22,13 +22,15 @@ import (
 // Missing this header returns 401 Unauthorized with a misleading
 // error message, which is the classic Twitch integration pitfall.
 //
-// Email verification: Twitch verifies email addresses at account
-// creation and doesn't allow API access without verification, so
-// `email` from /helix/users can be treated as verified. There is
-// no per-user email_verified flag in the response — we hardcode
-// EmailVerified=true to enable Tier-2 auto-link. If Twitch ever
-// changes this contract (allows API access from unverified accounts),
-// this assumption needs revisiting.
+// Email verification: Twitch's Helix /users response has NO per-user
+// email_verified flag, so the address is unconfirmable from the API.
+// While Twitch is generally believed to verify emails at account
+// creation, we do NOT bake that assumption into a security decision:
+// FetchUserInfo sets EmailVerified=false so Tier-2 email auto-link
+// (oauth_handlers.go resolveOAuthUser) never silently merges this
+// Twitch identity onto a pre-existing Aurora account by email match
+// alone. Logins still work via Tier-1 (existing link) and Tier-3
+// (new user). deep-debug MED.
 //
 // Settings keys (parallel to other providers):
 //   oauth_twitch_enabled       — "true" or anything else (off)
@@ -135,10 +137,17 @@ func (p *twitchProvider) FetchUserInfo(ctx context.Context, client *http.Client)
 	return &OAuthProfile{
 		Subject: user.ID,
 		Email:   user.Email,
-		// Twitch verifies emails at signup; no per-user flag in the
-		// response, so we treat all returned emails as verified.
-		// See file header for why this is safe.
-		EmailVerified: true,
+		// deep-debug MED — Helix /users has NO per-user email_verified
+		// flag, so we cannot actually confirm the address. Set false
+		// (do NOT assume verification): treating an unconfirmable email
+		// as verified lets Tier-2 email auto-link (resolveOAuthUser) bind
+		// this Twitch identity onto a pre-existing Aurora account purely
+		// by matching email — an account-takeover vector if the
+		// "signup-time verification" assumption ever fails to hold. With
+		// false, a Twitch login still works via Tier-1 (existing link) or
+		// Tier-3 (new user); it just won't silently merge into an
+		// unrelated existing account on email alone.
+		EmailVerified: false,
 		Name:          user.DisplayName,
 		// `login` is Twitch's lowercase handle — perfect for Aurora's
 		// sanitizeUsername (already a-z/0-9/_ shape).

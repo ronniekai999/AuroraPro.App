@@ -56,10 +56,13 @@ func TrustedProxyMiddleware(trustedCIDRs []*net.IPNet) func(http.Handler) http.H
 			}
 
 			if clientIP != "" && net.ParseIP(clientIP) != nil {
-				// Rewrite RemoteAddr with the resolved client IP; preserve
-				// the original peer:port for handlers that need it (we drop
-				// the proxy's port in the rewrite — irrelevant downstream).
-				r.RemoteAddr = clientIP + ":0"
+				// Rewrite RemoteAddr with the resolved client IP. Use
+				// net.JoinHostPort so an IPv6 client is bracketed
+				// ("[2001:db8::1]:0"): a bare clientIP+":0" yields an
+				// unparseable 9-colon string that net.SplitHostPort rejects,
+				// which silently defeated the rate limiter's IPv6 /64
+				// normalization behind a trusted proxy. deep-debug MED.
+				r.RemoteAddr = net.JoinHostPort(clientIP, "0")
 			}
 			next.ServeHTTP(w, r)
 		})
