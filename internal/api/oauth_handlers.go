@@ -105,11 +105,16 @@ const (
 // OAuth login, on the queries layer for user lookup/create/link, and on
 // a registry of providers for the actual third-party integrations.
 type OAuthHandler struct {
-	queries   *db.Queries
-	authSvc   *auth.Service
-	activity  *ActivityLogger
-	providers map[string]Provider
+	queries       *db.Queries
+	authSvc       *auth.Service
+	activity      *ActivityLogger
+	providers     map[string]Provider
+	secureCookies bool // deep-debug H10 — Secure attr on auth cookies behind a TLS proxy
 }
+
+// SetSecureCookies wires AURORA_SECURE_COOKIES so OAuth-login cookies get the
+// Secure attribute behind a TLS-terminating proxy. deep-debug H10.
+func (h *OAuthHandler) SetSecureCookies(v bool) { h.secureCookies = v }
 
 // NewOAuthHandler constructs the handler with its dependencies and
 // registers the built-in providers. Google is always registered as the
@@ -574,8 +579,8 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	// Render the bridge HTML page.
-	h.renderSuccess(w, accessToken, refreshTokenStr, expiresAt, user, joinCode)
+	// Render the bridge HTML page (sets the httpOnly auth cookies + redirects).
+	h.renderSuccess(w, r, accessToken, refreshTokenStr, expiresAt, user, joinCode)
 }
 
 // resolveOAuthUser is the three-tier lookup: by OAuth identity (tier 1),
@@ -831,17 +836,16 @@ func generateOAuthState() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// renderSuccess returns a small HTML page that stashes the issued tokens
-// in localStorage (matching the keys the legacy login flow uses) and
-// redirects to `/` (or `/?join=CODE` if a deep-link survived the OAuth
-// round-trip via the join cookie). This bridges OAuth's redirect-flow
-// nature with our frontend's JSON-token-based architecture.
+// renderSuccess sets the httpOnly auth cookies server-side (deep-debug H10 —
+// same as the password login flow) and returns a small HTML page that stashes
+// ONLY the cached user in localStorage (for the SPA's optimistic boot render)
+// and redirects to `/` (or `/?join=CODE` if a deep-link survived the OAuth
+// round-trip via the join cookie). Tokens are NO LONGER written to localStorage.
 //
-// The page is templated so we can safely inject the token values without
-// risk of HTML injection — html/template auto-escapes all expressions
-// in their respective contexts (JS-context inside <script>, URL-context
-// for the redirect destination).
-func (h *OAuthHandler) renderSuccess(w http.ResponseWriter, accessToken, refreshToken string, expiresAt time.Time, user *models.User, joinCode string) {
+// The page is templated so we can safely inject the user value without risk of
+// HTML injection — html/template auto-escapes all expressions in their
+// respective contexts (JS-context inside <script>, URL-context for redirect).
+func (h *OAuthHandler) renderSuccess(w http.ResponseWriter, r *http.Request, accessToken, refreshToken string, expiresAt time.Time, user *models.User, joinCode string) {
 	// Marshal the user as JSON for localStorage. Match the legacy
 	// /api/auth/login response shape so the frontend's existing post-
 	// login bootstrap code-path works without modification.
@@ -863,10 +867,9 @@ body{background:#0c0a18;color:#f4f0ff;font-family:system-ui,sans-serif;display:f
 <div class="box"><div class="spinner"></div><div>Signing you in…</div></div>
 <script>
 try{
-  localStorage.setItem('aurora_token', {{.AccessToken}});
-  localStorage.setItem('aurora_refresh', {{.RefreshToken}});
+  // deep-debug H10 — tokens are set as httpOnly cookies server-side; only the
+  // cached user is stashed for the SPA's optimistic boot render.
   localStorage.setItem('aurora_user', {{.UserJSON}});
-  localStorage.setItem('aurora_expires_at', {{.ExpiresAt}});
 }catch(e){}
 // Preserve any deep-link query (e.g. ?join=ABCDEF survives OAuth round-trip
 // via the start endpoint's query forwarding).
@@ -892,6 +895,11 @@ window.location.replace(dest);
 		redirectTo = "/?join=" + joinCode
 	}
 
+	// deep-debug H10 — set the httpOnly auth cookies server-side (the OAuth
+	// success path is now cookie-based like password login; tokens are no
+	// longer written to localStorage). Set-Cookie must precede the body write.
+	writeAuthCookies(w, cookieSecureFor(r, h.secureCookies), accessToken, time.Until(expiresAt), refreshToken, time.Until(h.authSvc.RefreshTokenExpiry()))
+
 	// Override the strict `/api/*` CSP set by the securityHeaders middleware
 	// (default-src 'none' would block the inline <script> + <style> below,
 	// leaving the user stuck on the "Signing you in…" spinner forever
@@ -909,11 +917,8 @@ window.location.replace(dest);
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = tpl.Execute(w, map[string]interface{}{
-		"AccessToken":  accessToken,
-		"RefreshToken": refreshToken,
-		"UserJSON":     string(userJSON),
-		"ExpiresAt":    fmt.Sprintf("%d", expiresAt.UnixMilli()),
-		"RedirectTo":   redirectTo,
+		"UserJSON":   string(userJSON),
+		"RedirectTo": redirectTo,
 	})
 }
 
