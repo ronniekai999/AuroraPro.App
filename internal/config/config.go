@@ -169,6 +169,12 @@ type ServerConfig struct {
 	// here lets external clients forge their apparent IP and bypass the
 	// auth rate limiter.
 	TrustedProxies []string
+	// SecureCookies forces the Secure attribute on auth cookies even when
+	// Aurora itself sees plain HTTP — set this when a TLS-terminating reverse
+	// proxy fronts it (the documented topology), where r.TLS is nil. Without
+	// it, the auth cookies would be sent over plain HTTP. deep-debug H10.
+	// Env: AURORA_SECURE_COOKIES.
+	SecureCookies bool
 }
 
 type DatabaseConfig struct {
@@ -239,6 +245,7 @@ type yamlConfig struct {
 		Port           int      `yaml:"port"`
 		AllowedOrigins []string `yaml:"allowed_origins"`
 		TrustedProxies []string `yaml:"trusted_proxies"`
+		SecureCookies  bool     `yaml:"secure_cookies"`
 	} `yaml:"server"`
 	Database struct {
 		URL      string `yaml:"url"`
@@ -519,6 +526,9 @@ func loadYAML(cfg *Config) error {
 	if len(yc.Server.TrustedProxies) > 0 {
 		cfg.Server.TrustedProxies = yc.Server.TrustedProxies
 	}
+	if yc.Server.SecureCookies {
+		cfg.Server.SecureCookies = true
+	}
 	if yc.Database.URL != "" {
 		cfg.Database.URL = yc.Database.URL
 	}
@@ -721,6 +731,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("AURORA_ALLOWED_ORIGINS"); v != "" {
 		cfg.Server.AllowedOrigins = parseOrigins(v)
+	}
+	if v := os.Getenv("AURORA_SECURE_COOKIES"); v != "" {
+		cfg.Server.SecureCookies = v == "true" || v == "1" || v == "yes"
 	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		cfg.Database.URL = v

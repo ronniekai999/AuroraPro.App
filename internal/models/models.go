@@ -286,8 +286,11 @@ type RegisterRequest struct {
 }
 
 type TokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	// AccessToken/RefreshToken are omitempty: the browser cookie-auth flow
+	// (deep-debug H10) sets httpOnly cookies and returns NO tokens in the body,
+	// so these are omitted there. Non-browser/API flows still populate them.
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
 	ExpiresIn    int64  `json:"expires_in"`
 	User         *User  `json:"user"`
 }

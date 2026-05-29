@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
-  getAccessToken,
   apiFetchResponse,
   getStoredUser,
   getMedia,
@@ -6101,33 +6100,34 @@ export default function App() {
     // one is actually open).
   }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
 
-  // Auth boot. If we have a stored token + cached user, optimistically
-  // render with the cached user while validating via /api/auth/me in
-  // the background. The cancelled flag + the re-check of
-  // getAccessToken() guard against a late /me settling onto stale
-  // state if the user logged out (or as a different user) mid-flight.
+  // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
+  // so a cached user is our auth signal: optimistically render with it while
+  // validating via /api/auth/me (the cookie authenticates the call). The
+  // cancelled flag + the re-check of getStoredUser() guard against a late /me
+  // settling onto stale state if the user logged out (or as a different user)
+  // mid-flight.
   useEffect(() => {
     const cached = getStoredUser()
-    const token = getAccessToken()
-    if (!token) {
+    // deep-debug H10 — auth state is signalled by a cached user; the tokens are
+    // httpOnly cookies, invisible to JS. No cached user → show the auth screen
+    // (a lone cookie we can't read still 401s at /me below).
+    if (!cached) {
       setUser(false)
       return
     }
-    if (cached) {
-      // Show the app immediately. Validate in the background so token
-      // expiry or password-change-revocation eventually kicks us out.
-      setUser(cached)
-    }
+    // Show the app immediately, then validate via /me (the httpOnly cookie
+    // authenticates it); a revoked/expired session 401s and kicks us out.
+    setUser(cached)
     const ac = new AbortController()
     let cancelled = false
     fetchMe(ac.signal)
       .then(u => {
         if (cancelled) return
-        // If a logout happened between when we fired and when we
-        // landed, getAccessToken() is now null and we must NOT call
-        // setUser(u) — that would silently re-authenticate the user
-        // as whoever the stale response describes.
-        if (!getAccessToken()) return
+        // If a logout happened between when we fired and when we landed,
+        // the cached user is now cleared and we must NOT call setUser(u) —
+        // that would silently re-authenticate as the stale response's user.
+        // deep-debug H10 — gate on cached-user presence, not a JS token.
+        if (!getStoredUser()) return
         setUser(u)
       })
       .catch(err => {
@@ -6411,7 +6411,7 @@ export default function App() {
   // briefly see the previous user's content.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key === 'aurora_token' && !e.newValue) {
+      if (e.key === 'aurora_user' && !e.newValue) { // deep-debug H10 — tokens are cookies; aurora_user is the cross-tab logout signal
         // leave() sends a best-effort leave-party then closes both
         // sockets. Sending on a revoked token may silently fail
         // server-side, but the socket-close handler will GC the

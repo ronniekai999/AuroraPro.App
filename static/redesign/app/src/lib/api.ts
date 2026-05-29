@@ -139,10 +139,13 @@ export interface UIMedia {
 // Token storage
 
 export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_KEY)
+  // deep-debug H10 — tokens now live in httpOnly cookies, unreadable from JS.
+  // Returns null so legacy callers (withToken, hls xhrSetup) degrade to cookie
+  // auth; auth-state checks use getStoredUser() instead of token presence.
+  return null
 }
 export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY)
+  return null // deep-debug H10 — refresh token is an httpOnly cookie now
 }
 export function getStoredUser(): User | null {
   const raw = localStorage.getItem(USER_KEY)
@@ -154,9 +157,10 @@ export function getStoredUser(): User | null {
   }
 }
 function storeTokens(t: TokenResponse) {
-  localStorage.setItem(ACCESS_KEY, t.access_token)
-  localStorage.setItem(REFRESH_KEY, t.refresh_token)
-  localStorage.setItem(USER_KEY, JSON.stringify(t.user))
+  // deep-debug H10 — access/refresh tokens are set as httpOnly cookies by the
+  // server and are NOT in the response body; persist only the cached user for
+  // an optimistic render on the next load.
+  if (t.user) localStorage.setItem(USER_KEY, JSON.stringify(t.user))
 }
 export function clearTokens() {
   localStorage.removeItem(ACCESS_KEY)
@@ -241,8 +245,6 @@ async function tryRefresh(): Promise<boolean> {
   // triggers exactly one refresh call. Subsequent callers await the
   // same promise and reuse its result.
   if (refreshInFlight) return refreshInFlight
-  const refreshToken = getRefreshToken()
-  if (!refreshToken) return false
 
   // Build the promise first, install it into refreshInFlight, then
   // chain a `.finally` that clears the flag AFTER all awaiters have
@@ -258,8 +260,9 @@ async function tryRefresh(): Promise<boolean> {
     try {
       const res = await fetch('/api/auth/refresh', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        // deep-debug H10 — the refresh token rides the httpOnly cookie; send
+        // credentials and no body. The server rotates the cookies in its reply.
+        credentials: 'same-origin',
         signal: ac.signal,
       })
       if (!res.ok) return false
@@ -309,8 +312,8 @@ export async function apiFetchResponse(path: string, opts: FetchResponseOpts = {
       'Accept': 'application/json',
       ...opts.headers,
     }
-    const token = getAccessToken()
-    if (token) headers['Authorization'] = `Bearer ${token}`
+    // deep-debug H10 — auth rides the httpOnly access cookie (same-origin
+    // credentials below); no Authorization header is set from JS.
     return fetch(path, {
       method: opts.method || 'GET',
       headers,
@@ -321,7 +324,7 @@ export async function apiFetchResponse(path: string, opts: FetchResponseOpts = {
   }
 
   let res = await doRequest()
-  if (res.status === 401 && getRefreshToken()) {
+  if (res.status === 401) {
     const refreshed = await tryRefresh()
     if (refreshed) {
       res = await doRequest()

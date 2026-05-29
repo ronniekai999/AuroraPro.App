@@ -54,7 +54,15 @@ func QueryParamToken(r *http.Request) string {
 func requireQueryTokenClaims(w http.ResponseWriter, r *http.Request, svc *auth.Service, versionStore *auth.TokenVersionStore) (*auth.JWTClaims, bool) {
 	token := QueryParamToken(r)
 	if token == "" {
-		writeError(w, http.StatusUnauthorized, "token query parameter required")
+		// deep-debug H10 — the browser SPA no longer puts the JWT in the URL;
+		// same-origin WS/HLS requests carry the httpOnly access cookie instead.
+		// (Cast/AirPlay receivers, which aren't same-origin, still use ?token=.)
+		if c, cerr := r.Cookie(auth.AccessCookieName); cerr == nil && c.Value != "" {
+			token = c.Value
+		}
+	}
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "token required")
 		return nil, false
 	}
 	claims, err := svc.ValidateAccessToken(token)

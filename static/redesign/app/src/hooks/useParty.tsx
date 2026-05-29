@@ -44,7 +44,7 @@ import {
   type ReactionEvent,
   type TickPayload,
 } from '@/lib/party'
-import { apiFetch, getAccessToken, refreshAccessToken } from '@/lib/api'
+import { apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
 import { cacheLastParty } from '@/lib/lastParty'
 import { createVoiceController, type VoiceController, type VoiceState } from '@/lib/voice'
 
@@ -778,15 +778,14 @@ export function useParty(currentUserId?: number): UseParty {
         // backoff timing still gates the actual WS open.
         void (async () => {
           await refreshAccessToken().catch(() => false)
-          const freshToken = getAccessToken()
           const code = activeCodeRef.current
-          if (!code || !freshToken) {
+          if (!code || !getStoredUser()) {
             setStatePatch({ reconnecting: false })
             return
           }
-          // Re-enter via the ref so the function picks up the latest
-          // closure (rather than capturing a stale version of itself).
-          openRoomSocketRef.current?.(code, freshToken)
+          // Re-enter via the ref so the function picks up the latest closure.
+          // deep-debug H10 — WS auth rides the httpOnly cookie; empty token.
+          openRoomSocketRef.current?.(code, '')
         })()
       }, delay)
     }
@@ -799,10 +798,10 @@ export function useParty(currentUserId?: number): UseParty {
   openRoomSocketRef.current = openRoomSocket
 
   const openSyncSocket = useCallback((code: string) => {
-    const token = getAccessToken()
-    if (!token) return
+    if (!getStoredUser()) return
     if (syncWsRef.current) return
-    const ws = new WebSocket(buildWsUrl('/ws/party-sync', token))
+    // deep-debug H10 — empty token: the same-origin WS handshake sends the cookie.
+    const ws = new WebSocket(buildWsUrl('/ws/party-sync', ''))
     syncWsRef.current = ws
     ws.onopen = () => {
       const msg: OutboundSyncMessage = { type: 'join-party', payload: { party_code: code } }
@@ -922,8 +921,7 @@ export function useParty(currentUserId?: number): UseParty {
       }
     }
 
-    const token = getAccessToken()
-    if (!token) {
+    if (!getStoredUser()) {
       const error = 'You must be signed in to join a party.'
       setStatePatch({ joining: false, error })
       return { ok: false, error }
@@ -933,7 +931,7 @@ export function useParty(currentUserId?: number): UseParty {
     reconnectAttemptRef.current = 0
     setStatePatch({ code, joining: true })
 
-    openRoomSocket(code, token)
+    openRoomSocket(code, '') // deep-debug H10 — WS auth via httpOnly cookie
     return { ok: true }
   }, [closeSockets, setStatePatch, openRoomSocket])
 

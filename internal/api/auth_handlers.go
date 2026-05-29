@@ -20,11 +20,17 @@ type AuthHandler struct {
 	queries       *db.Queries
 	activity      *ActivityLogger
 	tokenVerStore *auth.TokenVersionStore // optional — when set, ChangePassword invalidates cached versions immediately
+	secureCookies bool                    // force Secure on auth cookies (TLS-terminating proxy); deep-debug H10
 }
 
 func NewAuthHandler(authSvc *auth.Service, queries *db.Queries, activity *ActivityLogger) *AuthHandler {
 	return &AuthHandler{authSvc: authSvc, queries: queries, activity: activity}
 }
+
+// SetSecureCookies wires the AURORA_SECURE_COOKIES config so the auth cookies
+// get the Secure attribute when Aurora runs behind a TLS-terminating reverse
+// proxy (where r.TLS is nil). deep-debug H10.
+func (h *AuthHandler) SetSecureCookies(v bool) { h.secureCookies = v }
 
 // SetTokenVersionStore wires the shared cache so password changes can
 // invalidate cached versions and take effect on the next request.
@@ -111,11 +117,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	// Clear password hash before sending user object
 	user.PasswordHash = ""
+	// deep-debug H10 — set httpOnly cookies and return NO tokens in the body,
+	// so neither token is readable from browser JavaScript.
+	h.setAuthCookies(w, r, accessToken, time.Until(expiresAt), refreshTokenStr, time.Until(h.authSvc.RefreshTokenExpiry()))
 	writeJSON(w, http.StatusOK, models.TokenResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenStr,
-		ExpiresIn:    int64(time.Until(expiresAt).Seconds()),
-		User:         user,
+		ExpiresIn: int64(time.Until(expiresAt).Seconds()),
+		User:      user,
 	})
 }
 
@@ -367,18 +374,31 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user.PasswordHash = "" // defense-in-depth: clear even though json:"-" prevents serialization
+	// deep-debug H10 — httpOnly cookies, no body tokens.
+	h.setAuthCookies(w, r, accessToken, time.Until(expiresAt), refreshTokenStr, time.Until(h.authSvc.RefreshTokenExpiry()))
 	writeJSON(w, http.StatusCreated, models.TokenResponse{
-		AccessToken:  accessToken,
-		RefreshToken: refreshTokenStr,
-		ExpiresIn:    int64(time.Until(expiresAt).Seconds()),
-		User:         user,
+		ExpiresIn: int64(time.Until(expiresAt).Seconds()),
+		User:      user,
 	})
 }
 
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
-	var req models.RefreshRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	// deep-debug H10 — cookie-first (browser sends the httpOnly refresh cookie
+	// and no body); fall back to the JSON body for non-browser/API clients.
+	refreshTok := ""
+	if c, cerr := r.Cookie(auth.RefreshCookieName); cerr == nil && c.Value != "" {
+		refreshTok = c.Value
+	} else {
+		var req models.RefreshRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		refreshTok = req.RefreshToken
+	}
+	if refreshTok == "" {
+		h.clearAuthCookies(w, r)
+		writeError(w, http.StatusUnauthorized, "no refresh token provided")
 		return
 	}
 
@@ -389,13 +409,14 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// doesn't mass-log-out every active user with a misleading 401. A real
 	// DB outage returns 500 (alertable, retried by clients); a legitimate
 	// revoked/expired token returns 401 (re-login).
-	rt, err := h.queries.RevokeAndGetRefreshToken(r.Context(), req.RefreshToken)
+	rt, err := h.queries.RevokeAndGetRefreshToken(r.Context(), refreshTok)
 	if err != nil {
 		slog.Warn("refresh: RevokeAndGetRefreshToken DB error", "error", err)
 		writeError(w, http.StatusInternalServerError, "refresh failed")
 		return
 	}
 	if rt == nil {
+		h.clearAuthCookies(w, r)
 		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
 		return
 	}
@@ -431,27 +452,36 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user.PasswordHash = ""
+	// deep-debug H10 — rotate the cookies, no body tokens.
+	h.setAuthCookies(w, r, accessToken, time.Until(expiresAt), newRefreshStr, time.Until(h.authSvc.RefreshTokenExpiry()))
 	writeJSON(w, http.StatusOK, models.TokenResponse{
-		AccessToken:  accessToken,
-		RefreshToken: newRefreshStr,
-		ExpiresIn:    int64(time.Until(expiresAt).Seconds()),
-		User:         user,
+		ExpiresIn: int64(time.Until(expiresAt).Seconds()),
+		User:      user,
 	})
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
-	var req models.RefreshRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
+	// deep-debug H10 — cookie-first (browser); fall back to the body for
+	// non-browser clients. Always clear the cookies regardless of outcome.
+	refreshTok := ""
+	if c, cerr := r.Cookie(auth.RefreshCookieName); cerr == nil && c.Value != "" {
+		refreshTok = c.Value
+	} else {
+		var req models.RefreshRequest
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		refreshTok = req.RefreshToken
 	}
+	h.clearAuthCookies(w, r)
 
 	// Use RevokeAndGetRefreshToken to atomically revoke and retrieve the user ID
 	// so we can log the logout event. Falls back to plain revoke on failure.
-	rt, err := h.queries.RevokeAndGetRefreshToken(r.Context(), req.RefreshToken)
+	rt, err := h.queries.RevokeAndGetRefreshToken(r.Context(), refreshTok)
 	if err != nil || rt == nil {
 		// Token was already revoked, expired, or invalid — still acknowledge logout
-		_ = h.queries.RevokeRefreshToken(r.Context(), req.RefreshToken)
+		_ = h.queries.RevokeRefreshToken(r.Context(), refreshTok)
 	}
 
 	if rt != nil {

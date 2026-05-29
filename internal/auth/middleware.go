@@ -76,19 +76,13 @@ const (
 func RequireAuth(svc *Service, versionStore *TokenVersionStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				httputil.WriteError(w, http.StatusUnauthorized, "missing authorization header")
+			tokenStr, ok := tokenFromRequest(r)
+			if !ok {
+				httputil.WriteError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
 
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-				httputil.WriteError(w, http.StatusUnauthorized, "invalid authorization format")
-				return
-			}
-
-			claims, err := svc.ValidateAccessToken(parts[1])
+			claims, err := svc.ValidateAccessToken(tokenStr)
 			if err != nil {
 				httputil.WriteError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
@@ -127,17 +121,11 @@ func RequireAuth(svc *Service, versionStore *TokenVersionStore) func(http.Handle
 func RequireStreamAuth(svc *Service, versionStore *TokenVersionStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				httputil.WriteError(w, http.StatusUnauthorized, "missing authorization header")
+			tokenStr, ok := tokenFromRequest(r)
+			if !ok {
+				httputil.WriteError(w, http.StatusUnauthorized, "missing authorization")
 				return
 			}
-			parts := strings.SplitN(authHeader, " ", 2)
-			if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") {
-				httputil.WriteError(w, http.StatusUnauthorized, "invalid authorization format")
-				return
-			}
-			tokenStr := parts[1]
 
 			// Try the regular access-token path first. ValidateAccessToken
 			// rejects scoped tokens, so a cast token falls through to the
@@ -183,4 +171,24 @@ func RequireAdmin(next http.Handler) http.Handler {
 func GetClaims(ctx context.Context) *JWTClaims {
 	claims, _ := ctx.Value(ClaimsContextKey).(*JWTClaims)
 	return claims
+}
+
+// tokenFromRequest extracts the bearer token from the Authorization header, or
+// (deep-debug H10) falls back to the httpOnly access cookie used by the browser
+// SPA. The router's query-param promotion still rewrites ?token= into the
+// Authorization header for cast/HLS URLs, so this single helper covers the
+// header, cookie, and ?token= paths. A present-but-malformed Authorization
+// header is rejected (returns false) rather than falling through to the cookie.
+func tokenFromRequest(r *http.Request) (string, bool) {
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "bearer") || parts[1] == "" {
+			return "", false
+		}
+		return parts[1], true
+	}
+	if c, err := r.Cookie(AccessCookieName); err == nil && c.Value != "" {
+		return c.Value, true
+	}
+	return "", false
 }
