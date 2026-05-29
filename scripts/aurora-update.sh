@@ -239,15 +239,34 @@ else
 fi
 
 # ── Transport security (deep-debug H12) ───────────────────────────
-# The updater builds + installs the fetched code as ROOT, so a plaintext
-# git transport (http:// or git://) that a network attacker can MITM is
-# unauthenticated root RCE. https:// and ssh are authenticated + encrypted;
-# file:// is local (no network). Refuse anything plaintext.
+# The updater builds + installs the fetched code as ROOT, so a plaintext or
+# attacker-controllable git transport = unauthenticated root RCE. Use an
+# ALLOWLIST: only encrypted/authenticated transports (https, ssh, git+ssh) or a
+# local path / file:// are permitted. http:// and git:// (cleartext, MITM-able)
+# and remote-helper transports like ext:: (which run arbitrary commands) are
+# refused. Scheme matching is CASE-INSENSITIVE — git honors HTTP:// the same as
+# http://, so a denylist of literal lowercase schemes would be bypassable
+# (deep-debug H12 review).
 ORIGIN_URL="$(git remote get-url origin 2>/dev/null || echo "")"
 case "$ORIGIN_URL" in
-    http://*|git://*)
-        write_status misconfigured "Refusing to auto-update over an unencrypted remote ('$ORIGIN_URL'): a network attacker could MITM the update and run code as root. Switch origin to https:// or ssh: git -C $SOURCE_DIR remote set-url origin https://..."
-        log "insecure remote transport '$ORIGIN_URL' — refusing"
+    *://*)
+        ORIGIN_SCHEME="$(printf '%s' "${ORIGIN_URL%%://*}" | tr 'A-Z' 'a-z')"
+        case "$ORIGIN_SCHEME" in
+            https|ssh|git+ssh|file)
+                : # encrypted/authenticated, or local — OK
+                ;;
+            *)
+                write_status misconfigured "Refusing to auto-update over an unencrypted/unsupported remote transport ('$ORIGIN_URL'): a network attacker could MITM the update and run code as root. Use an https:// or ssh remote: git -C $SOURCE_DIR remote set-url origin https://..."
+                log "refused remote transport scheme '$ORIGIN_SCHEME' ('$ORIGIN_URL')"
+                exit 1
+                ;;
+        esac
+        ;;
+    *::*)
+        # Remote-helper transports (ext::, fd::, ...) can execute arbitrary
+        # commands — never acceptable for the root updater.
+        write_status misconfigured "Refusing remote-helper transport ('$ORIGIN_URL') for the root auto-updater — it can execute arbitrary commands. Use an https:// or ssh remote."
+        log "refused remote-helper transport '$ORIGIN_URL'"
         exit 1
         ;;
 esac
