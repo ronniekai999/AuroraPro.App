@@ -168,6 +168,16 @@ func isValidEmail(email string) bool {
 	return true
 }
 
+// normalizeEmail canonicalizes an email for storage and lookup: trimmed and
+// lowercased. Paired with the case-insensitive unique index on LOWER(email)
+// (migration 028) and the case-insensitive GetUserByEmail so "Bob@Corp.com"
+// and "bob@corp.com" resolve to one account — without it, OAuth Tier-2
+// auto-link silently failed and the email-collision anti-hijack safety net
+// could be bypassed with a case variant. deep-debug H1.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 func paginate(r *http.Request) models.PaginationParams {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))

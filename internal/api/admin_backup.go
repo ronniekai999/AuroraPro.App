@@ -509,6 +509,32 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 
+	// Validate the upload is FULLY restorable BEFORE the destructive wipe.
+	// The leading-magic + min-size checks above only prove the first bytes
+	// look like a custom dump, and `pg_restore --list` would only parse the
+	// header + table-of-contents — neither reads the compressed DATA blocks,
+	// so a dump truncated mid-data (a realistic interrupted-upload outcome)
+	// would pass and then fail AFTER the wipe, leaving the DB empty.
+	// `pg_restore -f /dev/null` decompresses and reads the ENTIRE archive to a
+	// throwaway script target WITHOUT connecting to the database, so a
+	// truncated / corrupt / version-incompatible archive is rejected with the
+	// DB still intact. Costs one extra full read of the archive — restores are
+	// rare and correctness beats speed here. deep-debug H8.
+	validateCmd := exec.CommandContext(ctx, "pg_restore", "-f", os.DevNull, tmpPath)
+	var validateStderr strings.Builder
+	validateCmd.Stderr = &limitedStringWriter{w: &validateStderr, max: 16 * 1024}
+	if err := validateCmd.Run(); err != nil {
+		stderrTail := strings.TrimSpace(validateStderr.String())
+		slog.Warn("restore rejected: archive is not fully readable by pg_restore (database NOT modified)",
+			"err", err, "stderr", stderrTail)
+		msg := "upload is not a complete, readable pg_dump custom archive (pg_restore validation failed) — the database was NOT modified"
+		if stderrTail != "" {
+			msg += ": " + stderrTail
+		}
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+
 	// Phase 1 — wipe the existing schema. Without this, the restore
 	// would fail on "relation already exists" for every table.
 	//
