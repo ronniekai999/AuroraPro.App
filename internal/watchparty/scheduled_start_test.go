@@ -1,6 +1,9 @@
 package watchparty
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestV3_FireScheduledStart_DrivesV3Playback is the regression test for audit
 // H6. A host-scheduled countdown firing must drive the V3 playback path
@@ -55,5 +58,39 @@ func TestV3_FireScheduledStart_Dedup(t *testing.T) {
 	}
 	if !ps.Running {
 		t.Error("Running flipped to false after a deduped second fire; want still true")
+	}
+}
+
+// TestV3_FireScheduledStart_SpoilerGateLeavesRetryable is the regression test
+// for the audit H6 follow-up. When SpoilerFreeStart is on and a non-host
+// participant has not readied up, HandleRequestPlay refuses to start playback.
+// fireScheduledStart must NOT stamp StartedAt (or persist MarkPartyStarted) in
+// that case, so the scheduled start stays retryable (a later manual host play,
+// which doesn't consult StartedAt, still works) rather than recording a false,
+// permanent "started" state.
+func TestV3_FireScheduledStart_SpoilerGateLeavesRetryable(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED3", 1)
+	ps.mu.Lock()
+	ps.Settings.SpoilerFreeStart = true
+	ps.Participants[2] = &Participant{
+		UserID: 2, Username: "guest", IsHost: false, Ready: false,
+		Suspensions: map[string]bool{}, LastSeen: time.Now(),
+	}
+	ps.mu.Unlock()
+
+	m.fireScheduledStart("SCHED3")
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.tickCancel != nil {
+		m.stopTickLoopLocked(ps) // cleanup if somehow started
+		t.Error("tick loop started despite the spoiler-free gate; want not started")
+	}
+	if ps.StartedAt != nil {
+		t.Error("StartedAt was stamped despite the gate blocking playback; want nil (retryable)")
+	}
+	if ps.Running {
+		t.Error("Running=true despite the spoiler-free gate; want false")
 	}
 }

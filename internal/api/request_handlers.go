@@ -394,9 +394,11 @@ const pendingRecoveryInterval = 5 * time.Minute
 // never re-examined by the monitor, which only polls 'processing'), and because
 // RequestExistsActive treats 'pending' as active the user can't even re-request
 // it. The sweep runs once shortly after boot and then periodically until ctx is
-// cancelled. Re-dispatch is safe: dispatchToARR re-confirms the row still
-// exists and Radarr/Sonarr de-dupe by TMDB id. See audit H4. Run in a
-// goroutine: go h.StartPendingRecovery(ctx).
+// cancelled. Re-dispatch is idempotent: dispatchToARR re-confirms the row
+// still exists, and addMovieToRadarr/addSeriesToSonarr skip the ARR add when
+// the title is already present, so an orphan whose original dispatch already
+// reached Radarr/Sonarr is reconciled to processing rather than failed. See
+// audit H4. Run in a goroutine: go h.StartPendingRecovery(ctx).
 func (h *RequestHandler) StartPendingRecovery(ctx context.Context) {
 	// Brief initial delay so boot-time dispatches and the DB pool settle
 	// before the first sweep (and so a request created seconds before a clean
@@ -483,6 +485,22 @@ func (h *RequestHandler) dispatchMovie(ctx context.Context, req *models.Request,
 
 // addMovieToRadarr adds a movie to a specific Radarr instance and returns the job ID string.
 func (h *RequestHandler) addMovieToRadarr(ctx context.Context, req *models.Request, client *arr.RadarrClient, prefix string) (string, error) {
+	// Idempotency (audit H4 follow-up): AddMovie is a bare POST with no
+	// existence check, and Radarr returns HTTP 400 for an already-added title,
+	// which doRequest maps to an error. On the recovery path an orphaned
+	// request may already be in Radarr (its original dispatch reached the API
+	// but the process died before the DB status write), and on the normal path
+	// the title may have been added out-of-band. Re-adding would then wrongly
+	// mark the request failed, so treat an existing movie as a successful
+	// (idempotent) dispatch and hand back its id for the monitor to reconcile.
+	if existing, err := client.GetMovie(ctx, req.TMDBID); err != nil {
+		return "", fmt.Errorf("failed to check %s for existing movie: %w", prefix, err)
+	} else if existing != nil {
+		slog.Info("movie already present in ARR; treating as dispatched",
+			"prefix", prefix, "tmdb_id", req.TMDBID, "movie_id", existing.ID)
+		return fmt.Sprintf("%s:%d", prefix, existing.ID), nil
+	}
+
 	folders, err := client.GetRootFolders(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get %s root folders: %w", prefix, err)
@@ -563,6 +581,17 @@ func (h *RequestHandler) addSeriesToSonarr(ctx context.Context, req *models.Requ
 	tvdbID, err := h.resolveTvdbID(ctx, req, client, prefix)
 	if err != nil {
 		return "", err
+	}
+
+	// Idempotency (audit H4 follow-up): see addMovieToRadarr. If the series is
+	// already in this Sonarr instance, re-adding 400s and would wrongly fail
+	// the request, so treat it as a successful dispatch and return its id.
+	if existing, err := client.GetSeries(ctx, tvdbID); err != nil {
+		return "", fmt.Errorf("failed to check %s for existing series: %w", prefix, err)
+	} else if existing != nil {
+		slog.Info("series already present in ARR; treating as dispatched",
+			"prefix", prefix, "tvdb_id", tvdbID, "series_id", existing.ID)
+		return fmt.Sprintf("%s:%d:%d", prefix, existing.ID, existing.TvdbID), nil
 	}
 
 	folders, err := client.GetRootFolders(ctx)
@@ -818,6 +847,15 @@ func nextInterval(activeCount int) time.Duration {
 // progress updates, and checks each request for completion. Returns the count
 // of processing requests so the caller can pick the next polling interval.
 func (m *RequestMonitor) pollOnce(ctx context.Context) int {
+	// Honor the runtime feature toggle (audit H5 follow-up): when requests are
+	// disabled, idle even if the ARR clients are still configured. Disabling
+	// the feature only flips Enabled — it does not clear the Radarr/Sonarr
+	// URL+key — so without this guard the always-on monitor would keep polling
+	// ARR, and could complete or library-scan in-flight rows, while the feature
+	// is supposedly off.
+	if m.clients == nil || !m.clients.Enabled() {
+		return 0
+	}
 	requests, err := m.queries.GetProcessingRequests(ctx)
 	if err != nil {
 		slog.Error("request monitor: failed to get processing requests", "error", err)
