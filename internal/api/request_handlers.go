@@ -784,10 +784,24 @@ type RequestMonitor struct {
 
 	mu           sync.Mutex
 	failCounts   map[int64]int              // consecutive API failures per request ID
+	goneCounts   map[int64]int              // consecutive "item absent in ARR" polls per request ID (MED finding 1)
 	lastProgress map[int64]downloadProgress // dedup cache for WS progress broadcasts
 }
 
 const maxMonitorFailures = 10
+
+// maxGoneChecks bounds how many consecutive polls may report a request's ARR
+// item as absent (no error, but the movie/series is no longer present in any
+// instance we dispatched to) before we give up and mark the request failed.
+//
+// MED finding 1: previously only an ARR *error* incremented failCounts, so a
+// legitimately-removed item (deleted from Radarr/Sonarr after dispatch) left
+// the request pinned in 'processing' forever — and because any processing row
+// holds the monitor at the 5s fast interval, that also meant perpetual
+// fast-polling. A small bound tolerates a brief window where the item is
+// momentarily not yet visible (e.g. just after an add, or a one-sided removal
+// in a dual-quality pair) while still letting the request leave 'processing'.
+const maxGoneChecks = 5
 
 // NewRequestMonitor creates a new RequestMonitor.
 func NewRequestMonitor(queries *db.Queries, hub *ws.Hub, clients *arr.ArrClients, scanner *library.Scanner) *RequestMonitor {
@@ -797,6 +811,7 @@ func NewRequestMonitor(queries *db.Queries, hub *ws.Hub, clients *arr.ArrClients
 		clients:      clients,
 		scanner:      scanner,
 		failCounts:   make(map[int64]int),
+		goneCounts:   make(map[int64]int),
 		lastProgress: make(map[int64]downloadProgress),
 	}
 }
@@ -887,15 +902,23 @@ func (m *RequestMonitor) pollOnce(ctx context.Context) int {
 }
 
 // checkRequest polls the appropriate ARR service for a single request.
+//
+// The ARR check yields three outcomes: an error (infrastructure problem →
+// handleCheckFailure), or a successful poll that reports the item as either
+// present (still being processed/downloaded) or absent. "Absent" with no error
+// means the movie/series was removed from every ARR instance we dispatched to
+// after the request started processing; that request can never complete, so we
+// must move it out of 'processing' (MED finding 1) rather than fast-poll it
+// forever — see handleGone.
 func (m *RequestMonitor) checkRequest(ctx context.Context, req *models.Request) {
-	var available bool
+	var present, available bool
 	var checkErr error
 
 	switch req.MediaType {
 	case "movie":
-		available, checkErr = m.checkMovie(ctx, req)
+		present, available, checkErr = m.checkMovie(ctx, req)
 	case "tv":
-		available, checkErr = m.checkTV(ctx, req)
+		present, available, checkErr = m.checkTV(ctx, req)
 	default:
 		checkErr = fmt.Errorf("unsupported media type: %s", req.MediaType)
 	}
@@ -905,9 +928,23 @@ func (m *RequestMonitor) checkRequest(ctx context.Context, req *models.Request) 
 		return
 	}
 
-	// Reset failure counter on successful check
+	// Successful poll: clear the API-failure counter regardless of outcome.
 	m.mu.Lock()
 	delete(m.failCounts, req.ID)
+	m.mu.Unlock()
+
+	// The item is no longer in ARR and not (yet) available. Count consecutive
+	// "gone" polls and fail the request once the bound is reached. A present
+	// item resets the counter below.
+	if !present && !available {
+		m.handleGone(ctx, req)
+		return
+	}
+
+	// Item is present (or already available): reset the gone counter so an
+	// earlier transient absence doesn't accumulate toward failure.
+	m.mu.Lock()
+	delete(m.goneCounts, req.ID)
 	m.mu.Unlock()
 
 	if available {
@@ -975,22 +1012,30 @@ func (m *RequestMonitor) triggerMatchingLibraryScan(ctx context.Context, req *mo
 
 // checkMovie checks if a movie is available in Radarr.
 // For dual-quality requests, both regular and 4K instances must have the file.
-func (m *RequestMonitor) checkMovie(ctx context.Context, req *models.Request) (bool, error) {
+//
+// Returns (present, available, error). present is true while the movie still
+// exists in at least one instance we dispatched to; it goes false only once the
+// movie has been removed from every such instance (MED finding 1 — lets a
+// removed request leave 'processing' instead of fast-polling forever). For a
+// dual-quality request, availability still requires the file in BOTH instances,
+// but presence is the OR across them so a one-sided removal doesn't read as
+// "gone" while the other half is still importing.
+func (m *RequestMonitor) checkMovie(ctx context.Context, req *models.Request) (present bool, available bool, err error) {
 	if isDualQuality(req) {
 		radarr := m.clients.Radarr()
 		radarr4K := m.clients.Radarr4K()
 		if radarr == nil || !radarr.IsConfigured() || radarr4K == nil || !radarr4K.IsConfigured() {
-			return false, fmt.Errorf("both Radarr instances required for dual-quality request")
+			return false, false, fmt.Errorf("both Radarr instances required for dual-quality request")
 		}
-		_, has1080, err := radarr.MovieExists(ctx, req.TMDBID)
+		exists1080, has1080, err := radarr.MovieExists(ctx, req.TMDBID)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
-		_, has4K, err := radarr4K.MovieExists(ctx, req.TMDBID)
+		exists4K, has4K, err := radarr4K.MovieExists(ctx, req.TMDBID)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
-		return has1080 && has4K, nil
+		return exists1080 || exists4K, has1080 && has4K, nil
 	}
 
 	client := m.clients.Radarr()
@@ -998,47 +1043,54 @@ func (m *RequestMonitor) checkMovie(ctx context.Context, req *models.Request) (b
 		client = r4k
 	}
 	if client == nil || !client.IsConfigured() {
-		return false, fmt.Errorf("Radarr is not configured")
+		return false, false, fmt.Errorf("Radarr is not configured")
 	}
-	_, hasFile, err := client.MovieExists(ctx, req.TMDBID)
+	exists, hasFile, err := client.MovieExists(ctx, req.TMDBID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return hasFile, nil
+	return exists, hasFile, nil
 }
 
 // checkTV checks if a TV series has episodes in Sonarr.
 // For dual-quality requests, both regular and 4K instances must have episodes.
-func (m *RequestMonitor) checkTV(ctx context.Context, req *models.Request) (bool, error) {
+//
+// Returns (present, available, error). See checkMovie for the presence
+// semantics: present stays true while the series exists in at least one
+// instance we dispatched to and goes false only once it is absent from every
+// such instance (MED finding 1).
+func (m *RequestMonitor) checkTV(ctx context.Context, req *models.Request) (present bool, available bool, err error) {
 	if isDualQuality(req) {
 		sonarr := m.clients.Sonarr()
 		sonarr4K := m.clients.Sonarr4K()
 		if sonarr == nil || !sonarr.IsConfigured() || sonarr4K == nil || !sonarr4K.IsConfigured() {
-			return false, fmt.Errorf("both Sonarr instances required for dual-quality request")
+			return false, false, fmt.Errorf("both Sonarr instances required for dual-quality request")
 		}
 		// Parse dual job IDs: "sonarr:5:82493|sonarr4k:8:82493"
 		parts := splitArrJobIDs(req.ArrJobIDs)
-		var has1080, has4K bool
+		var has1080, has4K, exists1080, exists4K bool
 		for _, part := range parts {
 			_, tvdbID, _ := parseTVArrIDs(part)
 			if tvdbID <= 0 {
 				continue
 			}
 			if strings.HasPrefix(part, "sonarr4k:") {
-				_, hasEps, err := sonarr4K.SeriesExists(ctx, tvdbID)
+				exists, hasEps, err := sonarr4K.SeriesExists(ctx, tvdbID)
 				if err != nil {
-					return false, err
+					return false, false, err
 				}
+				exists4K = exists
 				has4K = hasEps
 			} else {
-				_, hasEps, err := sonarr.SeriesExists(ctx, tvdbID)
+				exists, hasEps, err := sonarr.SeriesExists(ctx, tvdbID)
 				if err != nil {
-					return false, err
+					return false, false, err
 				}
+				exists1080 = exists
 				has1080 = hasEps
 			}
 		}
-		return has1080 && has4K, nil
+		return exists1080 || exists4K, has1080 && has4K, nil
 	}
 
 	client := m.clients.Sonarr()
@@ -1046,18 +1098,18 @@ func (m *RequestMonitor) checkTV(ctx context.Context, req *models.Request) (bool
 		client = s4k
 	}
 	if client == nil || !client.IsConfigured() {
-		return false, fmt.Errorf("Sonarr is not configured")
+		return false, false, fmt.Errorf("Sonarr is not configured")
 	}
 
 	_, tvdbID, _ := parseTVArrIDs(req.ArrJobIDs)
 	if tvdbID <= 0 {
-		return false, fmt.Errorf("invalid TVDB ID in arr_job_ids: %q", req.ArrJobIDs)
+		return false, false, fmt.Errorf("invalid TVDB ID in arr_job_ids: %q", req.ArrJobIDs)
 	}
-	_, hasEpisodes, checkErr := client.SeriesExists(ctx, tvdbID)
+	exists, hasEpisodes, checkErr := client.SeriesExists(ctx, tvdbID)
 	if checkErr != nil {
-		return false, checkErr
+		return false, false, checkErr
 	}
-	return hasEpisodes, nil
+	return exists, hasEpisodes, nil
 }
 
 // handleCheckFailure increments the failure counter and marks the request as
@@ -1084,6 +1136,7 @@ func (m *RequestMonitor) handleCheckFailure(ctx context.Context, req *models.Req
 
 		m.mu.Lock()
 		delete(m.failCounts, req.ID)
+		delete(m.goneCounts, req.ID)
 		delete(m.lastProgress, req.ID)
 		m.mu.Unlock()
 
@@ -1094,6 +1147,57 @@ func (m *RequestMonitor) handleCheckFailure(ctx context.Context, req *models.Req
 			"media_type": req.MediaType,
 		})
 	}
+}
+
+// handleGone counts consecutive polls in which a request's ARR item is absent
+// (no error, but the movie/series is gone from every instance we dispatched to)
+// and marks the request failed once maxGoneChecks is reached.
+//
+// MED finding 1: without this, a request whose item was deleted from
+// Radarr/Sonarr after it reached 'processing' stayed there indefinitely — the
+// completion check returned (available=false) with no error, so failCounts
+// never advanced, and the row kept the monitor pinned at the 5s fast interval.
+// The bound absorbs a brief, benign absence (e.g. immediately after an add, or
+// a transient one-sided removal in a dual-quality pair) before giving up.
+func (m *RequestMonitor) handleGone(ctx context.Context, req *models.Request) {
+	m.mu.Lock()
+	m.goneCounts[req.ID]++
+	count := m.goneCounts[req.ID]
+	m.mu.Unlock()
+
+	slog.Warn("request monitor: ARR item absent",
+		"request_id", req.ID,
+		"title", req.Title,
+		"consecutive_gone", count,
+	)
+
+	if count < maxGoneChecks {
+		return
+	}
+
+	errMsg := fmt.Sprintf(
+		"media was removed from the download service after %d consecutive checks; "+
+			"it may have been deleted in Radarr/Sonarr — delete this request and try again",
+		count,
+	)
+	if err := m.queries.UpdateRequestStatus(ctx, req.ID, models.RequestFailed, "", errMsg); err != nil {
+		slog.Error("request monitor: failed to mark gone request as failed", "request_id", req.ID, "error", err)
+		return
+	}
+
+	m.mu.Lock()
+	delete(m.goneCounts, req.ID)
+	delete(m.failCounts, req.ID)
+	delete(m.lastProgress, req.ID)
+	m.mu.Unlock()
+
+	slog.Info("request monitor: request marked failed (ARR item gone)", "request_id", req.ID, "title", req.Title)
+	m.hub.BroadcastToUser(req.UserID, ws.EventRequestStatus, map[string]interface{}{
+		"request_id": req.ID,
+		"title":      req.Title,
+		"status":     models.RequestFailed,
+		"media_type": req.MediaType,
+	})
 }
 
 // ============================================================

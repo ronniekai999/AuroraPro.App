@@ -44,15 +44,31 @@ func ResizeImage(srcPath, dstPath string, targetWidth int) error {
 	dst := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, bounds, draw.Over, nil)
 
-	out, err := os.Create(dstPath)
+	// Atomic publish: encode to a temp file in the SAME directory, then rename
+	// it into place. Writing straight to dstPath lets a concurrent reader
+	// (serveFromDisk -> http.ServeFile) observe a half-written/truncated JPEG.
+	// os.Rename within a directory is atomic, so readers see either the old
+	// state (absent) or the fully-encoded file — never a partial one.
+	// (2026-05-29 audit — BE-M*: truncated/corrupt cache file race.)
+	dir := filepath.Dir(dstPath)
+	tmp, err := os.CreateTemp(dir, ".resize-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}
-	defer out.Close()
+	tmpPath := tmp.Name()
 
-	if err := jpeg.Encode(out, dst, &jpeg.Options{Quality: 85}); err != nil {
-		os.Remove(dstPath)
+	if err := jpeg.Encode(tmp, dst, &jpeg.Options{Quality: 85}); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
 		return fmt.Errorf("encode jpeg: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close output: %w", err)
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("publish output: %w", err)
 	}
 	return nil
 }
@@ -107,6 +123,10 @@ func decodeImageFile(path string) (image.Image, error) {
 	}
 }
 
+// copyFile copies src to dst atomically (temp file in dst's dir + rename).
+// Used by ResizeImage's "don't upscale" branch to publish the source into the
+// resized-cache path; the atomic rename keeps concurrent readers from seeing a
+// partially-copied file (same race fixed in ResizeImage's encode path).
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -114,12 +134,25 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	dir := filepath.Dir(dst)
+	out, err := os.CreateTemp(dir, ".resize-*.tmp")
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	tmpPath := out.Name()
 
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return nil
 }

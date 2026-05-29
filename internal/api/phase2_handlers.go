@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,59 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 )
+
+// ============================================================
+// FFmpeg/FFprobe Concurrency Gate (audit MED — fork-bomb guard)
+// ============================================================
+//
+// The on-demand streaming handlers (GetStreamInfo, GetSubtitles, ServeSubtitle)
+// each shell out to ffprobe/ffmpeg per request to probe subtitle tracks, probe
+// seek keyframes, and extract/convert WebVTT. With no bound, a burst of
+// concurrent requests (or a malicious client looping the endpoint) forks one
+// ffprobe/ffmpeg per request and exhausts CPU/RAM. ffprobeGate caps how many of
+// these subprocess-spawning operations run at once across the whole api package.
+//
+// Sized to runtime.NumCPU(): ffprobe/ffmpeg are CPU-bound, so allowing roughly
+// one per core keeps the box responsive while still letting normal playback (a
+// handful of probes per stream start) proceed without queueing. Distinct from
+// the transcode session cap (long-lived HLS encodes) — these are short-lived
+// metadata probes / one-shot extractions.
+var ffprobeGate = make(chan struct{}, maxFFprobeConcurrency())
+
+// maxFFprobeConcurrency returns the gate size: NumCPU, floored at 1 so the gate
+// is never zero-capacity (which would deadlock every acquire).
+func maxFFprobeConcurrency() int {
+	if n := runtime.NumCPU(); n > 0 {
+		return n
+	}
+	return 1
+}
+
+// acquireFFprobeSlot blocks until a gate slot is free or ctx is cancelled.
+// On success it returns a release func that MUST be called (defer) to free the
+// slot. On ctx cancellation it returns (nil, ctx.Err()) and no slot is held, so
+// a client that disconnects while queued never ties up a subprocess slot.
+func acquireFFprobeSlot(ctx context.Context) (release func(), err error) {
+	select {
+	case ffprobeGate <- struct{}{}:
+		return func() { <-ffprobeGate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// gatedProbeSubtitles runs streaming.ProbeSubtitles under the ffprobe
+// concurrency gate so EVERY probe entry point — including the non-admin
+// CreateSession path — is bounded. On gate-acquire failure (ctx cancelled) it
+// returns the error and spawns no subprocess. deep-debug MED.
+func gatedProbeSubtitles(ctx context.Context, filePath string) ([]models.SubtitleTrack, error) {
+	release, err := acquireFFprobeSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return streaming.ProbeSubtitles(ctx, filePath)
+}
 
 // ============================================================
 // TV Show Handlers
@@ -1152,7 +1206,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 		// Auto-detect bitmap subtitles by probing the file's subtitle tracks
 		if req.BurnSubExternal == "" {
-			tracks, _ := streaming.ProbeSubtitles(r.Context(), filePath)
+			tracks, _ := gatedProbeSubtitles(r.Context(), filePath)
 			for _, t := range tracks {
 				if t.Index == *req.BurnSubIndex {
 					bi.IsBitmap = streaming.IsBitmapSubtitle(t.Codec)
@@ -1169,7 +1223,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	// bitmap subs (PGS, VOBSUB, DVB) cannot be converted to WebVTT.
 	// This adds zero overhead — the same file will be opened by FFmpeg for
 	// video/audio anyway; subtitles piggyback on that I/O.
-	if probedSubs, probeErr := streaming.ProbeSubtitles(r.Context(), filePath); probeErr == nil && len(probedSubs) > 0 {
+	if probedSubs, probeErr := gatedProbeSubtitles(r.Context(), filePath); probeErr == nil && len(probedSubs) > 0 {
 		for _, t := range probedSubs {
 			if streaming.IsBitmapSubtitle(t.Codec) {
 				continue
@@ -1432,8 +1486,15 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		streamURL = "/api/stream/media/" + strconv.FormatInt(fileID, 10)
 	}
 
-	// Probe subtitles
-	subtitles, _ := streaming.ProbeSubtitles(r.Context(), filePath)
+	// Probe subtitles. Bounded by ffprobeGate (audit MED) so a burst of
+	// concurrent stream-info requests can't fork-bomb ffprobe. On context
+	// cancellation (client gone) we skip probing and serve an empty list
+	// rather than holding a slot.
+	var subtitles []models.SubtitleTrack
+	if release, gErr := acquireFFprobeSlot(r.Context()); gErr == nil {
+		subtitles, _ = streaming.ProbeSubtitles(r.Context(), filePath)
+		release()
+	}
 	if subtitles == nil {
 		subtitles = []models.SubtitleTrack{}
 	}
@@ -1540,8 +1601,14 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Probe embedded subtitles
-	tracks, _ := streaming.ProbeSubtitles(r.Context(), filePath)
+	// Probe embedded subtitles. Bounded by ffprobeGate (audit MED) to stop a
+	// burst of concurrent requests from fork-bombing ffprobe. On context
+	// cancellation we skip the probe and fall back to external subs only.
+	var tracks []models.SubtitleTrack
+	if release, gErr := acquireFFprobeSlot(r.Context()); gErr == nil {
+		tracks, _ = streaming.ProbeSubtitles(r.Context(), filePath)
+		release()
+	}
 	if tracks == nil {
 		tracks = []models.SubtitleTrack{}
 	}
@@ -1644,7 +1711,13 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 				// Remux: shift by the keyframe the input seek lands on.
 				// ProbeSeekKeyframe falls back to startSec on any probe
 				// failure, so this never regresses below pre-#141.
-				shiftOffset = streaming.ProbeSeekKeyframe(r.Context(), filePath, float64(startSec))
+				// Bounded by ffprobeGate (audit MED); if we can't get a
+				// slot (ctx cancelled), fall back to startSec directly.
+				shiftOffset = float64(startSec)
+				if release, gErr := acquireFFprobeSlot(r.Context()); gErr == nil {
+					shiftOffset = streaming.ProbeSeekKeyframe(r.Context(), filePath, float64(startSec))
+					release()
+				}
 			} else {
 				// Transcode (or unknown): accurate seek lands on
 				// startSec; shift by it directly.
@@ -1698,8 +1771,16 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 					serve(ext.Title)
 					return
 				}
-				// ASS, SSA, and other formats: convert to VTT via ffmpeg
+				// ASS, SSA, and other formats: convert to VTT via ffmpeg.
+				// Bounded by ffprobeGate (audit MED) so concurrent
+				// conversions can't fork-bomb ffmpeg.
+				release, gErr := acquireFFprobeSlot(r.Context())
+				if gErr != nil {
+					writeError(w, http.StatusServiceUnavailable, "server busy, try again")
+					return
+				}
 				vttPath, err := streaming.ConvertSubtitleToVTT(r.Context(), ext.Title, h.subCache)
+				release()
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "subtitle conversion failed")
 					return
@@ -1715,11 +1796,16 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	// Embedded subtitle — check if it's a bitmap format (PGS, VOBSUB, DVB) which
 	// cannot be converted to WebVTT text. Without this check, FFmpeg hangs for the
 	// full 2-minute timeout trying an impossible conversion.
-	tracks, _ := streaming.ProbeSubtitles(r.Context(), filePath)
-	for _, t := range tracks {
-		if t.Index == trackIdx && streaming.IsBitmapSubtitle(t.Codec) {
-			writeError(w, http.StatusBadRequest, "bitmap subtitles (PGS/VOBSUB/DVB) cannot be converted to text; use burn-in instead")
-			return
+	// Bounded by ffprobeGate (audit MED); on ctx cancellation we skip the probe
+	// (the extraction below shares the same ctx and will fail fast anyway).
+	if release, gErr := acquireFFprobeSlot(r.Context()); gErr == nil {
+		tracks, _ := streaming.ProbeSubtitles(r.Context(), filePath)
+		release()
+		for _, t := range tracks {
+			if t.Index == trackIdx && streaming.IsBitmapSubtitle(t.Codec) {
+				writeError(w, http.StatusBadRequest, "bitmap subtitles (PGS/VOBSUB/DVB) cannot be converted to text; use burn-in instead")
+				return
+			}
 		}
 	}
 
@@ -1733,8 +1819,15 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("could not extend write deadline for subtitle extraction", "error", err)
 	}
 
-	// Text-based subtitle — extract with FFmpeg
+	// Text-based subtitle — extract with FFmpeg. Bounded by ffprobeGate
+	// (audit MED) so concurrent extractions can't fork-bomb ffmpeg.
+	release, gErr := acquireFFprobeSlot(r.Context())
+	if gErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "server busy, try again")
+		return
+	}
 	vttPath, err := streaming.ExtractSubtitleVTT(r.Context(), filePath, trackIdx, h.subCache)
+	release()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "subtitle extraction failed")
 		return

@@ -649,9 +649,36 @@ func FindExternalSubtitles(mediaPath string) []models.SubtitleTrack {
 // Phase 3: Subtitle Burn-In
 // ============================================================
 
+// SubtitleRelativeIndex translates an ABSOLUTE ffprobe stream index into the
+// SUBTITLE-RELATIVE index that FFmpeg's `subtitles` filter expects in its
+// stream_index option.
+//
+// Audit MED — the `subtitles` filter's stream_index is counted ONLY over the
+// file's subtitle streams (0 = first subtitle stream, 1 = second, …), NOT over
+// all streams. Passing the absolute index (e.g. stream 2 in a video+audio+sub
+// file) makes the filter try to read the 3rd subtitle stream, which usually
+// doesn't exist — burn-in then fails or silently picks the wrong track.
+//
+// tracks must be the file's subtitle tracks as returned by ProbeSubtitles
+// (ordered by appearance in the container). The position of the track whose
+// .Index == absoluteIndex is the relative index. If no track matches (probe
+// empty, stale index, or probe failure), we return absoluteIndex unchanged —
+// the pre-fix behavior, which is never worse than before and avoids breaking
+// burn-in entirely on a probe hiccup.
+func SubtitleRelativeIndex(tracks []models.SubtitleTrack, absoluteIndex int) int {
+	for rel, t := range tracks {
+		if t.Index == absoluteIndex {
+			return rel
+		}
+	}
+	return absoluteIndex
+}
+
 // BurnInArgs returns FFmpeg filter arguments to burn subtitles into the video stream.
-// For embedded subs, streamIndex is the subtitle stream index within the container.
-// For external subs, externalPath is the path to the .srt/.ass/.ssa file.
+// For embedded subs, streamIndex is the ABSOLUTE ffprobe stream index within the
+// container; it is translated to the subtitle-relative index the `subtitles`
+// filter requires (audit MED). For external subs, externalPath is the path to
+// the .srt/.ass/.ssa file.
 // These args are designed to be appended to the -vf filter chain.
 //
 // Note: burn-in happens when the client can't render subtitles natively (e.g.,
@@ -664,9 +691,17 @@ func BurnInArgs(mediaPath string, streamIndex int, externalPath string) []string
 		return []string{"-vf", fmt.Sprintf("subtitles=%s", escaped)}
 	}
 
-	// Embedded subtitle — reference the input file and stream index
+	// Embedded subtitle — reference the input file and stream index. The
+	// `subtitles` filter's stream_index is subtitle-relative, so probe the
+	// file's subtitle streams and map the absolute index across. On any probe
+	// failure ProbeSubtitles returns no tracks and SubtitleRelativeIndex falls
+	// back to the absolute index (pre-fix behavior).
+	relIndex := streamIndex
+	if tracks, _ := ProbeSubtitles(context.Background(), mediaPath); len(tracks) > 0 {
+		relIndex = SubtitleRelativeIndex(tracks, streamIndex)
+	}
 	escaped := escapeFFmpegPath(mediaPath)
-	return []string{"-vf", fmt.Sprintf("subtitles=%s:stream_index=%d", escaped, streamIndex)}
+	return []string{"-vf", fmt.Sprintf("subtitles=%s:stream_index=%d", escaped, relIndex)}
 }
 
 // BurnInBitmapArgs returns FFmpeg filter arguments to burn bitmap-based subtitles

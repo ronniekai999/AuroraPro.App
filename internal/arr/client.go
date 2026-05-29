@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -87,7 +88,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		// MED finding 2: NewRequestWithContext failures (e.g. a malformed URL)
+		// embed reqURL — the internal ARR host:port — in their error. Log the
+		// detail server-side but hand the caller a generic message, since this
+		// error can reach a non-admin requester via request.error_message.
+		slog.Error("arr: failed to build request", "method", method, "url", reqURL, "error", err)
+		return nil, fmt.Errorf("failed to build request to media service")
 	}
 
 	req.Header.Set("X-Api-Key", c.apiKey)
@@ -96,7 +102,13 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		// MED finding 2: the transport error from Do is a *url.Error whose text
+		// includes reqURL (e.g. `Get "http://10.0.0.5:7878/...": dial tcp ...`).
+		// That internal host:port must never surface to the requester through
+		// request.error_message, so log the full detail server-side and return
+		// a generic, URL-free error to the caller.
+		slog.Error("arr: request transport error", "method", method, "url", reqURL, "error", err)
+		return nil, fmt.Errorf("could not reach media service")
 	}
 	defer resp.Body.Close()
 
