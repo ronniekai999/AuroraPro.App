@@ -90,7 +90,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (*models.Use
 	err := q.pool.QueryRow(ctx,
 		`SELECT id, username, email, password_hash, role, COALESCE(avatar_url, ''),
 			created_at, updated_at, token_version, oauth_provider, oauth_subject
-		 FROM users WHERE email = $1`,
+		 FROM users WHERE LOWER(email) = LOWER($1)`,
 		email,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Role, &user.AvatarURL,
 		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject)

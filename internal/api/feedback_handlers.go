@@ -259,6 +259,14 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 		slog.Warn("feedback: ffmpeg not in PATH — WebM uploads will be served as-is (unseekable in some browsers)",
 			"hint", "install ffmpeg to enable Matroska container repair for screen recordings")
 	}
+	// 2026-05-29 (deep-debug H3) — bug-report attachments (screenshots and up
+	// to 30s screen recordings) are served unauthenticated via unguessable
+	// capability URLs and linked from the GitHub issue body, so anyone with the
+	// issue URL can fetch them. Surface this at boot so operators keep the
+	// bug-report repository PRIVATE.
+	if cfg.Enabled {
+		slog.Warn("feedback: attachments (incl. screen recordings) are served via unguessable public URLs embedded in GitHub issues — ensure the bug-report repository is PRIVATE so recordings aren't retrievable by anyone with the issue URL")
+	}
 	h := &FeedbackHandler{
 		cfg:                    cfg,
 		cacheDir:               filepath.Join(imageDir, "bug-reports"),
@@ -1058,10 +1066,14 @@ func (h *FeedbackHandler) ServeAttachment(w http.ResponseWriter, r *http.Request
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Disposition", `inline; filename="`+name+`"`)
 	// 2026-05-27 (deep-debug #14) — shorter origin TTL (1h) so
-	// admin deletions propagate quickly; CDNs may still hold for a
-	// day via s-maxage. Was 30d (`max-age=2592000`), which made
+	// admin deletions propagate quickly; CDNs may still hold IMAGES for
+	// a day via s-maxage. Was 30d (`max-age=2592000`), which made
 	// after-the-fact deletion effectively impossible.
-	w.Header().Set("Cache-Control", attachmentCacheControl)
+	// 2026-05-29 (deep-debug H3) — video screen recordings get
+	// private/no-store so a shared CDN never caches potentially-
+	// sensitive on-screen content; only images keep the shared cache
+	// (GitHub's Camo proxy needs to fetch them).
+	w.Header().Set("Cache-Control", attachmentCacheControlFor(name))
 	http.ServeContent(w, r, name, info.ModTime(), f)
 }
 
@@ -1451,6 +1463,18 @@ func mimeForAttachment(name string) string {
 	}
 }
 
+// attachmentCacheControlFor picks the Cache-Control policy for a served
+// attachment. Images use the shared-cacheable policy so GitHub's Camo image
+// proxy can fetch and cache them when rendering the issue. Video screen
+// recordings — which can capture other on-screen content — must NEVER sit in a
+// shared CDN cache, so they get a private, no-store policy. deep-debug H3.
+func attachmentCacheControlFor(name string) string {
+	if strings.HasPrefix(mimeForAttachment(name), "video/") {
+		return "private, no-store"
+	}
+	return attachmentCacheControl
+}
+
 // buildIssueBody composes the GitHub issue body. Description is the
 // lede; submitter context goes at the bottom. Attachment URL renders
 // as a Markdown image embed (GitHub's renderer auto-detects video
@@ -1837,8 +1861,8 @@ func (n *networkEntry) UnmarshalJSON(data []byte) error {
 	n.method = sanitizeDiagnosticString(strings.ToUpper(raw.Method), 16)
 	n.url = sanitizeDiagnosticString(raw.URL, maxNetworkURLChars)
 	n.status = clampInt(raw.Status, 0, 999)
-	n.durationMs = clampInt(raw.DurationMs, 0, 3600_000)         // cap at 1h
-	n.responseSize = clampInt64(raw.ResponseSize, 0, 1<<40)      // 1 TiB
+	n.durationMs = clampInt(raw.DurationMs, 0, 3600_000)    // cap at 1h
+	n.responseSize = clampInt64(raw.ResponseSize, 0, 1<<40) // 1 TiB
 	return nil
 }
 
@@ -1926,11 +1950,11 @@ func parseNetworkEntries(raw string) []networkEntry {
 
 // sanitizeDiagnosticString — like sanitizeContextField but with two
 // extra protections for diagnostic content:
-//   1. Strip backtick FENCES (``` and ```) that would break out of
-//      the issue body's code-block render. Single backticks are
-//      preserved (they're inside the code block, not closing it).
-//   2. Hard rune-cap at the supplied limit (sanitizeContextField
-//      caps at 500; diagnostic content has larger caps).
+//  1. Strip backtick FENCES (``` and ```) that would break out of
+//     the issue body's code-block render. Single backticks are
+//     preserved (they're inside the code block, not closing it).
+//  2. Hard rune-cap at the supplied limit (sanitizeContextField
+//     caps at 500; diagnostic content has larger caps).
 func sanitizeDiagnosticString(v string, maxRunes int) string {
 	v = strings.TrimSpace(v)
 	if v == "" {

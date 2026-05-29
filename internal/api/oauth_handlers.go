@@ -594,6 +594,11 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 // render a friendly message.
 func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, profile *OAuthProfile, inviteClaimID int64) (user *models.User, isNewUser bool, err error) {
 	providerName := provider.Name()
+	// Canonicalize the provider email so Tier-2 auto-link (case-insensitive
+	// GetUserByEmail) and Tier-3 CreateOAuthUser store/look up a consistent
+	// identity. Without this a case variant created a duplicate account and
+	// slipped past the email-collision anti-hijack safety net. deep-debug H1.
+	profile.Email = normalizeEmail(profile.Email)
 
 	// Tier 1: existing OAuth link.
 	if existing, lerr := h.queries.GetUserByOAuth(ctx, providerName, profile.Subject); lerr != nil {
@@ -706,7 +711,7 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 		//
 		// The constraint name varies by Postgres version + migration
 		// — covers `users_email_key`, the more recent
-		// `idx_users_email_lower` (Phase 5 unique-on-lower index),
+		// `idx_users_email_lower` (migration 028 unique-on-lower index),
 		// and any future `email` substring. Defensive matching.
 		if isEmailUniqueConstraint(pgErr.ConstraintName) {
 			return nil, false, fmt.Errorf("an account with email %s already exists. Sign in with your password first, then link %s from your profile", profile.Email, providerName)

@@ -150,10 +150,12 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 
 	// Phase 1: Walk all paths and collect video files
 	var allFiles []string
+	walkFailed := false
 	for _, rootPath := range lib.Paths {
 		files, err := collectVideoFiles(rootPath)
 		if err != nil {
 			slog.Error("walk path failed", "path", rootPath, "error", err)
+			walkFailed = true
 			continue
 		}
 		allFiles = append(allFiles, files...)
@@ -169,11 +171,22 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Phase 1b: Prune files that exist in the DB but are no longer on disk.
 	// This handles the case where a user deletes a file between scans —
 	// without this step, the stale DB row would persist indefinitely.
-	pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles)
-	if pruneErr != nil {
-		slog.Error("prune deleted files failed", "library", lib.Name, "error", pruneErr)
-	} else if pruned > 0 {
-		slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
+	//
+	// deep-debug H9 — only prune when EVERY path walked cleanly. A transient
+	// mount/permission failure (NFS/SMB unmounted, removable drive absent)
+	// makes collectVideoFiles error for that path, leaving allFiles missing
+	// its entries; pruning then would delete every DB file row under it. Skip
+	// pruning entirely on any walk error rather than risk wiping the catalog.
+	if walkFailed {
+		slog.Warn("skipping prune: one or more library paths failed to walk (transient mount/permission issue?) — leaving DB file rows intact",
+			"library", lib.Name)
+	} else {
+		pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles)
+		if pruneErr != nil {
+			slog.Error("prune deleted files failed", "library", lib.Name, "error", pruneErr)
+		} else if pruned > 0 {
+			slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
+		}
 	}
 
 	// Phase 2: Process files concurrently with bounded goroutines

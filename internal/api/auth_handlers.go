@@ -198,6 +198,11 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Canonicalize the email before validation + storage so case/whitespace
+	// variants collapse to one identity (paired with migration 028's
+	// LOWER(email) unique index and the case-insensitive GetUserByEmail).
+	// deep-debug H1.
+	req.Email = normalizeEmail(req.Email)
 	// Basic email format validation
 	if !isValidEmail(req.Email) {
 		writeError(w, http.StatusBadRequest, "invalid email format")

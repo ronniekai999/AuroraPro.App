@@ -509,6 +509,28 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Minute)
 	defer cancel()
 
+	// Validate the upload is actually restorable BEFORE the destructive wipe.
+	// The leading-magic + min-size checks above only prove the first bytes
+	// look like a custom dump; `pg_restore --list` parses the archive header +
+	// table-of-contents and fails fast on a truncated, corrupt, or version-
+	// incompatible archive WITHOUT touching the database. Without this, a
+	// plausible-but-unrestorable upload wiped the schema and then failed in
+	// pg_restore, leaving the DB empty with no recovery point. deep-debug H8.
+	listCmd := exec.CommandContext(ctx, "pg_restore", "--list", tmpPath)
+	var listStderr strings.Builder
+	listCmd.Stderr = &limitedStringWriter{w: &listStderr, max: 16 * 1024}
+	if err := listCmd.Run(); err != nil {
+		stderrTail := strings.TrimSpace(listStderr.String())
+		slog.Warn("restore rejected: pg_restore --list could not read the archive (database NOT modified)",
+			"err", err, "stderr", stderrTail)
+		msg := "upload is not a readable pg_dump custom archive (pg_restore --list failed) — the database was NOT modified"
+		if stderrTail != "" {
+			msg += ": " + stderrTail
+		}
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+
 	// Phase 1 — wipe the existing schema. Without this, the restore
 	// would fail on "relation already exists" for every table.
 	//
