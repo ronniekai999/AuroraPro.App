@@ -1163,8 +1163,20 @@ info "Writing $CONFIG_DIR/aurora.env..."
     printf 'CACHE_IMAGE_DIR=%s\n' "$CACHE_DIR/images"
     printf 'CACHE_TRANSCODE_DIR=%s\n' "$TRANSCODE_DIR"
     printf 'CACHE_SUBTITLE_DIR=%s\n' "$CACHE_DIR/subtitles"
-    printf '\n# CORS / WebSocket allowed origins (auth is still JWT-enforced)\n'
-    printf 'AURORA_ALLOWED_ORIGINS=*\n'
+    # deep-debug (insecure-by-default) — do NOT default to '*'. A wildcard
+    # origin combined with AllowCredentials=true is a CORS misconfiguration;
+    # since auth moved to cookies (H10) it matters more. Default to the real
+    # deployment origin: the domain when AURORA_DOMAIN is set, else localhost
+    # globs (matching the Go config default). Same-origin requests — the SPA
+    # itself, reached by any host/IP — are always allowed regardless, so this
+    # only constrains genuine cross-origin callers. The AURORA_DOMAIN proxy
+    # flow (Step 5) also pins this to https://<domain>.
+    printf '\n# CORS / WebSocket allowed origins (comma-separated; same-origin always allowed)\n'
+    if [ -n "${AURORA_DOMAIN:-}" ]; then
+        printf 'AURORA_ALLOWED_ORIGINS=https://%s\n' "$AURORA_DOMAIN"
+    else
+        printf 'AURORA_ALLOWED_ORIGINS=http://localhost:*,https://localhost:*\n'
+    fi
     printf '\n# Logging\n'
     printf 'LOG_DIR=%s\n' "$LOG_DIR"
     printf 'LOG_LEVEL=info\n'
