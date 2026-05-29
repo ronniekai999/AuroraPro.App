@@ -508,6 +508,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// attacker. Its own limiter (audit MED) so it doesn't share a
 				// budget with login/refresh.
 				r.With(deps.ChangePasswordLimiter.Middleware).Post("/change-password", authH.ChangePassword)
+
+				// Multi-provider OAuth account linking (audit carve-out D).
+				// Authenticated: a signed-in user lists/connects/disconnects
+				// their linked providers. The link START sets a server-side
+				// link-uid cookie that flips the PUBLIC /oauth/{provider}/callback
+				// above into link mode (handleLinkCallback) instead of login.
+				// DELETE refuses to remove the user's last sign-in method.
+				r.Get("/oauth/links", oauthH.LinksStatus)
+				r.Post("/oauth/{provider}/link", oauthH.StartLink)
+				r.Delete("/oauth/{provider}/link", oauthH.Unlink)
 			})
 		})
 

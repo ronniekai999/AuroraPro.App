@@ -35,6 +35,22 @@ type User struct {
 	OAuthSubject  *string `json:"-"`
 }
 
+// OAuthIdentity is one row of the oauth_identities table (migration 031) — a
+// single (provider, subject) link belonging to a user. Multiple rows per user
+// (one per provider) is the whole point: it's what lets an account link both
+// Google and Discord. This table is the authoritative source for OAuth-login
+// resolution; the legacy users.oauth_provider/oauth_subject columns are a
+// best-effort mirror of the primary identity only. Subject is omitted from
+// JSON (the provider's opaque user ID is not useful to the SPA and leaking it
+// serves no purpose).
+type OAuthIdentity struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Provider  string    `json:"provider"`
+	Subject   string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type RefreshToken struct {
 	ID         int64     `json:"id"`
 	UserID     int64     `json:"user_id"`
