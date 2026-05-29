@@ -1,0 +1,59 @@
+package watchparty
+
+import "testing"
+
+// TestV3_FireScheduledStart_DrivesV3Playback is the regression test for audit
+// H6. A host-scheduled countdown firing must drive the V3 playback path
+// (Running + tick loop), not the dead V2 state machine. Before the fix,
+// fireScheduledStart called HandlePlaybackControl, which only mutated the
+// unused V2 tri-state: ps.Running stayed false and the tick loop never
+// started, so V3 clients (the only live transport) showed "Starting now!" and
+// then sat paused at the anchor forever.
+func TestV3_FireScheduledStart_DrivesV3Playback(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED1", 1)
+
+	m.fireScheduledStart("SCHED1")
+
+	ps.mu.Lock()
+	started := ps.StartedAt != nil
+	running := ps.Running
+	hasTick := ps.tickCancel != nil
+	m.stopTickLoopLocked(ps) // cleanup; contract requires the caller hold ps.mu
+	ps.mu.Unlock()
+
+	if !started {
+		t.Error("StartedAt is nil after fireScheduledStart; want set")
+	}
+	if !running {
+		t.Error("Running=false after scheduled start; want true (V3 playback never engaged)")
+	}
+	if !hasTick {
+		t.Error("tickCancel is nil after scheduled start; the tick loop did not start")
+	}
+}
+
+// TestV3_FireScheduledStart_Dedup verifies the StartedAt guard: a second fire
+// (e.g. timer fired after a manual play already started the party) is a no-op
+// and does not restart the tick loop.
+func TestV3_FireScheduledStart_Dedup(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED2", 1)
+
+	m.fireScheduledStart("SCHED2")
+	ps.mu.Lock()
+	firstStart := ps.StartedAt // *time.Time — pointer identity proves no re-stamp
+	ps.mu.Unlock()
+
+	m.fireScheduledStart("SCHED2") // second fire — should dedup on StartedAt
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	m.stopTickLoopLocked(ps)
+	if ps.StartedAt != firstStart {
+		t.Error("StartedAt was re-stamped on the second fire; dedup guard failed")
+	}
+	if !ps.Running {
+		t.Error("Running flipped to false after a deduped second fire; want still true")
+	}
+}

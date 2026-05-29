@@ -647,6 +647,13 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = h.queries.RevokeAllUserTokens(r.Context(), id)
+	if h.tokenVerStore != nil {
+		// Drop any cached token_version so the next request bearing the
+		// deleted user's still-unexpired access token hits the DB and gets the
+		// fail-closed -1 sentinel immediately, rather than matching a stale
+		// cached value for up to the cache TTL. See audit H2.
+		h.tokenVerStore.Invalidate(id)
+	}
 	if h.activity != nil {
 		h.activity.LogUserDeleted(r.Context(), claims.UserID, id, clientIP(r))
 	}

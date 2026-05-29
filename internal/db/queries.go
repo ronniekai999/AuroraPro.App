@@ -270,7 +270,14 @@ func (q *Queries) GetUserTokenVersion(ctx context.Context, id int64) (int, error
 	).Scan(&v)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return 0, nil // user deleted — version 0 ensures tokens fail downstream comparison
+			// User deleted. Return a sentinel no real token can carry so the
+			// downstream version check FAILS CLOSED. token_version starts at 0
+			// and only ever increments, so a JWT's claim is always >= 0 and can
+			// never equal -1. The old behavior (return 0) made the check PASS
+			// for any deleted user whose token_version was still the default 0
+			// — i.e. a just-deleted account (including a deleted admin) kept
+			// full API access until its access token expired. See audit H2.
+			return -1, nil
 		}
 		return 0, fmt.Errorf("get user token_version: %w", err)
 	}
