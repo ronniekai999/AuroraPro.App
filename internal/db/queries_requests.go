@@ -207,6 +207,43 @@ func (q *Queries) GetProcessingRequests(ctx context.Context) ([]models.Request, 
 	return requests, rows.Err()
 }
 
+// GetStalePendingRequests returns requests stuck in 'pending' whose
+// requested_at is older than olderThan. A request only stays 'pending' if its
+// fire-and-forget dispatch goroutine never completed — i.e. the process
+// crashed/restarted or graceful shutdown cancelled the root context between the
+// INSERT and dispatchToARR finishing. A live dispatch resolves to 'processing'
+// or 'failed' within its 30s timeout, so anything still pending well past that
+// window was orphaned and must be re-dispatched. See audit H4.
+func (q *Queries) GetStalePendingRequests(ctx context.Context, olderThan time.Time) ([]models.Request, error) {
+	rows, err := q.pool.Query(ctx,
+		`SELECT `+requestColumns+`
+		 FROM requests
+		 WHERE status = 'pending' AND requested_at < $1
+		 ORDER BY requested_at ASC`,
+		olderThan,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get stale pending requests: %w", err)
+	}
+	defer rows.Close()
+
+	var requests []models.Request
+	for rows.Next() {
+		var r models.Request
+		err := rows.Scan(
+			&r.ID, &r.UserID, &r.MediaType, &r.TMDBID, &r.Title,
+			&r.PosterPath, &r.Overview, &r.Year, &r.Status,
+			&r.Quality1080p, &r.Quality4K, &r.ArrJobIDs, &r.ErrorMessage,
+			&r.RequestedAt, &r.ProcessedAt, &r.CompletedAt, &r.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan request row: %w", err)
+		}
+		requests = append(requests, r)
+	}
+	return requests, rows.Err()
+}
+
 // GetRequestCountByStatus returns the count of requests with the given status.
 func (q *Queries) GetRequestCountByStatus(ctx context.Context, status string) (int64, error) {
 	var count int64

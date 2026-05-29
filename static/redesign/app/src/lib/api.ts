@@ -1496,9 +1496,13 @@ export async function deleteRoom(id: number): Promise<void> {
 }
 
 // Phase 4.6 — highlight reel. Auto-generated server-side at party-
-// end (M9). Just need the URL; the server streams MP4. Token rides
-// via the standard withToken helper since /api/parties/{code}/
-// highlight.mp4 is on the streaming token-promotion whitelist.
+// end (M9). The server streams the MP4. The access token rides via
+// withToken's ?token= because an <a href> download can't carry an
+// Authorization header; the router's token-promotion middleware
+// (shouldPromoteToken) explicitly promotes
+// /api/parties/{code}/highlight.mp4 so the request authenticates.
+// (Audit H11: this path was previously NOT on the promotion list, so
+// the link always 401'd — the reel never downloaded.)
 export function highlightReelURL(code: string): string {
   return withToken(`/api/parties/${encodeURIComponent(code)}/highlight.mp4`)
 }

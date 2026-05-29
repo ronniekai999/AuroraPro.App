@@ -344,6 +344,28 @@ func maskAPIKey(s string) string {
 	return s[:4] + strings.Repeat("*", len(s)-8) + s[len(s)-4:]
 }
 
+// secretSettingSuffixes enumerates the server_settings key suffixes whose
+// values are credentials and must never be returned to a client in cleartext
+// — even to an admin. GetSettings masks any key matching one of these. It is a
+// suffix denylist rather than an allowlist of the few non-secret keys because
+// secret keys are added far more often than this rule is revisited; defaulting
+// to "mask" is the safe failure mode (a forgotten non-secret key shows masked,
+// which is harmless, vs. a forgotten secret key leaking raw).
+var secretSettingSuffixes = []string{
+	"_api_key", "_client_secret", "_secret", "_password", "_token", "_credential",
+}
+
+// isSecretSettingKey reports whether a server_settings key holds a credential
+// that must be masked before serialization. See audit H7.
+func isSecretSettingKey(key string) bool {
+	for _, suffix := range secretSettingSuffixes {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // EmbeddingStatus reports backfill progress for the admin dashboard:
 // {enabled, version, total, embedded, pending}. Cheap (one COUNT...FILTER
 // query) — safe to poll every few seconds during initial backfill.
@@ -490,22 +512,22 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 	type unifiedSession struct {
 		// Common fields
-		ID       string    `json:"id"`
-		Kind     string    `json:"kind"` // "transcode" or "direct"
-		UserID   int64     `json:"user_id"`
-		Username string    `json:"username,omitempty"`
-		FileName string    `json:"file_name"`
+		ID        string    `json:"id"`
+		Kind      string    `json:"kind"` // "transcode" or "direct"
+		UserID    int64     `json:"user_id"`
+		Username  string    `json:"username,omitempty"`
+		FileName  string    `json:"file_name"`
 		StartedAt time.Time `json:"started_at"`
 		// Transcode-only
-		Resolution string                       `json:"resolution,omitempty"`
-		Profiles   []streaming.QualityProfile   `json:"profiles,omitempty"`
-		Variants   []string                     `json:"active_variants,omitempty"`
-		Resources  *streaming.SessionResources  `json:"resources,omitempty"`
-		Remux      bool                         `json:"remux,omitempty"`
+		Resolution string                      `json:"resolution,omitempty"`
+		Profiles   []streaming.QualityProfile  `json:"profiles,omitempty"`
+		Variants   []string                    `json:"active_variants,omitempty"`
+		Resources  *streaming.SessionResources `json:"resources,omitempty"`
+		Remux      bool                        `json:"remux,omitempty"`
 		// Direct-play only
-		FileType  string `json:"file_type,omitempty"`
-		FileID    int64  `json:"file_id,omitempty"`
-		Decision  string `json:"decision,omitempty"`
+		FileType string `json:"file_type,omitempty"`
+		FileID   int64  `json:"file_id,omitempty"`
+		Decision string `json:"decision,omitempty"`
 	}
 
 	tc := h.transcode.ListSessions()
@@ -595,9 +617,14 @@ func (h *AdminHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
 	if settings == nil {
 		settings = []*models.ServerSetting{}
 	}
-	// Mask API keys in response
+	// Mask every secret-bearing setting in the response. This previously
+	// matched only the `_api_key` suffix, which silently leaked the OAuth
+	// client secrets (stored as `oauth_*_client_secret`) in cleartext to any
+	// caller of GET /api/admin/settings — see audit H7. isSecretSettingKey
+	// covers all credential suffixes so a newly-added secret key is masked by
+	// default rather than leaking until someone remembers to extend a list.
 	for _, s := range settings {
-		if strings.HasSuffix(s.Key, "_api_key") && s.Value != "" {
+		if isSecretSettingKey(s.Key) && s.Value != "" {
 			// Unify on the same masking helper used for LLM keys so a partial
 			// (<= 4 char) test key never leaks raw to the admin UI.
 			s.Value = maskAPIKey(s.Value)

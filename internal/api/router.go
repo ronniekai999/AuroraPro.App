@@ -49,7 +49,14 @@ func shouldPromoteToken(path string) bool {
 	return strings.HasPrefix(path, "/ws") ||
 		strings.HasPrefix(path, "/api/stream/") ||
 		strings.HasPrefix(path, "/api/images/") ||
-		path == "/api/admin/backup"
+		path == "/api/admin/backup" ||
+		// Highlight-reel download. Opened via an <a href> in a new tab (same
+		// constraint as /api/admin/backup — anchors can't carry an
+		// Authorization header), so the access token rides as ?token= and is
+		// promoted here. Without this the route, which sits in the RequireAuth
+		// group, always 401'd. Scoped to the .mp4 suffix so other
+		// /api/parties/ endpoints keep header-only auth. See audit H11.
+		(strings.HasPrefix(path, "/api/parties/") && strings.HasSuffix(path, "/highlight.mp4"))
 }
 
 // GetDiskFreeGB returns available disk space in gigabytes for the filesystem
@@ -326,6 +333,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	requestH := NewRequestHandler(deps.Queries, deps.Hub, deps.Activity, deps.ArrClients, deps.Tmdb, deps.Tvdb)
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
+		// Reconcile requests orphaned in 'pending' by a dispatch goroutine that
+		// was interrupted by a crash/restart, so they don't strand forever
+		// (and block re-requests via the active-duplicate guard). See audit H4.
+		go requestH.StartPendingRecovery(deps.RootCtx)
 	}
 	// Bug-report (Phase 1+). Constructor returns a handler even when
 	// the feature is disabled — its routes self-gate via cfg.Enabled

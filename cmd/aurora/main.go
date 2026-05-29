@@ -662,12 +662,16 @@ func main() {
 	}
 	go partyManager.CleanupStale(ctx)
 
-	// Request monitor: polls ARR services for processing request completion
-	if arrClients.Enabled() {
-		requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner)
-		go requestMonitor.Start(ctx)
-		slog.Info("request monitor started")
-	}
+	// Request monitor: polls ARR services for processing request completion.
+	// Started UNCONDITIONALLY (not gated on arrClients.Enabled() at boot) so
+	// that enabling the requests feature at runtime via the admin panel — which
+	// flips arrClients.SetEnabled(true) without a restart — doesn't leave
+	// newly-created requests stuck in 'processing' forever with no poller. The
+	// monitor idles at the slow (60s) cadence when nothing is processing and
+	// no-ops when ARR is unconfigured, so an always-on monitor is cheap. See
+	// audit H5.
+	requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner)
+	go requestMonitor.Start(ctx)
 
 	// Locate static files directory for frontend SPA
 	staticDir := findStaticDir()

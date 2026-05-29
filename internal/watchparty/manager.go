@@ -1362,11 +1362,18 @@ func (m *Manager) fireScheduledStart(code string) {
 	})
 	ps.mu.Unlock()
 
-	// Engage playback via the existing play path. This routes through
-	// transitionToWaitingLocked → Ready protocol so all clients converge
-	// at the start position before actually playing — same UX as the
-	// host pressing play manually.
-	if err := m.HandlePlaybackControl(code, ps.HostUserID, "play", 0); err != nil {
+	// Engage playback via the V3 intent path. The live transport is V3-only
+	// (only /ws/party-sync and /ws/party-room are mounted), so playback must
+	// run through HandleRequestPlay: it sets the anchor Running, starts the
+	// per-party tick loop, and emits a synthetic tick that drives V3 clients to
+	// actually play. The previous HandlePlaybackControl("play") call only
+	// mutated the dead V2 tri-state and never started the tick loop, so V3
+	// clients showed "Starting now!" and then sat paused at the anchor forever
+	// — the entire host-scheduled countdown was a no-op for real clients. See
+	// audit H6. (If SpoilerFreeStart is on and a non-host participant hasn't
+	// readied up, HandleRequestPlay returns a "waiting for: …" error and
+	// playback holds — identical semantics to the host pressing play manually.)
+	if err := m.HandleRequestPlay(code, ps.HostUserID); err != nil {
 		slog.Warn("scheduled-start play failed", "code", code, "error", err)
 	}
 

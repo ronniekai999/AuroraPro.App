@@ -377,6 +377,66 @@ func (h *RequestHandler) dispatchToARR(req *models.Request) {
 	h.broadcastRequestStatus(req, models.RequestProcessing)
 }
 
+// pendingRecoveryGrace is how long a request may sit in 'pending' before the
+// recovery sweep treats its dispatch goroutine as orphaned. It comfortably
+// exceeds dispatchToARR's 30s timeout so a live, in-flight dispatch is never
+// re-fired underneath itself.
+const pendingRecoveryGrace = 2 * time.Minute
+
+// pendingRecoveryInterval is the cadence of the periodic recovery sweep after
+// the initial post-boot pass.
+const pendingRecoveryInterval = 5 * time.Minute
+
+// StartPendingRecovery reconciles requests orphaned in 'pending' by an
+// interrupted dispatch goroutine — the process crashed/restarted or graceful
+// shutdown cancelled the root context between Create's INSERT and dispatchToARR
+// finishing. Without this, such a request is stranded forever ('pending' is
+// never re-examined by the monitor, which only polls 'processing'), and because
+// RequestExistsActive treats 'pending' as active the user can't even re-request
+// it. The sweep runs once shortly after boot and then periodically until ctx is
+// cancelled. Re-dispatch is safe: dispatchToARR re-confirms the row still
+// exists and Radarr/Sonarr de-dupe by TMDB id. See audit H4. Run in a
+// goroutine: go h.StartPendingRecovery(ctx).
+func (h *RequestHandler) StartPendingRecovery(ctx context.Context) {
+	// Brief initial delay so boot-time dispatches and the DB pool settle
+	// before the first sweep (and so a request created seconds before a clean
+	// restart isn't re-fired prematurely — the grace window guards that too).
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			h.recoverStalePending(ctx)
+			timer.Reset(pendingRecoveryInterval)
+		}
+	}
+}
+
+// recoverStalePending finds pending requests older than the grace window and
+// re-runs their ARR dispatch sequentially (sequential, not fan-out, to avoid
+// hammering Radarr/Sonarr on a backlog).
+func (h *RequestHandler) recoverStalePending(ctx context.Context) {
+	cutoff := time.Now().Add(-pendingRecoveryGrace)
+	stale, err := h.queries.GetStalePendingRequests(ctx, cutoff)
+	if err != nil {
+		slog.Error("pending-request recovery: query failed", "error", err)
+		return
+	}
+	if len(stale) == 0 {
+		return
+	}
+	slog.Info("pending-request recovery: re-dispatching orphaned requests", "count", len(stale))
+	for i := range stale {
+		if ctx.Err() != nil {
+			return
+		}
+		req := stale[i]
+		h.dispatchToARR(&req)
+	}
+}
+
 // dispatchMovie sends a movie request to Radarr.
 // When both 1080p and 4K are requested, dispatches to both instances.
 func (h *RequestHandler) dispatchMovie(ctx context.Context, req *models.Request, arrJobIDs *string) error {
