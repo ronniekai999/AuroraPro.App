@@ -198,9 +198,27 @@ func main() {
 		watcher.SetScanInterval(6 * time.Hour)
 	}
 
-	// Rate limiter for public auth endpoints
-	authLimiter := auth.NewRateLimiter(10, time.Minute)
-	defer authLimiter.Stop()
+	// Rate limiters for public/sensitive auth endpoints. Split into separate
+	// instances (audit MED — shared-budget starvation) so high-volume refresh
+	// traffic can't drain the budget that protects login/register from
+	// credential guessing. Each owns its own per-IP bucket map.
+	//
+	//   loginLimiter  — login + register. Tight (10/min/IP): the credential-
+	//                   guessing surface.
+	//   refreshLimiter — refresh + logout. Roomier (60/min/IP): a single client
+	//                   can legitimately rotate tokens often (multiple tabs,
+	//                   reconnects), and neither endpoint guesses a credential,
+	//                   so a wider budget here is safe and stops refresh churn
+	//                   from eating the login budget.
+	//   pwChangeLimiter — change-password. Modest (10/min/IP): already authed +
+	//                   Argon2id-gated, but still capped against a stolen-token
+	//                   brute-force over the access-token lifetime.
+	loginLimiter := auth.NewRateLimiter(10, time.Minute)
+	defer loginLimiter.Stop()
+	refreshLimiter := auth.NewRateLimiter(60, time.Minute)
+	defer refreshLimiter.Stop()
+	pwChangeLimiter := auth.NewRateLimiter(10, time.Minute)
+	defer pwChangeLimiter.Stop()
 
 	// Phase 2: TMDB metadata client
 	tmdbClient := metadata.NewTMDBClient(cfg.TMDB.APIKey, cfg.TMDB.Language)
@@ -696,32 +714,34 @@ func main() {
 
 	// Router
 	router := api.NewRouter(api.RouterDeps{
-		Cfg:              cfg,
-		AuthSvc:          authSvc,
-		Queries:          queries,
-		Scanner:          scanner,
-		Hub:              hub,
-		AuthLimiter:      authLimiter,
-		Watcher:          watcher,
-		Enricher:         enricher,
-		ImgProxy:         imgProxy,
-		Transcode:        transcode,
-		DirectPlay:       directPlay,
-		Activity:         activity,
-		RingLog:          ringLog,
-		Pool:             pool,
-		StartTime:        startTime,
-		Version:          version,
-		StaticDir:        staticDir,
-		ArrClients:       arrClients,
-		PartyManager:     partyManager,
-		Tmdb:             tmdbClient,
-		Tvdb:             tvdbClient,
-		Semantic:         apiSemantic,
-		HeroProv:         apiHero,
-		EmbeddingEnabled: cfg.LLM.Enabled && embedder != nil,
-		EmbeddingVersion: embedding.CurrentVersion,
-		LLMClient:        llmClient,
+		Cfg:                   cfg,
+		AuthSvc:               authSvc,
+		Queries:               queries,
+		Scanner:               scanner,
+		Hub:                   hub,
+		LoginLimiter:          loginLimiter,
+		RefreshLimiter:        refreshLimiter,
+		ChangePasswordLimiter: pwChangeLimiter,
+		Watcher:               watcher,
+		Enricher:              enricher,
+		ImgProxy:              imgProxy,
+		Transcode:             transcode,
+		DirectPlay:            directPlay,
+		Activity:              activity,
+		RingLog:               ringLog,
+		Pool:                  pool,
+		StartTime:             startTime,
+		Version:               version,
+		StaticDir:             staticDir,
+		ArrClients:            arrClients,
+		PartyManager:          partyManager,
+		Tmdb:                  tmdbClient,
+		Tvdb:                  tvdbClient,
+		Semantic:              apiSemantic,
+		HeroProv:              apiHero,
+		EmbeddingEnabled:      cfg.LLM.Enabled && embedder != nil,
+		EmbeddingVersion:      embedding.CurrentVersion,
+		LLMClient:             llmClient,
 		// aiBackfill is nil when LLM is disabled OR matching subsystem
 		// failed to construct. Router's nil check converts that to a
 		// 503 from the rematch endpoints — same shape as the

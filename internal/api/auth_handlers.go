@@ -416,6 +416,19 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rt == nil {
+		// Audit M-refresh — a token that hashes to nothing in the table was
+		// presented: either already-consumed (rotated away) or forged. Both
+		// are worth a theft signal so operators can alert on replay bursts.
+		// We log the client IP (not the token itself — it's a bearer secret).
+		//
+		// NOTE: this only *signals* reuse; it cannot *contain* it. Truly
+		// revoking the active session of a stolen-then-rotated token requires
+		// a token-family (family_id) concept so we can invalidate the whole
+		// chain when any consumed member reappears. That needs a schema
+		// migration and is deferred (migration numbering is coordinated
+		// separately).
+		slog.Warn("refresh: non-matching refresh token presented (consumed or invalid) — possible replay/theft",
+			"client_ip", clientIP(r))
 		h.clearAuthCookies(w, r)
 		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
 		return
@@ -485,6 +498,19 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rt != nil {
+		// Audit M-logout — "logout = kill all sessions" requires revoking
+		// EVERY refresh token for the user, not just the one presented.
+		// RevokeAndGetRefreshToken above only consumed the submitted token,
+		// leaving other devices' refresh tokens live and renewable. Mirror
+		// the password-change path (ChangePassword) which already pairs
+		// RevokeAllUserTokens with BumpUserTokenVersion. Non-fatal on error:
+		// the submitted token IS already revoked, and the token_version bump
+		// below still neutralizes outstanding access tokens; operator sees
+		// the log.
+		if err := h.queries.RevokeAllUserTokens(r.Context(), rt.UserID); err != nil {
+			slog.Error("failed to revoke all refresh tokens on logout", "user_id", rt.UserID, "error", err)
+		}
+
 		// Bump token_version so outstanding access AND cast-scoped tokens
 		// are invalidated immediately, not just on natural expiry. Without
 		// this, a long-lived cast URL (default 4h TTL) handed to a
