@@ -1506,7 +1506,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // party (tickRef, helloAbsMsRef) are mutable across renders
   // without retriggering — exactly what we want for high-frequency
   // tick data.
-  }, [target, party, party?.isHost, party?.isPlaying, party?.partyMediaItemId])
+  //
+  // Med-fix (2026-05-29) — DROPPED the raw `party` object from the
+  // dep array. App.tsx builds the `party` prop as a fresh object
+  // literal (`party.state.code ? { … } : undefined`) on EVERY render,
+  // so depending on its identity tore this effect down + rebound it
+  // (clearing the 250ms drift interval and re-adding the play/pause/
+  // seeked listeners) on every unrelated App re-render — a chat
+  // message, a participant joining, a reaction tick. We now depend on
+  // the stable primitive fields the effect's body actually reads at
+  // bind time, plus `Boolean(party)` so the effect still re-runs when
+  // the party transitions null↔active. Everything the bound event
+  // handlers reference at event time — requestPlay/requestPause/
+  // requestSeek (stable useCallbacks over a no-dep sendOrBuffer in
+  // useParty) and tickRef/clockOffsetRef (stable useRefs) — keeps
+  // working across renders without a rebind.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId])
 
   // Phase 7 — sync custom-controls state with the <video> element.
   // We mirror playback events into React state so PlayerControls
@@ -1658,6 +1674,97 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [playing, showControlsTemporarily])
 
+  // Med-fix (2026-05-29) — single seek entry point in REAL-FILE
+  // seconds. Previously the forward-seek-rebuild logic lived ONLY in
+  // the scrub bar's inline onSeek; the +30s skip button (onSeekRelative)
+  // and the ArrowRight keyboard shortcut did a raw `vid.currentTime +=`
+  // which, on a sequential transcode, seeks PAST the FFmpeg output head
+  // and stalls hls.js indefinitely (the segment isn't on disk yet).
+  // Routing every seek through here means the skip button + ArrowRight
+  // trigger the same transcode rebuild the scrubber does, instead of
+  // stalling. `sec` is the absolute media position (REAL-FILE seconds),
+  // matching what PlayerControls' onSeek emits.
+  const seekToRealSec = useCallback((sec: number) => {
+    // Map a REAL-FILE second back into the local video element's
+    // currentTime by subtracting the session's startSec offset.
+    const vid = videoRef.current
+    if (!vid) return
+    const localSec = sec - (startSecRef.current ?? 0)
+    // Backward-seek BEFORE the session's start_sec offset isn't
+    // possible without session rebuild; clamp to the start of the
+    // local timeline.
+    if (localSec < 0) {
+      try { vid.currentTime = 0 } catch { /* defensive */ }
+      return
+    }
+    // Audit H3 fix — forward-seek past the buffered range stalls
+    // hls.js indefinitely (the transcoder is sequential; segments
+    // past the current FFmpeg output position aren't on disk yet).
+    // Two paths:
+    //
+    // 2026-05-27 (preferred) — if onSeekRebuild is wired AND this
+    // player isn't participating in a watch-party sync for THIS media,
+    // ask the parent to tear down + re-create the session anchored at
+    // the requested seconds. The play effect handles teardown /
+    // re-init the same way it does for audio-track switches. This is
+    // the Plex / Jellyfin pattern.
+    //
+    // The party gate (deep-debug M1) is intentionally narrow: blocked
+    // ONLY when the local target IS the party-tracked media. A user
+    // who joined a party but is currently watching something else
+    // locally can still rebuild — no guest is mirroring this stream
+    // so there's nothing to drift.
+    //
+    // Deep-debug H2 — boundary tolerance: a 0.5s slack ensures
+    // near-edge clicks (where users intend a forward jump but click
+    // exactly on the buffered edge) still trigger the rebuild instead
+    // of landing on the stall point.
+    //
+    // Fallback (legacy) — clamp the seek to the buffered edge and
+    // toast a status hint. Reachable in two cases now: (a) when no
+    // onSeekRebuild handler is wired (defensive — App always wires it
+    // today), and (b) when party-sync is active for this media (host
+    // rebuild would desync guests; tracked as a follow-up). See
+    // App.tsx where the player is mounted for the rebuild wiring.
+    const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
+    const isPartySyncingThisMedia = !!party
+      && party.partyMediaItemId !== undefined
+      && target?.mediaItemId === party.partyMediaItemId
+    if (safeBufferedEnd > 0 && localSec >= safeBufferedEnd - 0.5) {
+      if (onSeekRebuild && !isPartySyncingThisMedia) {
+        // No interim status — the play effect's teardown immediately
+        // re-sets status to 'Loading…' (deep-debug M2: 'Jumping to
+        // that point…' would only flash for one render frame because
+        // both setStatus calls batch together, so it's not worth
+        // setting).
+        onSeekRebuild(sec)
+        return
+      }
+      try {
+        // Land 1s back from the buffered edge to avoid landing right
+        // at the boundary where hls.js stalls waiting for the next
+        // segment.
+        vid.currentTime = Math.max(0, safeBufferedEnd - 1)
+      } catch { /* defensive */ }
+      setStatus(isPartySyncingThisMedia
+        ? 'Forward-seek past buffer blocked while syncing with the party'
+        : 'Still transcoding to that point — try again in a moment')
+      return
+    }
+    try {
+      vid.currentTime = localSec
+    } catch { /* defensive */ }
+  }, [bufferedSec, party, target, onSeekRebuild])
+
+  // Med-fix (2026-05-29) — ref mirror of seekToRealSec so the
+  // keyboard-shortcut effect (registered once per `target`, with an
+  // eslint-disabled dep array) can reach the LATEST seek logic without
+  // re-binding the listener on every bufferedSec change. Reading via
+  // ref is the same stale-closure-avoidance pattern used elsewhere in
+  // this file (playingRef, currentSubIndexRef, …).
+  const seekToRealSecRef = useRef(seekToRealSec)
+  useEffect(() => { seekToRealSecRef.current = seekToRealSec }, [seekToRealSec])
+
   // 2026-05-20 — document-level mousemove + keydown backstop.
   //
   // The wrapper-div's onMouseMove was sometimes failing to bring
@@ -1743,11 +1850,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           break
         case 'ArrowLeft':
           e.preventDefault()
-          vid.currentTime = Math.max(0, vid.currentTime - 10)
+          // Med-fix (2026-05-29) — route through the shared seek path
+          // (REAL-FILE seconds = local currentTime + startSec offset).
+          // Backward seeks just clamp; the rebuild branch is never hit
+          // going back, so this preserves the old -10s behavior.
+          seekToRealSecRef.current((vid.currentTime + (startSecRef.current ?? 0)) - 10)
           break
         case 'ArrowRight':
           e.preventDefault()
-          vid.currentTime = vid.currentTime + 10
+          // Med-fix (2026-05-29) — was a raw `vid.currentTime + 10`,
+          // which seeks past the FFmpeg output head and stalls hls.js
+          // on a sequential transcode. Routing through seekToRealSec
+          // triggers a transcode rebuild when the +10s jump lands past
+          // the buffered head, matching the scrub bar.
+          seekToRealSecRef.current((vid.currentTime + (startSecRef.current ?? 0)) + 10)
           break
         case 'ArrowUp':
           e.preventDefault()
@@ -2281,92 +2397,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   if (vid.paused) void vid.play().catch(() => { /* defensive */ })
                   else vid.pause()
                 }}
-                onSeek={(sec) => {
-                  // Map a REAL-FILE second back into the local
-                  // video element's currentTime by subtracting the
-                  // session's startSec offset.
-                  const vid = videoRef.current
-                  if (!vid) return
-                  const localSec = sec - (startSecRef.current ?? 0)
-                  // Backward-seek BEFORE the session's start_sec
-                  // offset isn't possible without session rebuild;
-                  // clamp to the start of the local timeline.
-                  if (localSec < 0) {
-                    try { vid.currentTime = 0 } catch { /* defensive */ }
-                    return
-                  }
-                  // Audit H3 fix — forward-seek past the buffered
-                  // range stalls hls.js indefinitely (the
-                  // transcoder is sequential; segments past the
-                  // current FFmpeg output position aren't on disk
-                  // yet). Two paths:
-                  //
-                  // 2026-05-27 (preferred) — if onSeekRebuild is
-                  // wired AND this player isn't participating in a
-                  // watch-party sync for THIS media, ask the parent
-                  // to tear down + re-create the session anchored at
-                  // the requested seconds. The play effect handles
-                  // teardown / re-init the same way it does for
-                  // audio-track switches. This is the Plex / Jellyfin
-                  // pattern.
-                  //
-                  // The party gate (deep-debug M1) is intentionally
-                  // narrow: blocked ONLY when the local target IS the
-                  // party-tracked media. A user who joined a party
-                  // but is currently watching something else locally
-                  // can still rebuild — no guest is mirroring this
-                  // stream so there's nothing to drift.
-                  //
-                  // Deep-debug H2 — boundary tolerance: a 0.5s slack
-                  // ensures near-edge clicks (where users intend a
-                  // forward jump but click exactly on the buffered
-                  // edge) still trigger the rebuild instead of
-                  // landing on the stall point.
-                  //
-                  // Fallback (legacy) — clamp the seek to the buffered
-                  // edge and toast a status hint. Reachable in two
-                  // cases now: (a) when no onSeekRebuild handler is
-                  // wired (defensive — App always wires it today),
-                  // and (b) when party-sync is active for this media
-                  // (host rebuild would desync guests; tracked as a
-                  // follow-up). See App.tsx where the player is
-                  // mounted for the rebuild wiring.
-                  const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
-                  const isPartySyncingThisMedia = !!party
-                    && party.partyMediaItemId !== undefined
-                    && target?.mediaItemId === party.partyMediaItemId
-                  if (safeBufferedEnd > 0 && localSec >= safeBufferedEnd - 0.5) {
-                    if (onSeekRebuild && !isPartySyncingThisMedia) {
-                      // No interim status — the play effect's
-                      // teardown immediately re-sets status to
-                      // 'Loading…' (deep-debug M2: 'Jumping to that
-                      // point…' would only flash for one render
-                      // frame because both setStatus calls batch
-                      // together, so it's not worth setting).
-                      onSeekRebuild(sec)
-                      return
-                    }
-                    try {
-                      // Land 1s back from the buffered edge to
-                      // avoid landing right at the boundary where
-                      // hls.js stalls waiting for the next segment.
-                      vid.currentTime = Math.max(0, safeBufferedEnd - 1)
-                    } catch { /* defensive */ }
-                    setStatus(isPartySyncingThisMedia
-                      ? 'Forward-seek past buffer blocked while syncing with the party'
-                      : 'Still transcoding to that point — try again in a moment')
-                    return
-                  }
-                  try {
-                    vid.currentTime = localSec
-                  } catch { /* defensive */ }
-                }}
+                onSeek={seekToRealSec}
                 onSeekRelative={(delta) => {
+                  // Med-fix (2026-05-29) — was a raw
+                  // `vid.currentTime = max(0, currentTime + delta)`,
+                  // so the +30s skip button seeked past the FFmpeg
+                  // output head and stalled hls.js. Convert the
+                  // relative delta to a REAL-FILE absolute target
+                  // (local currentTime + startSec offset + delta) and
+                  // route through seekToRealSec, which triggers a
+                  // transcode rebuild on a forward jump past the
+                  // buffered head — same path the scrubber uses.
+                  // Backward deltas flow through unchanged (the
+                  // rebuild branch only fires near/past the buffered
+                  // edge; going back just clamps).
                   const vid = videoRef.current
                   if (!vid) return
-                  try {
-                    vid.currentTime = Math.max(0, vid.currentTime + delta)
-                  } catch { /* defensive */ }
+                  seekToRealSec((vid.currentTime + (startSecRef.current ?? 0)) + delta)
                 }}
                 onVolumeChange={(v) => {
                   const vid = videoRef.current
