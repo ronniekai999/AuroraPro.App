@@ -113,7 +113,12 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		code := currentCode
 		codeMu.Unlock()
 		if code != "" {
-			h.manager.LeavePartyV3Sync(code, claims.UserID)
+			// Guarded leave: only evict if THIS conn is still the registered
+			// one, so a fast reconnect (which already replaced sc in syncConns)
+			// isn't torn down by this stale defer. Mirrors the room socket.
+			// deep-debug MED (the previous unconditional call was the live bug;
+			// the IfConn guard had been added but never wired here).
+			h.manager.LeavePartyV3SyncIfConn(code, claims.UserID, sc)
 		}
 		_ = conn.Close()
 		slog.Debug("v3 sync disconnected", "user_id", claims.UserID)

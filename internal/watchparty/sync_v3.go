@@ -347,6 +347,42 @@ func (m *Manager) LeavePartyV3Sync(code string, userID int64) {
 	ps.mu.Unlock()
 }
 
+// LeavePartyV3SyncIfConn is the conn-identity-guarded variant of
+// LeavePartyV3Sync. It removes the sync conn ONLY when ps.syncConns[userID]
+// is still the SAME conn that is leaving (sc). This mirrors the room
+// socket's LeavePartyV3RoomIfConn guard.
+//
+// 2026-05-29 MED-integration fix (finding 1): the defer-cleanup path in
+// PartyWSHandlerV3Sync.ServeHTTP previously called the unconditional
+// LeavePartyV3Sync. When a user opened a second sync socket, the new
+// socket's JoinPartyV3Sync overwrote ps.syncConns[userID]; when the OLD
+// socket's read pump then died, its deferred leave would delete(syncConns,
+// userID) and evict the freshly-reconnected (active) conn — silently
+// dropping that peer off all tick/pause/seek broadcasts. Comparing conn
+// identity stops the dead socket from clobbering the live one.
+//
+// nil sc falls back to the unconditional delete (kept for callers without
+// a SafeConn handle, e.g. tests).
+func (m *Manager) LeavePartyV3SyncIfConn(code string, userID int64, sc *SafeConn) {
+	if sc == nil {
+		m.LeavePartyV3Sync(code, userID)
+		return
+	}
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return
+	}
+	ps.mu.Lock()
+	if current := ps.syncConns[userID]; current == nil || current == sc {
+		// Either we still own the slot, or it's already empty — safe to
+		// remove. A newer conn holding the slot is left untouched.
+		delete(ps.syncConns, userID)
+	}
+	ps.mu.Unlock()
+}
+
 // LeavePartyV3RoomIfConn is the conn-identity-guarded variant of
 // LeavePartyV3Room. Skips the leave when ps.roomConns[userID] != sc —
 // i.e. when this connection was already replaced by a fresher one
@@ -391,11 +427,11 @@ func (m *Manager) LeavePartyV3RoomIfConn(code string, userID int64, sc *SafeConn
 // LeavePartyV3Room. For guests it behaves identically (remove from
 // participants, broadcast participant-left). For the HOST it does NOT
 // immediately end the party — instead it:
-//   1. Removes the room conn (so broadcasts don't try to write to it)
-//   2. Sets ps.HostDisconnectedAt = now
-//   3. Spawns a goroutine that ends the party after HostDisconnectGracePeriod
-//      IF and ONLY IF HostDisconnectedAt is still set at that point
-//      (i.e. host hasn't reconnected via JoinPartyV3Room)
+//  1. Removes the room conn (so broadcasts don't try to write to it)
+//  2. Sets ps.HostDisconnectedAt = now
+//  3. Spawns a goroutine that ends the party after HostDisconnectGracePeriod
+//     IF and ONLY IF HostDisconnectedAt is still set at that point
+//     (i.e. host hasn't reconnected via JoinPartyV3Room)
 //
 // 2026-05-25 — added in response to "guests can't join, party died at
 // 90s" production diagnosis. Host's WS hit a proxy/idle timeout; before
@@ -468,15 +504,15 @@ func (m *Manager) LeavePartyV3RoomGraceful(code string, userID int64) error {
 // ends the party only if not.
 //
 // Two staleness guards:
-//   1. `expectedPS` is the pointer to the PartyState we captured at
-//      schedule time. If the party already ended and the code was
-//      re-issued to a different PartyState, the m.parties lookup
-//      below would surface the NEW one — comparing pointer identity
-//      stops us from accidentally ending it.
-//   2. `expectedDisconnectTime` distinguishes back-to-back disconnects
-//      of the SAME party (host dropped → reconnected → dropped again).
-//      Only the LATEST disconnect's goroutine should be the one to
-//      finally end the party.
+//  1. `expectedPS` is the pointer to the PartyState we captured at
+//     schedule time. If the party already ended and the code was
+//     re-issued to a different PartyState, the m.parties lookup
+//     below would surface the NEW one — comparing pointer identity
+//     stops us from accidentally ending it.
+//  2. `expectedDisconnectTime` distinguishes back-to-back disconnects
+//     of the SAME party (host dropped → reconnected → dropped again).
+//     Only the LATEST disconnect's goroutine should be the one to
+//     finally end the party.
 func (m *Manager) checkHostGraceExpiry(code string, expectedPS *PartyState, expectedDisconnectTime time.Time) {
 	time.Sleep(HostDisconnectGracePeriod)
 
@@ -671,6 +707,18 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	// 2026-05-29 MED-integration fix (finding 2): require the sender to be
+	// a CURRENT participant before honoring any intent. The host/AllowPause
+	// checks below compare against a stored HostUserID / a global setting,
+	// neither of which proves the sender is still in the party. A former
+	// participant (or a departed host) whose sync socket outlived their
+	// room membership could otherwise keep driving playback. The host
+	// always has a Participant record (created in JoinPartyV3Room), so this
+	// does not block the legitimate host path.
+	if _, ok := ps.Participants[userID]; !ok {
+		return fmt.Errorf("not a participant")
+	}
+
 	if ps.HostUserID != userID {
 		return fmt.Errorf("only the host can start playback")
 	}
@@ -730,6 +778,14 @@ func (m *Manager) HandleRequestPause(code string, userID int64, atAbsMs int64) e
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
+	// 2026-05-29 MED-integration fix (finding 2): pause is the most exposed
+	// intent — when Settings.AllowPause is true the host check below passes
+	// for ANY userID, so a former participant with a lingering sync socket
+	// could pause the party for everyone. Require current membership first.
+	if _, ok := ps.Participants[userID]; !ok {
+		return fmt.Errorf("not a participant")
+	}
+
 	if ps.HostUserID != userID && !ps.Settings.AllowPause {
 		return fmt.Errorf("only the host can pause")
 	}
@@ -780,6 +836,14 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+
+	// 2026-05-29 MED-integration fix (finding 2): require current
+	// membership before the host check (see HandleRequestPlay for the
+	// rationale — a stale HostUserID alone does not prove the sender is
+	// still in the party).
+	if _, ok := ps.Participants[userID]; !ok {
+		return fmt.Errorf("not a participant")
+	}
 
 	if ps.HostUserID != userID {
 		return fmt.Errorf("only the host can seek")

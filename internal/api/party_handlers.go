@@ -400,8 +400,24 @@ func (h *PartyHandler) GetInfo(w http.ResponseWriter, r *http.Request) {
 	// Try live state first
 	ps := h.manager.GetPartyState(code)
 	if ps != nil {
+		// 2026-05-29 MED-integration fix (finding 3): the participant
+		// roster (user_id + username of every member) is participant-
+		// scoped data. Previously buildLivePartyResponse returned it to
+		// ANY authenticated user who knew the 6-char code, leaking the
+		// guest list to non-members. Gate the roster on membership
+		// (mirrors the GetReactions / ServeHighlightReel pattern): only
+		// participants, the host, or an admin receive the named list.
+		// Non-members still get participant_count (same as the
+		// unauthenticated buildPublicPartyResponse already exposes) so the
+		// join UI can show "N people watching" without naming them.
+		includeRoster := false
+		claims := getClaimsFromRequest(r)
+		if claims != nil &&
+			(claims.Role == "admin" || h.manager.IsParticipantOrHost(code, claims.UserID)) {
+			includeRoster = true
+		}
 		// Build response under the party-level lock
-		resp := h.buildLivePartyResponse(ps)
+		resp := h.buildLivePartyResponse(ps, includeRoster)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -528,29 +544,24 @@ func (h *PartyHandler) buildPublicPartyResponse(ps *watchparty.PartyState) map[s
 }
 
 // buildLivePartyResponse locks the party and builds a JSON-friendly response map.
-func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState) map[string]interface{} {
+//
+// includeRoster gates the named participant list (user_id + username of every
+// member). Pass true only for members/host/admin — see finding 3 in GetInfo.
+// When false, the "participants" key is omitted entirely; callers still get
+// "participant_count" so the join UI can show a headcount without names.
+func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState, includeRoster bool) map[string]interface{} {
 	ps.Lock()
 	defer ps.Unlock()
 
-	participants := make([]map[string]interface{}, 0, len(ps.Participants))
-	for _, p := range ps.Participants {
-		participants = append(participants, map[string]interface{}{
-			"user_id":      p.UserID,
-			"username":     p.Username,
-			"is_host":      p.IsHost,
-			"is_buffering": p.IsBuffering,
-		})
-	}
-
-	return map[string]interface{}{
-		"code":               ps.Code,
-		"party_name":         ps.PartyName,
-		"host_user_id":       ps.HostUserID,
-		"media_item_id":      ps.MediaItemID,
-		"episode_id":         ps.EpisodeID,
-		"media_title":        ps.MediaTitle,
-		"media_poster":       ps.MediaPoster,
-		"current_time_ms":    ps.CurrentTimeMs,
+	resp := map[string]interface{}{
+		"code":            ps.Code,
+		"party_name":      ps.PartyName,
+		"host_user_id":    ps.HostUserID,
+		"media_item_id":   ps.MediaItemID,
+		"episode_id":      ps.EpisodeID,
+		"media_title":     ps.MediaTitle,
+		"media_poster":    ps.MediaPoster,
+		"current_time_ms": ps.CurrentTimeMs,
 		// 2026-05-25 — V3 OR (same contract as BuildPartyStateMessage /
 		// ActiveParties). The pre-join detail endpoint was showing
 		// V3-only parties as paused, so the join UI claimed "Host is
@@ -559,7 +570,6 @@ func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState) map[str
 		"is_active":          true,
 		"participant_count":  len(ps.Participants),
 		"max_participants":   ps.MaxParticipants,
-		"participants":       participants,
 		"scheduled_start_at": ps.ScheduledStartAt,
 		"started_at":         ps.StartedAt,
 		"server_now_ms":      time.Now().UnixMilli(),
@@ -569,6 +579,22 @@ func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState) map[str
 		},
 		"created_at": ps.CreatedAt,
 	}
+
+	// Only members/host/admin get the named roster (finding 3).
+	if includeRoster {
+		participants := make([]map[string]interface{}, 0, len(ps.Participants))
+		for _, p := range ps.Participants {
+			participants = append(participants, map[string]interface{}{
+				"user_id":      p.UserID,
+				"username":     p.Username,
+				"is_host":      p.IsHost,
+				"is_buffering": p.IsBuffering,
+			})
+		}
+		resp["participants"] = participants
+	}
+
+	return resp
 }
 
 // End handles POST /api/parties/{code}/end -- ends a party (host only).
