@@ -131,13 +131,45 @@ func (ip *ImageProxy) serveExternalImage(w http.ResponseWriter, r *http.Request,
 	ip.serveWithResize(w, r, localPath)
 }
 
+// allowedResizeWidths is the fixed set of pixel widths the on-demand ?w=
+// resizer will honor. These mirror the TMDB-standard rendered sizes already
+// accepted as path segments (see validSizes in ServeImage), so they cover
+// every width the UI actually displays.
+//
+// 2026-05-29 audit (BE-M*) — previously serveWithResize honored ANY
+// client-supplied ?w= in (0, 3840]. Since this endpoint is unauthenticated,
+// an attacker could request ~3840 distinct widths for a single image, each
+// triggering a CPU-heavy CatmullRom rescale AND a new on-disk cache variant —
+// CPU + disk amplification. Snapping to this small allowlist bounds the number
+// of resize operations/cache entries per source image to len(allowedResizeWidths).
+var allowedResizeWidths = []int{92, 154, 185, 300, 342, 500, 780, 1280}
+
+// normalizeResizeWidth maps a requested width to the smallest allowed width
+// that is >= the request, so the served image is never smaller (blurrier) than
+// asked. Requests larger than the largest allowed width snap down to that max
+// (we never upscale anyway — see ResizeImage). Returns 0 for non-positive or
+// unparseable input, signalling "serve the original, no resize".
+func normalizeResizeWidth(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	for _, w := range allowedResizeWidths { // allowedResizeWidths is ascending
+		if n <= w {
+			return w
+		}
+	}
+	return allowedResizeWidths[len(allowedResizeWidths)-1]
+}
+
 // serveWithResize serves a cached image, applying optional ?w= resize.
 func (ip *ImageProxy) serveWithResize(w http.ResponseWriter, r *http.Request, localPath string) {
-	// On-demand resize: ?w=<width>
+	// On-demand resize: ?w=<width>. The client-supplied width is snapped to a
+	// small fixed allowlist (allowedResizeWidths) to prevent CPU/disk
+	// amplification via arbitrary widths on this unauthenticated endpoint.
 	if wStr := r.URL.Query().Get("w"); wStr != "" {
 		targetWidth := 0
-		if n, err := strconv.Atoi(wStr); err == nil && n > 0 && n <= 3840 {
-			targetWidth = n
+		if n, err := strconv.Atoi(wStr); err == nil {
+			targetWidth = normalizeResizeWidth(n)
 		}
 		if targetWidth > 0 {
 			resizedPath := ip.resizedPath(localPath, targetWidth)

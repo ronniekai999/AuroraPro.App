@@ -599,6 +599,14 @@ type QualityVariant struct {
 	restartAttempts int
 }
 
+// defaultMaxSessions is the concurrency ceiling applied when the configured
+// transcode_max_sessions is <= 0 ("unlimited"). Audit MED — an unbounded cap
+// lets any number of concurrent stream requests each spawn FFmpeg transcode
+// processes, exhausting CPU/RAM (FFmpeg DoS). 8 simultaneous transcodes is a
+// generous ceiling for a self-hosted server while still bounding the blast
+// radius. Operators who genuinely want more must set an explicit positive cap.
+const defaultMaxSessions = 8
+
 // variantRestartMax is the max number of in-place FFmpeg restarts we'll
 // attempt for a single variant. After this, the variant is considered
 // permanently dead and the frontend must create a fresh session. One
@@ -684,7 +692,19 @@ func (tm *TranscodeManager) SetMaxSessions(n int) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.cfg.MaxSessions = n
-	slog.Info("transcode max sessions updated", "max_sessions", n)
+	slog.Info("transcode max sessions updated", "max_sessions", n, "effective_cap", effectiveMaxSessions(n))
+}
+
+// effectiveMaxSessions resolves the configured cap to an always-bounded ceiling.
+// A configured value <= 0 means "unlimited" in config, which would let
+// concurrent transcodes fork-bomb FFmpeg (audit MED); we clamp that to
+// defaultMaxSessions so concurrency is always bounded. Callers must use this
+// instead of reading tm.cfg.MaxSessions directly when enforcing the limit.
+func effectiveMaxSessions(configured int) int {
+	if configured <= 0 {
+		return defaultMaxSessions
+	}
+	return configured
 }
 
 // HWAccelStatus returns info about the detected hardware acceleration.
@@ -898,10 +918,14 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// on the max sessions limit. All I/O (mkdir, rand) is done above so
 	// the critical section is short.
 	tm.mu.Lock()
-	if tm.cfg.MaxSessions > 0 && len(tm.sessions) >= tm.cfg.MaxSessions {
+	// Always enforce a bounded cap: effectiveMaxSessions clamps a configured
+	// value of <= 0 ("unlimited") to defaultMaxSessions so concurrent
+	// transcodes can't fork-bomb FFmpeg (audit MED — FFmpeg DoS).
+	maxSessions := effectiveMaxSessions(tm.cfg.MaxSessions)
+	if len(tm.sessions) >= maxSessions {
 		tm.mu.Unlock()
 		os.RemoveAll(outputDir) // Clean up pre-created dirs
-		return nil, fmt.Errorf("maximum transcode sessions reached (%d)", tm.cfg.MaxSessions)
+		return nil, fmt.Errorf("maximum transcode sessions reached (%d)", maxSessions)
 	}
 	tm.sessions[sessionID] = session
 	tm.mu.Unlock()
@@ -2624,8 +2648,17 @@ func injectBurnInFilter(args []string, session *TranscodeSession) []string {
 		escaped := escapeFFmpegPath(session.BurnSubExternal)
 		burnFilter = fmt.Sprintf("subtitles=%s", escaped)
 	} else {
+		// Audit MED — the `subtitles` filter's stream_index is counted over
+		// the file's SUBTITLE streams only, not all streams. session.BurnSubIndex
+		// is the ABSOLUTE ffprobe index, so translate it to the subtitle-relative
+		// index here. ProbeSubtitles applies its own timeout; on probe failure
+		// SubtitleRelativeIndex falls back to the absolute index (pre-fix behavior).
+		relIndex := session.BurnSubIndex
+		if tracks, _ := ProbeSubtitles(context.Background(), session.FilePath); len(tracks) > 0 {
+			relIndex = SubtitleRelativeIndex(tracks, session.BurnSubIndex)
+		}
 		escaped := escapeFFmpegPath(session.FilePath)
-		burnFilter = fmt.Sprintf("subtitles=%s:stream_index=%d", escaped, session.BurnSubIndex)
+		burnFilter = fmt.Sprintf("subtitles=%s:stream_index=%d", escaped, relIndex)
 	}
 
 	result := make([]string, 0, len(args))
