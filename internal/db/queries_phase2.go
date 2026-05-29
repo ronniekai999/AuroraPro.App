@@ -1054,7 +1054,12 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 	return err
 }
 
-// GetWatchProgress returns progress for a specific item/episode.
+// GetWatchProgress returns progress for a specific item/episode, scoped to the
+// user's DEFAULT profile. Deferred follow-up (deep-debug B, non-blocking): make
+// this read + DeleteWatchProgress honor an explicit non-default profile, gated
+// on multi-profile UI. Today no client sends an explicit profile, so writes
+// (via resolveProgressProfileID) and reads/deletes all consistently resolve to
+// the default profile — the asymmetry is dormant until profile-switching ships.
 func (q *Queries) GetWatchProgress(ctx context.Context, userID, mediaItemID int64, episodeID *int64) (*models.WatchProgress, error) {
 	var wp models.WatchProgress
 	var err error
