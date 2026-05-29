@@ -1722,7 +1722,7 @@ export interface MediaRequest {
   poster_path: string
   overview: string
   year: number
-  status: 'pending' | 'processing' | 'available' | 'failed'
+  status: 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'
   quality_1080p: boolean
   quality_4k: boolean
   error_message?: string
@@ -1815,6 +1815,21 @@ export interface CreateRequestPayload {
 }
 export async function createRequest(payload: CreateRequestPayload): Promise<MediaRequest> {
   return apiFetch<MediaRequest>('/api/requests', { method: 'POST', body: payload })
+}
+
+// Admin approval queue (carve-out C). Requests held by the per-user quota
+// gate land in 'pending_approval'; these helpers back the admin Pending
+// Approvals section. All three are admin-gated server-side via the
+// /api/admin route group.
+export async function listPendingApprovals(signal?: AbortSignal): Promise<MediaRequest[]> {
+  const items = await apiFetch<MediaRequest[]>('/api/admin/requests/pending', { signal })
+  return items || []
+}
+export async function approveRequest(id: number): Promise<void> {
+  await apiFetch(`/api/admin/requests/${id}/approve`, { method: 'POST' })
+}
+export async function denyRequest(id: number): Promise<void> {
+  await apiFetch(`/api/admin/requests/${id}/deny`, { method: 'POST' })
 }
 
 // Build the TMDB poster URL. Aurora's request UI displays posters

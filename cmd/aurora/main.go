@@ -219,6 +219,12 @@ func main() {
 	defer refreshLimiter.Stop()
 	pwChangeLimiter := auth.NewRateLimiter(10, time.Minute)
 	defer pwChangeLimiter.Stop()
+	// requestLimiter — POST /api/requests. Per-IP flood cap (20/min/IP) on
+	// media-request creation (carve-out C). Roomier than login since it's an
+	// authed endpoint already behind a per-user quota gate, but bounded so a
+	// single client can't outrun admin triage of the approval queue.
+	requestLimiter := auth.NewRateLimiter(20, time.Minute)
+	defer requestLimiter.Stop()
 
 	// Phase 2: TMDB metadata client
 	tmdbClient := metadata.NewTMDBClient(cfg.TMDB.APIKey, cfg.TMDB.Language)
@@ -722,6 +728,7 @@ func main() {
 		LoginLimiter:          loginLimiter,
 		RefreshLimiter:        refreshLimiter,
 		ChangePasswordLimiter: pwChangeLimiter,
+		RequestLimiter:        requestLimiter,
 		Watcher:               watcher,
 		Enricher:              enricher,
 		ImgProxy:              imgProxy,

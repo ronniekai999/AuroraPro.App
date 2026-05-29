@@ -274,6 +274,33 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+
+	// Quota gating (carve-out C). Admins bypass all gating and dispatch
+	// immediately. Regular users are held for admin approval once they reach
+	// either the active-in-flight cap or the rolling 24h submission cap; held
+	// requests are inserted as pending_approval and NOT dispatched until an
+	// admin approves them.
+	status := models.RequestPending
+	if claims.Role != string(models.RoleAdmin) {
+		activeMax, dailyMax := h.requestQuota(r.Context())
+
+		activeCount, err := h.queries.CountActiveRequestsByUser(r.Context(), claims.UserID)
+		if err != nil {
+			slog.Error("failed to count active requests", "error", err, "user_id", claims.UserID)
+			writeError(w, http.StatusInternalServerError, "failed to check request quota")
+			return
+		}
+		dailyCount, err := h.queries.CountUserRequestsSince(r.Context(), claims.UserID, now.Add(-24*time.Hour))
+		if err != nil {
+			slog.Error("failed to count daily requests", "error", err, "user_id", claims.UserID)
+			writeError(w, http.StatusInternalServerError, "failed to check request quota")
+			return
+		}
+		if activeCount >= activeMax || dailyCount >= dailyMax {
+			status = models.RequestPendingApproval
+		}
+	}
+
 	req := &models.Request{
 		UserID:       claims.UserID,
 		MediaType:    payload.MediaType,
@@ -282,7 +309,7 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 		PosterPath:   payload.PosterPath,
 		Overview:     payload.Overview,
 		Year:         payload.Year,
-		Status:       models.RequestPending,
+		Status:       status,
 		Quality1080p: payload.Quality1080p,
 		Quality4K:    payload.Quality4K,
 		RequestedAt:  now,
@@ -304,20 +331,52 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dispatch to ARR service in background goroutine. Lifecycle is tied
-	// to h.rootCtx (set by main.go via SetRootContext) so graceful shutdown
-	// cancels in-flight ARR calls and the follow-up DB writes.
-	go h.dispatchToARR(req)
+	// Only dispatch immediately when the request was admitted (pending).
+	// Held (pending_approval) requests wait for an admin to approve them via
+	// ApproveRequest, which performs the dispatch at that point.
+	if status == models.RequestPending {
+		// Dispatch to ARR service in background goroutine. Lifecycle is tied
+		// to h.rootCtx (set by main.go via SetRootContext) so graceful shutdown
+		// cancels in-flight ARR calls and the follow-up DB writes.
+		go h.dispatchToARR(req)
+	}
 
 	if h.activity != nil {
+		eventType := "request_created"
+		if status == models.RequestPendingApproval {
+			eventType = "request_pending_approval"
+		}
 		h.activity.log(r.Context(), &models.ActivityEntry{
 			UserID:    &claims.UserID,
-			EventType: "request_created",
+			EventType: eventType,
 			Details:   map[string]interface{}{"title": req.Title, "type": req.MediaType, "tmdb_id": req.TMDBID},
 		})
 	}
 
 	writeJSON(w, http.StatusCreated, req)
+}
+
+// requestQuota returns the per-user request quotas: the maximum number of
+// simultaneously-active (pending/processing/pending_approval) requests, and the
+// maximum number of requests in a rolling 24h window. Defaults are 10 active /
+// 25 daily, each overridable via the server_settings keys
+// 'requests_quota_active' and 'requests_quota_daily'. A stored value only
+// overrides the default when it parses to a positive integer, so a missing,
+// empty, or malformed setting safely falls back to the default.
+func (h *RequestHandler) requestQuota(ctx context.Context) (int, int) {
+	activeMax, dailyMax := 10, 25
+
+	if v, err := h.queries.GetSetting(ctx, "requests_quota_active"); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			activeMax = n
+		}
+	}
+	if v, err := h.queries.GetSetting(ctx, "requests_quota_daily"); err == nil {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			dailyMax = n
+		}
+	}
+	return activeMax, dailyMax
 }
 
 // dispatchToARR sends a request to the appropriate Radarr/Sonarr instance.
@@ -767,6 +826,153 @@ func (h *RequestHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ============================================================
+// Admin Approval Queue (carve-out C)
+// ============================================================
+
+// ListPendingApprovals returns every request currently held for admin approval,
+// oldest first. Admin-only — wired under the RequireAdmin /api/admin group.
+// GET /api/admin/requests/pending
+func (h *RequestHandler) ListPendingApprovals(w http.ResponseWriter, r *http.Request) {
+	requests, err := h.queries.GetPendingApprovalRequests(r.Context())
+	if err != nil {
+		slog.Error("failed to get pending approval requests", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get pending approvals")
+		return
+	}
+	if requests == nil {
+		requests = []models.Request{}
+	}
+
+	// Populate usernames so the admin queue shows who requested each title.
+	// Single batch lookup (WHERE id = ANY) rather than per-row, matching the
+	// admin List handler. Degrade gracefully if the lookup fails.
+	seen := make(map[int64]struct{}, len(requests))
+	ids := make([]int64, 0, len(requests))
+	for _, req := range requests {
+		if _, ok := seen[req.UserID]; ok {
+			continue
+		}
+		seen[req.UserID] = struct{}{}
+		ids = append(ids, req.UserID)
+	}
+	if len(ids) > 0 {
+		usernameMap, uErr := h.queries.GetUsernamesByIDs(r.Context(), ids)
+		if uErr != nil {
+			slog.Warn("get usernames for pending approvals failed", "error", uErr)
+		} else {
+			for i := range requests {
+				requests[i].Username = usernameMap[requests[i].UserID]
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, requests)
+}
+
+// ApproveRequest admits a held (pending_approval) request: it flips the status
+// to pending and dispatches to the appropriate ARR service, exactly as a
+// non-gated Create would have. Admin-only.
+// POST /api/admin/requests/{id}/approve
+func (h *RequestHandler) ApproveRequest(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	reqID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request id")
+		return
+	}
+
+	req, err := h.queries.GetRequestByID(r.Context(), reqID)
+	if err != nil {
+		slog.Error("failed to get request", "error", err, "request_id", reqID)
+		writeError(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+	if req == nil {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+	if req.Status != models.RequestPendingApproval {
+		writeError(w, http.StatusBadRequest, "request is not pending approval")
+		return
+	}
+
+	if err := h.queries.UpdateRequestStatus(r.Context(), reqID, models.RequestPending, "", ""); err != nil {
+		slog.Error("failed to approve request", "error", err, "request_id", reqID)
+		writeError(w, http.StatusInternalServerError, "failed to approve request")
+		return
+	}
+
+	// Dispatch now that the request is admitted. dispatchToARR re-reads the row
+	// and drives it to processing/failed; lifecycle is tied to h.rootCtx.
+	req.Status = models.RequestPending
+	go h.dispatchToARR(req)
+
+	if h.activity != nil {
+		h.activity.log(r.Context(), &models.ActivityEntry{
+			UserID:    &claims.UserID,
+			EventType: "request_approved",
+			Details:   map[string]interface{}{"request_id": reqID, "title": req.Title, "type": req.MediaType, "tmdb_id": req.TMDBID},
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "approved"})
+}
+
+// DenyRequest rejects a held (pending_approval) request, marking it failed with
+// a "denied by admin" message. The user can delete it and try again later.
+// Admin-only.
+// POST /api/admin/requests/{id}/deny
+func (h *RequestHandler) DenyRequest(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	reqID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request id")
+		return
+	}
+
+	req, err := h.queries.GetRequestByID(r.Context(), reqID)
+	if err != nil {
+		slog.Error("failed to get request", "error", err, "request_id", reqID)
+		writeError(w, http.StatusInternalServerError, "failed to get request")
+		return
+	}
+	if req == nil {
+		writeError(w, http.StatusNotFound, "request not found")
+		return
+	}
+	if req.Status != models.RequestPendingApproval {
+		writeError(w, http.StatusBadRequest, "request is not pending approval")
+		return
+	}
+
+	if err := h.queries.UpdateRequestStatus(r.Context(), reqID, models.RequestFailed, "", "denied by admin"); err != nil {
+		slog.Error("failed to deny request", "error", err, "request_id", reqID)
+		writeError(w, http.StatusInternalServerError, "failed to deny request")
+		return
+	}
+
+	if h.activity != nil {
+		h.activity.log(r.Context(), &models.ActivityEntry{
+			UserID:    &claims.UserID,
+			EventType: "request_denied",
+			Details:   map[string]interface{}{"request_id": reqID, "title": req.Title, "type": req.MediaType, "tmdb_id": req.TMDBID},
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "denied"})
 }
 
 // ============================================================

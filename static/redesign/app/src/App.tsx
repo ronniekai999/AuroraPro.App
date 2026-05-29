@@ -26,6 +26,9 @@ import {
   searchMedia,
   searchTmdb,
   createRequest,
+  listPendingApprovals,
+  approveRequest,
+  denyRequest,
   createQuickParty,
   login as apiLogin,
   logout as apiLogout,
@@ -2406,7 +2409,7 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
 // RequestsView — submitted requests with status. Includes an inline
 // TMDB search + create dialog.
 function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requests: MediaRequest[] | null; onRequestSubmitted: (r: MediaRequest) => void; onRequestDeleted: (id: number) => void }) {
-  const [filter, setFilter] = useState<'all' | 'pending' | 'processing' | 'available' | 'failed'>('all')
+  const [filter, setFilter] = useState<'all' | 'pending' | 'pending_approval' | 'processing' | 'available' | 'failed'>('all')
   // QA 2026-05-25 — request cards looked clickable but didn't do
   // anything when clicked. The request carries `overview` text from
   // TMDB that we were fetching and storing but never rendering. Now:
@@ -2438,9 +2441,17 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
 
   const statusColors: Record<string, string> = {
     pending: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+    // Held for admin approval (carve-out C) — distinct orange so it reads
+    // apart from the amber "pending" (admitted, awaiting dispatch).
+    pending_approval: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
     processing: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
     available: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
     failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+  }
+  // Status display labels. snake_case statuses (pending_approval) need an
+  // explicit human label since the badge otherwise renders the raw value.
+  const statusLabels: Record<string, string> = {
+    pending_approval: 'Pending approval',
   }
 
   if (requests === null) {
@@ -2587,7 +2598,7 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
       )}
 
       <div className="flex items-center gap-2 mb-6 flex-wrap">
-        {(['all', 'pending', 'processing', 'available', 'failed'] as const).map(f => (
+        {(['all', 'pending', 'pending_approval', 'processing', 'available', 'failed'] as const).map(f => (
           <button
             key={f}
             onClick={() => setFilter(f)}
@@ -2597,7 +2608,7 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                 : 'bg-white/5 text-white/50 border border-white/[0.06] hover:bg-white/10'
             }`}
           >
-            {f} {f !== 'all' && `(${requests.filter(r => r.status === f).length})`}
+            {statusLabels[f] ?? f} {f !== 'all' && `(${requests.filter(r => r.status === f).length})`}
           </button>
         ))}
       </div>
@@ -2694,7 +2705,7 @@ function RequestsView({ requests, onRequestSubmitted, onRequestDeleted }: { requ
                   )}
                   <div className="flex items-center justify-between">
                     <span className={`badge-glass border text-xs capitalize ${statusColors[req.status]}`}>
-                      {req.status}
+                      {statusLabels[req.status] ?? req.status}
                     </span>
                     <div className="flex items-center gap-2">
                       <span className="text-white/30 text-xs">{formatRequestDate(req.requested_at)}</span>
@@ -3773,6 +3784,20 @@ function AdminServerSettingsTab() {
               </div>
               <input type="checkbox" checked={val('requests_enabled', 'false') === 'true'} onChange={e => setVal('requests_enabled', e.target.checked ? 'true' : 'false')} />
             </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-white/80 text-sm">Active request quota</p>
+                <p className="text-white/40 text-xs">Per user; requests over this are held for approval (default 10)</p>
+              </div>
+              <input type="number" min={1} max={10000} value={val('requests_quota_active', '10')} onChange={e => setVal('requests_quota_active', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-white/80 text-sm">Daily request quota</p>
+                <p className="text-white/40 text-xs">Per user, rolling 24h; requests over this are held for approval (default 25)</p>
+              </div>
+              <input type="number" min={1} max={10000} value={val('requests_quota_daily', '25')} onChange={e => setVal('requests_quota_daily', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
+            </div>
             <button
               disabled={saving || Object.keys(edited).length === 0}
               onClick={save}
@@ -3909,6 +3934,95 @@ function AdminRoomsTab() {
             <button onClick={async () => { if (!window.confirm(`Delete room "${r.name}"?`)) return; try { await deleteRoom(r.id); await reload() } catch (e) { window.alert(e instanceof Error ? e.message : 'failed') } }} className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded">Delete</button>
           </div>
         ))}
+      </div>
+    </div>
+  )
+}
+
+// AdminRequestsTab — the media-request approval queue (carve-out C).
+// Lists requests held in 'pending_approval' (parked by the per-user quota
+// gate in the Create handler) and lets an admin Approve (→ dispatch to
+// Radarr/Sonarr) or Deny (→ mark failed) each one. Self-contained fetch +
+// reload, mirroring AdminRoomsTab.
+function AdminRequestsTab() {
+  const [items, setItems] = useState<MediaRequest[] | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  // Tracks the request id with an in-flight approve/deny so we can disable
+  // both buttons on that row and avoid double-submits.
+  const [busy, setBusy] = useState<number | null>(null)
+  const reload = useCallback(async () => {
+    try { setItems(await listPendingApprovals()); setErr(null) }
+    catch (e) { setErr(e instanceof Error ? e.message : 'failed') }
+  }, [])
+  useEffect(() => { void reload() }, [reload])
+
+  const act = useCallback(async (id: number, fn: (id: number) => Promise<void>) => {
+    setBusy(id)
+    try { await fn(id); await reload() }
+    catch (e) { window.alert(e instanceof Error ? e.message : 'failed') }
+    finally { setBusy(null) }
+  }, [reload])
+
+  return (
+    <div className="space-y-4">
+      <div className="glass-panel rounded-xl p-5">
+        <h3 className="text-white font-semibold mb-1">Pending Approvals</h3>
+        <p className="text-white/40 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
+        {err && <p className="text-red-300 text-sm">{err}</p>}
+        {items === null && <p className="text-white/40 text-sm">Loading…</p>}
+        {items && items.length === 0 && <p className="text-white/40 text-sm">No requests awaiting approval.</p>}
+        {items && items.map(req => {
+          const poster = tmdbPosterURL(req.poster_path)
+          return (
+            <div key={req.id} className="flex items-center gap-3 py-3 border-b border-white/[0.04] last:border-0">
+              <div className="w-[44px] h-[66px] rounded-md overflow-hidden flex-shrink-0 bg-white/5 flex items-center justify-center">
+                {poster ? (
+                  <img
+                    key={poster}
+                    src={poster}
+                    alt=""
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      const img = e.currentTarget as HTMLImageElement
+                      img.style.display = 'none'
+                      const fallback = img.nextElementSibling as HTMLElement | null
+                      if (fallback) fallback.style.display = 'flex'
+                    }}
+                  />
+                ) : null}
+                <div
+                  className="w-full h-full items-center justify-center"
+                  style={{ display: poster ? 'none' : 'flex' }}
+                  aria-hidden="true"
+                >
+                  <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={16} className="text-white/25" />
+                </div>
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-white/90 text-sm font-medium truncate">{req.title}{req.year ? ` (${req.year})` : ''}</p>
+                <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                  <span className="text-white/40 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
+                  {req.quality_4k && <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px]">4K</span>}
+                  {req.quality_1080p && <span className="badge-glass bg-white/[0.04] text-white/60 border border-white/[0.06] text-[10px]">1080p</span>}
+                  {req.username && <span className="text-white/40 text-xs">by {req.username}</span>}
+                  <span className="text-white/30 text-xs">{formatRequestDate(req.requested_at)}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  disabled={busy === req.id}
+                  onClick={() => act(req.id, approveRequest)}
+                  className="px-3 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-xs rounded disabled:opacity-50"
+                >Approve</button>
+                <button
+                  disabled={busy === req.id}
+                  onClick={() => { if (!window.confirm(`Deny request for "${req.title}"?`)) return; void act(req.id, denyRequest) }}
+                  className="px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded disabled:opacity-50"
+                >Deny</button>
+              </div>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -4735,9 +4849,9 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
 // AdminView wired to /api/admin/* endpoints. Each tab lazy-fetches
 // on first visit and caches for the session.
 function AdminView({ currentAdminId }: { currentAdminId: number }) {
-  type AdminTab = 'dashboard' | 'users' | 'libraries' | 'rooms' | 'activity' | 'sessions' | 'flagged' | 'logs' | 'server' | 'llm' | 'oauth' | 'backup'
+  type AdminTab = 'dashboard' | 'users' | 'libraries' | 'rooms' | 'requests' | 'activity' | 'sessions' | 'flagged' | 'logs' | 'server' | 'llm' | 'oauth' | 'backup'
   const [tab, setTab] = useState<AdminTab>('dashboard')
-  const tabs: readonly AdminTab[] = ['dashboard', 'users', 'libraries', 'rooms', 'activity', 'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup'] as const
+  const tabs: readonly AdminTab[] = ['dashboard', 'users', 'libraries', 'rooms', 'requests', 'activity', 'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup'] as const
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
   // Authorization header (rather than a tokenized anchor) so the
@@ -5214,6 +5328,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
 
       {tab === 'libraries' && <AdminLibrariesTab />}
       {tab === 'rooms' && <AdminRoomsTab />}
+      {tab === 'requests' && <AdminRequestsTab />}
       {tab === 'server' && <AdminServerSettingsTab />}
       {tab === 'sessions' && <AdminSessionsTab />}
       {tab === 'flagged' && <AdminFlaggedTab onSelect={(_id) => { /* handled via parent? Not wired */ }} />}
