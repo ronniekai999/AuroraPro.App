@@ -7581,7 +7581,21 @@ export default function App() {
   // for progress tracking; episodeId is on the episode itself.
   const handlePlayEpisode = useCallback((ep: ApiEpisode) => {
     if (!selectedMedia) return
-    const file = pickFile(ep.files)
+    // Deep-debug #177 — honor the quality preference, matching handlePlay
+    // / handlePlayContinue / handlePlaybackEnded. Without it a manually-
+    // started episode used 'auto' (1080p-preferred) while an auto-advanced
+    // one used the 4k preference, so a binge could switch resolution
+    // mid-stream for a 4k-preference user.
+    let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+      if (raw && typeof raw === 'object') {
+        const prefs = raw as Record<string, unknown>
+        if (prefs.preferred_quality === '4k') preferQuality = '4k'
+        else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+      }
+    } catch { /* malformed prefs — keep 'auto' */ }
+    const file = pickFile(ep.files, preferQuality)
     if (!file) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'This episode has no playable file.', type: 'error' }])
@@ -7592,11 +7606,17 @@ export default function App() {
       fileId: file.id,
       fileType: 'episode',
       episodeId: ep.id,
-      // Issue #177 — detailSelectedSeason is the season_number the
-      // episode list was rendered from; it's always set when an
-      // episode row is clickable. Fall back to undefined (auto-advance
-      // no-ops) rather than guessing if it's somehow null.
-      seasonNumber: detailSelectedSeason ?? undefined,
+      // Issue #177 — stamp the season the RENDERED episode rows were
+      // actually fetched for, NOT the picker's current value.
+      // Deep-debug #177: on a season switch, setDetailSelectedSeason is
+      // synchronous but the episode list repopulates via an async
+      // getEpisodes effect; during that window the old rows stay
+      // clickable while detailSelectedSeason already holds the new
+      // number. currentEpisodesSeasonRef lags it (updated only after the
+      // new list loads), so it matches the still-visible rows and keeps
+      // auto-advance resolving "next" against the right season. Falls
+      // back to detailSelectedSeason (initial-load) then undefined.
+      seasonNumber: currentEpisodesSeasonRef.current?.season ?? detailSelectedSeason ?? undefined,
       episodeNumber: ep.episode_number,
       title: selectedMedia.title,
       subtitle: `E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
