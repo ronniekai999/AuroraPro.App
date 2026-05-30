@@ -774,8 +774,14 @@
   backdrop-filter: blur(10px);
 }
 
-/* Input styling */
-input, select, textarea {
+/* Input styling.
+   Exclude range sliders: this box treatment (padding/border/background)
+   applies inside the slider's content box, shrinking the track so the
+   thumb can't reach the ends — e.g. the player's volume slider couldn't
+   reach max ("doesn't go all the way to the right"). Range inputs keep
+   their native rendering + Tailwind `accent-*`. Text inputs, selects,
+   textareas, and checkboxes are unaffected. */
+input:not([type="range"]), select, textarea {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 10px;
@@ -785,7 +791,7 @@ input, select, textarea {
   transition: all 0.2s ease;
 }
 
-input:focus, select:focus, textarea:focus {
+input:not([type="range"]):focus, select:focus, textarea:focus {
   outline: none;
   border-color: rgba(168, 85, 247, 0.5);
   background: rgba(255, 255, 255, 0.08);
