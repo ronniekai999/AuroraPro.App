@@ -1288,6 +1288,26 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 		// would return a zombie variant forever and segment requests would
 		// 404 with no actionable signal.
 		if ffmpegDone(v) {
+			// Distinguish a CLEAN completion from a mid-stream crash. A remux
+			// copies the video stream far faster than realtime, so FFmpeg can
+			// run to EOF and write a complete VOD playlist (#EXT-X-ENDLIST)
+			// within a single viewing session. ffmpegDone is true in BOTH
+			// cases — but a clean exit (v.Err == nil) is NOT a crash: the
+			// finished playlist must simply be served. Only a real crash
+			// (v.Err != nil) needs the restart/recovery path below.
+			//
+			// Issues #172 / #174: treating a clean completion as a crash made
+			// EnsureVariant "restart" FFmpeg with -ss PAST the end of the
+			// file, which produced no new output and then 500'd every
+			// subsequent /{profile}/stream.m3u8 fetch. Locally that only
+			// spammed the console (hls.js kept playing the already-complete
+			// playlist, so progress never stalled), but it broke Chromecast
+			// outright — the receiver makes a fresh fetch and cannot bootstrap
+			// from a 500. (Elf is an h264+eac3 MKV whose fast remux finishes
+			// mid-watch, which is exactly why it reproduced there.)
+			if v.Err == nil {
+				return v, nil
+			}
 			// P3 — attempt one in-place restart before surfacing the
 			// "session is dead" error. Originally remux sessions were
 			// excluded (concern: codec-copy seek to a non-keyframe
