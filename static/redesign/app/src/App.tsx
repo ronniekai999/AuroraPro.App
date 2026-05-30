@@ -114,6 +114,7 @@ import {
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
+import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { BugReportButton } from '@/components/BugReportButton'
@@ -5904,6 +5905,26 @@ export default function App() {
   // undefined-but-truthy values.
   const party = useParty(user && typeof user === 'object' ? user.id : undefined)
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
+  // 2026-05-30 — Cinematic Overlay (Feature 2). Which face the on-screen
+  // party surface shows: 'rail' (the full floating glass panel) or
+  // 'minimal' (lower-third chat ticker + corner voice pill + mini dock).
+  // The header dock button flips this WITHOUT closing the panel; the ×
+  // still fully closes (setPartyPanelOpen(false)). Reset to 'rail' on
+  // close so re-opening always starts from the readable rail.
+  const [partyVariant, setPartyVariant] = useState<'rail' | 'minimal'>('rail')
+  // 2026-05-30 — host "invite to party" affordance (code + QR deep link
+  // for phones). Toggled from the rail header; host-only.
+  const [partyInviteOpen, setPartyInviteOpen] = useState(false)
+  // 2026-05-30 — reset overlay view-state when a party ends server-side
+  // (host left, kicked, party-ended). The hook clears party.state.code but
+  // our local 'minimal'/invite flags persist; without this the NEXT party
+  // would open in stale minimal mode. Mirrors PartyPanel onClose/onLeave.
+  useEffect(() => {
+    if (!party.state.code) {
+      setPartyVariant('rail')
+      setPartyInviteOpen(false)
+    }
+  }, [party.state.code])
   const [partyJoinPrompt, setPartyJoinPrompt] = useState(false)
   // Phase 5 — add-to-watchlist dialog. Opened from DetailView. The
   // dialog fetches the active profile's watchlists on open + lets
@@ -8363,8 +8384,22 @@ export default function App() {
           currentUserId={user.id}
           onSendChat={party.sendChat}
           onSendReaction={party.sendReaction}
-          onLeave={() => { party.leave(); setPartyPanelOpen(false) }}
-          onClose={() => setPartyPanelOpen(false)}
+          onLeave={() => { party.leave(); setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
+          onClose={() => { setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
+          // Feature 2 — Cinematic Overlay. variant + toggle flip the panel
+          // between the floating glass rail and the minimal ticker/pill/
+          // dock face (composed inside PartyPanel). The dock button in the
+          // header calls onToggleVariant; the × still closes via onClose.
+          variant={partyVariant}
+          onToggleVariant={() => setPartyVariant(v => (v === 'rail' ? 'minimal' : 'rail'))}
+          // Host-only "invite to party" affordance (rail header). Opens the
+          // PartyInvite card (code + QR deep link) so guests can join from a
+          // phone. Only wired for the host so guests don't see it.
+          onInvite={
+            party.state.hostUserId === user.id
+              ? () => setPartyInviteOpen(o => !o)
+              : undefined
+          }
           voice={party.voice}
           onJoinVoice={() => {
             party.joinVoice().catch(err => {
@@ -8420,6 +8455,28 @@ export default function App() {
           onToggleVoiceMute={party.toggleVoiceMute}
           onSendReady={party.sendReady}
         />
+      )}
+
+      {/* Feature 1 host affordance — invite card (join code + scannable QR
+          deep link to the mobile companion). Host-only, opened from the
+          rail header "invite" button. Floats centered over the player as a
+          lightweight modal; the rail stays mounted behind it. Suppressed in
+          minimal mode (the rail header — and thus the invite button — isn't
+          visible there). */}
+      {partyInviteOpen && partyPanelOpen && party.state.code &&
+        party.state.hostUserId === user.id && partyVariant === 'rail' && (
+        <div
+          className="fixed inset-0 z-[75] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm motion-safe:animate-fade-in"
+          onClick={() => setPartyInviteOpen(false)}
+        >
+          <div onClick={e => e.stopPropagation()} className="w-full max-w-sm">
+            <PartyInvite
+              code={party.state.code}
+              partyName={party.state.partyName || party.state.mediaTitle}
+              onClose={() => setPartyInviteOpen(false)}
+            />
+          </div>
+        </div>
       )}
 
       {collectionsModalOpen && (

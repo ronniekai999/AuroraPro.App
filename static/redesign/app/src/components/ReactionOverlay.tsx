@@ -171,7 +171,7 @@ export function ReactionPicker({ onSend, placement = 'right', vertical = 'up' }:
         😂
       </button>
       {open && (
-        <div className={`absolute ${popoverV} ${popoverAnchor} bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex gap-1 z-20`}>
+        <div className={`absolute ${popoverV} ${popoverAnchor} bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl px-2 py-2 flex flex-wrap justify-center gap-1 max-w-[min(90vw,288px)] z-20`}>
           {QUICK_EMOJI.map(e => (
             <button
               key={e}

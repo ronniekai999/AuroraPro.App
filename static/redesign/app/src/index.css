@@ -68,6 +68,21 @@
       0 0 96px rgba(255, 255, 255, 0.18);
   }
 
+  /* Cinematic watch-party overlay — reduce-transparency / blur budget.
+     The minimal-mode overlay surfaces (VoicePill, MiniDock, the floating
+     rail card) layer backdrop-blur over PLAYING video, which repaints
+     continuously — the exact per-frame re-composite cost flagged for the
+     media-card badge (deep-debug Bug 25). Users on weak / integrated GPUs
+     already have a lever: Settings → Appearance → Glow = Subtle
+     (data-glow="subtle"). For any .aurora-glass-overlay surface that ALSO
+     drops the backdrop blur for a flat fill — same readable look, zero
+     per-frame blur. Default ("aurora") and "heavy" keep the glass. */
+  html[data-glow="subtle"] .aurora-glass-overlay {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    background: rgba(10, 8, 16, 0.92) !important;
+  }
+
   body {
     @apply bg-background text-foreground;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;

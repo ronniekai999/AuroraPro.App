@@ -255,9 +255,21 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	// fire. Closes the "stale join cookie substitutes into an
 	// unrelated flow" scenario the auditor flagged.
 	if joinCode := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("join"))); isValidPartyCode(joinCode) {
+		// Companion (mobile second-screen) flow: when sign-in was launched
+		// from the /v2/join companion route (?companion=1), the success page
+		// must bounce the phone back to the companion shell (/v2/join/CODE),
+		// NOT the desktop app. Carry that intent as a third, dot-separated
+		// component on the SAME cookie so it stays bound to the state token
+		// (an attacker can't flip a victim's destination without also
+		// matching state). Value shape: "<state>.<code>" (desktop) or
+		// "<state>.<code>.c" (companion).
+		cookieVal := state + "." + joinCode
+		if r.URL.Query().Get("companion") == "1" {
+			cookieVal += ".c"
+		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     oauthJoinCookieName,
-			Value:    state + "." + joinCode,
+			Value:    cookieVal,
 			Path:     "/api/auth/oauth/",
 			MaxAge:   oauthStateCookieMaxAge, // same lifetime as state — they must complete together
 			HttpOnly: true,
@@ -522,18 +534,31 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// the prefix doesn't match — that means the cookie is from a
 	// different OAuth flow and shouldn't influence this one.
 	joinCode := ""
+	companion := false
 	if c, err := r.Cookie(oauthJoinCookieName); err == nil {
 		raw := c.Value
-		// New format: "<state>.<code>". Verify the state component
-		// matches the one we just validated.
+		// Format: "<state>.<code>" (desktop) or "<state>.<code>.c" (mobile
+		// companion). Verify the state component matches the one we just
+		// validated, then split the remainder into code + optional marker.
 		if dot := strings.IndexByte(raw, '.'); dot > 0 {
 			cookieState := raw[:dot]
-			cookieCode := strings.ToUpper(raw[dot+1:])
+			rest := raw[dot+1:]
+			// Optional trailing ".c" marks the companion (second-screen)
+			// flow — strip it off before validating the code.
+			isCompanion := false
+			if i := strings.LastIndexByte(rest, '.'); i >= 0 {
+				if strings.ToLower(rest[i+1:]) == "c" {
+					isCompanion = true
+				}
+				rest = rest[:i]
+			}
+			cookieCode := strings.ToUpper(rest)
 			// Constant-time compare on the state component so cookie
 			// behavior doesn't differ between "wrong state" and
 			// "missing state" — same response timing either way.
 			if subtle.ConstantTimeCompare([]byte(cookieState), []byte(gotState)) == 1 && isValidPartyCode(cookieCode) {
 				joinCode = cookieCode
+				companion = isCompanion
 			}
 		}
 	}
@@ -548,7 +573,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Render the bridge HTML page (sets the httpOnly auth cookies + redirects).
-	h.renderSuccess(w, r, accessToken, refreshTokenStr, expiresAt, user, joinCode)
+	h.renderSuccess(w, r, accessToken, refreshTokenStr, expiresAt, user, joinCode, companion)
 }
 
 // clearOAuthCookie expires one of the path-scoped OAuth round-trip cookies
@@ -931,7 +956,7 @@ func generateOAuthState() (string, error) {
 // The page is templated so we can safely inject the user value without risk of
 // HTML injection — html/template auto-escapes all expressions in their
 // respective contexts (JS-context inside <script>, URL-context for redirect).
-func (h *OAuthHandler) renderSuccess(w http.ResponseWriter, r *http.Request, accessToken, refreshToken string, expiresAt time.Time, user *models.User, joinCode string) {
+func (h *OAuthHandler) renderSuccess(w http.ResponseWriter, r *http.Request, accessToken, refreshToken string, expiresAt time.Time, user *models.User, joinCode string, companion bool) {
 	// Marshal the user as JSON for localStorage. Match the legacy
 	// /api/auth/login response shape so the frontend's existing post-
 	// login bootstrap code-path works without modification.
@@ -978,7 +1003,15 @@ window.location.replace(dest);
 	// even if that validation ever drifts.
 	redirectTo := "/"
 	if joinCode != "" {
-		redirectTo = "/?join=" + joinCode
+		if companion {
+			// Mobile companion sign-in: bounce the phone to the second-
+			// screen companion route, NOT the desktop app. joinCode is
+			// already constrained to [A-Z0-9]{6} by isValidPartyCode, so
+			// this is a fixed-shape, same-origin path — no open redirect.
+			redirectTo = "/v2/join/" + joinCode
+		} else {
+			redirectTo = "/?join=" + joinCode
+		}
 	}
 
 	// deep-debug H10 — set the httpOnly auth cookies server-side (the OAuth

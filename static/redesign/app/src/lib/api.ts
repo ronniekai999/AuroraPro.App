@@ -1,4 +1,5 @@
 import { getDiagnosticBuffer, redactURL } from './diagnosticBuffer'
+import type { CodeInfo } from './party'
 
 // Aurora V2 — API client.
 //
@@ -1597,6 +1598,94 @@ export async function deleteRoom(id: number): Promise<void> {
 // the link always 401'd — the reel never downloaded.)
 export function highlightReelURL(code: string): string {
   return withToken(`/api/parties/${encodeURIComponent(code)}/highlight.mp4`)
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Watch Party — Mobile Companion (additive helpers)
+//
+// The companion is a phone "second screen" that opens ONLY the room
+// socket (chat / voice / reactions) — it never decodes video or drives
+// playback. These helpers are pure additions; nothing here changes the
+// existing party/auth flows.
+
+// CompanionPartyPreview — the unauthenticated "now playing" preview the
+// JoinScreen shows under the code boxes. Backed by the EXISTING
+// GET /api/code/{code}/info preflight (party_handlers.go GetCodeInfo),
+// which is deliberately UNAUTHENTICATED and returns only public party
+// metadata (party name, media title/poster, host id, headcount) — never
+// the participant list or chat. We normalize the `type: 'active'` shape
+// into a flat preview; an 'offline_room' (or any non-active) result
+// means "no live session" and yields null so the UI can say so.
+export interface CompanionPartyPreview {
+  code: string
+  partyName?: string
+  mediaTitle?: string
+  mediaPoster?: string
+  participantCount?: number
+}
+
+export async function getCompanionPartyPreview(
+  code: string,
+  signal?: AbortSignal,
+): Promise<CompanionPartyPreview | null> {
+  const c = code.trim().toUpperCase()
+  if (!/^[A-Z0-9]{6}$/.test(c)) return null
+  const info = await apiFetch<CodeInfo>(`/api/code/${encodeURIComponent(c)}/info`, { signal })
+  if (info.type !== 'active') return null
+  const p = info.party
+  return {
+    code: p?.code ?? c,
+    partyName: p?.party_name,
+    mediaTitle: p?.media_title,
+    mediaPoster: p?.media_poster,
+    participantCount: p?.participant_count,
+  }
+}
+
+// companionQrURL — the QR PNG the DESKTOP host UI (PartyInvite) renders
+// in an <img>. The server (party_qr.go) renders it and encodes the
+// absolute /join/<CODE> short link so a scan lands the phone pre-filled.
+// No withToken(): the <img> is a same-origin GET that carries the
+// httpOnly auth cookie automatically (post-H10), so a ?token= query would
+// be dead today AND a latent token-in-URL leak if H10 ever regressed.
+export function companionQrURL(code: string): string {
+  return `/api/parties/${encodeURIComponent(code)}/qr.png`
+}
+
+// companionJoinPath — the canonical absolute companion-join link for the
+// "copy link" affordance. Uses the server SHORT-LINK form
+// `<origin>/join/<CODE>` (NOT /v2/join/...): the backend route
+// GET /join/{code} (router.go → joinShortLinkRedirect) 302-redirects to
+// /v2/join/{CODE}, where the SPA companion route takes over. This is the
+// SAME URL the server-rendered QR encodes (party_qr.go), so the scanned
+// QR and a pasted link land identically. Returns an absolute same-origin
+// URL (e.g. https://host/join/B9K4T2).
+export function companionJoinPath(code: string): string {
+  const path = `/join/${encodeURIComponent(code.trim().toUpperCase())}`
+  if (typeof location !== 'undefined') return `${location.origin}${path}`
+  return path
+}
+
+// companionOAuthStartUrl — builds the existing OAuth-start URL for the
+// companion sign-in (Option A: account required, one-tap via the 5
+// existing providers). We forward the party code as ?join=CODE, which
+// the server already understands (oauth_handlers.go Start → join cookie
+// → success-page redirect), so the user lands back signed-in with the
+// code preserved. Mirrors App.tsx's OAuthSignInButton href construction.
+export function companionOAuthStartUrl(
+  provider: 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter',
+  joinCode?: string,
+): string {
+  const params = new URLSearchParams()
+  const c = (joinCode ?? '').trim().toUpperCase()
+  if (/^[A-Z0-9]{6}$/.test(c)) params.set('join', c)
+  // companion=1 tells the OAuth success bridge (oauth_handlers.go
+  // renderSuccess) to redirect the phone back to the /v2/join/<CODE>
+  // companion shell instead of the desktop app. Without it, a friend who
+  // signs in via one-tap OAuth lands in the full desktop SPA on their phone.
+  params.set('companion', '1')
+  const qs = params.toString()
+  return `/api/auth/oauth/${provider}/start${qs ? '?' + qs : ''}`
 }
 
 // Phase 5 — admin ops + invites + server settings.

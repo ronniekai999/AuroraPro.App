@@ -213,7 +213,24 @@ func (m *Manager) broadcastToRoomPeers(ps *PartyState, msg map[string]interface{
 // party. Creates/updates the Participant record. Returns the party state
 // for the caller to build an initial room snapshot (participants, chat
 // history) from. Send the initial snapshot over the returned conn.
+//
+// Backward-compatible shim: joins as a primary-screen (non-companion)
+// participant. New callers that know whether the upgrade was a mobile
+// companion should call JoinPartyV3RoomCompanion directly.
 func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc *SafeConn) (*PartyState, error) {
+	return m.JoinPartyV3RoomCompanion(code, userID, username, false, sc)
+}
+
+// JoinPartyV3RoomCompanion is JoinPartyV3Room plus the mobile-companion
+// presence flag. companion=true marks the Participant as a phone
+// "second-screen" join (no video player / no sync socket); companion=false
+// is the exact behavior of the historical JoinPartyV3Room.
+//
+// The flag is set on first join and refreshed on reconnect, so a user who
+// drops and reconnects from the same surface keeps an accurate badge, and a
+// user who moves from desktop to phone (or vice-versa) gets re-flagged to
+// match their current connection rather than being stuck on a stale value.
+func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username string, companion bool, sc *SafeConn) (*PartyState, error) {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
@@ -228,6 +245,16 @@ func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc
 	if existing, ok := ps.Participants[userID]; ok {
 		ps.roomConns[userID] = sc
 		existing.LastSeen = time.Now()
+		// Refresh the companion flag to match the current connection's
+		// surface (a reconnect may arrive from a different device than the
+		// original join).
+		//
+		// SECURITY: `companion` is a self-asserted client hint (the
+		// ?companion=1 upgrade param). It is a PRESENTATION flag only — it
+		// drives the "on phone" UI badge and nothing else. It is NOT
+		// authenticated and MUST NOT gate any authorization or capability
+		// decision; identity and permissions come from the JWT, never this.
+		existing.Companion = companion
 		// 2026-05-25 — if this is the host reconnecting within the
 		// grace window after their WS dropped, clear the disconnect
 		// marker so the background ender goroutine no-ops on its
@@ -252,6 +279,7 @@ func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc
 		IsBuffering: false,
 		Suspensions: make(map[string]bool),
 		LastSeen:    time.Now(),
+		Companion:   companion,
 	}
 	ps.roomConns[userID] = sc
 
@@ -270,9 +298,10 @@ func (m *Manager) JoinPartyV3Room(code string, userID int64, username string, sc
 	joinMsg, _ := json.Marshal(map[string]interface{}{
 		"type": "participant-join",
 		"payload": map[string]interface{}{
-			"user_id":  userID,
-			"username": username,
-			"ready":    ps.Participants[userID].Ready,
+			"user_id":   userID,
+			"username":  username,
+			"ready":     ps.Participants[userID].Ready,
+			"companion": ps.Participants[userID].Companion,
 		},
 	})
 	// 2026-05-25 fix — set write deadline before each conn write.
