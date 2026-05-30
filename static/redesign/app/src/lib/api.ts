@@ -1,4 +1,4 @@
-import { getDiagnosticBuffer } from './diagnosticBuffer'
+import { getDiagnosticBuffer, redactURL } from './diagnosticBuffer'
 
 // Aurora V2 — API client.
 //
@@ -2009,7 +2009,11 @@ export function collectClientContext(): BugReportClientContext {
   const n = w.navigator as Navigator | undefined
   const ctx: BugReportClientContext = {}
   if (w.location?.pathname) {
-    ctx.url = w.location.pathname + (w.location.search || '')
+    // Run through redactURL (shared with the network-buffer scrubber) so
+    // sensitive query params — token / code / invite / etc. — don't ride
+    // along into the bug report's client_url. The network buffer already
+    // redacts its URLs; this closes the matching gap on client_url.
+    ctx.url = redactURL(w.location.pathname + (w.location.search || ''))
   }
   if (typeof w.innerWidth === 'number' && typeof w.innerHeight === 'number'
     && w.innerWidth > 0 && w.innerHeight > 0) {

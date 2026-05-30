@@ -67,6 +67,19 @@ const ROOM_HEARTBEAT_INTERVAL_MS = 25_000
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000]
 const MAX_RECONNECT_ATTEMPTS = RECONNECT_BACKOFF_MS.length
 
+// 2026-05-29 — sync-socket reconnect machinery, mirroring the room
+// socket's. The sync WS rides an independent backend/proxy connection
+// from the room WS, so an idle-timeout drop can kill sync (hello/tick/
+// pause/seek) while the room WS stays perfectly healthy. Before this,
+// the sync socket only ever re-opened as a side effect of a fresh
+// party-state on the ROOM socket — so a sync-only drop left playback
+// sync silently dead with no UI signal and no recovery until the user
+// rejoined. Same backoff curve + cap as the room socket; reuses the
+// same activeCodeRef + userInitiatedLeaveRef guards so an intentional
+// leave stops it. The room-driven reopen (room onclose force-closes
+// sync, then party-state re-opens it) takes precedence: that path
+// cancels any pending sync-reconnect timer to avoid a double-open.
+
 export interface PartyState {
   joining: boolean
   code: string | null
@@ -99,6 +112,13 @@ export interface PartyState {
   // behavior). False when fully connected OR when we've given up
   // after MAX_RECONNECT_ATTEMPTS.
   reconnecting: boolean
+  // 2026-05-29 — true while the SYNC WS is mid-reconnect after an
+  // independent (room-still-healthy) drop. Distinct from `reconnecting`
+  // (room socket) so the UI can show a "Sync lost — reconnecting…"
+  // badge separate from the room reconnect badge: chat keeps working
+  // while playback sync is being re-established. False when sync is
+  // connected OR after we've exhausted MAX_RECONNECT_ATTEMPTS.
+  syncReconnecting: boolean
   // UI-facing: did the last operation fail? Cleared on next action.
   error: string | null
 }
@@ -116,6 +136,7 @@ const INITIAL_STATE: PartyState = {
   roomConnected: false,
   syncConnected: false,
   reconnecting: false,
+  syncReconnecting: false,
   error: null,
 }
 
@@ -265,6 +286,15 @@ export function useParty(currentUserId?: number): UseParty {
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const reconnectAttemptRef = useRef<number>(0)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // 2026-05-29 — sync-socket reconnect counters, independent of the
+  // room socket's. syncReconnectAttemptRef counts in-flight sync
+  // reconnects after an unexpected sync-only close; reset to 0 on a
+  // successful sync open, explicit leave, or a room-driven sync reopen.
+  // syncReconnectTimerRef holds the backoff setTimeout so we can cancel
+  // it (on leave, OR when the room socket drives its own sync reopen
+  // and we must not double-open).
+  const syncReconnectAttemptRef = useRef<number>(0)
+  const syncReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Tracks whether the user explicitly left (leave-party) — used to
   // suppress reconnect attempts after a deliberate teardown.
   const userInitiatedLeaveRef = useRef<boolean>(false)
@@ -288,6 +318,17 @@ export function useParty(currentUserId?: number): UseParty {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
+    }
+  }, [])
+
+  // 2026-05-29 — cancel any pending SYNC reconnect timer. Called on
+  // leave/unmount AND on the room-driven sync reopen path so the two
+  // reopen routes (sync's own backoff vs. room's party-state) can't
+  // race into a double-open of the sync socket.
+  const cancelSyncReconnect = useCallback(() => {
+    if (syncReconnectTimerRef.current) {
+      clearTimeout(syncReconnectTimerRef.current)
+      syncReconnectTimerRef.current = null
     }
   }, [])
 
@@ -323,6 +364,7 @@ export function useParty(currentUserId?: number): UseParty {
     stopHeartbeat()
     stopTimeSync()
     cancelReconnect()
+    cancelSyncReconnect()
     if (syncWsRef.current) {
       try { syncWsRef.current.close() } catch { /* defensive */ }
       syncWsRef.current = null
@@ -333,7 +375,7 @@ export function useParty(currentUserId?: number): UseParty {
     }
     // Phase 4.6 — losing the room socket = voice is gone too.
     voiceRef.current?.onRoomSocketDown()
-  }, [stopHeartbeat, stopTimeSync, cancelReconnect])
+  }, [stopHeartbeat, stopTimeSync, cancelReconnect, cancelSyncReconnect])
 
   const leave = useCallback(() => {
     // 2026-05-25 — stash the just-left party in localStorage BEFORE
@@ -370,6 +412,7 @@ export function useParty(currentUserId?: number): UseParty {
     }
     activeCodeRef.current = null
     reconnectAttemptRef.current = 0
+    syncReconnectAttemptRef.current = 0
     closeSockets()
     setState(INITIAL_STATE)
     tickRef.current = null
@@ -464,9 +507,18 @@ export function useParty(currentUserId?: number): UseParty {
           }
         }
         // First party-state arrival is the cue to open the sync
-        // socket. openSyncOnce is idempotent via the syncWsRef
+        // socket. openSyncSocket is idempotent via the syncWsRef
         // guard.
+        //
+        // 2026-05-29 — this is the ROOM-DRIVEN sync reopen path. If a
+        // sync-only drop already armed a backoff reconnect (sync's own
+        // onclose), this party-state arrival wins: cancel that pending
+        // timer and reset the counter first, so the two reopen routes
+        // can't both fire and leave two sync sockets racing. (The
+        // explicit open below replaces what the timer would have done.)
         if (!syncWsRef.current && activeCodeRef.current) {
+          cancelSyncReconnect()
+          syncReconnectAttemptRef.current = 0
           openSyncSocket(activeCodeRef.current)
         }
         break
@@ -566,7 +618,7 @@ export function useParty(currentUserId?: number): UseParty {
   // would let us add it to deps, but the ref-pattern is overkill for
   // a function that already has stable identity through closure.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setStatePatch, closeSockets])
+  }, [setStatePatch, closeSockets, cancelSyncReconnect])
 
   const handleSyncMessage = useCallback((raw: string) => {
     let msg: InboundSyncMessage
@@ -738,6 +790,17 @@ export function useParty(currentUserId?: number): UseParty {
         setStatePatch({ syncConnected: false })
         stopTimeSync()
       }
+      // 2026-05-29 — the room drop owns sync recovery from here: the
+      // reconnected room socket's party-state will re-open sync. So
+      // tear down any sync-driven reconnect that was already in flight
+      // (from a prior sync-only drop) and clear its UI badge, so we
+      // don't end up with the sync backoff and the room-driven reopen
+      // both firing. Nulling syncWsRef above also makes the sync
+      // socket's own (async) onclose guard a no-op, so it won't arm a
+      // fresh sync reconnect here.
+      cancelSyncReconnect()
+      syncReconnectAttemptRef.current = 0
+      setStatePatch({ syncReconnecting: false })
 
       // Suppress reconnect when the user explicitly left.
       if (userInitiatedLeaveRef.current) {
@@ -791,22 +854,34 @@ export function useParty(currentUserId?: number): UseParty {
     }
 
     rws.onerror = () => { /* silent — close handler covers UI */ }
-  }, [handleRoomMessage, setStatePatch, stopHeartbeat])
+  }, [handleRoomMessage, setStatePatch, stopHeartbeat, stopTimeSync, cancelSyncReconnect])
 
   // Keep the ref pointed at the latest version so onclose can recurse
   // without stale-closure shenanigans.
   openRoomSocketRef.current = openRoomSocket
 
+  // 2026-05-29 — same self-reference trick as openRoomSocketRef: the
+  // sync socket's onclose schedules a reconnect that re-invokes
+  // openSyncSocket, but a useCallback can't reference itself
+  // synchronously, so it goes through this ref.
+  const openSyncSocketRef = useRef<((code: string) => void) | null>(null)
   const openSyncSocket = useCallback((code: string) => {
     if (!getStoredUser()) return
     if (syncWsRef.current) return
+    // A fresh open supersedes any pending sync-reconnect timer (e.g.
+    // join() / room-driven reopen calling us while a backoff was
+    // armed). Clear it so the timer doesn't later fire a duplicate.
+    cancelSyncReconnect()
     // deep-debug H10 — empty token: the same-origin WS handshake sends the cookie.
     const ws = new WebSocket(buildWsUrl('/ws/party-sync', ''))
     syncWsRef.current = ws
     ws.onopen = () => {
       const msg: OutboundSyncMessage = { type: 'join-party', payload: { party_code: code } }
       try { ws.send(JSON.stringify(msg)) } catch { /* defensive */ }
-      setStatePatch({ syncConnected: true })
+      // 2026-05-29 — sync is back: reset the reconnect counter and
+      // clear the "sync lost" badge (mirrors the room socket's onopen).
+      syncReconnectAttemptRef.current = 0
+      setStatePatch({ syncConnected: true, syncReconnecting: false })
       // Audit H1 (P4) — flush the buffered intent NOW that we're
       // connected. The most common case: host's MANIFEST_PARSED
       // auto-fired vid.play() which called requestPlay before sync
@@ -870,16 +945,71 @@ export function useParty(currentUserId?: number): UseParty {
       handleSyncMessage(ev.data)
     }
     ws.onclose = () => {
-      if (syncWsRef.current === ws) {
-        syncWsRef.current = null
-        setStatePatch({ syncConnected: false })
-        // Stop pinging into a closed socket. Reconnect (when it
-        // exists for the sync socket) will re-arm via onopen.
-        stopTimeSync()
+      // Only react if THIS socket is still the active one. A late close
+      // from a socket we already replaced — or one the room's onclose
+      // already force-closed + nulled (the room then owns sync reopen
+      // via its next party-state) — must NOT arm a reconnect here.
+      if (syncWsRef.current !== ws) return
+      syncWsRef.current = null
+      setStatePatch({ syncConnected: false })
+      // Stop pinging into a closed socket; onopen re-arms the burst.
+      stopTimeSync()
+
+      // 2026-05-29 — independent sync reconnect with exponential
+      // backoff, mirroring openRoomSocket's onclose. A sync-only drop
+      // (proxy idle-timeout while the room WS stays alive) used to
+      // leave hello/tick/pause/seek dead with no recovery + no UI
+      // signal. Reuses the room's activeCodeRef + userInitiatedLeaveRef
+      // guards so an intentional leave / party-end stops it.
+
+      // Intentional leave (or a teardown that nulled activeCodeRef, e.g.
+      // party-ended): stay down, clear the badge, don't reconnect.
+      if (userInitiatedLeaveRef.current || !activeCodeRef.current) {
+        setStatePatch({ syncReconnecting: false })
+        return
       }
+
+      const attempt = syncReconnectAttemptRef.current
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        // Give up the dedicated retries, but DON'T surface a fatal
+        // `error` like the room path does: the room socket is (by
+        // construction here) still healthy, so chat/participants keep
+        // working and a future room party-state can still re-open sync.
+        // We just stop the badge + the backoff loop.
+        setStatePatch({ syncReconnecting: false })
+        return
+      }
+
+      // Schedule the next attempt with exp backoff (same curve as room).
+      const delay = RECONNECT_BACKOFF_MS[attempt]
+      syncReconnectAttemptRef.current = attempt + 1
+      setStatePatch({ syncReconnecting: true })
+      syncReconnectTimerRef.current = setTimeout(() => {
+        syncReconnectTimerRef.current = null
+        // Refresh before reconnect for the same reason the room path
+        // does: the sync WS upgrade authenticates via the httpOnly
+        // cookie, which can expire on long sessions. A no-op (~200ms)
+        // when still valid; rescues the reconnect when expired.
+        void (async () => {
+          await refreshAccessToken().catch(() => false)
+          const code = activeCodeRef.current
+          // Re-check guards after the await — the user may have left,
+          // the room may have driven its own sync reopen, or signed out
+          // during the refresh round-trip.
+          if (!code || !getStoredUser() || userInitiatedLeaveRef.current || syncWsRef.current) {
+            setStatePatch({ syncReconnecting: false })
+            return
+          }
+          openSyncSocketRef.current?.(code)
+        })()
+      }, delay)
     }
     ws.onerror = () => { /* silent — onclose handles cleanup */ }
-  }, [handleSyncMessage, setStatePatch, stopTimeSync])
+  }, [handleSyncMessage, setStatePatch, stopTimeSync, cancelSyncReconnect])
+
+  // Keep the ref pointed at the latest version so the sync onclose can
+  // recurse without stale-closure shenanigans (mirrors openRoomSocketRef).
+  openSyncSocketRef.current = openSyncSocket
 
   const join = useCallback(async (rawCode: string, opts?: { skipPreflight?: boolean }): Promise<{ ok: boolean; error?: string }> => {
     const code = rawCode.trim().toUpperCase()

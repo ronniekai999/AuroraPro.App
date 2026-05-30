@@ -487,42 +487,75 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
       // produce sub-resolution captures. Ceiling at 2 keeps the
       // worst-case canvas under the 25 MB attachment cap.
       const pixelRatio = Math.max(1, Math.min(window.devicePixelRatio || 1, 2))
-      // Deep-debug M1 — the `filter` predicate runs on every
-      // descendant including Text/Comment nodes (despite the
-      // library's TS signature claiming HTMLElement). The
-      // `instanceof HTMLElement` guard handles this correctly;
-      // simplifying to `!node.dataset.screenshotExclude` would
-      // crash on Text nodes whose `dataset` is undefined.
-      const blob = await toBlob(document.body, {
-        pixelRatio,
-        width: vw,
-        height: vh,
-        canvasWidth: vw,
-        canvasHeight: vh,
-        style: {
-          transform: `translate(-${window.scrollX}px, -${window.scrollY}px)`,
-          transformOrigin: 'top left',
-        },
-        // Skip excluded elements (launcher, modal overlay, toast,
-        // reaction overlay). True = keep, false = skip (inverse of
-        // html2canvas's ignoreElements).
-        filter: (node) =>
-          !(node instanceof HTMLElement
-            && node.dataset.screenshotExclude === 'true'),
-        // Deep-debug H1 — `skipFonts: true` prevents the library
-        // from fetching @font-face binaries (Aurora's CSS @imports
-        // Inter + Space Grotesk from Google Fonts). Without this,
-        // every Capture click pings fonts.googleapis.com +
-        // fonts.gstatic.com — adds 200ms-2s latency and silently
-        // fails on offline / corporate-proxy users. The DOM is
-        // already painted with the user's chosen font; the
-        // captured PNG matches what they see on screen via the
-        // browser's font cache (NOT via re-embedding the font in
-        // the SVG). Worst case on a system that hasn't loaded
-        // the font: capture falls back to the next stack font,
-        // which is fine for bug-report screenshots.
-        skipFonts: true,
-      })
+      // Improvement #8 — capture-side defense-in-depth for sensitive
+      // inputs. The sibling lane tags known sensitive *surfaces* with
+      // data-screenshot-exclude (the `filter` below drops those whole
+      // subtrees), but a stray password/secret field elsewhere on the
+      // page would otherwise be serialized in clear text into the PNG
+      // — which becomes a public-ish GitHub attachment. html-to-image
+      // rasterizes `input.value` (the live property), so CSS tricks
+      // like -webkit-text-security don't help; we have to actually
+      // blank the value for the duration of the rasterize, then
+      // restore it. We also blank any input/textarea that is itself
+      // tagged data-screenshot-exclude (belt-and-suspenders for fields
+      // a surface tagged but the `filter` can't reach because the
+      // field is the captured node's ancestor, not a descendant).
+      // Restored in the inner finally so a thrown toBlob still leaves
+      // the user's typed values intact.
+      const maskedInputs: Array<{ el: HTMLInputElement | HTMLTextAreaElement; value: string }> = []
+      const sensitiveFields = document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+        'input[type="password"], input[data-screenshot-exclude="true"], textarea[data-screenshot-exclude="true"]',
+      )
+      for (const field of sensitiveFields) {
+        if (field.value) {
+          maskedInputs.push({ el: field, value: field.value })
+          field.value = ''
+        }
+      }
+      let blob: Blob | null
+      try {
+        // Deep-debug M1 — the `filter` predicate runs on every
+        // descendant including Text/Comment nodes (despite the
+        // library's TS signature claiming HTMLElement). The
+        // `instanceof HTMLElement` guard handles this correctly;
+        // simplifying to `!node.dataset.screenshotExclude` would
+        // crash on Text nodes whose `dataset` is undefined.
+        blob = await toBlob(document.body, {
+          pixelRatio,
+          width: vw,
+          height: vh,
+          canvasWidth: vw,
+          canvasHeight: vh,
+          style: {
+            transform: `translate(-${window.scrollX}px, -${window.scrollY}px)`,
+            transformOrigin: 'top left',
+          },
+          // Skip excluded elements (launcher, modal overlay, toast,
+          // reaction overlay). True = keep, false = skip (inverse of
+          // html2canvas's ignoreElements).
+          filter: (node) =>
+            !(node instanceof HTMLElement
+              && node.dataset.screenshotExclude === 'true'),
+          // Deep-debug H1 — `skipFonts: true` prevents the library
+          // from fetching @font-face binaries (Aurora's CSS @imports
+          // Inter + Space Grotesk from Google Fonts). Without this,
+          // every Capture click pings fonts.googleapis.com +
+          // fonts.gstatic.com — adds 200ms-2s latency and silently
+          // fails on offline / corporate-proxy users. The DOM is
+          // already painted with the user's chosen font; the
+          // captured PNG matches what they see on screen via the
+          // browser's font cache (NOT via re-embedding the font in
+          // the SVG). Worst case on a system that hasn't loaded
+          // the font: capture falls back to the next stack font,
+          // which is fine for bug-report screenshots.
+          skipFonts: true,
+        })
+      } finally {
+        // Restore the blanked values regardless of capture outcome.
+        for (const { el, value } of maskedInputs) {
+          el.value = value
+        }
+      }
       if (!mountedRef.current) return
       if (!blob) {
         setError('Capture failed: the browser could not encode the screenshot.')
@@ -1291,7 +1324,8 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 once they see what they captured). */}
             <p className="text-amber-200/80 text-[10px] mt-1">
               Captures show whatever is on screen now — library, currently playing media, profile info.
-              Review the thumbnail below before submitting.
+              If you Record screen and choose to share tab or system audio in the browser's share
+              dialog, that audio is recorded into the clip too. Review the thumbnail below before submitting.
             </p>
             {attachment && (
               <div className="mt-2 flex items-start gap-3 p-2 rounded-lg bg-white/[0.03] border border-white/[0.06]">
@@ -1355,6 +1389,13 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
                 {' '}Screenshots and recordings may also show personal data
                 (your library, currently playing media, profile info) —
                 review what you're attaching before submitting.
+                {attachment.type.startsWith('video/') && (
+                  <>
+                    {' '}If you shared tab or system audio in the screen-share
+                    dialog, that audio is part of this recording and will be
+                    uploaded with the report.
+                  </>
+                )}
               </>
             )}
           </div>

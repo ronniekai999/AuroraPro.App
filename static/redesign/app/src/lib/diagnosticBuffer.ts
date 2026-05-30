@@ -120,10 +120,11 @@ function shouldFilterNetworkEntry(url: string, status: number): boolean {
 const SENSITIVE_PARAMS = new Set([
   'token', 'access_token', 'refresh_token', 'id_token',
   'password', 'pass', 'pwd', 'secret',
-  'api_key', 'apikey', 'key',
+  'api_key', 'api-key', 'apikey', 'key',
   'authorization', 'auth',
   'code', 'state',                  // OAuth callback codes
   'sig', 'signature',
+  'invite',                         // invite-link token (client_url redaction)
 ])
 
 // ── Console-message redaction ────────────────────────────────────────
@@ -170,6 +171,22 @@ const BEARER_RE = /\b(bearer|basic)\s+[A-Za-z0-9\-._~+/]+=*/gi
 // strings / file paths.
 const JWT_RE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g
 
+// Long opaque hex / base64(url) runs — bare credentials logged without a
+// key (session IDs, raw API keys, signatures, hashes pasted into a log).
+// Thresholds are deliberately high so ordinary log text doesn't trip:
+//   - hex: 32+ contiguous [0-9a-f] (covers MD5/SHA, hex API keys; a 32
+//     char hex string is far longer than any English word or CSS color)
+//   - base64/base64url: 40+ chars of [A-Za-z0-9+/_-] containing BOTH a
+//     digit AND a letter, with optional `=` padding. Requiring a mixed
+//     alphabet keeps it off long all-letter prose / kebab-case slugs.
+// \b boundaries keep partial matches off longer identifiers. These run
+// AFTER the structured (header/bearer/JWT/param) passes so a token that
+// one of those would mask with its key/scheme intact isn't pre-clobbered
+// into a bare run first.
+const LONG_HEX_RE = /\b[0-9a-f]{32,}\b/gi
+const LONG_B64_RE =
+  /\b(?=[A-Za-z0-9+/_-]*[0-9])(?=[A-Za-z0-9+/_-]*[A-Za-z])[A-Za-z0-9+/_-]{40,}={0,2}/g
+
 // Assignment-context redaction for the SENSITIVE_PARAMS keys (token,
 // access_token, password, api_key, secret, …). Matches `key=value`,
 // `key: value`, and JSON `"key":"value"` forms. The value is a single
@@ -210,9 +227,12 @@ const SENSITIVE_PARAM_UQ_RE = new RegExp(
 // redactConsoleMessage masks credential-shaped content in a formatted
 // console string before it's buffered. Order matters: header + bearer +
 // JWT first (they may span what the param matcher would otherwise stop
-// at), then the assignment-context param keys. Wrapped so a pathological
-// input can never throw out of the interceptor — on any error we fall
-// back to a fully-masked sentinel rather than leak the raw string.
+// at), then the assignment-context param keys, and finally the bare
+// long-hex / long-base64 runs (a structured pass keeps the secret's
+// key/scheme intact, so it must win over the catch-all run scrubber).
+// Wrapped so a pathological input can never throw out of the interceptor
+// — on any error we fall back to a fully-masked sentinel rather than
+// leak the raw string.
 function redactConsoleMessage(s: string): string {
   try {
     return s
@@ -228,6 +248,8 @@ function redactConsoleMessage(s: string): string {
       .replace(SENSITIVE_PARAM_DQ_RE, (_m, pre: string, q: string) => `${pre}${REDACTED}${q}`)
       .replace(SENSITIVE_PARAM_SQ_RE, (_m, pre: string, q: string) => `${pre}${REDACTED}${q}`)
       .replace(SENSITIVE_PARAM_UQ_RE, (_m, pre: string) => `${pre}${REDACTED}`)
+      .replace(LONG_HEX_RE, REDACTED)
+      .replace(LONG_B64_RE, REDACTED)
   } catch {
     // A regex engine should never throw on these linear patterns, but
     // if it somehow does we must not buffer the unredacted original.
@@ -235,25 +257,68 @@ function redactConsoleMessage(s: string): string {
   }
 }
 
+// RingBuffer is a fixed-capacity circular buffer with O(1) push. The
+// previous implementation was a plain array with push()+shift(); shift()
+// is O(n) (every remaining element slides down one slot) and ran on the
+// hot path of EVERY console.* call and EVERY fetch once the buffers
+// filled (500 console / 300 network). Under heavy logging that's
+// O(n) per event = quadratic over a burst. A preallocated array + head
+// index + count makes both push and overwrite O(1); ordering is only
+// reconstructed (oldest→newest) on read, which happens once per bug
+// report — not on the hot path.
+//
+// `head` is the slot the NEXT push writes to. Once `count === cap` the
+// buffer is full and each push overwrites the current-oldest slot (which
+// is `head`), then advances head — so the oldest entry is dropped
+// silently, matching the old push/shift semantics.
+class RingBuffer<T> {
+  private readonly buf: (T | undefined)[]
+  private head = 0
+  private count = 0
+  private readonly cap: number
+  constructor(cap: number) {
+    // cap is always a positive constant here; guard defensively so a
+    // zero/negative never produces a zero-length buffer that silently
+    // drops everything. Plain field + assignment (NOT a constructor
+    // parameter property) — parameter properties are illegal under this
+    // project's tsconfig `erasableSyntaxOnly`, which `tsc -b` enforces
+    // (a plain --strict typecheck would not catch it).
+    this.cap = cap > 0 ? cap : 1
+    this.buf = new Array<T | undefined>(this.cap)
+  }
+  push(item: T): void {
+    this.buf[this.head] = item
+    this.head = (this.head + 1) % this.cap
+    if (this.count < this.cap) this.count++
+  }
+  // toArray returns a plain array ordered oldest→newest. When the buffer
+  // hasn't wrapped yet the oldest entry is at index 0; once full the
+  // oldest is at `head` (the slot about to be overwritten next).
+  toArray(): T[] {
+    const out: T[] = new Array<T>(this.count)
+    const start = this.count < this.cap ? 0 : this.head
+    for (let i = 0; i < this.count; i++) {
+      out[i] = this.buf[(start + i) % this.cap] as T
+    }
+    return out
+  }
+  clear(): void {
+    this.buf.fill(undefined)
+    this.head = 0
+    this.count = 0
+  }
+}
+
 // Module-level state. Lazy-initialized on first install.
 let installed = false
-const consoleBuffer: ConsoleEntry[] = []
-const networkBuffer: NetworkEntry[] = []
+const consoleBuffer = new RingBuffer<ConsoleEntry>(CONSOLE_MAX)
+const networkBuffer = new RingBuffer<NetworkEntry>(NETWORK_MAX)
 
 // Originals saved for passthrough. Kept module-private so test code
 // can't accidentally call them directly; uninstall is intentionally
 // not exposed (the buffer should run for the lifetime of the SPA).
 const originalConsole: Partial<Record<ConsoleEntry['level'], (...args: unknown[]) => void>> = {}
 let originalFetch: typeof window.fetch | null = null
-
-// pushBounded drops the oldest entry when the buffer is full. Mutates
-// in place — cheap and produces stable behavior under heavy logging.
-function pushBounded<T>(arr: T[], item: T, max: number): void {
-  arr.push(item)
-  if (arr.length > max) {
-    arr.shift()
-  }
-}
 
 // safeStringify handles circular references, Error objects, undefined,
 // and BigInt. console.log({ a: a }) where a holds a ref to itself
@@ -321,12 +386,18 @@ function formatConsoleArgs(args: unknown[]): string {
   return out
 }
 
-// redactURL strips sensitive query parameters from a URL string.
-// Returns the result capped at NETWORK_URL_MAX.
+// redactURL strips sensitive query parameters (and basic-auth userinfo,
+// and sensitive fragment params) from a URL string. Returns the result
+// capped at NETWORK_URL_MAX.
 //
 // Falls back to the input on parse failure (e.g. relative URLs with
 // no base) — better to have an un-redacted relative path than nothing.
-function redactURL(input: string): string {
+//
+// Exported (not just via _testing) because collectClientContext in
+// api.ts runs the bug-report `client_url` through it — that URL is the
+// page's pathname+search and can carry the same token / invite / code
+// query params the network buffer already scrubs.
+export function redactURL(input: string): string {
   let result = input
   try {
     // Use document.baseURI so relative URLs parse. If we're in a
@@ -404,11 +475,11 @@ function installConsoleInterceptor(): void {
     originalConsole[level] = original.bind(console)
     console[level] = (...args: unknown[]) => {
       try {
-        pushBounded(consoleBuffer, {
+        consoleBuffer.push({
           ts: new Date().toISOString(),
           level,
           message: formatConsoleArgs(args),
-        }, CONSOLE_MAX)
+        })
       } catch {
         // Never let the interceptor itself break the page.
       }
@@ -455,14 +526,14 @@ function installFetchInterceptor(): void {
         if (!shouldFilterNetworkEntry(urlStr, res.status)) {
           const lenHeader = res.headers.get('content-length')
           const size = lenHeader ? parseInt(lenHeader, 10) || 0 : 0
-          pushBounded(networkBuffer, {
+          networkBuffer.push({
             ts,
             method,
             url: redactURL(urlStr),
             status: res.status,
             durationMs: Math.round(performance.now() - startMs),
             responseSize: size,
-          }, NETWORK_MAX)
+          })
         }
       } catch {
         // Recording failed; the actual fetch succeeded so we still
@@ -471,14 +542,14 @@ function installFetchInterceptor(): void {
       return res
     } catch (err) {
       try {
-        pushBounded(networkBuffer, {
+        networkBuffer.push({
           ts,
           method,
           url: redactURL(urlStr),
           status: 0,
           durationMs: Math.round(performance.now() - startMs),
           responseSize: 0,
-        }, NETWORK_MAX)
+        })
       } catch { /* defensive */ }
       throw err
     }
@@ -500,11 +571,11 @@ function installErrorHandlers(): void {
       const raw = `[uncaught] ${e.message || 'unknown'}` +
         (e.filename ? ` at ${e.filename}:${e.lineno}:${e.colno}` : '') +
         (e.error?.stack ? '\n' + e.error.stack.split('\n').slice(0, 5).join('\n') : '')
-      pushBounded(consoleBuffer, {
+      consoleBuffer.push({
         ts: new Date().toISOString(),
         level: 'error',
         message: formatConsoleArgs([raw]),
-      }, CONSOLE_MAX)
+      })
     } catch { /* defensive */ }
   })
   window.addEventListener('unhandledrejection', (e) => {
@@ -513,11 +584,11 @@ function installErrorHandlers(): void {
       const raw = reason instanceof Error
         ? `${reason.name}: ${reason.message}${reason.stack ? '\n' + reason.stack.split('\n').slice(0, 5).join('\n') : ''}`
         : safeStringify(reason)
-      pushBounded(consoleBuffer, {
+      consoleBuffer.push({
         ts: new Date().toISOString(),
         level: 'error',
         message: formatConsoleArgs([`[unhandled-rejection] ${raw}`]),
-      }, CONSOLE_MAX)
+      })
     } catch { /* defensive */ }
   })
 }
@@ -535,12 +606,13 @@ export function installDiagnosticBuffer(): void {
 }
 
 // getDiagnosticBuffer returns a SNAPSHOT of the current buffers.
-// Callers receive copies; the underlying buffers continue to mutate
-// in the background. Returns empty arrays when never installed.
+// Callers receive fresh arrays (RingBuffer.toArray reconstructs ordering
+// oldest→newest); the underlying ring buffers continue to mutate in the
+// background. Returns empty arrays when never installed.
 export function getDiagnosticBuffer(): DiagnosticSnapshot {
   return {
-    console: consoleBuffer.slice(),
-    network: networkBuffer.slice(),
+    console: consoleBuffer.toArray(),
+    network: networkBuffer.toArray(),
   }
 }
 
@@ -550,14 +622,14 @@ export function getDiagnosticBuffer(): DiagnosticSnapshot {
 // reachable from tests."
 export const _testing = {
   resetBuffers(): void {
-    consoleBuffer.length = 0
-    networkBuffer.length = 0
+    consoleBuffer.clear()
+    networkBuffer.clear()
   },
   pushConsole(entry: ConsoleEntry): void {
-    pushBounded(consoleBuffer, entry, CONSOLE_MAX)
+    consoleBuffer.push(entry)
   },
   pushNetwork(entry: NetworkEntry): void {
-    pushBounded(networkBuffer, entry, NETWORK_MAX)
+    networkBuffer.push(entry)
   },
   redactURL,
   redactConsoleMessage,
