@@ -104,6 +104,13 @@ export interface PlayTarget {
   // EpisodeId if this is a TV episode — threaded through to
   // /api/progress for per-episode tracking. Undefined for movies.
   episodeId?: number
+  // Issue #177 — the season/episode NUMBERS of the currently-playing
+  // episode (not IDs). Required so auto-play-next can resolve "what
+  // comes after this" without re-deriving position from episodeId.
+  // Undefined for movies and for any episode target that couldn't
+  // supply them (auto-advance simply no-ops in that case).
+  seasonNumber?: number
+  episodeNumber?: number
   // For the player UI title.
   title: string
   subtitle?: string
@@ -156,6 +163,12 @@ interface VideoPlayerProps {
   // file seconds (the absolute media position, NOT video element
   // currentTime), matching what the scrubber emits to onSeek.
   onSeekRebuild?: (newStartSec: number) => void
+  // Issue #177 — fires once when playback reaches the natural end of
+  // the media (the <video> 'ended' event). The parent decides whether
+  // to auto-advance to the next episode (gated on the user's autoplay
+  // preference, episode-vs-movie, party state, etc.) — the player
+  // itself stays dumb about the episode graph.
+  onEnded?: () => void
 }
 
 // Pick a file to play from the available list.
@@ -240,8 +253,13 @@ function liftCuesAboveControls(tt: TextTrack | null | undefined): void {
   }
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild }: VideoPlayerProps) {
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  // Issue #177 — hold the latest onEnded in a ref so the 'ended'
+  // listener (bound in the [target] effect) always invokes the current
+  // callback without re-subscribing on every render.
+  const onEndedRef = useRef(onEnded)
+  onEndedRef.current = onEnded
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const startSecRef = useRef<number>(0)
@@ -1619,12 +1637,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const onFullscreenChange = () => {
       setFullscreen(document.fullscreenElement === overlayRootRef.current)
     }
+    // Issue #177 — natural end of playback. Defer entirely to the
+    // parent (auto-play-next decision lives there). 'ended' fires once
+    // per playthrough; the parent re-targets on advance, which tears
+    // down + rebuilds this effect for the next episode.
+    const onEndedDom = () => { onEndedRef.current?.() }
     vid.addEventListener('play', onPlay)
     vid.addEventListener('pause', onPause)
     vid.addEventListener('timeupdate', onTimeUpdate)
     vid.addEventListener('progress', onProgress)
     vid.addEventListener('durationchange', onDurationChange)
     vid.addEventListener('volumechange', onVolumeChange)
+    vid.addEventListener('ended', onEndedDom)
     document.addEventListener('fullscreenchange', onFullscreenChange)
     // Hydrate initial state from the element (it may already be
     // playing if we're re-mounting on a target change).
@@ -1638,6 +1662,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.removeEventListener('progress', onProgress)
       vid.removeEventListener('durationchange', onDurationChange)
       vid.removeEventListener('volumechange', onVolumeChange)
+      vid.removeEventListener('ended', onEndedDom)
       document.removeEventListener('fullscreenchange', onFullscreenChange)
     }
   }, [target])
