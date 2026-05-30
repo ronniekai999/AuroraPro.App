@@ -5886,6 +5886,13 @@ export default function App() {
   // blank player.
   const [playerTarget, setPlayerTarget] = useState<PlayTarget | null>(null)
   const [playerLoading, setPlayerLoading] = useState(false)
+  // Issue #177 — latest-target mirror. The auto-advance lookup (which
+  // runs async between two API calls) reads this to confirm the player
+  // is still parked on the episode that ended before it swaps in the
+  // next one — so closing the player or picking a different episode
+  // mid-lookup can't get stomped by a stale resolve.
+  const playerTargetRef = useRef<PlayTarget | null>(null)
+  playerTargetRef.current = playerTarget
 
   // M10 Phase 4 — watch party state.
   // 2026-05-25 — pass user.id so the hook can scope its last-party
@@ -6285,6 +6292,8 @@ export default function App() {
           fileId: file.id,
           fileType: 'episode',
           episodeId: ep.id,
+          seasonNumber: firstSeason.season_number,
+          episodeNumber: ep.episode_number,
           title: m.title,
           subtitle: `S${firstSeason.season_number}E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
         })
@@ -6444,6 +6453,8 @@ export default function App() {
               fileId: file.id,
               fileType: 'episode',
               episodeId: foundEp.id,
+              seasonNumber: foundSeasonNum,
+              episodeNumber: foundEp.episode_number,
               title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
               subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
             })
@@ -6535,6 +6546,8 @@ export default function App() {
             fileId: file.id,
             fileType: 'episode',
             episodeId: foundEp.id,
+            seasonNumber: foundSeasonNum,
+            episodeNumber: foundEp.episode_number,
             title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
             subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
           })
@@ -7254,6 +7267,8 @@ export default function App() {
           fileId: file.id,
           fileType: 'episode',
           episodeId: ep.id,
+          seasonNumber: c.season_number,
+          episodeNumber: c.episode_number ?? ep.episode_number,
           title: c.title,
           subtitle: `S${c.season_number}E${c.episode_number ?? ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
           resumePositionMs: c.position_ms,
@@ -7303,6 +7318,112 @@ export default function App() {
       }
     }
   }, [nextToastId])
+
+  // Issue #177 — auto-play the next episode when one finishes.
+  //
+  // The "Auto-play next episode" toggle in Settings has shipped since
+  // the V2 redesign but was never wired to anything — the V1 logic was
+  // left as a documented TODO in handlePlay. This is that wiring,
+  // driven by the <video> 'ended' event the player now forwards.
+  //
+  //   - Episode targets only; movies and number-less targets no-op.
+  //   - Honors the autoplay preference, read straight from the
+  //     aurora_prefs bucket. SettingsView owns the React state, but the
+  //     raw localStorage object is the cross-component source of truth
+  //     (same pattern handlePlay uses for preferred_quality). Default
+  //     ON, matching the toggle's own default.
+  //   - NOT inside a watch party: host/guest media sync flows through
+  //     the party media-change broadcast (onMediaChange above). A
+  //     unilateral advance here would desync guests, so party
+  //     auto-advance is left as a separate follow-up.
+  //   - Resolution: the next playable episode in the current season,
+  //     else the first playable episode of the earliest later season.
+  //     Fileless episodes are skipped. At the series end (or when
+  //     nothing playable remains) we leave the player parked on the
+  //     final frame rather than closing it.
+  //
+  // The playerTargetRef re-check before applying guards the async
+  // window: if the player advanced, closed, or switched episodes while
+  // getEpisodes/getSeasons were in flight, the stale resolve bails.
+  const handlePlaybackEnded = useCallback(() => {
+    const ended = playerTargetRef.current
+    if (!ended || ended.fileType !== 'episode') return
+    if (ended.seasonNumber == null || ended.episodeNumber == null) return
+    if (party.state.code) return // no unilateral advance in a watch party
+
+    // Read prefs once. Default autoplay ON; quality mirrors handlePlay.
+    let autoplay = true
+    let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+      if (raw && typeof raw === 'object') {
+        const prefs = raw as Record<string, unknown>
+        if (prefs.autoplay === false) autoplay = false
+        if (prefs.preferred_quality === '4k') preferQuality = '4k'
+        else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+      }
+    } catch { /* malformed prefs — keep defaults (autoplay ON) */ }
+    if (!autoplay) return
+
+    const mediaItemId = ended.mediaItemId
+    const curSeason = ended.seasonNumber
+    const curEp = ended.episodeNumber
+    const showTitle = ended.title
+    const endedEpisodeId = ended.episodeId
+
+    void (async () => {
+      try {
+        // 1) Next playable episode in the current season.
+        let nextEp: ApiEpisode | null = null
+        let nextFile: ReturnType<typeof pickFile> = null
+        let nextSeason = curSeason
+        const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
+          .sort((a, b) => a.episode_number - b.episode_number)
+        for (const e of sameSeason) {
+          if (e.episode_number <= curEp) continue
+          const f = pickFile(e.files, preferQuality)
+          if (f) { nextEp = e; nextFile = f; break }
+        }
+        // 2) Else the first playable episode of the earliest later season.
+        if (!nextEp) {
+          const laterSeasons = [...await getSeasons(mediaItemId)]
+            .sort((a, b) => a.season_number - b.season_number)
+            .filter(s => s.season_number > curSeason)
+          for (const s of laterSeasons) {
+            const eps = [...await getEpisodes(mediaItemId, s.season_number)]
+              .sort((a, b) => a.episode_number - b.episode_number)
+            for (const e of eps) {
+              const f = pickFile(e.files, preferQuality)
+              if (f) { nextEp = e; nextFile = f; nextSeason = s.season_number; break }
+            }
+            if (nextEp) break
+          }
+        }
+
+        // Bail if the player moved on while we were resolving.
+        if (playerTargetRef.current?.episodeId !== endedEpisodeId) return
+        if (!nextEp || !nextFile) return // series end / nothing playable — park on final frame
+
+        const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
+        setPlayerTarget({
+          mediaItemId,
+          fileId: nextFile.id,
+          fileType: 'episode',
+          episodeId: nextEp.id,
+          seasonNumber: nextSeason,
+          episodeNumber: nextEp.episode_number,
+          title: showTitle,
+          subtitle: label,
+        })
+        addToast(`Up next: ${label}`, 'info')
+        // The finished episode now has completed progress — refresh
+        // Continue Watching (same nonce the player-close path bumps).
+        setCwReloadNonce(n => n + 1)
+      } catch (err) {
+        console.warn('[Aurora] auto-advance to next episode failed', err)
+      }
+    })()
+  }, [party.state.code, addToast])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
   // identity unless continueItems OR handlePlayContinue changes (both
@@ -7460,7 +7581,21 @@ export default function App() {
   // for progress tracking; episodeId is on the episode itself.
   const handlePlayEpisode = useCallback((ep: ApiEpisode) => {
     if (!selectedMedia) return
-    const file = pickFile(ep.files)
+    // Deep-debug #177 — honor the quality preference, matching handlePlay
+    // / handlePlayContinue / handlePlaybackEnded. Without it a manually-
+    // started episode used 'auto' (1080p-preferred) while an auto-advanced
+    // one used the 4k preference, so a binge could switch resolution
+    // mid-stream for a 4k-preference user.
+    let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+      if (raw && typeof raw === 'object') {
+        const prefs = raw as Record<string, unknown>
+        if (prefs.preferred_quality === '4k') preferQuality = '4k'
+        else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
+      }
+    } catch { /* malformed prefs — keep 'auto' */ }
+    const file = pickFile(ep.files, preferQuality)
     if (!file) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'This episode has no playable file.', type: 'error' }])
@@ -7471,10 +7606,22 @@ export default function App() {
       fileId: file.id,
       fileType: 'episode',
       episodeId: ep.id,
+      // Issue #177 — stamp the season the RENDERED episode rows were
+      // actually fetched for, NOT the picker's current value.
+      // Deep-debug #177: on a season switch, setDetailSelectedSeason is
+      // synchronous but the episode list repopulates via an async
+      // getEpisodes effect; during that window the old rows stay
+      // clickable while detailSelectedSeason already holds the new
+      // number. currentEpisodesSeasonRef lags it (updated only after the
+      // new list loads), so it matches the still-visible rows and keeps
+      // auto-advance resolving "next" against the right season. Falls
+      // back to detailSelectedSeason (initial-load) then undefined.
+      seasonNumber: currentEpisodesSeasonRef.current?.season ?? detailSelectedSeason ?? undefined,
+      episodeNumber: ep.episode_number,
       title: selectedMedia.title,
       subtitle: `E${ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
     })
-  }, [selectedMedia, nextToastId])
+  }, [selectedMedia, detailSelectedSeason, nextToastId])
 
   // M10 Phase 4.5 — episode list refetches when the user switches
   // season via the picker. The initial-load case is handled inside
@@ -8140,6 +8287,7 @@ export default function App() {
       )}
       <VideoPlayer
         target={playerTarget}
+        onEnded={handlePlaybackEnded}
         onClose={() => {
           setPlayerTarget(null)
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after
