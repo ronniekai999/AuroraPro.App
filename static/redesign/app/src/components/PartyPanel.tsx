@@ -19,11 +19,29 @@
 //
 // The panel reads from `useParty().state` and dispatches via the
 // action methods (sendChat, leave). It does not own party state.
+//
+// 2026-05-30 — Cinematic Overlay. The panel is now a translucent
+// floating GLASS overlay that floats OVER the video instead of an
+// opaque slab bolted to the right edge, and it has two faces:
+//   - variant="rail"    (default) — the full feature set below
+//                         (members, voice strip, chat, ready, composer,
+//                         end-party, highlight reel, reconnecting badge),
+//                         restyled to read as floating glass.
+//   - variant="minimal" — the "just the movie" face: a lower-third chat
+//                         ticker, a corner voice pill, and a bottom mini
+//                         dock (CinematicChatTicker / VoicePill /
+//                         MiniDock), composed here so the parent keeps
+//                         ONE mount point and the header toggle just
+//                         flips `variant`.
+// `variant` defaults to "rail" so existing callers are unchanged.
 
 import { useEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
+import { CinematicChatTicker } from './CinematicChatTicker'
+import { VoicePill } from './VoicePill'
+import { MiniDock } from './MiniDock'
 
 interface PartyPanelProps {
   state: PartyState
@@ -42,6 +60,20 @@ interface PartyPanelProps {
   onToggleVoiceMute?: () => void
   // Phase 4.6 — ready dots / spoiler-free start gate.
   onSendReady?: (ready: boolean) => void
+  // 2026-05-30 — Cinematic Overlay. Which face to render. Defaults to
+  // "rail" so every existing caller keeps the current behavior with no
+  // change. "minimal" renders the ticker + voice pill + mini dock.
+  variant?: 'rail' | 'minimal'
+  // Fired by the header dock button (rail) and by a restore affordance
+  // (minimal) to flip between the two faces. Optional: when absent, the
+  // toggle button is hidden and the panel is locked to `variant`.
+  onToggleVariant?: () => void
+  // 2026-05-30 — host "invite to party" affordance. When provided (the
+  // parent passes it only for the HOST), the rail header shows an invite
+  // button that opens the parent's PartyInvite card (join code + QR deep
+  // link for phones). Optional: guests don't get it, so the button is
+  // hidden. Rail-only (minimal mode has no header).
+  onInvite?: () => void
 }
 
 export function PartyPanel({
@@ -49,6 +81,9 @@ export function PartyPanel({
   onSendReaction,
   voice, onJoinVoice, onLeaveVoice, onToggleVoiceMute,
   onSendReady,
+  variant = 'rail',
+  onToggleVariant,
+  onInvite,
 }: PartyPanelProps) {
   const [draft, setDraft] = useState('')
   const chatRef = useRef<HTMLDivElement | null>(null)
@@ -80,8 +115,72 @@ export function PartyPanel({
     setDraft('')
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // Minimal (cinematic) face. Renders the three lower-chrome surfaces
+  // over the video and a single small "expand to rail" affordance.
+  // Composed here so App keeps ONE mount point and the toggle just
+  // flips `variant`. Each child is itself a floating fixed/absolute
+  // overlay (positioned relative to the viewport like the rail), so we
+  // render them as siblings inside a Fragment — no wrapping box that
+  // would intercept clicks over the player.
+  if (variant === 'minimal') {
+    const selfLabel =
+      state.participants.find(p => p.user_id === currentUserId)?.username || 'You'
+    return (
+      <>
+        <CinematicChatTicker chat={state.chat} currentUserId={currentUserId} />
+        <VoicePill
+          voice={voice}
+          onJoinVoice={onJoinVoice}
+          onLeaveVoice={onLeaveVoice}
+          onToggleVoiceMute={onToggleVoiceMute}
+          selfLabel={selfLabel}
+        />
+        <MiniDock
+          onSendChat={onSendChat}
+          onSendReaction={onSendReaction}
+          voice={voice}
+          onToggleVoiceMute={onToggleVoiceMute}
+        />
+        {/* Restore-to-rail affordance. Only when the parent supports
+            toggling; otherwise minimal is a locked presentation. Sits
+            top-left, clear of the top-right VoicePill. */}
+        {onToggleVariant && (
+          <button
+            type="button"
+            onClick={onToggleVariant}
+            className="aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
+                       bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.16)]
+                       text-white/70 hover:text-white hover:border-[rgba(220,200,255,0.3)]
+                       text-xs font-medium transition-colors"
+            title="Expand the watch-party rail"
+            aria-label="Expand the watch-party rail"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M4 4h7v2H6v5H4V4zm9 0h7v7h-2V6h-5V4zM4 13h2v5h5v2H4v-7zm14 0h2v7h-7v-2h5v-5z" />
+            </svg>
+            Party
+            {state.code && state.reconnecting && (
+              <span
+                className="w-1.5 h-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse"
+                title="Reconnecting to the party"
+              />
+            )}
+          </button>
+        )}
+      </>
+    )
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Rail (default) face — the full panel, restyled as floating glass.
+  // 2026-05-30 — was a near-opaque slab bolted to the right edge
+  // (`bg-[#0a0a0f]/95` + `border-l`, flush to top/right/bottom). Now a
+  // translucent glass card lifted off the edges (inset margins +
+  // rounded) so the movie glows through and around it. On phones it
+  // still spans (nearly) full width but keeps the float inset + radius.
   return (
-    <aside className="fixed top-0 right-0 bottom-0 w-full sm:w-[340px] bg-[#0a0a0f]/95 backdrop-blur-xl border-l border-white/[0.06] z-[70] flex flex-col animate-fade-in">
+    <aside className="aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
       {/* Header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
         <div className="min-w-0">
@@ -102,7 +201,7 @@ export function PartyPanel({
                 className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 text-[10px] font-medium border border-amber-500/30"
                 title="Lost connection to the party — trying to reconnect"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 motion-safe:animate-pulse" />
                 Reconnecting…
               </span>
             )}
@@ -141,13 +240,47 @@ export function PartyPanel({
             )}
           </p>
         </div>
-        <button
-          onClick={onClose}
-          className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center"
-          aria-label="Close panel"
-        >
-          ×
-        </button>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          {/* 2026-05-30 — host invite affordance. Opens the parent's
+              PartyInvite card (join code + QR deep link for phones).
+              Rendered only when the parent wires onInvite (host-only). */}
+          {onInvite && (
+            <button
+              onClick={onInvite}
+              className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/60 hover:text-white flex items-center justify-center transition-colors"
+              title="Invite friends to this party"
+              aria-label="Invite friends to this party"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M19 8v6M22 11h-6" />
+              </svg>
+            </button>
+          )}
+          {/* 2026-05-30 — dock → minimal toggle. Collapses the rail into
+              the cinematic ticker/pill/dock face. Hidden when the parent
+              doesn't support toggling (rail-only callers). */}
+          {onToggleVariant && (
+            <button
+              onClick={onToggleVariant}
+              className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/60 hover:text-white flex items-center justify-center transition-colors"
+              title="Switch to minimal (cinematic) mode"
+              aria-label="Switch to minimal cinematic mode"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M4 4h7v2H6v5H4V4zm9 0h7v7h-2V6h-5V4zM4 13h2v5h5v2H4v-7zm14 0h2v7h-7v-2h5v-5z" />
+              </svg>
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/70 hover:text-white text-lg flex items-center justify-center"
+            aria-label="Close panel"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       {/* Error banner */}

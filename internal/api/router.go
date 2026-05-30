@@ -297,6 +297,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Get("/r/{code}", func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, "/v2/r/"+chi.URLParam(r, "code"), http.StatusFound)
 			})
+			// Feature 1 (mobile companion) — the QR code on the big screen
+			// encodes /join/{CODE}; this mirrors /p and /r by bouncing to
+			// the V2 SPA companion route. See joinShortLinkRedirect for the
+			// open-redirect-safe details.
+			r.Get("/join/{code}", joinShortLinkRedirect)
 			r.Handle("/static/*", http.StripPrefix("/static/",
 				safeFileServer(http.Dir(deps.StaticDir))))
 
@@ -454,6 +459,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// directory reuses the image proxy's cache root for filesystem locality;
 	// generated images live under <root>/party-share/<code>.png.
 	partyShareH := NewPartyShareHandler(deps.PartyManager, deps.Cfg.Cache.ImageDir)
+	// Feature 1 (mobile companion): renders the companion-join QR code
+	// (PNG of <scheme>://<host>/join/{CODE}). Auth + party-membership gated;
+	// secureCookies threads through so the encoded URL's scheme is https
+	// behind a TLS-terminating proxy (same hint the auth cookies use).
+	partyQRH := NewPartyQRHandler(deps.PartyManager, cfg.Server.SecureCookies)
 	// V3 dual-socket handlers. The legacy NewPartyWSHandler/V2 handler is
 	// no longer constructed (orphan code in party_ws.go) — its route has
 	// been removed and no current client speaks V2 wire format.
@@ -937,6 +947,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// endpoint serves the cached MP4 (404 if not yet generated
 			// or if the party never had enough reactions).
 			r.Get("/api/parties/{code}/highlight.mp4", partyH.ServeHighlightReel)
+			// Feature 1 (mobile companion) — companion-join QR. Returns a
+			// PNG encoding <scheme>://<host>/join/{CODE}. Auth-required
+			// (this group) + party-membership gated inside the handler,
+			// same policy as reactions/highlight above.
+			r.Get("/api/parties/{code}/qr.png", partyQRH.ServeQR)
 		})
 
 		// HLS playlist + segment routes — sibling of the RequireAuth

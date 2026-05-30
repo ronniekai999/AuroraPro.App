@@ -64,6 +64,15 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Mobile-companion presence signal. The frontend appends `?companion=1`
+	// to the /ws/party-room upgrade URL when the connection is a phone
+	// "second screen" (chat/voice/emoji only — no video player, no
+	// /ws/party-sync). Read it BEFORE the upgrade (it's an ordinary query
+	// param on the HTTP handshake request). Any value other than the exact
+	// string "1" is treated as not-a-companion, so a malformed/garbage value
+	// degrades to the historical (non-companion) behavior rather than erroring.
+	companion := r.URL.Query().Get("companion") == "1"
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("v3 room upgrade failed", "err", err, "user_id", claims.UserID)
@@ -141,7 +150,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 			codeMu.Unlock()
 
-			ps, err := h.manager.JoinPartyV3Room(p.PartyCode, claims.UserID, claims.Username, sc)
+			ps, err := h.manager.JoinPartyV3RoomCompanion(p.PartyCode, claims.UserID, claims.Username, companion, sc)
 			if err != nil {
 				h.sendErr(sc, err.Error())
 				continue

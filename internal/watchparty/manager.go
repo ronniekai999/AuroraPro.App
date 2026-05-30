@@ -121,6 +121,19 @@ type Participant struct {
 	// "I'm Ready" in the lobby UI. Reset to false when the party
 	// transitions to a new session (e.g. media-change).
 	Ready bool `json:"ready"`
+
+	// Companion marks a participant that joined via the mobile companion
+	// surface (the phone "second screen" — chat/voice/emoji only, no video
+	// player, no /ws/party-sync). Set when the room-socket upgrade carries
+	// the `?companion=1` query param (see PartyWSHandlerV3Room.ServeHTTP).
+	//
+	// Purely additive and advisory: it lets the frontend render a "📱 on
+	// phone" affordance and lets future logic treat a companion's
+	// disconnect differently from a primary-screen disconnect. When false
+	// (the default, and the value for every existing/desktop client),
+	// behavior is identical to before this field existed. It is NOT
+	// persisted to the DB — it's a live-presence attribute only.
+	Companion bool `json:"companion"`
 }
 
 // ChatMessage represents a single chat message in the party history.
@@ -3112,6 +3125,11 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 			// toggled their Ready (which then broadcast ready-changed
 			// and re-established the picture).
 			"ready": p.Ready,
+			// Mobile-companion presence flag. Additive: absent/false on
+			// every desktop/legacy client, so existing UIs that ignore
+			// it are unaffected. The companion frontend reads this to
+			// render the "📱 on phone" badge next to a participant.
+			"companion": p.Companion,
 		})
 	}
 

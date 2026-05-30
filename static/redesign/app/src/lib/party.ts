@@ -23,6 +23,12 @@
 // Wire types — outbound (client → server)
 
 export type OutboundRoomMessage =
+  // Companion mode is NOT signaled here. The server reads it from a
+  // `?companion=1` query param on the /ws/party-room upgrade URL (see
+  // PartyWSHandlerV3Room.ServeHTTP + useCompanion's buildCompanionWsUrl),
+  // because the flag must be known at upgrade time — before any
+  // join-party message arrives. The join-party payload stays identical
+  // for desktop + companion clients (only party_code).
   | { type: 'join-party'; payload: { party_code: string } }
   | { type: 'chat'; payload: { message: string } }
   | { type: 'reaction'; payload: { emoji: string; abs_ms?: number } }
@@ -69,6 +75,16 @@ export interface PartyParticipant {
   is_buffering: boolean
   last_seen: string
   ready: boolean
+  // Mobile-companion presence flag (Watch Party companion feature).
+  // True when this participant joined from the phone "second screen"
+  // (room socket only — no playback sync). Lets the UI badge them as
+  // "📱 on phone" and lets the server skip host-style cleanup when a
+  // companion drops. Populated server-side from the `?companion=1`
+  // upgrade query param (manager.go Participant.Companion, echoed in
+  // BuildPartyStateMessage); optional so any server/state snapshot that
+  // pre-dates the field simply leaves it undefined (treated as a
+  // regular desktop participant).
+  companion?: boolean
 }
 
 // 2026-05-25 — the original type put every field at the root of
@@ -125,6 +141,11 @@ export interface ParticipantEvent {
   user_id: number
   username: string
   is_host?: boolean
+  // Mirrors PartyParticipant.companion — present on participant-join
+  // events for a mobile-companion joiner so the optimistic local list
+  // patch in useParty/useCompanion can carry the flag forward without
+  // waiting for a fresh party-state. Optional / omitted for desktop.
+  companion?: boolean
 }
 
 export interface TickPayload {
@@ -233,6 +254,19 @@ export interface CodeInfo {
 export function buildWsUrl(path: '/ws/party-room' | '/ws/party-sync', token: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${location.host}${path}?token=${encodeURIComponent(token)}`
+}
+
+// Build the room-socket URL for the MOBILE COMPANION (phone "second
+// screen"). Identical to buildWsUrl('/ws/party-room', token) plus a
+// `&companion=1` query param, which the server reads at upgrade time
+// (PartyWSHandlerV3Room.ServeHTTP) to mark this participant's presence
+// as companion (chat/voice/emoji only — no /ws/party-sync, no video).
+// Any value other than the exact string "1" degrades to non-companion
+// server-side, so this is strictly additive. Companion clients MUST use
+// this instead of buildWsUrl so the flag is present on the very first
+// (and every reconnect) upgrade.
+export function buildCompanionWsUrl(token: string): string {
+  return `${buildWsUrl('/ws/party-room', token)}&companion=1`
 }
 
 // Validate a code format before any network round-trip — same constraint
