@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -60,6 +59,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		// Without this, "user not found" responds instantly while "wrong password"
 		// takes ~100ms (Argon2), revealing whether the username exists.
 		_, _ = h.authSvc.VerifyPassword(req.Password, "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+		if h.activity != nil {
+			h.activity.LogLoginFailed(r.Context(), req.Username, clientIP(r))
+		}
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -77,12 +79,18 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	// they exist as an OAuth account.
 	if user.PasswordHash == "" {
 		_, _ = h.authSvc.VerifyPassword(req.Password, "$argon2id$v=19$m=65536,t=3,p=4$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+		if h.activity != nil {
+			h.activity.LogLoginFailed(r.Context(), req.Username, clientIP(r))
+		}
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
 	match, err := h.authSvc.VerifyPassword(req.Password, user.PasswordHash)
 	if err != nil || !match {
+		if h.activity != nil {
+			h.activity.LogLoginFailed(r.Context(), req.Username, clientIP(r))
+		}
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -252,13 +260,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			msg := "username or email already taken"
-			if strings.Contains(pgErr.ConstraintName, "username") {
-				msg = "username already taken"
-			} else if strings.Contains(pgErr.ConstraintName, "email") {
-				msg = "email already taken"
-			}
-			writeError(w, http.StatusConflict, msg)
+			// Account-enumeration defense: return ONE generic conflict
+			// regardless of which unique constraint fired. A
+			// username-specific vs email-specific message lets an
+			// attacker probe which usernames/emails are already
+			// registered. The specific constraint is logged for
+			// operators only.
+			slog.Warn("register: unique violation on first-admin create",
+				"constraint", pgErr.ConstraintName)
+			writeError(w, http.StatusConflict, "that username or email is unavailable")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create user")
@@ -271,16 +281,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		// Atomically claim the invite code BEFORE user creation to prevent
 		// TOCTOU races where two concurrent registrations reuse the same code.
 		if req.InviteCode == "" {
-			// Give a helpful message if the admin account already exists
-			// (common when a previous registration partially succeeded).
-			count, cErr := h.queries.CountUsers(r.Context())
-			if cErr != nil {
-				slog.Warn("CountUsers failed during registration hint", "error", cErr)
-			}
-			if count == 1 {
-				writeError(w, http.StatusConflict, "an administrator account already exists — try signing in instead")
-				return
-			}
+			// Account-enumeration defense: we used to special-case
+			// "an administrator account already exists — try signing in
+			// instead" when exactly one user (the admin) existed. That
+			// message confirmed, to an unauthenticated caller, the exact
+			// setup state of the server. Return the generic
+			// invite-required error in all cases; the gating itself
+			// (no invite code → rejected) is unchanged.
 			writeError(w, http.StatusBadRequest, "invite code required")
 			return
 		}
@@ -298,13 +305,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 			_ = h.queries.UnclaimInviteCode(r.Context(), inviteClaimID)
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				msg := "username or email already taken"
-				if strings.Contains(pgErr.ConstraintName, "username") {
-					msg = "username already taken"
-				} else if strings.Contains(pgErr.ConstraintName, "email") {
-					msg = "email already taken"
-				}
-				writeError(w, http.StatusConflict, msg)
+				// Account-enumeration defense — single generic conflict,
+				// specific constraint logged for operators only (see the
+				// first-admin branch above for the full rationale).
+				slog.Warn("register: unique violation on user create",
+					"constraint", pgErr.ConstraintName)
+				writeError(w, http.StatusConflict, "that username or email is unavailable")
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create user")
@@ -592,6 +598,9 @@ func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 	match, err := h.authSvc.VerifyPassword(req.CurrentPassword, user.PasswordHash)
 	if err != nil || !match {
+		if h.activity != nil {
+			h.activity.LogPasswordChangeFailed(r.Context(), claims.UserID, clientIP(r))
+		}
 		writeError(w, http.StatusUnauthorized, "current password is incorrect")
 		return
 	}

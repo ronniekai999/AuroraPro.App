@@ -5,7 +5,21 @@ import (
 	"time"
 
 	"github.com/aurora-media/aurora/internal/config"
+	"github.com/golang-jwt/jwt/v5"
 )
+
+// signClaims signs the given claims with svc's secret using HS256, bypassing
+// GenerateAccessToken so tests can mint tokens with deliberately wrong fields
+// (e.g. a non-"aurora" issuer or a missing expiry).
+func signClaims(t *testing.T, svc *Service, claims JWTClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := tok.SignedString([]byte(svc.cfg.JWTSecret))
+	if err != nil {
+		t.Fatalf("signClaims: %v", err)
+	}
+	return signed
+}
 
 // newTestService creates a Service with known test configuration.
 func newTestService() *Service {
@@ -256,6 +270,64 @@ func TestValidateAccessToken_GarbageInput(t *testing.T) {
 	}
 }
 
+// A token signed with the correct secret but a foreign/blank issuer must be
+// rejected now that ValidateAccessToken opts into jwt.WithIssuer("aurora").
+func TestValidateAccessToken_WrongIssuer(t *testing.T) {
+	svc := newTestService()
+
+	for _, iss := range []string{"", "evil", "Aurora"} {
+		tok := signClaims(t, svc, JWTClaims{
+			UserID: 1, Username: "u", Role: "user",
+			RegisteredClaims: jwt.RegisteredClaims{
+				ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
+				IssuedAt:  jwt.NewNumericDate(time.Now()),
+				Issuer:    iss,
+				Subject:   "1",
+			},
+		})
+		if _, err := svc.ValidateAccessToken(tok); err != ErrInvalidToken {
+			t.Errorf("issuer %q: ValidateAccessToken() = %v, want ErrInvalidToken", iss, err)
+		}
+	}
+}
+
+// A token with the correct issuer but NO exp claim must be rejected now that
+// ValidateAccessToken opts into jwt.WithExpirationRequired().
+func TestValidateAccessToken_MissingExpiry(t *testing.T) {
+	svc := newTestService()
+	tok := signClaims(t, svc, JWTClaims{
+		UserID: 1, Username: "u", Role: "user",
+		RegisteredClaims: jwt.RegisteredClaims{
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+			Issuer:   "aurora",
+			Subject:  "1",
+			// ExpiresAt deliberately omitted.
+		},
+	})
+	if _, err := svc.ValidateAccessToken(tok); err != ErrInvalidToken {
+		t.Errorf("ValidateAccessToken(no-exp) = %v, want ErrInvalidToken", err)
+	}
+}
+
+// The cast validator gained the same issuer guard; a cast-scoped token with a
+// wrong issuer must be rejected.
+func TestValidateCastToken_WrongIssuer(t *testing.T) {
+	svc := newCastTestService()
+	tok := signClaims(t, svc, JWTClaims{
+		UserID: 1, Username: "u", Role: "user",
+		Scope: ScopeCast, SessionID: "sess-1",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    "evil",
+			Subject:   "1",
+		},
+	})
+	if _, err := svc.ValidateCastToken(tok); err != ErrInvalidToken {
+		t.Errorf("ValidateCastToken(wrong-issuer) = %v, want ErrInvalidToken", err)
+	}
+}
+
 func TestGenerateRefreshToken(t *testing.T) {
 	svc := newTestService()
 
@@ -418,13 +490,13 @@ func TestValidateCastToken_RejectsRegularToken(t *testing.T) {
 
 func TestValidateCastToken_Expired(t *testing.T) {
 	svc := NewService(config.AuthConfig{
-		JWTSecret:        "test-secret-key-that-is-at-least-32-chars-long-for-testing",
-		CastTokenExpiry:  -1 * time.Hour, // already expired
-		Argon2Memory:     64 * 1024,
-		Argon2Iterations: 1,
+		JWTSecret:         "test-secret-key-that-is-at-least-32-chars-long-for-testing",
+		CastTokenExpiry:   -1 * time.Hour, // already expired
+		Argon2Memory:      64 * 1024,
+		Argon2Iterations:  1,
 		Argon2Parallelism: 1,
-		Argon2SaltLength: 16,
-		Argon2KeyLength:  32,
+		Argon2SaltLength:  16,
+		Argon2KeyLength:   32,
 	})
 	tok, _, err := svc.GenerateCastToken(1, "u", "user", 0, "sess-1")
 	if err != nil {

@@ -146,7 +146,14 @@ func (s *Service) ValidateAccessToken(tokenStr string) (*JWTClaims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return []byte(s.cfg.JWTSecret), nil
-	})
+	},
+		// Reject tokens that don't carry our issuer or an expiry. Every token
+		// we mint sets Issuer "aurora" + exp, so this rejects only foreign or
+		// malformed tokens (e.g. an exp-less token from a misconfigured signer
+		// reusing the secret) without affecting legitimate Aurora sessions.
+		jwt.WithIssuer("aurora"),
+		jwt.WithExpirationRequired(),
+	)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
@@ -218,7 +225,12 @@ func (s *Service) ValidateCastToken(tokenStr string) (*JWTClaims, error) {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return []byte(s.cfg.JWTSecret), nil
-	})
+	},
+		// Same issuer + expiry-required checks as ValidateAccessToken. Cast
+		// tokens are also minted with Issuer "aurora" + exp.
+		jwt.WithIssuer("aurora"),
+		jwt.WithExpirationRequired(),
+	)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
