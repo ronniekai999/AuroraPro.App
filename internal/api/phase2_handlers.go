@@ -679,6 +679,30 @@ func (h *StreamHandler) resolveFilePath(ctx context.Context, fileID int64, fileT
 	}
 }
 
+// mediaRoots returns the configured library paths, EvalSymlinks-resolved, for the
+// direct-play symlink-containment guard in streaming.ServeFile. Best-effort: on a
+// libraries-lookup error it returns nil, which makes ServeFile skip containment
+// (preserving the prior unguarded behavior rather than failing playback on a DB
+// blip). Library roots are few and direct play is once-per-playback, so the query
+// cost is negligible.
+func (h *StreamHandler) mediaRoots(ctx context.Context) []string {
+	libs, err := h.queries.GetLibraries(ctx)
+	if err != nil {
+		return nil
+	}
+	var roots []string
+	for _, lib := range libs {
+		for _, p := range lib.Paths {
+			if rp, rerr := filepath.EvalSymlinks(p); rerr == nil {
+				roots = append(roots, rp)
+			} else {
+				roots = append(roots, p)
+			}
+		}
+	}
+	return roots
+}
+
 // ServeDirectFile unconditionally serves a media file for direct playback.
 // Unlike StreamMediaFile, this does NOT check CanDirectPlay or create transcode
 // sessions. Used when the client-aware decision engine has already determined
@@ -741,7 +765,7 @@ func (h *StreamHandler) ServeDirectFile(w http.ResponseWriter, r *http.Request) 
 		defer close(stopHB)
 	}
 
-	streaming.ServeFile(w, r, filePath)
+	streaming.ServeFile(w, r, filePath, h.mediaRoots(r.Context()))
 }
 
 // heartbeatRegistry pings the direct-play registry every 20s while
@@ -816,7 +840,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 			}
 			h.broadcastNowPlaying(r.Context(), claims, mediaTitle, "movie", "", "direct_play")
 		}
-		streaming.ServeFile(w, r, file.Path)
+		streaming.ServeFile(w, r, file.Path, h.mediaRoots(r.Context()))
 		return
 	}
 
@@ -898,7 +922,7 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 			}
 			h.broadcastNowPlaying(r.Context(), claims, mediaTitle, "episode", episodeInfo, "direct_play")
 		}
-		streaming.ServeFile(w, r, file.Path)
+		streaming.ServeFile(w, r, file.Path, h.mediaRoots(r.Context()))
 		return
 	}
 
@@ -1959,23 +1983,41 @@ func (h *ProgressHandler) UpdateProgress(w http.ResponseWriter, r *http.Request)
 		DurationMs:  req.DurationMs,
 	}
 
-	if err := h.queries.UpsertWatchProgress(r.Context(), wp); err != nil {
+	newlyCompleted, err := h.queries.UpsertWatchProgress(r.Context(), wp)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update progress")
 		return
 	}
 
-	// Notify other devices of the same user about the progress change
+	// Notify other devices of the same user about the progress change.
+	// `completed` mirrors what the upsert persisted (it auto-completes at the
+	// >= threshold position), not a hardcoded false — so a heartbeat that
+	// crosses the finish line broadcasts the completion to other devices.
 	if h.hub != nil {
 		h.hub.BroadcastToUser(claims.UserID, ws.EventProgressSync, map[string]interface{}{
 			"media_item_id": mediaID,
 			"episode_id":    req.EpisodeID,
 			"position_ms":   req.PositionMs,
 			"duration_ms":   req.DurationMs,
-			"completed":     false,
+			"completed":     wp.Completed,
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "progress updated"})
+	// Phase 6 — Gamification. UpdateProgress that crosses the completion
+	// threshold (>= 90% of duration) grants XP exactly once, implementing the
+	// documented ">=90% on UpdateProgress grants XP" contract in the same
+	// shared, idempotent place as MarkWatched. The newlyCompleted gate ensures
+	// repeated heartbeats past the threshold don't re-award. Best-effort: an
+	// engine error must not fail the progress write.
+	var unlocks []AchievementDef
+	if h.gamify != nil && newlyCompleted {
+		unlocks = h.gamify.AwardForWatch(r.Context(), claims.UserID, time.Now().UTC())
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":               "progress updated",
+		"achievements_unlocked": unlocks,
+	})
 }
 
 // GetProgress returns watch progress for a specific item.
@@ -2118,7 +2160,8 @@ func (h *ProgressHandler) MarkWatched(w http.ResponseWriter, r *http.Request) {
 		Completed:   true,
 	}
 
-	if err := h.queries.UpsertWatchProgress(r.Context(), wp); err != nil {
+	newlyCompleted, err := h.queries.UpsertWatchProgress(r.Context(), wp)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to mark watched")
 		return
 	}
@@ -2149,8 +2192,13 @@ func (h *ProgressHandler) MarkWatched(w http.ResponseWriter, r *http.Request) {
 	// Audit M5 — AwardForWatch returns full defs (icon + title +
 	// xp_reward) so the client can render a rich toast without a
 	// second roundtrip.
+	//
+	// Idempotency gate (security low) — only award when THIS call first
+	// transitioned the row to completed. Without it, scripting repeated
+	// POSTs (even on a never-streamed media id) farms +50 XP, levels,
+	// total_watches, and count-based achievements per request.
 	var unlocks []AchievementDef
-	if h.gamify != nil {
+	if h.gamify != nil && newlyCompleted {
 		unlocks = h.gamify.AwardForWatch(r.Context(), claims.UserID, time.Now().UTC())
 	}
 

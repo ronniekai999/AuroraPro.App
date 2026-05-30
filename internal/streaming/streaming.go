@@ -459,8 +459,64 @@ func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps) (index int
 	return 0, strings.ToLower(tracks[0].Codec), false, true
 }
 
+// pathWithinRoot reports whether target, after symlink resolution, stays inside
+// canonicalRoot. canonicalRoot MUST already be symlink-resolved + cleaned by the
+// caller (e.g. via filepath.EvalSymlinks); target is resolved here. A path that
+// can't be resolved (broken symlink, missing file) yields false — callers treat
+// that as "not contained" and return 404.
+//
+// The prefix check is separator-aware so that a root of "/media" cannot match an
+// unrelated sibling like "/mediaX": we require target == root OR target starts
+// with root + os.PathSeparator. filepath.Clean on both sides strips any trailing
+// separator first so the boundary compare is exact.
+func pathWithinRoot(canonicalRoot, target string) bool {
+	if canonicalRoot == "" {
+		return false
+	}
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return false
+	}
+	root := filepath.Clean(canonicalRoot)
+	realTarget = filepath.Clean(realTarget)
+	if realTarget == root {
+		return true
+	}
+	return strings.HasPrefix(realTarget, root+string(os.PathSeparator))
+}
+
+// pathWithinAnyRoot reports whether target's symlink-resolved real path is
+// contained within ANY of the canonical roots. Used by ServeFile so a media file
+// may symlink anywhere under one of the configured (EvalSymlinks-resolved) library
+// roots — including a sibling content-pool / dedup directory — while still
+// rejecting a symlink whose target escapes the library tree entirely.
+func pathWithinAnyRoot(roots []string, target string) bool {
+	for _, root := range roots {
+		if pathWithinRoot(root, target) {
+			return true
+		}
+	}
+	return false
+}
+
 // ServeFile serves a media file with HTTP range request support (direct play path).
-func ServeFile(w http.ResponseWriter, r *http.Request, filePath string) {
+//
+// Containment (audit LOW): the file's symlink-resolved real path must stay within
+// one of allowedRoots — the configured library roots, themselves EvalSymlinks-
+// resolved by the caller (see StreamHandler.mediaRoots). This blocks a symlink
+// placed inside a media directory whose target escapes the library tree (e.g.
+// /media/movies/evil.mkv -> /etc/shadow) while STILL serving legitimate content-
+// pool / symlink-dedup layouts, where a title links to a sibling directory under
+// the SAME library root (the scanner indexes exactly these). When allowedRoots is
+// empty — the caller could not resolve any, e.g. a transient libraries-table
+// lookup error — containment is skipped, matching the prior unguarded behavior so
+// a lookup blip never breaks playback. An escape yields 404, not 500.
+func ServeFile(w http.ResponseWriter, r *http.Request, filePath string, allowedRoots []string) {
+	if len(allowedRoots) > 0 && !pathWithinAnyRoot(allowedRoots, filePath) {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		http.Error(w, "file not found", http.StatusNotFound)
@@ -661,6 +717,19 @@ type SessionResources struct {
 func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*TranscodeManager, error) {
 	if err := os.MkdirAll(baseDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create transcode dir: %w", err)
+	}
+
+	// Canonicalize the transcode base once so every session/variant OutputDir
+	// derived from it is already symlink-resolved. The HLS serve paths
+	// (playlist/segment/subtitle) use this as the containment root: a real
+	// path that escapes it (e.g. a symlink dropped into the output tree
+	// pointing at /etc/passwd) is rejected with 404 (audit LOW). If the base
+	// itself can't be resolved (shouldn't happen — we just created it), fall
+	// back to a cleaned absolute form so containment still has a stable root.
+	if resolved, err := filepath.EvalSymlinks(baseDir); err == nil {
+		baseDir = resolved
+	} else if abs, aerr := filepath.Abs(baseDir); aerr == nil {
+		baseDir = filepath.Clean(abs)
 	}
 
 	hwAccel := DetectHWAccel(tcCfg.HWAccel)
@@ -1952,6 +2021,17 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 	}
 
 	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
+
+	// Containment (audit LOW): the playlist must resolve to a real path inside
+	// the canonical transcode base. FFmpeg writes stream.m3u8 itself so this is
+	// normally a no-op, but a symlink dropped into the output tree pointing
+	// outside the base is rejected with 404 rather than served. Guards both the
+	// token-rewrite read below and the http.ServeFile fall-through.
+	if !pathWithinRoot(tm.baseDir, playlistPath) {
+		http.Error(w, "playlist not found", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
 
@@ -2044,6 +2124,15 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 	}
 
 	segPath := filepath.Join(v.OutputDir, segmentName)
+
+	// Containment (audit LOW): the segment name is already traversal-checked,
+	// but a symlink physically placed in the variant output dir could still
+	// point outside the transcode base. Resolve and confirm the real path stays
+	// within the canonical base before serving; an escape yields 404.
+	if !pathWithinRoot(tm.baseDir, segPath) {
+		http.Error(w, "segment not found", http.StatusNotFound)
+		return
+	}
 
 	// Track bytes served for bandwidth estimation
 	if info, err := os.Stat(segPath); err == nil {
@@ -2138,6 +2227,16 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 			return
 		case <-time.After(500 * time.Millisecond):
 		}
+	}
+
+	// Containment (audit LOW): confirm the resolved playlist stays within the
+	// canonical transcode base before serving. FFmpeg writes these subtitle
+	// playlists itself; a symlink dropped into the output dir pointing outside
+	// the base is rejected with 404. Guards both the token-rewrite read and the
+	// http.ServeFile fall-through.
+	if !pathWithinRoot(tm.baseDir, playlistPath) {
+		http.Error(w, "subtitle playlist not found", http.StatusNotFound)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -2387,6 +2486,15 @@ func (tm *TranscodeManager) ServeSubtitleSegment(w http.ResponseWriter, r *http.
 	}
 
 	segPath := filepath.Join(s.OutputDir, segmentName)
+
+	// Containment (audit LOW): the segment name is regex-validated above, but a
+	// symlink physically placed in the session output dir could still point at
+	// an arbitrary file. Resolve and confirm the real path stays within the
+	// canonical transcode base before reading; an escape yields 404.
+	if !pathWithinRoot(tm.baseDir, segPath) {
+		http.Error(w, "subtitle segment not found", http.StatusNotFound)
+		return
+	}
 
 	// Read the segment and inject X-TIMESTAMP-MAP for HLS timing alignment.
 	// FFmpeg's segment muxer produces valid WebVTT segments (with WEBVTT

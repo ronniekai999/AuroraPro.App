@@ -779,13 +779,19 @@ func IsTextSubtitle(codec string) bool {
 	return false
 }
 
-// escapeFFmpegPath escapes special characters in file paths for FFmpeg filter syntax.
-// FFmpeg's subtitle/overlay filters parse these characters as filter syntax unless escaped.
+// escapeFFmpegPath escapes special characters in file paths for an FFmpeg
+// FILTERGRAPH literal (e.g. the argument to subtitles=...). FFmpeg's filtergraph
+// parser treats these characters as syntax unless each is prefixed with a single
+// backslash; there is NO shell-style quote-region concept here. A single quote is
+// therefore escaped as backslash-quote (\') -- NOT the shell-style close/escape/
+// reopen sequence, which would toggle quote regions and produce a malformed
+// filter (audit LOW).
 func escapeFFmpegPath(path string) string {
-	// Order matters: escape backslash first so we don't double-escape later replacements
+	// Order matters: escape backslash first so the backslashes we add for the
+	// other characters (and for the quote below) aren't themselves re-escaped.
 	path = strings.ReplaceAll(path, "\\", "\\\\")
 	path = strings.ReplaceAll(path, ":", "\\:")
-	path = strings.ReplaceAll(path, "'", "'\\''")
+	path = strings.ReplaceAll(path, "'", "\\'") // Filtergraph quote: escape, don't toggle regions
 	path = strings.ReplaceAll(path, "[", "\\[")
 	path = strings.ReplaceAll(path, "]", "\\]")
 	path = strings.ReplaceAll(path, ";", "\\;") // Filter chain separator

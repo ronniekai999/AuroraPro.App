@@ -1011,13 +1011,21 @@ func (q *Queries) GetNextEpisode(ctx context.Context, userID, mediaItemID int64)
 // UpsertWatchProgress creates or updates watch progress.
 // Automatically marks as completed if position >= completion_threshold (default 90%) of duration.
 // The threshold is read from the server_settings table ("completion_threshold" key).
-func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgress) error {
+//
+// Returns newlyCompleted=true iff THIS call caused the row to transition into
+// completed=true for the first time (a fresh INSERT that lands completed, or an
+// UPDATE that flips a previously-incomplete row to completed). Repeat calls on an
+// already-completed row return false. Callers use this to make one-time side
+// effects — gamification XP/achievement grants — idempotent: completing a title
+// awards exactly once, and replaying the endpoint awards nothing (security low:
+// MarkWatched XP/achievement farming).
+func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgress) (newlyCompleted bool, err error) {
 	// Read completion threshold from DB settings; fall back to 0.90 if unset or invalid.
 	threshold := 0.90
-	if raw, err := q.GetSetting(ctx, "completion_threshold"); err != nil {
-		slog.Warn("failed to read completion_threshold setting, using default", "error", err)
+	if raw, gErr := q.GetSetting(ctx, "completion_threshold"); gErr != nil {
+		slog.Warn("failed to read completion_threshold setting, using default", "error", gErr)
 	} else if raw != "" {
-		if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed >= 0 && parsed <= 1 {
+		if parsed, pErr := strconv.ParseFloat(raw, 64); pErr == nil && parsed >= 0 && parsed <= 1 {
 			threshold = parsed
 		}
 	}
@@ -1033,25 +1041,51 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 		profileID = p.ProfileID
 	}
 
+	// The CTE captures the row's PRIOR completed state (before the upsert) so we
+	// can report newly_completed = (new completed AND NOT previously completed).
+	// `prior` is empty on a first INSERT, so COALESCE(prior.completed, FALSE) is
+	// FALSE and newly_completed collapses to the incoming completed flag. We can't
+	// use RETURNING (xmax=0) here because an UPDATE that flips completed must also
+	// count — only a re-update of an already-completed row must be suppressed.
 	if p.EpisodeID != nil {
-		_, err := q.pool.Exec(ctx, `
-			INSERT INTO watch_progress (user_id, media_item_id, episode_id, position_ms, duration_ms, completed, profile_id)
-			VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
-			ON CONFLICT (user_id, profile_id, episode_id) WHERE episode_id IS NOT NULL
-			DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-			             completed = EXCLUDED.completed, updated_at = NOW()`,
-			p.UserID, p.MediaItemID, p.EpisodeID, p.PositionMs, p.DurationMs, p.Completed, profileID)
-		return err
+		err = q.pool.QueryRow(ctx, `
+			WITH prior AS (
+			    SELECT completed FROM watch_progress
+			    WHERE user_id = $1 AND episode_id = $3
+			      AND profile_id = COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
+			),
+			upsert AS (
+			    INSERT INTO watch_progress (user_id, media_item_id, episode_id, position_ms, duration_ms, completed, profile_id)
+			    VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+			    ON CONFLICT (user_id, profile_id, episode_id) WHERE episode_id IS NOT NULL
+			    DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
+			                 completed = (watch_progress.completed OR EXCLUDED.completed), updated_at = NOW()
+			    RETURNING completed
+			)
+			SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)
+			FROM upsert`,
+			p.UserID, p.MediaItemID, p.EpisodeID, p.PositionMs, p.DurationMs, p.Completed, profileID).Scan(&newlyCompleted)
+		return newlyCompleted, err
 	}
 
-	_, err := q.pool.Exec(ctx, `
-		INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, profile_id)
-		VALUES ($1, $2, $3, $4, $5, COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
-		ON CONFLICT (user_id, profile_id, media_item_id) WHERE episode_id IS NULL
-		DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-		             completed = EXCLUDED.completed, updated_at = NOW()`,
-		p.UserID, p.MediaItemID, p.PositionMs, p.DurationMs, p.Completed, profileID)
-	return err
+	err = q.pool.QueryRow(ctx, `
+		WITH prior AS (
+		    SELECT completed FROM watch_progress
+		    WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL
+		      AND profile_id = COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
+		),
+		upsert AS (
+		    INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, profile_id)
+		    VALUES ($1, $2, $3, $4, $5, COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+		    ON CONFLICT (user_id, profile_id, media_item_id) WHERE episode_id IS NULL
+		    DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
+		                 completed = (watch_progress.completed OR EXCLUDED.completed), updated_at = NOW()
+		    RETURNING completed
+		)
+		SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)
+		FROM upsert`,
+		p.UserID, p.MediaItemID, p.PositionMs, p.DurationMs, p.Completed, profileID).Scan(&newlyCompleted)
+	return newlyCompleted, err
 }
 
 // GetWatchProgress returns progress for a specific item/episode, scoped to the
