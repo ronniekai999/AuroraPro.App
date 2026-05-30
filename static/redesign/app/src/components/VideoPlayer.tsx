@@ -1010,11 +1010,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           levelLoadingMaxRetry: 3,
           fragLoadingTimeOut: 30000,
           xhrSetup(xhr) {
-            // Bearer token on every hls.js request. The xhrSetup
-            // override is the supported extension point — we don't
-            // need to monkey-patch the loader.
-            const tok = localStorage.getItem('aurora_token')
-            if (tok) xhr.setRequestHeader('Authorization', 'Bearer ' + tok)
+            // Issue #165 (deep-debug) — auth moved to an httpOnly cookie in
+            // the H10 migration (#152). The old localStorage('aurora_token')
+            // read here was DEAD post-H10: getAccessToken() returns null and
+            // nothing writes that key anymore, so hls.js's manifest + segment
+            // XHRs went out with NO Authorization header AND no ?token=
+            // (withToken() is also a no-op now). They authenticated solely by
+            // the implicit same-origin `aurora_access` cookie — which silently
+            // breaks on any cross-origin / reverse-proxy deploy that doesn't
+            // forward the cookie onto /api/stream/*, producing the "video
+            // won't play, 401s in console" report. (The 401s are invisible in
+            // the bug-report network log because diagnosticBuffer patches
+            // window.fetch, not hls.js's XHR — the lone /api/auth/refresh at
+            // +160ms is the 401-recovery tell.)
+            //
+            // Fix: send credentials on every hls.js request. Same-origin
+            // sends the cookie regardless; withCredentials makes it ride
+            // cross-origin too. The server already returns
+            // Access-Control-Allow-Credentials=true with a non-wildcard
+            // Allow-Origin (router.go), and RequireStreamAuth reads the cookie
+            // via tokenFromRequest (middleware.go), so this is all the client
+            // needs to authenticate the stream.
+            xhr.withCredentials = true
           },
         })
         hlsRef.current = hls
