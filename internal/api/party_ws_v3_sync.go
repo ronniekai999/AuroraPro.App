@@ -26,6 +26,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// syncRateLimit is the maximum sync intents (request-play / request-pause /
+// request-seek / time-sync) per user per chatRateWindow (60s). The sync
+// socket otherwise applied no limit, so a single participant could flood
+// request-pause/seek and hold ps.mu across every broadcast (DoS). 120/min
+// averages 2 intents/sec sustained — generous for a human scrubbing the
+// timeline while time-sync probes interleave — but well below the rate at
+// which a malicious client could saturate the per-party broadcast loop.
+// Benign internal ticks (heartbeat) are NOT counted against this budget.
+const syncRateLimit = 120
+
 // PartyWSHandlerV3Sync handles /ws/party-sync. One instance per server,
 // shared across all connections.
 type PartyWSHandlerV3Sync struct {
@@ -33,6 +43,11 @@ type PartyWSHandlerV3Sync struct {
 	authSvc      *auth.Service
 	versionStore *auth.TokenVersionStore
 	upgrader     websocket.Upgrader
+
+	// Per-user sync-intent rate limiting. Reuses chatRateTracker (see
+	// party_ratelimit.go) with a dedicated, higher cap (syncRateLimit).
+	rateMu    sync.Mutex
+	syncRates map[int64]*chatRateTracker
 }
 
 // NewPartyWSHandlerV3Sync constructs the handler.
@@ -49,6 +64,7 @@ func NewPartyWSHandlerV3Sync(manager *watchparty.Manager, authSvc *auth.Service,
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
+		syncRates: make(map[int64]*chatRateTracker),
 	}
 }
 
@@ -166,6 +182,12 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				h.sendErr(sc, "not in a party")
 				continue
 			}
+			// Throttle BEFORE dispatch so a flood never reaches the manager
+			// (which holds ps.mu across N broadcasts). Drop, don't block.
+			if !h.checkSyncRate(claims.UserID) {
+				h.sendErr(sc, "sync rate limit exceeded")
+				continue
+			}
 			if err := h.manager.HandleRequestPlay(code, claims.UserID); err != nil {
 				h.sendErr(sc, err.Error())
 			}
@@ -174,6 +196,10 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			code := h.currentCode(&codeMu, &currentCode)
 			if code == "" {
 				h.sendErr(sc, "not in a party")
+				continue
+			}
+			if !h.checkSyncRate(claims.UserID) {
+				h.sendErr(sc, "sync rate limit exceeded")
 				continue
 			}
 			var p v3RequestPausePayload
@@ -187,6 +213,10 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			code := h.currentCode(&codeMu, &currentCode)
 			if code == "" {
 				h.sendErr(sc, "not in a party")
+				continue
+			}
+			if !h.checkSyncRate(claims.UserID) {
+				h.sendErr(sc, "sync rate limit exceeded")
 				continue
 			}
 			var p v3RequestSeekPayload
@@ -212,6 +242,12 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		case "time-sync":
 			serverRecvMs := time.Now().UnixMilli()
 			code := h.currentCode(&codeMu, &currentCode)
+			// time-sync triggers a marshal + write back to the client, so it
+			// is floodable too. Throttle silently (no sendErr — a probe storm
+			// shouldn't be answered with an error storm).
+			if !h.checkSyncRate(claims.UserID) {
+				continue
+			}
 			var p timeSyncPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
 				continue
@@ -248,6 +284,34 @@ func (h *PartyWSHandlerV3Sync) currentCode(mu *sync.Mutex, code *string) string 
 	mu.Lock()
 	defer mu.Unlock()
 	return *code
+}
+
+// checkSyncRate returns true if the user is within the sync-intent rate
+// limit (syncRateLimit per chatRateWindow). Windowed counter, same shape as
+// the room handler's checkChatRate; lazy-cleans expired entries to bound the
+// map. Crucially this runs WITHOUT touching the manager, so a throttled
+// flood never reaches the broadcast path that holds ps.mu.
+func (h *PartyWSHandlerV3Sync) checkSyncRate(userID int64) bool {
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+	now := time.Now()
+	if len(h.syncRates) > 100 {
+		for uid, t := range h.syncRates {
+			if now.After(t.windowEnd) {
+				delete(h.syncRates, uid)
+			}
+		}
+	}
+	t, ok := h.syncRates[userID]
+	if !ok || now.After(t.windowEnd) {
+		h.syncRates[userID] = &chatRateTracker{count: 1, windowEnd: now.Add(chatRateWindow)}
+		return true
+	}
+	if t.count >= syncRateLimit {
+		return false
+	}
+	t.count++
+	return true
 }
 
 func (h *PartyWSHandlerV3Sync) sendErr(sc *watchparty.SafeConn, errMsg string) {

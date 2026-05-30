@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -475,5 +476,57 @@ func TestAllowedOrigins_Override(t *testing.T) {
 	}
 	if cfg.Server.AllowedOrigins[1] != "https://admin.example.com" {
 		t.Errorf("AllowedOrigins[1] = %q", cfg.Server.AllowedOrigins[1])
+	}
+}
+
+// A wildcard origin combined with credentialed CORS is the footgun guarded
+// by Config.Validate: go-chi reflects ACAO:* + credentials:true, which every
+// browser rejects, silently breaking cookie/OAuth login. Load must fail fast.
+func TestAllowedOrigins_WildcardWithCredentials_FailsFast(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("AURORA_ALLOWED_ORIGINS", "*")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with AURORA_ALLOWED_ORIGINS=* should fail, got nil error")
+	}
+	if !strings.Contains(err.Error(), "AURORA_ALLOWED_ORIGINS=*") {
+		t.Errorf("error = %q, want it to mention AURORA_ALLOWED_ORIGINS=*", err.Error())
+	}
+}
+
+// A wildcard mixed in with explicit origins is just as broken — the loop must
+// catch "*" anywhere in the list, not only when it's the sole entry.
+func TestAllowedOrigins_WildcardAmongExplicit_FailsFast(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("AURORA_ALLOWED_ORIGINS", "https://app.example.com,*")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() with a wildcard among explicit origins should fail, got nil error")
+	}
+}
+
+// The default localhost:* port-wildcard (and any explicit scheme+host[:port]
+// origin) must keep working — only the bare "*" allow-all sentinel is refused.
+func TestValidate_PortWildcardAndExplicitOK(t *testing.T) {
+	cases := []struct {
+		name    string
+		origins []string
+	}{
+		{"default localhost", parseOrigins("http://localhost:*,https://localhost:*")},
+		{"explicit hosts", []string{"https://aurora.example.com", "https://admin.example.com"}},
+		{"empty list", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{Server: ServerConfig{AllowedOrigins: tc.origins}}
+			if err := c.Validate(); err != nil {
+				t.Errorf("Validate() with %v = %v, want nil", tc.origins, err)
+			}
+		})
 	}
 }

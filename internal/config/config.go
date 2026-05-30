@@ -471,7 +471,44 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Cross-field / sentinel validation that can't be expressed as a simple
+	// per-field check above. Runs here so a misconfiguration fails the boot
+	// rather than degrading silently at request time.
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// Validate performs cross-field configuration checks that must hold before
+// the server starts serving. It is called at the end of Load (so a bad
+// config fails the boot loudly) and is safe to call again from tests.
+//
+// Today its sole job is the CORS credentials footgun: the router hardcodes
+// cors.Options.AllowCredentials=true (cookies are required for the OAuth
+// login flow). go-chi/cors, when the allowed-origins list contains the "*"
+// wildcard AND credentials are enabled, reflects `Access-Control-Allow-Origin: *`
+// alongside `Access-Control-Allow-Credentials: true` — a combination every
+// browser rejects, silently breaking every credentialed/cookie request
+// (login, refresh, all authed XHR). Rather than let that ship as a
+// hard-to-diagnose "CORS error" in the user's console, we refuse to start
+// and tell the operator exactly what to do.
+func (c *Config) Validate() error {
+	// AllowCredentials is hardcoded true in NewRouter (cookies for OAuth);
+	// keep this guard in sync if that ever becomes configurable.
+	const credentialedCORS = true
+	if credentialedCORS {
+		for _, o := range c.Server.AllowedOrigins {
+			if o == "*" {
+				return fmt.Errorf("AURORA_ALLOWED_ORIGINS=* is unsupported with credentialed CORS " +
+					"(browsers reject Access-Control-Allow-Origin:* together with credentials:true, " +
+					"silently breaking cookie/OAuth login) — list explicit scheme+host[:port] origins " +
+					"instead, e.g. https://aurora.example.com (a localhost:* port-wildcard is fine)")
+			}
+		}
+	}
+	return nil
 }
 
 func loadYAML(cfg *Config) error {

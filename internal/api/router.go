@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,6 +86,67 @@ func GetDiskFreeGB(path string) float64 {
 	// Bavail = blocks available to unprivileged users, Bsize = block size
 	freeBytes := uint64(stat.Bavail) * uint64(stat.Bsize)
 	return float64(freeBytes) / (1 << 30)
+}
+
+// ffmpegAvailOnce caches the ffmpeg PATH lookup. The binary's presence
+// doesn't change over a process lifetime (install.sh ships it alongside
+// the unit), so there's no reason to shell out to LookPath on every health
+// probe — and the detailed health fields are now behind auth, so this is
+// only hit by authenticated callers + the admin dashboard anyway.
+var (
+	ffmpegAvailOnce sync.Once
+	ffmpegAvailVal  bool
+)
+
+// ffmpegAvailable reports whether an `ffmpeg` binary is resolvable on PATH,
+// memoizing the first lookup. See ffmpegAvailOnce.
+func ffmpegAvailable() bool {
+	ffmpegAvailOnce.Do(func() {
+		_, err := exec.LookPath("ffmpeg")
+		ffmpegAvailVal = err == nil
+	})
+	return ffmpegAvailVal
+}
+
+// healthCallerAuthed reports whether the request carries a valid access token,
+// without writing any response — used by the public /api/health handler to
+// decide between the anonymous liveness shape and the full diagnostic payload.
+// Unlike requireQueryTokenClaims / RequireAuth it never 401s: an absent or bad
+// token simply means "anonymous", since the route is public by design.
+//
+// Accepts the same two credential carriers a logged-in operator's browser
+// would send: an Authorization: Bearer header (curl/CI probes) or the SPA's
+// httpOnly access cookie. The ?token= query form is intentionally NOT honored
+// here — /api/health is not in shouldPromoteToken, so a query token is never
+// promoted to the header, and we don't want the version leaking to a URL that
+// lands in proxy access logs.
+func healthCallerAuthed(r *http.Request, svc *auth.Service, versionStore *auth.TokenVersionStore) bool {
+	if svc == nil {
+		return false
+	}
+	var token string
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+			token = parts[1]
+		}
+	}
+	if token == "" {
+		if c, err := r.Cookie(auth.AccessCookieName); err == nil {
+			token = c.Value
+		}
+	}
+	if token == "" {
+		return false
+	}
+	claims, err := svc.ValidateAccessToken(token)
+	if err != nil {
+		return false
+	}
+	if versionStore != nil && !versionStore.Check(r.Context(), claims.UserID, claims.TokenVersion) {
+		return false
+	}
+	return true
 }
 
 // RouterDeps holds all dependencies needed by the router.
@@ -402,32 +464,51 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Group(func(r chi.Router) {
 		r.Use(securityHeaders)
 
-		// Health check (public, enhanced)
+		// Health check.
+		//
+		// Public response is a MINIMAL liveness shape: {status, db_connected}.
+		// The detailed fields (version, disk_free_gb, ffmpeg_available, uptime)
+		// are gated on a valid access token in the same handler — leaking the
+		// build version to anonymous callers enables CVE fingerprinting
+		// (security-low audit). An authenticated probe (Authorization: Bearer …
+		// OR the SPA's access cookie) still gets the full diagnostic payload;
+		// the admin dashboard surfaces the same data via /api/admin/dashboard.
 		r.Get("/api/health", func(w http.ResponseWriter, r *http.Request) {
-			status := "ok"
-
+			// Liveness: DB connectivity drives the public status. Ping is the
+			// one check we keep on the anonymous path so load balancers /
+			// uptime monitors can see "degraded" when the DB is unreachable.
 			dbOK := true
 			if deps.Pool != nil {
 				if err := deps.Pool.Ping(r.Context()); err != nil {
 					dbOK = false
-					status = "degraded"
 				}
 			}
-
-			ffmpegOK := true
-			if _, err := exec.LookPath("ffmpeg"); err != nil {
-				ffmpegOK = false
+			status := "ok"
+			if !dbOK {
 				status = "degraded"
 			}
 
-			diskFreeGB := GetDiskFreeGB(cfg.Cache.TranscodeDir)
+			// Anonymous callers get liveness only — no version, no host metrics.
+			if !healthCallerAuthed(r, deps.AuthSvc, tokenVerStore) {
+				writeJSON(w, http.StatusOK, struct {
+					Status      string `json:"status"`
+					DBConnected bool   `json:"db_connected"`
+				}{Status: status, DBConnected: dbOK})
+				return
+			}
 
+			// Authenticated: fold ffmpeg availability into the status and
+			// return the full diagnostic payload.
+			ffmpegOK := ffmpegAvailable()
+			if !ffmpegOK {
+				status = "degraded"
+			}
 			writeJSON(w, http.StatusOK, models.HealthStatus{
 				Status:      status,
 				Service:     "aurora",
 				DBConnected: dbOK,
 				FFmpegAvail: ffmpegOK,
-				DiskFreeGB:  diskFreeGB,
+				DiskFreeGB:  GetDiskFreeGB(cfg.Cache.TranscodeDir),
 				Uptime:      time.Since(deps.StartTime).Round(time.Second).String(),
 				Version:     deps.Version,
 			})
