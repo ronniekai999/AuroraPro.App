@@ -152,6 +152,17 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsDir string
 	}
 	sort.Strings(upFiles)
 
+	// Fail-fast on an empty migration set. os.ReadDir happily returns a
+	// directory that exists but contains no .up.sql files (wrong cwd, a
+	// deploy that shipped the binary without the migrations/ dir beside
+	// it, an empty volume mount). Without this, RunMigrations would apply
+	// zero migrations and return nil — booting an UNMIGRATED schema that
+	// then fails opaquely on the first query against a missing table.
+	if len(upFiles) == 0 {
+		return fmt.Errorf("no migrations found in %s — check deployment layout (migrations/ must ship beside the binary)", migrationsDir)
+	}
+
+	applied := 0
 	for _, name := range upFiles {
 		// Check if already applied
 		var exists bool
@@ -190,8 +201,10 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool, migrationsDir string
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 
+		applied++
 		slog.Info("migration applied", "file", name)
 	}
 
+	slog.Info("migrations complete", "applied", applied, "total", len(upFiles))
 	return nil
 }

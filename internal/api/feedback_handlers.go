@@ -38,6 +38,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -172,6 +174,21 @@ const (
 	// via BUG_REPORT_ATTACHMENT_TTL_DAYS / BUG_REPORT_JANITOR_INTERVAL_HOURS.
 	defaultAttachmentTTL        = 30 * 24 * time.Hour
 	defaultJanitorSweepInterval = time.Hour
+
+	// 2026-05-29 (improvement #3) — aggregate disk cap on the
+	// bug-report attachment cache. The per-file (25 MiB), per-user-rate,
+	// and 30-day-TTL limits bound a single file / a single user's burst,
+	// but nothing bounds the TOTAL bytes on disk: a steady drip of
+	// distinct users (or one user spread across the TTL window) can
+	// persist tens of GiB before the TTL reaps any of it. The janitor
+	// now enforces this budget by extending its age-sweep to evict
+	// OLDEST-first — continuing past the TTL boundary into still-fresh
+	// files when the past-TTL tranche alone isn't enough — until the
+	// directory is back under budget. Default 5 GiB; operators override via
+	// BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES (read directly from env — no
+	// config.go field, see attachmentMaxTotalBytes). int64 because the
+	// byte count exceeds int32 on 32-bit builds.
+	defaultAttachmentMaxTotalBytes int64 = 5 << 30 // 5 GiB
 
 	// 2026-05-27 — GitHub Camo (the image proxy that serves embedded
 	// issue-body images) rejects images > ~5 MB. Embeds above this
@@ -478,10 +495,87 @@ func (h *FeedbackHandler) runJanitor(ctx context.Context) {
 	}
 }
 
+// attachmentMaxTotalBytes resolves the aggregate disk budget for the
+// attachment cache from BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES, falling
+// back to defaultAttachmentMaxTotalBytes (5 GiB) when unset, unparseable,
+// or non-positive. Read directly from env (not config.go) because it's a
+// memory-/disk-safety knob operators tune in place, not a first-class
+// config field — mirrors feedbackLimiterMaxUsers' "safety floor, not a
+// policy decision" rationale. A non-positive override would disable the
+// cap entirely, which defeats the purpose, so it warns + falls back like
+// the config.go env-parse paths do.
+func attachmentMaxTotalBytes() int64 {
+	v := strings.TrimSpace(os.Getenv("BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES"))
+	if v == "" {
+		return defaultAttachmentMaxTotalBytes
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		slog.Warn("BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES must be a positive integer (bytes); falling back to default",
+			"value", v,
+			"default_bytes", defaultAttachmentMaxTotalBytes)
+		return defaultAttachmentMaxTotalBytes
+	}
+	return n
+}
+
+// cacheDirUsageBytes walks h.cacheDir and sums the sizes of the
+// whitelisted attachment files (plus remux-tmp orphans) currently on
+// disk. Cheap — the janitor already needs the same os.ReadDir + per-entry
+// Info() — and exposed separately so the Submit path can cheaply gate new
+// uploads when we're already over budget without duplicating the walk
+// logic. Non-attachment files (operator's README, etc.) are excluded so
+// the budget reflects only bytes WE manage. Read/stat errors are skipped
+// (logged by the caller's context); a transient FS hiccup must not crash
+// the janitor or wrongly reject a submission.
+func (h *FeedbackHandler) cacheDirUsageBytes() int64 {
+	entries, err := os.ReadDir(h.cacheDir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !isValidAttachmentName(entry.Name()) && !isRemuxTmp(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total
+}
+
+// sweptFile is a whitelisted attachment that survived the TTL pass,
+// retained (with the size/mtime captured during that same walk) so the
+// budget pass can evict oldest-first without a second os.ReadDir.
+type sweptFile struct {
+	name    string
+	size    int64
+	modTime time.Time
+}
+
 // sweepAttachments scans h.cacheDir and removes files older than
-// h.effectiveTTL (env-tunable). Failures (missing dir, read errors)
-// are logged and the function returns cleanly — janitor lifecycle
-// MUST NOT crash the parent goroutine on transient FS issues.
+// h.effectiveTTL (env-tunable), then — if the survivors still exceed the
+// aggregate disk budget (BUG_REPORT_ATTACHMENT_MAX_TOTAL_BYTES, default
+// 5 GiB) — keeps evicting OLDEST-first until back under budget. Failures
+// (missing dir, read errors) are logged and the function returns cleanly
+// — janitor lifecycle MUST NOT crash the parent goroutine on transient FS
+// issues.
+//
+// 2026-05-29 (improvement #3) — the per-file (25 MiB), per-user-rate, and
+// TTL limits don't bound TOTAL bytes on disk: a steady stream of distinct
+// users (or one user spread across the 30-day window) can persist tens of
+// GiB before the TTL reaps any of it. The budget pass is the aggregate
+// backstop. It EXTENDS the age-sweep: the TTL removal already evicted the
+// oldest (past-TTL) tranche; when that isn't enough the budget pass
+// continues oldest-first into still-fresh files until under budget. The
+// Submit handler additionally refuses new uploads with 507 while over
+// budget, so the hourly cadence can't be outrun between sweeps.
 func (h *FeedbackHandler) sweepAttachments() {
 	entries, err := os.ReadDir(h.cacheDir)
 	if err != nil {
@@ -494,6 +588,8 @@ func (h *FeedbackHandler) sweepAttachments() {
 	}
 	cutoff := time.Now().Add(-h.effectiveTTL)
 	var removed, kept int
+	var totalBytes int64              // bytes of whitelisted files still on disk after the TTL pass
+	survivors := make([]sweptFile, 0) // populated only as needed for a possible budget pass
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -517,15 +613,56 @@ func (h *FeedbackHandler) sweepAttachments() {
 		}
 		if info.ModTime().After(cutoff) {
 			kept++
+			totalBytes += info.Size()
+			survivors = append(survivors, sweptFile{name: entry.Name(), size: info.Size(), modTime: info.ModTime()})
 			continue
 		}
 		full := filepath.Join(h.cacheDir, entry.Name())
 		if err := os.Remove(full); err != nil {
 			slog.Warn("feedback janitor: remove failed", "file", entry.Name(), "error", err)
+			// Removal failed → the file is still on disk and still
+			// counts against the budget. Track it as a survivor so the
+			// accounting stays honest (the budget pass may retry it).
+			totalBytes += info.Size()
+			survivors = append(survivors, sweptFile{name: entry.Name(), size: info.Size(), modTime: info.ModTime()})
 			continue
 		}
 		removed++
 	}
+
+	// Budget pass — only runs when the TTL sweep left us over the cap
+	// (the common case is a no-op: well under budget, nothing to do).
+	budget := attachmentMaxTotalBytes()
+	if totalBytes > budget {
+		// Evict oldest-first. The TTL pass already took the past-TTL
+		// tranche; this continues into the newest-but-still-over set.
+		sort.Slice(survivors, func(i, j int) bool {
+			return survivors[i].modTime.Before(survivors[j].modTime)
+		})
+		var evicted int
+		var evictedBytes int64
+		for _, s := range survivors {
+			if totalBytes <= budget {
+				break
+			}
+			full := filepath.Join(h.cacheDir, s.name)
+			if err := os.Remove(full); err != nil {
+				slog.Warn("feedback janitor: budget eviction remove failed", "file", s.name, "error", err)
+				continue
+			}
+			totalBytes -= s.size
+			evicted++
+			evictedBytes += s.size
+		}
+		if evicted > 0 {
+			slog.Warn("feedback janitor: evicted attachments to enforce disk budget",
+				"evicted", evicted,
+				"evicted_bytes", evictedBytes,
+				"budget_bytes", budget,
+				"remaining_bytes", totalBytes)
+		}
+	}
+
 	// Phase 3 deep-debug L3 — log at DEBUG for routine sweeps so
 	// busy deploys don't get an INFO line every hour. INFO is
 	// reserved for substantive removals (>= 10 files) which signal
@@ -825,6 +962,27 @@ func (h *FeedbackHandler) Submit(w http.ResponseWriter, r *http.Request) {
 		if fh.Size > maxFeedbackAttachment {
 			writeError(w, http.StatusBadRequest,
 				fmt.Sprintf("attachment exceeds %d bytes", maxFeedbackAttachment))
+			return
+		}
+		// 2026-05-29 (improvement #3) — aggregate disk-cap backstop. The
+		// janitor enforces the budget on its cadence by evicting
+		// oldest-first, but between sweeps a burst could still push us
+		// past the cap. Refuse to persist a NEW attachment once the cache
+		// is already at/over budget so the directory can't keep growing
+		// faster than the janitor drains it. 507 Insufficient Storage is
+		// the precise status; the report itself (title/description) still
+		// would have succeeded, so this only gates the attachment, not
+		// the whole submission — but since the attachment is required for
+		// the user's intent here, we surface it as a hard error they can
+		// retry later. cacheDirUsageBytes is a single cheap directory
+		// walk; on the missing-dir / first-upload path it returns 0 and
+		// this never trips.
+		if h.cacheDirUsageBytes() >= attachmentMaxTotalBytes() {
+			slog.Warn("feedback: rejecting attachment — cache dir at/over aggregate budget",
+				"user_id", claims.UserID,
+				"budget_bytes", attachmentMaxTotalBytes())
+			writeError(w, http.StatusInsufficientStorage,
+				"attachment storage is temporarily full — please try again later or submit without an attachment")
 			return
 		}
 		// Reject obviously-bad MIME types up front so we don't write
