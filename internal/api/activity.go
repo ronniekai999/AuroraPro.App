@@ -38,6 +38,30 @@ func (a *ActivityLogger) LogLogout(ctx context.Context, userID int64) {
 	})
 }
 
+// LogLoginFailed records a failed authentication attempt. No UserID is set —
+// the attempt may target a non-existent user, or we intentionally avoid
+// confirming the account exists — so the attempted username lives in Details
+// alongside the source IP for brute-force/credential-stuffing forensics.
+func (a *ActivityLogger) LogLoginFailed(ctx context.Context, username, ip string) {
+	a.log(ctx, &models.ActivityEntry{
+		EventType: "login_failed",
+		IPAddress: ip,
+		Details:   map[string]interface{}{"username": username},
+	})
+}
+
+// LogPasswordChangeFailed records a failed change-password attempt (wrong
+// current password) so operators can spot an attacker probing a hijacked
+// session. The acting user is known here (the request is authenticated), so
+// it is attributed via UserID.
+func (a *ActivityLogger) LogPasswordChangeFailed(ctx context.Context, userID int64, ip string) {
+	a.log(ctx, &models.ActivityEntry{
+		UserID:    &userID,
+		EventType: "password_change_failed",
+		IPAddress: ip,
+	})
+}
+
 func (a *ActivityLogger) LogUserCreated(ctx context.Context, userID int64, username, ip string) {
 	a.log(ctx, &models.ActivityEntry{
 		UserID:    &userID,

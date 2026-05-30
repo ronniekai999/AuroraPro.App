@@ -501,9 +501,13 @@ func (q *Queries) ClaimInviteCode(ctx context.Context, code string) (int64, erro
 			code,
 		).Scan(&diagID, &usedBy, &usedAt, &expiresAt)
 		if diagErr != nil {
+			// Do NOT log any portion of the code: it is a 16-char shared
+			// secret, and a 4-char prefix is enough to meaningfully narrow a
+			// brute-force of the remaining space. The code simply doesn't
+			// exist here (no row, hence no invite_id to log); code_length is a
+			// non-reversible signal that's sufficient for triage.
 			slog.Warn("invite code claim failed: code not found in database",
-				"code_length", len(code),
-				"code_prefix", safePrefix(code, 4))
+				"code_length", len(code))
 		} else if usedBy != nil {
 			slog.Warn("invite code claim failed: already used",
 				"invite_id", diagID,
@@ -522,24 +526,6 @@ func (q *Queries) ClaimInviteCode(ctx context.Context, code string) (int64, erro
 		return 0, fmt.Errorf("invite code already used or expired")
 	}
 	return id, nil
-}
-
-// safePrefix returns the first n characters of s for logging, without
-// revealing the full code. Returns "(empty)" for empty strings.
-func safePrefix(s string, n int) string {
-	if s == "" {
-		return "(empty)"
-	}
-	// Never reveal the full code — always truncate to at most n chars,
-	// and ensure at least 1 char is hidden.
-	end := n
-	if end >= len(s) {
-		end = len(s) - 1
-	}
-	if end < 1 {
-		end = 1
-	}
-	return s[:end] + "..."
 }
 
 // FinalizeInviteCode sets the real user ID on a previously claimed invite code.
