@@ -250,7 +250,17 @@ func TestEscapeFFmpegPath(t *testing.T) {
 		{name: "equals", input: "/media/a=b.mkv", want: "/media/a\\=b.mkv"},
 		{name: "comma", input: "/media/a,b.mkv", want: "/media/a\\,b.mkv"},
 		{name: "backslash", input: "C:\\media\\movie.mkv", want: "C\\:\\\\media\\\\movie.mkv"},
-		{name: "single quote", input: "/media/it's.mkv", want: "/media/it'\\''s.mkv"},
+		// Filtergraph escaping: a single quote becomes \' (backslash-quote), NOT
+		// shell-style '\'' which would toggle quote regions (audit LOW).
+		{name: "single quote", input: "/media/it's.mkv", want: "/media/it\\'s.mkv"},
+		// Every filtergraph metacharacter present at once must round-trip to a
+		// literal form: each is prefixed with exactly one backslash and the
+		// quote never opens a region (no bare leading/trailing ' left unescaped).
+		{
+			name:  "all filtergraph metachars",
+			input: "/m/a:b;c=d,e[f]g'h.mkv",
+			want:  "/m/a\\:b\\;c\\=d\\,e\\[f\\]g\\'h.mkv",
+		},
 	}
 
 	for _, tt := range tests {
@@ -258,6 +268,20 @@ func TestEscapeFFmpegPath(t *testing.T) {
 			got := escapeFFmpegPath(tt.input)
 			if got != tt.want {
 				t.Errorf("escapeFFmpegPath(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+			// A filtergraph literal must never contain the shell-style
+			// quote-toggle sequence '\'' (apostrophe, backslash, apostrophe,
+			// apostrophe) — that would open/close quote regions instead of
+			// escaping. Asserting its absence pins the fix.
+			if strings.Contains(got, "'\\''") {
+				t.Errorf("escapeFFmpegPath(%q) = %q contains shell-style quote toggle %q", tt.input, got, "'\\''")
+			}
+			// Every apostrophe in the output must be backslash-escaped: each "'"
+			// is immediately preceded by an odd run of backslashes. Since the
+			// source paths above contain no backslashes of their own, a simpler
+			// invariant holds — no apostrophe is unescaped.
+			if strings.Contains(tt.input, "'") && !strings.Contains(got, "\\'") {
+				t.Errorf("escapeFFmpegPath(%q) = %q did not backslash-escape the quote", tt.input, got)
 			}
 		})
 	}
