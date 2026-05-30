@@ -3969,7 +3969,7 @@ function AdminServerSettingsTab() {
               <p className="text-white/80 text-sm mb-2">{label}</p>
               <div className="flex gap-2 flex-wrap">
                 <input value={val(urlKey, '')} onChange={e => setVal(urlKey, e.target.value)} placeholder="http://radarr:7878" className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
-                <input type="password" defaultValue="" onChange={e => setVal(keyKey, e.target.value)} placeholder={settings[keyKey] ? 'API Key (saved)' : 'API Key'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+                <input type="password" data-screenshot-exclude="true" defaultValue="" onChange={e => setVal(keyKey, e.target.value)} placeholder={settings[keyKey] ? 'API Key (saved)' : 'API Key'} className="flex-1 min-w-[200px] px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
                 <button
                   onClick={async () => {
                     // The stored key comes back masked (****abcd);
@@ -4756,7 +4756,7 @@ function AdminLLMTab() {
           <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
-          <input type="password" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
       </div>
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
@@ -4922,6 +4922,7 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
           </span>
           <input
             type="password"
+            data-screenshot-exclude="true"
             value={secretEdit}
             onChange={e => setSecretEdit(e.target.value)}
             placeholder={maskedSecret || 'leave empty to keep existing'}
@@ -5285,8 +5286,11 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                 className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-sm rounded-lg whitespace-nowrap"
               >{inviteBusy ? 'Generating…' : 'Generate Invite Code'}</button>
             </div>
+            {/* data-screenshot-exclude — a live invite code is a one-time
+                credential; blank the whole reveal block from bug-report
+                screenshots (the capture path drops tagged subtrees). */}
             {inviteCode && (
-              <div className="mt-4 p-4 bg-white/[0.04] border border-white/[0.06] rounded flex items-center justify-between gap-4 flex-wrap">
+              <div data-screenshot-exclude="true" className="mt-4 p-4 bg-white/[0.04] border border-white/[0.06] rounded flex items-center justify-between gap-4 flex-wrap">
                 <div className="min-w-0">
                   <p className="text-white/60 text-xs mb-1">Share this code:</p>
                   <p className="font-mono text-lg text-purple-300 tracking-wider break-all">{inviteCode}</p>
@@ -6162,6 +6166,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname])
 
+  // security — bounce a non-admin who lands on /admin (typed URL,
+  // bookmark, stale link) back home. Pairs with the role gate on the
+  // AdminView mount below; the sidebar link is already admin-only.
+  // We wait until `user` is a resolved ApiUser so we don't redirect
+  // during the boot/loading window (user === null) — once revalidated,
+  // a non-admin gets kicked to home. Uses the same role signal as the link.
+  useEffect(() => {
+    if (user && user.role !== 'admin' && pathToView(location.pathname) === 'admin') {
+      navigate('/')
+    }
+  }, [user, location.pathname, navigate])
+
   const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
     const id = nextToastId()
     setToasts(prev => [...prev, { id, message, type }])
@@ -6683,8 +6699,12 @@ export default function App() {
   // clear cached state so a re-login as a different user doesn't
   // briefly see the previous user's content.
   useEffect(() => {
+    // A newer storage event aborts an older in-flight /me revalidation
+    // so we always land on the most recent authoritative response.
+    let meAc: AbortController | null = null
     const onStorage = (e: StorageEvent) => {
       if (e.key === 'aurora_user' && !e.newValue) { // deep-debug H10 — tokens are cookies; aurora_user is the cross-tab logout signal
+        meAc?.abort()
         // leave() sends a best-effort leave-party then closes both
         // sockets. Sending on a revoked token may silently fail
         // server-side, but the socket-close handler will GC the
@@ -6699,19 +6719,37 @@ export default function App() {
       // Propagate aurora_user changes (profile edits, avatar updates)
       // from another tab so we don't show stale user data.
       if (e.key === 'aurora_user' && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue)
-          if (parsed && typeof parsed === 'object') {
-            setUser(parsed)
-          }
-        } catch {
-          // Corrupted aurora_user — ignore; existing state is
-          // better than half-parsed garbage.
-        }
+        // security — never trust the role (or anything) from the
+        // localStorage blob: a tampered/stale value could flip this tab
+        // into admin-UI mode. Re-fetch /api/auth/me and set the user from
+        // the AUTHORITATIVE server response. Server-side authz remains the
+        // real control; this just keeps the UI from widening privileges off
+        // a cross-tab write. We still require a stored user (it's the
+        // cross-tab auth signal) before applying the result, mirroring boot.
+        meAc?.abort()
+        const ac = new AbortController()
+        meAc = ac
+        fetchMe(ac.signal)
+          .then(u => {
+            if (ac.signal.aborted) return
+            // A logout may have landed while /me was in flight — don't
+            // re-authenticate off a stale response (mirrors the boot path).
+            if (!getStoredUser()) return
+            setUser(u)
+          })
+          .catch(err => {
+            if (ac.signal.aborted || (err as Error)?.name === 'AbortError') return
+            // /me failed (revoked/expired session) — drop to the auth
+            // screen rather than keeping unverified state.
+            setUser(false)
+          })
       }
     }
     window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+    return () => {
+      meAc?.abort()
+      window.removeEventListener('storage', onStorage)
+    }
   }, [party, resetUserState])
 
   // Home rails fetch — pulls Recent / Top Rated Movies / Top Rated
@@ -8082,7 +8120,12 @@ export default function App() {
               }}
             />
           )}
-          {view === 'admin' && <AdminView currentAdminId={user.id} />}
+          {/* security — gate the mount on role, not just the view string.
+              The sidebar link is admin-only, but typing /admin would otherwise
+              mount AdminView for any signed-in user (server data is 403-backstopped,
+              but the UI must not mount). A non-admin who lands here is redirected
+              home by the effect below. */}
+          {view === 'admin' && user.role === 'admin' && <AdminView currentAdminId={user.id} />}
         </div>
       </main>
 
