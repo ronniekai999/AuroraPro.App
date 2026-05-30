@@ -158,13 +158,85 @@ export function getStoredUser(): User | null {
     return null
   }
 }
+// ── Proactive (pre-emptive) token refresh ──────────────────────────
+// The access token is a short-lived (15-minute) httpOnly cookie. With
+// ONLY the reactive 401→refresh→retry path, every ~15 minutes a wave of
+// in-flight requests (keepalive, progress, scan-status polls, …) all 401
+// at once — the browser logs each as a red "Failed to load resource: 401"
+// — before the single coalesced refresh rotates the cookie. The requests
+// still succeed on retry, so it's functionally harmless, but it's noisy
+// and wasteful (N failed requests + N retries per cycle). Refreshing
+// shortly BEFORE expiry keeps the cookie alive so requests never lapse.
+// The reactive path stays as the safety net (laptop sleep, a missed
+// timer, or a failed proactive refresh all fall back to it).
+let proactiveTimer: ReturnType<typeof setTimeout> | null = null
+// How long before actual expiry to refresh. Comfortably larger than a
+// normal request's round-trip so nothing in flight straddles expiry.
+const PROACTIVE_REFRESH_SKEW_MS = 60_000
+// Floor on the scheduled delay — guards against a tiny/zero expires_in
+// (clock skew, misconfig) scheduling a near-instant refresh hot-loop.
+const MIN_PROACTIVE_DELAY_MS = 10_000
+// Per-tab stagger, chosen once at load. Multiple tabs of the same origin
+// share ONE rotating refresh cookie; if their pre-emptive refreshes fired
+// in lockstep they could race the cookie rotation (the loser gets a 401 +
+// a spurious server "possible replay/theft" warning). A fixed per-tab
+// offset keeps each tab's refreshes consistently spread apart. It only
+// SUBTRACTS lead time, so the refresh still lands ≥ SKEW before expiry.
+const PROACTIVE_JITTER_MS = 15_000
+const tabJitterMs = Math.floor(Math.random() * PROACTIVE_JITTER_MS)
+
+// scheduleProactiveRefresh (re)arms the single pre-emptive refresh timer
+// from the access token's lifetime (seconds). Idempotent: replaces any
+// pending timer. On fire it calls tryRefresh(), whose success re-stores
+// the tokens and re-arms this timer for the next cycle; on failure it
+// does NOT re-arm (the next request's 401 reactively refreshes and
+// re-seeds), so a flaky network can't spin a refresh loop.
+function scheduleProactiveRefresh(expiresInSec: number): void {
+  cancelProactiveRefresh()
+  if (!Number.isFinite(expiresInSec) || expiresInSec <= 0) return
+  const delay = Math.max(MIN_PROACTIVE_DELAY_MS, expiresInSec * 1000 - PROACTIVE_REFRESH_SKEW_MS - tabJitterMs)
+  proactiveTimer = setTimeout(() => {
+    proactiveTimer = null
+    void tryRefresh()
+  }, delay)
+}
+
+// cancelProactiveRefresh clears any pending pre-emptive refresh (logout).
+function cancelProactiveRefresh(): void {
+  if (proactiveTimer !== null) {
+    clearTimeout(proactiveTimer)
+    proactiveTimer = null
+  }
+}
+
+// Cross-tab logout: when ANOTHER tab logs out, its clearTokens() removes
+// USER_KEY from localStorage, which fires a `storage` event here (storage
+// events only fire in OTHER tabs, never the one that made the change).
+// Cancel this tab's pending pre-emptive refresh so a backgrounded,
+// now-logged-out tab doesn't later fire a stale refresh against the
+// revoked/rotated cookie — harmless (a 401) but it trips the server's
+// "possible replay/theft" warning log. The logging-out tab itself already
+// cancels via clearTokens() → cancelProactiveRefresh().
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e) => {
+    if (e.key === USER_KEY && e.newValue === null) cancelProactiveRefresh()
+  })
+}
+
 function storeTokens(t: TokenResponse) {
   // deep-debug H10 — access/refresh tokens are set as httpOnly cookies by the
   // server and are NOT in the response body; persist only the cached user for
   // an optimistic render on the next load.
   if (t.user) localStorage.setItem(USER_KEY, JSON.stringify(t.user))
+  // Capture the access token's lifetime (the token itself is an httpOnly
+  // cookie we can't read) so we can refresh pre-emptively. See
+  // scheduleProactiveRefresh.
+  if (typeof t.expires_in === 'number' && t.expires_in > 0) {
+    scheduleProactiveRefresh(t.expires_in)
+  }
 }
 export function clearTokens() {
+  cancelProactiveRefresh()
   localStorage.removeItem(ACCESS_KEY)
   localStorage.removeItem(REFRESH_KEY)
   localStorage.removeItem(USER_KEY)
@@ -783,7 +855,22 @@ export async function listRecent(perPage = 12, signal?: AbortSignal): Promise<UI
 // (or a refresh succeeds inside apiFetch's 401 handler); otherwise it
 // throws.
 export async function fetchMe(signal?: AbortSignal): Promise<User> {
-  return apiFetch<User>('/api/auth/me', { signal })
+  const user = await apiFetch<User>('/api/auth/me', { signal })
+  // Cold page-load seed. /api/auth/me validates the existing access
+  // cookie but doesn't reveal when it expires, so storeTokens never ran
+  // and no pre-emptive refresh is armed — leaving the FIRST ~15-minute
+  // expiry after a page load to fail reactively (one 401 burst). If
+  // nothing is scheduled yet, kick off ONE refresh to learn expires_in
+  // and arm the timer; thereafter it self-perpetuates. tryRefresh()
+  // single-flights, so concurrent fetchMe calls coalesce to one refresh;
+  // the guard skips re-seeding once a timer exists (e.g. when /api/auth/me
+  // itself already triggered a reactive refresh because the access cookie
+  // had lapsed). Fire-and-forget so it adds no latency to the auth check;
+  // an unauthenticated /api/auth/me throws above and never reaches here.
+  if (proactiveTimer === null) {
+    void tryRefresh()
+  }
+  return user
 }
 
 // ──────────────────────────────────────────────────────────────────
