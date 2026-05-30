@@ -411,10 +411,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       contentType: 'application/x-mpegURL',
       title: target.title,
       subtitle: target.subtitle,
-      // Server's hls_start_sec + the local elapsed offset gives us
-      // the absolute resume position in source-file seconds, which
-      // the Default Media Receiver consumes as `currentTime`.
-      startTime: startSecRef.current + (videoRef.current?.currentTime ?? 0),
+      // The receiver fetches the SAME session playlist the local <video>
+      // element is playing, and that playlist is resume-relative: when the
+      // session was created with a resume offset the server FFmpeg-`-ss`'d
+      // the transcode, so playlist-time 0 maps to the resume point and
+      // vid.currentTime is already HLS-relative (0 = resume point). The
+      // receiver must therefore seek to the element's CURRENT position
+      // directly — NOT startSec + currentTime.
+      //
+      // Issue #172: adding startSecRef double-counted the resume offset and
+      // seeked the receiver `start_sec` seconds PAST what the on-demand
+      // transcoder had produced, so the Default Media Receiver connected but
+      // buffered forever ("let me connect but did not play"). The bug only
+      // surfaced on resume (start_sec>0); play-from-start casts were fine.
+      //
+      // When start_sec==0 (play-from-start, direct-play, or the MANIFEST_PARSED
+      // client-seek fallback at line ~1068) vid.currentTime is the absolute
+      // source position, so this expression is still correct there.
+      startTime: videoRef.current?.currentTime ?? 0,
     }
   }, [target])
   const cast = useCast(castLoadGetter)
