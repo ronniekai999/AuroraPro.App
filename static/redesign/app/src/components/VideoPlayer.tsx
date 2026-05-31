@@ -27,7 +27,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
-import { Cast, StopCircle } from 'lucide-react'
+import { Airplay, Cast, Maximize2, Pause, Play, StopCircle, X } from 'lucide-react'
 import {
   forceTokenRefresh,
   type EpisodeFile,
@@ -169,6 +169,9 @@ interface VideoPlayerProps {
   // preference, episode-vs-movie, party state, etc.) — the player
   // itself stays dumb about the episode graph.
   onEnded?: () => void
+  // Reports whether the player has collapsed to the cast/AirPlay control
+  // widget, so the parent can suppress Escape/back-to-close while casting.
+  onMinimizedChange?: (minimized: boolean) => void
 }
 
 // Pick a file to play from the available list.
@@ -253,7 +256,7 @@ function liftCuesAboveControls(tt: TextTrack | null | undefined): void {
   }
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded }: VideoPlayerProps) {
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
@@ -455,6 +458,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
   const cast = useCast(castLoadGetter)
+  const [airplayActive, setAirplayActive] = useState(false)
+  const [airplayAvailable, setAirplayAvailable] = useState(false)
+  const [minimized, setMinimized] = useState(false)
+  // Playback is on a REMOTE surface — the Chromecast receiver OR an AirPlay
+  // target — rather than the local <video>. Gated on !party: casting is
+  // intentionally disabled in a watch party (the receiver runs an independent
+  // timeline the party can't sync), and an AirPlay target would desync it the
+  // same way, so the minimize/widget flow stays out of party mode entirely.
+  const remoteActive = !party && (cast.status.connected || airplayActive)
+  // "Minimized" only counts when there's actually a remote to control. This
+  // collapses the 1-frame gap when a cast ends (remoteActive flips false the
+  // same render, snapping the full player back in) and is the single source
+  // of truth for the off-screen render + the keyboard/Escape gates.
+  const minimizedActive = minimized && remoteActive
+  // Latest flag for handlers/parent that close over an early render (the
+  // keyboard effect deps are [target]; App's Escape gate reads a ref).
+  const minimizedRef = useRef(false)
+  minimizedRef.current = minimizedActive
 
   // While a Cast session is connected, pause local playback. The
   // receiver runs its own copy of the stream; running the local
@@ -489,8 +510,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         pausedByCastRef.current = false
       }
       vid.addEventListener('pause', onLocalPause)
+      // While Chromecasting, the receiver is the playback surface — never let
+      // the local <video> actually play (any control/keyboard that resumes it
+      // would double the audio against the TV). Re-pause on local play. This
+      // branch only runs for a connected Chromecast session; AirPlay (where
+      // the local element IS the mirrored source) is unaffected.
+      const onLocalPlay = () => { vid.pause() }
+      vid.addEventListener('play', onLocalPlay)
       return () => {
         vid.removeEventListener('pause', onLocalPause)
+        vid.removeEventListener('play', onLocalPlay)
       }
     }
     if (pausedByCastRef.current) {
@@ -498,6 +527,61 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       void vid.play().catch(() => { /* defensive — autoplay may block */ })
     }
   }, [cast.status.connected])
+
+  // AirPlay active-state detection. Safari fires
+  // 'webkitcurrentplaybacktargetiswirelesschanged' on the <video> when the
+  // user picks/drops an AirPlay target via the native glyph. While active,
+  // the local <video> element IS the source mirrored to the TV — so it must
+  // stay mounted and we drive it directly (unlike Chromecast, where the
+  // receiver fetches the stream itself). We deliberately do NOT pause local
+  // playback for AirPlay (the pausedByCastRef effect above keys on the
+  // Chromecast session only).
+  useEffect(() => {
+    const vid = videoRef.current
+    if (!vid) return
+    const sync = () => setAirplayActive(!!vid.webkitCurrentPlaybackTargetIsWireless)
+    sync()
+    // Availability drives our custom AirPlay button (the native glyph is
+    // suppressed by our custom controls). Chrome never fires this event, so
+    // the button stays hidden there.
+    const onAvail = (e: Event & { availability?: string }) => {
+      setAirplayAvailable(e.availability === 'available')
+    }
+    vid.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', sync)
+    vid.addEventListener('webkitplaybacktargetavailabilitychanged', onAvail as EventListener)
+    return () => {
+      vid.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', sync)
+      vid.removeEventListener('webkitplaybacktargetavailabilitychanged', onAvail as EventListener)
+    }
+  }, [target])
+
+  // Auto-minimize to the floating control widget when playback moves to a
+  // remote surface; expand back when it returns to local. The full player
+  // stays MOUNTED (just hidden) so the Chromecast streaming session and the
+  // AirPlay <video> source survive — closing the laptop view no longer kills
+  // the cast (the prior bug). A manual expand (widget → expand) leaves
+  // remoteActive unchanged, so this effect won't fight the user back down.
+  useEffect(() => {
+    setMinimized(remoteActive)
+    if (remoteActive) {
+      // Move focus off the (about-to-be-hidden) full player so it isn't
+      // stranded inside the off-screen/aria-hidden subtree.
+      ;(document.activeElement as HTMLElement | null)?.blur?.()
+      // Drop browser-fullscreen so we don't strand a black fullscreen surface
+      // (the root goes opacity-0 while minimized).
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => { /* defensive */ })
+      }
+    }
+  }, [remoteActive])
+
+  // Report minimized-widget state up so the parent's global Escape/back
+  // handlers don't unmount the player while casting (which would tear down the
+  // streaming session feeding the receiver). See App's Escape gate.
+  useEffect(() => {
+    onMinimizedChange?.(minimizedActive)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minimizedActive])
 
   // QA 2026-05-25 — disable every TextTrack on the <video>. Called
   // after a new HLS manifest or direct-play source loads so any
@@ -1919,6 +2003,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       }
       const vid = videoRef.current
       if (!vid) return
+      // When minimized to the cast/AirPlay widget, don't hijack global keys
+      // (space/arrows) for the off-screen local player — the widget owns
+      // control. Ref so this [target]-bound handler sees the live value.
+      if (minimizedRef.current) return
       switch (e.key) {
         case ' ':
         case 'k':
@@ -2059,7 +2147,27 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
 
   if (!target) return null
 
+  // Minimized-widget control surface — drives the active remote: the
+  // Chromecast receiver (via cast.remote / cast.playOrPause) or, for AirPlay,
+  // the local <video> element that Safari is mirroring to the TV.
+  const widgetPaused = cast.status.connected ? cast.remote.isPaused : !playing
+  const widgetCurSec = cast.status.connected ? cast.remote.currentTime : currentSec
+  const widgetDurSec = cast.status.connected ? cast.remote.duration : realDurationSec
+  const widgetToggle = () => {
+    if (cast.status.connected) { cast.playOrPause(); return }
+    const v = videoRef.current
+    if (!v) return
+    if (v.paused) void v.play().catch(() => { /* defensive */ })
+    else v.pause()
+  }
+  const widgetStopAndClose = () => {
+    if (cast.status.connected) cast.stop()
+    else videoRef.current?.pause() // AirPlay ends when the source <video> unmounts on close
+    onClose()
+  }
+
   return (
+    <>
     <div
       ref={overlayRootRef}
       // Phase 7 — mouse/touch on the overlay (anywhere, including
@@ -2095,7 +2203,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // mousemove (which also un-hides the controls via the handler
       // above). Matches Plex/Netflix/YouTube behavior.
       style={{ cursor: controlsVisible ? 'auto' : 'none' }}
-      className="fixed inset-0 z-[60] bg-black flex items-center justify-center"
+      aria-hidden={minimizedActive || undefined}
+      className={
+        minimizedActive
+          // Keep the full player MOUNTED but off-screen while minimized: the
+          // Chromecast streaming session and the AirPlay <video> source must
+          // stay alive (closing the laptop view must not kill the cast). The
+          // floating widget below is the visible surface.
+          ? 'fixed inset-0 -z-10 opacity-0 pointer-events-none'
+          : 'fixed inset-0 z-[60] bg-black flex items-center justify-center'
+      }
     >
       {/* 2026-05-28 — Player shell. WINDOWED (not browser-fullscreen):
           a centered card capped below the viewport so there's a clear
@@ -2288,11 +2405,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               <ReactionPicker onSend={onSendReaction} vertical="down" />
             )}
             <button
-              onClick={onClose}
+              onClick={remoteActive ? () => setMinimized(true) : onClose}
               className="px-4 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
-              aria-label="Close player"
+              aria-label={remoteActive ? 'Minimize player' : 'Close player'}
+              title={remoteActive ? 'Minimize — keeps the cast going' : 'Close player'}
             >
-              Close
+              {remoteActive ? 'Minimize' : 'Close'}
             </button>
           </div>
         </div>
@@ -2386,7 +2504,30 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   and a receiver is reachable. A second button
                   would be visual clutter that opens the same
                   picker. Chrome has no AirPlay support at all,
-                  so there's nothing to add there either. */}
+                  so there's nothing to add there either.
+
+                  UPDATE (cast/AirPlay controls) — our custom controls SUPPRESS
+                  Safari's native AirPlay glyph, so we surface our own button
+                  that opens the system target picker. Shown only when a
+                  wireless target is available (Chrome never fires availability,
+                  so it stays hidden there). */}
+              {!party && airplayAvailable && !cast.status.connected && (
+                <div
+                  className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
+                    controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => videoRef.current?.webkitShowPlaybackTargetPicker?.()}
+                    title="AirPlay to an Apple TV or AirPlay device"
+                    aria-label="AirPlay"
+                    className="inline-flex items-center justify-center rounded-full w-9 h-9 text-white bg-black/60 hover:bg-black/80"
+                  >
+                    <Airplay size={18} />
+                  </button>
+                </div>
+              )}
               {!party && cast.status.supported && (
                 <div
                   className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
@@ -2470,6 +2611,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 fullscreen={fullscreen}
                 visible={controlsVisible}
                 onPlayPause={() => {
+                  // While Chromecasting, the play/pause control drives the
+                  // RECEIVER (the local <video> is held paused as the surface).
+                  if (cast.status.connected) { cast.playOrPause(); return }
                   const vid = videoRef.current
                   if (!vid) return
                   if (vid.paused) void vid.play().catch(() => { /* defensive */ })
@@ -2514,5 +2658,69 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         </div>
       </div>
     </div>
+    {minimizedActive && (
+      <div
+        className="fixed bottom-4 left-4 z-[70] w-72 max-w-[calc(100vw-2rem)] rounded-2xl bg-zinc-900/95 backdrop-blur ring-1 ring-white/10 shadow-2xl p-3 text-white"
+        role="dialog"
+        aria-label="Cast controls"
+      >
+        <div className="flex items-center gap-2">
+          {cast.status.connected ? (
+            <Cast size={16} className="text-purple-400 shrink-0" />
+          ) : (
+            <Airplay size={16} className="text-sky-400 shrink-0" />
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium truncate">{target.title}</p>
+            <p className="text-[11px] text-white/50 truncate">
+              {cast.status.connected
+                ? `Casting to ${cast.status.deviceName ?? 'device'}`
+                : 'Playing via AirPlay'}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setMinimized(false)}
+            title="Expand player"
+            aria-label="Expand player"
+            className="p-1.5 rounded-full hover:bg-white/10 transition-colors"
+          >
+            <Maximize2 size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={widgetStopAndClose}
+            title={cast.status.connected ? 'Stop casting' : 'Stop'}
+            aria-label="Stop and close"
+            className="p-1.5 rounded-full hover:bg-white/10 text-white/80 hover:text-red-400 transition-colors"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="mt-2.5 flex items-center gap-3">
+          <button
+            type="button"
+            onClick={widgetToggle}
+            aria-label={widgetPaused ? 'Play' : 'Pause'}
+            className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-white text-black hover:bg-white/90 shrink-0 transition-colors"
+          >
+            {widgetPaused ? <Play size={16} className="ml-0.5" /> : <Pause size={16} />}
+          </button>
+          <div className="h-1 flex-1 rounded-full bg-white/15 overflow-hidden">
+            <div
+              className="h-full bg-white/80"
+              style={{
+                width: `${
+                  widgetDurSec > 0
+                    ? Math.min(100, Math.max(0, (widgetCurSec / widgetDurSec) * 100))
+                    : 0
+                }%`,
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   )
 }

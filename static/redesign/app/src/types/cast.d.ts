@@ -86,7 +86,44 @@ declare global {
         SESSION_RESUMED: 'SESSION_RESUMED'
       }
       AutoJoinPolicy: { ORIGIN_SCOPED: string }
+      // Remote playback control — lets the sender drive (play/pause/seek)
+      // and observe the receiver's media session. A RemotePlayer holds live
+      // state; the controller mutates it. Both are singletons over the
+      // CastContext's current session.
+      RemotePlayer: new () => CastRemotePlayer
+      RemotePlayerController: new (player: CastRemotePlayer) => CastRemotePlayerController
+      RemotePlayerEventType: {
+        ANY_CHANGE: string
+        IS_CONNECTED_CHANGED: string
+        IS_MEDIA_LOADED_CHANGED: string
+        IS_PAUSED_CHANGED: string
+        CURRENT_TIME_CHANGED: string
+        DURATION_CHANGED: string
+        CAN_SEEK_CHANGED: string
+        PLAYER_STATE_CHANGED: string
+      }
     }
+  }
+
+  // RemotePlayer carries live receiver state; RemotePlayerController mutates
+  // it. To seek: set `player.currentTime = sec` then call `controller.seek()`.
+  interface CastRemotePlayer {
+    isConnected: boolean
+    isMediaLoaded: boolean
+    isPaused: boolean
+    canSeek: boolean
+    currentTime: number
+    duration: number
+    playerState: string | null
+    title?: string | null
+  }
+
+  interface CastRemotePlayerController {
+    playOrPause(): void
+    stop(): void
+    seek(): void
+    addEventListener(type: string, listener: (e: unknown) => void): void
+    removeEventListener(type: string, listener: (e: unknown) => void): void
   }
 
   interface CastContextInstance {
@@ -114,6 +151,11 @@ declare global {
   interface HTMLVideoElement {
     // Available on Safari/WebKit. Pops the system AirPlay picker.
     webkitShowPlaybackTargetPicker?: () => void
+    // True while the video is being mirrored to a wireless (AirPlay) target.
+    // Read it to know whether the laptop <video> is currently the AirPlay
+    // source; pairs with the 'webkitcurrentplaybacktargetiswirelesschanged'
+    // event to drive the minimized cast/AirPlay control widget.
+    readonly webkitCurrentPlaybackTargetIsWireless?: boolean
     // Fires when an AirPlay-capable device becomes available or
     // disappears. Detail is a CustomEvent-like object with
     // `availability: 'available' | 'not-available'`.
