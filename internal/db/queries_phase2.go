@@ -119,6 +119,15 @@ func (q *Queries) UpdateMediaMetadata(ctx context.Context, u *models.MetadataUpd
 	if u.MetadataSrc != nil {
 		addField("metadata_src", *u.MetadataSrc)
 	}
+	if u.Studio != nil {
+		addField("studio", *u.Studio)
+	}
+	if u.Network != nil {
+		addField("network", *u.Network)
+	}
+	if u.ReleaseDate != nil {
+		addField("release_date", *u.ReleaseDate)
+	}
 
 	// Always update last_metadata timestamp
 	addField("last_metadata", time.Now())
@@ -1345,7 +1354,8 @@ func (q *Queries) GetMediaItemEnriched(ctx context.Context, id int64) (*models.M
 		SELECT id, library_id, type, title, sort_title, year, overview, rating, runtime_minutes,
 		       content_rating, added_at, updated_at,
 		       tmdb_id, COALESCE(imdb_id, ''), COALESCE(tagline, ''),
-		       COALESCE(poster_path, ''), COALESCE(backdrop_path, '')
+		       COALESCE(poster_path, ''), COALESCE(backdrop_path, ''),
+		       COALESCE(studio, ''), COALESCE(network, ''), COALESCE(release_date, '')
 		FROM media_items WHERE id = $1`, id)
 
 	item := &models.MediaItem{}
@@ -1355,7 +1365,8 @@ func (q *Queries) GetMediaItemEnriched(ctx context.Context, id int64) (*models.M
 		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
 		&item.AddedAt, &item.UpdatedAt,
 		&enriched.TMDBID, &enriched.IMDbID, &enriched.Tagline,
-		&item.PosterPath, &item.BackdropPath)
+		&item.PosterPath, &item.BackdropPath,
+		&item.Studio, &item.Network, &item.ReleaseDate)
 	if err != nil {
 		return nil, err
 	}

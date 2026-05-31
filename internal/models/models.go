@@ -113,6 +113,9 @@ type MediaItem struct {
 	ContentRating string    `json:"content_rating,omitempty"`
 	PosterPath    string    `json:"poster_path,omitempty"`
 	BackdropPath  string    `json:"backdrop_path,omitempty"`
+	Studio        string    `json:"studio,omitempty"`
+	Network       string    `json:"network,omitempty"`
+	ReleaseDate   string    `json:"release_date,omitempty"`
 	MatchStatus   string    `json:"match_status,omitempty"`
 	AddedAt       time.Time `json:"added_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -384,6 +387,9 @@ type MetadataUpdate struct {
 	Year          *int
 	SortTitle     *string
 	MetadataSrc   *string
+	Studio        *string
+	Network       *string
+	ReleaseDate   *string
 }
 
 type EpisodeMetadataUpdate struct {
