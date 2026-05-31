@@ -203,3 +203,19 @@ export function episodeProgressPct(p?: EpProgress | null): number {
   if (!p || !p.duration_ms || p.duration_ms <= 0) return 0
   return Math.min(100, Math.max(0, Math.round(((p.position_ms ?? 0) / p.duration_ms) * 100)))
 }
+
+/* ──────────────────────────── dates ──────────────────────────── */
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// Format a TMDB ISO date ("YYYY-MM-DD") as "Jul 16, 1993" WITHOUT going
+// through Date() (avoids the UTC-parse / local-render off-by-one-day shift).
+// Falls back to the year, then the raw string.
+export function formatReleaseDate(iso?: string): string {
+  if (!iso) return ''
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso)
+  if (!m) return /^\d{4}/.test(iso) ? iso.slice(0, 4) : iso
+  const mo = parseInt(m[2], 10)
+  if (mo < 1 || mo > 12) return m[1]
+  return `${MONTHS[mo - 1]} ${parseInt(m[3], 10)}, ${m[1]}`
+}
