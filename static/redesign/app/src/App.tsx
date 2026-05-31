@@ -5904,6 +5904,11 @@ export default function App() {
   // when actually logged in so the hook's cache key isn't keyed on
   // undefined-but-truthy values.
   const party = useParty(user && typeof user === 'object' ? user.id : undefined)
+  // Freshest party state for callbacks that close over an early render (e.g.
+  // handlePlayContinue is a stable useCallback). Reading party.state directly
+  // inside such a callback would capture a stale snapshot.
+  const partyStateRef = useRef(party.state)
+  partyStateRef.current = party.state
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
   // 2026-05-30 — Cinematic Overlay (Feature 2). Which face the on-screen
   // party surface shows: 'rail' (the full floating glass panel) or
@@ -6571,6 +6576,12 @@ export default function App() {
             episodeNumber: foundEp.episode_number,
             title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
             subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
+            // Watch-party rejoin sync: open AT the party's current position
+            // so a returning guest doesn't start at 0:00 and rely on the drift
+            // loop to catch up. partyStateRef holds the freshest position.
+            resumePositionMs: partyStateRef.current.currentTimeMs > 0
+              ? partyStateRef.current.currentTimeMs
+              : undefined,
           })
         } else {
           const files = await getMediaFiles(mediaItemId)
@@ -6584,6 +6595,10 @@ export default function App() {
             fileId: file.id,
             fileType: 'media',
             title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
+            // Watch-party rejoin sync: open AT the party's current position.
+            resumePositionMs: partyStateRef.current.currentTimeMs > 0
+              ? partyStateRef.current.currentTimeMs
+              : undefined,
           })
         }
       } catch (err) {
@@ -7258,6 +7273,22 @@ export default function App() {
           else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
         }
       } catch { /* ignore */ }
+      // "Always sync to the party" — when a watch party is live for THIS exact
+      // title/episode, resume into the party's CURRENT position instead of the
+      // personal continue-watching bookmark. This stops a host's Resume from
+      // dragging the party to a personal offset (the rejoin/resync bug) and lets
+      // a rejoiner catch up to where the group is. partyStateRef holds the
+      // freshest state (this callback closes over an early render).
+      const ps = partyStateRef.current
+      const inPartyForThis =
+        !!ps.code &&
+        ps.mediaItemId === c.media_item_id &&
+        (c.type === 'show' ? ps.episodeId === c.episode_id : true)
+      // Use the party position when the party is actively playing (even at ~0,
+      // a fresh start) or paused mid-movie (currentTimeMs > 0). A not-started
+      // party (lobby, paused at 0) falls back to the personal bookmark.
+      const resumeMs =
+        inPartyForThis && (ps.isPlaying || ps.currentTimeMs > 0) ? ps.currentTimeMs : c.position_ms
       if (c.type === 'show') {
         // Defensive: server invariant says show CW rows always have
         // episode_id + season_number (enforced by SQL WHERE clause in
@@ -7292,7 +7323,7 @@ export default function App() {
           episodeNumber: c.episode_number ?? ep.episode_number,
           title: c.title,
           subtitle: `S${c.season_number}E${c.episode_number ?? ep.episode_number}${ep.title ? ' — ' + ep.title : ''}`,
-          resumePositionMs: c.position_ms,
+          resumePositionMs: resumeMs,
         })
       } else {
         // Movie — same path as handlePlay but with resume position.
@@ -7306,7 +7337,7 @@ export default function App() {
           fileType: 'media',
           title: c.title,
           subtitle: c.year ? String(c.year) : undefined,
-          resumePositionMs: c.position_ms,
+          resumePositionMs: resumeMs,
         })
       }
     } catch (err) {
