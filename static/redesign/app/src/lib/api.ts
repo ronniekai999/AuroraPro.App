@@ -996,6 +996,10 @@ export interface MediaDetail extends ServerMediaItem {
   season_count?: number
   episode_count?: number
   files?: MediaFile[]
+  // Populated by the enricher (migration 032) — shown on the Details card.
+  studio?: string // first production company (movies)
+  network?: string // first network (TV)
+  release_date?: string // ISO "YYYY-MM-DD" (movie release / TV first-air)
 }
 
 export async function getMedia(id: number, signal?: AbortSignal): Promise<MediaDetail> {

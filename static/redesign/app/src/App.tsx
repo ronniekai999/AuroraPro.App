@@ -124,7 +124,7 @@ import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
 import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
-import { deriveQualityChips, episodeWatchState, episodeProgressPct } from '@/lib/detail'
+import { deriveQualityChips, episodeWatchState, episodeProgressPct, formatReleaseDate } from '@/lib/detail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
@@ -1751,7 +1751,10 @@ function DetailView({
   if (directors.length) railDetailRows.push({ label: 'Director', value: directors.map(d => d.name).join(', ') })
   if (creators.length) railDetailRows.push({ label: 'Created by', value: creators.map(c => c.name).join(', ') })
   if (writers.length && !isShow) railDetailRows.push({ label: 'Writers', value: writers.map(w => w.name).join(', ') })
-  if (media.year > 0) railDetailRows.push({ label: isShow ? 'First aired' : 'Released', value: String(media.year) })
+  if (!isShow && detail?.studio) railDetailRows.push({ label: 'Studio', value: detail.studio })
+  if (isShow && detail?.network) railDetailRows.push({ label: 'Network', value: detail.network })
+  const releasedValue = detail?.release_date ? formatReleaseDate(detail.release_date) : (media.year > 0 ? String(media.year) : '')
+  if (releasedValue) railDetailRows.push({ label: isShow ? 'Premiered' : 'Released', value: releasedValue })
   if (isShow && detail?.season_count) railDetailRows.push({ label: 'Seasons', value: String(detail.season_count) })
   if (isShow && detail?.episode_count) railDetailRows.push({ label: 'Episodes', value: String(detail.episode_count) })
   if (realRuntime) railDetailRows.push({ label: isShow ? 'Episode' : 'Runtime', value: realRuntime })
