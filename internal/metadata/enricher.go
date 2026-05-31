@@ -168,7 +168,7 @@ func (e *Enricher) enrichMovie(ctx context.Context, item *models.MediaItem, titl
 		OriginalLang:  nilIfEmpty(detail.OriginalLanguage),
 		ContentRating: nilIfEmpty(detail.ContentRating),
 		PosterPath:    ptrStr(detail.PosterPath),
-		BackdropPath:  ptrStr(detail.BackdropPath),
+		BackdropPath:  pickBackdropPath(detail.Images, detail.BackdropPath),
 		Popularity:    &detail.Popularity,
 		VoteAverage:   &detail.VoteAverage,
 		VoteCount:     &detail.VoteCount,
@@ -295,7 +295,7 @@ func (e *Enricher) applyTMDBShowMatch(ctx context.Context, item *models.MediaIte
 		OriginalLang:  nilIfEmpty(detail.OriginalLanguage),
 		ContentRating: nilIfEmpty(contentRating),
 		PosterPath:    ptrStr(detail.PosterPath),
-		BackdropPath:  ptrStr(detail.BackdropPath),
+		BackdropPath:  pickBackdropPath(detail.Images, detail.BackdropPath),
 		Popularity:    &detail.Popularity,
 		VoteAverage:   &detail.VoteAverage,
 		VoteCount:     &detail.VoteCount,
@@ -706,10 +706,48 @@ func (e *Enricher) enrichEpisodesFromTVDB(ctx context.Context, mediaItemID int64
 	}
 }
 
+// pickBackdropPath chooses the hero backdrop for a title, PREFERRING a
+// textless (no iso_639_1) backdrop over TMDB's default backdrop_path — which
+// is frequently logo / title key-art (e.g. a bare Netflix "N"). TMDB returns
+// Backdrops sorted by vote_average desc, so the first entry with no language
+// is the highest-voted textless one. Falls back to the default backdrop_path
+// when the images list has no textless backdrop.
+func pickBackdropPath(images *TMDBImages, fallback *string) *string {
+	if images != nil {
+		for i := range images.Backdrops {
+			b := images.Backdrops[i]
+			if b.FilePath != "" && (b.Lang == nil || *b.Lang == "") {
+				return nilIfEmpty(b.FilePath)
+			}
+		}
+	}
+	return ptrStr(fallback)
+}
+
+// firstTextlessIndex returns the index (within the first `limit` entries) of
+// the first textless image, or 0 when none is textless. Bounded by `limit`
+// so the chosen primary is always among the stored rows.
+func firstTextlessIndex(imgs []TMDBImage, limit int) int {
+	n := len(imgs)
+	if n > limit {
+		n = limit
+	}
+	for i := 0; i < n; i++ {
+		if imgs[i].Lang == nil || *imgs[i].Lang == "" {
+			return i
+		}
+	}
+	return 0
+}
+
 func (e *Enricher) storeArtwork(ctx context.Context, mediaItemID int64, images *TMDBImages) {
 	var artworks []models.Artwork
 
-	addImages := func(imgs []TMDBImage, artType string, maxCount int) {
+	addImages := func(imgs []TMDBImage, artType string, maxCount int, preferTextless bool) {
+		primaryIdx := 0
+		if preferTextless {
+			primaryIdx = firstTextlessIndex(imgs, maxCount)
+		}
 		for i, img := range imgs {
 			if i >= maxCount {
 				break
@@ -722,7 +760,7 @@ func (e *Enricher) storeArtwork(ctx context.Context, mediaItemID int64, images *
 				Width:       img.Width,
 				Height:      img.Height,
 				VoteAverage: img.VoteAverage,
-				IsPrimary:   i == 0,
+				IsPrimary:   i == primaryIdx,
 			}
 			if img.Lang != nil {
 				a.Lang = *img.Lang
@@ -731,9 +769,11 @@ func (e *Enricher) storeArtwork(ctx context.Context, mediaItemID int64, images *
 		}
 	}
 
-	addImages(images.Posters, "poster", 5)
-	addImages(images.Backdrops, "backdrop", 5)
-	addImages(images.Logos, "logo", 2)
+	// Posters keep highest-voted-first (a textless poster is unusual);
+	// backdrops prefer textless so the hero isn't a logo / title card.
+	addImages(images.Posters, "poster", 5, false)
+	addImages(images.Backdrops, "backdrop", 5, true)
+	addImages(images.Logos, "logo", 2, false)
 
 	if len(artworks) > 0 {
 		if err := e.queries.UpsertArtwork(ctx, artworks); err != nil {
@@ -930,7 +970,7 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			OriginalLang:  nilIfEmpty(detail.OriginalLanguage),
 			ContentRating: nilIfEmpty(contentRating),
 			PosterPath:    ptrStr(detail.PosterPath),
-			BackdropPath:  ptrStr(detail.BackdropPath),
+			BackdropPath:  pickBackdropPath(detail.Images, detail.BackdropPath),
 			Popularity:    &detail.Popularity,
 			VoteAverage:   &detail.VoteAverage,
 			VoteCount:     &detail.VoteCount,
@@ -982,7 +1022,7 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			OriginalLang:  nilIfEmpty(detail.OriginalLanguage),
 			ContentRating: nilIfEmpty(detail.ContentRating),
 			PosterPath:    ptrStr(detail.PosterPath),
-			BackdropPath:  ptrStr(detail.BackdropPath),
+			BackdropPath:  pickBackdropPath(detail.Images, detail.BackdropPath),
 			Popularity:    &detail.Popularity,
 			VoteAverage:   &detail.VoteAverage,
 			VoteCount:     &detail.VoteCount,
