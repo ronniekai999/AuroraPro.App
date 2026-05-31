@@ -1116,6 +1116,45 @@ func TestCalculateCurrentPosition_Playing(t *testing.T) {
 	}
 }
 
+// A PAUSED V3 party holds its position in the anchor (setAnchorLocked on
+// pause), NOT the dead V2 CurrentTimeMs. The snapshot must report the anchor
+// so a (re)joining client lands where the party actually is — regression test
+// for the "rejoin didn't sync" watch-party bug.
+func TestCalculateCurrentPosition_V3PausedReportsAnchor(t *testing.T) {
+	m := mockPartyManager()
+
+	ps := &PartyState{
+		Running:        false,
+		AnchorAbsMs:    600000, // 10:00 — where the party paused
+		AnchorServerMs: time.Now().UnixMilli(),
+		CurrentTimeMs:  0, // dead V2 field — must NOT be reported
+		IsPlaying:      false,
+	}
+
+	pos := m.calculateCurrentPosition(ps)
+	if pos != 600000 {
+		t.Errorf("paused V3 position = %d, want 600000 (the anchor, not the stale V2 CurrentTimeMs)", pos)
+	}
+}
+
+// A RUNNING V3 party advances from the anchor by wall-clock elapsed.
+func TestCalculateCurrentPosition_V3RunningExtrapolates(t *testing.T) {
+	m := mockPartyManager()
+
+	ps := &PartyState{
+		Running:        true,
+		AnchorAbsMs:    600000,
+		AnchorServerMs: time.Now().Add(-5 * time.Second).UnixMilli(),
+		CurrentTimeMs:  0,
+	}
+
+	pos := m.calculateCurrentPosition(ps)
+	// ~605000ms (600000 + 5000 elapsed); allow 500ms tolerance.
+	if pos < 604500 || pos > 605500 {
+		t.Errorf("running V3 position = %d, want ~605000", pos)
+	}
+}
+
 // ============================================================
 // Sync Heartbeat Tests
 // ============================================================
