@@ -5894,6 +5894,10 @@ export default function App() {
   // mid-lookup can't get stomped by a stale resolve.
   const playerTargetRef = useRef<PlayTarget | null>(null)
   playerTargetRef.current = playerTarget
+  // Whether the open player has minimized itself to the cast/AirPlay widget.
+  // While minimized, Escape / back must NOT unmount it — that would tear down
+  // the streaming session feeding the receiver and kill the cast.
+  const playerMinimizedRef = useRef(false)
 
   // M10 Phase 4 — watch party state.
   // 2026-05-25 — pass user.id so the hook can scope its last-party
@@ -6371,7 +6375,10 @@ export default function App() {
         // palette without ALSO triggering the page-level back/etc.
         // navigation here.
         if (paletteOpen) return
-        if (playerTarget) setPlayerTarget(null)
+        // While the player is minimized to the cast/AirPlay widget, Escape
+        // must NOT unmount it (that kills the cast) — fall through to the
+        // normal app navigation below instead.
+        if (playerTarget && !playerMinimizedRef.current) setPlayerTarget(null)
         else if (searchOpen) setSearchOpen(false)
         else if (view === 'detail') handleBack()
       }
@@ -8340,6 +8347,7 @@ export default function App() {
       <VideoPlayer
         target={playerTarget}
         onEnded={handlePlaybackEnded}
+        onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onClose={() => {
           setPlayerTarget(null)
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after

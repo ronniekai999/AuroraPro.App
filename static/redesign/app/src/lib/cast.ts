@@ -154,12 +154,29 @@ export interface CastStatus {
 // be async (e.g. minting a session-scoped token from the backend).
 // We deliberately don't pre-mint before the picker opens — a user
 // who dismisses the picker should not have wasted a token.
+// Live receiver-side playback state, surfaced from the CAF RemotePlayer so
+// the sender UI (the minimized cast control widget) can show + drive what's
+// playing on the TV.
+export interface CastRemoteState {
+  // A RemotePlayer is bound to an active receiver session.
+  isConnected: boolean
+  // The receiver has media loaded (false during launch / between items).
+  isMediaLoaded: boolean
+  isPaused: boolean
+  canSeek: boolean
+  currentTime: number // seconds, receiver timeline
+  duration: number // seconds
+}
+
 export function useCast(
   currentLoad?: () => CastLoadArgs | null | Promise<CastLoadArgs | null>,
 ): {
   status: CastStatus
+  remote: CastRemoteState
   start: () => Promise<void>
   stop: () => void
+  playOrPause: () => void
+  seek: (toSec: number) => void
 } {
   const [status, setStatus] = useState<CastStatus>({
     supported: false,
@@ -167,6 +184,18 @@ export function useCast(
     connected: false,
     deviceName: null,
   })
+  const [remote, setRemote] = useState<CastRemoteState>({
+    isConnected: false,
+    isMediaLoaded: false,
+    isPaused: false,
+    canSeek: false,
+    currentTime: 0,
+    duration: 0,
+  })
+  // RemotePlayer + its controller, created once the framework is detected.
+  // Held in refs so the play/pause/seek callbacks stay stable across renders.
+  const remotePlayerRef = useRef<CastRemotePlayer | null>(null)
+  const remoteControllerRef = useRef<CastRemotePlayerController | null>(null)
 
   // Stable ref to currentLoad so listeners don't need to be
   // re-attached when the player's state changes. Assigned in an
@@ -196,6 +225,10 @@ export function useCast(
 
     const tryAttach = (): boolean => {
       if (!mounted) return false
+      // Idempotency guard: once attached (RemotePlayer + listeners), never
+      // re-run — a second successful pass would orphan the prior RemotePlayer's
+      // ANY_CHANGE listener, since `cleanup` is reassigned wholesale below.
+      if (listenersAttached) return true
       const fw = window.cast?.framework
       if (!fw) return false
       const ctx = fw.CastContext.getInstance()
@@ -234,11 +267,46 @@ export function useCast(
       const onSessionState = () => refresh()
       ctx.addEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
       ctx.addEventListener(fw.CastContextEventType.SESSION_STATE_CHANGED, onSessionState)
+
+      // RemotePlayer — live receiver playback state + controls. ANY_CHANGE
+      // fires on every property mutation; we mirror the fields the minimized
+      // control widget needs. Wrapped in try/catch because some SDK builds
+      // expose the framework before RemotePlayer is constructible.
+      let remoteController: CastRemotePlayerController | null = null
+      let onRemoteChange: (() => void) | null = null
+      try {
+        const player = new fw.RemotePlayer()
+        remoteController = new fw.RemotePlayerController(player)
+        remotePlayerRef.current = player
+        remoteControllerRef.current = remoteController
+        onRemoteChange = () => {
+          if (!mounted) return
+          setRemote({
+            isConnected: !!player.isConnected,
+            isMediaLoaded: !!player.isMediaLoaded,
+            isPaused: !!player.isPaused,
+            canSeek: !!player.canSeek,
+            currentTime: player.currentTime || 0,
+            duration: player.duration || 0,
+          })
+        }
+        remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
+        onRemoteChange()
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[Aurora Cast] RemotePlayer init failed:', e)
+      }
+
       cleanup = () => {
         try {
           ctx.removeEventListener(fw.CastContextEventType.CAST_STATE_CHANGED, onCastState)
           ctx.removeEventListener(fw.CastContextEventType.SESSION_STATE_CHANGED, onSessionState)
+          if (remoteController && onRemoteChange) {
+            remoteController.removeEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
+          }
         } catch { /* listener cleanup is best-effort */ }
+        remotePlayerRef.current = null
+        remoteControllerRef.current = null
       }
       refresh()
       // eslint-disable-next-line no-console
@@ -428,7 +496,22 @@ export function useCast(
     if (session) session.endSession(true)
   }
 
-  return { status, start, stop }
+  // Toggle play/pause on the receiver. No-op until a RemotePlayer is bound.
+  const playOrPause = () => {
+    remoteControllerRef.current?.playOrPause()
+  }
+
+  // Seek the receiver. CAF's pattern: set the player's currentTime, then ask
+  // the controller to commit it.
+  const seek = (toSec: number) => {
+    const player = remotePlayerRef.current
+    const controller = remoteControllerRef.current
+    if (!player || !controller) return
+    player.currentTime = Math.max(0, toSec)
+    controller.seek()
+  }
+
+  return { status, remote, start, stop, playOrPause, seek }
 }
 
 // absoluteUrl rewrites a server-relative path to a fully-qualified
