@@ -1928,10 +1928,19 @@ func (m *Manager) HandleSyncHeartbeat(code string, userID int64, currentTimeMs i
 // PlayingSince + CurrentTimeMs` path returned a stale frozen position
 // for V3 mid-stream joiners — the BuildPartyStateMessage fix made the
 // joined payload's `is_playing` correct, but `current_time_ms` would
-// still be the resume-offset from 10 minutes ago. Prefer the V3
-// anchor when Running is true; fall through to V2 semantics otherwise.
+// still be the resume-offset from 10 minutes ago.
+//
+// 2026-05-31 — extend the V3 preference to the PAUSED case too. V3 pause
+// writes the position to AnchorAbsMs (setAnchorLocked), NOT the dead V2
+// CurrentTimeMs, so a PAUSED V3 party used to fall through to the V2 branch
+// below and report a stale/zero current_time_ms to a (re)joining client
+// (the watch-party "rejoin didn't sync" symptom). Every live party is
+// anchored at create (AnchorServerMs is stamped in CreateParty and the
+// persistent-room path), so prefer the anchor whenever it is populated;
+// the V2 IsPlaying/PlayingSince fallback now only serves bare PartyState
+// values constructed in unit tests.
 func (m *Manager) calculateCurrentPosition(ps *PartyState) int64 {
-	if ps.Running {
+	if ps.Running || ps.AnchorServerMs != 0 {
 		return ps.CurrentAbsMs()
 	}
 	if !ps.IsPlaying || ps.PlayingSince == nil {

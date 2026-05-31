@@ -263,6 +263,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const startSecRef = useRef<number>(0)
+  // Watch-party sync — false while the player is (re)booting a
+  // session. Gates host play/pause/seek broadcasts so the transient
+  // currentTime=0 / startSec=0 boot window can't propagate abs_ms=0 to the
+  // party (which would yank every other participant to the start).
+  const playerReadyRef = useRef<boolean>(false)
   // Issue #141 — true when the active HLS session is REMUXING (-c:v
   // copy), false when full-transcoding. Drives the subtitle cue-shift
   // offset: remux can't accurate-seek so the stream's t=0 is the
@@ -852,6 +857,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setErrorMsg(null)
     sessionIdRef.current = null
     startSecRef.current = 0
+    // Suppress host party-broadcasts until this session has (re)booted —
+    // see playerReadyRef. Set true right before each vid.play() below.
+    playerReadyRef.current = false
     mediaErrorFallbackTriedRef.current = false
     // Audit M1 fix — reset session-bound playback state so the
     // scrub bar doesn't render with the OLD session's coords while
@@ -972,6 +980,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           }
           vid.addEventListener('loadedmetadata', onLoadedMetadata)
           vid.addEventListener('canplay', onCanPlayForSub)
+          // Booted: re-enable host broadcasts. The deferred resume seek + play
+          // below are the host's intended state, safe to propagate.
+          playerReadyRef.current = true
           try { await vid.play() } catch { /* autoplay-blocked, user clicks play */ }
           return
         }
@@ -1025,6 +1036,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // The ?token= query promotion handles auth.
           vid.src = masterUrl
           vid.load()
+          playerReadyRef.current = true
           try { await vid.play() } catch { /* autoplay-blocked */ }
           return
         }
@@ -1121,6 +1133,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           if (subToRestore >= 0 && newSubsHls.some(s => s.index === subToRestore)) {
             applySubtitle(subToRestore)
           }
+          // Booted: manifest parsed + start_sec applied. Re-enable host
+          // broadcasts so the play below (and later host seeks) propagate,
+          // while the transient boot seeks stayed suppressed. Guard against a
+          // superseded target (defensive — hls.destroy() also detaches this).
+          if (cancelled) return
+          playerReadyRef.current = true
           vid.play().catch(() => { /* autoplay-blocked, user clicks play */ })
         })
 
@@ -1481,6 +1499,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // would corrupt the party's currentTimeMs.
     const hostShouldBroadcast = () =>
       party.isHost &&
+      // Never broadcast while the player is still (re)booting:
+      // startSecRef is 0 and currentTime snaps to 0 during boot, so a transient
+      // 'seeked'/'pause' would otherwise propagate abs_ms=0 to the whole party.
+      playerReadyRef.current &&
       !isApplyingRemote() &&
       (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)
     const onPlay = () => {
@@ -1536,7 +1558,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // recovery fire overwrites the buffered seek with request-play.
     // Seek is lost. The ref resets only when target identity changes
     // (new movie/episode), so a single recovery per player-bind.
-    if (party.isHost && !vid.paused && !party.isPlaying && !isApplyingRemote() &&
+    if (party.isHost && playerReadyRef.current && !vid.paused && !party.isPlaying && !isApplyingRemote() &&
         !hostBroadcastRecoveryFiredRef.current &&
         (party.partyMediaItemId === undefined || party.partyMediaItemId === target.mediaItemId)) {
       hostBroadcastRecoveryFiredRef.current = true
