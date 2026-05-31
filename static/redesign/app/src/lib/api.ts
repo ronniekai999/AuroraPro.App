@@ -909,6 +909,10 @@ export interface MediaFile {
   audio_codec?: string
   resolution?: string
   version_tag?: string
+  // ffprobe color metadata — drives the HDR quality chip.
+  // color_transfer: 'smpte2084' (PQ/HDR10) | 'arib-std-b67' (HLG) | 'bt709' (SDR)
+  color_transfer?: string
+  color_primaries?: string
   bitrate?: number
   duration_ms?: number
   size_bytes?: number
@@ -922,8 +926,24 @@ export interface EpisodeFile {
   episode_id: number
   container?: string
   video_codec?: string
+  audio_codec?: string
   resolution?: string
+  version_tag?: string
+  color_transfer?: string
+  color_primaries?: string
   duration_ms?: number
+  library_name?: string
+  audio_tracks?: AudioTrack[]
+  subtitle_tracks?: SubtitleTrack[]
+}
+
+// Per-episode watch progress (mirrors models.WatchProgress). episode_id
+// is set for episodes; absent for movie-level progress.
+export interface WatchProgress {
+  position_ms: number
+  duration_ms: number
+  completed?: boolean
+  episode_id?: number
 }
 
 // /api/media/{id}/seasons/{n}/episodes returns models.EpisodeDetail
@@ -941,6 +961,9 @@ export interface Episode {
   still_path?: string
   still_url?: string
   files?: EpisodeFile[]
+  // Populated by GetEpisodes (phase2_handlers.go) when authed — drives
+  // the episode list's watched / in-progress states.
+  progress?: WatchProgress
 }
 
 export interface Season {

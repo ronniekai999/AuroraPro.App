@@ -117,6 +117,14 @@ import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
+import { DetailHero } from '@/components/detail/DetailHero'
+import { DetailRail } from '@/components/detail/DetailRail'
+import { DetailTabs, type DetailTab } from '@/components/detail/DetailTabs'
+import { QualityChips } from '@/components/detail/QualityChips'
+import { EpisodeList } from '@/components/detail/EpisodeList'
+import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
+import { CastGrid } from '@/components/detail/CastGrid'
+import { deriveQualityChips, episodeWatchState, episodeProgressPct } from '@/lib/detail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
@@ -1521,53 +1529,6 @@ function BrowseView({
   )
 }
 
-/* ─────────────────────── CAST CARD ─────────────────────── */
-// Each card owns its own image-failure state so a broken thumbnail
-// renders the same placeholder as a missing one (instead of an
-// 80px hole).
-//
-// QA 2026-05-25 — placeholder upgraded from a generic person icon
-// to first+last initials on a tinted background. The icon-only
-// fallback made a row of imageless cast (e.g. older shows where
-// TMDB doesn't have headshots) look like a row of identical blanks;
-// initials at least disambiguate visually.
-function castInitials(name: string): string {
-  if (!name) return '?'
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return '?'
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
-}
-
-function CastCard({ member }: { member: { id: number; name: string; profile_path?: string; character?: string; role_type: string } }) {
-  const [imgFailed, setImgFailed] = useState(false)
-  const showImg = !!member.profile_path && !imgFailed
-  return (
-    <div className="flex-shrink-0 w-[100px] text-center">
-      {showImg ? (
-        <img
-          src={posterURL(member.profile_path, 'w185')}
-          alt={member.name}
-          className="w-[80px] h-[80px] rounded-full object-cover mb-2 mx-auto ring-1 ring-white/10"
-          loading="lazy"
-          onError={() => setImgFailed(true)}
-        />
-      ) : (
-        <div
-          className="w-[80px] h-[80px] rounded-full bg-gradient-to-br from-purple-500/20 to-fuchsia-500/15 border border-white/10 mb-2 mx-auto flex items-center justify-center text-white/80 text-xl font-semibold"
-          aria-label={`${member.name} avatar placeholder`}
-        >
-          {castInitials(member.name)}
-        </div>
-      )}
-      <div className="text-white/90 text-xs font-medium truncate">{member.name}</div>
-      {member.character && (
-        <div className="text-white/40 text-[11px] truncate" title={member.character}>{member.character}</div>
-      )}
-    </div>
-  )
-}
-
 /* ─────────────────────── DETAIL VIEW ─────────────────────── */
 // 2026-05-27 — Continue Watching resume helpers. Used by Hero,
 // DetailView, the home CW rail, and the Library CW grid. Module-
@@ -1756,222 +1717,177 @@ function DetailView({
   }
   const audioTracks = trackFile?.audio_tracks || []
   const subtitleTracks = trackFile?.subtitle_tracks || []
+  // ───────────── view-models for the editorial layout ─────────────
+  // 2026-05-31 — DetailView rebuilt into the "editorial split-view":
+  // a tall hero banner, a sticky left rail (poster + actions + a credits
+  // card), and a tabbed content column. The heavy derivation lives above;
+  // here we shape it into plain props for the presentational components in
+  // components/detail/*. See docs/proposals/details-page-redesign/.
+  const isShow = media.type === 'show'
+  const [activeTab, setActiveTab] = useState('overview')
+  const [showAllCast, setShowAllCast] = useState(false)
+  const heroMetaMiddle = isShow
+    ? (detail?.season_count ? `${detail.season_count} Season${detail.season_count === 1 ? '' : 's'}` : undefined)
+    : (realRuntime || undefined)
+
+  // Quality chips (descriptive) from the resolved track file.
+  const qualityChips = deriveQualityChips(trackFile, subtitleTracks.length)
+
+  // Rail Resume mapping — reuse the existing resume formatters.
+  const resumeShown = !!resume && isResumable(resume.item)
+  const ri = resume?.item
+  const railResumeFraction = resumeShown && ri && ri.duration_ms
+    ? Math.min(1, ri.position_ms / ri.duration_ms)
+    : undefined
+  const railResumeLeft = resumeShown && ri
+    ? (ri.type === 'show' && ri.season_number !== undefined
+        ? `S${ri.season_number}·E${ri.episode_number} · ${formatResumeTime(ri.position_ms)}`
+        : `Resume · ${formatResumeTime(ri.position_ms)}`)
+    : undefined
+  const railResumeRight = resumeShown && ri && ri.duration_ms ? formatResumeTime(ri.duration_ms) : undefined
+
+  // Credits card — only rows we actually have data for (no fabrication).
+  const railDetailRows: { label: string; value: string }[] = []
+  if (directors.length) railDetailRows.push({ label: 'Director', value: directors.map(d => d.name).join(', ') })
+  if (creators.length) railDetailRows.push({ label: 'Created by', value: creators.map(c => c.name).join(', ') })
+  if (writers.length && !isShow) railDetailRows.push({ label: 'Writers', value: writers.map(w => w.name).join(', ') })
+  if (media.year > 0) railDetailRows.push({ label: isShow ? 'First aired' : 'Released', value: String(media.year) })
+  if (isShow && detail?.season_count) railDetailRows.push({ label: 'Seasons', value: String(detail.season_count) })
+  if (isShow && detail?.episode_count) railDetailRows.push({ label: 'Episodes', value: String(detail.episode_count) })
+  if (realRuntime) railDetailRows.push({ label: isShow ? 'Episode' : 'Runtime', value: realRuntime })
+
+  // Cast VMs (first 12; the rest behind "View all").
+  const castVMs = (showAllCast ? castMembers : castMembers.slice(0, 12)).map(c => ({
+    id: c.id,
+    name: c.name,
+    character: c.character,
+    profileUrl: c.profile_path ? posterURL(c.profile_path, 'w185') : undefined,
+  }))
+
+  // Episode VMs — per-episode watch state from the (now-typed) progress.
+  const episodeRows = (apiEpisodes || []).map(ep => {
+    const p = ep.progress
+    const state = episodeWatchState(p)
+    const rt = ep.runtime_minutes
+    const leftMs = p?.duration_ms ? p.duration_ms - (p.position_ms || 0) : 0
+    return {
+      id: ep.id,
+      number: ep.episode_number,
+      title: ep.title || `Episode ${ep.episode_number}`,
+      overview: ep.overview,
+      still: ep.still_url || realBackdrop,
+      hasFile: !!(ep.files && ep.files.length > 0),
+      state,
+      progressPct: episodeProgressPct(p),
+      leftLabel: state === 'in-progress' && p?.duration_ms
+        ? `${formatResumeTime(leftMs)} left${rt ? ' of ' + rt + 'm' : ''}`
+        : undefined,
+      watchedLabel: state === 'watched' ? `Watched${rt ? ' · ' + rt + 'm' : ''}` : undefined,
+      plainLabel: state === 'unwatched' && rt ? `${rt}m` : undefined,
+    }
+  })
+
+  // Media Info VMs (preserve the channels>0 guard from the old code).
+  const channelLayout = (ch?: number) =>
+    ch === 8 ? '7.1' : ch === 7 ? '6.1' : ch === 6 ? '5.1' : ch === 3 ? '2.1' : ch === 2 ? '2.0' : ch === 1 ? 'Mono' : ''
+  const audioVMs = audioTracks.map(t => ({
+    language: (t.language || 'und').toUpperCase(),
+    codec: t.codec.toUpperCase(),
+    detail: [
+      t.channels !== undefined && t.channels > 0
+        ? [channelLayout(t.channels), `${t.channels}ch`].filter(Boolean).join(' · ')
+        : '',
+      t.title || '',
+    ].filter(Boolean).join(' · ') || undefined,
+    isDefault: t.is_default,
+  }))
+  const subtitleVMs = subtitleTracks.map(t => ({
+    language: (t.language || 'und').toUpperCase(),
+    forced: t.forced,
+    default: t.default,
+  }))
+  const subtitleFormat = subtitleTracks[0]
+    ? `${subtitleTracks[0].codec.toUpperCase()} / ${subtitleTracks[0].bitmap ? 'image-based' : 'text'}`
+    : undefined
+
+  const overviewText = loading && !detail ? 'Loading details…' : (description || 'No description available.')
+
+  // Tabs: Overview always; Episodes (shows), Cast, Media only when present.
+  // Default tab = Overview, which renders the full stacked column.
+  const tabs: DetailTab[] = [{ id: 'overview', label: 'Overview' }]
+  if (isShow) tabs.push({ id: 'episodes', label: 'Episodes' })
+  if (castVMs.length) tabs.push({ id: 'cast', label: 'Cast & Crew' })
+  if (audioVMs.length || subtitleVMs.length) tabs.push({ id: 'media', label: 'Media Info' })
+
+  const storylineNode = (
+    <section>
+      <h3 className="text-lg font-semibold font-display mb-3">Storyline</h3>
+      <p className="text-white/75 text-[15.5px] leading-[1.75] max-w-3xl">{overviewText}</p>
+    </section>
+  )
+  const episodesNode = isShow ? (
+    <EpisodeList
+      count={apiEpisodes?.length || 0}
+      seasons={seasons}
+      selectedSeason={selectedSeason}
+      onSelectSeason={onSelectSeason}
+      rows={episodeRows}
+      onPlay={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep) }}
+      onUnavailable={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onEpisodeUnavailable?.(ep) }}
+      emptyText={loading ? 'Loading episodes…' : 'No episodes available yet.'}
+    />
+  ) : null
+  const castNode = <CastGrid cast={castVMs} totalCount={castMembers.length} onViewAll={() => setShowAllCast(true)} />
+  const mediaNode = <MediaInfoPanel audio={audioVMs} subtitles={subtitleVMs} subtitleFormat={subtitleFormat} />
+
   return (
     <div className="animate-fade-in -mx-8 -mt-8">
-      {/* Hero */}
-      <div className="relative h-[60vh] min-h-[450px]">
-        <img src={realBackdrop} alt="" className="w-full h-full object-cover" />
-        <div className="absolute inset-0 bg-gradient-to-t from-[#050505] via-[#050505]/40 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-r from-[#050505]/80 to-transparent" />
+      <DetailHero
+        backdrop={realBackdrop}
+        title={media.title}
+        kindLabel={isShow ? 'Series' : 'Movie'}
+        contentRating={detail?.content_rating}
+        rating={rating}
+        year={media.year}
+        metaMiddle={heroMetaMiddle}
+        genre={realGenre}
+        tagline={detail?.tagline}
+        error={error}
+        onBack={onBack}
+      />
 
-        <button
-          onClick={onBack}
-          className="absolute top-6 left-6 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-white text-sm transition-all border border-white/10"
-        >
-          <Icon name="arrowLeft" size={16} /> Back
-        </button>
+      <div className="px-8 pt-9 pb-12 max-w-[1400px]">
+        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
+          <DetailRail
+            poster={realPoster}
+            title={media.title}
+            resumeFraction={railResumeFraction}
+            resumeLeftLabel={railResumeLeft}
+            resumeRightLabel={railResumeRight}
+            primaryLabel={resumeShown && ri ? formatResumeLabel(ri) : 'Play'}
+            onPrimary={resumeShown && ri ? () => resume!.onPlay(ri) : () => onPlay(media)}
+            primaryAriaLabel={resumeShown && ri ? formatResumeAriaLabel(ri) : undefined}
+            primaryTitle={resumeShown && ri ? `Resume from your last position (${formatResumeTime(ri.position_ms)})` : undefined}
+            secondaryLabel={resumeShown ? 'Play from start' : undefined}
+            onSecondary={resumeShown ? () => onPlay(media) : undefined}
+            inLibrary={inLibrary}
+            onToggleLibrary={() => onToggleLib(media)}
+            onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
+            onParty={onStartParty ? () => onStartParty(media) : undefined}
+            inParty={inParty}
+            detailRows={railDetailRows}
+            onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
+            onIdentify={onIdentify ? () => onIdentify(media) : undefined}
+          />
 
-        <div className="absolute bottom-8 left-8 right-8 flex items-end gap-8">
-          <div className="w-[200px] h-[300px] rounded-2xl overflow-hidden shadow-2xl hidden md:block ring-1 ring-white/10">
-            <img src={realPoster} alt={media.title} className="w-full h-full object-cover" />
-          </div>
-          <div className="flex-1 max-w-2xl">
-            <div className="flex items-center gap-3 mb-3">
-              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 uppercase">
-                {media.type}
-              </span>
-              {media.tags?.map(tag => (
-                <span key={tag} className="badge-glass bg-white/5 text-white/50 border border-white/10">
-                  {tag}
-                </span>
-              ))}
-            </div>
-            <h1 className="text-white text-5xl font-bold font-display mb-2">{media.title}</h1>
-            {/* TMDB tagline. */}
-            {detail?.tagline && (
-              <p className="text-purple-200/70 text-base italic mb-3">{detail.tagline}</p>
-            )}
-            <div className="flex items-center gap-4 mb-4 flex-wrap">
-              {rating > 0 && (
-                <span className="text-yellow-400 flex items-center gap-1">
-                  <Icon name="star" size={14} className="fill-yellow-400" /> {rating.toFixed(1)}
-                </span>
-              )}
-              {media.year > 0 && <span className="text-white/50">{media.year}</span>}
-              {realRuntime && <span className="text-white/50">{realRuntime}</span>}
-              {realGenre && <span className="text-white/50">{realGenre}</span>}
-              {detail?.content_rating && (
-                <span className="px-2 py-0.5 text-xs border border-white/15 rounded text-white/60">{detail.content_rating}</span>
-              )}
-            </div>
-            {/* Crew row — director/writer/creator under the metadata
-                line. V1 renders these as small inline text; we mirror
-                that. Skips when no crew data is available. */}
-            {(directors.length > 0 || writers.length > 0 || creators.length > 0) && (
-              <div className="space-y-1 mb-4 text-sm">
-                {directors.length > 0 && (
-                  <div className="text-white/60">
-                    <span className="text-white/40">Directed by</span>{' '}
-                    <span className="text-white/85">{directors.map(d => d.name).join(', ')}</span>
-                  </div>
-                )}
-                {writers.length > 0 && (
-                  <div className="text-white/60">
-                    <span className="text-white/40">Written by</span>{' '}
-                    <span className="text-white/85">{writers.map(w => w.name).join(', ')}</span>
-                  </div>
-                )}
-                {creators.length > 0 && (
-                  <div className="text-white/60">
-                    <span className="text-white/40">Created by</span>{' '}
-                    <span className="text-white/85">{creators.map(c => c.name).join(', ')}</span>
-                  </div>
-                )}
-              </div>
-            )}
-            {error && (
-              <p className="text-red-400 text-sm mb-4">{error}</p>
-            )}
-            <p className="text-white/70 text-base leading-relaxed mb-6 line-clamp-4">
-              {loading && !detail ? 'Loading details…' : (description || 'No description available.')}
-            </p>
-            {/* Action buttons share uniform height (h-11) and icon
-                size (16). flex-wrap + whitespace-nowrap keeps text
-                from wrapping inside individual pills on narrow
-                viewports. */}
-            <div className="flex items-center gap-3 flex-wrap">
-              {/* 2026-05-27 — Continue Watching resume CTA. When the
-                  parent threads a `resume` bundle for this media, Resume
-                  replaces Play as the primary action and a smaller
-                  "From start" secondary appears next to it (Plex /
-                  Netflix pattern). Without `resume`, only the classic
-                  Play renders — same as before the restore.
+          <div className="min-w-0 pt-1">
+            <DetailTabs tabs={tabs} active={activeTab} onChange={setActiveTab} className="mb-6" />
 
-                  Both buttons rely on the global "Resolving stream…"
-                  overlay (App.tsx where setPlayerLoading shows the
-                  full-viewport blocker) to prevent double-click races:
-                  during the async stream-resolve, the overlay covers
-                  these buttons so a second click physically can't
-                  reach them. No per-button `disabled` needed. */}
-              {resume ? (
-                <>
-                  <button
-                    onClick={() => resume.onPlay(resume.item)}
-                    // PRIMARY CTA — fixed Aurora purple + purple glow.
-                    // The single loud button in the bar; identical on
-                    // every title so the page reads consistent and
-                    // on-brand (no per-poster color).
-                    className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap bg-purple-600 hover:bg-purple-500 shadow-[0_0_24px_rgba(168,85,247,0.45)]"
-                    title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
-                    aria-label={formatResumeAriaLabel(resume.item)}
-                  >
-                    <Icon name="play" size={16} /> {formatResumeLabel(resume.item)}
-                  </button>
-                  <button
-                    onClick={() => onPlay(media)}
-                    className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 whitespace-nowrap"
-                    title="Restart from the beginning"
-                    aria-label="Play from the beginning"
-                  >
-                    {/* `refresh` glyph (counter-clockwise arrow) reads
-                        as "restart" more clearly than `skipBack` which
-                        is the media-transport "previous track" icon and
-                        could be misread as "go back one episode." */}
-                    <Icon name="refresh" size={16} /> From start
-                  </button>
-                </>
-              ) : (
-                <button
-                  onClick={() => onPlay(media)}
-                  // PRIMARY CTA — fixed Aurora purple + purple glow
-                  // (consistent on every title; see Resume above).
-                  className="h-11 inline-flex items-center gap-2 px-7 text-white rounded-full font-medium transition-all hover:scale-[1.03] whitespace-nowrap bg-purple-600 hover:bg-purple-500 shadow-[0_0_24px_rgba(168,85,247,0.45)]"
-                >
-                  <Icon name="play" size={16} /> Play
-                </button>
-              )}
-              <button
-                onClick={() => onToggleLib(media)}
-                // SECONDARY (ghost). When saved, the only accent is a
-                // purple check — it signals state without becoming a
-                // second solid color competing with the primary CTA.
-                // Hovering a saved item reveals the red "remove" intent
-                // across the whole pill (group-hover).
-                className={`group h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all border whitespace-nowrap ${
-                  inLibrary
-                    ? 'bg-white/[0.05] border-white/[0.08] text-white/85 hover:bg-red-500/15 hover:border-red-500/30 hover:text-red-300'
-                    : 'bg-white/10 border-white/10 text-white hover:bg-white/15'
-                }`}
-              >
-                <Icon
-                  name={inLibrary ? 'check' : 'plus'}
-                  size={16}
-                  className={inLibrary ? 'text-purple-400 group-hover:text-red-300' : ''}
-                />
-                {inLibrary ? 'In Library' : 'Add to Library'}
-              </button>
-              {onAddToWatchlist && (
-                <button
-                  onClick={() => onAddToWatchlist(media)}
-                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 whitespace-nowrap"
-                  title="Add to a watchlist"
-                >
-                  <Icon name="library" size={16} />
-                  Add to List
-                </button>
-              )}
-              {onStartParty && (
-                <button
-                  onClick={() => onStartParty(media)}
-                  disabled={inParty}
-                  title={inParty ? 'Already in a party. Leave first to start a new one.' : 'Start a watch party'}
-                  // SECONDARY (ghost) — was emerald-tinted; neutralized
-                  // so the bar has a single accent (the purple primary).
-                  className="h-11 inline-flex items-center gap-2 px-6 rounded-full font-medium transition-all bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/80 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                >
-                  <Icon name="users" size={16} />
-                  {inParty ? 'In Party' : 'Watch Party'}
-                </button>
-              )}
-              {/* UTILITY group (admin metadata tools). Set apart with a
-                  divider and rendered at the lowest visual weight —
-                  these aren't viewer actions, so they shouldn't compete
-                  with Play/Library/Party. Only shown to admins. */}
-              {(onRefreshMetadata || onIdentify) && (
-                <div className="w-px h-6 bg-white/10 mx-1 self-center" aria-hidden="true" />
-              )}
-              {onRefreshMetadata && (
-                <button
-                  onClick={() => onRefreshMetadata(media)}
-                  title="Re-fetch metadata from TMDB/TVDB (auto-match)"
-                  className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.05] text-white/55 hover:text-white/80 whitespace-nowrap"
-                >
-                  <Icon name="refresh" size={16} />
-                  Refresh
-                </button>
-              )}
-              {onIdentify && (
-                <button
-                  onClick={() => onIdentify(media)}
-                  title="Manually search TMDB/TVDB and pick the correct match"
-                  // Was amber-tinted; neutralized to the same muted
-                  // utility style as Refresh.
-                  className="h-11 inline-flex items-center gap-2 px-5 rounded-full font-medium transition-all bg-white/[0.03] hover:bg-white/[0.08] border border-white/[0.05] text-white/55 hover:text-white/80 whitespace-nowrap"
-                >
-                  <Icon name="info" size={16} />
-                  Identify
-                </button>
-              )}
-            </div>
-
-            {/* Phase 5.3 final QA — version chips moved INTO the hero
-                next to the action buttons. Previously buried below
-                the cast section, where users had to scroll past it
-                AFTER deciding to play. Versions are a pre-play
-                choice (4K vs 1080p vs alt cut), so they belong next
-                to Play. Only renders for movies with 2+ files. */}
+            {/* Multi-file version chooser (actionable — plays a specific
+                file). Distinct from the descriptive QualityChips below.
+                Movies with 2+ files only. */}
             {media.type !== 'show' && files && files.length > 1 && onPlayFile && (
-              <div className="mt-4 flex items-center gap-2 flex-wrap">
+              <div className="mb-6 flex items-center gap-2 flex-wrap">
                 <span className="text-white/40 text-xs uppercase tracking-wider mr-1">Play in</span>
                 {files.map(f => {
                   const tag = f.version_tag || f.resolution || 'Unknown'
@@ -1981,6 +1897,7 @@ function DetailView({
                   return (
                     <button
                       key={f.id}
+                      type="button"
                       onClick={() => onPlayFile(media, f.id)}
                       title={[codec, sizeGB, f.library_name].filter(Boolean).join(' · ')}
                       className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-colors border whitespace-nowrap ${
@@ -1996,181 +1913,27 @@ function DetailView({
                 })}
               </div>
             )}
+
+            <QualityChips chips={qualityChips} className="mb-7" />
+
+            <div role="tabpanel" id={`detail-panel-${activeTab}`} aria-labelledby={`detail-tab-${activeTab}`}>
+              {activeTab === 'overview' ? (
+                <div className="space-y-10">
+                  {storylineNode}
+                  {episodesNode}
+                  {castNode}
+                  {mediaNode}
+                </div>
+              ) : activeTab === 'episodes' ? (
+                episodesNode
+              ) : activeTab === 'cast' ? (
+                castNode
+              ) : activeTab === 'media' ? (
+                mediaNode
+              ) : null}
+            </div>
           </div>
         </div>
-      </div>
-
-      {/* Content */}
-      <div className="px-8 py-8">
-        {/* Phase 5.3 final QA — Cast row. Avatars + name + character
-            from server's CastMember[] (role_type === 'cast'). Mirrors
-            V1 (aurora_pro.html renderCast). Horizontal scroll on
-            overflow so the row never wraps onto multiple lines on a
-            wide cast (TV shows can have 20+ regulars). */}
-        {castMembers.length > 0 && (
-          <div className="mb-10">
-            <h3 className="text-white text-lg font-semibold mb-4">Cast</h3>
-            <div className="flex gap-6 overflow-x-auto pb-4 scrollbar-hide">
-              {castMembers.slice(0, 20).map((c) => (
-                <CastCard key={c.id} member={c} />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Phase 5.3 final QA — Media Info (audio/subtitle tracks).
-            V1 surfaces this so users can see if their content has
-            a 5.1 mix, foreign-language tracks, or forced subs before
-            they hit play. Two-column grid; gracefully hides empty
-            halves. */}
-        {(audioTracks.length > 0 || subtitleTracks.length > 0) && (
-          <div className="mb-10">
-            <h3 className="text-white text-lg font-semibold mb-4">Media Info</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {audioTracks.length > 0 && (
-                <div>
-                  <h4 className="text-white/40 text-xs uppercase tracking-wider mb-2">Audio Tracks</h4>
-                  <div className="space-y-1">
-                    {audioTracks.map((t, i) => (
-                      <div key={`a-${i}`} className="text-sm text-white/80 py-1.5 border-b border-white/[0.04] last:border-0">
-                        <span className="text-white/60 uppercase mr-2">{t.language || 'und'}</span>
-                        <span className="text-white/85">{t.codec.toUpperCase()}</span>
-                        {/* Audit H1 — server emits `channels:0` without
-                            omitempty when ffprobe couldn't detect.
-                            `t.channels && X` would render the literal
-                            "0" in JSX; explicit `> 0` avoids that. */}
-                        {t.channels !== undefined && t.channels > 0 && (
-                          <span className="text-white/50"> · {t.channels}ch</span>
-                        )}
-                        {t.title && <span className="text-white/50"> · {t.title}</span>}
-                        {t.is_default && <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] bg-purple-500/15 text-purple-300 rounded">Default</span>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {subtitleTracks.length > 0 && (
-                <div>
-                  <h4 className="text-white/40 text-xs uppercase tracking-wider mb-2">Subtitles</h4>
-                  <div className="space-y-1">
-                    {subtitleTracks.map((t, i) => (
-                      <div key={`s-${i}`} className="text-sm text-white/80 py-1.5 border-b border-white/[0.04] last:border-0">
-                        <span className="text-white/60 uppercase mr-2">{t.language || 'und'}</span>
-                        <span className="text-white/85">{t.codec.toUpperCase()}</span>
-                        {t.title && <span className="text-white/50"> · {t.title}</span>}
-                        {t.forced && <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] bg-amber-500/15 text-amber-300 rounded">Forced</span>}
-                        {t.default && <span className="ml-2 inline-block px-1.5 py-0.5 text-[10px] bg-purple-500/15 text-purple-300 rounded">Default</span>}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* M10 Phase 4.5 — Season picker. Only renders when there's
-            more than one season; single-season shows would just have
-            a redundant "S1" chip. */}
-        {seasons && seasons.length > 1 && (
-          <div className="mb-4">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-white/40 text-xs uppercase tracking-wider mr-2">Season</span>
-              {seasons.map(s => (
-                <button
-                  key={s.season_number}
-                  onClick={() => onSelectSeason?.(s.season_number)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors border ${
-                    selectedSeason === s.season_number
-                      ? 'bg-purple-600/25 border-purple-500/40 text-purple-200'
-                      : 'bg-white/[0.03] border-white/[0.06] text-white/60 hover:bg-white/[0.06] hover:text-white/85'
-                  }`}
-                  title={s.episode_count ? `${s.episode_count} episodes` : undefined}
-                >
-                  S{s.season_number}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Episodes — M10 Phase 2: real episodes from the API.
-            apiEpisodes is undefined for movies (no episode rail) and
-            an empty array while loading (we don't render a stub —
-            the description block already shows "Loading details…").
-            Phase 5.3 final QA: click ALWAYS fires; missing-file
-            episodes route to onEpisodeUnavailable so the App layer
-            can surface a toast instead of the user wondering why
-            their click did nothing. */}
-        {apiEpisodes && apiEpisodes.length > 0 && (
-          <div>
-            <h3 className="text-white text-lg font-semibold mb-4">
-              {selectedSeason ? `Season ${selectedSeason}` : 'Episodes'}
-              <span className="text-white/40 text-sm font-normal ml-2">({apiEpisodes.length})</span>
-            </h3>
-            <div className="space-y-2">
-              {apiEpisodes.map((ep) => {
-                const hasFile = !!(ep.files && ep.files.length > 0)
-                const runtime = ep.runtime_minutes
-                  ? `${ep.runtime_minutes}m`
-                  : ''
-                // Per-episode still: server pre-renders `still_url`
-                // on EpisodeDetail. Falls back to the show backdrop
-                // when an episode lacks a TMDB still (older shows,
-                // pre-air, etc.).
-                const stillImg = ep.still_url || realBackdrop
-                return (
-                  <button
-                    key={ep.id}
-                    type="button"
-                    className={`w-full text-left flex items-center gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] transition-all group hover:bg-white/[0.05] hover:border-purple-500/30 cursor-pointer ${
-                      hasFile ? '' : 'opacity-70'
-                    }`}
-                    onClick={() => {
-                      // Keep these branches separate so a "has file"
-                      // case can never fall through to the
-                      // unavailable toast and lie about file presence.
-                      if (hasFile) {
-                        onPlayEpisode?.(ep)
-                        return
-                      }
-                      onEpisodeUnavailable?.(ep)
-                    }}
-                    title={hasFile ? 'Play episode' : 'No file available — scan the library or wait for the next pull'}
-                  >
-                    <div className="w-[160px] h-[90px] rounded-lg overflow-hidden flex-shrink-0 relative bg-white/5">
-                      <img src={stillImg} alt="" className="w-full h-full object-cover" loading="lazy" />
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                          hasFile ? 'bg-purple-600/90' : 'bg-white/20'
-                        }`}>
-                          <Icon name={hasFile ? 'play' : 'info'} size={16} className="ml-0.5" />
-                        </div>
-                      </div>
-                      {!hasFile && (
-                        <div className="absolute top-1 right-1 px-1.5 py-0.5 text-[9px] uppercase tracking-wider rounded bg-black/60 text-white/70">
-                          No file
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-purple-400 text-sm font-semibold">E{ep.episode_number}</span>
-                        <h4 className="text-white text-sm font-medium truncate">{ep.title || `Episode ${ep.episode_number}`}</h4>
-                      </div>
-                      {ep.overview && <p className="text-white/40 text-xs line-clamp-2">{ep.overview}</p>}
-                    </div>
-                    {runtime && <span className="text-white/40 text-sm flex-shrink-0">{runtime}</span>}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
-        {/* Empty-state for shows with no episodes loaded. */}
-        {media.type === 'show' && (!apiEpisodes || apiEpisodes.length === 0) && !loading && (
-          <p className="text-white/40 text-sm">No episodes available yet.</p>
-        )}
       </div>
     </div>
   )
@@ -8187,6 +7950,10 @@ export default function App() {
           )}
           {view === 'detail' && selectedMedia && (
             <DetailView
+              // Reset internal state (active tab, cast-expand) per title so
+              // detail→detail navigation (e.g. Cmd+K search) never leaves a
+              // stale tab selected (an Episodes tab on a movie = blank column).
+              key={selectedMedia.id}
               media={selectedMedia}
               onBack={handleBack}
               onPlay={handlePlay}

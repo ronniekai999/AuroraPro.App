@@ -145,11 +145,25 @@
   }
 
   .aurora-bg {
-    background: 
+    background:
       radial-gradient(ellipse 80% 60% at 20% 40%, rgba(168, 85, 247, 0.08) 0%, transparent 60%),
       radial-gradient(ellipse 60% 50% at 80% 20%, rgba(216, 180, 254, 0.05) 0%, transparent 50%),
       radial-gradient(ellipse 50% 40% at 50% 80%, rgba(107, 33, 168, 0.06) 0%, transparent 50%),
       #050505;
+  }
+
+  /* DetailView hero glow floor — a soft purple radial at the bottom-left of
+     the backdrop, giving the editorial hero its "shine". Single static
+     element on a non-scrolling hero, so the blur cost is paid once. */
+  .aurora-floor {
+    position: absolute;
+    left: -10%;
+    right: -10%;
+    bottom: -25%;
+    height: 60%;
+    background: radial-gradient(55% 100% at 28% 100%, rgba(168, 85, 247, 0.28), transparent 70%);
+    filter: blur(46px);
+    pointer-events: none;
   }
 }
 
