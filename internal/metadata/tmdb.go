@@ -257,6 +257,16 @@ type TMDBMovieTV struct {
 	OriginalLanguage string  `json:"original_language"`
 	MediaType        string  `json:"media_type"` // "movie" or "tv" (multi search only)
 	Adult            bool    `json:"adult"`
+	// production_companies (movie + TV) and networks (TV) come back on the
+	// detail response by default — used to populate studio / network.
+	ProductionCompanies []TMDBNamedEntity `json:"production_companies,omitempty"`
+	Networks            []TMDBNamedEntity `json:"networks,omitempty"`
+}
+
+// TMDBNamedEntity is the shared shape of a TMDB production company or network
+// ({id, name, logo_path, origin_country}); we only need the name.
+type TMDBNamedEntity struct {
+	Name string `json:"name"`
 }
 
 // DisplayTitle returns Title for movies, Name for TV.

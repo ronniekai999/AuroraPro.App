@@ -175,6 +175,9 @@ func (e *Enricher) enrichMovie(ctx context.Context, item *models.MediaItem, titl
 		RuntimeMin:    nilIfZero(detail.Runtime),
 		Year:          nilIfZero(match.Year()),
 		MetadataSrc:   strPtr("tmdb"),
+		Studio:        firstNamed(detail.ProductionCompanies),
+		Network:       firstNamed(detail.Networks),
+		ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
 	}
 
 	if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
@@ -302,6 +305,9 @@ func (e *Enricher) applyTMDBShowMatch(ctx context.Context, item *models.MediaIte
 		RuntimeMin:    nilIfZero(runtime),
 		Year:          nilIfZero(match.Year()),
 		MetadataSrc:   strPtr("tmdb"),
+		Studio:        firstNamed(detail.ProductionCompanies),
+		Network:       firstNamed(detail.Networks),
+		ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
 	}
 
 	if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
@@ -882,6 +888,25 @@ func ptrStr(p *string) *string {
 	return p
 }
 
+// firstNamed returns the first non-empty entity name (production company or
+// network) as a pointer, or nil when none is present.
+func firstNamed(entities []TMDBNamedEntity) *string {
+	for _, e := range entities {
+		if e.Name != "" {
+			return nilIfEmpty(e.Name)
+		}
+	}
+	return nil
+}
+
+// firstNonEmpty returns the first non-empty of a, b as a pointer, or nil.
+func firstNonEmpty(a, b string) *string {
+	if a != "" {
+		return nilIfEmpty(a)
+	}
+	return nilIfEmpty(b)
+}
+
 func strPtr(s string) *string {
 	return &s
 }
@@ -937,6 +962,9 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			RuntimeMin:    nilIfZero(runtime),
 			Year:          nilIfZero(detail.Year()),
 			MetadataSrc:   strPtr("tmdb"),
+			Studio:        firstNamed(detail.ProductionCompanies),
+			Network:       firstNamed(detail.Networks),
+			ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
 		}
 		if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
 			if e.handleDuplicateMetadata(ctx, err, item.Title) {
@@ -989,6 +1017,9 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			RuntimeMin:    nilIfZero(detail.Runtime),
 			Year:          nilIfZero(detail.Year()),
 			MetadataSrc:   strPtr("tmdb"),
+			Studio:        firstNamed(detail.ProductionCompanies),
+			Network:       firstNamed(detail.Networks),
+			ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
 		}
 		if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
 			if e.handleDuplicateMetadata(ctx, err, item.Title) {
