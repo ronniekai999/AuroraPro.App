@@ -26,7 +26,6 @@ import (
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -242,14 +241,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 	r.Use(middleware.Recoverer)
 	// NOTE: 60s request timeout is applied per-route-group below, NOT globally,
 	// so that long-running streaming and WebSocket connections are not killed.
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   cfg.Server.AllowedOrigins,
-		AllowedMethods:   []string{"GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
-		ExposedHeaders:   []string{"Link", "X-Search-Mode"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	// CORS is dispatched by path (see corsMiddleware): the token-authed HLS
+	// streaming subtree gets a permissive credential-less policy so Chromecast /
+	// AirPlay receivers can fetch fragments cross-origin (issue #181), while
+	// every other route keeps the credentialed allowlist.
+	r.Use(corsMiddleware(cfg.Server.AllowedOrigins))
 	// NOTE: securityHeaders is NOT applied globally — it is applied only to
 	// API routes below.  Static/frontend routes get a permissive CSP instead.
 
