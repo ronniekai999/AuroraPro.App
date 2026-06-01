@@ -262,6 +262,11 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 // WatchAnchor is a recently-watched item with its embedding, used by the
 // rail to attach a "Because you watched X" hint to each recommendation.
 type WatchAnchor struct {
+	// MediaItemID identifies the underlying title so callers can dedupe
+	// anchors. watch_progress holds one row PER EPISODE, so a multi-
+	// episode show would otherwise appear as several anchors (→ duplicate
+	// "Because you watched <show>" rails). See RecentAnchorsWithEmbeddings.
+	MediaItemID   int64
 	Title         string
 	Year          int
 	Type          string
@@ -280,12 +285,26 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	if limit <= 0 {
 		limit = 10
 	}
+	// watch_progress holds one row PER EPISODE for shows (episode_id NOT
+	// NULL; movies get a single item-level row), so a JOIN to media_items
+	// returns a binged show once per watched episode. Collapse to ONE
+	// anchor per title with
+	// DISTINCT ON (m.id): the inner query keeps each title's best progress
+	// row (completed first, then most recent), and the outer query re-sorts
+	// those one-per-title rows by the same key before LIMIT. Without this a
+	// binged show produced N identical "Because you watched <show>" rails.
 	rows, err := q.pool.Query(ctx, `
-		SELECT m.title, m.type::text, COALESCE(m.year, 0), m.embedding::text
-		FROM watch_progress wp
-		JOIN media_items m ON m.id = wp.media_item_id
-		WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL
-		ORDER BY wp.completed DESC, wp.updated_at DESC
+		SELECT id, title, type, year, embedding FROM (
+			SELECT DISTINCT ON (m.id)
+			       m.id, m.title, m.type::text AS type, COALESCE(m.year, 0) AS year,
+			       m.embedding::text AS embedding,
+			       wp.completed AS completed, wp.updated_at AS updated_at
+			FROM watch_progress wp
+			JOIN media_items m ON m.id = wp.media_item_id
+			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL
+			ORDER BY m.id, wp.completed DESC, wp.updated_at DESC
+		) d
+		ORDER BY d.completed DESC, d.updated_at DESC
 		LIMIT $2`,
 		profileID, limit,
 	)
@@ -296,7 +315,7 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	var out []*WatchAnchor
 	for rows.Next() {
 		a := &WatchAnchor{}
-		if err := rows.Scan(&a.Title, &a.Type, &a.Year, &a.EmbeddingText); err != nil {
+		if err := rows.Scan(&a.MediaItemID, &a.Title, &a.Type, &a.Year, &a.EmbeddingText); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
