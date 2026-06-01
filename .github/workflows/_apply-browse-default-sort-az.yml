@@ -1,0 +1,56 @@
+name: Apply browse default A-Z patch
+
+on:
+  push:
+    branches:
+      - fix/browse-default-sort-az
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/browse-default-sort-az
+          persist-credentials: true
+
+      - name: Apply targeted sort default change
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('static/redesign/app/src/App.tsx')
+          text = path.read_text(encoding='utf-8')
+          replacements = {
+              "const [moviesSort, setMoviesSort] = useState<MediaSort>('rating')": "const [moviesSort, setMoviesSort] = useState<MediaSort>('title')",
+              "const [showsSort, setShowsSort] = useState<MediaSort>('rating')": "const [showsSort, setShowsSort] = useState<MediaSort>('title')",
+              "// sortBy=rating (the default), so the See All button takes": "// sortBy=rating, so the See All button takes",
+          }
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one match for {old!r}; found {count}')
+              text = text.replace(old, new, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Remove one-time workflow from final diff
+        run: rm .github/workflows/_apply-browse-default-sort-az.yml
+
+      - name: Validate frontend build
+        working-directory: static/redesign/app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Commit targeted change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add static/redesign/app/src/App.tsx .github/workflows/_apply-browse-default-sort-az.yml
+          git commit -m "fix(browse): default movies and shows to A-Z"
+          git push origin HEAD:fix/browse-default-sort-az
