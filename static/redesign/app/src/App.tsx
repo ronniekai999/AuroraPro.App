@@ -125,7 +125,7 @@ import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
 import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
-import { deriveQualityChips, episodeWatchState, episodeProgressPct, formatReleaseDate } from '@/lib/detail'
+import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, formatReleaseDate } from '@/lib/detail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
@@ -1831,7 +1831,9 @@ interface DetailViewProps {
   // Phase 2 extras:
   detail?: MediaDetail
   apiEpisodes?: ApiEpisode[]
-  onPlayEpisode?: (ep: ApiEpisode) => void
+  // fileId (optional) — a version chip passes the specific file to play;
+  // a plain row click omits it (default quality-preference pick).
+  onPlayEpisode?: (ep: ApiEpisode, fileId?: number) => void
   // Phase 5.3 final QA — fires when the user clicks an episode that
   // has no associated file. App surfaces a toast so the click isn't
   // silent (previously the row was greyed out with no explanation).
@@ -2008,6 +2010,14 @@ function DetailView({
         : undefined,
       watchedLabel: state === 'watched' ? `Watched${rt ? ' · ' + rt + 'm' : ''}` : undefined,
       plainLabel: state === 'unwatched' && rt ? `${rt}m` : undefined,
+      // Multi-version chips. The server returns all of an episode's
+      // files 4K-first (queries_phase2 ORDER BY version_tag); before
+      // this, the detail page silently played files[0] (the 4K) and
+      // never surfaced that a 1080p also existed. We dedupe by visible
+      // label so two same-resolution files (rare) don't draw two
+      // identical chips, and only attach `versions` when 2+ distinct
+      // labels remain — single-version episodes render no chips.
+      versions: episodeVersions(ep.files),
     }
   })
 
@@ -2056,7 +2066,7 @@ function DetailView({
       selectedSeason={selectedSeason}
       onSelectSeason={onSelectSeason}
       rows={episodeRows}
-      onPlay={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep) }}
+      onPlay={(id, fileId) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onPlayEpisode?.(ep, fileId) }}
       onUnavailable={(id) => { const ep = apiEpisodes?.find(e => e.id === id); if (ep) onEpisodeUnavailable?.(ep) }}
       emptyText={loading ? 'Loading episodes…' : 'No episodes available yet.'}
     />
@@ -7625,7 +7635,11 @@ export default function App() {
   // plays a parent show's "first available" episode). Used by the
   // detail-view episode list. mediaItemId is the parent show's id
   // for progress tracking; episodeId is on the episode itself.
-  const handlePlayEpisode = useCallback((ep: ApiEpisode) => {
+  // fileId (optional) — when the user clicks a specific version chip on
+  // an episode row, play THAT file directly and skip the quality-
+  // preference pick. Omitted for a normal row click, which falls back to
+  // pickFile + the user's preferred_quality like before.
+  const handlePlayEpisode = useCallback((ep: ApiEpisode, fileId?: number) => {
     if (!selectedMedia) return
     // Deep-debug #177 — honor the quality preference, matching handlePlay
     // / handlePlayContinue / handlePlaybackEnded. Without it a manually-
@@ -7641,7 +7655,12 @@ export default function App() {
         else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
       }
     } catch { /* malformed prefs — keep 'auto' */ }
-    const file = pickFile(ep.files, preferQuality)
+    // Explicit version chip → that exact file; otherwise resolve by
+    // quality preference. The `?? pickFile` fallback covers a stale
+    // fileId (file pruned between render and click) by degrading to the
+    // default pick rather than failing the play.
+    const file = (fileId !== undefined ? ep.files?.find(f => f.id === fileId) : undefined)
+      ?? pickFile(ep.files, preferQuality)
     if (!file) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'This episode has no playable file.', type: 'error' }])

@@ -14,7 +14,9 @@ interface EpisodeListProps {
   selectedSeason?: number | null
   onSelectSeason?: (n: number) => void
   rows: EpisodeRowVM[]
-  onPlay: (id: number) => void
+  // fileId is optional — version chips pass an explicit file, the row
+  // body omits it (default quality-preference pick).
+  onPlay: (id: number, fileId?: number) => void
   onUnavailable: (id: number) => void
   emptyText?: string
   className?: string

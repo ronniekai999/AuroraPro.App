@@ -8,6 +8,15 @@ import { PlayIcon, CheckIcon, InfoIcon } from './icons'
 
 export type EpWatchState = 'watched' | 'in-progress' | 'unwatched'
 
+// One selectable file version for an episode that has more than one
+// (e.g. a 1080p AND a 2160p file). Built by the caller from the
+// episode's files; only present when there are 2+ distinct versions.
+export interface EpisodeVersion {
+  fileId: number
+  label: string // "4K", "1080p", "720p", … (4K tier shows as "4K")
+  is4k: boolean
+}
+
 export interface EpisodeRowVM {
   id: number
   number: number
@@ -20,27 +29,45 @@ export interface EpisodeRowVM {
   leftLabel?: string // "18:23 left of 50m"
   watchedLabel?: string // "Watched · 57m"
   plainLabel?: string // "53m"
+  // Multiple file versions (4K + 1080p, …). Only set when 2+ exist;
+  // single-version episodes leave this undefined and render no chips,
+  // so the common case is visually unchanged. Clicking a version chip
+  // plays THAT file; clicking the row body still plays the default
+  // (quality-preference-resolved) pick.
+  versions?: EpisodeVersion[]
 }
 
 interface EpisodeRowProps {
   ep: EpisodeRowVM
-  onPlay: (id: number) => void
+  // onPlay carries an optional fileId: the row body omits it (default
+  // quality-preference pick), a version chip passes the explicit file.
+  onPlay: (id: number, fileId?: number) => void
   onUnavailable: (id: number) => void
 }
 
 export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
   const inProgress = ep.state === 'in-progress'
   const watched = ep.state === 'watched'
+  // Render version chips only when 2+ distinct versions exist. The
+  // chips live OUTSIDE the row's <button> (nesting interactive
+  // elements is invalid HTML + breaks keyboard/AT), so the row is
+  // wrapped in a div with the chip strip as a sibling.
+  const hasVersions = !!ep.versions && ep.versions.length > 1
   return (
+    <div
+      className={cn(
+        'group/row rounded-2xl border bg-white/[0.02] border-white/[0.05] transition-all overflow-hidden hover:border-purple-500/30',
+        inProgress &&
+          'border-purple-400/45 bg-purple-500/[0.06] shadow-[0_0_0_1px_rgba(168,85,247,0.18),0_0_30px_rgba(168,85,247,0.08)]',
+        !ep.hasFile && 'opacity-70',
+      )}
+    >
     <button
       type="button"
       onClick={() => (ep.hasFile ? onPlay(ep.id) : onUnavailable(ep.id))}
       title={ep.hasFile ? 'Play episode' : 'No file available yet'}
       className={cn(
-        'group flex gap-4 p-[0.7rem] rounded-2xl border bg-white/[0.02] border-white/[0.05] transition-all cursor-pointer text-left w-full hover:bg-white/[0.05] hover:border-purple-500/30',
-        inProgress &&
-          'border-purple-400/45 bg-purple-500/[0.06] shadow-[0_0_0_1px_rgba(168,85,247,0.18),0_0_30px_rgba(168,85,247,0.08)]',
-        !ep.hasFile && 'opacity-70',
+        'group flex gap-4 p-[0.7rem] transition-all cursor-pointer text-left w-full hover:bg-white/[0.03] group-hover/row:bg-white/[0.03]',
       )}
     >
       <div className="relative w-[140px] sm:w-[176px] aspect-video rounded-xl overflow-hidden flex-shrink-0 bg-white/5">
@@ -116,5 +143,32 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
         </div>
       </div>
     </button>
+
+    {/* Version chips — only when this episode has 2+ files (e.g. a
+        1080p AND a 2160p). Sits below the row body as a sibling of the
+        play button so it stays its own keyboard-focusable control.
+        Each chip plays that specific file; the 4K one gets the purple
+        accent matching the movie "Play in" chooser. */}
+    {hasVersions && (
+      <div className="flex items-center gap-2 flex-wrap px-[0.7rem] pb-[0.7rem] -mt-0.5">
+        <span className="text-white/40 text-[10px] uppercase tracking-wider mr-0.5">Play in</span>
+        {ep.versions!.map((v) => (
+          <button
+            key={v.fileId}
+            type="button"
+            onClick={() => onPlay(ep.id, v.fileId)}
+            className={cn(
+              'px-2.5 py-1 rounded-full text-[11px] font-semibold transition-colors border whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-purple-400/70 focus-visible:ring-offset-1 focus-visible:ring-offset-[#0a0a0f]',
+              v.is4k
+                ? 'bg-purple-600/25 border-purple-500/50 text-purple-100 hover:bg-purple-600/40 hover:border-purple-400'
+                : 'bg-white/[0.06] border-white/[0.1] text-white/85 hover:bg-white/[0.1] hover:text-white',
+            )}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+    )}
+    </div>
   )
 }
