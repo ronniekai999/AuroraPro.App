@@ -125,7 +125,7 @@ import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
 import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
-import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, formatReleaseDate } from '@/lib/detail'
+import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
 import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
@@ -1940,6 +1940,26 @@ function DetailView({
   }
   const audioTracks = trackFile?.audio_tracks || []
   const subtitleTracks = trackFile?.subtitle_tracks || []
+  // Resolution pool for the descriptive strip's secondary-res chips
+  // ("2160p" + "also 1080p"). Movies: the title's media_files. Shows: the
+  // files of one episode (first with files) — a show's "other resolution"
+  // is per-episode, same source the Episodes-tab version chips use. Both
+  // MediaFile[] and EpisodeFile[] satisfy secondaryResolutionLabels'
+  // {id,resolution?,version_tag?}.
+  //
+  // We pass the SAME pool's first (highest-res, since the server sorts
+  // files highest-first) file as the primary so the excluded tier always
+  // matches the leading res chip — deriving the primary from a different
+  // file (e.g. trackFile, which is chosen for its audio/sub tracks) could
+  // exclude the wrong tier and duplicate or drop a chip.
+  const resolutionPool: { id: number; resolution?: string; version_tag?: string }[] =
+    media.type === 'show'
+      ? (apiEpisodes?.find(e => e.files && e.files.length > 0)?.files ?? [])
+      // Match trackFile's `detail.files || files` precedence (non-empty
+      // detail.files wins, else the separate /files fetch) so the pool and
+      // the primary res chip always describe the same source.
+      : ((detail?.files?.length ? detail.files : files) ?? [])
+  const otherResolutions = secondaryResolutionLabels(resolutionPool, resolutionPool[0])
   // ───────────── view-models for the editorial layout ─────────────
   // 2026-05-31 — DetailView rebuilt into the "editorial split-view":
   // a tall hero banner, a sticky left rail (poster + actions + a credits
@@ -1953,8 +1973,10 @@ function DetailView({
     ? (detail?.season_count ? `${detail.season_count} Season${detail.season_count === 1 ? '' : 's'}` : undefined)
     : (realRuntime || undefined)
 
-  // Quality chips (descriptive) from the resolved track file.
-  const qualityChips = deriveQualityChips(trackFile, subtitleTracks.length)
+  // Quality chips (descriptive) from the resolved track file, plus any
+  // other resolution tiers the title is available in (e.g. a 1080p chip
+  // next to the 2160p one).
+  const qualityChips = deriveQualityChips(trackFile, subtitleTracks.length, otherResolutions)
 
   // Rail Resume mapping — reuse the existing resume formatters.
   const resumeShown = !!resume && isResumable(resume.item)
