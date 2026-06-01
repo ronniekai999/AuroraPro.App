@@ -110,6 +110,47 @@ export function resolutionLabel(file: ResolutionLike): string | undefined {
   return file.version_tag || file.resolution || undefined
 }
 
+/* ──────────────────────── episode versions ──────────────────────── */
+
+// One selectable file version for the episode-row "Play in 4K / 1080p"
+// chips. Mirrors EpisodeVersion in components/detail/EpisodeRow but is
+// defined here too so this lib stays free of component imports.
+export interface EpisodeVersionVM {
+  fileId: number
+  label: string // "2160p", "1080p", …
+  is4k: boolean
+}
+
+interface VersionFileLike extends ResolutionLike {
+  id: number
+}
+
+// Build the version chips for an episode from its files. Returns
+// undefined unless there are 2+ files with DISTINCT resolution labels —
+// the common single-file episode renders no chips, and two files at the
+// same tier (e.g. two 1080p rips) collapse to one chip pointing at the
+// first. Order is preserved from the input, which the server already
+// sorts 4K-first (queries_phase2 ORDER BY version_tag), so the 4K chip
+// leads. This is what fixes "a show with a 1080p AND a 2160p only shows
+// the 2160p" — both now appear and each plays its own file.
+export function episodeVersions(files?: VersionFileLike[]): EpisodeVersionVM[] | undefined {
+  if (!files || files.length < 2) return undefined
+  const seen = new Set<string>()
+  const out: EpisodeVersionVM[] = []
+  for (const f of files) {
+    const res = resolutionLabel(f) || f.version_tag || f.resolution || 'Unknown'
+    const is4k = /2160|4320|\b4k\b|\buhd\b/i.test(res)
+    // Dedupe by the resolution tier, then DISPLAY the 4K tier as "4K"
+    // (not "2160p") to match the movie "Play in" chooser, which shows
+    // the raw version_tag (usually literally "4K"). Keeps the two
+    // surfaces consistent for the user.
+    if (seen.has(res)) continue
+    seen.add(res)
+    out.push({ fileId: f.id, label: is4k ? '4K' : res, is4k })
+  }
+  return out.length > 1 ? out : undefined
+}
+
 // Pull a release-source token out of version_tag ("BluRay", "WEB-DL",
 // "Remux", …) so the primary chip can read "1080p BluRay" like the mockup.
 // Returns undefined when the tag has no recognizable source.
