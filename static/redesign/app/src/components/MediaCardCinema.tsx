@@ -41,6 +41,20 @@ export interface MediaLike {
   // 0..1 fraction; when > 0 renders a progress bar at the bottom of
   // the poster (e.g. Continue Watching).
   progress?: number
+  // 2026-05-31 (library hybrid redesign) — formatted runtime from
+  // mapMedia (formatDuration(runtime_minutes)): "2h 55m" for movies, a
+  // per-episode runtime like "45m" for shows, or "" when unknown. NOTE:
+  // this is a RUNTIME, not a season count — there is no "N Seasons"
+  // path today. Shown in the meta row ONLY when `showLength` is set
+  // (the Movies/TV grid); rails keep the compact star·year·genre meta.
+  // Empty just omits the token (no stray separator).
+  duration?: string
+  // 2026-05-31 — quality / maturity chips already assembled by
+  // mapMedia (e.g. ["4K", "TV-MA"]) from the list payload's has_4k +
+  // content_rating. Rendered as poster badges ONLY when `showBadges`
+  // is set. Continue-Watching items carry no tags, so even if a future
+  // caller sets showBadges on a CW card nothing spurious renders.
+  tags?: string[]
 }
 
 export interface MediaCardCinemaProps {
@@ -75,6 +89,20 @@ export interface MediaCardCinemaProps {
   // partially-watched title that ALSO appears in (e.g.) Top Rated
   // doesn't get a Resume pill there.
   onResume?: () => void
+  // 2026-05-31 (library hybrid redesign) — opt-in enrichments used ONLY
+  // by the Movies/TV browse grid. Defaulting them off keeps the 5 other
+  // callers (home rails, library, search, collections, CW) pixel-identical.
+  //  • showLength: append the formatted `duration` to the meta row.
+  //  • showBadges: render quality/maturity chips (from `tags`) as poster
+  //    badges in the bottom-left.
+  //  • hoverPreview: reveal the cinematic hover scrim + center play
+  //    glyph. NOTE: clicking it still calls onSelect (open detail) — it
+  //    does NOT play directly, preserving the established
+  //    "click → detail → act" language so we don't have to thread an
+  //    onPlay through every surface. Purely a richer affordance.
+  showLength?: boolean
+  showBadges?: boolean
+  hoverPreview?: boolean
 }
 
 // ─── Inlined SVG icons (decorative — wrapped in aria-hidden) ───
@@ -125,10 +153,19 @@ function MovieSvg() {
 export function MediaCardCinema({
   item, onSelect, onCardContext, libraryIds, onToggleLib,
   className = '', subtitle, aspect = 'poster', topRightOverlay, onResume,
+  showLength = false, showBadges = false, hoverPreview = false,
 }: MediaCardCinemaProps) {
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
     aspect === 'landscape' ? { aspectRatio: '16 / 9' } : undefined
+  // Poster badges (quality / maturity). Only when the caller opts in
+  // AND the item actually carries tags — keeps Continue-Watching and
+  // metadata-less rows clean.
+  const badges = showBadges && item.tags ? item.tags.filter(Boolean) : []
+  // Length token only when opted in and present (movies → "2h 55m",
+  // shows → episode runtime like "45m"). Empty string from mapMedia
+  // (no runtime_minutes) omits it without leaving a stray separator.
+  const lengthText = showLength && item.duration ? item.duration : ''
 
   return (
     // 2028-05-28 (deep-debug Bug A) — `group` class so the
@@ -164,6 +201,23 @@ export function MediaCardCinema({
           // lands.
           <div className="poster-img bg-white/[0.03] flex items-center justify-center" style={landscapeStyle}>
             <MovieSvg />
+          </div>
+        )}
+        {/* 2026-05-31 — cinematic hover preview (browse grid only). A
+            scrim + center play glyph that fades in on hover/focus. It is
+            DECORATIVE: the click is the card's own onSelect (open detail),
+            so we deliberately don't attach a separate handler here — that
+            keeps the "click → detail → act" language intact and avoids
+            threading an onPlay through every caller. aria-hidden + the
+            scrim ignoring pointer events means it never intercepts the
+            library/resume buttons stacked above it. */}
+        {hoverPreview && (
+          <div className="card-hover-preview" aria-hidden="true">
+            <span className="chp-play">
+              <svg width={20} height={20} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <polygon points="5 3 19 12 5 21" />
+              </svg>
+            </span>
           </div>
         )}
         {/* + / ✓ library badge. stopPropagation so the click toggles
@@ -219,6 +273,19 @@ export function MediaCardCinema({
             Resume
           </button>
         )}
+        {/* 2026-05-31 — quality / maturity badges (browse grid only).
+            Bottom-left of the poster so they don't collide with the
+            top-corner lib badge / AI gem. First tag (quality, e.g. "4K")
+            gets the accent treatment; the rest (maturity) are neutral
+            glass. Hidden behind the progress bar's 3px strip is fine —
+            badges sit 14px up. */}
+        {badges.length > 0 && (
+          <div className="card-badges" aria-hidden="true">
+            {badges.map((b, i) => (
+              <span key={b} className={`card-badge ${i === 0 ? 'is-quality' : ''}`}>{b}</span>
+            ))}
+          </div>
+        )}
         {/* Progress bar — only when progress > 0. */}
         {item.progress !== undefined && item.progress > 0 && (
           <div className="progress-bar">
@@ -247,6 +314,16 @@ export function MediaCardCinema({
             {item.year !== undefined && item.year > 0 && (
               <>
                 <span>{item.year}</span>
+                {(item.genre || lengthText) && <span className="sep">·</span>}
+              </>
+            )}
+            {/* Runtime token (browse grid only). Placed before genre so
+                the row reads "★ 9.5 · 2008 · 2h 55m · Crime". Only
+                renders when showLength is set AND duration is non-empty
+                (shows with no per-episode runtime simply omit it). */}
+            {lengthText && (
+              <>
+                <span>{lengthText}</span>
                 {item.genre && <span className="sep">·</span>}
               </>
             )}

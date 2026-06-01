@@ -1,0 +1,492 @@
+<!doctype html>
+<!--
+  AURORA · LIBRARY REDESIGN — MOCKUP 2 of 2
+  Direction: "EDITORIAL MOSAIC"  (information-dense, magazine, lean-forward power-browsing)
+
+  What changes vs. today's flat grid:
+   • A wide EDITORIAL SPOTLIGHT (#1 pick) — poster + synopsis + cast + big rating numeral.
+   • A "Featured" band of cinematic 16:9 cards for variety of rhythm.
+   • A denser, metadata-rich grid: rating · year · runtime/seasons · genre on every card,
+     plus an inline rank numeral and a genre-hue accent.
+   • A real GRID ⇄ LIST density toggle — list view shows far more catalog per screen,
+     which matters at 2,423 movies / 511 shows.
+   • Genre DROPDOWN → underline TABS; sort stays explicit.
+
+  Poster tiles are art-directed gradient stand-ins for the real TMDB poster art.
+  Self-contained: open directly in a browser. Toggle Films / Series and Grid / List up top.
+-->
+<html lang="en" data-glow="aurora">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aurora · Editorial Mosaic (mockup)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#050505; --panel:rgba(255,255,255,.03); --panel2:rgba(255,255,255,.05);
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.12); --hair:rgba(255,255,255,.08);
+    --text:#fff; --muted:rgba(255,255,255,.6); --muted2:rgba(255,255,255,.4);
+    --purple:#a855f7; --purple-l:#d8b4fe; --purple-d:#7e22ce; --indigo:#6366f1;
+    --gold:#facc15; --glow-border:rgba(220,200,255,.22); --glow-border-strong:rgba(220,200,255,.45);
+    --halo:0 0 0 1px rgba(220,200,255,.14), 0 0 28px rgba(168,85,247,.12), 0 0 56px rgba(255,255,255,.05);
+    --halo-strong:0 0 0 1px rgba(220,200,255,.25), 0 0 34px rgba(168,85,247,.2), 0 0 72px rgba(255,255,255,.08);
+    --radius:14px; --sidebar:240px;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:'Space Grotesk','Inter',sans-serif;
+  }
+  html,body{background:var(--bg);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased}
+  body{min-height:100vh;background:
+      radial-gradient(ellipse 70% 50% at 85% 0%, rgba(168,85,247,.09), transparent 55%),
+      radial-gradient(ellipse 60% 45% at 0% 12%, rgba(99,102,241,.06), transparent 55%),
+      var(--bg)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(217,70,239,.25));border-radius:10px;border:2px solid transparent;background-clip:padding-box}
+  .ico{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+
+  /* ---------- Sidebar (shared chrome) ---------- */
+  .sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar);background:#050505;border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:40}
+  .brand{display:flex;align-items:center;gap:11px;padding:20px 18px 16px}
+  .brand .logo{width:36px;height:36px;border-radius:11px;background:rgba(168,85,247,.18);border:1px solid rgba(168,85,247,.4);display:grid;place-items:center;box-shadow:0 0 18px rgba(168,85,247,.25)}
+  .brand .name{font-family:var(--display);font-weight:700;font-size:19px;letter-spacing:.14em}
+  .nav{flex:1;padding:8px 12px;display:flex;flex-direction:column;gap:3px;overflow:auto}
+  .nav .lbl{font-size:10px;letter-spacing:.16em;color:var(--muted2);text-transform:uppercase;padding:14px 10px 6px}
+  .navlink{display:flex;align-items:center;gap:12px;padding:10px 11px;border-radius:10px;color:var(--muted);font-size:14px;font-weight:500;cursor:pointer;position:relative;border:1px solid transparent;transition:.15s}
+  .navlink:hover{color:#fff;background:rgba(255,255,255,.04)}
+  .navlink.active{color:#fff;background:rgba(168,85,247,.15);border-color:rgba(168,85,247,.25)}
+  .navlink.active::before{content:'';position:absolute;left:-12px;top:50%;transform:translateY(-50%);width:3px;height:20px;background:var(--purple);border-radius:0 3px 3px 0;box-shadow:0 0 10px rgba(168,85,247,.6)}
+  .navlink .badge{margin-left:auto;background:var(--purple);color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:1px 6px}
+  .side-foot{padding:10px 12px;border-top:1px solid var(--border)}
+  .user{display:flex;align-items:center;gap:10px;padding:9px;border-radius:11px;cursor:pointer}
+  .user:hover{background:rgba(255,255,255,.04)}
+  .user .av{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--purple-d));display:grid;place-items:center;font-weight:700;font-size:13px}
+  .user .nm{font-size:13px;font-weight:600;line-height:1.2}
+  .user .rl{font-size:11px;color:var(--muted2)}
+
+  /* ---------- Shell ---------- */
+  .main{margin-left:var(--sidebar)}
+  .topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;padding:12px 28px;background:rgba(5,5,5,.72);backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,255,255,.05)}
+  .search{position:relative;flex:1;max-width:440px}
+  .search .ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted2)}
+  .search input{width:100%;padding:11px 14px 11px 40px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:11px;color:#fff;font-size:14px;font-family:var(--font)}
+  .search input::placeholder{color:var(--muted2)}
+  .search input:focus{outline:none;border-color:rgba(168,85,247,.4)}
+  .spacer{flex:1}
+  .tb-btn{width:40px;height:40px;border-radius:11px;background:rgba(255,255,255,.03);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted);cursor:pointer}
+  .tb-btn:hover{color:#fff;background:rgba(255,255,255,.06)}
+  .tb-user{display:flex;align-items:center;gap:8px;padding:5px 6px 5px 12px;border-radius:11px;background:rgba(255,255,255,.03);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600}
+  .tb-user .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--purple-d));display:grid;place-items:center;font-size:12px;font-weight:700}
+  .tb-user .star{color:var(--gold)}
+
+  .content{padding:30px 40px 90px;max-width:1500px}
+
+  /* ---------- Page header + toolbar ---------- */
+  .pagehead{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:8px}
+  .pill{display:inline-flex;align-items:center;gap:7px;padding:5px 12px;border-radius:999px;background:rgba(168,85,247,.1);border:1px solid rgba(168,85,247,.2);color:var(--purple-l);font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;margin-bottom:12px}
+  .pill .ico{width:13px;height:13px}
+  .pagehead h1{font-family:var(--display);font-size:40px;font-weight:700;letter-spacing:-.015em;line-height:1}
+  .pagehead .sub{color:var(--muted);font-size:14px;margin-top:8px}
+  .pagehead .sub b{color:#fff;font-weight:600}
+  .tools{display:flex;align-items:center;gap:10px}
+  .seg{display:flex;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:11px;padding:3px}
+  .seg button{padding:8px 15px;border-radius:8px;background:transparent;border:none;color:var(--muted);font-size:13px;font-weight:600;cursor:pointer;font-family:var(--font);display:flex;align-items:center;gap:7px}
+  .seg button.on{background:linear-gradient(135deg,var(--purple),var(--purple-d));color:#fff;box-shadow:0 4px 16px rgba(168,85,247,.35)}
+  .seg button .ico{width:15px;height:15px}
+  .seg.icononly button{padding:8px 10px}
+  .sort{display:flex;align-items:center;gap:8px;color:var(--muted2);font-size:13px}
+  .sort select{background:rgba(255,255,255,.04);border:1px solid var(--border);color:#fff;border-radius:9px;padding:9px 12px;font-size:13px;font-family:var(--font);cursor:pointer}
+
+  /* genre underline tabs */
+  .gtabs{display:flex;gap:24px;overflow-x:auto;border-bottom:1px solid var(--hair);margin:18px 0 26px;scrollbar-width:none}
+  .gtabs::-webkit-scrollbar{display:none}
+  .gtab{padding:0 1px 14px;color:var(--muted2);font-size:13.5px;font-weight:500;white-space:nowrap;cursor:pointer;position:relative;transition:.15s}
+  .gtab:hover{color:#fff}
+  .gtab.on{color:#fff}
+  .gtab.on::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;background:linear-gradient(90deg,var(--purple),var(--purple-l));border-radius:2px;box-shadow:0 0 10px rgba(168,85,247,.6)}
+
+  .seclabel{display:flex;align-items:center;gap:12px;margin:34px 0 16px}
+  .seclabel .t{font-family:var(--display);font-size:13px;font-weight:600;letter-spacing:.2em;text-transform:uppercase;color:var(--muted)}
+  .seclabel .line{flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent)}
+  .seclabel .ico{width:15px;height:15px;color:var(--purple-l)}
+
+  /* ---------- Editorial spotlight ---------- */
+  .spotlight{position:relative;display:grid;grid-template-columns:230px 1fr;gap:34px;padding:28px;border-radius:20px;border:1px solid var(--glow-border);box-shadow:var(--halo);overflow:hidden;isolation:isolate}
+  .spot-bg{position:absolute;inset:0;z-index:-2;opacity:.5;filter:blur(8px) saturate(1.1);transform:scale(1.1)}
+  .spotlight::after{content:'';position:absolute;inset:0;z-index:-1;background:linear-gradient(110deg, rgba(5,5,5,.92), rgba(5,5,5,.7) 55%, rgba(5,5,5,.55))}
+  .spot-poster{position:relative;aspect-ratio:2/3;border-radius:14px;overflow:hidden;border:1px solid var(--glow-border-strong);box-shadow:0 18px 50px rgba(0,0,0,.6)}
+  .spot-poster .art{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;padding:16px}
+  .spot-poster .art::before{content:'';position:absolute;inset:0;background:radial-gradient(120% 80% at 70% 12%,rgba(255,255,255,.22),transparent 55%)}
+  .spot-poster .art .pt{position:relative;font-family:var(--display);font-weight:700;font-size:21px;line-height:1.05;text-shadow:0 2px 12px rgba(0,0,0,.6)}
+  .spot-main{display:flex;flex-direction:column;justify-content:center;min-width:0}
+  .ribbon{display:inline-flex;align-items:center;gap:7px;align-self:flex-start;padding:5px 12px;border-radius:7px;background:linear-gradient(135deg,rgba(250,204,21,.18),rgba(168,85,247,.18));border:1px solid rgba(250,204,21,.35);color:#fde68a;font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:14px}
+  .ribbon .ico{width:13px;height:13px;stroke:none;fill:#fde68a}
+  .spot-main h2{font-family:var(--display);font-size:46px;line-height:1;font-weight:700;letter-spacing:-.02em;margin-bottom:14px}
+  .spot-stats{display:flex;align-items:center;gap:20px;margin-bottom:16px}
+  .bigrate{display:flex;align-items:baseline;gap:5px}
+  .bigrate .n{font-family:var(--display);font-size:38px;font-weight:700;color:var(--gold);line-height:1}
+  .bigrate .d{font-size:14px;color:var(--muted2)}
+  .bigrate .stars{display:flex;gap:2px;margin-left:2px}
+  .bigrate .stars .ico{width:13px;height:13px;stroke:none;fill:var(--gold)}
+  .spot-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px;color:var(--muted);padding-left:20px;border-left:1px solid var(--hair)}
+  .spot-meta .chip{padding:2px 9px;border:1px solid var(--border2);border-radius:6px;font-size:12px}
+  .spot-meta .dot{width:3px;height:3px;border-radius:50%;background:var(--muted2)}
+  .spot-main .syn{font-size:14.5px;line-height:1.6;color:rgba(255,255,255,.78);max-width:680px;margin-bottom:14px}
+  .spot-cast{font-size:13px;color:var(--muted);margin-bottom:22px}
+  .spot-cast b{color:rgba(255,255,255,.8);font-weight:500}
+  .spot-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;padding:12px 22px;border-radius:11px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:.18s;font-family:var(--font)}
+  .btn .ico{width:17px;height:17px}
+  .btn-play{background:#fff;color:#0a0a0a}
+  .btn-play:hover{transform:translateY(-1px);box-shadow:0 8px 30px rgba(255,255,255,.18)}
+  .btn-play .ico{stroke:none;fill:#0a0a0a}
+  .btn-glass{background:rgba(255,255,255,.08);color:#fff;border-color:var(--border2)}
+  .btn-glass:hover{background:rgba(255,255,255,.14)}
+
+  /* ---------- Featured landscape band ---------- */
+  .featured{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .fcard{position:relative;aspect-ratio:16/9;border-radius:14px;overflow:hidden;border:1px solid var(--glow-border);box-shadow:var(--halo);cursor:pointer;transition:transform .3s,box-shadow .3s,border-color .3s}
+  .fcard:hover{transform:translateY(-4px);border-color:var(--glow-border-strong);box-shadow:var(--halo-strong)}
+  .fcard .art{position:absolute;inset:0}
+  .fcard .art::after{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(5,5,5,.92),rgba(5,5,5,.1) 60%)}
+  .fcard .fc-in{position:absolute;left:0;right:0;bottom:0;padding:16px;z-index:1}
+  .fcard .fc-in .ft{font-family:var(--display);font-size:19px;font-weight:700;line-height:1.1;text-shadow:0 2px 10px rgba(0,0,0,.6)}
+  .fcard .fc-in .fm{display:flex;align-items:center;gap:8px;font-size:12px;color:rgba(255,255,255,.75);margin-top:6px}
+  .fcard .fc-in .fm .s{display:inline-flex;align-items:center;gap:3px;color:var(--gold);font-weight:700}
+  .fcard .fc-in .fm .s .ico{width:11px;height:11px;stroke:none;fill:var(--gold)}
+  .fcard .fc-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-46%) scale(.8);opacity:0;width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,.95);display:grid;place-items:center;transition:.25s;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .fcard:hover .fc-play{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .fcard .fc-play .ico{width:20px;height:20px;stroke:none;fill:#0a0a0a;margin-left:2px}
+
+  /* ---------- Dense editorial grid ---------- */
+  .emosaic{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:24px 18px}
+  .ecard{cursor:pointer}
+  .ec-poster{position:relative;aspect-ratio:2/3;border-radius:12px;overflow:hidden;border:1px solid var(--glow-border);box-shadow:var(--halo);transition:transform .3s cubic-bezier(.4,0,.2,1),box-shadow .3s,border-color .3s}
+  .ecard:hover .ec-poster{transform:translateY(-6px);border-color:var(--glow-border-strong);box-shadow:var(--halo-strong)}
+  .ec-poster .art{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;padding:13px}
+  .ec-poster .art::before{content:'';position:absolute;inset:0;background:radial-gradient(120% 80% at 72% 14%,rgba(255,255,255,.2),transparent 55%)}
+  .ec-poster .art::after{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(0,0,0,.45),transparent 55%)}
+  .ec-poster .pt{position:relative;font-family:var(--display);font-weight:700;font-size:16px;line-height:1.1;z-index:1;text-shadow:0 2px 10px rgba(0,0,0,.5)}
+  .ec-accent{position:absolute;left:0;right:0;bottom:0;height:3px;z-index:2}
+  .ec-rank{position:absolute;top:10px;left:11px;font-family:var(--display);font-weight:700;font-size:13px;color:#fff;background:rgba(8,6,14,.7);border:1px solid var(--border2);border-radius:7px;padding:2px 7px;backdrop-filter:blur(4px);z-index:3}
+  .ec-add{position:absolute;top:9px;right:9px;width:28px;height:28px;border-radius:50%;background:rgba(8,6,14,.65);border:1px solid rgba(255,255,255,.2);display:grid;place-items:center;color:#fff;z-index:3;opacity:0;transition:.18s}
+  .ecard:hover .ec-add{opacity:1}
+  .ec-add:hover{background:linear-gradient(135deg,var(--purple),var(--purple-d));transform:scale(1.08)}
+  .ec-add .ico{width:15px;height:15px}
+  .ec-hover{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:7px;background:rgba(5,5,5,.55);opacity:0;transition:.2s;z-index:2}
+  .ecard:hover .ec-hover{opacity:1}
+  .ec-hover .v{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;border-radius:9px;background:#fff;color:#0a0a0a;font-size:12.5px;font-weight:600}
+  .ec-hover .v .ico{width:14px;height:14px;stroke:none;fill:#0a0a0a}
+  /* metadata-rich shelf */
+  .ec-shelf{padding:11px 2px 0}
+  .ec-shelf .t{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ec-shelf .m1{display:flex;align-items:center;gap:6px;font-size:12px;margin-top:5px}
+  .ec-shelf .m1 .s{display:inline-flex;align-items:center;gap:3px;color:var(--gold);font-weight:700}
+  .ec-shelf .m1 .s .ico{width:11px;height:11px;stroke:none;fill:var(--gold)}
+  .ec-shelf .m1 .yr{color:var(--muted)}
+  .ec-shelf .m2{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--muted2);margin-top:4px}
+  .ec-shelf .m2 .gc{color:var(--purple-l)}
+
+  /* ---------- List view ---------- */
+  .elist{display:none;flex-direction:column;border:1px solid var(--hair);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.015)}
+  .lhead,.lrow{display:grid;grid-template-columns:46px 52px 1fr 130px 88px 96px 44px;align-items:center;gap:16px;padding:13px 18px}
+  .lhead{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted2);border-bottom:1px solid var(--hair);background:rgba(255,255,255,.02)}
+  .lrow{border-bottom:1px solid var(--hair);cursor:pointer;transition:background .15s}
+  .lrow:last-child{border-bottom:none}
+  .lrow:hover{background:rgba(168,85,247,.07)}
+  .lrow .rk{font-family:var(--display);font-size:17px;font-weight:700;color:var(--muted2)}
+  .lrow:hover .rk{color:var(--purple-l)}
+  .lthumb{width:42px;height:62px;border-radius:7px;overflow:hidden;position:relative;border:1px solid var(--border)}
+  .lthumb .art{position:absolute;inset:0}
+  .lr-title{min-width:0}
+  .lr-title .t{font-size:14.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lr-title .gg{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+  .tag{font-size:10.5px;color:var(--muted);border:1px solid var(--hair);border-radius:5px;padding:1px 7px}
+  .lr-cell{font-size:13px;color:var(--muted)}
+  .lr-rate{display:inline-flex;align-items:center;gap:5px;color:var(--gold);font-weight:700;font-size:14px}
+  .lr-rate .ico{width:13px;height:13px;stroke:none;fill:var(--gold)}
+  .lr-add{width:30px;height:30px;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted);cursor:pointer}
+  .lr-add:hover{color:#fff;background:linear-gradient(135deg,var(--purple),var(--purple-d));border-color:transparent}
+  .lr-add .ico{width:15px;height:15px}
+
+  .loadmore{display:flex;justify-content:center;margin-top:42px}
+  .loadmore button{padding:13px 30px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--muted);font-size:14px;font-weight:600;cursor:pointer;font-family:var(--font)}
+  .loadmore button:hover{color:#fff;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.1)}
+
+  .reportbug{position:fixed;right:24px;bottom:24px;z-index:50;display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid rgba(168,85,247,.2);color:var(--muted);font-size:12px;font-weight:500;cursor:pointer;backdrop-filter:blur(10px)}
+  .reportbug:hover{color:#fff;background:rgba(168,85,247,.15);border-color:rgba(168,85,247,.4)}
+  .reportbug .ico{width:14px;height:14px}
+  .note{margin-bottom:22px;padding:11px 16px;border-radius:10px;background:rgba(168,85,247,.07);border:1px solid rgba(168,85,247,.18);color:var(--purple-l);font-size:12px;display:flex;gap:9px;align-items:center}
+  .note .ico{width:15px;height:15px;flex:none}
+  @media (max-width:900px){.spotlight{grid-template-columns:1fr}.spot-poster{max-width:200px}.featured{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v11h14V9"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 12h4M3 16h4M17 8h4M17 12h4M17 16h4"/></symbol>
+  <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.5 14.9 8.6l6.6.9-4.8 4.6 1.2 6.6L12 17.6 6.1 20.7l1.2-6.6L2.5 9.5l6.6-.9z"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9h18M8 2.5v4M16 2.5v4"/></symbol>
+  <symbol id="i-lib" viewBox="0 0 24 24"><path d="M4 4h6v16H4zM14 4h6v16h-6z"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></symbol>
+  <symbol id="i-admin" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.3l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.3-1.3L13.8 2h-3.6l-.5 2.5A7 7 0 0 0 7.4 5.8l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.6l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.3 1.3l.5 2.5h3.6l.5-2.5a7 7 0 0 0 2.3-1.3l2.3 1 2-3.4-2-1.5A7 7 0 0 0 19 12z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0M16 5.2a3.2 3.2 0 0 1 0 6.1M20.5 20a5.5 5.5 0 0 0-4-5.3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+  <symbol id="i-award" viewBox="0 0 24 24"><circle cx="12" cy="9" r="6"/><path d="m8.5 14-1.5 7 5-3 5 3-1.5-7"/></symbol>
+  <symbol id="i-grid2" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8"/><rect x="13" y="3" width="8" height="8"/><rect x="3" y="13" width="8" height="8"/><rect x="13" y="13" width="8" height="8"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><rect x="8" y="6" width="8" height="13" rx="4"/><path d="M8 10H4M16 10h4M8 14H3.5M16 14h4.5M9 6 8 3M15 6l1-3"/></symbol>
+</defs></svg>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="brand">
+    <span class="logo"><svg viewBox="0 0 36 36" width="20" height="20" fill="none"><circle cx="18" cy="18" r="15" stroke="#A855F7" stroke-width="2.5" opacity=".55"/><path d="M14 11l12 7-12 7z" fill="#A855F7"/></svg></span>
+    <span class="name">AURORA</span>
+  </div>
+  <nav class="nav">
+    <a class="navlink"><svg class="ico"><use href="#i-home"/></svg> Home</a>
+    <a class="navlink active" id="navMovies"><svg class="ico"><use href="#i-film"/></svg> Movies</a>
+    <a class="navlink" id="navTv"><svg class="ico"><use href="#i-tv"/></svg> TV Shows</a>
+    <a class="navlink"><svg class="ico"><use href="#i-star"/></svg> Collections</a>
+    <a class="navlink"><svg class="ico"><use href="#i-cal"/></svg> Calendar</a>
+    <a class="navlink"><svg class="ico"><use href="#i-lib"/></svg> My Library</a>
+    <a class="navlink"><svg class="ico"><use href="#i-dl"/></svg> Requests</a>
+    <a class="navlink"><svg class="ico"><use href="#i-admin"/></svg> Admin</a>
+    <div class="lbl">System</div>
+    <a class="navlink"><svg class="ico"><use href="#i-server"/></svg> Server Status</a>
+    <a class="navlink"><svg class="ico"><use href="#i-bell"/></svg> Notifications <span class="badge">3</span></a>
+    <a class="navlink"><svg class="ico"><use href="#i-gear"/></svg> Settings</a>
+  </nav>
+  <div class="side-foot">
+    <div class="user"><span class="av">R</span><div><div class="nm">rontavious999</div><div class="rl">Admin</div></div></div>
+  </div>
+</aside>
+
+<div class="main">
+  <header class="topbar">
+    <div class="search"><svg class="ico"><use href="#i-search"/></svg><input placeholder="Search titles… (⌘K)"></div>
+    <div class="spacer"></div>
+    <button class="tb-btn"><svg class="ico"><use href="#i-users"/></svg></button>
+    <div class="tb-user"><span>rontavious999 <span class="star">★</span></span><span class="av">R</span></div>
+  </header>
+
+  <main class="content">
+    <!-- header + toolbar -->
+    <div class="pagehead">
+      <div>
+        <span class="pill" id="pagePill"><svg class="ico"><use href="#i-film"/></svg> <span>Browse Films</span></span>
+        <h1 id="pageTitle">Movies</h1>
+        <div class="sub" id="pageSub"></div>
+      </div>
+      <div class="tools">
+        <div class="seg">
+          <button id="tFilms" class="on"><svg class="ico"><use href="#i-film"/></svg> Films</button>
+          <button id="tSeries"><svg class="ico"><use href="#i-tv"/></svg> Series</button>
+        </div>
+        <div class="seg icononly">
+          <button id="vGrid" class="on" title="Grid view"><svg class="ico"><use href="#i-grid2"/></svg></button>
+          <button id="vList" title="List view"><svg class="ico"><use href="#i-list"/></svg></button>
+        </div>
+        <div class="sort">Sort <select><option>Top Rated</option><option>Newest</option><option>A–Z</option><option>Recently Added</option></select></div>
+      </div>
+    </div>
+
+    <!-- genre tabs -->
+    <div class="gtabs" id="gtabs"></div>
+
+    <div class="note"><svg class="ico"><use href="#i-info"/></svg> Mockup 2 — “Editorial Mosaic”. Poster tiles are art-directed stand-ins for the real poster art. Try the Grid / List toggle and Films / Series above.</div>
+
+    <!-- spotlight -->
+    <div class="spotlight">
+      <div class="spot-bg" id="spotBg"></div>
+      <div class="spot-poster"><div class="art" id="spotPosterArt"><div class="pt" id="spotPosterTitle"></div></div></div>
+      <div class="spot-main">
+        <span class="ribbon"><svg class="ico"><use href="#i-award"/></svg> <span id="spotRibbon">Editor’s Pick · #1 Top Rated</span></span>
+        <h2 id="spotTitle"></h2>
+        <div class="spot-stats">
+          <div class="bigrate"><span class="n" id="spotRate"></span><span class="d">/10</span><span class="stars"><svg class="ico"><use href="#i-star"/></svg><svg class="ico"><use href="#i-star"/></svg><svg class="ico"><use href="#i-star"/></svg><svg class="ico"><use href="#i-star"/></svg><svg class="ico"><use href="#i-star"/></svg></span></div>
+          <div class="spot-meta" id="spotMeta"></div>
+        </div>
+        <p class="syn" id="spotSyn"></p>
+        <div class="spot-cast" id="spotCast"></div>
+        <div class="spot-actions">
+          <button class="btn btn-play"><svg class="ico"><use href="#i-play"/></svg> Play</button>
+          <button class="btn btn-glass"><svg class="ico"><use href="#i-plus"/></svg> Add to Library</button>
+          <button class="btn btn-glass"><svg class="ico"><use href="#i-info"/></svg> Details</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- featured band -->
+    <div class="seclabel"><svg class="ico"><use href="#i-award"/></svg><span class="t">Featured This Week</span><span class="line"></span></div>
+    <div class="featured" id="featured"></div>
+
+    <!-- all -->
+    <div class="seclabel"><svg class="ico"><use href="#i-grid"/></svg><span class="t" id="allLabel">All Films · Top Rated</span><span class="line"></span></div>
+    <div class="emosaic" id="grid"></div>
+    <div class="elist" id="list">
+      <div class="lhead"><span>#</span><span></span><span>Title</span><span>Genre</span><span>Year</span><span>Rating</span><span></span></div>
+      <div id="listBody"></div>
+    </div>
+
+    <div class="loadmore"><button>Load 100 more</button></div>
+  </main>
+</div>
+
+<button class="reportbug"><svg class="ico"><use href="#i-bug"/></svg> Report bug</button>
+
+<script>
+const TV = [
+  {t:"Breaking Bad", y:2008, r:9.5, g:"Crime", mat:"TV-MA", ext:"5 Seasons", c1:"#16341f", c2:"#bcc436",
+   syn:"A high-school chemistry teacher diagnosed with cancer turns to manufacturing methamphetamine to secure his family's future — and is steadily consumed by the empire he builds.",
+   cast:"Bryan Cranston, Aaron Paul, Anna Gunn"},
+  {t:"The Sopranos", y:1999, r:9.2, g:"Drama", mat:"TV-MA", ext:"6 Seasons", c1:"#3a0d0d", c2:"#7c1d1d", cast:"James Gandolfini, Edie Falco"},
+  {t:"Rick and Morty", y:2013, r:9.1, g:"Animation", mat:"TV-MA", ext:"7 Seasons", c1:"#0b6e6e", c2:"#7ee787", cast:"Justin Roiland, Chris Parnell"},
+  {t:"Arcane", y:2021, r:8.8, g:"Action & Adventure", mat:"TV-14", ext:"2 Seasons", c1:"#16223f", c2:"#c026d3", cast:"Hailee Steinfeld, Ella Purnell"},
+  {t:"Severance", y:2022, r:8.8, g:"Sci-Fi", mat:"TV-MA", ext:"2 Seasons", c1:"#0a2233", c2:"#4fd1c5"},
+  {t:"Better Call Saul", y:2015, r:8.7, g:"Crime", mat:"TV-MA", ext:"6 Seasons", c1:"#3a2a0a", c2:"#d98c1f"},
+  {t:"The Owl House", y:2020, r:8.7, g:"Adventure", mat:"TV-Y7", ext:"3 Seasons", c1:"#2a134f", c2:"#16a3a3"},
+  {t:"Hunter x Hunter", y:2011, r:8.7, g:"Adventure", mat:"TV-14", ext:"6 Seasons", c1:"#0a3d2e", c2:"#19c37d"},
+  {t:"The Last of Us", y:2023, r:8.7, g:"Drama", mat:"TV-MA", ext:"2 Seasons", c1:"#1a2a14", c2:"#84a35a"},
+  {t:"Chernobyl", y:2019, r:9.3, g:"Drama", mat:"TV-MA", ext:"Mini-series", c1:"#1a2018", c2:"#9aa676"},
+  {t:"Game of Thrones", y:2011, r:9.2, g:"Fantasy", mat:"TV-MA", ext:"8 Seasons", c1:"#0d1622", c2:"#5b7a99"},
+  {t:"Wizards Beyond Waverly Place", y:2024, r:8.8, g:"Comedy", mat:"TV-G", ext:"1 Season", c1:"#2a0a4f", c2:"#a855f7"},
+  {t:"The Pitt", y:2025, r:8.6, g:"Drama", mat:"TV-MA", ext:"1 Season", c1:"#0f2a3a", c2:"#3b82f6"},
+  {t:"One Piece", y:1999, r:8.9, g:"Animation", mat:"TV-14", ext:"20+ Seasons", c1:"#0a2a4f", c2:"#38bdf8"},
+  {t:"Attack on Titan", y:2013, r:9.1, g:"Animation", mat:"TV-MA", ext:"4 Seasons", c1:"#2a1410", c2:"#d97706"},
+  {t:"Fleabag", y:2016, r:8.7, g:"Comedy", mat:"TV-MA", ext:"2 Seasons", c1:"#2a0f1a", c2:"#e11d74"},
+  {t:"Dark", y:2017, r:8.7, g:"Sci-Fi", mat:"TV-MA", ext:"3 Seasons", c1:"#0c1014", c2:"#3f6184"},
+  {t:"Heated Rivalry", y:2024, r:8.5, g:"Romance", mat:"TV-MA", ext:"1 Season", c1:"#3a0a1a", c2:"#ef4444"},
+];
+const MOVIES = [
+  {t:"The Godfather", y:1972, r:9.2, g:"Crime", mat:"R", ext:"2h 55m", c1:"#0a0a0a", c2:"#c9a227",
+   syn:"The aging patriarch of an organized-crime dynasty transfers control of his clandestine empire to his reluctant youngest son — a slow, operatic descent into power and family.",
+   cast:"Marlon Brando, Al Pacino, James Caan"},
+  {t:"The Shawshank Redemption", y:1994, r:9.3, g:"Drama", mat:"R", ext:"2h 22m", c1:"#1a2433", c2:"#d9a441", cast:"Tim Robbins, Morgan Freeman"},
+  {t:"Schindler's List", y:1993, r:9.0, g:"Drama", mat:"R", ext:"3h 15m", c1:"#101010", c2:"#b91c1c", cast:"Liam Neeson, Ralph Fiennes"},
+  {t:"12 Angry Men", y:1957, r:9.0, g:"Drama", mat:"NR", ext:"1h 36m", c1:"#2a2418", c2:"#b08d57", cast:"Henry Fonda, Lee J. Cobb"},
+  {t:"Parasite", y:2019, r:8.9, g:"Thriller", mat:"R", ext:"2h 12m", c1:"#14140e", c2:"#9aa153"},
+  {t:"Double Exposure", y:2024, r:10.0, g:"Drama", mat:"R", ext:"1h 48m", c1:"#1a0a14", c2:"#be123c"},
+  {t:"Noah's Arc: The Movie", y:2025, r:9.5, g:"Comedy", mat:"R", ext:"1h 41m", c1:"#2a1a0a", c2:"#f59e0b"},
+  {t:"Bibleman: Jesus Our Savior", y:2002, r:10.0, g:"Adventure", mat:"G", ext:"45m", c1:"#1a1440", c2:"#818cf8"},
+  {t:"Scooby-Doo Meets the Harlem Globetrotters", y:1973, r:9.1, g:"Animation", mat:"G", ext:"1h 30m", c1:"#0a2a4f", c2:"#f59e0b"},
+  {t:"Swapped", y:2026, r:9.0, g:"Adventure", mat:"PG-13", ext:"1h 52m", c1:"#14213a", c2:"#38bdf8"},
+  {t:"Spirited Away", y:2001, r:8.9, g:"Animation", mat:"PG", ext:"2h 5m", c1:"#143226", c2:"#5fbf8f"},
+  {t:"Dune: Part Two", y:2024, r:8.8, g:"Sci-Fi", mat:"PG-13", ext:"2h 46m", c1:"#2a1d0e", c2:"#e0a458"},
+  {t:"Attack on Titan: THE LAST ATTACK", y:2024, r:8.7, g:"Action", mat:"R", ext:"2h 25m", c1:"#2a1410", c2:"#d97706"},
+  {t:"Whiplash", y:2014, r:8.8, g:"Drama", mat:"R", ext:"1h 47m", c1:"#241008", c2:"#d4762a"},
+  {t:"The Last Whale Singer", y:2024, r:8.5, g:"Animation", mat:"PG", ext:"1h 38m", c1:"#0a2a3a", c2:"#22d3ee"},
+  {t:"Blade Runner 2049", y:2017, r:8.5, g:"Sci-Fi", mat:"R", ext:"2h 44m", c1:"#2a160a", c2:"#e8852f"},
+  {t:"K-Pops!", y:2025, r:8.4, g:"Comedy", mat:"PG-13", ext:"1h 47m", c1:"#2a0a2a", c2:"#ec4899"},
+  {t:"Interstellar", y:2014, r:8.7, g:"Sci-Fi", mat:"PG-13", ext:"2h 49m", c1:"#0c1420", c2:"#6b8cae"},
+];
+const GENRES = ["All Genres","Crime","Drama","Action & Adventure","Animation","Comedy","Sci-Fi","Thriller","Fantasy","Romance"];
+
+const $ = s => document.querySelector(s);
+const art = it => `background:linear-gradient(150deg, ${it.c1}, ${it.c2});`;
+
+function gridCard(it, i){
+  return `<div class="ecard">
+    <div class="ec-poster">
+      <div class="art" style="${art(it)}"><div class="pt">${it.t}</div></div>
+      <div class="ec-rank">#${i+1}</div>
+      <button class="ec-add"><svg class="ico"><use href="#i-plus"/></svg></button>
+      <div class="ec-hover"><span class="v"><svg class="ico"><use href="#i-play"/></svg> Play</span></div>
+      <div class="ec-accent" style="background:linear-gradient(90deg,${it.c2},${it.c1})"></div>
+    </div>
+    <div class="ec-shelf">
+      <div class="t">${it.t}</div>
+      <div class="m1"><span class="s"><svg class="ico"><use href="#i-star"/></svg>${it.r.toFixed(1)}</span><span class="yr">${it.y}</span></div>
+      <div class="m2"><span>${it.ext}</span> · <span class="gc">${it.g}</span></div>
+    </div>
+  </div>`;
+}
+function listRow(it, i){
+  return `<div class="lrow">
+    <span class="rk">${i+1}</span>
+    <span class="lthumb"><span class="art" style="${art(it)}"></span></span>
+    <span class="lr-title"><div class="t">${it.t}</div><div class="gg"><span class="tag">${it.mat}</span><span class="tag">${it.ext}</span></div></span>
+    <span class="lr-cell">${it.g}</span>
+    <span class="lr-cell">${it.y}</span>
+    <span class="lr-rate"><svg class="ico"><use href="#i-star"/></svg>${it.r.toFixed(1)}</span>
+    <button class="lr-add"><svg class="ico"><use href="#i-plus"/></svg></button>
+  </div>`;
+}
+function fCard(it){
+  return `<div class="fcard">
+    <div class="art" style="${art(it)}"></div>
+    <div class="fc-play"><svg class="ico"><use href="#i-play"/></svg></div>
+    <div class="fc-in">
+      <div class="ft">${it.t}</div>
+      <div class="fm"><span class="s"><svg class="ico"><use href="#i-star"/></svg>${it.r.toFixed(1)}</span> · ${it.y} · ${it.g}</div>
+    </div>
+  </div>`;
+}
+
+function renderTabs(){
+  $("#gtabs").innerHTML = GENRES.map((g,i)=>`<a class="gtab ${i===0?'on':''}">${g}</a>`).join("");
+  $("#gtabs").querySelectorAll(".gtab").forEach(t=>t.onclick=()=>{$("#gtabs").querySelector(".on").classList.remove("on");t.classList.add("on")});
+}
+
+let view='grid';
+function applyView(){
+  $("#grid").style.display = view==='grid' ? 'grid':'none';
+  $("#list").style.display = view==='list' ? 'flex':'none';
+  $("#vGrid").classList.toggle('on', view==='grid');
+  $("#vList").classList.toggle('on', view==='list');
+}
+
+function setMode(mode){
+  const isTv = mode==='tv';
+  const data = isTv ? TV : MOVIES;
+  $("#tFilms").classList.toggle("on", !isTv);
+  $("#tSeries").classList.toggle("on", isTv);
+  $("#navTv").classList.toggle("active", isTv);
+  $("#navMovies").classList.toggle("active", !isTv);
+  $("#pagePill").innerHTML = `<svg class="ico"><use href="#${isTv?'i-tv':'i-film'}"/></svg> <span>Browse ${isTv?'Series':'Films'}</span>`;
+  $("#pageTitle").textContent = isTv ? "TV Shows" : "Movies";
+  $("#pageSub").innerHTML = `Browse your ${isTv?'series':'movie'} collection &nbsp;•&nbsp; Showing <b>100</b> of <b>${isTv?'511':'2,423'}</b> titles`;
+  $("#allLabel").textContent = `All ${isTv?'Series':'Films'} · Top Rated`;
+  // spotlight
+  const h = data[0];
+  $("#spotBg").style.cssText = art(h);
+  $("#spotPosterArt").style.cssText = art(h);
+  $("#spotPosterTitle").textContent = h.t;
+  $("#spotRibbon").textContent = `Editor’s Pick · #1 in ${h.g}`;
+  $("#spotTitle").textContent = h.t;
+  $("#spotRate").textContent = h.r.toFixed(1);
+  $("#spotMeta").innerHTML = `${h.y}<span class="dot"></span><span class="chip">${h.mat}</span><span class="dot"></span>${h.ext}<span class="dot"></span>${h.g}`;
+  $("#spotSyn").textContent = h.syn || "";
+  $("#spotCast").innerHTML = h.cast ? `<b>Starring</b> ${h.cast}` : "";
+  // featured = next 3
+  $("#featured").innerHTML = data.slice(1,4).map(fCard).join("");
+  // grid + list = the rest (from #2 on, so spotlight isn't duplicated as #1)
+  const rest = data.slice(1);
+  $("#grid").innerHTML = rest.map((it,i)=>gridCard(it,i+1)).join("");
+  $("#listBody").innerHTML = rest.map((it,i)=>listRow(it,i+1)).join("");
+}
+
+renderTabs();
+setMode('movie');
+applyView();
+$("#tFilms").onclick = ()=>setMode('movie');
+$("#tSeries").onclick = ()=>setMode('tv');
+$("#navMovies").onclick = ()=>setMode('movie');
+$("#navTv").onclick = ()=>setMode('tv');
+$("#vGrid").onclick = ()=>{view='grid';applyView()};
+$("#vList").onclick = ()=>{view='list';applyView()};
+</script>
+</body>
+</html>
