@@ -20,6 +20,10 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 export interface RowMedia {
   id: number
   title: string
+  // Poster URL from mapMedia (posterURL(poster_path)); "" / undefined when
+  // the item has no artwork yet. Rendered as a small lazy-loaded thumb;
+  // the tinted gradient placeholder shows while it loads or when absent.
+  poster?: string
   year?: number
   rating?: number
   genre?: string
@@ -86,11 +90,22 @@ export function MediaListRow({
       }}
       title={item.title}
     >
-      {/* Small poster-less thumb: a tinted placeholder keeps the row
-          height stable and the list lightweight (no 2,400 extra <img>
-          requests just to scan a list). The grid view is where posters
-          shine; the list trades them for density. */}
-      <div className="mlr-thumb" aria-hidden="true" />
+      {/* Small poster thumb (#194). The tinted gradient is the box's
+          background, so it doubles as the placeholder while the image
+          lazy-loads and as the fallback when an item has no artwork.
+          loading="lazy" keeps a long list cheap — only thumbs scrolled
+          into view fetch. decoding="async" avoids blocking the row. */}
+      <div className="mlr-thumb" aria-hidden="true">
+        {item.poster && (
+          <img
+            src={item.poster}
+            alt=""
+            className="mlr-thumb-img"
+            loading="lazy"
+            decoding="async"
+          />
+        )}
+      </div>
 
       <div className="mlr-main">
         <div className="mlr-title">{item.title}</div>

@@ -1187,11 +1187,26 @@ input::placeholder, textarea::placeholder {
   outline-offset: -2px;
 }
 .media-list-row .mlr-thumb {
+  /* The thumb sits in the row grid's fixed 52px first column, so its 40px
+     width is stable regardless of title length. position:relative +
+     overflow:hidden clip the img to the rounded box; the gradient stays as
+     the box background so it shows through while the lazy img loads and
+     when an item has no poster. */
+  position: relative;
+  overflow: hidden;
   width: 40px;
   height: 58px;
   border-radius: 7px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(160deg, rgba(168, 85, 247, 0.22), rgba(14, 12, 22, 0.9));
+}
+.media-list-row .mlr-thumb-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 .media-list-row .mlr-main { min-width: 0; }
 .media-list-row .mlr-title {
