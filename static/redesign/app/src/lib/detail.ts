@@ -151,6 +151,33 @@ export function episodeVersions(files?: VersionFileLike[]): EpisodeVersionVM[] |
   return out.length > 1 ? out : undefined
 }
 
+// Distinct resolution-tier labels present in `files` OTHER than the tier
+// of `primary`, for the descriptive quality strip's "also in 1080p" chips.
+// Order is preserved from the input (server sorts files highest-first), so
+// the result reads 2160p → 1080p → 720p. Dedupes by tier and excludes the
+// primary so the strip never shows the same resolution twice. Returns []
+// when the title has only one resolution tier (the common case) so the
+// caller appends nothing. Labels use the same resolutionLabel() form as
+// the primary res chip ("2160p", not "4K") so the two sit consistently —
+// unlike the version chooser, which shows "4K" because it's actionable.
+export function secondaryResolutionLabels(
+  files: VersionFileLike[] | undefined,
+  primary: ResolutionLike | undefined,
+): string[] {
+  if (!files || files.length < 2) return []
+  const primaryTier = primary ? resolutionLabel(primary) : undefined
+  const seen = new Set<string>()
+  if (primaryTier) seen.add(primaryTier)
+  const out: string[] = []
+  for (const f of files) {
+    const res = resolutionLabel(f)
+    if (!res || seen.has(res)) continue
+    seen.add(res)
+    out.push(res)
+  }
+  return out
+}
+
 // Pull a release-source token out of version_tag ("BluRay", "WEB-DL",
 // "Remux", …) so the primary chip can read "1080p BluRay" like the mockup.
 // Returns undefined when the tag has no recognizable source.
@@ -185,11 +212,18 @@ interface QualityFileLike extends ResolutionLike {
 
 // Build the descriptive quality-chip strip from a single file's metadata
 // plus an aggregate subtitle count. Order: resolution (primary/purple),
-// HDR, audio, subtitle count. Returns [] when there's nothing to show so
-// the caller can hide the strip entirely.
+// any OTHER available resolutions (e.g. a 1080p alongside the 2160p), HDR,
+// audio, subtitle count. Returns [] when there's nothing to show so the
+// caller can hide the strip entirely.
+//
+// `otherResolutions` lets the caller surface that the title also exists in
+// lower tiers — passed pre-computed (via secondaryResolutionLabels) since
+// only the caller has the full file pool (movie media_files / show
+// episode_files); deriveQualityChips itself describes one file.
 export function deriveQualityChips(
   file: QualityFileLike | undefined,
   subtitleCount = 0,
+  otherResolutions: string[] = [],
 ): QualityChip[] {
   if (!file) return []
   const chips: QualityChip[] = []
@@ -200,6 +234,10 @@ export function deriveQualityChips(
     // `src !== res` guards the edge where version_tag is a bare source word
     // and resolutionLabel fell back to it (avoids "BluRay BluRay").
     chips.push({ label: src && src !== res ? `${res} ${src}` : res, kind: 'res', primary: true })
+    // Secondary resolution chips (non-primary styling) — "also in 1080p".
+    for (const other of otherResolutions) {
+      chips.push({ label: other, kind: 'res' })
+    }
   }
 
   const hdr = formatHdr(file.color_transfer)
