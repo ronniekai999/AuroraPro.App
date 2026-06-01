@@ -96,7 +96,9 @@ export function MediaListRow({
         <div className="mlr-title">{item.title}</div>
         <div className="mlr-tags">
           {tags.map((t, i) => (
-            <span key={t} className={`mlr-tag ${i === 0 ? 'is-quality' : ''}`}>{t}</span>
+            // HDR → amber; else first tag (resolution) → purple; rest neutral.
+            // Mutually exclusive so an HDR-but-not-4K tag (index 0) reads amber.
+            <span key={t} className={`mlr-tag ${t === 'HDR' ? 'is-hdr' : i === 0 ? 'is-quality' : ''}`}>{t}</span>
           ))}
         </div>
       </div>

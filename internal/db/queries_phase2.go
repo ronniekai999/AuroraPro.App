@@ -1448,6 +1448,46 @@ func (q *Queries) GetMediaItemsWith4K(ctx context.Context, mediaItemIDs []int64)
 	return result, rows.Err()
 }
 
+// hdrColorTransfers are the ffprobe color_transfer values that mark a
+// file as HDR: smpte2084 = PQ (HDR10 / Dolby Vision base layer),
+// arib-std-b67 = HLG. Everything else (bt709, unset) is SDR. Mirrors the
+// frontend's formatHdr() in lib/detail.ts so the browse badge and the
+// detail quality chip agree on what counts as HDR.
+var hdrColorTransfers = []string{"smpte2084", "arib-std-b67"}
+
+// GetMediaItemsWithHDR returns a set of media_item_ids that have at least
+// one HDR file (movie media_files OR show episode_files), detected via
+// color_transfer rather than version_tag — HDR isn't reliably encoded in
+// the release tag, but ffprobe always records the transfer function
+// (migration 025_video_color_metadata). Mirrors GetMediaItemsWith4K.
+// Used by the API layer to annotate list responses with has_hdr badges.
+func (q *Queries) GetMediaItemsWithHDR(ctx context.Context, mediaItemIDs []int64) (map[int64]bool, error) {
+	if len(mediaItemIDs) == 0 {
+		return map[int64]bool{}, nil
+	}
+	rows, err := q.pool.Query(ctx,
+		`SELECT DISTINCT media_item_id FROM media_files
+		 WHERE media_item_id = ANY($1) AND color_transfer = ANY($2)
+		 UNION
+		 SELECT DISTINCT e.media_item_id FROM episode_files ef
+		 JOIN tv_episodes e ON e.id = ef.episode_id
+		 WHERE e.media_item_id = ANY($1) AND ef.color_transfer = ANY($2)`, mediaItemIDs, hdrColorTransfers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]bool, len(mediaItemIDs))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[id] = true
+	}
+	return result, rows.Err()
+}
+
 // ============================================================
 // Helpers
 // ============================================================
