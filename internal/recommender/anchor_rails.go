@@ -70,8 +70,20 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 
 	out := make([]AnchorRail, 0, len(anchors))
 	used := make(map[int64]bool)
+	// anchorSeen dedupes anchors by their underlying title so a show
+	// watched across many episodes (each a watch_progress row) yields ONE
+	// "Because you watched X" rail, not one per episode. The query already
+	// collapses these via DISTINCT ON; this is defense-in-depth so a future
+	// query change can't reintroduce duplicate rails.
+	anchorSeen := make(map[int64]bool)
 
 	for _, a := range anchors {
+		if a.MediaItemID != 0 {
+			if anchorSeen[a.MediaItemID] {
+				continue
+			}
+			anchorSeen[a.MediaItemID] = true
+		}
 		// NearestUnwatched takes a pgvector text literal — the anchor's
 		// EmbeddingText is already in that exact format, so we pass it
 		// through without re-parsing/re-formatting. Same code path the
