@@ -1082,6 +1082,15 @@ input::placeholder, textarea::placeholder {
   background: linear-gradient(135deg, rgba(168, 85, 247, 0.85), rgba(126, 34, 206, 0.85));
   border-color: rgba(220, 200, 255, 0.5);
 }
+/* HDR badge — amber accent, distinct from 4K's purple and the neutral
+   maturity rating. The JSX makes is-hdr and is-quality mutually exclusive
+   (an HDR chip never also carries is-quality, even at index 0), so this
+   stands alone. */
+.media-card-cinema .card-badge.is-hdr {
+  color: #fff7e6;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.85), rgba(180, 83, 9, 0.85));
+  border-color: rgba(253, 224, 138, 0.5);
+}
 
 /* ── Browse toolbar: genre chips + density toggle ──────────────────── */
 .browse-toolbar .genre-chips {
@@ -1211,6 +1220,11 @@ input::placeholder, textarea::placeholder {
   color: #e9d5ff;
   border-color: rgba(168, 85, 247, 0.45);
   background: rgba(168, 85, 247, 0.12);
+}
+.media-list-row .mlr-tag.is-hdr {
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.12);
 }
 .media-list-row .mlr-cell {
   font-size: 0.82rem;

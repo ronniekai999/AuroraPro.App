@@ -124,6 +124,7 @@ type MediaItem struct {
 	Genres   []string     `json:"genres,omitempty"`
 	Files    []*MediaFile `json:"files,omitempty"`
 	Has4K    bool         `json:"has_4k,omitempty"`
+	HasHDR   bool         `json:"has_hdr,omitempty"`
 	FilePath string       `json:"file_path"` // representative file path (flagged items only)
 	// Reason is a transient one-line LLM-generated explanation ("Because you finished
 	// Severance"). Populated at the API layer by semantic search / hero rerank and

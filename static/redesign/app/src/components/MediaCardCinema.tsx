@@ -282,7 +282,16 @@ export function MediaCardCinema({
         {badges.length > 0 && (
           <div className="card-badges" aria-hidden="true">
             {badges.map((b, i) => (
-              <span key={b} className={`card-badge ${i === 0 ? 'is-quality' : ''}`}>{b}</span>
+              <span
+                key={b}
+                // HDR always gets its amber accent; otherwise the first
+                // tag (the resolution, e.g. 4K) gets the purple quality
+                // accent and the rest (maturity rating) stay neutral. The
+                // two accents are mutually exclusive: an HDR-but-not-4K
+                // item has 'HDR' at index 0, and we want amber there, not
+                // purple — so the HDR check wins over the i===0 check.
+                className={`card-badge ${b === 'HDR' ? 'is-hdr' : i === 0 ? 'is-quality' : ''}`}
+              >{b}</span>
             ))}
           </div>
         )}

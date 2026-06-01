@@ -415,6 +415,18 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Annotate has_hdr the same way (cross-library aware). A failed
+		// HDR query is non-fatal — the badge is cosmetic, so we log and
+		// leave has_hdr false rather than failing the whole list response.
+		hdrMap, err := h.queries.GetMediaItemsWithHDRCrossLibrary(r.Context(), ids)
+		if err != nil {
+			slog.Warn("failed to query HDR versions", "error", err)
+		} else {
+			for _, item := range items {
+				item.HasHDR = hdrMap[item.ID]
+			}
+		}
+
 		// Load genres for all items in batch
 		genreMap, err := h.queries.GetMediaGenresBatch(r.Context(), ids)
 		if err != nil {
@@ -521,6 +533,18 @@ func (h *MediaHandler) Recent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Annotate has_hdr the same way (cross-library aware). A failed
+		// HDR query is non-fatal — the badge is cosmetic, so we log and
+		// leave has_hdr false rather than failing the whole list response.
+		hdrMap, err := h.queries.GetMediaItemsWithHDRCrossLibrary(r.Context(), ids)
+		if err != nil {
+			slog.Warn("failed to query HDR versions", "error", err)
+		} else {
+			for _, item := range items {
+				item.HasHDR = hdrMap[item.ID]
+			}
+		}
+
 		genreMap, err := h.queries.GetMediaGenresBatch(r.Context(), ids)
 		if err != nil {
 			slog.Warn("failed to query genres", "error", err)
@@ -621,6 +645,18 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 		} else {
 			for _, item := range items {
 				item.Has4K = fourKMap[item.ID]
+			}
+		}
+
+		// Annotate has_hdr the same way (cross-library aware). A failed
+		// HDR query is non-fatal — the badge is cosmetic, so we log and
+		// leave has_hdr false rather than failing the whole list response.
+		hdrMap, err := h.queries.GetMediaItemsWithHDRCrossLibrary(r.Context(), ids)
+		if err != nil {
+			slog.Warn("failed to query HDR versions", "error", err)
+		} else {
+			for _, item := range items {
+				item.HasHDR = hdrMap[item.ID]
 			}
 		}
 

@@ -299,6 +299,71 @@ func (q *Queries) GetMediaItemsWith4KCrossLibrary(ctx context.Context, mediaItem
 	return directResult, nil
 }
 
+// GetMediaItemsWithHDRCrossLibrary extends GetMediaItemsWithHDR to also
+// check sibling media_items that share the same tmdb_id, exactly like
+// GetMediaItemsWith4KCrossLibrary does for 4K. If "Dune" in library A has
+// no HDR file but "Dune" in library B does, both show the HDR badge. HDR
+// is detected via color_transfer (hdrColorTransfers), not version_tag.
+func (q *Queries) GetMediaItemsWithHDRCrossLibrary(ctx context.Context, mediaItemIDs []int64) (map[int64]bool, error) {
+	if len(mediaItemIDs) == 0 {
+		return map[int64]bool{}, nil
+	}
+
+	// Step 1: direct HDR results.
+	directResult, err := q.GetMediaItemsWithHDR(ctx, mediaItemIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Step 2: for items without direct HDR, check cross-library siblings.
+	var needsCrossCheck []int64
+	for _, id := range mediaItemIDs {
+		if !directResult[id] {
+			needsCrossCheck = append(needsCrossCheck, id)
+		}
+	}
+	if len(needsCrossCheck) == 0 {
+		return directResult, nil
+	}
+
+	rows, err := q.pool.Query(ctx, `
+		SELECT DISTINCT src.id
+		FROM media_items src
+		JOIN media_items sibling ON sibling.tmdb_id = src.tmdb_id
+		    AND sibling.id != src.id
+		    AND sibling.tmdb_id IS NOT NULL
+		WHERE src.id = ANY($1)
+		  AND src.tmdb_id IS NOT NULL AND src.tmdb_id > 0
+		  AND (
+		    EXISTS (
+		      SELECT 1 FROM media_files mf
+		      WHERE mf.media_item_id = sibling.id AND mf.color_transfer = ANY($2)
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM episode_files ef
+		      JOIN tv_episodes e ON e.id = ef.episode_id
+		      WHERE e.media_item_id = sibling.id AND ef.color_transfer = ANY($2)
+		    )
+		  )`, needsCrossCheck, hdrColorTransfers)
+	if err != nil {
+		return nil, fmt.Errorf("cross-library HDR check: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		directResult[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return directResult, nil
+}
+
 // DeduplicateByTMDBID takes a list of media items and deduplicates items that
 // share the same tmdb_id across different libraries. For each group of duplicates,
 // it keeps the item with the richest metadata (most non-empty fields) and annotates
@@ -388,10 +453,18 @@ func (q *Queries) DeduplicateByTMDBID(ctx context.Context, items []*models.Media
 		for i, item := range result {
 			tmdbID := tmdbMap[item.ID]
 			if tmdbID == g.tmdbID {
-				// Propagate has_4k from any sibling
+				// Propagate has_4k / has_hdr from any sibling so the
+				// winning item carries the union of quality flags across
+				// the dedup group (symmetry: both badges survive dedup).
 				for _, sibling := range g.items {
 					if sibling.Has4K {
 						best.Has4K = true
+						break
+					}
+				}
+				for _, sibling := range g.items {
+					if sibling.HasHDR {
+						best.HasHDR = true
 						break
 					}
 				}

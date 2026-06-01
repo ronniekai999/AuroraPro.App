@@ -65,6 +65,7 @@ export interface ServerMediaItem {
   backdrop_path?: string
   genres?: string[]
   has_4k?: boolean
+  has_hdr?: boolean
   added_at: string
   updated_at: string
   // Populated on admin flagged-items responses; absent on /api/media
@@ -479,6 +480,7 @@ export function mapMedia(item: ServerMediaItem): UIMedia {
     description: item.overview || '',
     tags: [
       ...(item.has_4k ? ['4K'] : []),
+      ...(item.has_hdr ? ['HDR'] : []),
       ...(item.content_rating ? [item.content_rating] : []),
     ],
     // Carry the LLM-generated reason through to the UI layer. For
