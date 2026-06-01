@@ -6095,8 +6095,8 @@ export default function App() {
   // Sort lives here (not in BrowseView) because changing sort
   // triggers a re-fetch from page 1, and the parent owns the cache.
   type MediaSort = 'rating' | 'title' | 'year' | 'recent'
-  const [moviesSort, setMoviesSort] = useState<MediaSort>('rating')
-  const [showsSort, setShowsSort] = useState<MediaSort>('rating')
+  const [moviesSort, setMoviesSort] = useState<MediaSort>('title')
+  const [showsSort, setShowsSort] = useState<MediaSort>('title')
   // Genre filter — QA BUG-003 fix. Previously this lived inside
   // BrowseView, but changing Sort sets moviesList=null which
   // unmounts BrowseView and resets its local state. Lifting to
@@ -6892,7 +6892,7 @@ export default function App() {
           // affordance off rather than pick one arbitrarily.
           { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const },
           // Top Rated rails map cleanly to /movies and /shows with
-          // sortBy=rating (the default), so the See All button takes
+          // sortBy=rating, so the See All button takes
           // the user to the full Top Rated catalog.
           { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const,
             seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
