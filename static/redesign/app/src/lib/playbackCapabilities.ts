@@ -12,8 +12,10 @@
 //     available, an hls.js client must confirm BOTH native and MediaSource
 //     support before a video codec is advertised. Native-HLS-only clients may
 //     rely on native playback support alone.
-//   - Audio/container flags stay native-playback based; the backend already
-//     applies stricter HLS-TS audio policy when HLSJS is true.
+//   - AAC and AC-3 can be copied on today's HLS-TS remux path; on an hls.js
+//     client they are reported only when both native and MediaSource support
+//     are confirmed. Audio formats that the backend never copies into HLS-TS
+//     remain native-only direct-play signals.
 //
 // A future capability-contract v2 can separately report native playback,
 // MediaSource support, and MediaCapabilities.decodingInfo() results against
@@ -33,8 +35,8 @@ function mediaSourceSupportsAny(mimes: string[]): boolean {
   return typeof MediaSource !== 'undefined' && mimes.some((mime) => MediaSource.isTypeSupported(mime))
 }
 
-function videoCodecSafeForCurrentDelivery(video: HTMLVideoElement, mimes: string[], usesHlsJS: boolean): boolean {
-  if (!nativeSupportsAny(video, mimes)) return false
+function safeForCurrentDelivery(element: HTMLMediaElement, mimes: string[], usesHlsJS: boolean): boolean {
+  if (!nativeSupportsAny(element, mimes)) return false
   return !usesHlsJS || mediaSourceSupportsAny(mimes)
 }
 
@@ -73,8 +75,8 @@ export function detectCapabilities(): string {
 
   // Video codec support. With today's single-capability contract, hls.js
   // clients must support both direct-file playback and MSE delivery.
-  if (videoCodecSafeForCurrentDelivery(video, mp4H264, usesHlsJS)) caps.add('h264')
-  if (videoCodecSafeForCurrentDelivery(video, [
+  if (safeForCurrentDelivery(video, mp4H264, usesHlsJS)) caps.add('h264')
+  if (safeForCurrentDelivery(video, [
     'video/mp4; codecs="hvc1.1.6.L93.B0"',
     'video/mp4; codecs="hev1.1.6.L93.B0"',
     'video/mp4; codecs="hvc1"',
@@ -82,23 +84,25 @@ export function detectCapabilities(): string {
   ], usesHlsJS)) {
     caps.add('h265')
   }
-  if (videoCodecSafeForCurrentDelivery(video, [
+  if (safeForCurrentDelivery(video, [
     'video/webm; codecs="vp9"',
     'video/webm; codecs="vp09.00.10.08"',
   ], usesHlsJS)) caps.add('vp9')
-  if (videoCodecSafeForCurrentDelivery(video, ['video/webm; codecs="vp8"'], usesHlsJS)) caps.add('vp8')
-  if (videoCodecSafeForCurrentDelivery(video, [
+  if (safeForCurrentDelivery(video, ['video/webm; codecs="vp8"'], usesHlsJS)) caps.add('vp8')
+  if (safeForCurrentDelivery(video, [
     'video/mp4; codecs="av01.0.05M.08"',
     'video/webm; codecs="av01.0.05M.08"',
   ], usesHlsJS)) caps.add('av1')
 
-  // Audio support used for direct-file selection and the backend's existing
-  // safe HLS passthrough/recode decisions. Do not emit DTS/TrueHD: the
-  // current backend does not pass them through for browser playback.
-  if (nativeSupportsAny(audio, [
-    'audio/mp4; codecs="mp4a.40.2"',
-    'audio/aac',
-  ])) caps.add('aac')
+  // AAC and AC-3 may be copied by the backend on current HLS-TS paths, so
+  // hls.js clients must also confirm that MediaSource can accept them.
+  const aac = ['audio/mp4; codecs="mp4a.40.2"', 'audio/aac']
+  const ac3 = ['audio/mp4; codecs="ac-3"', 'audio/mp4; codecs="ac3"']
+  if (safeForCurrentDelivery(audio, aac, usesHlsJS)) caps.add('aac')
+  if (safeForCurrentDelivery(audio, ac3, usesHlsJS)) caps.add('ac3')
+
+  // These formats remain useful as native direct-play signals. The current
+  // HLS.js remux policy either recodes them or excludes them from passthrough.
   if (nativeSupportsAny(audio, ['audio/mpeg'])) caps.add('mp3')
   if (nativeSupportsAny(audio, [
     'audio/webm; codecs="opus"',
@@ -106,10 +110,6 @@ export function detectCapabilities(): string {
   ])) caps.add('opus')
   if (nativeSupportsAny(audio, ['audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"'])) caps.add('vorbis')
   if (nativeSupportsAny(audio, ['audio/flac', 'audio/x-flac'])) caps.add('flac')
-  if (nativeSupportsAny(audio, [
-    'audio/mp4; codecs="ac-3"',
-    'audio/mp4; codecs="ac3"',
-  ])) caps.add('ac3')
   if (nativeSupportsAny(audio, [
     'audio/mp4; codecs="ec-3"',
     'audio/mp4; codecs="eac3"',
