@@ -73,8 +73,8 @@ export function detectCapabilities(): string {
   if (nativeSupportsAny(video, mp4H264)) caps.add('mp4_container')
   if (nativeSupportsAny(video, webmVP9)) caps.add('webm_container')
 
-  // Video codec support. With today's single-capability contract, hls.js
-  // clients must support both direct-file playback and MSE delivery.
+  // Video codec support. With today's single-capability contract, codecs that
+  // can reach the hls.js copy/remux path must support native and MSE delivery.
   if (safeForCurrentDelivery(video, mp4H264, usesHlsJS)) caps.add('h264')
   if (safeForCurrentDelivery(video, [
     'video/mp4; codecs="hvc1.1.6.L93.B0"',
@@ -84,15 +84,15 @@ export function detectCapabilities(): string {
   ], usesHlsJS)) {
     caps.add('h265')
   }
-  if (safeForCurrentDelivery(video, [
+  if (nativeSupportsAny(video, [
     'video/webm; codecs="vp9"',
     'video/webm; codecs="vp09.00.10.08"',
-  ], usesHlsJS)) caps.add('vp9')
-  if (safeForCurrentDelivery(video, ['video/webm; codecs="vp8"'], usesHlsJS)) caps.add('vp8')
-  if (safeForCurrentDelivery(video, [
+  ])) caps.add('vp9')
+  if (nativeSupportsAny(video, ['video/webm; codecs="vp8"'])) caps.add('vp8')
+  if (nativeSupportsAny(video, [
     'video/mp4; codecs="av01.0.05M.08"',
     'video/webm; codecs="av01.0.05M.08"',
-  ], usesHlsJS)) caps.add('av1')
+  ])) caps.add('av1')
 
   // AAC and AC-3 may be copied by the backend on current HLS-TS paths, so
   // hls.js clients must also confirm that MediaSource can accept them.
