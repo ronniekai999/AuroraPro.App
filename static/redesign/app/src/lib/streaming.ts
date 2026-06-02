@@ -119,6 +119,12 @@ function isMacOSChrome(): boolean {
   return ua.includes('Macintosh') && ua.includes('Chrome/') && !ua.includes('Edg/') && !ua.includes('OPR/')
 }
 
+function streamInfoURL(fileId: number, fileType: 'media' | 'episode', caps: string): string {
+  const query = new URLSearchParams({ type: fileType })
+  if (caps) query.set('caps', caps)
+  return `/api/stream/info/${fileId}?${query.toString()}`
+}
+
 function decisionBreadcrumb(fileId: number, fileType: 'media' | 'episode', stream: StreamDecision): Record<string, unknown> {
   return {
     fileId,
@@ -142,47 +148,52 @@ function decisionBreadcrumb(fileId: number, fileType: 'media' | 'episode', strea
 // PR #200 removed HEVC promotion after #198, but #201 and #202 reproduced the
 // same ~15-second stop on the deployed no-h265 build. That proves the symptom
 // is not solved by HEVC capability removal alone. The repeated affected client
-// is Chrome on macOS, and the observed follow-up full-transcode session in
-// #201 strongly points at an unstable direct_stream/remux startup on that path.
+// is Chrome on macOS, and #201's follow-up larger session response strongly
+// indicates that a direct_stream/remux attempt failed before a full-transcode
+// retry succeeded.
 //
-// Until the HLS transport can identify its exact failing stream combination,
-// quarantine only Chrome/macOS direct_stream decisions: retain direct_play,
-// but turn remux into a full-transcode session before the fragile session is
-// created. We log the original decision and the containment action so the next
-// bug report proves whether this guard actually applied to Free Willy.
+// Until the transport can identify the precise broken remux combination,
+// quarantine only Chrome/macOS direct_stream decisions. We do NOT mutate a
+// remux response into transcode client-side: doing so would preserve the old
+// server-computed HDR/audio decisions. Instead, make a second stream-info
+// request with HLS support but no advertised source video codec. The existing
+// backend then produces a genuine full-transcode decision and recomputes HDR
+// tone mapping/audio handling consistently before a session is created.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
-  const query = new URLSearchParams({ type: fileType })
-  const caps = detectBaselineCapabilities()
-  if (caps) query.set('caps', caps)
-
-  const info = await apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?${query.toString()}`,
+  const baseline = await apiFetch<StreamInfo>(
+    streamInfoURL(fileId, fileType, detectBaselineCapabilities()),
     { signal },
   )
-  console.info('[Aurora.playback] stream-info decision', decisionBreadcrumb(fileId, fileType, info.stream))
+  console.info('[Aurora.playback] stream-info decision', decisionBreadcrumb(fileId, fileType, baseline.stream))
 
-  if (isMacOSChrome() && info.stream.decision === 'direct_stream' && !!info.stream.remux) {
-    console.warn('[Aurora.playback] Chrome/macOS remux quarantined; creating full transcode session', {
-      ...decisionBreadcrumb(fileId, fileType, info.stream),
-      issueGuard: '#201/#202',
-    })
-    return {
-      ...info,
-      stream: {
-        ...info.stream,
-        decision: 'transcode',
-        remux: false,
-        audio_passthrough: false,
-        transcode_reason: 'Chrome/macOS direct_stream temporarily quarantined after early remux stalls',
-      },
-    }
+  if (!isMacOSChrome() || baseline.stream.decision !== 'direct_stream' || !baseline.stream.remux) {
+    return baseline
   }
 
-  return info
+  console.warn('[Aurora.playback] Chrome/macOS remux quarantined; requesting server-authoritative transcode decision', {
+    ...decisionBreadcrumb(fileId, fileType, baseline.stream),
+    issueGuard: '#201/#202',
+  })
+
+  // Advertise the delivery engine only. With no video codec advertised,
+  // DecidePlayback cannot select direct_play or direct_stream, but it still
+  // follows the hls.js audio safety rules for the transcoded output.
+  const forced = await apiFetch<StreamInfo>(
+    streamInfoURL(fileId, fileType, 'hls_js'),
+    { signal },
+  )
+  console.info('[Aurora.playback] remux quarantine replacement decision', decisionBreadcrumb(fileId, fileType, forced.stream))
+
+  if (forced.stream.decision !== 'transcode' || !!forced.stream.remux) {
+    console.error('[Aurora.playback] remux quarantine failed to obtain safe transcode decision', decisionBreadcrumb(fileId, fileType, forced.stream))
+    throw new Error('Unable to establish a safe playback path for this browser.')
+  }
+
+  return forced
 }
 
 export async function createSession(
