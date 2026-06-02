@@ -25,7 +25,7 @@
 // owns the hls.js lifecycle and orchestrates calls in here.
 
 import { apiFetch } from './api'
-import { detectCapabilities } from './playbackCapabilities'
+import { detectBaselineCapabilities } from './playbackCapabilities'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -100,13 +100,9 @@ export interface CreateSessionRequest {
   audio_channels?: number
   hdr_tonemap?: boolean
   video_codec?: string
-  // FFmpeg -ss seek offset in WHOLE SECONDS (V1's playMedia floors
-  // resumeMs/1000 before sending). The server starts transcoding
-  // from this position, so hls.js's currentTime 0 maps to this
-  // offset in the source file. The session response echoes back
-  // the actual start_sec the server used (it may round-snap to a
-  // GOP boundary), which the client adds back when reporting
-  // progress.
+  // FFmpeg -ss position in whole seconds. The server starts transcoding
+  // from this position, so hls.js currentTime 0 maps to this offset in
+  // the source file; progress reporting adds the echoed start_sec back.
   start_sec?: number
 }
 
@@ -116,18 +112,22 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-// /api/stream/info call. The Go server already accepts an optional
-// comma-separated `caps` query parameter. V2 now probes the current browser
-// before requesting a decision, enabling client-aware HEVC/remux choices.
-// An empty probe deliberately omits `caps` so the backend preserves its
-// existing conservative static fallback.
+// /api/stream/info capability contract v2 safety gate.
+//
+// Issue #198 demonstrated that the legacy backend cannot distinguish native
+// HEVC file playback capability from HEVC copied into its current HLS/MPEG-TS
+// remux output. Until the backend exposes separate delivery-safe/source-aware
+// capabilities, V2 sends the established baseline and deliberately excludes
+// h265/hevc. That retains capability plumbing and existing playback choices,
+// while forcing HEVC through the known-safe transcode path instead of creating
+// a fragile HEVC remux session that can stop after several segments.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
-  const caps = detectCapabilities()
   const query = new URLSearchParams({ type: fileType })
+  const caps = detectBaselineCapabilities()
   if (caps) query.set('caps', caps)
 
   return apiFetch<StreamInfo>(
