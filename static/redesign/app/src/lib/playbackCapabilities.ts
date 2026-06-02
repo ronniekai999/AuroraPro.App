@@ -5,16 +5,16 @@
 // redesign previously omitted it entirely, which forced HEVC and other
 // browser-specific decisions through the conservative static fallback path.
 //
-// Keep this v1 probe intentionally conservative and synchronous:
-//   - Only emit keys the current backend understands.
-//   - H.264 and HEVC may enter today's HLS copy/remux path. Because V2 prefers
-//     hls.js where available, an hls.js client must confirm BOTH native and
-//     MediaSource support before either codec is advertised.
-//   - VP8, VP9, AV1, Opus, Vorbis, and FLAC are native direct-play signals on
-//     today's transport. They are not advertised for native-HLS-only clients,
-//     where a fallback remux could otherwise package them into MPEG-TS.
-//   - AAC and AC-3 can be copied on today's HLS-TS remux path; on an hls.js
-//     client they are reported only when native and MediaSource support agree.
+// Keep this v1 probe intentionally narrow and synchronous:
+//   - Only report capabilities when this player will use hls.js. The current
+//     backend already prevents VP8/VP9/AV1 MPEG-TS remux on HLSJS sessions,
+//     but does not yet express the same distinction for native-HLS-only paths.
+//     Omitting caps on native-HLS-only clients preserves the existing fallback
+//     until contract v2 models direct-file support separately from remux safety.
+//   - H.264, HEVC, AAC and AC-3 may enter today's HLS copy/remux path, so they
+//     are reported only when native playback and MediaSource both confirm them.
+//   - VP8, VP9, AV1, Opus, Vorbis, FLAC and E-AC-3 remain native direct-play
+//     signals; the backend's HLSJS restrictions prevent unsafe TS passthrough.
 //
 // A future capability-contract v2 can separately report native playback,
 // MediaSource support, and MediaCapabilities.decodingInfo() results against
@@ -34,9 +34,8 @@ function mediaSourceSupportsAny(mimes: string[]): boolean {
   return typeof MediaSource !== 'undefined' && mimes.some((mime) => MediaSource.isTypeSupported(mime))
 }
 
-function safeForCurrentDelivery(element: HTMLMediaElement, mimes: string[], usesHlsJS: boolean): boolean {
-  if (!nativeSupportsAny(element, mimes)) return false
-  return !usesHlsJS || mediaSourceSupportsAny(mimes)
+function remuxSafe(element: HTMLMediaElement, mimes: string[]): boolean {
+  return nativeSupportsAny(element, mimes) && mediaSourceSupportsAny(mimes)
 }
 
 /**
@@ -44,87 +43,68 @@ function safeForCurrentDelivery(element: HTMLMediaElement, mimes: string[], uses
  * An empty string means the server should use its existing static fallback.
  */
 export function detectCapabilities(): string {
-  if (typeof document === 'undefined') return ''
+  if (typeof document === 'undefined' || !Hls.isSupported()) return ''
 
   const video = document.createElement('video')
   const audio = document.createElement('audio')
-  const caps = new Set<string>()
-  const usesHlsJS = Hls.isSupported()
-  const hasNativeHLS = canPlay(video, 'application/vnd.apple.mpegurl') || canPlay(video, 'application/x-mpegURL')
-  const canAdvertiseNativeOnlySignals = usesHlsJS || !hasNativeHLS
+  const caps = new Set<string>(['hls_js'])
 
-  // Delivery capabilities. The player prefers hls.js whenever it can attach;
-  // native HLS remains relevant on Safari/iOS and cast/AirPlay-style paths.
-  if (usesHlsJS) caps.add('hls_js')
-  if (hasNativeHLS) caps.add('hls_native')
+  // macOS Safari can expose hls.js and native HLS. HLSJS remains present so
+  // the server applies its guarded hls.js policy for any non-direct path.
+  if (canPlay(video, 'application/vnd.apple.mpegurl') || canPlay(video, 'application/x-mpegURL')) {
+    caps.add('hls_native')
+  }
 
   // Native container support. These are advertised with representative
   // browser-playable codecs rather than on extension alone.
-  const mp4H264 = [
+  const h264 = [
     'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
     'video/mp4; codecs="avc1.42E01E"',
   ]
-  const webmVP9 = [
-    'video/webm; codecs="vp09.00.10.08, opus"',
-    'video/webm; codecs="vp9, opus"',
-    'video/webm; codecs="vp8, vorbis"',
-  ]
-  if (nativeSupportsAny(video, mp4H264)) caps.add('mp4_container')
-  if (nativeSupportsAny(video, webmVP9)) caps.add('webm_container')
-
-  // These video codecs can be copied into the current HLS transport. On an
-  // hls.js client, require support for both direct-file playback and MSE.
-  if (safeForCurrentDelivery(video, mp4H264, usesHlsJS)) caps.add('h264')
-  if (safeForCurrentDelivery(video, [
+  const hevc = [
     'video/mp4; codecs="hvc1.1.6.L93.B0"',
     'video/mp4; codecs="hev1.1.6.L93.B0"',
     'video/mp4; codecs="hvc1"',
     'video/mp4; codecs="hev1"',
-  ], usesHlsJS)) {
-    caps.add('h265')
-  }
-
-  // The current backend refuses these codecs on hls.js TS-remux paths. Do
-  // not emit them on native-HLS-only clients until the backend contract can
-  // prevent a native-HLS remux fallback from incorrectly copying them to TS.
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(video, [
-    'video/webm; codecs="vp9"',
-    'video/webm; codecs="vp09.00.10.08"',
-  ])) caps.add('vp9')
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(video, ['video/webm; codecs="vp8"'])) caps.add('vp8')
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(video, [
+  ]
+  const vp9 = ['video/webm; codecs="vp9"', 'video/webm; codecs="vp09.00.10.08"']
+  const webm = [
+    'video/webm; codecs="vp09.00.10.08, opus"',
+    'video/webm; codecs="vp9, opus"',
+    'video/webm; codecs="vp8, vorbis"',
+  ]
+  const av1 = [
     'video/mp4; codecs="av01.0.05M.08"',
     'video/webm; codecs="av01.0.05M.08"',
-  ])) caps.add('av1')
+  ]
 
-  // AAC and AC-3 may be copied by the backend on current HLS-TS paths, so
-  // hls.js clients must also confirm that MediaSource can accept them.
+  if (nativeSupportsAny(video, h264) || nativeSupportsAny(video, hevc) || nativeSupportsAny(video, av1)) {
+    caps.add('mp4_container')
+  }
+  if (nativeSupportsAny(video, webm)) caps.add('webm_container')
+
+  // These codecs can be copied into current HLS delivery, so require MSE.
+  if (remuxSafe(video, h264)) caps.add('h264')
+  if (remuxSafe(video, hevc)) caps.add('h265')
+
+  // Current Go logic prevents these codecs from TS remux when HLSJS is true;
+  // native direct play can therefore be advertised without MSE confirmation.
+  if (nativeSupportsAny(video, vp9)) caps.add('vp9')
+  if (nativeSupportsAny(video, ['video/webm; codecs="vp8"'])) caps.add('vp8')
+  if (nativeSupportsAny(video, av1)) caps.add('av1')
+
+  // AAC and AC-3 can be copied into current HLS delivery, so require MSE.
   const aac = ['audio/mp4; codecs="mp4a.40.2"', 'audio/aac']
   const ac3 = ['audio/mp4; codecs="ac-3"', 'audio/mp4; codecs="ac3"']
-  if (safeForCurrentDelivery(audio, aac, usesHlsJS)) caps.add('aac')
-  if (safeForCurrentDelivery(audio, ac3, usesHlsJS)) caps.add('ac3')
+  if (remuxSafe(audio, aac)) caps.add('aac')
+  if (remuxSafe(audio, ac3)) caps.add('ac3')
 
-  // MP3 is forced to AAC if it reaches remux, so it remains safe to report.
+  // These are direct-play signals or force audio recode on the HLSJS path.
   if (nativeSupportsAny(audio, ['audio/mpeg'])) caps.add('mp3')
-
-  // These remain native direct-play signals and are withheld on native-HLS-
-  // only clients for the same MPEG-TS fallback reason as VP8/VP9/AV1 above.
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(audio, [
-    'audio/webm; codecs="opus"',
-    'audio/ogg; codecs="opus"',
-  ])) caps.add('opus')
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(audio, [
-    'audio/webm; codecs="vorbis"',
-    'audio/ogg; codecs="vorbis"',
-  ])) caps.add('vorbis')
-  if (canAdvertiseNativeOnlySignals && nativeSupportsAny(audio, ['audio/flac', 'audio/x-flac'])) caps.add('flac')
-
-  // Native HLS clients such as Safari support E-AC-3 in the existing path;
-  // hls.js clients will already recode E-AC-3 in the backend's HLS caps filter.
-  if (nativeSupportsAny(audio, [
-    'audio/mp4; codecs="ec-3"',
-    'audio/mp4; codecs="eac3"',
-  ])) caps.add('eac3')
+  if (nativeSupportsAny(audio, ['audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"'])) caps.add('opus')
+  if (nativeSupportsAny(audio, ['audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"'])) caps.add('vorbis')
+  if (nativeSupportsAny(audio, ['audio/flac', 'audio/x-flac'])) caps.add('flac')
+  if (nativeSupportsAny(audio, ['audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="eac3"'])) caps.add('eac3')
 
   return Array.from(caps).join(',')
 }
