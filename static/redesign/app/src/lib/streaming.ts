@@ -113,9 +113,13 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-function isMacOSChrome(): boolean {
+function isMacOSChromium(): boolean {
   if (typeof navigator === 'undefined') return false
   const ua = navigator.userAgent
+  // #201/#202 reported official Chrome, but Chromium-derived browsers may
+  // share the same HLS.js/MSE behavior. Exclude engines with their own named
+  // tokens that have not reproduced this fault; keep the guard honest about
+  // its actual UA scope rather than claiming Chrome-only detection.
   return ua.includes('Macintosh') && ua.includes('Chrome/') && !ua.includes('Edg/') && !ua.includes('OPR/')
 }
 
@@ -148,17 +152,18 @@ function decisionBreadcrumb(fileId: number, fileType: 'media' | 'episode', strea
 // PR #200 removed HEVC promotion after #198, but #201 and #202 reproduced the
 // same ~15-second stop on the deployed no-h265 build. That proves the symptom
 // is not solved by HEVC capability removal alone. The repeated affected client
-// is Chrome on macOS, and #201's follow-up larger session response strongly
+// is Chromium on macOS, and #201's follow-up larger session response strongly
 // indicates that a direct_stream/remux attempt failed before a full-transcode
 // retry succeeded.
 //
 // Until the transport can identify the precise broken remux combination,
-// quarantine only Chrome/macOS direct_stream decisions. We do NOT mutate a
+// quarantine only Chromium/macOS direct_stream decisions. We do NOT mutate a
 // remux response into transcode client-side: doing so would preserve the old
 // server-computed HDR/audio decisions. Instead, make a second stream-info
-// request with HLS support but no advertised source video codec. The existing
-// backend then produces a genuine full-transcode decision and recomputes HDR
-// tone mapping/audio handling consistently before a session is created.
+// request with HLS support and only the known-safe AAC output claim, but no
+// advertised source video codec. The backend then produces a genuine video-
+// transcode decision, recomputes HDR tone mapping, and may preserve AAC audio
+// when it is already compatible.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
@@ -170,20 +175,21 @@ export async function getStreamInfo(
   )
   console.info('[Aurora.playback] stream-info decision', decisionBreadcrumb(fileId, fileType, baseline.stream))
 
-  if (!isMacOSChrome() || baseline.stream.decision !== 'direct_stream' || !baseline.stream.remux) {
+  if (!isMacOSChromium() || baseline.stream.decision !== 'direct_stream' || !baseline.stream.remux) {
     return baseline
   }
 
-  console.warn('[Aurora.playback] Chrome/macOS remux quarantined; requesting server-authoritative transcode decision', {
+  console.warn('[Aurora.playback] Chromium/macOS remux quarantined; requesting server-authoritative transcode decision', {
     ...decisionBreadcrumb(fileId, fileType, baseline.stream),
     issueGuard: '#201/#202',
   })
 
-  // Advertise the delivery engine only. With no video codec advertised,
-  // DecidePlayback cannot select direct_play or direct_stream, but it still
-  // follows the hls.js audio safety rules for the transcoded output.
+  // Preserve only safe HLS.js AAC output capability. With no video codec
+  // advertised, DecidePlayback cannot select direct_play or direct_stream;
+  // retaining AAC lets the full-transcode decision avoid an unnecessary audio
+  // re-encode when the selected source track is already AAC.
   const forced = await apiFetch<StreamInfo>(
-    streamInfoURL(fileId, fileType, 'hls_js'),
+    streamInfoURL(fileId, fileType, 'hls_js,aac'),
     { signal },
   )
   console.info('[Aurora.playback] remux quarantine replacement decision', decisionBreadcrumb(fileId, fileType, forced.stream))
