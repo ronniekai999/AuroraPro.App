@@ -25,6 +25,7 @@
 // owns the hls.js lifecycle and orchestrates calls in here.
 
 import { apiFetch } from './api'
+import { detectCapabilities } from './playbackCapabilities'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -115,18 +116,22 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-// /api/stream/info call. caps is a base64-encoded JSON of client
-// capabilities (codecs, hwdecode flags). The detection logic lives
-// in V1's CLIENT_CAPS probe; Phase 2 ships without caps (server
-// falls back to a conservative profile) and Phase 2.5 will port the
-// probe — once ported, this signature accepts a `caps` string.
+// /api/stream/info call. The Go server already accepts an optional
+// comma-separated `caps` query parameter. V2 now probes the current browser
+// before requesting a decision, enabling client-aware HEVC/remux choices.
+// An empty probe deliberately omits `caps` so the backend preserves its
+// existing conservative static fallback.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
+  const caps = detectCapabilities()
+  const query = new URLSearchParams({ type: fileType })
+  if (caps) query.set('caps', caps)
+
   return apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?type=${fileType}`,
+    `/api/stream/info/${fileId}?${query.toString()}`,
     { signal },
   )
 }
