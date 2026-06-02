@@ -25,10 +25,7 @@
 // owns the hls.js lifecycle and orchestrates calls in here.
 
 import { apiFetch } from './api'
-import {
-  detectBaselineCapabilities,
-  detectHEVCDirectPlayCapabilities,
-} from './playbackCapabilities'
+import { detectBaselineCapabilities } from './playbackCapabilities'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -115,78 +112,28 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-function streamInfoPath(fileId: number, fileType: 'media' | 'episode', caps: string): string {
-  const query = new URLSearchParams({ type: fileType })
-  if (caps) query.set('caps', caps)
-  return `/api/stream/info/${fileId}?${query.toString()}`
-}
-
-function canonicalContainer(container?: string): string {
-  const value = (container || '').toLowerCase().split(',')[0].trim()
-  // FFprobe reports ordinary MP4 sources as mov,mp4,m4a,3gp,3g2,mj2.
-  // Match the Go-side NormalizeContainer behavior before qualifying a file.
-  return value === 'mov' ? 'mp4' : value
-}
-
-function isHEVC(codec?: string): boolean {
-  const value = (codec || '').toLowerCase()
-  return value === 'h265' || value === 'hevc'
-}
-
-function hasBaselineDirectPlayAudio(info: StreamInfo): boolean {
-  // Keep the HEVC candidate narrowly aligned with Aurora's long-established
-  // direct-play baseline. Multi-track files are only eligible when their
-  // effective/default source codec is already browser-safe without selection.
-  const codec = (info.stream.audio_codec || '').toLowerCase()
-  return codec === '' || codec === 'aac' || codec === 'mp3'
-}
-
-function isHEVCDirectFileCandidate(info: StreamInfo): boolean {
-  const stream = info.stream
-  return (
-    stream.decision === 'transcode' &&
-    isHEVC(stream.video_codec) &&
-    canonicalContainer(stream.container) === 'mp4' &&
-    // Known HDR baseline transcodes request tone mapping; do not bypass that
-    // path. A later server-contract slice should surface explicit source color
-    // metadata so legacy unknowns can be classified rather than inferred.
-    !stream.hdr_tonemap &&
-    hasBaselineDirectPlayAudio(info)
-  )
-}
-
-// /api/stream/info decision handshake.
+// /api/stream/info capability contract v2 safety gate.
 //
-// Issue #198 showed that a generic HEVC capability flag cannot safely authorize
-// HEVC copied into the current HLS/MPEG-TS remux path: Chrome/macOS accepted
-// the probe, began playback, then failed after several segments. Contract v2
-// therefore requests a stable baseline decision first. Only an HEVC MP4 that
-// is not marked for HDR-to-SDR tone mapping and already has baseline-safe audio
-// gets one additional direct-file check. That candidate is accepted ONLY if
-// the server answers with direct_play; a direct_stream answer is discarded so
-// the current HEVC HLS remux route remains disabled from the V2 client.
+// Issue #198 demonstrated that the legacy backend cannot distinguish native
+// HEVC file playback capability from HEVC copied into its current HLS/MPEG-TS
+// remux output. Until the backend exposes separate delivery-safe/source-aware
+// capabilities, V2 sends the established baseline and deliberately excludes
+// h265/hevc. That retains capability plumbing and existing playback choices,
+// while forcing HEVC through the known-safe transcode path instead of creating
+// a fragile HEVC remux session that can stop after several segments.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
-  const baselineCaps = detectBaselineCapabilities()
-  const baseline = await apiFetch<StreamInfo>(
-    streamInfoPath(fileId, fileType, baselineCaps),
+  const query = new URLSearchParams({ type: fileType })
+  const caps = detectBaselineCapabilities()
+  if (caps) query.set('caps', caps)
+
+  return apiFetch<StreamInfo>(
+    `/api/stream/info/${fileId}?${query.toString()}`,
     { signal },
   )
-
-  if (!isHEVCDirectFileCandidate(baseline)) return baseline
-
-  const hevcCaps = detectHEVCDirectPlayCapabilities()
-  if (!hevcCaps) return baseline
-
-  const candidate = await apiFetch<StreamInfo>(
-    streamInfoPath(fileId, fileType, hevcCaps),
-    { signal },
-  )
-
-  return candidate.stream.decision === 'direct_play' ? candidate : baseline
 }
 
 export async function createSession(
