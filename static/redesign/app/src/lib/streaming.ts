@@ -21,16 +21,16 @@
 //      effort — server eventually GCs idle sessions, but explicit
 //      cleanup releases ffmpeg + disk faster).
 //
-// This module is intentionally I/O only — the React player component
-// owns the hls.js lifecycle and orchestrates calls in here.
+// The React player owns hls.js lifecycle; this module owns the request-side
+// decision contract and records safe, source-level diagnostic breadcrumbs.
 
 import { apiFetch } from './api'
 import { detectBaselineCapabilities } from './playbackCapabilities'
 
 // /api/stream/info response — sparse subset of what the server returns,
-// covering only the fields the V2 player consumes today. Phase 2.5
-// will surface audio_passthrough, hdr_tonemap, etc. for the codec
-// settings panel.
+// covering only the fields the V2 player consumes today. Keep diagnostic
+// fields here too: the bug-report console buffer captures decision summaries
+// without including paths, tokens, or response bodies.
 export interface StreamInfo {
   stream: StreamDecision
   audio_tracks?: AudioTrack[]
@@ -46,6 +46,7 @@ export interface StreamDecision {
   video_codec?: string
   audio_codec?: string
   resolution?: string
+  transcode_reason?: string
   // Real source-file duration in milliseconds, from the ffprobe
   // metadata captured at scan time. CRITICAL for the custom
   // controls overlay — `vid.duration` reports HLS-playlist length
@@ -112,34 +113,110 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-// /api/stream/info capability contract v2 safety gate.
+function isMacOSChromium(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const ua = navigator.userAgent
+  // #201/#202 reported official Chrome, but Chromium-derived browsers may
+  // share the same HLS.js/MSE behavior. Exclude engines with their own named
+  // tokens that have not reproduced this fault; keep the guard honest about
+  // its actual UA scope rather than claiming Chrome-only detection.
+  return ua.includes('Macintosh') && ua.includes('Chrome/') && !ua.includes('Edg/') && !ua.includes('OPR/')
+}
+
+function streamInfoURL(fileId: number, fileType: 'media' | 'episode', caps: string): string {
+  const query = new URLSearchParams({ type: fileType })
+  if (caps) query.set('caps', caps)
+  return `/api/stream/info/${fileId}?${query.toString()}`
+}
+
+function decisionBreadcrumb(fileId: number, fileType: 'media' | 'episode', stream: StreamDecision): Record<string, unknown> {
+  return {
+    fileId,
+    fileType,
+    decision: stream.decision,
+    remux: !!stream.remux,
+    container: stream.container ?? '',
+    videoCodec: stream.video_codec ?? '',
+    audioCodec: stream.audio_codec ?? '',
+    resolution: stream.resolution ?? '',
+    audioPassthrough: !!stream.audio_passthrough,
+    audioTrackIndex: stream.audio_track_index ?? -1,
+    audioChannels: stream.audio_channels ?? 0,
+    hdrTonemap: !!stream.hdr_tonemap,
+    transcodeReason: stream.transcode_reason ?? '',
+  }
+}
+
+// /api/stream/info capability and recovery safety gate.
 //
-// Issue #198 demonstrated that the legacy backend cannot distinguish native
-// HEVC file playback capability from HEVC copied into its current HLS/MPEG-TS
-// remux output. Until the backend exposes separate delivery-safe/source-aware
-// capabilities, V2 sends the established baseline and deliberately excludes
-// h265/hevc. That retains capability plumbing and existing playback choices,
-// while forcing HEVC through the known-safe transcode path instead of creating
-// a fragile HEVC remux session that can stop after several segments.
+// PR #200 removed HEVC promotion after #198, but #201 and #202 reproduced the
+// same ~15-second stop on the deployed no-h265 build. That proves the symptom
+// is not solved by HEVC capability removal alone. The repeated affected client
+// is Chromium on macOS, and #201's follow-up larger session response strongly
+// indicates that a direct_stream/remux attempt failed before a full-transcode
+// retry succeeded.
+//
+// Until the transport can identify the precise broken remux combination,
+// quarantine only Chromium/macOS direct_stream decisions. We do NOT mutate a
+// remux response into transcode client-side: doing so would preserve the old
+// server-computed HDR/audio decisions. Instead, make a second stream-info
+// request with HLS support and only the known-safe AAC output claim, but no
+// advertised source video codec. The backend then produces a genuine video-
+// transcode decision, recomputes HDR tone mapping, and may preserve AAC audio
+// when it is already compatible.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
-  const query = new URLSearchParams({ type: fileType })
-  const caps = detectBaselineCapabilities()
-  if (caps) query.set('caps', caps)
-
-  return apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?${query.toString()}`,
+  const baseline = await apiFetch<StreamInfo>(
+    streamInfoURL(fileId, fileType, detectBaselineCapabilities()),
     { signal },
   )
+  console.info('[Aurora.playback] stream-info decision', decisionBreadcrumb(fileId, fileType, baseline.stream))
+
+  if (!isMacOSChromium() || baseline.stream.decision !== 'direct_stream' || !baseline.stream.remux) {
+    return baseline
+  }
+
+  console.warn('[Aurora.playback] Chromium/macOS remux quarantined; requesting server-authoritative transcode decision', {
+    ...decisionBreadcrumb(fileId, fileType, baseline.stream),
+    issueGuard: '#201/#202',
+  })
+
+  // Preserve only safe HLS.js AAC output capability. With no video codec
+  // advertised, DecidePlayback cannot select direct_play or direct_stream;
+  // retaining AAC lets the full-transcode decision avoid an unnecessary audio
+  // re-encode when the selected source track is already AAC.
+  const forced = await apiFetch<StreamInfo>(
+    streamInfoURL(fileId, fileType, 'hls_js,aac'),
+    { signal },
+  )
+  console.info('[Aurora.playback] remux quarantine replacement decision', decisionBreadcrumb(fileId, fileType, forced.stream))
+
+  if (forced.stream.decision !== 'transcode' || !!forced.stream.remux) {
+    console.error('[Aurora.playback] remux quarantine failed to obtain safe transcode decision', decisionBreadcrumb(fileId, fileType, forced.stream))
+    throw new Error('Unable to establish a safe playback path for this browser.')
+  }
+
+  return forced
 }
 
 export async function createSession(
   req: CreateSessionRequest,
   signal?: AbortSignal,
 ): Promise<SessionResponse> {
+  console.info('[Aurora.playback] creating HLS session', {
+    fileId: req.file_id,
+    fileType: req.file_type,
+    remux: !!req.remux,
+    audioPassthrough: !!req.audio_passthrough,
+    audioTrackIndex: req.audio_track_index ?? -1,
+    audioChannels: req.audio_channels ?? 0,
+    hdrTonemap: !!req.hdr_tonemap,
+    videoCodec: req.video_codec ?? '',
+    startSec: req.start_sec ?? 0,
+  })
   return apiFetch<SessionResponse>('/api/stream/sessions', {
     method: 'POST',
     body: req,
