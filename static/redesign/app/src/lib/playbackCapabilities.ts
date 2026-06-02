@@ -5,16 +5,17 @@
 // redesign previously omitted it entirely, which forced HEVC and other
 // browser-specific decisions through the conservative static fallback path.
 //
-// Keep this v1 probe intentionally narrow and synchronous:
-//   - Only report capabilities when this player will use hls.js. The current
-//     backend already prevents VP8/VP9/AV1 MPEG-TS remux on HLSJS sessions,
-//     but does not yet express the same distinction for native-HLS-only paths.
-//     Omitting caps on native-HLS-only clients preserves the existing fallback
-//     until contract v2 models direct-file support separately from remux safety.
-//   - H.264, HEVC, AAC and AC-3 may enter today's HLS copy/remux path, so they
-//     are reported only when native playback and MediaSource both confirm them.
-//   - VP8, VP9, AV1, Opus, Vorbis, FLAC and E-AC-3 remain native direct-play
-//     signals; the backend's HLSJS restrictions prevent unsafe TS passthrough.
+// Keep this v1 probe intentionally narrow and backward compatible:
+//   - Only report capabilities when this player will use hls.js. The backend
+//     already prevents VP8/VP9/AV1 MPEG-TS remux on HLSJS sessions, but does
+//     not yet represent the same distinction for native-HLS-only paths.
+//   - Start with the backend's existing static browser baseline. Sending caps
+//     must not turn ordinary H.264/AAC or VP9/AV1 direct play into a transcode
+//     merely because an optional capability probe returned an empty result.
+//   - Add HEVC only when native playback and MediaSource both confirm it,
+//     because HEVC may be direct-played or copied through hls.js remux.
+//   - Add optional audio codecs only where the backend's current HLSJS policy
+//     either safely passes them or safely recodes them.
 //
 // A future capability-contract v2 can separately report native playback,
 // MediaSource support, and MediaCapabilities.decodingInfo() results against
@@ -47,7 +48,16 @@ export function detectCapabilities(): string {
 
   const video = document.createElement('video')
   const audio = document.createElement('audio')
-  const caps = new Set<string>(['hls_js'])
+
+  // Mirror the pre-existing nil-caps baseline so capability plumbing cannot
+  // regress previously working standard playback decisions. The only new
+  // claims below are capability-probed extensions to that baseline.
+  const caps = new Set<string>([
+    'hls_js',
+    'h264', 'vp8', 'vp9', 'av1',
+    'aac', 'mp3',
+    'mp4_container', 'webm_container',
+  ])
 
   // macOS Safari can expose hls.js and native HLS. HLSJS remains present so
   // the server applies its guarded hls.js policy for any non-direct path.
@@ -55,52 +65,24 @@ export function detectCapabilities(): string {
     caps.add('hls_native')
   }
 
-  // Native container support. These are advertised with representative
-  // browser-playable codecs rather than on extension alone.
-  const h264 = [
-    'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-    'video/mp4; codecs="avc1.42E01E"',
-  ]
+  // HEVC is the immediate capability win for this PR. The current backend may
+  // use this same key for native MP4 playback and hls.js remux, so require
+  // positive evidence on both playback surfaces before enabling it.
   const hevc = [
     'video/mp4; codecs="hvc1.1.6.L93.B0"',
     'video/mp4; codecs="hev1.1.6.L93.B0"',
     'video/mp4; codecs="hvc1"',
     'video/mp4; codecs="hev1"',
   ]
-  const vp9 = ['video/webm; codecs="vp9"', 'video/webm; codecs="vp09.00.10.08"']
-  const webm = [
-    'video/webm; codecs="vp09.00.10.08, opus"',
-    'video/webm; codecs="vp9, opus"',
-    'video/webm; codecs="vp8, vorbis"',
-  ]
-  const av1 = [
-    'video/mp4; codecs="av01.0.05M.08"',
-    'video/webm; codecs="av01.0.05M.08"',
-  ]
-
-  if (nativeSupportsAny(video, h264) || nativeSupportsAny(video, hevc) || nativeSupportsAny(video, av1)) {
-    caps.add('mp4_container')
-  }
-  if (nativeSupportsAny(video, webm)) caps.add('webm_container')
-
-  // These codecs can be copied into current HLS delivery, so require MSE.
-  if (remuxSafe(video, h264)) caps.add('h264')
   if (remuxSafe(video, hevc)) caps.add('h265')
 
-  // Current Go logic prevents these codecs from TS remux when HLSJS is true;
-  // native direct play can therefore be advertised without MSE confirmation.
-  if (nativeSupportsAny(video, vp9)) caps.add('vp9')
-  if (nativeSupportsAny(video, ['video/webm; codecs="vp8"'])) caps.add('vp8')
-  if (nativeSupportsAny(video, av1)) caps.add('av1')
-
-  // AAC and AC-3 can be copied into current HLS delivery, so require MSE.
-  const aac = ['audio/mp4; codecs="mp4a.40.2"', 'audio/aac']
+  // AC-3 can be copied in current HLS-TS delivery, so enable it only where
+  // both native playback and MediaSource support are confirmed.
   const ac3 = ['audio/mp4; codecs="ac-3"', 'audio/mp4; codecs="ac3"']
-  if (remuxSafe(audio, aac)) caps.add('aac')
   if (remuxSafe(audio, ac3)) caps.add('ac3')
 
-  // These are direct-play signals or force audio recode on the HLSJS path.
-  if (nativeSupportsAny(audio, ['audio/mpeg'])) caps.add('mp3')
+  // These are useful only for native direct play. When HLSJS remux is needed,
+  // the Go backend filters them out of HLS caps and recodes audio to AAC.
   if (nativeSupportsAny(audio, ['audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"'])) caps.add('opus')
   if (nativeSupportsAny(audio, ['audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"'])) caps.add('vorbis')
   if (nativeSupportsAny(audio, ['audio/flac', 'audio/x-flac'])) caps.add('flac')
