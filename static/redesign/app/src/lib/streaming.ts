@@ -122,7 +122,10 @@ function streamInfoPath(fileId: number, fileType: 'media' | 'episode', caps: str
 }
 
 function canonicalContainer(container?: string): string {
-  return (container || '').toLowerCase().split(',')[0].trim()
+  const value = (container || '').toLowerCase().split(',')[0].trim()
+  // FFprobe reports ordinary MP4 sources as mov,mp4,m4a,3gp,3g2,mj2.
+  // Match the Go-side NormalizeContainer behavior before qualifying a file.
+  return value === 'mov' ? 'mp4' : value
 }
 
 function isHEVC(codec?: string): boolean {
@@ -144,6 +147,9 @@ function isHEVCDirectFileCandidate(info: StreamInfo): boolean {
     stream.decision === 'transcode' &&
     isHEVC(stream.video_codec) &&
     canonicalContainer(stream.container) === 'mp4' &&
+    // Known HDR baseline transcodes request tone mapping; do not bypass that
+    // path. A later server-contract slice should surface explicit source color
+    // metadata so legacy unknowns can be classified rather than inferred.
     !stream.hdr_tonemap &&
     hasBaselineDirectPlayAudio(info)
   )
@@ -151,13 +157,14 @@ function isHEVCDirectFileCandidate(info: StreamInfo): boolean {
 
 // /api/stream/info decision handshake.
 //
-// Issue #198 proved that a generic HEVC capability flag cannot safely authorize
+// Issue #198 showed that a generic HEVC capability flag cannot safely authorize
 // HEVC copied into the current HLS/MPEG-TS remux path: Chrome/macOS accepted
 // the probe, began playback, then failed after several segments. Contract v2
-// therefore requests a stable baseline decision first. Only an SDR HEVC MP4
-// with already-compatible audio gets one extra direct-file check, and that
-// candidate is accepted ONLY if the server answers with direct_play. A server
-// answer of direct_stream is discarded so current HEVC HLS remux remains off.
+// therefore requests a stable baseline decision first. Only an HEVC MP4 that
+// is not marked for HDR-to-SDR tone mapping and already has baseline-safe audio
+// gets one additional direct-file check. That candidate is accepted ONLY if
+// the server answers with direct_play; a direct_stream answer is discarded so
+// the current HEVC HLS remux route remains disabled from the V2 client.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
