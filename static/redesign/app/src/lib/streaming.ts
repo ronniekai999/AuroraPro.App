@@ -25,7 +25,10 @@
 // owns the hls.js lifecycle and orchestrates calls in here.
 
 import { apiFetch } from './api'
-import { detectCapabilities } from './playbackCapabilities'
+import {
+  detectBaselineCapabilities,
+  detectHEVCDirectPlayCapabilities,
+} from './playbackCapabilities'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -100,13 +103,9 @@ export interface CreateSessionRequest {
   audio_channels?: number
   hdr_tonemap?: boolean
   video_codec?: string
-  // FFmpeg -ss seek offset in WHOLE SECONDS (V1's playMedia floors
-  // resumeMs/1000 before sending). The server starts transcoding
-  // from this position, so hls.js's currentTime 0 maps to this
-  // offset in the source file. The session response echoes back
-  // the actual start_sec the server used (it may round-snap to a
-  // GOP boundary), which the client adds back when reporting
-  // progress.
+  // FFmpeg -ss position in whole seconds. The server starts transcoding
+  // from this position, so hls.js currentTime 0 maps to this offset in
+  // the source file; progress reporting adds the echoed start_sec back.
   start_sec?: number
 }
 
@@ -116,24 +115,71 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-// /api/stream/info call. The Go server already accepts an optional
-// comma-separated `caps` query parameter. V2 now probes the current browser
-// before requesting a decision, enabling client-aware HEVC/remux choices.
-// An empty probe deliberately omits `caps` so the backend preserves its
-// existing conservative static fallback.
+function streamInfoPath(fileId: number, fileType: 'media' | 'episode', caps: string): string {
+  const query = new URLSearchParams({ type: fileType })
+  if (caps) query.set('caps', caps)
+  return `/api/stream/info/${fileId}?${query.toString()}`
+}
+
+function canonicalContainer(container?: string): string {
+  return (container || '').toLowerCase().split(',')[0].trim()
+}
+
+function isHEVC(codec?: string): boolean {
+  const value = (codec || '').toLowerCase()
+  return value === 'h265' || value === 'hevc'
+}
+
+function hasBaselineDirectPlayAudio(info: StreamInfo): boolean {
+  // Keep the HEVC candidate narrowly aligned with Aurora's long-established
+  // direct-play baseline. Multi-track files are only eligible when their
+  // effective/default source codec is already browser-safe without selection.
+  const codec = (info.stream.audio_codec || '').toLowerCase()
+  return codec === '' || codec === 'aac' || codec === 'mp3'
+}
+
+function isHEVCDirectFileCandidate(info: StreamInfo): boolean {
+  const stream = info.stream
+  return (
+    stream.decision === 'transcode' &&
+    isHEVC(stream.video_codec) &&
+    canonicalContainer(stream.container) === 'mp4' &&
+    !stream.hdr_tonemap &&
+    hasBaselineDirectPlayAudio(info)
+  )
+}
+
+// /api/stream/info decision handshake.
+//
+// Issue #198 proved that a generic HEVC capability flag cannot safely authorize
+// HEVC copied into the current HLS/MPEG-TS remux path: Chrome/macOS accepted
+// the probe, began playback, then failed after several segments. Contract v2
+// therefore requests a stable baseline decision first. Only an SDR HEVC MP4
+// with already-compatible audio gets one extra direct-file check, and that
+// candidate is accepted ONLY if the server answers with direct_play. A server
+// answer of direct_stream is discarded so current HEVC HLS remux remains off.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
-  const caps = detectCapabilities()
-  const query = new URLSearchParams({ type: fileType })
-  if (caps) query.set('caps', caps)
-
-  return apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?${query.toString()}`,
+  const baselineCaps = detectBaselineCapabilities()
+  const baseline = await apiFetch<StreamInfo>(
+    streamInfoPath(fileId, fileType, baselineCaps),
     { signal },
   )
+
+  if (!isHEVCDirectFileCandidate(baseline)) return baseline
+
+  const hevcCaps = detectHEVCDirectPlayCapabilities()
+  if (!hevcCaps) return baseline
+
+  const candidate = await apiFetch<StreamInfo>(
+    streamInfoPath(fileId, fileType, hevcCaps),
+    { signal },
+  )
+
+  return candidate.stream.decision === 'direct_play' ? candidate : baseline
 }
 
 export async function createSession(
