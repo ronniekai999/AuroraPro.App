@@ -7995,11 +7995,18 @@ export default function App() {
             {/* Search */}
             <div className="relative max-w-md w-full">
               <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+              {/* !pl-10 (important): the global `input` rule in index.css
+                  (`input:not([type="range"])`, specificity 0,1,1) sets
+                  `padding: 12px 16px`, which outranks the plain `pl-10` utility
+                  (0,1,0) and collapses the left padding to 16px — overlapping the
+                  magnifying-glass icon (absolute left-3) with the placeholder
+                  text (#209). The important modifier wins the cascade so the icon
+                  clears the text. */}
               <input
                 ref={searchInputRef}
                 type="text"
                 placeholder="Search titles... (⌘K)"
-                className="w-full pl-10 pr-4 py-2.5 text-sm bg-white/[0.03] border-white/[0.06] focus:bg-white/[0.05]"
+                className="w-full !pl-10 pr-4 py-2.5 text-sm bg-white/[0.03] border-white/[0.06] focus:bg-white/[0.05]"
                 value={searchQuery}
                 onChange={(e) => {
                   setSearchQuery(e.target.value)
