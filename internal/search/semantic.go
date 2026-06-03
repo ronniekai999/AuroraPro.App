@@ -76,12 +76,23 @@ func New(llmClient *llm.Client, q *db.Queries) *Searcher {
 	}
 }
 
-// IsLiteralQuery returns true for queries that are clearly title lookups —
-// short, no question words, no relational phrases. Callers should route these
-// to their existing trigram search instead of paying the LLM round-trip.
+// IsLiteralQuery returns true for queries that should hit the trigram path
+// FIRST — i.e. anything that is not an explicit recommendation request. This
+// is the inverse of "does the user want the LLM to reason about taste".
 //
-// Examples that return true:  "Inception", "the matrix", "severance s2"
-// Examples that return false: "movies like Severance", "feel-good 90s sci-fi",
+// Word count is intentionally NOT a signal: long exact titles ("A Time to
+// Kill", "Gone with the Wind") and titles containing an incidental mood word
+// ("The Dark Knight") are title lookups, not vibe queries. Routing them to
+// semantic returned fuzzy/empty results (issue #207). Descriptive queries
+// without an explicit marker ("dark gritty thriller") also return true here;
+// callers should fall back to semantic only when the library can't satisfy
+// the trigram lookup.
+//
+// Kept in sync with the api package's recommendationMarkerRE — that copy is
+// the one wired into /api/media/search routing.
+//
+// Examples that return true:  "Inception", "A Time to Kill", "The Dark Knight"
+// Examples that return false: "movies like Severance", "recommend a thriller",
 //
 //	"what should I watch tonight"
 func IsLiteralQuery(query string) bool {
@@ -89,15 +100,11 @@ func IsLiteralQuery(query string) bool {
 	if q == "" {
 		return true
 	}
-	if relationalRE.MatchString(q) {
-		return false
-	}
-	tokens := strings.Fields(q)
-	return len(tokens) <= 3
+	return !relationalRE.MatchString(q)
 }
 
 var relationalRE = regexp.MustCompile(
-	`\b(like|similar|kind of|sort of|feels? like|reminds? me|something|anything|good|best|recommend|watch|show me|find me|should|with|without|but|funny|sad|scary|dark|light|cozy|wholesome|gritty|underrated)\b`,
+	`\b(like|similar|reminds? me|kind of|sort of|feels? like|recommend|suggest|what should)\b`,
 )
 
 // ParsedQuery is the structured output of the LLM query parser. All fields

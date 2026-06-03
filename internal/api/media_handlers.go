@@ -348,27 +348,62 @@ func (h *MediaHandler) SetSemanticSearcher(s SemanticSearcher) {
 	h.semantic = s
 }
 
-// isLiteralLookalike heuristically classifies a search query as a title
-// lookup vs a descriptive/conversational query. Mirrors search.IsLiteralQuery
-// but kept inline here so the api package doesn't need to import internal/search
-// just for one regex.
+// wantsRecommendations reports whether a search query is explicitly asking the
+// system to reason about taste — a comparison ("movies like X", "similar to
+// Y", "reminds me of Z") or a request ("recommend a thriller", "what should I
+// watch"). These are the ONLY queries routed straight to the semantic LLM
+// path, because the trigram path would short-circuit on a title embedded in
+// the phrase (e.g. "movies like The Matrix" trigram-matches "The Matrix" and
+// returns it, instead of titles *similar* to it).
 //
-// True (use trigram):  "Inception", "the matrix", "severance s2"
-// False (use semantic): "movies like Severance", "feel-good 90s sci-fi"
-func isLiteralLookalike(query string) bool {
+// Everything else — including multi-word exact titles ("A Time to Kill",
+// "Gone with the Wind") and titles that merely contain a mood word ("The Dark
+// Knight", "Good Will Hunting") — goes to the trigram path FIRST. Title
+// lookups must always check the library before paying the LLM round-trip;
+// marker-less queries the library can't satisfy fall back to semantic at the
+// call site, so descriptive vibe queries ("dark gritty thriller") still work.
+//
+// Issue #207: the previous heuristic routed any 4+-word query (and any title
+// containing an incidental word like "dark"/"good"/"with") to the slow, fuzzy
+// semantic path, so exact titles came back wrong or empty.
+//
+// True (semantic-first): "movies like Severance", "recommend a thriller",
+//
+//	"what should I watch tonight"
+//
+// False (trigram-first): "Inception", "A Time to Kill", "The Dark Knight",
+//
+//	"dark gritty thriller"
+func wantsRecommendations(query string) bool {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
-		return true
-	}
-	if literalLookalikeRE.MatchString(q) {
 		return false
 	}
-	return len(strings.Fields(q)) <= 3
+	return recommendationMarkerRE.MatchString(q)
 }
 
-var literalLookalikeRE = regexp.MustCompile(
-	`\b(like|similar|kind of|sort of|feels? like|reminds? me|something|anything|good|best|recommend|watch|show me|find me|should|with|without|but|funny|sad|scary|dark|light|cozy|wholesome|gritty|underrated)\b`,
+// recommendationMarkerRE matches comparison + request phrases that signal a
+// taste query. It deliberately excludes bare mood adjectives (dark, good,
+// funny, scary…), prepositions (with, without), and title-leading request
+// phrases (show me, find me — cf. "Show Me a Hero") because those appear in
+// real titles and caused #207. Descriptive queries without an explicit marker
+// are handled by the empty-trigram → semantic fallback instead.
+var recommendationMarkerRE = regexp.MustCompile(
+	`\b(like|similar|reminds? me|kind of|sort of|feels? like|recommend|suggest|what should)\b`,
 )
+
+// semanticFirst decides whether a query should try the semantic LLM path
+// before trigram. It returns false when no LLM is configured or the caller
+// forced ?mode=literal, and true when ?mode=semantic or the query carries an
+// explicit recommendation marker. Marker-less queries return false here and
+// only reach semantic via the empty-trigram fallback in Search — so exact
+// title lookups always check the library first (#207).
+func semanticFirst(mode, query string, semanticConfigured bool) bool {
+	if !semanticConfigured || mode == "literal" {
+		return false
+	}
+	return mode == "semantic" || wantsRecommendations(query)
+}
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -579,53 +614,97 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 		limit = 20
 	}
 
-	// Route: short, literal-looking queries go to the trigram path (it's
-	// faster and better at exact title matching). Conversational / vibe
-	// queries go to the semantic path. The `mode` query param can force
-	// either side for testing: ?mode=semantic or ?mode=literal.
+	// Routing. Title lookups must hit the trigram path FIRST — it does exact,
+	// substring, and typo-tolerant matching, so any title actually in the
+	// library always resolves. Only queries that explicitly ask for
+	// recommendations ("movies like X", "recommend a thriller") skip straight
+	// to the semantic LLM path, because trigram would short-circuit on a title
+	// embedded in such a phrase. Marker-less queries the library can't satisfy
+	// fall back to semantic, so descriptive vibe queries still work (#207).
+	//
+	// The `mode` query param forces a side for testing:
+	//   ?mode=semantic — use the LLM path (degrades to trigram on error)
+	//   ?mode=literal  — use trigram only, never the LLM
 	mode := r.URL.Query().Get("mode")
-	useSemantic := h.semantic != nil &&
-		(mode == "semantic" || (mode == "" && !isLiteralLookalike(query)))
 
-	var items []*models.MediaItem
-	// Reported back in X-Search-Mode so the frontend can show a "Smart search"
-	// badge when the LLM path was actually used. "semantic" means the LLM
-	// parsed + retrieved; "literal" means we used the trigram fast path.
-	searchMode := "literal"
-	if useSemantic {
-		hits, err := h.semantic.Search(r.Context(), query, limit+10)
-		if err != nil {
-			// Degrade silently to trigram so the user still gets results.
-			slog.Warn("semantic search failed, falling back to trigram", "error", err, "q", query)
-			items, err = h.queries.SearchMedia(r.Context(), query, limit+10)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "search failed")
-				return
-			}
-			searchMode = "literal" // fell back; don't claim semantic
-		} else {
-			items = make([]*models.MediaItem, len(hits))
-			for i, hit := range hits {
-				items[i] = hit.Item
-				// Reason is a transient per-search annotation — set it here
-				// rather than on the model so it doesn't bleed into other
-				// endpoints that serve the same media item.
-				if hit.Reason != "" && items[i] != nil {
-					items[i].Reason = hit.Reason
-				}
-			}
-			searchMode = "semantic"
-		}
-	} else {
+	// trigram runs the fast literal path (exact + substring + trigram-similar).
+	trigram := func() ([]*models.MediaItem, error) {
 		fetchLimit := limit + 10
 		if fetchLimit > 50 {
 			fetchLimit = 50
 		}
-		var err error
-		items, err = h.queries.SearchMedia(r.Context(), query, fetchLimit)
+		return h.queries.SearchMedia(r.Context(), query, fetchLimit)
+	}
+	// semantic runs the LLM path; ok is false when it errored (the caller
+	// decides how to degrade). Reason is a transient per-search annotation set
+	// here rather than on the model so it doesn't bleed into other endpoints
+	// that serve the same media item.
+	semantic := func() (its []*models.MediaItem, ok bool) {
+		hits, err := h.semantic.Search(r.Context(), query, limit+10)
+		if err != nil {
+			slog.Warn("semantic search failed", "error", err, "q", query)
+			return nil, false
+		}
+		its = make([]*models.MediaItem, len(hits))
+		for i, hit := range hits {
+			its[i] = hit.Item
+			if hit.Reason != "" && its[i] != nil {
+				its[i].Reason = hit.Reason
+			}
+		}
+		return its, true
+	}
+
+	var items []*models.MediaItem
+	// Reported back in X-Search-Mode so the frontend shows a "Smart search"
+	// badge only when the LLM path actually served the results.
+	searchMode := "literal"
+	// semanticAllowed gates the empty-result fallback; ?mode=literal opts a
+	// request out of the LLM entirely.
+	semanticAllowed := h.semantic != nil && mode != "literal"
+
+	if semanticFirst(mode, query, h.semantic != nil) {
+		// Explicit recommendation/comparison query → LLM first.
+		sem, semOK := semantic()
+		if semOK && len(sem) > 0 {
+			items, searchMode = sem, "semantic"
+		} else {
+			// Semantic errored OR returned nothing. Fall back to trigram so an
+			// exact title that merely tripped a marker substring (e.g. the film
+			// "Like Crazy" or "As You Like It") still resolves from the library
+			// instead of returning an empty page. Mirrors the literal-first
+			// branch's fallback so neither route is a dead end (#207 deep-debug).
+			lit, err := trigram()
+			switch {
+			case err == nil && len(lit) > 0:
+				items, searchMode = lit, "literal"
+			case semOK:
+				// Genuine recommendation query with no library hit: surface the
+				// (possibly empty) semantic result.
+				items, searchMode = sem, "semantic"
+			case err == nil:
+				items = lit // both empty
+			default:
+				// Semantic failed and trigram errored — nothing to serve.
+				writeError(w, http.StatusInternalServerError, "search failed")
+				return
+			}
+		}
+	} else {
+		// Title lookup → trigram first.
+		its, err := trigram()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "search failed")
 			return
+		}
+		items = its
+		// Nothing in the library matched: fall back to semantic so a
+		// marker-less descriptive query ("dark gritty thriller") still
+		// returns something instead of an empty page.
+		if len(items) == 0 && semanticAllowed {
+			if sem, ok := semantic(); ok && len(sem) > 0 {
+				items, searchMode = sem, "semantic"
+			}
 		}
 	}
 	if items == nil {
