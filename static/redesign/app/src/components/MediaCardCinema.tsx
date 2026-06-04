@@ -179,11 +179,13 @@ export function MediaCardCinema({
       className={`media-card-cinema group ${className}`}
       onClick={onSelect}
       onContextMenu={onCardContext}
-      // outer title= = AI reason (so hovering the card shows the
-      // recommender's rationale). The inner .title div has its own
-      // title={item.title} so the browser picks the more-specific
-      // tooltip when the user hovers the truncated title text.
-      title={item.reason || undefined}
+      // 2026-06-04 — the AI reason is NO LONGER a native title= tooltip on
+      // the card. Native tooltips clash with the dark theme, lag ~1s, fire
+      // from anywhere on the card (fighting the inner .title tooltip) and
+      // are invisible on touch. The reason now surfaces via the
+      // reveal-on-intent .reason-scrim over the poster bottom (hover /
+      // focus / tap the gem). The inner .title div keeps its own
+      // title={item.title} for the truncated-title case.
     >
       <div className="poster-wrap">
         {item.poster ? (
@@ -232,12 +234,45 @@ export function MediaCardCinema({
             {isInLib ? <CheckSvg /> : <PlusSvg />}
           </button>
         )}
-        {/* AI-matched gem — only when the recommender attached an LLM
-            reason. Decorative; reason text is shown in the shelf below
-            and via the outer card's title attr. */}
+        {/* AI-matched gem + reveal affordance — only when the recommender
+            attached an LLM reason. The gem is BOTH the always-on
+            "AI-picked" signal AND the explicit control that surfaces the
+            full reason:
+              • desktop  — hovering the card fades .reason-scrim up (CSS).
+              • keyboard — tabbing to this button reveals it (the card's
+                           :focus-within drives the same scrim).
+              • touch    — tapping the gem focuses it → :focus-within →
+                           reveal; tapping elsewhere opens detail.
+            The onClick both stops the tap from navigating AND explicitly
+            focuses the gem: Safari / iOS / Firefox do NOT focus a <button>
+            on tap by default, so without the focus() the touch reveal
+            would silently fail there. The reason TEXT lives in
+            .reason-scrim (kept in the DOM, only opacity-hidden) so screen
+            readers get it without interaction — this button just carries a
+            short label. */}
         {item.reason && (
-          <div className="ai-gem" aria-hidden="true">
+          <button
+            type="button"
+            className="ai-gem"
+            onClick={(e) => {
+              e.stopPropagation()
+              // preventScroll: focusing must not yank the rail into view.
+              e.currentTarget.focus({ preventScroll: true })
+            }}
+            aria-label="Why this is recommended"
+          >
             <SparkleSvg />
+          </button>
+        )}
+        {/* Reveal-on-intent reason scrim — the full LLM reason over the
+            poster bottom. Hidden by default (opacity 0), faded up on card
+            :hover / :focus-within (see index.css). NOT aria-hidden: the
+            text stays in the accessibility tree so screen readers read the
+            reason regardless of the visual reveal. pointer-events stay off
+            so it never intercepts the card's click-to-detail. */}
+        {item.reason && (
+          <div className="reason-scrim">
+            <p className="reason-text">{item.reason}</p>
           </div>
         )}
         {/* Optional caller-controlled overlay (CollectionsView's admin
@@ -339,7 +374,9 @@ export function MediaCardCinema({
             {item.genre && <span>{item.genre}</span>}
           </div>
         )}
-        {item.reason && <p className="reason">{item.reason}</p>}
+        {/* The reason is no longer an always-on truncated caption here —
+            it moved to the reveal-on-intent .reason-scrim over the poster
+            (above), so the shelf stays compact and rail heights uniform. */}
       </div>
     </div>
   )
