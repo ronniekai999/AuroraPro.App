@@ -522,10 +522,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         vid.removeEventListener('play', onLocalPlay)
       }
     }
-    if (pausedByCastRef.current) {
-      pausedByCastRef.current = false
-      void vid.play().catch(() => { /* defensive — autoplay may block */ })
-    }
+    // Cast ended. Do NOT auto-resume LOCAL playback — the cast-end effect
+    // below closes the player rather than handing a finished/stopped
+    // Chromecast back to a phantom full-screen local player over whatever
+    // view the user navigated to (which would also briefly double the audio).
+    // Just clear the flag. AirPlay never sets this ref (its <video> is the
+    // live mirrored source and keeps playing on handoff), so it's unaffected.
+    pausedByCastRef.current = false
   }, [cast.status.connected])
 
   // AirPlay active-state detection. Safari fires
@@ -582,6 +585,46 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     onMinimizedChange?.(minimizedActive)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [minimizedActive])
+
+  // ── Cast end-of-life ──────────────────────────────────────────────────
+  // The minimized cast widget must end ONLY when the user stops it or the
+  // media finishes — never on navigation (gated in App) — and without
+  // resuming a phantom local player over whatever view the user browsed to.
+
+  // Media finished: the Default Media Receiver keeps the SESSION connected at
+  // end-of-media and flips the RemotePlayer's playerState to 'IDLE'. We only
+  // act once the receiver has actually started PLAYING, so the initial
+  // IDLE-before-load doesn't trigger. Keying off playerState (rather than a
+  // currentTime/duration heuristic) is robust to HLS streams whose duration is
+  // unknown or grows as the playlist arrives, and it never fires mid-playback:
+  // a seek/buffer reports BUFFERING and a pause reports PAUSED — only a genuine
+  // end/stop reports IDLE. cast.stop() routes through the Chromecast-end effect
+  // below, which closes the player.
+  const castHasPlayedRef = useRef(false)
+  useEffect(() => {
+    if (!cast.status.connected) { castHasPlayedRef.current = false; return }
+    if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
+    if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
+      castHasPlayedRef.current = false
+      cast.stop()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cast.status.connected, cast.remote.playerState])
+
+  // Chromecast SESSION ended (widget Stop, TV remote, network drop, or the
+  // media-finish stop() above): close the player. We deliberately do NOT
+  // resume local playback — the receiver was the surface and the user has
+  // likely navigated away, so a full-screen local player slamming over the
+  // current view (and starting audio) is wrong. AirPlay keeps its seamless
+  // local handoff via the auto-minimize effect (its <video> IS the mirrored
+  // source), so this is gated on the Chromecast session only.
+  const castConnectedRef = useRef(false)
+  useEffect(() => {
+    const was = castConnectedRef.current
+    castConnectedRef.current = cast.status.connected
+    if (was && !cast.status.connected && !party) onClose()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cast.status.connected, party])
 
   // QA 2026-05-25 — disable every TextTrack on the <video>. Called
   // after a new HLS manifest or direct-play source loads so any
