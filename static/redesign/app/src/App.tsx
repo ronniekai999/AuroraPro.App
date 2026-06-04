@@ -6283,7 +6283,12 @@ export default function App() {
     setSearchQuery('')
     // Close the player on nav so the URL and rendered state stay in
     // sync (matters for programmatic history.replaceState calls).
-    setPlayerTarget(null)
+    // EXCEPTION: when the player is minimized to the cast/AirPlay widget,
+    // keep it mounted — navigating away from the show must NOT tear down an
+    // active cast. The widget (rendered as a root-level sibling, outside the
+    // swapped <main> view) persists and the receiver keeps playing until the
+    // user stops it or the media ends. Mirrors the Escape gate above.
+    if (!playerMinimizedRef.current) setPlayerTarget(null)
     navigate(`/${v}`)
   }, [view, navigate])
 
@@ -6299,6 +6304,15 @@ export default function App() {
   //   - Shows: play the first episode of season 1 (TODO: port the
   //     V1 next-episode smart-resume).
   const handlePlay = useCallback(async (m: Media) => {
+    // Don't start a new playback while a cast/AirPlay session is active: it
+    // would tear down the cast's stream and leave the widget driving a
+    // different title than the TV. The cast persists across navigation by
+    // design — the user stops it from the widget first.
+    if (playerMinimizedRef.current) {
+      const id = nextToastId()
+      setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
+      return
+    }
     setPlayerLoading(true)
     try {
       // Phase 5 — quality preference. Read from the same aurora_prefs
@@ -7281,6 +7295,13 @@ export default function App() {
   // navigated away.
   const continueRequestRef = useRef<AbortController | null>(null)
   const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
+    // Don't start a new playback while a cast/AirPlay session is active (see
+    // handlePlay) — make the user stop the cast from the widget first.
+    if (playerMinimizedRef.current) {
+      const id = nextToastId()
+      setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
+      return
+    }
     // Cancel any previous in-flight resume request (rapid double-click
     // or route change mid-load).
     continueRequestRef.current?.abort()
@@ -7517,6 +7538,11 @@ export default function App() {
   // Play a specific file from the version picker — bypasses
   // pickFile's quality preference since the user picked explicitly.
   const handlePlayFile = useCallback((m: Media, fileId: number) => {
+    if (playerMinimizedRef.current) {
+      const id = nextToastId()
+      setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
+      return
+    }
     setPlayerTarget({
       mediaItemId: m.id,
       fileId,
@@ -7524,7 +7550,7 @@ export default function App() {
       title: m.title,
       subtitle: m.year ? String(m.year) : undefined,
     })
-  }, [])
+  }, [nextToastId])
 
   // Admin refresh-metadata — re-fetches detail after the server
   // starts the refresh so the UI shows updated fields.
@@ -7663,6 +7689,13 @@ export default function App() {
   // pickFile + the user's preferred_quality like before.
   const handlePlayEpisode = useCallback((ep: ApiEpisode, fileId?: number) => {
     if (!selectedMedia) return
+    // Don't start a new playback while a cast/AirPlay session is active (see
+    // handlePlay) — make the user stop the cast from the widget first.
+    if (playerMinimizedRef.current) {
+      const id = nextToastId()
+      setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
+      return
+    }
     // Deep-debug #177 — honor the quality preference, matching handlePlay
     // / handlePlayContinue / handlePlaybackEnded. Without it a manually-
     // started episode used 'auto' (1080p-preferred) while an auto-advanced

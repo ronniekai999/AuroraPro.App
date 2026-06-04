@@ -166,6 +166,11 @@ export interface CastRemoteState {
   canSeek: boolean
   currentTime: number // seconds, receiver timeline
   duration: number // seconds
+  // Receiver playback state: 'IDLE' | 'PLAYING' | 'PAUSED' | 'BUFFERING'.
+  // Flips to 'IDLE' when the media finishes (the explicit end-of-media signal
+  // the player uses to dismiss the cast widget — robust to HLS streams whose
+  // duration is unknown/growing).
+  playerState: string | null
 }
 
 export function useCast(
@@ -191,6 +196,7 @@ export function useCast(
     canSeek: false,
     currentTime: 0,
     duration: 0,
+    playerState: null,
   })
   // RemotePlayer + its controller, created once the framework is detected.
   // Held in refs so the play/pause/seek callbacks stay stable across renders.
@@ -288,6 +294,7 @@ export function useCast(
             canSeek: !!player.canSeek,
             currentTime: player.currentTime || 0,
             duration: player.duration || 0,
+            playerState: player.playerState ?? null,
           })
         }
         remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
