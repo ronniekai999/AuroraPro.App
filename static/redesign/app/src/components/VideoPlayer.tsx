@@ -630,18 +630,29 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
       // De-arm synchronously so a re-render mid-advance can't re-enter here.
       castHasPlayedRef.current = false
-      // Arm BEFORE the async advance so the next session's epoch bump (which
-      // is network-bound and always lands later) can never beat the flag.
-      castAdvancePendingRef.current = true
-      void (async () => {
-        const advanced = await onEndedRef.current?.()
-        if (!advanced) {
-          // Nothing to advance to — clear the arm and close out (the prior
-          // end-of-media behavior: stop → Chromecast-end effect → onClose).
-          castAdvancePendingRef.current = false
-          cast.stop()
-        }
-      })()
+      // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
+      // remote reports CANCELLED/INTERRUPTED, and an ERROR shouldn't silently
+      // skip ahead — those close out instead (cast.stop → Chromecast-end →
+      // onClose). FINISHED, and null/unknown (to preserve the prior any-IDLE
+      // behavior on receivers that don't surface a reason), advance. idleReason
+      // rides the same MEDIA_STATUS as playerState, so it's current here.
+      const reason = cast.remote.idleReason
+      if (reason === 'CANCELLED' || reason === 'INTERRUPTED' || reason === 'ERROR') {
+        cast.stop()
+      } else {
+        // Arm BEFORE the async advance so the next session's epoch bump (which
+        // is network-bound and always lands later) can never beat the flag.
+        castAdvancePendingRef.current = true
+        void (async () => {
+          const advanced = await onEndedRef.current?.()
+          if (!advanced) {
+            // Nothing to advance to — clear the arm and close out (the prior
+            // end-of-media behavior: stop → Chromecast-end effect → onClose).
+            castAdvancePendingRef.current = false
+            cast.stop()
+          }
+        })()
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, cast.remote.playerState])

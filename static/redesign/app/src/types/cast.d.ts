@@ -143,8 +143,18 @@ declare global {
   interface CastSessionInstance {
     getCastDevice(): { friendlyName: string }
     loadMedia(request: CastLoadRequest): Promise<unknown>
-    getMediaSession(): unknown
+    getMediaSession(): CastMediaSession | null
     endSession(stopCasting: boolean): void
+  }
+
+  // The receiver's current media session (chrome.cast.media.Media). We only
+  // read idleReason: the RemotePlayer exposes playerState ('IDLE') but NOT why
+  // it went idle, and that distinction lives here.
+  interface CastMediaSession {
+    // Why playback went IDLE: 'FINISHED' on natural end-of-media,
+    // 'CANCELLED'/'INTERRUPTED' on a user stop or media switch, 'ERROR' on
+    // failure. Null/undefined until the media has gone idle at least once.
+    idleReason?: string | null
   }
 
   // ---- WebKit AirPlay on HTMLVideoElement ----
