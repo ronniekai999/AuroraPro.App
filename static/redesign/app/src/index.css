@@ -713,6 +713,20 @@
   opacity: 1;
   transform: translateY(0);
 }
+/* 2026-06-05 (Home redesign) — AI cards now carry BOTH a reveal-on-hover
+   .reason-scrim AND the quality/maturity .card-badges, which share the
+   poster-bottom-left corner and overlap when the reason reveals. Fade the
+   badges out while the reason is up so the rating chip doesn't sit on top
+   of the reason text. The `.reason-scrim ~` combinator scopes this to
+   cards that actually have a reason — badge-only cards (no scrim) keep
+   their badges on hover. */
+.media-card-cinema .reason-scrim ~ .card-badges {
+  transition: opacity 0.22s ease;
+}
+.media-card-cinema:hover .reason-scrim ~ .card-badges,
+.media-card-cinema:focus-within .reason-scrim ~ .card-badges {
+  opacity: 0;
+}
 .media-card-cinema .reason-text {
   margin: 0;
   font-size: 0.72rem;
