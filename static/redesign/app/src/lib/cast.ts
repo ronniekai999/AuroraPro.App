@@ -171,6 +171,12 @@ export interface CastRemoteState {
   // the player uses to dismiss the cast widget — robust to HLS streams whose
   // duration is unknown/growing).
   playerState: string | null
+  // Why the receiver last went IDLE: 'FINISHED' (natural end-of-media),
+  // 'CANCELLED'/'INTERRUPTED' (user stop / media switch), 'ERROR', or null
+  // (never idled / receiver didn't surface a reason). Sourced from the media
+  // session, not the RemotePlayer (which only carries playerState). The player
+  // uses this to auto-advance only on a genuine finish.
+  idleReason: string | null
 }
 
 export function useCast(
@@ -198,6 +204,7 @@ export function useCast(
     currentTime: 0,
     duration: 0,
     playerState: null,
+    idleReason: null,
   })
   // RemotePlayer + its controller, created once the framework is detected.
   // Held in refs so the play/pause/seek callbacks stay stable across renders.
@@ -288,6 +295,16 @@ export function useCast(
         remoteControllerRef.current = remoteController
         onRemoteChange = () => {
           if (!mounted) return
+          // idleReason lives on the media session, not the RemotePlayer. Read
+          // it here so it lands in the SAME state update as playerState — the
+          // receiver delivers both in one MEDIA_STATUS, so when playerState
+          // becomes 'IDLE' the matching reason is already current. getMediaSession()
+          // can be null between items; default to null then (treated as a
+          // permissive "finished" by the player's advance gate).
+          let idleReason: string | null = null
+          try {
+            idleReason = ctx.getCurrentSession()?.getMediaSession()?.idleReason ?? null
+          } catch { /* defensive — SDK shape varies across builds */ }
           setRemote({
             isConnected: !!player.isConnected,
             isMediaLoaded: !!player.isMediaLoaded,
@@ -296,6 +313,7 @@ export function useCast(
             currentTime: player.currentTime || 0,
             duration: player.duration || 0,
             playerState: player.playerState ?? null,
+            idleReason,
           })
         }
         remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
