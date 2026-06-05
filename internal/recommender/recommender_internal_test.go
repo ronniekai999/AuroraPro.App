@@ -905,3 +905,108 @@ func TestChatJSONWithRetryOn5xx_NilOnRetryHook(t *testing.T) {
 		t.Errorf("want got='ok' calls=2, got got=%q calls=%d", got, calls)
 	}
 }
+
+// --------------------------------------------------------------------------
+// scoreFromMatch — distance→percent mapping (Home net-new #2)
+// --------------------------------------------------------------------------
+
+// TestScoreFromMatch covers the MatchScore (similarity ∈[0,1]) → integer
+// "match %" mapping that drives the hero ring. The DB layer already converts
+// cosine distance to similarity via matchFromDistance; this is the second
+// half (similarity → rounded, clamped percent).
+func TestScoreFromMatch(t *testing.T) {
+	cases := []struct {
+		name  string
+		match float64
+		want  int
+	}{
+		{"perfect", 1.0, 100},
+		{"zero", 0.0, 0},
+		{"half", 0.5, 50},
+		{"rounds up", 0.876, 88},
+		{"rounds down", 0.872, 87},
+		{"cold-start (no centroid)", 0.0, 0},
+		// Defensive clamps — matchFromDistance should never feed these, but
+		// scoreFromMatch must stay in [0,100] regardless.
+		{"above one clamps", 1.4, 100},
+		{"negative clamps", -0.3, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := scoreFromMatch(tc.match); got != tc.want {
+				t.Errorf("scoreFromMatch(%v) = %d, want %d", tc.match, got, tc.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// parseDiscoverResponse — description field (Home net-new #3)
+// --------------------------------------------------------------------------
+
+func TestParseDiscoverResponse_Description(t *testing.T) {
+	raw := `{"rails":[{"title":"Cult Classics","description":"Beloved oddities worth a rewatch","picks":[{"index":1,"reason":"good"}]}]}`
+	rails, err := parseDiscoverResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(rails) != 1 {
+		t.Fatalf("want 1 rail, got %d: %+v", len(rails), rails)
+	}
+	if rails[0].Description != "Beloved oddities worth a rewatch" {
+		t.Errorf("description not parsed: %q", rails[0].Description)
+	}
+}
+
+// A rail without a description must still parse (the field is optional) and
+// leave Description empty so the frontend can fall back to its generic
+// subtitle.
+func TestParseDiscoverResponse_DescriptionOptional(t *testing.T) {
+	raw := `{"rails":[{"title":"R","picks":[{"index":1,"reason":"a"}]}]}`
+	rails, err := parseDiscoverResponse(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(rails) != 1 || rails[0].Description != "" {
+		t.Errorf("absent description should stay empty: %+v", rails)
+	}
+}
+
+// Defensive synonym handling: a model that emits "subtitle" (or "desc")
+// instead of "description" should still populate Description. Also exercises
+// the uppercase-key path (LowercaseKeys runs before the lookup), and that the
+// description is trimmed.
+func TestParseDiscoverResponse_DescriptionSynonyms(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			"subtitle alias",
+			`{"rails":[{"title":"R","subtitle":"  themed line  ","picks":[{"index":1,"reason":"a"}]}]}`,
+			"themed line",
+		},
+		{
+			"desc alias",
+			`{"rails":[{"title":"R","desc":"short theme","picks":[{"index":1,"reason":"a"}]}]}`,
+			"short theme",
+		},
+		{
+			"uppercase DESCRIPTION key",
+			`{"rails":[{"TITLE":"R","DESCRIPTION":"caps theme","PICKS":[{"INDEX":1,"REASON":"a"}]}]}`,
+			"caps theme",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rails, err := parseDiscoverResponse(tc.raw)
+			if err != nil {
+				t.Fatalf("parse failed: %v", err)
+			}
+			if len(rails) != 1 || rails[0].Description != tc.want {
+				t.Errorf("want description %q, got %+v", tc.want, rails)
+			}
+		})
+	}
+}

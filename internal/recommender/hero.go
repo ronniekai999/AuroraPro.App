@@ -90,6 +90,14 @@ const (
 type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
+	// Score is the integer "match %" (0-100) derived from the item's
+	// cosine similarity to the profile's taste vector (Item.MatchScore *
+	// 100, rounded + clamped). It's >0 only for the personalized
+	// (taste-vector) pool; the cold-start popular pool has no centroid so
+	// Score stays 0 and the frontend falls back to its derived rating-based
+	// estimate. Computed once here so the distance→percent mapping lives in
+	// one place server-side.
+	Score int `json:"score,omitempty"`
 }
 
 // Hero is the per-profile recommender. Construct once at startup and reuse;
@@ -459,7 +467,10 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 			if i >= h.poolSize {
 				break
 			}
-			picks = append(picks, HeroPick{Item: item})
+			// PopularUnwatched has no taste centroid, so MatchScore is 0 here
+			// and Score resolves to 0 — the frontend falls back to its
+			// derived rating-based estimate for the cold-start hero.
+			picks = append(picks, HeroPick{Item: item, Score: scoreFromMatch(item.MatchScore)})
 		}
 		quality = qualityFallback
 	}
@@ -565,6 +576,7 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 		picks = append(picks, HeroPick{
 			Item:   candidates[idx],
 			Reason: strings.TrimSpace(p.Reason),
+			Score:  scoreFromMatch(candidates[idx].MatchScore),
 		})
 		if len(picks) >= h.poolSize {
 			break
@@ -578,7 +590,7 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 			if used[i] {
 				continue
 			}
-			picks = append(picks, HeroPick{Item: item})
+			picks = append(picks, HeroPick{Item: item, Score: scoreFromMatch(item.MatchScore)})
 			if len(picks) >= h.poolSize {
 				break
 			}
@@ -587,13 +599,29 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 	return picks, qualityFinal
 }
 
+// scoreFromMatch maps an Item.MatchScore similarity (∈[0,1], set by the
+// recommender DB queries from cosine distance) to the integer "match %"
+// (0-100) the hero ring renders. Centralized so the distance→percent mapping
+// happens in exactly one place. Cold-start items have MatchScore==0 → 0, which
+// the frontend treats as "no real score, use the derived fallback".
+func scoreFromMatch(match float64) int {
+	pct := int(math.Round(match * 100))
+	if pct < 0 {
+		return 0
+	}
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
 func topN(items []*models.MediaItem, n int) []HeroPick {
 	if n > len(items) {
 		n = len(items)
 	}
 	out := make([]HeroPick, n)
 	for i := 0; i < n; i++ {
-		out[i] = HeroPick{Item: items[i]}
+		out[i] = HeroPick{Item: items[i], Score: scoreFromMatch(items[i].MatchScore)}
 	}
 	return out
 }

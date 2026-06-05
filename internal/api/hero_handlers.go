@@ -29,10 +29,13 @@ type HeroProvider interface {
 
 // DiscoverRail is one LLM-curated themed section. Mirrors
 // recommender.DiscoverRail at the boundary. The frontend renders one
-// shelf per rail.
+// shelf per rail. Description is the LLM's optional one-sentence theme line
+// (≤100 chars); empty when the model omitted it, in which case the frontend
+// falls back to a generic subtitle.
 type DiscoverRail struct {
-	Title string              `json:"title"`
-	Items []*models.MediaItem `json:"items"`
+	Title       string              `json:"title"`
+	Description string              `json:"description,omitempty"`
+	Items       []*models.MediaItem `json:"items"`
 }
 
 // AnchorRail is one "Because You Watched X" section: an anchor reference
@@ -45,9 +48,14 @@ type AnchorRail struct {
 
 // HeroPick is the API-layer shape of a hero pool entry. Mirrors
 // recommender.HeroPick at the boundary so internal types can evolve freely.
+//
+// Match is the integer "match %" (0-100) from the recommender's
+// taste-vector similarity; 0/omitted for the cold-start popular pool, in
+// which case the frontend falls back to its own derived estimate.
 type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
+	Match  int               `json:"match,omitempty"`
 }
 
 // HeroHandler serves the personalized "Featured" rail. When no provider is

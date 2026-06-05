@@ -213,6 +213,38 @@ func (q *Queries) UnlockAchievement(ctx context.Context, userID int64, key strin
 	return tag.RowsAffected() > 0, nil
 }
 
+// TopGenreForUser returns the name of the genre the user has finished the
+// most titles in, derived from completed watch_progress rows joined through
+// media_genres → genres. Scoped to user_id (not profile_id) to match the
+// gamification surface, which is per-user (user_xp / user_achievements are
+// keyed on user_id). A title with multiple genres counts once per genre, so a
+// user who finishes one Comedy-Drama contributes to both — the ORDER BY then
+// surfaces whichever genre dominates across all their finishes.
+//
+// Returns ("", nil) — NOT an error — when the user has no completed watches
+// with genre metadata yet, so the caller can treat "no data" as a soft
+// placeholder rather than a failure. Only real DB errors propagate.
+func (q *Queries) TopGenreForUser(ctx context.Context, userID int64) (string, error) {
+	var name string
+	err := q.pool.QueryRow(ctx, `
+		SELECT g.name
+		  FROM watch_progress wp
+		  JOIN media_genres mg ON mg.media_item_id = wp.media_item_id
+		  JOIN genres g ON g.id = mg.genre_id
+		 WHERE wp.user_id = $1 AND wp.completed
+		 GROUP BY g.name
+		 ORDER BY COUNT(*) DESC, g.name ASC
+		 LIMIT 1
+	`, userID).Scan(&name)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("top genre for user: %w", err)
+	}
+	return name, nil
+}
+
 // TouchDate returns today's UTC date (DATE column compatibility).
 func TouchDate() time.Time {
 	now := time.Now().UTC()

@@ -18,8 +18,13 @@ import (
 // an LLM-generated title plus 5-10 picks. Mirrors the api.DiscoverRail
 // shape at the boundary so the recommender stays free of HTTP types.
 type DiscoverRail struct {
-	Title string              `json:"title"`
-	Items []*models.MediaItem `json:"items"`
+	Title string `json:"title"`
+	// Description is the LLM's one-sentence theme line for the rail (≤100
+	// chars). Optional — empty when the model omitted it or on the legacy
+	// flat-title-map fallback shape; the frontend falls back to a generic
+	// subtitle in that case.
+	Description string              `json:"description,omitempty"`
+	Items       []*models.MediaItem `json:"items"`
 }
 
 // Tunables. Discover is the most expensive call in the system — a big
@@ -116,6 +121,13 @@ Your job: produce 3-5 themed rails. Each rail has:
     "Mystery"   — too generic, just a tag
     "Movies"    — empty category
     "Because You Watched Scooby-Doo" — anchor-pinned, that's the other rail's job
+- A one-sentence "description" (≤ 100 characters, no quotes, no emojis) that
+  captures the rail's theme — what ties these picks together. It complements
+  the TITLE; don't just restate it. Examples (paired with the titles above):
+    "Beloved oddities that reward a second viewing"
+    "Quiet horror that builds dread before it bites"
+    "Decade-defining films that refused to pick a lane"
+    "Low-stakes feel-good picks for an unhurried afternoon"
 - A list of 5-8 picks from the candidate list, each with a 1-based "index"
   and a one-sentence "reason" (≤ 80 chars, no quotes, no emojis). The
   RAIL TITLE should not reference a specific anchor (that's the other
@@ -224,8 +236,9 @@ type discoverPickSpec struct {
 
 // discoverRailSpec is one parsed rail before binding to actual MediaItems.
 type discoverRailSpec struct {
-	Title string
-	Picks []discoverPickSpec
+	Title       string
+	Description string
+	Picks       []discoverPickSpec
 }
 
 // DiscoverFor returns the LLM-curated rails for a profile, using the
@@ -418,7 +431,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	used := make(map[int64]bool)
 	out := make([]DiscoverRail, 0, len(specs))
 	for _, spec := range specs {
-		rail := DiscoverRail{Title: spec.Title}
+		rail := DiscoverRail{Title: spec.Title, Description: spec.Description}
 		for _, p := range spec.Picks {
 			item := resolvePick(p, candidates, titleIdx)
 			if item == nil || used[item.ID] {
@@ -642,6 +655,21 @@ func parseDiscoverResponse(raw string) ([]discoverRailSpec, error) {
 			continue
 		}
 
+		// Optional one-sentence theme line. The prompt asks for
+		// "description"; we defensively accept "subtitle"/"desc" too in case
+		// the model picks a synonym (same tolerant-parsing posture as the
+		// title/picks fallbacks). Keys are already lowercased by LowercaseKeys
+		// above. Absent → empty, which the frontend falls back from.
+		description, _ := obj["description"].(string)
+		if description == "" {
+			if d, ok := obj["subtitle"].(string); ok {
+				description = d
+			} else if d, ok := obj["desc"].(string); ok {
+				description = d
+			}
+		}
+		description = strings.TrimSpace(description)
+
 		// The picks array can be nested under any of several keys.
 		// LowercaseKeys above ensured the case-insensitive match — we
 		// only need to lookup the lowercase forms of each alias.
@@ -685,7 +713,7 @@ func parseDiscoverResponse(raw string) ([]discoverRailSpec, error) {
 		if len(picks) == 0 {
 			continue
 		}
-		out = append(out, discoverRailSpec{Title: title, Picks: picks})
+		out = append(out, discoverRailSpec{Title: title, Description: description, Picks: picks})
 	}
 	return out, nil
 }

@@ -317,13 +317,14 @@ function greetingFirstName(username?: string): string {
   return base.charAt(0).toUpperCase() + base.slice(1)
 }
 
-// Stable, deterministic "match %" for the hero ring. The recommender
-// doesn't return a numeric match score yet, so we derive a plausible,
-// CONSISTENT-per-title value (same title → same %, never random) from
-// the media's rating, clamped to a flattering 82–98 band. Falls back to
-// a hash of the id when rating is missing so every hero still gets a
-// number.
-// TODO(redesign-net-new): replace heroMatchScore with the real recommender match score (extend /api/me/hero).
+// Stable, deterministic "match %" for the hero ring — the COLD-START
+// FALLBACK only. The recommender now returns a real taste-vector match
+// (HeroPick.match, threaded as heroMatch) for the personalized pool; this
+// derived value is used solely when that's absent or 0 (the popular
+// cold-start pool has no taste centroid). It produces a plausible,
+// CONSISTENT-per-title value (same title → same %, never random) from the
+// media's rating, clamped to a flattering 82–98 band, hashing the id when
+// rating is missing so every cold-start hero still gets a number.
 function heroMatchScore(media: { id: number; rating?: number }): number {
   const r = media.rating ?? 0
   let score: number
@@ -378,10 +379,13 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onRefreshHero, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
+  // Real recommender "match %" (0-100) for the current hero. Undefined / 0
+  // (cold-start popular pool, no centroid) → fall back to heroMatchScore.
+  match?: number
   // 2026-06-05 (Home redesign B) — My Library state for the hero's
   // "＋ My List / ✓ In My List" toggle. Both must be present for the
   // button to render (same contract as MediaCardCinema's lib badge).
@@ -433,9 +437,11 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   // Backdrop → poster → gradient fallback chain (some TMDB rows have
   // no backdrop image).
   const bgImage = hero.backdrop || hero.poster || ''
-  // 2026-06-05 (Home redesign B) — stable derived match % for the ring
-  // (computed once per render; same title → same value).
-  const matchScore = heroMatchScore(hero)
+  // 2026-06-05 (Home redesign B) — match % for the ring. Prefer the REAL
+  // recommender score (match, from /api/me/hero) when present and positive;
+  // otherwise fall back to the stable derived value (cold-start pool, where
+  // there's no taste centroid). Same title → same value either way.
+  const matchScore = match && match > 0 ? match : heroMatchScore(hero)
   const matchCircumference = 2 * Math.PI * 36
   // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
   // doesn't feel like a static still. The transition smooths cursor
@@ -1432,6 +1438,10 @@ interface HomeViewProps {
   onCardContext?: (e: React.MouseEvent, m: Media) => void
   // Phase 5.3 — hero reason + refresh + pause hooks.
   heroReason?: string
+  // 2026-06-05 (Home net-new #2) — real recommender "match %" for the
+  // current hero pick. Undefined / 0 (cold-start) → HeroSection falls back
+  // to its derived rating-based estimate.
+  heroMatch?: number
   onRefreshHero?: () => void
   onHeroPauseChange?: (paused: boolean) => void
   // Cold-start hint info — passed through from the /api/me/hero response.
@@ -1484,7 +1494,7 @@ interface HomeViewProps {
   libraryTotal?: number | null
   onOpenParty?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1506,23 +1516,10 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
   const weekday = new Date().toLocaleDateString(undefined, { weekday: 'long' })
   const firstName = greetingFirstName(user?.username)
   const nPicks = pickCount ?? 0
-  // Top genre: most common genre across the loaded rails' cards. Honest
-  // derived value (not a stat endpoint); falls back to "—" when no genre
-  // metadata is present yet.
-  const topGenre = (() => {
-    const counts = new Map<string, number>()
-    for (const rail of effectiveRails) {
-      // Skip the Continue Watching rail's items? They carry genre too,
-      // so include everything — more signal = better mode estimate.
-      for (const m of rail.items) {
-        const g = (m.genre || '').trim()
-        if (g) counts.set(g, (counts.get(g) ?? 0) + 1)
-      }
-    }
-    let best = '—'; let bestN = 0
-    for (const [g, n] of counts) { if (n > bestN) { best = g; bestN = n } }
-    return best
-  })()
+  // Top genre is now derived server-side (stats.top_genre, from the user's
+  // completed watch history) and rendered inside YourWeekBand — see
+  // Home net-new #4. The former client-side "most common genre across the
+  // loaded rails" estimate was removed as dead once the real signal landed.
 
   return (
     <div className="animate-fade-in">
@@ -1569,6 +1566,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         onPlay={onPlay}
         onInfo={onSelect}
         reason={heroReason}
+        match={heroMatch}
         onRefreshHero={onRefreshHero}
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
@@ -1666,7 +1664,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
           rails (so they don't flash above an empty/loading home). */}
       {effectiveRails.length > 0 && (
         <>
-          <YourWeekBand topGenre={topGenre} />
+          <YourWeekBand />
           <WatchTogetherCard onStartParty={onOpenParty} />
         </>
       )}
@@ -1678,13 +1676,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
  * 2026-06-05 — A slim glass band below the last rail. Real data from
  * getGamificationStats: Level, per-level XP bar (SAME math as
  * GamificationCard so the two never disagree), day-streak (current +
- * "best {longest}"), and "Completed" (total_watches). The weekly
- * watch-hours / titles-finished-this-week / top-genre stats have no
- * backend yet — they render as honest placeholders (a dash for the
- * counts, a derived top genre passed from HomeView) and are marked for
- * wiring. Self-fetches like GamificationCard so HomeView doesn't have to
- * own the request. */
-function YourWeekBand({ topGenre }: { topGenre: string }) {
+ * "best {longest}"), and the top genre (stats.top_genre, derived
+ * server-side from the user's completed watch history). The weekly
+ * watch-hours / titles-finished-this-week stats have no backend yet — they
+ * render as honest "—" placeholders and are marked for wiring. Self-fetches
+ * like GamificationCard so HomeView doesn't have to own the request. */
+function YourWeekBand() {
   const [stats, setStats] = useState<GamificationStats | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -1727,7 +1724,7 @@ function YourWeekBand({ topGenre }: { topGenre: string }) {
         </div>
         {/* Stats grid */}
         <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
-          {/* TODO(redesign-net-new): weekly watch-hours / titles-finished-this-week / top-genre need a backend stats endpoint. */}
+          {/* TODO(redesign-net-new): weekly watch-hours + titles-finished-this-week still need a backend stats endpoint (top genre is now wired via stats.top_genre below). */}
           <div className="px-5 py-5 flex flex-col gap-1.5">
             <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">—<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
             <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
@@ -1742,7 +1739,7 @@ function YourWeekBand({ topGenre }: { topGenre: string }) {
             <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
           </div>
           <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[21px] font-bold leading-none">{topGenre}</span>
+            <span className="font-display text-[21px] font-bold leading-none">{stats?.top_genre || '—'}</span>
             <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
           </div>
         </div>
@@ -6661,6 +6658,13 @@ export default function App() {
   const [homeRails, setHomeRails] = useState<HomeViewProps['rails']>(undefined)
   const [homeLoading, setHomeLoading] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
+  // 2026-06-05 (Home net-new #1) — real total library size for the greeting's
+  // "picked from X titles" clause. Fetched count-only on Home mount via a
+  // per_page=1 /api/media call (no type filter → counts movies+shows
+  // together). null until it lands / on error, so the greeting omits the
+  // clause rather than fabricating a number. The browse-tab counts
+  // (moviesTotal+showsTotal) remain a fallback (see the libraryTotal prop).
+  const [homeLibraryTotal, setHomeLibraryTotal] = useState<number | null>(null)
 
   const navigate = useNavigate()
   const location = useLocation()
@@ -7405,17 +7409,18 @@ export default function App() {
         ])
         if (cancelled) return
 
-        // 2026-06-05 (Home redesign D) — the recommender-driven rails get
-        // the "✨ AI PICK" chip + a short "why it's here" subtitle + 4K/HDR
-        // badges. The subtitles are illustrative (the recommender doesn't
-        // return per-rail descriptions yet).
-        // TODO(redesign-net-new): real per-rail descriptions if the recommender starts returning them.
+        // 2026-06-05 (Home redesign D / net-new #3) — the recommender-driven
+        // rails get the "✨ AI PICK" chip + a short "why it's here" subtitle +
+        // 4K/HDR badges. Discover rails now carry a REAL LLM-written
+        // description; fall back to the generic constant when the model
+        // omitted it. Anchor rails have no LLM description (pure vector
+        // retrieval), so they keep their hardcoded subtitle.
         const personalizedRails = [
           ...(discover.length > 0
             ? discover
                 .filter(r => r.items.length > 0)
                 .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-                  aiPick: true, showBadges: true, subtitle: 'Hand-picked by Aurora for your taste' }))
+                  aiPick: true, showBadges: true, subtitle: r.description || 'Hand-picked by Aurora for your taste' }))
             : []),
           ...(anchor.length > 0
             ? anchor
@@ -8284,6 +8289,22 @@ export default function App() {
     void reloadHeroPool(false)
   }, [reloadHeroPool])
 
+  // 2026-06-05 (Home net-new #1) — fetch the real library total for the
+  // greeting's "picked from X titles" clause. One count-only call
+  // (per_page=1, no type filter → movies+shows counted together) using the
+  // server's total_items. Non-blocking, abortable, and non-fatal: on error
+  // we leave homeLibraryTotal null and the greeting simply omits the clause
+  // (it already gates on a non-null total). The browse-tab counts remain a
+  // fallback. Gated on `user` so we don't fire pre-auth.
+  useEffect(() => {
+    if (!user) return
+    const ac = new AbortController()
+    listMediaWithTotal({ perPage: 1, signal: ac.signal })
+      .then(({ total }) => setHomeLibraryTotal(total))
+      .catch(() => { /* non-fatal — greeting omits the clause when null */ })
+    return () => ac.abort()
+  }, [user])
+
   // Hero rotation. Cycles every 9s; pauses on hover via heroPaused.
   // CSS in HeroSection handles the crossfade.
   useEffect(() => {
@@ -8636,6 +8657,7 @@ export default function App() {
               onRetry={requestHomeReload}
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
+              heroMatch={heroPool[heroIndex]?.match}
               onRefreshHero={() => void reloadHeroPool(true)}
               onHeroPauseChange={setHeroPaused}
               heroPersonalization={heroPersonalization}
@@ -8646,15 +8668,18 @@ export default function App() {
               user={typeof user === 'object' ? user : undefined}
               // Real count of personalized/hero picks available.
               pickCount={heroPool.length}
-              // Real library total ONLY when reachable: moviesTotal /
-              // showsTotal are populated lazily when the user visits those
-              // browse tabs (null until then). Sum what's available; pass
-              // null when neither has loaded so HomeView OMITS the
-              // "picked from X titles" clause rather than fabricate it.
+              // Real library total. Prefer the count-only mount fetch
+              // (homeLibraryTotal — movies+shows in one call); fall back to
+              // the browse-tab counts (moviesTotal / showsTotal, populated
+              // lazily when the user visits those tabs). Pass null when none
+              // has loaded so HomeView OMITS the "picked from X titles"
+              // clause rather than fabricate it.
               libraryTotal={
-                moviesTotal == null && showsTotal == null
-                  ? null
-                  : (moviesTotal ?? 0) + (showsTotal ?? 0)
+                homeLibraryTotal != null
+                  ? homeLibraryTotal
+                  : moviesTotal == null && showsTotal == null
+                    ? null
+                    : (moviesTotal ?? 0) + (showsTotal ?? 0)
               }
               // Opens the existing Watch Party hub (same as the top bar).
               onOpenParty={() => setPartyJoinPrompt(true)}
