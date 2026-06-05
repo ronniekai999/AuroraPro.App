@@ -1,0 +1,798 @@
+<!doctype html>
+<!--
+  AURORA · UI REFRESH 2026 — HOME / "FOR YOU" (mockup 1 of 3: Home · Search · Player)
+  ──────────────────────────────────────────────────────────────────────────────
+  POV: "Aurora knows you." Today's Home is a generic Netflix-shaped hero on top of
+  a flat vertical stack of rails — it buries Aurora's smartest assets: the AI pick
+  *reasons*, the user's own watch stats (real GamificationCard), and watch parties.
+  This redesign turns Home into a personal, intelligent concierge.
+
+  WHAT'S NEW vs the shipped HomeView (App.tsx HomeView ~1232 + HeroSection ~280):
+    1. Time-aware GREETING BAND above the hero ("Good evening, Ronnie · 3 worth your time").
+    2. "Tonight's Pick" hero that LEADS WITH THE WHY — the AI reason is a first-class
+       line, not a hover tooltip — + a 94% match ring + a "Not tonight ↻" shuffle that
+       rotates through 3 reasoned picks (backdrop, title, reason, match all swap).
+    3. CONTINUE WATCHING resume strip — wide 16:9 cards w/ purple progress + "23 min left".
+    4. SELF-EXPLAINING rails — every rail has a one-line "why it's here" subtitle; the AI
+       rails carry a ✨ tag and a per-card "why" phrase that reveals on hover (cf. PR #212).
+    5. "YOUR WEEK" stat strip — quiet premium glass band (hours · finished · day-streak ·
+       top genre), mirroring the real GamificationCard model (level/streak/completed).
+    6. "WATCH TOGETHER" moment — a friend is mid-movie; join, or start a party.
+
+  Shared chrome (sidebar, topbar, tokens, scrollbar, icon-sprite) is lifted VERBATIM
+  from docs/proposals/library-redesign/03-hybrid-recommended.html so Home/Search/Player
+  read as ONE app on ONE logged-in account (rontavious999, Admin).
+
+  Artwork is the real TMDB poster/backdrop art the app serves; each tile keeps an
+  art-directed gradient underneath as a graceful fallback if an image is slow or blocked.
+-->
+<html lang="en" data-glow="aurora">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aurora · Home (For You)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#050505; --panel:rgba(255,255,255,.03); --panel2:rgba(255,255,255,.05);
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.12); --hair:rgba(255,255,255,.08);
+    --text:#fff; --muted:rgba(255,255,255,.6); --muted2:rgba(255,255,255,.4);
+    --purple:#a855f7; --purple-l:#d8b4fe; --purple-d:#7e22ce; --indigo:#6366f1;
+    --gold:#facc15;
+    --glow-border:rgba(220,200,255,.22); --glow-border-strong:rgba(220,200,255,.45);
+    --halo:0 0 0 1px rgba(220,200,255,.14), 0 0 28px rgba(168,85,247,.12), 0 0 56px rgba(255,255,255,.05);
+    --halo-strong:0 0 0 1px rgba(220,200,255,.25), 0 0 34px rgba(168,85,247,.2), 0 0 72px rgba(255,255,255,.08);
+    --radius:14px; --sidebar:240px;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;
+    --display:'Space Grotesk','Inter',sans-serif;
+  }
+  html,body{background:var(--bg);color:var(--text);font-family:var(--font);-webkit-font-smoothing:antialiased}
+  body{min-height:100vh;background:
+      radial-gradient(ellipse 80% 60% at 18% 0%, rgba(168,85,247,.10), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 100% 8%, rgba(216,180,254,.06), transparent 55%),
+      radial-gradient(ellipse 70% 60% at 50% 100%, rgba(107,33,168,.08), transparent 60%),
+      var(--bg)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(217,70,239,.25));border-radius:10px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:linear-gradient(135deg,rgba(168,85,247,.75),rgba(217,70,239,.55));background-clip:padding-box}
+  .ico{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+  /* real TMDB art layer — sits under existing scrims/text; gradient shows through if it never loads */
+  .tmdb-art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
+
+  /* ---------- Sidebar (verbatim from reference) ---------- */
+  .sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sidebar);background:#050505;border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:40}
+  .brand{display:flex;align-items:center;gap:11px;padding:20px 18px 16px}
+  .brand .logo{width:36px;height:36px;border-radius:11px;background:rgba(168,85,247,.18);border:1px solid rgba(168,85,247,.4);display:grid;place-items:center;box-shadow:0 0 18px rgba(168,85,247,.25)}
+  .brand .name{font-family:var(--display);font-weight:700;font-size:19px;letter-spacing:.14em}
+  .nav{flex:1;padding:8px 12px;display:flex;flex-direction:column;gap:3px;overflow:auto}
+  .nav .lbl{font-size:10px;letter-spacing:.16em;color:var(--muted2);text-transform:uppercase;padding:14px 10px 6px}
+  .navlink{display:flex;align-items:center;gap:12px;padding:10px 11px;border-radius:10px;color:var(--muted);font-size:14px;font-weight:500;cursor:pointer;position:relative;border:1px solid transparent;transition:.15s}
+  .navlink:hover{color:#fff;background:rgba(255,255,255,.04)}
+  .navlink.active{color:#fff;background:rgba(168,85,247,.15);border-color:rgba(168,85,247,.25)}
+  .navlink.active::before{content:'';position:absolute;left:-12px;top:50%;transform:translateY(-50%);width:3px;height:20px;background:var(--purple);border-radius:0 3px 3px 0;box-shadow:0 0 10px rgba(168,85,247,.6)}
+  .navlink .badge{margin-left:auto;background:var(--purple);color:#fff;font-size:10px;font-weight:700;border-radius:9px;padding:1px 6px}
+  .side-foot{padding:10px 12px;border-top:1px solid var(--border)}
+  .user{display:flex;align-items:center;gap:10px;padding:9px;border-radius:11px;cursor:pointer}
+  .user:hover{background:rgba(255,255,255,.04)}
+  .user .av{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--purple-d));display:grid;place-items:center;font-weight:700;font-size:13px}
+  .user .nm{font-size:13px;font-weight:600;line-height:1.2}
+  .user .rl{font-size:11px;color:var(--muted2)}
+
+  /* ---------- Shell ---------- */
+  .main{margin-left:var(--sidebar)}
+  .topbar{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;padding:12px 28px;background:rgba(5,5,5,.72);backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,255,255,.05)}
+  .search{position:relative;flex:1;max-width:440px}
+  .search .ico{position:absolute;left:13px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--muted2)}
+  .search input{width:100%;padding:11px 14px 11px 40px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:11px;color:#fff;font-size:14px;font-family:var(--font)}
+  .search input::placeholder{color:var(--muted2)}
+  .search input:focus{outline:none;border-color:rgba(168,85,247,.4);background:rgba(255,255,255,.05)}
+  .spacer{flex:1}
+  .tb-btn{position:relative;width:40px;height:40px;border-radius:11px;background:rgba(255,255,255,.03);border:1px solid var(--border);display:grid;place-items:center;color:var(--muted);cursor:pointer}
+  .tb-btn:hover{color:#fff;background:rgba(255,255,255,.06)}
+  .tb-btn .dot{position:absolute;top:8px;right:9px;width:7px;height:7px;border-radius:50%;background:var(--purple);box-shadow:0 0 8px rgba(168,85,247,.8)}
+  .tb-user{display:flex;align-items:center;gap:8px;padding:5px 6px 5px 12px;border-radius:11px;background:rgba(255,255,255,.03);border:1px solid var(--border);cursor:pointer;font-size:13px;font-weight:600}
+  .tb-user .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,var(--purple),var(--purple-d));display:grid;place-items:center;font-size:12px;font-weight:700}
+  .tb-user .star{color:var(--gold)}
+
+  .content{padding:22px 40px 96px;max-width:1560px}
+
+  /* ---------- 1 · Greeting band ---------- */
+  .greet{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin:8px 0 18px}
+  .greet h1{font-family:var(--display);font-size:30px;font-weight:700;letter-spacing:-.01em;line-height:1.05}
+  .greet h1 .accent{background:linear-gradient(120deg,var(--purple-l),var(--purple));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .greet .sub{color:var(--muted);font-size:13.5px;margin-top:6px;display:flex;align-items:center;gap:9px}
+  .greet .sub .ico{width:14px;height:14px;color:var(--purple-l)}
+  .greet .sub b{color:#fff;font-weight:600}
+  .greet .dot{width:3px;height:3px;border-radius:50%;background:var(--muted2)}
+  .greet .liveask{display:inline-flex;align-items:center;gap:8px;padding:9px 15px;border-radius:999px;background:rgba(168,85,247,.12);border:1px solid rgba(168,85,247,.3);color:var(--purple-l);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:.15s}
+  .greet .liveask:hover{background:rgba(168,85,247,.2);color:#fff;box-shadow:var(--halo)}
+  .greet .liveask .ico{width:15px;height:15px;stroke:none;fill:var(--gold)}
+
+  /* ---------- 2 · Tonight's Pick hero ---------- */
+  .hero{position:relative;height:486px;border-radius:20px;overflow:hidden;isolation:isolate;border:1px solid var(--glow-border);box-shadow:var(--halo)}
+  .hero-art{position:absolute;inset:0;z-index:-2;transition:opacity .5s,background .5s}
+  .hero-art::after{content:'';position:absolute;inset:0;background:
+     linear-gradient(90deg, rgba(5,5,5,.96) 0%, rgba(5,5,5,.6) 40%, rgba(5,5,5,.12) 70%, transparent 100%),
+     linear-gradient(0deg, var(--bg) 1%, rgba(5,5,5,.25) 32%, transparent 64%)}
+  .hero-grain{position:absolute;inset:0;z-index:-1;opacity:.5;pointer-events:none;
+     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.4'/%3E%3C/svg%3E")}
+  .hero-inner{position:relative;height:100%;display:flex;flex-direction:column;justify-content:flex-end;padding:0 52px 40px;max-width:720px}
+  .hero-eyebrow{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;padding:6px 13px;border-radius:999px;background:rgba(168,85,247,.16);border:1px solid rgba(168,85,247,.34);color:var(--purple-l);font-size:11px;font-weight:600;letter-spacing:.13em;text-transform:uppercase;margin-bottom:14px}
+  .hero-eyebrow .ico{width:13px;height:13px;stroke:none;fill:var(--gold)}
+  .hero h2{font-family:var(--display);font-size:54px;line-height:.98;font-weight:700;letter-spacing:-.02em;margin-bottom:13px;text-shadow:0 4px 40px rgba(0,0,0,.6);transition:opacity .35s}
+  /* the WHY — first-class, not a tooltip */
+  .hero-why{display:flex;align-items:flex-start;gap:11px;max-width:540px;margin-bottom:15px;transition:opacity .35s}
+  .hero-why .spark{width:30px;height:30px;flex:none;border-radius:9px;background:rgba(250,204,21,.12);border:1px solid rgba(250,204,21,.3);display:grid;place-items:center;margin-top:1px}
+  .hero-why .spark .ico{width:16px;height:16px;stroke:none;fill:var(--gold)}
+  .hero-why p{font-size:16px;line-height:1.45;color:rgba(255,255,255,.92);font-weight:500}
+  .hero-why p .em{color:var(--purple-l);font-weight:600}
+  .hero-meta{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:14px;color:rgba(255,255,255,.82);margin-bottom:13px}
+  .hero-meta .rate{display:inline-flex;align-items:center;gap:5px;color:var(--gold);font-weight:700}
+  .hero-meta .rate .ico{width:15px;height:15px;stroke:none;fill:var(--gold)}
+  .hero-meta .chip{padding:2px 9px;border:1px solid var(--border2);border-radius:6px;font-size:12px;color:var(--muted)}
+  .hero-meta .dot{width:3px;height:3px;border-radius:50%;background:var(--muted2)}
+  .hero .syn{font-size:14.5px;line-height:1.55;color:rgba(255,255,255,.7);max-width:540px;margin-bottom:22px;transition:opacity .35s}
+  .hero-actions{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;padding:12px 22px;border-radius:11px;font-size:14.5px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:.18s;font-family:var(--font)}
+  .btn .ico{width:18px;height:18px}
+  /* Resume CTA with embedded progress (indigo, per shipped HeroSection M4) */
+  .btn-resume{position:relative;overflow:hidden;background:var(--indigo);color:#fff;padding-bottom:15px}
+  .btn-resume:hover{transform:translateY(-1px);background:#7c7ff5;box-shadow:0 8px 30px rgba(99,102,241,.4)}
+  .btn-resume .ico{stroke:#fff;fill:none}
+  .btn-resume .barwrap{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,.22)}
+  .btn-resume .barwrap i{display:block;height:100%;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.6)}
+  .btn-glass{background:rgba(255,255,255,.1);color:#fff;border-color:var(--border2);backdrop-filter:blur(8px)}
+  .btn-glass:hover{background:rgba(255,255,255,.16)}
+  .btn-shuffle{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid var(--border);font-size:13px;padding:11px 16px}
+  .btn-shuffle:hover{color:#fff;border-color:rgba(168,85,247,.4);background:rgba(168,85,247,.1)}
+  .btn-shuffle .ico{width:15px;height:15px;transition:transform .5s}
+  .btn-shuffle:hover .ico{transform:rotate(180deg)}
+  /* match ring (top-right of hero) */
+  .matchwrap{position:absolute;top:30px;right:34px;z-index:3;display:flex;flex-direction:column;align-items:center;gap:7px}
+  .ring{width:84px;height:84px;transform:rotate(-90deg)}
+  .ring .track{fill:none;stroke:rgba(255,255,255,.1);stroke-width:6}
+  .ring .val{fill:none;stroke:url(#mg);stroke-width:6;stroke-linecap:round;transition:stroke-dasharray .6s}
+  .matchwrap .num{position:absolute;top:24px;font-family:var(--display);font-weight:700;font-size:21px;line-height:1}
+  .matchwrap .lab{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--purple-l);font-weight:600}
+
+  /* ---------- section label (shared) ---------- */
+  .seclabel{display:flex;align-items:center;gap:13px;margin:34px 0 14px}
+  .seclabel .ico{width:17px;height:17px;color:var(--purple-l)}
+  .seclabel .tt{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .seclabel h3{font-size:16.5px;font-weight:600;display:flex;align-items:center;gap:9px}
+  .seclabel .aitag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;background:rgba(250,204,21,.1);border:1px solid rgba(250,204,21,.28);color:var(--gold);font-size:9.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .seclabel .aitag .ico{width:10px;height:10px;color:var(--gold);stroke:none;fill:var(--gold)}
+  .seclabel .why{font-size:12.5px;color:var(--muted)}
+  .seclabel .why b{color:var(--purple-l);font-weight:600}
+  .seclabel .line{flex:1;height:1px;background:linear-gradient(90deg,var(--hair),transparent);align-self:center}
+  .seclabel .more{color:var(--muted2);font-size:12.5px;cursor:pointer;flex:none;align-self:center}
+  .seclabel .more:hover{color:var(--purple-l)}
+
+  .rail{display:flex;gap:18px;overflow-x:auto;padding:4px 0 14px;scrollbar-width:none}
+  .rail::-webkit-scrollbar{display:none}
+
+  /* ---------- 3 · Continue Watching (wide 16:9) ---------- */
+  .cwcard{width:340px;flex:none;cursor:pointer}
+  .cwart{position:relative;aspect-ratio:16/9;border-radius:var(--radius);overflow:hidden;border:1px solid var(--glow-border);box-shadow:var(--halo);transition:transform .35s cubic-bezier(.4,0,.2,1),box-shadow .35s,border-color .35s}
+  .cwcard:hover .cwart{transform:translateY(-6px);border-color:var(--glow-border-strong);box-shadow:var(--halo-strong),0 22px 46px rgba(0,0,0,.6)}
+  .cwart .scrim{position:absolute;inset:0;background:linear-gradient(0deg,rgba(5,5,5,.9),rgba(5,5,5,.1) 55%,transparent),linear-gradient(180deg,rgba(0,0,0,.28),transparent 30%)}
+  .cwart .play{position:absolute;top:50%;left:50%;transform:translate(-50%,-46%) scale(.85);width:54px;height:54px;border-radius:50%;background:rgba(255,255,255,.95);display:grid;place-items:center;opacity:0;transition:.28s;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .cwcard:hover .cwart .play{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .cwart .play .ico{width:22px;height:22px;stroke:none;fill:#0a0a0a;margin-left:2px}
+  .cwart .badge{position:absolute;top:11px;left:12px;padding:3px 8px;border-radius:6px;background:rgba(8,6,14,.72);border:1px solid var(--border2);font-size:9.5px;font-weight:700;letter-spacing:.06em}
+  .cwart .label{position:absolute;left:14px;right:14px;bottom:14px;z-index:1}
+  .cwart .label .t{font-family:var(--display);font-weight:700;font-size:18px;text-shadow:0 2px 12px rgba(0,0,0,.6)}
+  .cwart .label .e{font-size:12px;color:rgba(255,255,255,.78);margin-top:3px;display:flex;align-items:center;gap:7px}
+  .cwart .label .e .ico{width:12px;height:12px}
+  .cwbar{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,.16)}
+  .cwbar i{display:block;height:100%;background:linear-gradient(90deg,var(--purple),var(--purple-l));box-shadow:0 0 10px rgba(168,85,247,.6)}
+
+  /* ---------- 4 · Reasoned poster rails ---------- */
+  .pcard{width:184px;flex:none;cursor:pointer}
+  .poster{position:relative;aspect-ratio:2/3;border-radius:var(--radius);overflow:hidden;border:1px solid var(--glow-border);box-shadow:var(--halo);transition:transform .35s cubic-bezier(.4,0,.2,1),box-shadow .35s,border-color .35s}
+  .pcard:hover .poster{transform:translateY(-8px);border-color:var(--glow-border-strong);box-shadow:var(--halo-strong),0 24px 50px rgba(0,0,0,.6)}
+  .poster .art{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:18px}
+  .poster .art::before{content:'';position:absolute;inset:0;background:radial-gradient(120% 80% at 70% 14%,rgba(255,255,255,.2),transparent 55%)}
+  .poster .art::after{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(0,0,0,.55),transparent 42%),linear-gradient(180deg,rgba(0,0,0,.32),transparent 28%);box-shadow:inset 0 0 60px rgba(0,0,0,.45)}
+  .poster .ptitle{position:relative;font-family:var(--display);font-weight:700;font-size:18px;line-height:1.12;letter-spacing:-.01em;text-shadow:0 2px 14px rgba(0,0,0,.6);z-index:1}
+  .poster .pgenre{position:relative;font-size:10px;letter-spacing:.2em;text-transform:uppercase;color:rgba(255,255,255,.72);margin-top:8px;z-index:1}
+  .rchip{position:absolute;top:10px;right:11px;display:flex;align-items:center;gap:3px;padding:4px 8px;border-radius:999px;background:rgba(8,6,14,.72);border:1px solid rgba(250,204,21,.3);color:var(--gold);font-size:12px;font-weight:700;z-index:3}
+  .rchip .ico{width:12px;height:12px;stroke:none;fill:var(--gold)}
+  .qbadge{position:absolute;bottom:10px;left:11px;padding:3px 7px;border-radius:6px;background:rgba(8,6,14,.72);border:1px solid var(--border2);font-size:9.5px;font-weight:700;letter-spacing:.06em;z-index:3}
+  .ec-accent{position:absolute;left:0;right:0;bottom:0;height:3px;z-index:2}
+  /* the per-card AI "why" — reveal on hover/focus (cf. PR #212) */
+  .whyscrim{position:absolute;inset:0;z-index:4;opacity:0;transition:opacity .25s;background:linear-gradient(0deg,rgba(5,5,5,.94),rgba(8,6,16,.55) 50%,rgba(8,6,16,.2));display:flex;flex-direction:column;justify-content:flex-end;padding:14px;pointer-events:none}
+  .pcard:hover .poster .whyscrim,.pcard:focus-within .poster .whyscrim{opacity:1}
+  .whyscrim .wlab{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:7px}
+  .whyscrim .wlab .ico{width:11px;height:11px;stroke:none;fill:var(--gold)}
+  .whyscrim .wtxt{font-size:13px;line-height:1.4;color:#fff;font-weight:500}
+  .pshelf{padding:10px 2px 0}
+  .pshelf .t{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pshelf .m1{display:flex;align-items:center;gap:6px;font-size:12px;margin-top:5px}
+  .pshelf .m1 .s{display:inline-flex;align-items:center;gap:3px;color:var(--gold);font-weight:700}
+  .pshelf .m1 .s .ico{width:11px;height:11px;stroke:none;fill:var(--gold)}
+  .pshelf .m1 .yr{color:var(--muted)}
+  .pshelf .m1 .gc{color:var(--purple-l)}
+
+  /* ---------- 5 · "Your week" stat strip ---------- */
+  .week{margin-top:30px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(120deg,rgba(168,85,247,.08),rgba(255,255,255,.02));position:relative;overflow:hidden;display:flex;align-items:stretch}
+  .week::before{content:'';position:absolute;top:-60px;right:-40px;width:280px;height:280px;border-radius:50%;background:rgba(168,85,247,.14);filter:blur(60px);pointer-events:none}
+  .week-lead{padding:20px 24px;display:flex;flex-direction:column;justify-content:center;gap:5px;min-width:210px;border-right:1px solid var(--hair)}
+  .week-lead .k{display:inline-flex;align-items:center;gap:8px;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--purple-l);font-weight:600}
+  .week-lead .k .ico{width:13px;height:13px}
+  .week-lead .lvl{font-family:var(--display);font-size:26px;font-weight:700;line-height:1.05}
+  .week-lead .xpbar{height:6px;border-radius:6px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:7px}
+  .week-lead .xpbar i{display:block;height:100%;background:linear-gradient(90deg,var(--purple),#e879f9)}
+  .week-lead .xpnote{font-size:11px;color:var(--muted2);margin-top:6px}
+  .week-stats{flex:1;display:grid;grid-template-columns:repeat(4,1fr);position:relative}
+  .wstat{padding:20px 22px;display:flex;flex-direction:column;gap:5px;border-left:1px solid var(--hair)}
+  .wstat:first-child{border-left:none}
+  .wstat .big{font-family:var(--display);font-size:28px;font-weight:700;line-height:1;display:flex;align-items:baseline;gap:4px}
+  .wstat .big small{font-size:14px;color:var(--muted);font-weight:500;font-family:var(--font)}
+  .wstat .cap{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .wstat .cap .ico{width:13px;height:13px;color:var(--purple-l)}
+  .wstat .streak .ico{color:#fb923c;stroke:#fb923c;fill:none}
+
+  /* ---------- 6 · Watch together ---------- */
+  .together{margin-top:30px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(120deg,rgba(99,102,241,.1),rgba(255,255,255,.02));position:relative;overflow:hidden;display:flex;align-items:center;gap:22px;padding:20px 24px;flex-wrap:wrap}
+  .together::before{content:'';position:absolute;bottom:-70px;left:30%;width:300px;height:240px;border-radius:50%;background:rgba(99,102,241,.16);filter:blur(64px);pointer-events:none}
+  .together .ttart{position:relative;width:118px;height:68px;border-radius:11px;overflow:hidden;flex:none;border:1px solid var(--border2)}
+  .together .ttart::after{content:'';position:absolute;inset:0;background:linear-gradient(0deg,rgba(0,0,0,.4),transparent 60%)}
+  .together .ttart .live{position:absolute;top:7px;left:7px;z-index:1;display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:999px;background:rgba(8,6,14,.7);font-size:9px;font-weight:700;letter-spacing:.08em;color:#fff}
+  .together .ttart .live i{width:6px;height:6px;border-radius:50%;background:#22d3ee;box-shadow:0 0 7px #22d3ee;animation:pulse 1.6s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .together .ttbody{flex:1;min-width:200px}
+  .together .ttbody .k{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#a5b4fc;font-weight:600;display:flex;align-items:center;gap:7px}
+  .together .ttbody .k .ico{width:13px;height:13px}
+  .together .ttbody .h{font-size:17px;font-weight:600;margin-top:5px}
+  .together .ttbody .h b{color:#fff}
+  .together .ttbody .h .ttl{color:var(--purple-l);font-weight:600}
+  .together .ttbody .s{font-size:12.5px;color:var(--muted);margin-top:3px}
+  .together .ttacts{display:flex;align-items:center;gap:14px;flex:none;flex-wrap:wrap}
+  .friends{display:flex;align-items:center}
+  .friends .fav{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff;border:2px solid #0a0a0f;margin-left:-10px}
+  .friends .fav:first-child{margin-left:0}
+  .friends .more{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:600;background:rgba(255,255,255,.08);border:2px solid #0a0a0f;color:var(--muted);margin-left:-10px}
+  .btn-join{background:#fff;color:#0a0a0a;padding:11px 20px}
+  .btn-join:hover{transform:translateY(-1px);box-shadow:0 8px 26px rgba(255,255,255,.18)}
+  .btn-join .ico{width:16px;height:16px;stroke:none;fill:#0a0a0a}
+  .btn-party{background:rgba(99,102,241,.18);color:#c7d2fe;border:1px solid rgba(99,102,241,.4);padding:11px 18px}
+  .btn-party:hover{background:rgba(99,102,241,.3);color:#fff}
+  .btn-party .ico{width:16px;height:16px}
+
+  .reportbug{position:fixed;right:24px;bottom:24px;z-index:50;display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid rgba(168,85,247,.2);color:var(--muted);font-size:12px;font-weight:500;cursor:pointer;backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .reportbug:hover{color:#fff;background:rgba(168,85,247,.15);border-color:rgba(168,85,247,.4)}
+  .reportbug .ico{width:14px;height:14px}
+
+  @media (max-width:1080px){
+    .week{flex-direction:column}
+    .week-lead{border-right:none;border-bottom:1px solid var(--hair)}
+    .week-stats{grid-template-columns:repeat(2,1fr)}
+    .wstat:nth-child(3){border-left:none}
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9v11h14V9"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 12h4M3 16h4M17 8h4M17 12h4M17 16h4"/></symbol>
+  <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="m8 3 4 4 4-4"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="M12 2.5 14.9 8.6l6.6.9-4.8 4.6 1.2 6.6L12 17.6 6.1 20.7l1.2-6.6L2.5 9.5l6.6-.9z"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9h18M8 2.5v4M16 2.5v4"/></symbol>
+  <symbol id="i-lib" viewBox="0 0 24 24"><path d="M4 4h6v16H4zM14 4h6v16h-6z"/></symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></symbol>
+  <symbol id="i-admin" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 0 0-.1-1.3l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2.3-1.3L13.8 2h-3.6l-.5 2.5A7 7 0 0 0 7.4 5.8l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.6l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2.3 1.3l.5 2.5h3.6l.5-2.5a7 7 0 0 0 2.3-1.3l2.3 1 2-3.4-2-1.5A7 7 0 0 0 19 12z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0M16 5.2a3.2 3.2 0 0 1 0 6.1M20.5 20a5.5 5.5 0 0 0-4-5.3"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="i-fire" viewBox="0 0 24 24"><path d="M12 3s4 3.5 4 8a4 4 0 0 1-8 0c0-1.5.5-2.5.5-2.5S6 11 6 14a6 6 0 0 0 12 0c0-5-6-11-6-11z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-bug" viewBox="0 0 24 24"><rect x="8" y="6" width="8" height="13" rx="4"/><path d="M8 10H4M16 10h4M8 14H3.5M16 14h4.5M9 6 8 3M15 6l1-3"/></symbol>
+  <!-- new symbols (same style: viewBox 0 0 24 24, stroke 1.9, round caps) -->
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/><path d="M19 14l.7 2.3L22 17l-2.3.7L19 20l-.7-2.3L16 17l2.3-.7z"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+  <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M7 4h10v4a5 5 0 0 1-10 0z"/><path d="M7 6H4v1a3 3 0 0 0 3 3M17 6h3v1a3 3 0 0 1-3 3M9 16h6M10 16l-.5 4h5l-.5-4M8 20h8"/></symbol>
+  <symbol id="i-check2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.3 2.3 4.7-4.7"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3 12.5 11 4l9 0 0 9-8.5 8.5z"/><circle cx="15.5" cy="8.5" r="1.4"/></symbol>
+</defs></svg>
+
+<!-- gradient defs for the match ring -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <linearGradient id="mg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#22d3ee"/></linearGradient>
+</defs></svg>
+
+<!-- SIDEBAR -->
+<aside class="sidebar">
+  <div class="brand">
+    <span class="logo"><svg viewBox="0 0 36 36" width="20" height="20" fill="none"><circle cx="18" cy="18" r="15" stroke="#A855F7" stroke-width="2.5" opacity=".55"/><path d="M14 11l12 7-12 7z" fill="#A855F7"/></svg></span>
+    <span class="name">AURORA</span>
+  </div>
+  <nav class="nav">
+    <a class="navlink active"><svg class="ico"><use href="#i-home"/></svg> Home</a>
+    <a class="navlink"><svg class="ico"><use href="#i-film"/></svg> Movies</a>
+    <a class="navlink"><svg class="ico"><use href="#i-tv"/></svg> TV Shows</a>
+    <a class="navlink"><svg class="ico"><use href="#i-star"/></svg> Collections</a>
+    <a class="navlink"><svg class="ico"><use href="#i-cal"/></svg> Calendar</a>
+    <a class="navlink"><svg class="ico"><use href="#i-lib"/></svg> My Library</a>
+    <a class="navlink"><svg class="ico"><use href="#i-dl"/></svg> Requests</a>
+    <a class="navlink"><svg class="ico"><use href="#i-admin"/></svg> Admin</a>
+    <div class="lbl">System</div>
+    <a class="navlink"><svg class="ico"><use href="#i-server"/></svg> Server Status</a>
+    <a class="navlink"><svg class="ico"><use href="#i-bell"/></svg> Notifications <span class="badge">3</span></a>
+    <a class="navlink"><svg class="ico"><use href="#i-gear"/></svg> Settings</a>
+  </nav>
+  <div class="side-foot">
+    <div class="user"><span class="av">R</span><div><div class="nm">rontavious999</div><div class="rl">Admin</div></div></div>
+  </div>
+</aside>
+
+<div class="main">
+  <header class="topbar">
+    <div class="search"><svg class="ico"><use href="#i-search"/></svg><input placeholder="Search titles… (⌘K)"></div>
+    <div class="spacer"></div>
+    <button class="tb-btn" title="Watch parties"><svg class="ico"><use href="#i-users"/></svg><span class="dot"></span></button>
+    <div class="tb-user"><span>rontavious999 <span class="star">★</span></span><span class="av">R</span></div>
+  </header>
+
+  <main class="content">
+
+    <!-- 1 · GREETING BAND -->
+    <div class="greet">
+      <div>
+        <h1>Good evening, <span class="accent">Ronnie</span></h1>
+        <div class="sub">
+          <svg class="ico"><use href="#i-moon"/></svg>
+          <span>Friday night</span><span class="dot"></span>
+          <span><b>3 things</b> worth your time</span><span class="dot"></span>
+          <span>picked from <b>2,934</b> titles in your library</span>
+        </div>
+      </div>
+      <button class="liveask"><svg class="ico"><use href="#i-spark"/></svg> Surprise me</button>
+    </div>
+
+    <!-- 2 · TONIGHT'S PICK HERO (leads with the WHY) -->
+    <section class="hero">
+      <div class="hero-art" id="heroArt"></div>
+      <div class="hero-grain"></div>
+
+      <div class="matchwrap">
+        <svg class="ring" viewBox="0 0 84 84">
+          <circle class="track" cx="42" cy="42" r="36"/>
+          <circle class="val" id="matchRing" cx="42" cy="42" r="36" stroke-dasharray="0 226"/>
+        </svg>
+        <span class="num" id="matchNum">94%</span>
+        <span class="lab">Match</span>
+      </div>
+
+      <div class="hero-inner">
+        <span class="hero-eyebrow"><svg class="ico"><use href="#i-spark"/></svg> <span id="heroEyebrow">Aurora picked this for you</span></span>
+        <h2 id="heroTitle">Severance</h2>
+        <div class="hero-why">
+          <span class="spark"><svg class="ico"><use href="#i-spark"/></svg></span>
+          <p id="heroWhy"></p>
+        </div>
+        <div class="hero-meta" id="heroMeta"></div>
+        <p class="syn" id="heroSyn"></p>
+        <div class="hero-actions">
+          <button class="btn btn-resume" id="heroResume">
+            <svg class="ico"><use href="#i-clock"/></svg> <span id="heroResumeLabel">Resume S2 E4</span>
+            <span class="barwrap"><i id="heroResumeBar" style="width:62%"></i></span>
+          </button>
+          <button class="btn btn-glass"><svg class="ico"><use href="#i-plus"/></svg> My List</button>
+          <button class="btn btn-glass"><svg class="ico"><use href="#i-info"/></svg> More Info</button>
+          <button class="btn btn-shuffle" id="heroShuffle"><svg class="ico"><use href="#i-dl" transform="rotate(90 12 12)"/></svg> Not tonight</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3 · CONTINUE WATCHING -->
+    <div class="seclabel">
+      <svg class="ico"><use href="#i-clock"/></svg>
+      <div class="tt"><h3>Continue Watching</h3></div>
+      <span class="line"></span><span class="more">See all →</span>
+    </div>
+    <div class="rail" id="cwRail"></div>
+
+    <!-- 4 · REASONED RAILS (rendered by JS) -->
+    <div id="railHost"></div>
+
+    <!-- 5 · YOUR WEEK -->
+    <div class="seclabel">
+      <svg class="ico"><use href="#i-chart"/></svg>
+      <div class="tt"><h3>Your week</h3></div>
+      <span class="line"></span><span class="more">View profile →</span>
+    </div>
+    <div class="week">
+      <div class="week-lead">
+        <span class="k"><svg class="ico"><use href="#i-trophy"/></svg> Level 7 · Cinephile</span>
+        <span class="lvl">2,340 XP</span>
+        <span class="xpbar"><i style="width:64%"></i></span>
+        <span class="xpnote">360 XP to Level 8</span>
+      </div>
+      <div class="week-stats">
+        <div class="wstat">
+          <span class="big">9.4<small>hrs</small></span>
+          <span class="cap"><svg class="ico"><use href="#i-clock"/></svg> Watched this week</span>
+        </div>
+        <div class="wstat">
+          <span class="big">4</span>
+          <span class="cap"><svg class="ico"><use href="#i-check2"/></svg> Titles finished</span>
+        </div>
+        <div class="wstat">
+          <span class="big">12<small>days</small></span>
+          <span class="cap streak"><svg class="ico"><use href="#i-fire"/></svg> Day streak · best 18</span>
+        </div>
+        <div class="wstat">
+          <span class="big" style="font-size:21px">Sci-Fi</span>
+          <span class="cap"><svg class="ico"><use href="#i-tag"/></svg> Your top genre</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6 · WATCH TOGETHER -->
+    <div class="seclabel">
+      <svg class="ico"><use href="#i-users"/></svg>
+      <div class="tt"><h3>Watch together</h3></div>
+      <span class="line"></span>
+    </div>
+    <div class="together">
+      <div class="ttart" id="ttArt" style="background:linear-gradient(150deg,#2a160a,#e8852f)">
+        <span class="live"><i></i> LIVE</span>
+      </div>
+      <div class="ttbody">
+        <div class="k"><svg class="ico"><use href="#i-users"/></svg> A friend is watching</div>
+        <div class="h"><b>Mia</b> started <span class="ttl">Blade Runner 2049</span> · 8 min in</div>
+        <div class="s">Jump in and you'll auto-sync to her spot.</div>
+      </div>
+      <div class="ttacts">
+        <div class="friends" title="Mia, Jordan, Theo">
+          <span class="fav" style="background:linear-gradient(135deg,#e11d74,#7e22ce)">M</span>
+          <span class="fav" style="background:linear-gradient(135deg,#3b82f6,#6366f1)">J</span>
+          <span class="fav" style="background:linear-gradient(135deg,#22d3ee,#0ea5e9)">T</span>
+          <span class="more">+2</span>
+        </div>
+        <button class="btn btn-join"><svg class="ico"><use href="#i-play"/></svg> Join Mia</button>
+        <button class="btn btn-party"><svg class="ico"><use href="#i-users"/></svg> Start a watch party</button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<button class="reportbug"><svg class="ico"><use href="#i-bug"/></svg> Report bug</button>
+
+<script>
+// Real TMDB art (image.tmdb.org public CDN — same source Aurora serves). Generated, do not hand-edit.
+const TMDB_IMG = {
+  "Severance": {
+    "poster": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/ixgFmf1X59PUZam2qbAfskx2gQr.jpg"
+  },
+  "The Last of Us": {
+    "poster": "https://image.tmdb.org/t/p/w500/dmo6TYuuJgaYinXBPjrgG9mB5od.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/acevLdSl5I2MK5RYAm7gwAndt1w.jpg"
+  },
+  "Dune: Part Two": {
+    "poster": "https://image.tmdb.org/t/p/w500/1pdfLvkbY9ohJlCjQH2CZjjYVvJ.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/xOMo8BRK7PfcJv9JCnx7s5hj0PX.jpg"
+  },
+  "Arcane": {
+    "poster": "https://image.tmdb.org/t/p/w500/abf8tHznhSvl9BAElD2cQeRr7do.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/q8eejQcg1bAqImEV8jh8RtBD4uH.jpg"
+  },
+  "Cyberpunk: Edgerunners": {
+    "poster": "https://image.tmdb.org/t/p/w500/lqcDVZ8pyk08AVftMBildDR3QUK.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/bRE6zX4iOAejLOQCHryoV5WNu8G.jpg"
+  },
+  "Blade Runner 2049": {
+    "poster": "https://image.tmdb.org/t/p/w500/gajva2L0rPYkEWjzgFlBXCAVBE5.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/mVr0UiqyltcfqxbAUcLl9zWL8ah.jpg"
+  },
+  "Scavengers Reign": {
+    "poster": "https://image.tmdb.org/t/p/w500/bFlVZV8TQbs8hcIY7PVYonYFMgK.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/rrREM1cowfMZ8SmrJ9KCFO3y4j6.jpg"
+  },
+  "Pantheon": {
+    "poster": "https://image.tmdb.org/t/p/w500/aZupC6eJhTe82e5I0JRaOBjFHOd.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/6MVugklRWUCZGijAaqc6um1Rgff.jpg"
+  },
+  "Love, Death & Robots": {
+    "poster": "https://image.tmdb.org/t/p/w500/vL5BQvXH96cJzmNK5n7QliQxy90.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/nBrkOZyI75artyizuBFeya48KbO.jpg"
+  },
+  "Castlevania": {
+    "poster": "https://image.tmdb.org/t/p/w500/WzFHnJY44uDERER0xi1jOdoafT.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/jLE5bsPA9xOKzBWOaOmKbp1DWQS.jpg"
+  },
+  "Dark": {
+    "poster": "https://image.tmdb.org/t/p/w500/1DLjjvSWMYo17B7wuz6YikB96hH.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/3jDXL4Xvj3AzDOF6UH1xeyHW8MH.jpg"
+  },
+  "Devs": {
+    "poster": "https://image.tmdb.org/t/p/w500/uv63iNWOh69bSJYJQZjiX6n8B3m.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/5yf5yfogIxhHhDU7F2Nuk1BsTYQ.jpg"
+  },
+  "Foundation": {
+    "poster": "https://image.tmdb.org/t/p/w500/tg9I5pOY4M9CKj8U0cxVBTsm5eh.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/7NNNXo0qG2SqH4JoG7GPvJ2hzes.jpg"
+  },
+  "Annihilation": {
+    "poster": "https://image.tmdb.org/t/p/w500/4YRplSk6BhH6PRuE9gfyw9byUJ6.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/9trZvBr44UGedUOiGo3jgSUw13e.jpg"
+  },
+  "Arrival": {
+    "poster": "https://image.tmdb.org/t/p/w500/x2FJsf1ElAgr63Y3PNPtJrcmpoe.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/uKPbFF08QkRMvIAsgCh1soeyPhZ.jpg"
+  },
+  "Solaris": {
+    "poster": "https://image.tmdb.org/t/p/w500/drdrB1hEZmzFlK1xtW5HMxK3LUJ.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/avjG5EPgWXyLvsUId6hEn0iqT4A.jpg"
+  },
+  "Breaking Bad": {
+    "poster": "https://image.tmdb.org/t/p/w500/ztkUQFLlC19CCMYHW9o1zWhJRNq.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg"
+  },
+  "Chernobyl": {
+    "poster": "https://image.tmdb.org/t/p/w500/hlLXt2tOPT6RRnjiUmoxyG1LTFi.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/3URK0z9PzpVNJrGE7XOuyy6KFzk.jpg"
+  },
+  "The Wire": {
+    "poster": "https://image.tmdb.org/t/p/w500/4lbclFySvugI51fwsyxBTOm4DqK.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/layPSOJGckJv3PXZDIVluMq69mn.jpg"
+  },
+  "Planet Earth II": {
+    "poster": "https://image.tmdb.org/t/p/w500/5maYKYzWpE68ycxGh1luu4P2LOS.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/1DYpBOVdb7Mzc9DgMCdIBTN1JEC.jpg"
+  },
+  "Game of Thrones": {
+    "poster": "https://image.tmdb.org/t/p/w500/1XS1oqL89opfnbLl8WnZY1O1uJx.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/2OMB0ynKlyIenMJWI2Dy9IWT4c.jpg"
+  },
+  "The Sopranos": {
+    "poster": "https://image.tmdb.org/t/p/w500/rTc7ZXdroqjkKivFPvCPX0Ru7uw.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/lNpkvX2s8LGB0mjGODMT4o6Up7j.jpg"
+  },
+  "The Pitt": {
+    "poster": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/z3BkMbCy5ajZPMyKEUwsPHuz2cV.jpg"
+  },
+  "Shogun": {
+    "poster": "https://image.tmdb.org/t/p/w500/7O4iVfOMQmdCSxhOg1WnzG1AgYT.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/6Tb87q9Tog30F5AAHh1gyDT2Vve.jpg"
+  },
+  "Fallout": {
+    "poster": "https://image.tmdb.org/t/p/w500/c15BtJxCXMrISLVmysdsnZUPQft.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/cIgHBLTMbcIkS0yvIrUUVVKLdOz.jpg"
+  },
+  "Ripley": {
+    "poster": "https://image.tmdb.org/t/p/w500/rpSo8z9alultGVTqQ3dkLEyU8xx.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/erpjqVdJLpDQJjsbxaSJmMwvcqd.jpg"
+  },
+  "3 Body Problem": {
+    "poster": "https://image.tmdb.org/t/p/w500/ykZ7hlShkdRQaL2aiieXdEMmrLb.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/ciizJ9Okzt9tBBGK7Q3T14LFT2j.jpg"
+  },
+  "Inception": {
+    "poster": "https://image.tmdb.org/t/p/w500/xlaY2zyzMfkhk0HSC5VUwzoZPU1.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/8ZTVqvKDQ8emSGUEMjsS4yHAwrp.jpg"
+  },
+  "Tenet": {
+    "poster": "https://image.tmdb.org/t/p/w500/aCIFMriQh8rvhxpN1IWGgvH0Tlg.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/7BYtnXUfweV6EryNYDpZFeS31Ia.jpg"
+  },
+  "The Matrix": {
+    "poster": "https://image.tmdb.org/t/p/w500/aOIuZAjPaRIE6CMzbazvcHuHXDc.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/tlm8UkiQsitc8rSuIAscQDCnP8d.jpg"
+  },
+  "Ex Machina": {
+    "poster": "https://image.tmdb.org/t/p/w500/dmJW8IAKHKxFNiUnoDR7JfsK7Rp.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/uqOuJ50EtTj7kkDIXP8LCg7G45D.jpg"
+  },
+  "Interstellar": {
+    "poster": "https://image.tmdb.org/t/p/w500/yQvGrMoipbRoddT0ZR8tPoR7NfX.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/w1280/2ssWTSVklAEc98frZUQhgtGHx7s.jpg"
+  }
+};
+const TMDB_PERSON = {
+  "Christopher Nolan": "https://image.tmdb.org/t/p/w185/xuAIuYSmsUzKlUMBFGVZaWsY3DZ.jpg",
+  "Tom Hardy": "https://image.tmdb.org/t/p/w185/d81K0RH8UX7tZj49tZaQhZ9ewH.jpg"
+};
+
+// Resolve a title to a real TMDB <img>; gradient stays as the fallback (onerror removes the img).
+function tmdbArt(title, kind){ // kind = 'poster' | 'backdrop'
+  const norm = (title||'').normalize('NFD').replace(/[̀-ͯ]/g,''); // Shōgun→Shogun
+  const e = TMDB_IMG[title] || TMDB_IMG[norm];
+  const url = e && e[kind];
+  return url ? `<img class="tmdb-art" src="${url}" loading="lazy" alt="" onerror="this.remove()">` : '';
+}
+// True only when a real poster exists (so we can hide the in-poster title overlay).
+function hasArt(title, kind){
+  const norm = (title||'').normalize('NFD').replace(/[̀-ͯ]/g,'');
+  const e = TMDB_IMG[title] || TMDB_IMG[norm];
+  return !!(e && e[kind]);
+}
+</script>
+
+<script>
+const $ = s => document.querySelector(s);
+const art = it => `background:linear-gradient(150deg, ${it.c1}, ${it.c2});`;
+
+/* ---- Tonight's Pick — 3 reasoned picks the "Not tonight ↻" shuffle rotates ---- */
+const PICKS = [
+  { t:"Severance", c1:"#0a2233", c2:"#4fd1c5", match:94, r:8.8, year:2022, mat:"TV-MA", extra:"S2 · Sci-Fi",
+    eyebrow:"Aurora picked this for you",
+    why:`Because you finished <span class="em">Arcane</span> and lean into <span class="em">slow-burn sci-fi</span>.`,
+    syn:"Mark and the team venture outside for the first time as the line between their severed selves collapses.",
+    resume:{label:"Resume S2 E4", pct:62} },
+  { t:"Blade Runner 2049", c1:"#2a160a", c2:"#e8852f", match:91, r:8.5, year:2017, mat:"R", extra:"2h 44m · Sci-Fi",
+    eyebrow:"Because you finished Blade Runner 2049 once before",
+    why:`A <span class="em">methodical, atmospheric</span> future noir — right in your <span class="em">prestige sci-fi</span> lane.`,
+    syn:"A new blade runner unearths a long-buried secret that could plunge what's left of society into chaos.",
+    resume:{label:"Play from start", pct:0} },
+  { t:"Chernobyl", c1:"#1a2018", c2:"#9aa676", match:89, r:9.3, year:2019, mat:"TV-MA", extra:"Mini-series · Drama",
+    eyebrow:"Because you love prestige crime & true-event drama",
+    why:`You finished <span class="em">Breaking Bad</span> — this has the same <span class="em">tense, exacting</span> dread.`,
+    syn:"A dramatization of the 1986 nuclear disaster and the sacrifices made to contain it.",
+    resume:{label:"Play from start", pct:0} },
+];
+let pickIdx = 0;
+const RING_C = 2 * Math.PI * 36; // circumference for r=36
+
+function renderHero(){
+  const p = PICKS[pickIdx];
+  $("#heroArt").style.cssText = art(p);
+  $("#heroArt").innerHTML = tmdbArt(p.t, 'backdrop'); // real backdrop over the gradient (swaps on shuffle)
+  // fade the text block on swap
+  ["#heroTitle","#heroWhy","#heroSyn","#heroMeta"].forEach(s=>{const e=$(s);e.style.opacity=0;});
+  $("#heroEyebrow").textContent = p.eyebrow;
+  $("#heroTitle").textContent = p.t;
+  $("#heroWhy").innerHTML = p.why;
+  $("#heroSyn").textContent = p.syn;
+  $("#heroMeta").innerHTML =
+    `<span class="rate"><svg class="ico"><use href="#i-star"/></svg>${p.r.toFixed(1)}</span>`+
+    `<span class="dot"></span>${p.year}`+
+    `<span class="dot"></span><span class="chip">${p.mat}</span>`+
+    `<span class="dot"></span>${p.extra}`;
+  $("#heroResumeLabel").textContent = p.resume.label;
+  $("#heroResumeBar").style.width = p.resume.pct + "%";
+  $("#heroResume").querySelector(".barwrap").style.display = p.resume.pct>0 ? "block":"none";
+  // match ring + number
+  $("#matchNum").textContent = p.match + "%";
+  $("#matchRing").setAttribute("stroke-dasharray", `${(p.match/100*RING_C).toFixed(1)} ${RING_C.toFixed(1)}`);
+  requestAnimationFrame(()=>["#heroTitle","#heroWhy","#heroSyn","#heroMeta"].forEach(s=>$(s).style.opacity=1));
+}
+$("#heroShuffle").onclick = () => { pickIdx = (pickIdx+1) % PICKS.length; renderHero(); };
+
+/* ---- 3 · Continue Watching (wide 16:9) ---- */
+const CW = [
+  { t:"Severance", c1:"#0a2233", c2:"#4fd1c5", badge:"4K HDR", ep:"S2 E4 · Woe's Hollow", left:"23 min left", pct:62 },
+  { t:"The Last of Us", c1:"#1a2a14", c2:"#84a35a", badge:"4K HDR", ep:"S2 E3 · The Path", left:"44 min left", pct:18 },
+  { t:"Dune: Part Two", c1:"#2a1d0e", c2:"#e0a458", badge:"4K HDR", ep:"Movie", left:"1h 12m left", pct:41 },
+  { t:"Arcane", c1:"#16223f", c2:"#c026d3", badge:"4K HDR", ep:"S2 E6 · Finale", left:"9 min left", pct:88 },
+];
+function cwCard(it){
+  return `<div class="cwcard">
+    <div class="cwart" style="${art(it)}">
+      ${tmdbArt(it.t, 'backdrop')}
+      <div class="scrim"></div>
+      <div class="badge">${it.badge}</div>
+      <div class="play"><svg class="ico"><use href="#i-play"/></svg></div>
+      <div class="label">
+        <div class="t">${it.t}</div>
+        <div class="e"><svg class="ico"><use href="#i-clock"/></svg> ${it.ep} · ${it.left}</div>
+      </div>
+      <div class="cwbar"><i style="width:${it.pct}%"></i></div>
+    </div>
+  </div>`;
+}
+$("#cwRail").innerHTML = CW.map(cwCard).join("");
+
+/* ---- 4 · Reasoned rails (title + WHY subtitle; AI rails get a ✨ tag + per-card why) ---- */
+function P(t,c1,c2,r,year,g,badge,why){ return {t,c1,c2,r,year,g,badge,why}; }
+const RAILS = [
+  {
+    icon:"i-spark", title:"Because you finished Arcane", ai:true,
+    why:"More stylised, character-driven animation & sci-fi.",
+    items:[
+      P("Cyberpunk: Edgerunners","#1a0a2a","#ec4899",8.6,2022,"Animation","4K HDR","kinetic, neon, doomed-romantic"),
+      P("Blade Runner 2049","#2a160a","#e8852f",8.5,2017,"Sci-Fi","4K HDR","methodical, atmospheric, cerebral"),
+      P("Scavengers Reign","#0a2a1e","#34d399",8.4,2023,"Animation","HD","painterly, alien, patient"),
+      P("Pantheon","#16223f","#38bdf8",8.7,2022,"Animation","4K","heady uploaded-mind thriller"),
+      P("Love, Death & Robots","#2a0a14","#f43f5e",8.4,2019,"Animation","4K HDR","punchy sci-fi anthology"),
+      P("Castlevania","#1a0a0a","#b91c1c",8.3,2017,"Animation","4K","gothic, operatic, brutal"),
+    ],
+  },
+  {
+    icon:"i-moon", title:"Slow-burn sci-fi you haven't started", ai:true,
+    why:"Quiet, methodical worlds — matched to your taste, not yet in your history.",
+    items:[
+      P("Dark","#0c1014","#3f6184",8.7,2017,"Sci-Fi","4K","time-loop, glacial, exacting"),
+      P("Devs","#0a1622","#22d3ee",8.0,2020,"Sci-Fi","4K","hypnotic, deterministic dread"),
+      P("Foundation","#14213a","#6366f1",7.9,2021,"Sci-Fi","4K HDR","grand, contemplative, vast"),
+      P("Annihilation","#0a2a1e","#34d399",7.8,2018,"Sci-Fi","4K","eerie, shimmering, surreal"),
+      P("Arrival","#101820","#64748b",8.2,2016,"Sci-Fi","4K","patient first-contact, aching"),
+      P("Solaris","#0c1424","#7c93b8",7.4,1972,"Sci-Fi","HD","meditative, mournful, slow"),
+    ],
+  },
+  {
+    icon:"i-trophy", title:"Critically acclaimed · 9.0+", ai:false,
+    why:"The highest-rated titles sitting in your library.",
+    items:[
+      P("Breaking Bad","#16341f","#bcc436",9.5,2008,"Crime","4K"),
+      P("Chernobyl","#1a2018","#9aa676",9.3,2019,"Drama","4K"),
+      P("The Wire","#1a1408","#a98b3f",9.3,2002,"Crime","HD"),
+      P("Planet Earth II","#0a2a1a","#22c55e",9.5,2016,"Documentary","4K HDR"),
+      P("Game of Thrones","#0d1622","#5b7a99",9.2,2011,"Fantasy","4K"),
+      P("The Sopranos","#3a0d0d","#7c1d1d",9.2,1999,"Drama","4K"),
+    ],
+  },
+  {
+    icon:"i-fire", title:"New this week in your library", ai:false,
+    why:"Freshly added since you last visited.",
+    items:[
+      P("Dune: Part Two","#2a1d0e","#e0a458",8.8,2024,"Sci-Fi","4K HDR"),
+      P("The Pitt","#0f2a3a","#3b82f6",8.6,2025,"Drama","4K"),
+      P("Shōgun","#1a140a","#d4a017",8.7,2024,"Drama","4K HDR"),
+      P("Fallout","#2a200a","#eab308",8.5,2024,"Sci-Fi","4K HDR"),
+      P("Ripley","#101010","#9ca3af",8.2,2024,"Thriller","4K"),
+      P("3 Body Problem","#0a1a2a","#0ea5e9",7.6,2024,"Sci-Fi","4K HDR"),
+    ],
+  },
+];
+
+function posterCard(it){
+  const badge = it.badge ? `<div class="qbadge">${it.badge}</div>` : "";
+  const why = it.why ? `<div class="whyscrim">
+      <span class="wlab"><svg class="ico"><use href="#i-spark"/></svg> Why this</span>
+      <div class="wtxt">${it.why}</div>
+    </div>` : "";
+  const realPoster = hasArt(it.t, 'poster');
+  // real poster already carries the title art — drop the in-poster title/genre overlay to avoid doubling it up
+  const overlay = realPoster ? "" : `<div class="ptitle">${it.t}</div><div class="pgenre">${it.g}</div>`;
+  return `<div class="pcard" tabindex="0">
+    <div class="poster">
+      <div class="art" style="${art(it)}">${tmdbArt(it.t, 'poster')}${overlay}</div>
+      <div class="rchip"><svg class="ico"><use href="#i-star"/></svg>${it.r.toFixed(1)}</div>
+      ${badge}
+      ${why}
+      <div class="ec-accent" style="background:linear-gradient(90deg,${it.c2},${it.c1})"></div>
+    </div>
+    <div class="pshelf">
+      <div class="t">${it.t}</div>
+      <div class="m1"><span class="s"><svg class="ico"><use href="#i-star"/></svg>${it.r.toFixed(1)}</span><span class="yr">${it.year}</span> · <span class="gc">${it.g}</span></div>
+    </div>
+  </div>`;
+}
+function railBlock(rail){
+  const tag = rail.ai ? `<span class="aitag"><svg class="ico"><use href="#i-spark"/></svg> AI pick</span>` : "";
+  return `<div class="seclabel">
+      <svg class="ico"><use href="#${rail.icon}"/></svg>
+      <div class="tt">
+        <h3>${rail.title} ${tag}</h3>
+        <span class="why">${rail.why}</span>
+      </div>
+      <span class="line"></span><span class="more">See all →</span>
+    </div>
+    <div class="rail">${rail.items.map(posterCard).join("")}</div>`;
+}
+$("#railHost").innerHTML = RAILS.map(railBlock).join("");
+
+/* watch-together thumb — real backdrop (Mia is watching Blade Runner 2049), gradient stays as fallback */
+$("#ttArt").insertAdjacentHTML("afterbegin", tmdbArt("Blade Runner 2049", "backdrop"));
+
+/* boot */
+renderHero();
+</script>
+</body>
+</html>
