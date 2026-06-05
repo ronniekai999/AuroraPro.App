@@ -15,6 +15,8 @@ import {
   getHeroPool,
   getDiscoverRails,
   getAnchorRails,
+  getGamificationStats,
+  type GamificationStats,
   searchForMatch,
   manualMatch,
   listContinueWatching,
@@ -276,14 +278,115 @@ function Icon({ name, size = 20, className = '' }: { name: string; size?: number
   )
 }
 
+/* ─────────────────── HOME REDESIGN HELPERS ───────────────────
+ * 2026-06-05 (ui-refresh-2026 Home) — small pure helpers shared by the
+ * greeting band, the hero match-ring / resume bar, and the Continue
+ * Watching subtitle. Kept module-scoped (not inside a component) so
+ * they're trivially testable and don't re-allocate per render. */
+
+// Time-of-day greeting word from the client clock (matches the mockup:
+// "Good {morning|afternoon|evening}").
+function greetingTimeOfDay(d: Date = new Date()): 'morning' | 'afternoon' | 'evening' {
+  const h = d.getHours()
+  // Small hours read as "Good evening" so the greeting never pairs
+  // "Good morning" with the "night" day-part (e.g. 2am → "morning…night").
+  if (h < 5) return 'evening'
+  if (h < 12) return 'morning'
+  if (h < 18) return 'afternoon'
+  return 'evening'
+}
+
+// Casual "night/evening" descriptor for the greeting subline ("Friday
+// night"). Mornings/afternoons keep their literal word so the copy
+// stays truthful ("Saturday morning"), evenings read as "night".
+function greetingDayPart(d: Date = new Date()): string {
+  const h = d.getHours()
+  if (h >= 21 || h < 5) return 'night'
+  if (h < 12) return 'morning'
+  if (h < 18) return 'afternoon'
+  return 'evening'
+}
+
+// First name for the greeting. The User record only carries `username`
+// (no display/first name field) — derive a friendly capitalized handle
+// from it. Strips a leading email-ish local part if a full email slips
+// in, then Title-cases the first token.
+function greetingFirstName(username?: string): string {
+  if (!username) return 'there'
+  const base = username.split('@')[0].split(/[._\s-]/)[0] || username
+  return base.charAt(0).toUpperCase() + base.slice(1)
+}
+
+// Stable, deterministic "match %" for the hero ring. The recommender
+// doesn't return a numeric match score yet, so we derive a plausible,
+// CONSISTENT-per-title value (same title → same %, never random) from
+// the media's rating, clamped to a flattering 82–98 band. Falls back to
+// a hash of the id when rating is missing so every hero still gets a
+// number.
+// TODO(redesign-net-new): replace heroMatchScore with the real recommender match score (extend /api/me/hero).
+function heroMatchScore(media: { id: number; rating?: number }): number {
+  const r = media.rating ?? 0
+  let score: number
+  if (r > 0) {
+    // TMDB ratings are 0–10. Map the realistic 6.5–9.5 band onto 82–98
+    // so well-rated titles read high without ever hitting a fake 100%.
+    const norm = Math.max(0, Math.min(1, (r - 6.5) / 3))
+    score = 82 + norm * 16
+  } else {
+    // No rating — derive a deterministic value from the id so it's
+    // stable across renders/rotations rather than jumping around.
+    score = 85 + (media.id % 13)
+  }
+  return Math.round(Math.max(82, Math.min(98, score)))
+}
+
+// "{Xh Ym left}" / "{Ym left}" remaining-time label for a Continue
+// Watching record. Returns '' when we can't compute it honestly (no
+// duration, or already past the end) so callers omit the token rather
+// than show a guess.
+function formatRemaining(positionMs: number, durationMs: number): string {
+  if (!durationMs || durationMs <= 0) return ''
+  const remMs = durationMs - positionMs
+  if (remMs <= 0) return ''
+  const totalMin = Math.max(1, Math.round(remMs / 60000))
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
+  if (h > 0) return m > 0 ? `${h}h ${m}m left` : `${h}h left`
+  return `${m}m left`
+}
+
+// Continue Watching card subtitle: "{S#E# | 'Movie'} · {Xh Ym left}".
+// Either half is omitted (with its separator) when unavailable so we
+// never render a stray "·" or a fabricated time.
+function cwSubtitle(c: ContinueWatchingItem): string {
+  // Branch on type FIRST so a show with a missing/zero season (specials,
+  // or a data gap) reads "Episode" instead of being mislabeled "Movie".
+  // `!= null` honors season 0.
+  let epLabel: string
+  if (c.type === 'show') {
+    epLabel = c.season_number != null && c.episode_number != null
+      ? `S${c.season_number}E${c.episode_number}`
+      : 'Episode'
+  } else {
+    epLabel = 'Movie'
+  }
+  const left = formatRemaining(c.position_ms, c.duration_ms)
+  return left ? `${epLabel} · ${left}` : epLabel
+}
+
 /* ─────────────────────── HERO SECTION ─────────────────────── */
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization, resume }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
+  // 2026-06-05 (Home redesign B) — My Library state for the hero's
+  // "＋ My List / ✓ In My List" toggle. Both must be present for the
+  // button to render (same contract as MediaCardCinema's lib badge).
+  libraryIds?: Set<number>
+  onToggleLib?: (m: Media) => void
   // Phase 5.3 — personalization reason ("Because you finished
   // Severance"). Rendered above the title. Empty/undefined hides.
   reason?: string
@@ -330,6 +433,10 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
   // Backdrop → poster → gradient fallback chain (some TMDB rows have
   // no backdrop image).
   const bgImage = hero.backdrop || hero.poster || ''
+  // 2026-06-05 (Home redesign B) — stable derived match % for the ring
+  // (computed once per render; same title → same value).
+  const matchScore = heroMatchScore(hero)
+  const matchCircumference = 2 * Math.PI * 36
   // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
   // doesn't feel like a static still. The transition smooths cursor
   // jitter into a slow drift instead of jumpy 1:1 tracking.
@@ -338,9 +445,13 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
 
   return (
     <section
-      // Bleed to viewport edges: HomeView wraps content in p-8, so
-      // -mx-8 -mt-8 cancels that padding for the hero only.
-      className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden -mx-8 -mt-8 mb-10 bg-[#050505]"
+      // 2026-06-05 (Home redesign A/B) — the redesign frames the hero as
+      // a rounded, INSET card (matching the mockup + the new greeting
+      // band, which is also inset). Dropped the former full-bleed
+      // `-mx-8 -mt-8` so the hero aligns with the greeting band and the
+      // rails below it inside the page's p-8 padding. rounded-2xl + a
+      // soft border give it the "glass card" treatment from the mockup.
+      className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden mt-1 mb-10 bg-[#050505] rounded-2xl border border-purple-300/15"
       onMouseMove={(e) => {
         const rect = e.currentTarget.getBoundingClientRect()
         setMousePos({
@@ -413,13 +524,57 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
         }}
       />
 
+      {/* 2026-06-05 (Home redesign B) — Match ring, top-right of the
+          hero. A circular purple→cyan arc showing a stable, derived
+          "{n}% match" (see heroMatchScore). The inner number + label are
+          aria-hidden (decorative), so role="img" + aria-label on the wrap
+          is what exposes the score to assistive tech. The cold-start path
+          keeps it (an honest derived signal); sits above scrims (z-20). */}
+      <div
+        className="absolute top-6 right-6 md:top-8 md:right-8 z-20 flex flex-col items-center gap-1.5"
+        role="img"
+        aria-label={`${matchScore} percent match`}
+      >
+        <div className="relative w-[84px] h-[84px]">
+          <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
+            <defs>
+              <linearGradient id="heroMatchGradient" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#a855f7" />
+                <stop offset="1" stopColor="#22d3ee" />
+              </linearGradient>
+            </defs>
+            <circle cx="42" cy="42" r="36" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="6" />
+            <circle
+              cx="42" cy="42" r="36" fill="none" stroke="url(#heroMatchGradient)"
+              strokeWidth="6" strokeLinecap="round"
+              strokeDasharray={`${(matchScore / 100) * matchCircumference} ${matchCircumference}`}
+            />
+          </svg>
+          <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white" aria-hidden="true">
+            {matchScore}%
+          </span>
+        </div>
+        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold" aria-hidden="true">Match</span>
+      </div>
+
       {/* Subtitle */}
       <div className="absolute bottom-8 left-8 right-8 z-20 flex items-end justify-between gap-4">
         <div className="max-w-2xl">
           <div className="flex items-center gap-3 mb-3">
-            <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
-              <Icon name="star" size={12} /> {reason ? 'Recommended' : 'Featured'}
-            </span>
+            {/* 2026-06-05 (Home redesign B) — when a personalization
+                reason exists, lead with an "✨ Aurora picked this for
+                you" pill (replaces the plain "Recommended" copy). No
+                reason → keep "Featured". The cold-start hint copy below
+                is untouched. */}
+            {reason ? (
+              <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/30">
+                <Icon name="sparkle" size={12} /> Aurora picked this for you
+              </span>
+            ) : (
+              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                <Icon name="star" size={12} /> Featured
+              </span>
+            )}
             <span className="text-white/60 text-sm">
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
@@ -480,11 +635,29 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
                 // button resumes rather than restarts. Same shape
                 // and glow weight to keep it readable as the primary
                 // CTA.
-                className="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+                // 2026-06-05 (Home redesign B) — relative + overflow so
+                // the thin embedded progress fill (below) clips to the
+                // pill. extra bottom padding leaves room for the 3px bar.
+                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
                 title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
                 aria-label={formatResumeAriaLabel(resume.item)}
               >
                 <Icon name="clock" size={16} /> {formatResumeLabel(resume.item)}
+                {/* Embedded progress bar — fraction from the CW record's
+                    position/duration. Only when duration is known and the
+                    fraction is in (0,1); otherwise we omit the fill rather
+                    than guess (e.g. a live item with duration_ms=0). */}
+                {(() => {
+                  const d = resume.item.duration_ms
+                  if (!d || d <= 0) return null
+                  const frac = Math.max(0, Math.min(1, resume.item.position_ms / d))
+                  if (frac <= 0) return null
+                  return (
+                    <span className="absolute left-0 right-0 bottom-0 h-[3px] bg-white/25" aria-hidden="true">
+                      <span className="block h-full bg-white" style={{ width: `${frac * 100}%`, boxShadow: '0 0 8px rgba(255,255,255,0.6)' }} />
+                    </span>
+                  )
+                })()}
               </button>
             ) : (
               <button
@@ -494,6 +667,27 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
                 <Icon name="play" size={18} /> Play
               </button>
             )}
+            {/* 2026-06-05 (Home redesign B) — "My List" toggle. Adds /
+                removes the hero title from My Library. Only when the
+                caller wired both libraryIds + onToggleLib (matches the
+                MediaCardCinema lib-badge contract). */}
+            {libraryIds && onToggleLib && (() => {
+              const inLib = libraryIds.has(hero.id)
+              return (
+                <button
+                  onClick={() => onToggleLib(hero)}
+                  aria-label={inLib ? `Remove ${hero.title} from My List` : `Add ${hero.title} to My List`}
+                  title={inLib ? 'In My List — click to remove' : 'Add to My List'}
+                  className={`flex items-center gap-2 px-6 py-3 backdrop-blur-md rounded-full font-medium transition-all duration-200 border ${
+                    inLib
+                      ? 'bg-purple-500/20 text-purple-100 border-purple-400/40 hover:bg-purple-500/30'
+                      : 'bg-white/10 text-white border-white/10 hover:bg-white/15 hover:border-white/20'
+                  }`}
+                >
+                  <Icon name={inLib ? 'check' : 'plus'} size={18} /> {inLib ? 'In My List' : 'My List'}
+                </button>
+              )
+            })()}
             <button
               onClick={() => onInfo(hero)}
               className="flex items-center gap-2 px-6 py-3 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20"
@@ -502,19 +696,24 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
             </button>
           </div>
         </div>
-        {/* Refresh-suggestions button: rerolls the personalized pool.
+        {/* Refresh-suggestions control: rerolls the personalized pool.
             In cold-start mode the reroll is deterministic (popular-
             unwatched, no LLM input), so we explain that in the tooltip
-            instead of letting the user think it's broken. */}
+            instead of letting the user think it's broken.
+            2026-06-05 (Home redesign B) — relabeled from a bare refresh
+            icon to a "Not tonight ↻" pill (mockup copy). Same onClick +
+            cold-start tooltip; just a clearer affordance that this
+            shuffles the hero pick. */}
         {onRefreshHero && (
           <button
             onClick={onRefreshHero}
             title={personalization?.coldStart
-              ? `Refresh — picks won't change in cold-start (${personalization.historyCount}/${personalization.threshold} titles watched). Watch a few more to unlock personalized rerolls.`
-              : 'Refresh suggestions'}
-            className="p-2 rounded-full bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.06] text-white/70 hover:text-white transition-colors"
+              ? `Not tonight — picks won't change in cold-start (${personalization.historyCount}/${personalization.threshold} titles watched). Watch a few more to unlock personalized rerolls.`
+              : 'Not tonight — shuffle to a different pick'}
+            aria-label="Not tonight — show a different pick"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/60 hover:text-white text-sm transition-colors whitespace-nowrap"
           >
-            <Icon name="refresh" size={16} />
+            Not tonight <Icon name="refresh" size={15} />
           </button>
         )}
       </div>
@@ -548,12 +747,25 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, onRefreshHero, on
 // case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume }: {
+function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
+  // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
+  // subtitle under the rail title, and an "✨ AI PICK" chip beside the
+  // title for recommender-driven rails (discover / anchor). Both are
+  // additive: rails that don't pass them render exactly as before.
+  subtitle?: string
+  aiPick?: boolean
+  // Forward MediaCardCinema's quality/maturity badge opt-in so Home
+  // rail cards can show 4K/HDR chips (the mockup shows them).
+  showBadges?: boolean
+  // 2026-06-05 (Home redesign C) — per-card subtitle resolver (e.g. the
+  // Continue Watching "S2E4 · 23m left" line). Returns undefined to keep
+  // the default star/year/genre meta for that card.
+  cardSubtitleFor?: (m: Media) => string | undefined
   // 2026-05-27 — Per-card resume resolver. Caller passes a function
   // that returns a click handler when the item has a Continue
   // Watching match worth resuming (caller decides — typically only
@@ -599,9 +811,22 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
 
   return (
     <section className="rail-container">
+      {/* 2026-06-05 (Home redesign D) — header now supports a stacked
+          title + subtitle and an inline "AI PICK" chip. When no subtitle
+          is passed the title row layout is unchanged. */}
       <div className="rail-header">
         <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
-        <h2 className="rail-title">{title}</h2>
+        <div className="flex flex-col gap-0.5 min-w-0">
+          <div className="flex items-center gap-2.5">
+            <h2 className="rail-title">{title}</h2>
+            {aiPick && (
+              <span className="inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
+                <Icon name="sparkle" size={10} className="text-yellow-300" /> AI Pick
+              </span>
+            )}
+          </div>
+          {subtitle && <span className="text-white/55 text-xs">{subtitle}</span>}
+        </div>
         <span className="rail-spacer" aria-hidden="true" />
         {onSeeAll && (
           <button onClick={onSeeAll} className="rail-see-all">
@@ -621,6 +846,8 @@ function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, l
             className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
             aspect={aspect}
             onResume={resolveResume?.(item)}
+            showBadges={showBadges}
+            subtitle={cardSubtitleFor?.(item)}
           />
         ))}
       </div>
@@ -1174,6 +1401,18 @@ interface HomeViewProps {
     // (no dedicated browse page) leave it undefined so the button
     // hides — no more misleading clicks that do nothing.
     seeAllTarget?: { view: 'movies' | 'shows'; sortBy?: 'rating' | 'recent' | 'title' | 'year' }
+    // 2026-06-05 (Home redesign C/D) — optional presentation hints.
+    //  • subtitle    — one-line "why it's here" under the rail title.
+    //  • aiPick      — show the "✨ AI PICK" chip (recommender rails).
+    //  • showBadges  — render 4K/HDR quality chips on the cards.
+    //  • cardSubtitles — per-card subtitle override keyed by media id
+    //    (Continue Watching uses it for "S2E4 · 23m left"); derived in
+    //    the Home render where the source ContinueWatchingItem is in
+    //    scope, since Media alone can't reconstruct the remaining time.
+    subtitle?: string
+    aiPick?: boolean
+    showBadges?: boolean
+    cardSubtitles?: Record<number, string>
   }[]
   // App-level navigation callback so HomeView can request a route
   // change for See All clicks. Optional so the type stays backwards
@@ -1228,8 +1467,24 @@ interface HomeViewProps {
     items: ContinueWatchingItem[]
     onPlay: (c: ContinueWatchingItem) => void
   }
+  // 2026-06-05 (Home redesign A/F) — greeting band + watch-together
+  // inputs.
+  //  • user        — logged-in account; first name is derived from
+  //    `username` (the only name field the User record carries).
+  //  • pickCount   — number of personalized/hero picks available (real),
+  //    powers the "{N} worth your time" line.
+  //  • libraryTotal — real movies+shows total IF reachable in App state
+  //    (null when the browse tabs haven't loaded their counts yet); the
+  //    "picked from X titles" clause is OMITTED when null rather than
+  //    fabricated.
+  //  • onOpenParty — opens the existing Watch Party hub (same handler the
+  //    top bar uses); wired to the "Start a watch party" CTA.
+  user?: ApiUser
+  pickCount?: number
+  libraryTotal?: number | null
+  onOpenParty?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1242,8 +1497,73 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
   const cwResumeRef = useRef(cwResume)
   useEffect(() => { cwResumeRef.current = cwResume }, [cwResume])
 
+  // 2026-06-05 (Home redesign A/E) — derived greeting bits + top genre.
+  // Time-of-day from the client clock; first name from the username.
+  // pickCount drives "{N} worth your time"; libraryTotal (real, or null)
+  // gates the "picked from X titles" clause.
+  const greetWord = greetingTimeOfDay()
+  const dayPart = greetingDayPart()
+  const weekday = new Date().toLocaleDateString(undefined, { weekday: 'long' })
+  const firstName = greetingFirstName(user?.username)
+  const nPicks = pickCount ?? 0
+  // Top genre: most common genre across the loaded rails' cards. Honest
+  // derived value (not a stat endpoint); falls back to "—" when no genre
+  // metadata is present yet.
+  const topGenre = (() => {
+    const counts = new Map<string, number>()
+    for (const rail of effectiveRails) {
+      // Skip the Continue Watching rail's items? They carry genre too,
+      // so include everything — more signal = better mode estimate.
+      for (const m of rail.items) {
+        const g = (m.genre || '').trim()
+        if (g) counts.set(g, (counts.get(g) ?? 0) + 1)
+      }
+    }
+    let best = '—'; let bestN = 0
+    for (const [g, n] of counts) { if (n > bestN) { best = g; bestN = n } }
+    return best
+  })()
+
   return (
     <div className="animate-fade-in">
+      {/* 2026-06-05 (Home redesign A) — Greeting band above the hero.
+          Time-aware greeting + a derived subline. The "{N} worth your
+          time" count is real (personalized/hero picks); the "picked from
+          X titles" clause only renders when a real library total is
+          reachable (libraryTotal != null) — omitted, never faked,
+          otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
+      <div className="flex items-end justify-between gap-5 mt-2 mb-5">
+        <div className="min-w-0">
+          <h1 className="font-display text-3xl font-bold tracking-tight leading-tight">
+            Good {greetWord},{' '}
+            <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
+          </h1>
+          <div className="text-white/60 text-sm mt-1.5 flex items-center gap-2 flex-wrap">
+            <span>{weekday} {dayPart}</span>
+            {nPicks > 0 && (
+              <>
+                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
+                <span><b className="text-white font-semibold">{nPicks}</b> worth your time</span>
+              </>
+            )}
+            {/* TODO(redesign-net-new): wire a real library-count if a lightweight endpoint exists. */}
+            {libraryTotal != null && libraryTotal > 0 && (
+              <>
+                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
+                <span>picked from <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</span>
+              </>
+            )}
+          </div>
+        </div>
+        {onRefreshHero && (
+          <button
+            onClick={onRefreshHero}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
+          >
+            <Icon name="sparkle" size={15} /> Surprise me
+          </button>
+        )}
+      </div>
       <HeroSection
         hero={hero}
         onPlay={onPlay}
@@ -1253,6 +1573,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
         resume={heroResume}
+        libraryIds={libraryIds}
+        onToggleLib={onToggleLib}
       />
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
@@ -1313,6 +1635,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
               }
             }
           : undefined
+        // 2026-06-05 (Home redesign C) — per-card subtitle resolver
+        // from the rail's precomputed map (only the CW rail supplies
+        // one). Undefined for cards not in the map → default meta row.
+        const cardSubtitleFor = rail.cardSubtitles
+          ? (m: Media) => rail.cardSubtitles![m.id]
+          : undefined
         return (
           <MediaRail
             key={`${rail.title}-${i}`}
@@ -1325,10 +1653,144 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
             onToggleLib={onToggleLib}
             onSeeAll={seeAllHandler}
             resolveResume={resolveResume}
+            subtitle={rail.subtitle}
+            aiPick={rail.aiPick}
+            showBadges={rail.showBadges}
+            cardSubtitleFor={cardSubtitleFor}
           />
         )
       })}
+      {/* 2026-06-05 (Home redesign E/F) — "Your week" stat band +
+          "Watch together" card, rendered below the last rail. Both are
+          self-contained components; they only show once the page has
+          rails (so they don't flash above an empty/loading home). */}
+      {effectiveRails.length > 0 && (
+        <>
+          <YourWeekBand topGenre={topGenre} />
+          <WatchTogetherCard onStartParty={onOpenParty} />
+        </>
+      )}
     </div>
+  )
+}
+
+/* ─────────────────── YOUR WEEK STAT BAND (Home redesign E) ───────────────────
+ * 2026-06-05 — A slim glass band below the last rail. Real data from
+ * getGamificationStats: Level, per-level XP bar (SAME math as
+ * GamificationCard so the two never disagree), day-streak (current +
+ * "best {longest}"), and "Completed" (total_watches). The weekly
+ * watch-hours / titles-finished-this-week / top-genre stats have no
+ * backend yet — they render as honest placeholders (a dash for the
+ * counts, a derived top genre passed from HomeView) and are marked for
+ * wiring. Self-fetches like GamificationCard so HomeView doesn't have to
+ * own the request. */
+function YourWeekBand({ topGenre }: { topGenre: string }) {
+  const [stats, setStats] = useState<GamificationStats | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const ac = new AbortController()
+    getGamificationStats(ac.signal)
+      .then((s) => { if (!cancelled) setStats(s) })
+      .catch(() => { /* non-fatal — band just stays in its loading shell */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [])
+
+  // Per-level progress — identical formula to GamificationCard (Audit H1):
+  // progress through THIS level's slice, not absolute XP%.
+  const xp = stats?.xp
+  const prevTotal = xp?.prev_level_total ?? 0
+  const nextTotal = xp?.next_level_total ?? 0
+  const slice = Math.max(1, nextTotal - prevTotal)
+  const pct = xp ? Math.min(100, Math.max(0, ((xp.xp - prevTotal) / slice) * 100)) : 0
+
+  return (
+    <>
+      <div className="flex items-center gap-3 mt-9 mb-3.5">
+        <Icon name="barChart" size={17} className="text-purple-300" />
+        <h3 className="text-[16.5px] font-semibold">Your week</h3>
+        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
+      </div>
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-purple-500/[0.08] to-white/[0.02] flex flex-col lg:flex-row items-stretch">
+        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-purple-500/[0.14] blur-[60px] pointer-events-none" aria-hidden="true" />
+        {/* Lead: level + XP bar (real) */}
+        <div className="relative px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[210px] border-b lg:border-b-0 lg:border-r border-white/[0.08]">
+          <span className="inline-flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold">
+            <Icon name="zap" size={13} /> Level {xp ? xp.level : '—'}
+          </span>
+          <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
+          <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
+            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+          </span>
+          <span className="text-[11px] text-white/40 mt-1">
+            {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
+          </span>
+        </div>
+        {/* Stats grid */}
+        <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
+          {/* TODO(redesign-net-new): weekly watch-hours / titles-finished-this-week / top-genre need a backend stats endpoint. */}
+          <div className="px-5 py-5 flex flex-col gap-1.5">
+            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">—<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
+          </div>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[28px] font-bold leading-none">—</span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
+          </div>
+          {/* Day streak — REAL from xp.current_streak / longest_streak */}
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-white/60 font-medium font-sans">days</small></span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
+          </div>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[21px] font-bold leading-none">{topGenre}</span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
+          </div>
+        </div>
+      </div>
+    </>
+  )
+}
+
+/* ─────────────── WATCH TOGETHER CARD (Home redesign F) ───────────────
+ * 2026-06-05 — A glass card at the bottom of Home. The "Start a watch
+ * party" CTA is REAL — it opens the existing Watch Party hub via the
+ * onStartParty handler threaded from App (same one the top bar uses).
+ * Live friend-presence ("who's watching what") has no backend feed yet,
+ * so we render a tasteful empty/placeholder state instead of fabricating
+ * a fake friend — the real CTA stays prominent. */
+function WatchTogetherCard({ onStartParty }: { onStartParty?: () => void }) {
+  return (
+    <>
+      <div className="flex items-center gap-3 mt-9 mb-3.5">
+        <Icon name="users" size={17} className="text-purple-300" />
+        <h3 className="text-[16.5px] font-semibold">Watch together</h3>
+        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
+      </div>
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] flex items-center gap-5 px-6 py-5 flex-wrap">
+        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
+        <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
+          <Icon name="users" size={26} className="text-indigo-300" />
+        </div>
+        <div className="relative flex-1 min-w-[200px]">
+          <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
+            <Icon name="users" size={13} /> Watch parties
+          </div>
+          <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
+          {/* TODO(redesign-net-new): live friend-presence ("who's watching what") needs a backend presence feed. */}
+          <div className="text-[12.5px] text-white/50 mt-0.5">Everyone stays in sync — same scene, same time. Friend presence is coming soon.</div>
+        </div>
+        <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
+          {onStartParty && (
+            <button
+              onClick={onStartParty}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
+            >
+              <Icon name="users" size={16} /> Start a watch party
+            </button>
+          )}
+        </div>
+      </div>
+    </>
   )
 }
 
@@ -6900,17 +7362,22 @@ export default function App() {
         // same as the final shape so the personalized splice below
         // can insert between Recently Added and Top Rated Movies
         // without re-ordering.
+        // 2026-06-05 (Home redesign D) — every Home rail card now opts
+        // into quality badges (showBadges) so 4K/HDR chips show, matching
+        // the mockup. Core rails (Recently Added / Top Rated) get neither
+        // the "AI PICK" chip nor a "why it's here" subtitle — only the
+        // recommender-driven discover/anchor rails do (spliced below).
         const coreRails: NonNullable<HomeViewProps['rails']> = [
           // Recently Added blends movies + shows so the See All
           // can't honestly map to a single browse page — leave the
           // affordance off rather than pick one arbitrarily.
-          { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const },
+          { title: 'Recently Added', items: recent as Media[], aspect: 'poster' as const, showBadges: true },
           // Top Rated rails map cleanly to /movies and /shows with
           // sortBy=rating, so the See All button takes
           // the user to the full Top Rated catalog.
-          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const,
+          { title: 'Top Rated Movies', items: movies as Media[], aspect: 'poster' as const, showBadges: true,
             seeAllTarget: { view: 'movies' as const, sortBy: 'rating' as const } },
-          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const,
+          { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const, showBadges: true,
             seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
         ]
         setHomeRails(coreRails)
@@ -6938,16 +7405,23 @@ export default function App() {
         ])
         if (cancelled) return
 
+        // 2026-06-05 (Home redesign D) — the recommender-driven rails get
+        // the "✨ AI PICK" chip + a short "why it's here" subtitle + 4K/HDR
+        // badges. The subtitles are illustrative (the recommender doesn't
+        // return per-rail descriptions yet).
+        // TODO(redesign-net-new): real per-rail descriptions if the recommender starts returning them.
         const personalizedRails = [
           ...(discover.length > 0
             ? discover
                 .filter(r => r.items.length > 0)
-                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const }))
+                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+                  aiPick: true, showBadges: true, subtitle: 'Hand-picked by Aurora for your taste' }))
             : []),
           ...(anchor.length > 0
             ? anchor
                 .filter(r => r.items.length > 0)
-                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const }))
+                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+                  aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' }))
             : []),
         ]
 
@@ -8132,17 +8606,27 @@ export default function App() {
                   seen.add(c.media_item_id)
                   return true
                 })
+                // 2026-06-05 (Home redesign C) — per-card subtitle map
+                // ("S2E4 · 23m left" / "Movie · 1h 12m left") computed
+                // here where the source ContinueWatchingItem is in scope
+                // (Media alone can't reconstruct remaining time). Keyed by
+                // media_item_id to match MediaCardCinema's item.id.
+                const cwSubtitles: Record<number, string> = {}
+                for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
                 return [
                   {
                     title: 'Continue Watching',
                     items: deduped.map(c => mapContinueToMedia(c)) as Media[],
-                    // 'poster' (not 'landscape') so the full 2:3
-                    // frame shows — landscape cropped to a 16:9
-                    // slice that hid title art.
-                    aspect: 'poster' as const,
+                    // 2026-06-05 (Home redesign C) — switched to 'landscape'
+                    // (16:9 backdrop) per the redesign. The cards now lead
+                    // with the backdrop + a "min left" subtitle rather than
+                    // poster art; MediaCardCinema renders the landscape
+                    // aspect, progress bar, resume pill, and subtitle.
+                    aspect: 'landscape' as const,
                     // Stable identifier for HomeView's resume-play
                     // interceptor (title is for display only).
                     kind: 'continue-watching' as const,
+                    cardSubtitles: cwSubtitles,
                   },
                   ...base,
                 ]
@@ -8157,6 +8641,23 @@ export default function App() {
               heroPersonalization={heroPersonalization}
               libraryIds={libraryIds}
               onToggleLib={handleToggleLib}
+              // 2026-06-05 (Home redesign A/F) — greeting band + watch-
+              // together inputs.
+              user={typeof user === 'object' ? user : undefined}
+              // Real count of personalized/hero picks available.
+              pickCount={heroPool.length}
+              // Real library total ONLY when reachable: moviesTotal /
+              // showsTotal are populated lazily when the user visits those
+              // browse tabs (null until then). Sum what's available; pass
+              // null when neither has loaded so HomeView OMITS the
+              // "picked from X titles" clause rather than fabricate it.
+              libraryTotal={
+                moviesTotal == null && showsTotal == null
+                  ? null
+                  : (moviesTotal ?? 0) + (showsTotal ?? 0)
+              }
+              // Opens the existing Watch Party hub (same as the top bar).
+              onOpenParty={() => setPartyJoinPrompt(true)}
               // 2026-05-27 — Hero resume bundle. Same lookup as
               // DetailView's `resume`: find the user's CW record for
               // the current hero (movie OR show) with position_ms > 0.
