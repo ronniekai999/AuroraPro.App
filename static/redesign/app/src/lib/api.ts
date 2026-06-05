@@ -622,6 +622,10 @@ export async function searchMedia(
 export interface HeroPick {
   media: UIMedia
   reason?: string
+  // Integer "match %" (0-100) from the recommender's taste-vector
+  // similarity. Undefined / 0 for the cold-start popular pool (no centroid),
+  // in which case the hero ring falls back to its derived rating estimate.
+  match?: number
 }
 export interface HeroPersonalization {
   coldStart: boolean
@@ -642,13 +646,13 @@ export async function getHeroPool(
   if (profileId) params.set('profile_id', String(profileId))
   const qs = params.toString()
   const resp = await apiFetch<{
-    picks: { item: ServerMediaItem; reason?: string }[],
+    picks: { item: ServerMediaItem; reason?: string; match?: number }[],
     personalization?: { cold_start?: boolean; history_count?: number; threshold?: number },
   }>(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
   return {
-    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason })),
+    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason, match: p.match })),
     // Defaults preserve the pre-personalization-field behavior for any
     // server older than this change (cold_start=false hides the hint).
     personalization: {
@@ -669,6 +673,9 @@ export async function getHeroPool(
 // (mirrors internal/api/hero_handlers.go DiscoverRail).
 export interface DiscoverRailUI {
   title: string
+  // LLM's one-sentence theme line (≤100 chars). Optional — empty when the
+  // model omitted it; the home renderer falls back to a generic subtitle.
+  description?: string
   items: UIMedia[]
 }
 export async function getDiscoverRails(
@@ -678,12 +685,13 @@ export async function getDiscoverRails(
   const params = new URLSearchParams()
   if (profileId) params.set('profile_id', String(profileId))
   const qs = params.toString()
-  type Raw = { rails?: { title: string; items?: ServerMediaItem[] }[] }
+  type Raw = { rails?: { title: string; description?: string; items?: ServerMediaItem[] }[] }
   const resp = await apiFetch<Raw>(
     qs ? `/api/me/discover?${qs}` : '/api/me/discover', { signal },
   )
   return (resp.rails || []).map(r => ({
     title: r.title,
+    description: r.description,
     items: (r.items || []).map(mapMedia),
   }))
 }
@@ -1585,6 +1593,11 @@ export interface GamificationStats {
   xp: UserXPStats
   unlocked: UserAchievementUnlock[]
   achievement_catalog: AchievementDef[]
+  // Most-finished genre across the user's completed watch history. Empty
+  // string ("") when there's no completed-watch data yet; the "Your week"
+  // band renders a placeholder in that case. Older servers omit the field
+  // entirely (undefined), which the band also treats as the placeholder.
+  top_genre?: string
 }
 
 export async function getGamificationStats(signal?: AbortSignal): Promise<GamificationStats> {

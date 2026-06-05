@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -158,7 +159,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
-		       added_at, updated_at
+		       added_at, updated_at, distance
 		FROM ranked
 		ORDER BY distance ASC
 		LIMIT $3`,
@@ -172,14 +173,19 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 	var items []*models.MediaItem
 	for rows.Next() {
 		item := &models.MediaItem{}
+		var distance float64
 		if err := rows.Scan(
 			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
 			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin,
 			&item.ContentRating, &item.PosterPath, &item.BackdropPath,
-			&item.AddedAt, &item.UpdatedAt,
+			&item.AddedAt, &item.UpdatedAt, &distance,
 		); err != nil {
 			return nil, fmt.Errorf("scan nearest unwatched: %w", err)
 		}
+		// Cosine distance d∈[0,2] on L2-normalized embeddings; similarity =
+		// 1-d∈[-1,1]. Clamp negatives to 0 so the frontend never sees a
+		// nonsensical match below zero.
+		item.MatchScore = matchFromDistance(distance)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -232,7 +238,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
-		       added_at, updated_at, embedding_text
+		       added_at, updated_at, embedding_text, distance
 		FROM ranked
 		ORDER BY distance ASC
 		LIMIT $3`,
@@ -246,17 +252,44 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 	var out []*RailCandidate
 	for rows.Next() {
 		c := &RailCandidate{Item: &models.MediaItem{}}
+		var distance float64
 		if err := rows.Scan(
 			&c.Item.ID, &c.Item.LibraryID, &c.Item.Type, &c.Item.Title, &c.Item.SortTitle,
 			&c.Item.Year, &c.Item.Overview, &c.Item.Rating, &c.Item.RuntimeMin,
 			&c.Item.ContentRating, &c.Item.PosterPath, &c.Item.BackdropPath,
-			&c.Item.AddedAt, &c.Item.UpdatedAt, &c.EmbeddingText,
+			&c.Item.AddedAt, &c.Item.UpdatedAt, &c.EmbeddingText, &distance,
 		); err != nil {
 			return nil, fmt.Errorf("scan nearest unwatched rich: %w", err)
 		}
+		// Same distance→similarity mapping as NearestUnwatched.
+		c.Item.MatchScore = matchFromDistance(distance)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// matchFromDistance converts a pgvector cosine distance into a [0,1]
+// similarity score. Embeddings in media_items.embedding are L2-normalized at
+// insert time (see internal/llm/client.go `normalize`), so the cosine
+// DISTANCE the `<=>` operator returns is d = 1 - cos(θ) ∈ [0,2], and the
+// similarity is 1 - d. We clamp the result to [0,1]: the upper end can't
+// exceed 1 for normalized vectors, and the lower clamp guards against the
+// (theoretically possible) negative-similarity case for near-opposite
+// vectors so the frontend never renders a sub-zero match. Kept here next to
+// its only callers (NearestUnwatched / NearestUnwatchedRich) rather than in
+// the recommender so the conversion lives where the distance is read.
+func matchFromDistance(distance float64) float64 {
+	sim := 1 - distance
+	// A zero/degenerate embedding makes the cosine distance NaN; NaN fails every
+	// comparison below, so guard it explicitly or it would propagate into the
+	// user-facing match %.
+	if math.IsNaN(sim) || sim < 0 {
+		return 0
+	}
+	if sim > 1 {
+		return 1
+	}
+	return sim
 }
 
 // WatchAnchor is a recently-watched item with its embedding, used by the

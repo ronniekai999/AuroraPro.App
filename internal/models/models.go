@@ -136,6 +136,14 @@ type MediaItem struct {
 	// watch history. Used by the frontend to render a "Because you watched X"
 	// caption when no LLM-generated Reason is available. Never persisted.
 	NearestAnchor *AnchorRef `json:"nearest_anchor,omitempty"`
+	// MatchScore is a transient cosine-similarity-to-taste-vector score in
+	// [0,1], derived as max(0, 1 - cosine_distance) where the distance comes
+	// from the recommender's pgvector ORDER BY. Populated by NearestUnwatched /
+	// NearestUnwatchedRich for personalized (taste-vector) pools only; stays 0
+	// for the cold-start popular pool which has no centroid to compare against.
+	// The hero recommender maps this to an integer percent (HeroPick.Score).
+	// Never persisted.
+	MatchScore float64 `json:"match_score,omitempty"`
 
 	// AI-match suggestion (migration 026). Populated by the AI matcher
 	// (internal/matching) for items in match_status='needs_review'. The

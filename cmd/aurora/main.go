@@ -1016,7 +1016,7 @@ func (a heroAdapter) PoolFor(ctx context.Context, profileID int64) ([]api.HeroPi
 	}
 	out := make([]api.HeroPick, len(picks))
 	for i, p := range picks {
-		out[i] = api.HeroPick{Item: p.Item, Reason: p.Reason}
+		out[i] = api.HeroPick{Item: p.Item, Reason: p.Reason, Match: p.Score}
 	}
 	return out, nil
 }
@@ -1035,7 +1035,7 @@ func (a heroAdapter) DiscoverFor(ctx context.Context, profileID int64) ([]api.Di
 	}
 	out := make([]api.DiscoverRail, len(rails))
 	for i, r := range rails {
-		out[i] = api.DiscoverRail{Title: r.Title, Items: r.Items}
+		out[i] = api.DiscoverRail{Title: r.Title, Description: r.Description, Items: r.Items}
 	}
 	return out, nil
 }

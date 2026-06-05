@@ -326,9 +326,22 @@ func (h *GamificationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 	if unlocked == nil {
 		unlocked = []*models.UserAchievement{}
 	}
+
+	// Top genre — derived from the user's completed watch history. Best-effort
+	// (mirrors the achievements fallback above): a failure degrades to an
+	// empty string rather than 500ing the whole stats payload. Empty is also
+	// the legitimate "no completed watches yet" value; the frontend renders a
+	// placeholder in that case.
+	topGenre, tgErr := h.queries.TopGenreForUser(r.Context(), claims.UserID)
+	if tgErr != nil {
+		slog.Warn("gamification stats: top genre failed (non-fatal)", "error", tgErr)
+		topGenre = ""
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"xp":                  x,
 		"unlocked":            unlocked,
 		"achievement_catalog": defs,
+		"top_genre":           topGenre,
 	})
 }
