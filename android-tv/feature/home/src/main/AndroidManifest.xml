@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-    Library-module manifest. Empty intentionally — feature:home contributes
-    composables only, no activities, no services, no permissions of its own.
-    The :app module's manifest declares the launcher activity.
--->
-<manifest />
