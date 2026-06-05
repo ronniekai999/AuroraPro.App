@@ -179,6 +179,7 @@ export function useCast(
   status: CastStatus
   remote: CastRemoteState
   start: () => Promise<void>
+  loadCurrent: () => Promise<void>
   stop: () => void
   playOrPause: () => void
   seek: (toSec: number) => void
@@ -358,55 +359,21 @@ export function useCast(
     }
   }, [])
 
-  const start = async () => {
+  // Load the CURRENT media (from loadRef) onto the EXISTING cast session —
+  // no device picker. This is the second half of start(), factored out so the
+  // next-episode auto-advance can re-point a live receiver at a freshly-booted
+  // local session (the receiver mirrors the local <video>'s server session).
+  // Throws on every failure so callers decide whether to retry or stop.
+  const loadCurrent = async () => {
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
       throw new Error('cast SDK not ready')
     }
     const ctx = window.cast.framework.CastContext.getInstance()
-    // Belt-and-suspenders: re-apply setOptions right before requesting
-    // a session. The CAF Sender will throw "Cannot start session
-    // before cast options are provided" if any earlier setOptions call
-    // didn't take effect (e.g. timing race with SDK init). Calling
-    // again is idempotent and cheap.
-    try {
-      ctx.setOptions({
-        receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
-      })
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn('[Aurora Cast] setOptions in start() threw:', e)
-    }
-    // requestSession opens the Cast device picker. Resolves when
-    // the user selects a device, rejects if they dismiss it. Wrap
-    // in a richer rethrow so the caller sees the full Cast error
-    // object (code + description + details), not just a bare
-    // "session_error" string — those extra fields are what tell us
-    // whether it was the receiver-app launch, a network problem, or
-    // the user dismissing the picker.
-    try {
-      await ctx.requestSession()
-    } catch (rawErr) {
-      const e = rawErr as { code?: string; description?: string; details?: unknown } & Error
-      // eslint-disable-next-line no-console
-      console.error('[Aurora Cast] requestSession failed:', {
-        code: e?.code,
-        description: e?.description,
-        details: e?.details,
-        message: e?.message,
-        raw: rawErr,
-      })
-      const code = e?.code ?? 'unknown'
-      const desc = e?.description ?? e?.message ?? ''
-      throw new Error(desc ? `${code}: ${desc}` : code)
-    }
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
 
     const load = await Promise.resolve(loadRef.current?.())
-    if (!load) {
-      session.endSession(true)
-      throw new Error('no media to cast')
-    }
+    if (!load) throw new Error('no media to cast')
     // eslint-disable-next-line no-console
     console.info('[Aurora Cast] loading media:', {
       url: load.contentUrl,
@@ -496,6 +463,64 @@ export function useCast(
     }
   }
 
+  const start = async () => {
+    if (!window.cast?.framework || !window.chrome?.cast?.media) {
+      throw new Error('cast SDK not ready')
+    }
+    const ctx = window.cast.framework.CastContext.getInstance()
+    // Belt-and-suspenders: re-apply setOptions right before requesting
+    // a session. The CAF Sender will throw "Cannot start session
+    // before cast options are provided" if any earlier setOptions call
+    // didn't take effect (e.g. timing race with SDK init). Calling
+    // again is idempotent and cheap.
+    try {
+      ctx.setOptions({
+        receiverApplicationId: DEFAULT_MEDIA_RECEIVER_APP_ID,
+      })
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[Aurora Cast] setOptions in start() threw:', e)
+    }
+    // requestSession opens the Cast device picker. Resolves when
+    // the user selects a device, rejects if they dismiss it. Wrap
+    // in a richer rethrow so the caller sees the full Cast error
+    // object (code + description + details), not just a bare
+    // "session_error" string — those extra fields are what tell us
+    // whether it was the receiver-app launch, a network problem, or
+    // the user dismissing the picker.
+    try {
+      await ctx.requestSession()
+    } catch (rawErr) {
+      const e = rawErr as { code?: string; description?: string; details?: unknown } & Error
+      // eslint-disable-next-line no-console
+      console.error('[Aurora Cast] requestSession failed:', {
+        code: e?.code,
+        description: e?.description,
+        details: e?.details,
+        message: e?.message,
+        raw: rawErr,
+      })
+      const code = e?.code ?? 'unknown'
+      const desc = e?.description ?? e?.message ?? ''
+      throw new Error(desc ? `${code}: ${desc}` : code)
+    }
+    const session = ctx.getCurrentSession()
+    if (!session) throw new Error('cast session not established')
+
+    // Hand off to the shared loader (also used by the next-episode
+    // auto-advance). Preserve start()'s original cleanup: when there is
+    // nothing to cast, tear the just-opened session back down rather than
+    // stranding an empty receiver after the user picked a device.
+    try {
+      await loadCurrent()
+    } catch (e) {
+      if ((e as Error)?.message === 'no media to cast') {
+        try { session.endSession(true) } catch { /* defensive */ }
+      }
+      throw e
+    }
+  }
+
   const stop = () => {
     if (!window.cast?.framework) return
     const ctx = window.cast.framework.CastContext.getInstance()
@@ -518,7 +543,7 @@ export function useCast(
     controller.seek()
   }
 
-  return { status, remote, start, stop, playOrPause, seek }
+  return { status, remote, start, loadCurrent, stop, playOrPause, seek }
 }
 
 // absoluteUrl rewrites a server-relative path to a fully-qualified

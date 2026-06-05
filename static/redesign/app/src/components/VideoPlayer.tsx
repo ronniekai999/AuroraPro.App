@@ -164,11 +164,13 @@ interface VideoPlayerProps {
   // currentTime), matching what the scrubber emits to onSeek.
   onSeekRebuild?: (newStartSec: number) => void
   // Issue #177 — fires once when playback reaches the natural end of
-  // the media (the <video> 'ended' event). The parent decides whether
-  // to auto-advance to the next episode (gated on the user's autoplay
-  // preference, episode-vs-movie, party state, etc.) — the player
-  // itself stays dumb about the episode graph.
-  onEnded?: () => void
+  // the media: the local <video> 'ended' event, OR (when casting) the
+  // receiver flipping to IDLE. The parent decides whether to auto-advance
+  // to the next episode (gated on the user's autoplay preference,
+  // episode-vs-movie, party state, etc.) — the player itself stays dumb
+  // about the episode graph. Returns whether it advanced; the cast path
+  // awaits this to decide between re-pointing the receiver and stopping.
+  onEnded?: () => boolean | Promise<boolean>
   // Reports whether the player has collapsed to the cast/AirPlay control
   // widget, so the parent can suppress Escape/back-to-close while casting.
   onMinimizedChange?: (minimized: boolean) => void
@@ -598,18 +600,69 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // currentTime/duration heuristic) is robust to HLS streams whose duration is
   // unknown or grows as the playlist arrives, and it never fires mid-playback:
   // a seek/buffer reports BUFFERING and a pause reports PAUSED — only a genuine
-  // end/stop reports IDLE. cast.stop() routes through the Chromecast-end effect
-  // below, which closes the player.
+  // end/stop reports IDLE.
+  //
+  // On finish we try the SAME next-episode advance as local playback (via
+  // onEnded — the local <video> is paused while casting, so its 'ended' event
+  // never fires). If it advances, the local player reboots its server session
+  // for the next episode and the reload effect below re-points the receiver at
+  // it (the receiver mirrors the local session). If there's nothing to advance
+  // to (movie, autoplay off, party, series end), we stop — which routes through
+  // the Chromecast-end effect below and closes the player (the prior behavior).
   const castHasPlayedRef = useRef(false)
+  // True from the moment we decide to advance until the receiver has been
+  // re-pointed at the next episode. Gates the reload effect so unrelated
+  // session reboots (audio-track switch, seek-rebuild) don't reload the cast.
+  const castAdvancePendingRef = useRef(false)
+  // Bumped by the main play effect once a new local session is established;
+  // drives the reload effect at exactly the moment castLoadGetter can mint a
+  // cast token for the new target.
+  const [castReloadEpoch, setCastReloadEpoch] = useState(0)
   useEffect(() => {
-    if (!cast.status.connected) { castHasPlayedRef.current = false; return }
+    if (!cast.status.connected) {
+      // Cast gone: disarm both flags so a stale advance can't survive a
+      // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
+      castHasPlayedRef.current = false
+      castAdvancePendingRef.current = false
+      return
+    }
     if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
     if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
+      // De-arm synchronously so a re-render mid-advance can't re-enter here.
       castHasPlayedRef.current = false
-      cast.stop()
+      // Arm BEFORE the async advance so the next session's epoch bump (which
+      // is network-bound and always lands later) can never beat the flag.
+      castAdvancePendingRef.current = true
+      void (async () => {
+        const advanced = await onEndedRef.current?.()
+        if (!advanced) {
+          // Nothing to advance to — clear the arm and close out (the prior
+          // end-of-media behavior: stop → Chromecast-end effect → onClose).
+          castAdvancePendingRef.current = false
+          cast.stop()
+        }
+      })()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cast.status.connected, cast.remote.playerState])
+
+  // Re-point a live receiver at a freshly-booted local session after a cast
+  // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
+  // the new target). Gated on a pending advance + a still-connected receiver;
+  // any load failure (e.g. the next episode is direct-play and has no castable
+  // HLS session) stops the cast, closing the player rather than leaving an idle
+  // receiver hanging.
+  useEffect(() => {
+    if (!castAdvancePendingRef.current) return
+    castAdvancePendingRef.current = false
+    if (!cast.status.connected) return
+    void cast.loadCurrent().catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn('[Aurora Cast] auto-advance load failed; stopping cast', err)
+      cast.stop()
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [castReloadEpoch])
 
   // Chromecast SESSION ended (widget Stop, TV remote, network drop, or the
   // media-finish stop() above): close the player. We deliberately do NOT
@@ -1111,6 +1164,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // below are the host's intended state, safe to propagate.
           playerReadyRef.current = true
           try { await vid.play() } catch { /* autoplay-blocked, user clicks play */ }
+          // A direct-play target has no castable HLS session; bump anyway so a
+          // pending cast auto-advance resolves (loadCurrent finds no media and
+          // stops the cast — direct-play can't be cast).
+          setCastReloadEpoch(n => n + 1)
           return
         }
 
@@ -1147,6 +1204,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // this to pick the cue-shift offset: keyframe for remux, raw
         // startSec for transcode.
         sessionRemuxRef.current = sessionReq.remux
+        // Cast follows the local session: now that the new session exists,
+        // signal the reload effect so a pending cast auto-advance re-points the
+        // receiver at this episode (no-op when not casting / nothing pending).
+        setCastReloadEpoch(n => n + 1)
         setStatus(
           stream.decision === 'direct_stream'
             ? `Remux · ${stream.container ?? 'hls'}`
@@ -1426,6 +1487,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         if (err && (err as Error).name === 'AbortError') return
         const msg = err instanceof Error ? err.message : 'Failed to start playback'
         setErrorMsg(msg)
+        // If a cast auto-advance was waiting on this boot, it just failed
+        // (sessionIdRef was never set). Tick the reload epoch so the cast
+        // reload effect runs and — finding no castable session — stops the
+        // cast and closes, instead of leaving the receiver stuck on the
+        // finished episode's last frame. No-op when nothing is pending.
+        setCastReloadEpoch(n => n + 1)
       }
     })()
 
@@ -1790,7 +1857,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // parent (auto-play-next decision lives there). 'ended' fires once
     // per playthrough; the parent re-targets on advance, which tears
     // down + rebuilds this effect for the next episode.
-    const onEndedDom = () => { onEndedRef.current?.() }
+    const onEndedDom = () => { void onEndedRef.current?.() }
     vid.addEventListener('play', onPlay)
     vid.addEventListener('pause', onPause)
     vid.addEventListener('timeupdate', onTimeUpdate)

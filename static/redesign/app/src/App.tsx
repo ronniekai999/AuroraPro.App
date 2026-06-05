@@ -7444,11 +7444,18 @@ export default function App() {
   // The playerTargetRef re-check before applying guards the async
   // window: if the player advanced, closed, or switched episodes while
   // getEpisodes/getSeasons were in flight, the stale resolve bails.
-  const handlePlaybackEnded = useCallback(() => {
+  //
+  // Returns true iff it actually advanced to a next episode. Local
+  // playback (the <video> 'ended' listener) ignores the result, but the
+  // cast path awaits it: a Chromecast receiver signals end-of-media via
+  // playerState→IDLE (the local <video> is paused, so its 'ended' never
+  // fires), and the player needs to know whether to re-point the receiver
+  // at the new episode's session (true) or stop the cast (false).
+  const handlePlaybackEnded = useCallback(async (): Promise<boolean> => {
     const ended = playerTargetRef.current
-    if (!ended || ended.fileType !== 'episode') return
-    if (ended.seasonNumber == null || ended.episodeNumber == null) return
-    if (party.state.code) return // no unilateral advance in a watch party
+    if (!ended || ended.fileType !== 'episode') return false
+    if (ended.seasonNumber == null || ended.episodeNumber == null) return false
+    if (party.state.code) return false // no unilateral advance in a watch party
 
     // Read prefs once. Default autoplay ON; quality mirrors handlePlay.
     let autoplay = true
@@ -7462,7 +7469,7 @@ export default function App() {
         else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
       }
     } catch { /* malformed prefs — keep defaults (autoplay ON) */ }
-    if (!autoplay) return
+    if (!autoplay) return false
 
     const mediaItemId = ended.mediaItemId
     const curSeason = ended.seasonNumber
@@ -7470,58 +7477,58 @@ export default function App() {
     const showTitle = ended.title
     const endedEpisodeId = ended.episodeId
 
-    void (async () => {
-      try {
-        // 1) Next playable episode in the current season.
-        let nextEp: ApiEpisode | null = null
-        let nextFile: ReturnType<typeof pickFile> = null
-        let nextSeason = curSeason
-        const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
-          .sort((a, b) => a.episode_number - b.episode_number)
-        for (const e of sameSeason) {
-          if (e.episode_number <= curEp) continue
-          const f = pickFile(e.files, preferQuality)
-          if (f) { nextEp = e; nextFile = f; break }
-        }
-        // 2) Else the first playable episode of the earliest later season.
-        if (!nextEp) {
-          const laterSeasons = [...await getSeasons(mediaItemId)]
-            .sort((a, b) => a.season_number - b.season_number)
-            .filter(s => s.season_number > curSeason)
-          for (const s of laterSeasons) {
-            const eps = [...await getEpisodes(mediaItemId, s.season_number)]
-              .sort((a, b) => a.episode_number - b.episode_number)
-            for (const e of eps) {
-              const f = pickFile(e.files, preferQuality)
-              if (f) { nextEp = e; nextFile = f; nextSeason = s.season_number; break }
-            }
-            if (nextEp) break
-          }
-        }
-
-        // Bail if the player moved on while we were resolving.
-        if (playerTargetRef.current?.episodeId !== endedEpisodeId) return
-        if (!nextEp || !nextFile) return // series end / nothing playable — park on final frame
-
-        const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
-        setPlayerTarget({
-          mediaItemId,
-          fileId: nextFile.id,
-          fileType: 'episode',
-          episodeId: nextEp.id,
-          seasonNumber: nextSeason,
-          episodeNumber: nextEp.episode_number,
-          title: showTitle,
-          subtitle: label,
-        })
-        addToast(`Up next: ${label}`, 'info')
-        // The finished episode now has completed progress — refresh
-        // Continue Watching (same nonce the player-close path bumps).
-        setCwReloadNonce(n => n + 1)
-      } catch (err) {
-        console.warn('[Aurora] auto-advance to next episode failed', err)
+    try {
+      // 1) Next playable episode in the current season.
+      let nextEp: ApiEpisode | null = null
+      let nextFile: ReturnType<typeof pickFile> = null
+      let nextSeason = curSeason
+      const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
+        .sort((a, b) => a.episode_number - b.episode_number)
+      for (const e of sameSeason) {
+        if (e.episode_number <= curEp) continue
+        const f = pickFile(e.files, preferQuality)
+        if (f) { nextEp = e; nextFile = f; break }
       }
-    })()
+      // 2) Else the first playable episode of the earliest later season.
+      if (!nextEp) {
+        const laterSeasons = [...await getSeasons(mediaItemId)]
+          .sort((a, b) => a.season_number - b.season_number)
+          .filter(s => s.season_number > curSeason)
+        for (const s of laterSeasons) {
+          const eps = [...await getEpisodes(mediaItemId, s.season_number)]
+            .sort((a, b) => a.episode_number - b.episode_number)
+          for (const e of eps) {
+            const f = pickFile(e.files, preferQuality)
+            if (f) { nextEp = e; nextFile = f; nextSeason = s.season_number; break }
+          }
+          if (nextEp) break
+        }
+      }
+
+      // Bail if the player moved on while we were resolving.
+      if (playerTargetRef.current?.episodeId !== endedEpisodeId) return false
+      if (!nextEp || !nextFile) return false // series end / nothing playable — park on final frame
+
+      const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
+      setPlayerTarget({
+        mediaItemId,
+        fileId: nextFile.id,
+        fileType: 'episode',
+        episodeId: nextEp.id,
+        seasonNumber: nextSeason,
+        episodeNumber: nextEp.episode_number,
+        title: showTitle,
+        subtitle: label,
+      })
+      addToast(`Up next: ${label}`, 'info')
+      // The finished episode now has completed progress — refresh
+      // Continue Watching (same nonce the player-close path bumps).
+      setCwReloadNonce(n => n + 1)
+      return true
+    } catch (err) {
+      console.warn('[Aurora] auto-advance to next episode failed', err)
+      return false
+    }
   }, [party.state.code, addToast])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
