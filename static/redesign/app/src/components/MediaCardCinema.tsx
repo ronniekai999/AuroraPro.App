@@ -31,6 +31,11 @@ export interface MediaLike {
   id: number
   title: string
   poster?: string
+  // 2026-06-05 (Home redesign) — landscape (16:9) cards (Continue
+  // Watching) use the backdrop so the art fills the frame instead of
+  // center-cropping a 2:3 poster into a sliver. Portrait callers ignore
+  // it; landscape callers fall back to the poster when no backdrop.
+  backdrop?: string
   year?: number
   rating?: number
   genre?: string
@@ -158,6 +163,10 @@ export function MediaCardCinema({
   const isInLib = !!libraryIds?.has(item.id)
   const landscapeStyle: CSSProperties | undefined =
     aspect === 'landscape' ? { aspectRatio: '16 / 9' } : undefined
+  // Landscape (Continue Watching) cards fill a 16:9 frame, so prefer the
+  // backdrop and fall back to the poster; portrait cards always use the
+  // poster. Without this a 2:3 poster center-crops into a sliver.
+  const artSrc = aspect === 'landscape' ? (item.backdrop ?? item.poster) : item.poster
   // Poster badges (quality / maturity). Only when the caller opts in
   // AND the item actually carries tags — keeps Continue-Watching and
   // metadata-less rows clean.
@@ -188,9 +197,9 @@ export function MediaCardCinema({
       // title={item.title} for the truncated-title case.
     >
       <div className="poster-wrap">
-        {item.poster ? (
+        {artSrc ? (
           <img
-            src={item.poster}
+            src={artSrc}
             alt={item.title}
             className="poster-img"
             loading="lazy"
