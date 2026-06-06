@@ -16,6 +16,7 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 )
@@ -157,5 +158,75 @@ func TestUpsertWatchProgress_RewindDoesNotRefarm(t *testing.T) {
 	// Re-cross the threshold — still no second award (the farming guard).
 	if got := upsert(9600, 10000); got {
 		t.Errorf("re-cross after rewind: newlyCompleted = true, want false (no re-farm)")
+	}
+}
+
+// TestUpsertWatchProgress_CompletedAtAndDuration pins two invariants the weekly
+// "finished this week" stats depend on (migration 033 completed_at + the
+// duration-preservation guard):
+//  1. completed_at is stamped exactly once, on the false->true transition, and
+//     preserved (never nulled, never bumped) on rewinds / re-completions.
+//  2. a MarkWatched-style upsert (duration_ms = 0) must NOT clobber a row's real
+//     duration_ms, so SUM(duration_ms) over completed rows stays meaningful.
+func TestUpsertWatchProgress_CompletedAtAndDuration(t *testing.T) {
+	q := requireIntegrationDB(t)
+	userID := seedTestUser(t, q)
+	profileID := seedDefaultProfile(t, q, userID)
+	libraryID := seedTestLibrary(t, q, userID)
+	mediaID := seedTestMediaItem(t, q, libraryID)
+	ctx := context.Background()
+
+	upsert := func(posMs, durMs int64, completed bool) {
+		t.Helper()
+		if _, err := q.UpsertWatchProgress(ctx, &models.WatchProgress{
+			UserID:      userID,
+			ProfileID:   profileID,
+			MediaItemID: mediaID,
+			PositionMs:  posMs,
+			DurationMs:  durMs,
+			Completed:   completed,
+		}); err != nil {
+			t.Fatalf("UpsertWatchProgress: %v", err)
+		}
+	}
+	readRow := func() (completedAt *time.Time, durationMs int64) {
+		t.Helper()
+		if err := q.pool.QueryRow(ctx,
+			`SELECT completed_at, duration_ms FROM watch_progress
+			   WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL`,
+			userID, mediaID).Scan(&completedAt, &durationMs); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		return completedAt, durationMs
+	}
+
+	// In-progress (50%) — not completed, no timestamp yet.
+	upsert(5000, 10000, false)
+	if cAt, _ := readRow(); cAt != nil {
+		t.Errorf("incomplete row: completed_at = %v, want NULL", cAt)
+	}
+	// Cross the threshold (95%, auto-complete) — completed_at stamped once.
+	upsert(9500, 10000, false)
+	t0, dur := readRow()
+	if t0 == nil {
+		t.Fatalf("completed row: completed_at = NULL, want a timestamp")
+	}
+	if dur != 10000 {
+		t.Fatalf("completed row: duration_ms = %d, want 10000", dur)
+	}
+	// Sub-threshold rewind — completed_at + duration preserved.
+	upsert(1000, 10000, false)
+	if cAt, d := readRow(); cAt == nil || !cAt.Equal(*t0) {
+		t.Errorf("rewind: completed_at = %v, want preserved %v", cAt, t0)
+	} else if d != 10000 {
+		t.Errorf("rewind: duration_ms = %d, want preserved 10000", d)
+	}
+	// MarkWatched-style (duration 0, completed=true) — must NOT zero duration_ms
+	// and must NOT bump completed_at.
+	upsert(0, 0, true)
+	if cAt, d := readRow(); cAt == nil || !cAt.Equal(*t0) {
+		t.Errorf("mark-watched: completed_at = %v, want preserved %v", cAt, t0)
+	} else if d != 10000 {
+		t.Errorf("mark-watched zeroed duration_ms = %d, want preserved 10000", d)
 	}
 }
