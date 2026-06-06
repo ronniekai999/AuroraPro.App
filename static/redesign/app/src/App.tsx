@@ -16,6 +16,8 @@ import {
   getDiscoverRails,
   getAnchorRails,
   getGamificationStats,
+  listActiveParties,
+  type ActiveParty,
   type GamificationStats,
   searchForMatch,
   manualMatch,
@@ -1490,12 +1492,15 @@ interface HomeViewProps {
   pickCount?: number
   libraryTotal?: number | null
   onOpenParty?: () => void
+  // onJoinParty — join a specific active party by code (Watch-together card);
+  // same path as PartyHubModal's onJoin (join by code, open the party panel).
+  onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
   // onRefreshHero — "Surprise me": pull a whole fresh personalized pool.
   // onNextPick    — "Not tonight": advance to the next pick already in the
   //   loaded pool (instant, no refetch). Distinct affordances.
   onNextPick?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1666,7 +1671,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
       {effectiveRails.length > 0 && (
         <>
           <YourWeekBand />
-          <WatchTogetherCard onStartParty={onOpenParty} />
+          <WatchTogetherCard onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
         </>
       )}
     </div>
@@ -1756,37 +1761,128 @@ function YourWeekBand() {
  * Live friend-presence ("who's watching what") has no backend feed yet,
  * so we render a tasteful empty/placeholder state instead of fabricating
  * a fake friend — the real CTA stays prominent. */
-function WatchTogetherCard({ onStartParty }: { onStartParty?: () => void }) {
+// 2026-06-06 (Home net-new #7) — "Watch together" now shows LIVE active
+// watch parties anyone on the server can join, replacing the stubbed
+// "friend presence coming soon" copy. Aurora is a single household, so
+// active parties (not a friend graph) are the honest "who's watching
+// together right now" signal. Polls /api/parties/active; non-fatal.
+function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
+  onStartParty?: () => void
+  onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
+  currentUserId?: number
+}) {
+  const [parties, setParties] = useState<ActiveParty[]>([])
+  const [joining, setJoining] = useState<string | null>(null)
+  const [joinError, setJoinError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    const ac = new AbortController()
+    const load = () => {
+      listActiveParties(ac.signal)
+        .then((list) => { if (!cancelled) setParties(list) })
+        .catch(() => { /* non-fatal — fall back to the start CTA */ })
+    }
+    load()
+    const id = window.setInterval(load, 15000)
+    return () => { cancelled = true; ac.abort(); window.clearInterval(id) }
+  }, [])
+  // Don't offer to "join" a party you're already hosting.
+  const joinable = parties.filter((p) => p.host_user_id !== currentUserId)
+
+  const handleJoin = async (code: string) => {
+    if (!onJoinParty || joining !== null) return
+    setJoining(code)
+    setJoinError(null)
+    try {
+      const r = await onJoinParty(code)
+      if (!r.ok) setJoinError(r.error || 'Could not join that party.')
+    } catch {
+      setJoinError('Could not join that party.')
+    } finally {
+      setJoining(null)
+    }
+  }
+
   return (
     <>
       <div className="flex items-center gap-3 mt-9 mb-3.5">
         <Icon name="users" size={17} className="text-purple-300" />
         <h3 className="text-[16.5px] font-semibold">Watch together</h3>
+        {joinable.length > 0 && (
+          <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
+            {joinable.length} live now
+          </span>
+        )}
         <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
       </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] flex items-center gap-5 px-6 py-5 flex-wrap">
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] px-6 py-5">
         <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
-        <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
-          <Icon name="users" size={26} className="text-indigo-300" />
-        </div>
-        <div className="relative flex-1 min-w-[200px]">
-          <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
-            <Icon name="users" size={13} /> Watch parties
+
+        {joinable.length > 0 ? (
+          <div className="relative flex flex-col gap-2.5">
+            {joinable.slice(0, 3).map((p) => (
+              <div key={p.code} className="flex items-center gap-3.5 flex-wrap">
+                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex-none overflow-hidden">
+                  <Icon name="users" size={20} className="text-indigo-300" />
+                  {p.media_poster ? (
+                    <img
+                      src={posterURL(p.media_poster, 'w154')}
+                      alt=""
+                      loading="lazy"
+                      className="absolute inset-0 w-full h-full object-cover"
+                      onError={(e) => { e.currentTarget.style.display = 'none' }}
+                    />
+                  ) : null}
+                </div>
+                <div className="flex-1 min-w-[180px]">
+                  <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
+                  <div className="text-[12.5px] text-white/55 truncate">
+                    {p.media_title
+                      ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
+                      : 'In the lobby'}
+                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleJoin(p.code)}
+                  disabled={!onJoinParty || joining !== null}
+                  className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
+                >
+                  {joining === p.code ? 'Joining…' : 'Join'}
+                </button>
+              </div>
+            ))}
+            {joinError && <div className="text-[12px] text-rose-300/90 mt-0.5">{joinError}</div>}
+            {onStartParty && (
+              <button onClick={onStartParty} className="self-start text-[12.5px] text-indigo-200/80 hover:text-white mt-1 transition-colors">
+                or start your own watch party →
+              </button>
+            )}
           </div>
-          <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
-          {/* TODO(redesign-net-new): live friend-presence ("who's watching what") needs a backend presence feed. */}
-          <div className="text-[12.5px] text-white/50 mt-0.5">Everyone stays in sync — same scene, same time. Friend presence is coming soon.</div>
-        </div>
-        <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
-          {onStartParty && (
-            <button
-              onClick={onStartParty}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
-            >
-              <Icon name="users" size={16} /> Start a watch party
-            </button>
-          )}
-        </div>
+        ) : (
+          <div className="relative flex items-center gap-5 flex-wrap">
+            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
+              <Icon name="users" size={26} className="text-indigo-300" />
+            </div>
+            <div className="relative flex-1 min-w-[200px]">
+              <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
+                <Icon name="users" size={13} /> Watch parties
+              </div>
+              <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
+              <div className="text-[12.5px] text-white/50 mt-0.5">No one's hosting right now — start one and everyone stays in sync, same scene, same time.</div>
+            </div>
+            <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
+              {onStartParty && (
+                <button
+                  onClick={onStartParty}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
+                >
+                  <Icon name="users" size={16} /> Start a watch party
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </>
   )
@@ -8729,6 +8825,12 @@ export default function App() {
               }
               // Opens the existing Watch Party hub (same as the top bar).
               onOpenParty={() => setPartyJoinPrompt(true)}
+              // Join a specific active party (Watch-together card) — same path
+              // as PartyHubModal's onJoin: join by code, then open the panel.
+              onJoinParty={(code) => party.join(code).then((r) => {
+                if (r.ok) setPartyPanelOpen(true)
+                return r
+              })}
               // 2026-05-27 — Hero resume bundle. Same lookup as
               // DetailView's `resume`: find the user's CW record for
               // the current hero (movie OR show) with position_ms > 0.
