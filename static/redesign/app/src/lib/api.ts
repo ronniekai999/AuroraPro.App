@@ -1604,6 +1604,29 @@ export async function getGamificationStats(signal?: AbortSignal): Promise<Gamifi
   return apiFetch<GamificationStats>('/api/me/gamification', { signal })
 }
 
+// 2026-06-06 — Active watch parties for the Home "Watch together" card.
+// GET /api/parties/active returns the manager's live in-memory snapshot
+// (more up-to-date than the DB). Regular-user accessible; every entry is a
+// party anyone on the server can join via its 6-char code. Aurora is a
+// single household, so "active parties" — not a friend graph — is the honest
+// "who's watching together right now" signal.
+export interface ActiveParty {
+  code: string
+  host_user_id: number
+  party_name: string
+  media_title: string
+  media_poster: string
+  participant_count: number
+  max_participants: number
+  is_playing: boolean
+}
+
+export async function listActiveParties(signal?: AbortSignal): Promise<ActiveParty[]> {
+  type Raw = { parties?: ActiveParty[]; total?: number }
+  const resp = await apiFetch<Raw>('/api/parties/active', { signal })
+  return resp.parties ?? []
+}
+
 // Phase 4.6 — persistent rooms. Quick-parties die when the host
 // leaves; rooms have a stable code that survives across sessions.
 // V2 ships a small list+create UI in admin; full "open + stage"
