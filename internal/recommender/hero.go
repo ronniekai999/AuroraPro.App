@@ -91,8 +91,9 @@ type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
 	// Score is the integer "match %" (0-100) derived from the item's
-	// cosine similarity to the profile's taste vector (Item.MatchScore *
-	// 100, rounded + clamped). It's >0 only for the personalized
+	// cosine similarity to the profile's taste vector via calibrateMatch (a
+	// piecewise-linear curve, see scoreFromMatch). It's >0 only for the
+	// personalized
 	// (taste-vector) pool; the cold-start popular pool has no centroid so
 	// Score stays 0 and the frontend falls back to its derived rating-based
 	// estimate. Computed once here so the distance→percent mapping lives in
