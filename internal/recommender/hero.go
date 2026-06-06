@@ -91,8 +91,9 @@ type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
 	// Score is the integer "match %" (0-100) derived from the item's
-	// cosine similarity to the profile's taste vector (Item.MatchScore *
-	// 100, rounded + clamped). It's >0 only for the personalized
+	// cosine similarity to the profile's taste vector via calibrateMatch (a
+	// piecewise-linear curve, see scoreFromMatch). It's >0 only for the
+	// personalized
 	// (taste-vector) pool; the cold-start popular pool has no centroid so
 	// Score stays 0 and the frontend falls back to its derived rating-based
 	// estimate. Computed once here so the distance→percent mapping lives in
@@ -605,14 +606,44 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 // happens in exactly one place. Cold-start items have MatchScore==0 → 0, which
 // the frontend treats as "no real score, use the derived fallback".
 func scoreFromMatch(match float64) int {
-	pct := int(math.Round(match * 100))
-	if pct < 0 {
+	// Cold-start / no-centroid items carry MatchScore==0 (NaN can't reach here
+	// — matchFromDistance guards it — but check anyway) → 0, so the frontend
+	// uses its derived fallback rather than a misleading low %.
+	if match <= 0 || math.IsNaN(match) {
 		return 0
 	}
-	if pct > 100 {
-		return 100
+	return calibrateMatch(match)
+}
+
+// calibrateMatch maps a raw cosine similarity (0..1, vs the user's taste
+// vector) to a display match % (0..100). Text embeddings are anisotropic:
+// related items' cosine sims compress into a narrow high band (~0.78–0.90), so
+// a flat match*100 makes every strong pick read a uniform ~84%. This
+// piecewise-linear curve stretches that band — the slope is steepest where
+// real recommendations live (≈0.72–0.90), so genuine differences are amplified
+// and strong picks read in the 90s while clearly weaker ones fall off. The
+// anchors are the single tuning point; the mapping is monotonic (each anchor
+// ascends in both sim and pct) and bounded to [0,100].
+func calibrateMatch(sim float64) int {
+	anchors := [...]struct{ sim, pct float64 }{
+		{0.00, 0}, {0.55, 40}, {0.72, 62}, {0.80, 80},
+		{0.85, 90}, {0.92, 96}, {1.00, 100},
 	}
-	return pct
+	last := len(anchors) - 1
+	if sim <= anchors[0].sim {
+		return int(anchors[0].pct)
+	}
+	if sim >= anchors[last].sim {
+		return int(anchors[last].pct)
+	}
+	for i := 1; i <= last; i++ {
+		if sim <= anchors[i].sim {
+			a, b := anchors[i-1], anchors[i]
+			t := (sim - a.sim) / (b.sim - a.sim)
+			return int(math.Round(a.pct + t*(b.pct-a.pct)))
+		}
+	}
+	return int(anchors[last].pct) // unreachable given the guards above
 }
 
 func topN(items []*models.MediaItem, n int) []HeroPick {
