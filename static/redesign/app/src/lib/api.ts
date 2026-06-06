@@ -1598,6 +1598,12 @@ export interface GamificationStats {
   // band renders a placeholder in that case. Older servers omit the field
   // entirely (undefined), which the band also treats as the placeholder.
   top_genre?: string
+  // Titles finished + minutes of content finished in the last 7 days
+  // (watch_progress.completed_at, populated going forward — 0 until the user
+  // finishes something post-deploy). Older servers omit these (undefined),
+  // which the "Your week" band renders as a "—" placeholder.
+  titles_this_week?: number
+  minutes_this_week?: number
 }
 
 export async function getGamificationStats(signal?: AbortSignal): Promise<GamificationStats> {

@@ -1064,11 +1064,14 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 			      AND profile_id = COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
 			),
 			upsert AS (
-			    INSERT INTO watch_progress (user_id, media_item_id, episode_id, position_ms, duration_ms, completed, profile_id)
-			    VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+			    INSERT INTO watch_progress (user_id, media_item_id, episode_id, position_ms, duration_ms, completed, completed_at, profile_id)
+			    VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $6 THEN NOW() ELSE NULL END, COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
 			    ON CONFLICT (user_id, profile_id, episode_id) WHERE episode_id IS NOT NULL
-			    DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-			                 completed = (watch_progress.completed OR EXCLUDED.completed), updated_at = NOW()
+			    DO UPDATE SET position_ms = EXCLUDED.position_ms,
+			                 duration_ms = COALESCE(NULLIF(EXCLUDED.duration_ms, 0), watch_progress.duration_ms),
+			                 completed = (watch_progress.completed OR EXCLUDED.completed),
+			                 completed_at = CASE WHEN EXCLUDED.completed AND NOT watch_progress.completed THEN NOW() ELSE watch_progress.completed_at END,
+			                 updated_at = NOW()
 			    RETURNING completed
 			)
 			SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)
@@ -1084,11 +1087,14 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 		      AND profile_id = COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
 		),
 		upsert AS (
-		    INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, profile_id)
-		    VALUES ($1, $2, $3, $4, $5, COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
+		    INSERT INTO watch_progress (user_id, media_item_id, position_ms, duration_ms, completed, completed_at, profile_id)
+		    VALUES ($1, $2, $3, $4, $5, CASE WHEN $5 THEN NOW() ELSE NULL END, COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1)))
 		    ON CONFLICT (user_id, profile_id, media_item_id) WHERE episode_id IS NULL
-		    DO UPDATE SET position_ms = EXCLUDED.position_ms, duration_ms = EXCLUDED.duration_ms,
-		                 completed = (watch_progress.completed OR EXCLUDED.completed), updated_at = NOW()
+		    DO UPDATE SET position_ms = EXCLUDED.position_ms,
+			                 duration_ms = COALESCE(NULLIF(EXCLUDED.duration_ms, 0), watch_progress.duration_ms),
+		                 completed = (watch_progress.completed OR EXCLUDED.completed),
+		                 completed_at = CASE WHEN EXCLUDED.completed AND NOT watch_progress.completed THEN NOW() ELSE watch_progress.completed_at END,
+		                 updated_at = NOW()
 		    RETURNING completed
 		)
 		SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)

@@ -1701,6 +1701,12 @@ function YourWeekBand() {
   // Per-level progress — identical formula to GamificationCard (Audit H1):
   // progress through THIS level's slice, not absolute XP%.
   const xp = stats?.xp
+  // Weekly "finished" stats (real, from watch_progress.completed_at). null
+  // when loading or on an older server → "—" placeholder. Hours: 1 decimal
+  // under 10h, integer above, for a glanceable number.
+  const wkMin = stats?.minutes_this_week
+  const wkHrs = wkMin == null ? null : wkMin === 0 ? '0' : wkMin >= 600 ? String(Math.round(wkMin / 60)) : (wkMin / 60).toFixed(1)
+  const wkTitles = stats?.titles_this_week
   const prevTotal = xp?.prev_level_total ?? 0
   const nextTotal = xp?.next_level_total ?? 0
   const slice = Math.max(1, nextTotal - prevTotal)
@@ -1730,13 +1736,13 @@ function YourWeekBand() {
         </div>
         {/* Stats grid */}
         <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
-          {/* TODO(redesign-net-new): weekly watch-hours + titles-finished-this-week still need a backend stats endpoint (top genre is now wired via stats.top_genre below). */}
+          {/* Hrs + titles finished this week — real, from watch_progress.completed_at. */}
           <div className="px-5 py-5 flex flex-col gap-1.5">
-            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">—<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
+            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
             <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
           </div>
           <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[28px] font-bold leading-none">—</span>
+            <span className="font-display text-[28px] font-bold leading-none">{wkTitles != null ? wkTitles : '—'}</span>
             <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
           </div>
           {/* Day streak — REAL from xp.current_streak / longest_streak */}

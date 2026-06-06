@@ -245,6 +245,25 @@ func (q *Queries) TopGenreForUser(ctx context.Context, userID int64) (string, er
 	return name, nil
 }
 
+// WeeklyFinishedStats returns how many titles the user finished in the last 7
+// days and the total runtime (ms) of that content, from watch_progress rows
+// completed within the window. completed_at is set on the completion
+// transition (migration 033) and NULL for pre-migration completions, which are
+// therefore (correctly) excluded — the stat is accurate going forward. Scoped
+// to user_id, consistent with the other gamification stats.
+func (q *Queries) WeeklyFinishedStats(ctx context.Context, userID int64) (titles int, durationMs int64, err error) {
+	err = q.pool.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(SUM(duration_ms), 0)
+		  FROM watch_progress
+		 WHERE user_id = $1 AND completed
+		   AND completed_at >= NOW() - INTERVAL '7 days'
+	`, userID).Scan(&titles, &durationMs)
+	if err != nil {
+		return 0, 0, fmt.Errorf("weekly finished stats: %w", err)
+	}
+	return titles, durationMs, nil
+}
+
 // TouchDate returns today's UTC date (DATE column compatibility).
 func TouchDate() time.Time {
 	now := time.Now().UTC()

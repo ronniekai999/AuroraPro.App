@@ -338,10 +338,21 @@ func (h *GamificationHandler) Stats(w http.ResponseWriter, r *http.Request) {
 		topGenre = ""
 	}
 
+	// Weekly finished stats — best-effort, same non-fatal pattern. completed_at
+	// is populated only going forward (migration 033), so these read 0 until the
+	// user finishes something post-deploy, which is the honest value.
+	weekTitles, weekMs, wErr := h.queries.WeeklyFinishedStats(r.Context(), claims.UserID)
+	if wErr != nil {
+		slog.Warn("gamification stats: weekly finished failed (non-fatal)", "error", wErr)
+		weekTitles, weekMs = 0, 0
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"xp":                  x,
 		"unlocked":            unlocked,
 		"achievement_catalog": defs,
 		"top_genre":           topGenre,
+		"titles_this_week":    weekTitles,
+		"minutes_this_week":   int((weekMs + 30000) / 60000), // ms → minutes, rounded
 	})
 }
