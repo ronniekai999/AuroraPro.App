@@ -379,7 +379,7 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onRefreshHero, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -394,9 +394,10 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onRefreshH
   // Phase 5.3 — personalization reason ("Because you finished
   // Severance"). Rendered above the title. Empty/undefined hides.
   reason?: string
-  // Optional Refresh suggestions button (admin or end-user with
-  // LLM enabled). Forces a fresh /api/me/hero pull.
-  onRefreshHero?: () => void
+  // "Not tonight" — advance to the next pick in the loaded hero pool
+  // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
+  // the button doesn't render.
+  onNextPick?: () => void
   // Pause auto-rotation while user hovers.
   onPauseChange?: (paused: boolean) => void
   // Personalization status — drives the cold-start hint that replaces
@@ -702,21 +703,17 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onRefreshH
             </button>
           </div>
         </div>
-        {/* Refresh-suggestions control: rerolls the personalized pool.
-            In cold-start mode the reroll is deterministic (popular-
-            unwatched, no LLM input), so we explain that in the tooltip
-            instead of letting the user think it's broken.
-            2026-06-05 (Home redesign B) — relabeled from a bare refresh
-            icon to a "Not tonight ↻" pill (mockup copy). Same onClick +
-            cold-start tooltip; just a clearer affordance that this
-            shuffles the hero pick. */}
-        {onRefreshHero && (
+        {/* "Not tonight" — advance to the NEXT pick in the loaded hero
+            pool (instant, no refetch). Distinct from the greeting's
+            "Surprise me", which pulls a whole fresh pool. The pool has
+            multiple picks even in cold-start (deterministic popular-
+            unwatched), so this always moves to a different title.
+            2026-06-05 (Home redesign B). */}
+        {onNextPick && (
           <button
-            onClick={onRefreshHero}
-            title={personalization?.coldStart
-              ? `Not tonight — picks won't change in cold-start (${personalization.historyCount}/${personalization.threshold} titles watched). Watch a few more to unlock personalized rerolls.`
-              : 'Not tonight — shuffle to a different pick'}
-            aria-label="Not tonight — show a different pick"
+            onClick={onNextPick}
+            title="Not tonight — show the next pick"
+            aria-label="Not tonight — show the next pick"
             className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/60 hover:text-white text-sm transition-colors whitespace-nowrap"
           >
             Not tonight <Icon name="refresh" size={15} />
@@ -1493,8 +1490,12 @@ interface HomeViewProps {
   pickCount?: number
   libraryTotal?: number | null
   onOpenParty?: () => void
+  // onRefreshHero — "Surprise me": pull a whole fresh personalized pool.
+  // onNextPick    — "Not tonight": advance to the next pick already in the
+  //   loaded pool (instant, no refetch). Distinct affordances.
+  onNextPick?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1567,7 +1568,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         onInfo={onSelect}
         reason={heroReason}
         match={heroMatch}
-        onRefreshHero={onRefreshHero}
+        onNextPick={onNextPick}
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
         resume={heroResume}
@@ -6642,6 +6643,16 @@ export default function App() {
   // Falls back to listRecent[0] when /api/me/hero 503s (no LLM).
   const [heroPool, setHeroPool] = useState<HeroPick[]>([])
   const [heroIndex, setHeroIndex] = useState(0)
+  // Mirror heroIndex into a ref so the 9s auto-rotation and the manual
+  // "Not tonight" skip share one source of truth (the interval can't list
+  // heroIndex as a dep without re-creating every tick). Synced on every
+  // heroIndex change below.
+  const heroIndexRef = useRef(0)
+  // Bumped on a manual "Not tonight" skip so the rotation effect re-runs
+  // and restarts the 9s dwell from the newly-chosen pick. Without hover-
+  // pause (i.e. touch / keyboard) the next auto-tick would otherwise cut
+  // the chosen pick short.
+  const [rotEpoch, setRotEpoch] = useState(0)
   const [heroPaused, setHeroPaused] = useState(false)
   // Personalization status from /api/me/hero. When `coldStart` is true,
   // we're below the watch-history threshold and Hero is serving the
@@ -8289,6 +8300,35 @@ export default function App() {
     void reloadHeroPool(false)
   }, [reloadHeroPool])
 
+  // "Not tonight" — advance to the NEXT pick in the loaded hero pool
+  // instantly (no refetch), distinct from "Surprise me" (a whole fresh
+  // pool via reloadHeroPool). Uses heroIndexRef so rapid skips advance
+  // correctly and stay in sync with the 9s auto-rotation. Falls back to a
+  // fresh pool when there's nothing to advance to (pool of 0 or 1).
+  const advanceHero = useCallback(() => {
+    if (heroPool.length < 2) { void reloadHeroPool(true); return }
+    const next = (heroIndexRef.current + 1) % heroPool.length
+    heroIndexRef.current = next
+    setHeroIndex(next)
+    setHomeHero(heroPool[next].media)
+    // Restart the 9s auto-rotation dwell from this pick (see rotEpoch) so a
+    // skip isn't cut short by the next tick when the hero isn't hover-paused.
+    setRotEpoch(e => e + 1)
+  }, [heroPool, reloadHeroPool])
+
+  // "{N} worth your time" counts the real AI-curated set — the
+  // personalized hero picks plus the items on the "✨ AI PICK" rails
+  // (Discover + "Because you watched"), deduped by id. Varies with the
+  // recommender output instead of the fixed ~5 hero-pool size.
+  const aiCuratedCount = useMemo(() => {
+    const ids = new Set<number>()
+    for (const p of heroPool) ids.add(p.media.id)
+    for (const r of homeRails ?? []) {
+      if (r.aiPick) for (const it of r.items) ids.add(it.id)
+    }
+    return ids.size
+  }, [heroPool, homeRails])
+
   // 2026-06-05 (Home net-new #1) — fetch the real library total for the
   // greeting's "picked from X titles" clause. One count-only call
   // (per_page=1, no type filter → movies+shows counted together) using the
@@ -8305,26 +8345,28 @@ export default function App() {
     return () => ac.abort()
   }, [user])
 
-  // Hero rotation. Cycles every 9s; pauses on hover via heroPaused.
-  // CSS in HeroSection handles the crossfade.
+  // Keep heroIndexRef in sync with heroIndex across every change path
+  // (auto-rotation, manual "Not tonight" skip, pool resets) so the
+  // rotation interval below always reads the latest index.
+  useEffect(() => { heroIndexRef.current = heroIndex }, [heroIndex])
+
+  // Hero rotation. Cycles every 9s; pauses on hover via heroPaused. CSS in
+  // HeroSection handles the crossfade. Reads the current index from
+  // heroIndexRef (synced above) instead of a captured closure local, so it
+  // always advances from the latest pick. heroIndex stays OUT of the deps
+  // (it would re-create the interval every tick and drift the cadence); a
+  // manual "Not tonight" skip instead bumps rotEpoch, which re-runs this
+  // effect to restart the 9s dwell from the chosen pick without affecting
+  // steady-state cadence.
   useEffect(() => {
     if (heroPool.length < 2 || heroPaused) return
-    // Compute `next` outside the setState updater — React updaters
-    // must be pure, and calling setHomeHero inside setHeroIndex
-    // double-fires under StrictMode.
-    let cur = heroIndex
     const id = window.setInterval(() => {
-      const next = (cur + 1) % heroPool.length
-      cur = next
+      const next = (heroIndexRef.current + 1) % heroPool.length
       setHeroIndex(next)
       setHomeHero(heroPool[next].media)
     }, 9000)
     return () => window.clearInterval(id)
-  // heroIndex intentionally NOT in deps — including it would clear
-  // and re-create the interval every tick, drifting the cadence.
-  // Using `cur` locally inside the closure keeps timing stable.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [heroPool, heroPaused])
+  }, [heroPool, heroPaused, rotEpoch])
 
   // Continue Watching rail. Its own fetch (independent of home
   // rails) so retry/failure paths don't couple. Re-fetches on
@@ -8658,7 +8700,10 @@ export default function App() {
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
               heroMatch={heroPool[heroIndex]?.match}
+              // "Surprise me" — a whole fresh personalized pool.
               onRefreshHero={() => void reloadHeroPool(true)}
+              // "Not tonight" — advance to the next pick in the loaded pool.
+              onNextPick={advanceHero}
               onHeroPauseChange={setHeroPaused}
               heroPersonalization={heroPersonalization}
               libraryIds={libraryIds}
@@ -8666,8 +8711,9 @@ export default function App() {
               // 2026-06-05 (Home redesign A/F) — greeting band + watch-
               // together inputs.
               user={typeof user === 'object' ? user : undefined}
-              // Real count of personalized/hero picks available.
-              pickCount={heroPool.length}
+              // Real count of the AI-curated set (hero picks + AI rails,
+              // deduped) — varies, vs the old fixed ~5 hero-pool size.
+              pickCount={aiCuratedCount}
               // Real library total. Prefer the count-only mount fetch
               // (homeLibraryTotal — movies+shows in one call); fall back to
               // the browse-tab counts (moviesTotal / showsTotal, populated
