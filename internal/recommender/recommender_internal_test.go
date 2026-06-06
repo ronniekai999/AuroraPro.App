@@ -921,15 +921,19 @@ func TestScoreFromMatch(t *testing.T) {
 		want  int
 	}{
 		{"perfect", 1.0, 100},
-		{"zero", 0.0, 0},
-		{"half", 0.5, 50},
-		{"rounds up", 0.876, 88},
-		{"rounds down", 0.872, 87},
-		{"cold-start (no centroid)", 0.0, 0},
-		// Defensive clamps — matchFromDistance should never feed these, but
-		// scoreFromMatch must stay in [0,100] regardless.
+		{"zero / cold-start", 0.0, 0},
+		// Calibration curve anchors + an interpolated point (see calibrateMatch).
+		{"anchor 0.72", 0.72, 62},
+		{"anchor 0.80", 0.80, 80},
+		{"anchor 0.85", 0.85, 90},
+		{"observed top pick ~0.84", 0.84, 88},
+		{"midband 0.60", 0.60, 46},
+		{"low 0.50", 0.50, 36},
+		// Defensive — matchFromDistance should never feed these, but
+		// scoreFromMatch must stay in [0,100] and never propagate NaN.
 		{"above one clamps", 1.4, 100},
 		{"negative clamps", -0.3, 0},
+		{"NaN clamps", math.NaN(), 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -937,6 +941,17 @@ func TestScoreFromMatch(t *testing.T) {
 				t.Errorf("scoreFromMatch(%v) = %d, want %d", tc.match, got, tc.want)
 			}
 		})
+	}
+
+	// The display curve must be monotonic — a higher similarity can never
+	// produce a lower match %.
+	prev := -1
+	for s := 0.0; s <= 1.0001; s += 0.01 {
+		got := scoreFromMatch(s)
+		if got < prev {
+			t.Fatalf("non-monotonic at sim=%.2f: %d < previous %d", s, got, prev)
+		}
+		prev = got
 	}
 }
 
