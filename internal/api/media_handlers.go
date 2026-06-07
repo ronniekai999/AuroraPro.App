@@ -292,27 +292,12 @@ func (h *LibraryHandler) ScanStatus(w http.ResponseWriter, r *http.Request) {
 // Media Handlers
 // ============================================================
 
-// ageRatingOrder maps content rating strings to a numeric severity level.
-// Both MPAA (movie) and TV Parental Guidelines ratings are supported.
-var ageRatingOrder = map[string]int{
-	"G": 1, "PG": 2, "PG-13": 3, "R": 4, "NC-17": 5,
-	"TV-Y": 1, "TV-Y7": 2, "TV-G": 2, "TV-PG": 3, "TV-14": 4, "TV-MA": 5,
-}
-
-// allowedRatingsForMax returns all rating strings whose severity is at or
-// below the given max rating. Returns nil if maxRating is not recognized.
+// allowedRatingsForMax is a thin alias over the canonical content-rating ladder
+// in package db (single source of truth — db/ratings.go). Kept as a
+// package-local name so existing api call sites read unchanged; browse,
+// onboarding, and the recommender now all gate through the same ladder.
 func allowedRatingsForMax(maxRating string) []string {
-	maxLevel, ok := ageRatingOrder[maxRating]
-	if !ok {
-		return nil
-	}
-	var allowed []string
-	for rating, level := range ageRatingOrder {
-		if level <= maxLevel {
-			allowed = append(allowed, rating)
-		}
-	}
-	return allowed
+	return db.AllowedRatingsForMax(maxRating)
 }
 
 type MediaHandler struct {

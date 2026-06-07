@@ -133,7 +133,7 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
-	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 12)
+	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 12, allowedRatingsForMax(profile.MaxAgeRating))
 	if err != nil {
 		slog.Warn("onboarding: preview failed", "profile", profile.ID, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})

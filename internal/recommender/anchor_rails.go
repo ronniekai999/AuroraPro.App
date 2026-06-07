@@ -68,6 +68,7 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 		return nil, nil
 	}
 
+	allowed := h.allowedRatings(ctx, profileID)
 	out := make([]AnchorRail, 0, len(anchors))
 	used := make(map[int64]bool)
 	// anchorSeen dedupes anchors by their underlying title so a show
@@ -88,7 +89,7 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 		// EmbeddingText is already in that exact format, so we pass it
 		// through without re-parsing/re-formatting. Same code path the
 		// centroid rail uses; only the input vector differs.
-		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch)
+		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch, allowed)
 		if ierr != nil {
 			slog.Warn("anchor rails: kNN failed",
 				"anchor", a.Title, "profile", profileID, "error", ierr)
