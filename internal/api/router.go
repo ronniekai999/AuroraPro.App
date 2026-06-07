@@ -1048,6 +1048,15 @@ func frontendHeaders(next http.Handler) http.Handler {
 				"img-src 'self' https://image.tmdb.org data: blob:; "+
 				"connect-src 'self' ws: wss: https://cdn.jsdelivr.net; "+
 				"media-src 'self' blob:; "+
+				// frame-src allows the detail page's "Watch Trailer" modal to
+				// embed a YouTube trailer. Without it the browser falls back to
+				// default-src 'self' and refuses the cross-origin iframe, so the
+				// trailer would silently render blank. youtube.com is included
+				// alongside the nocookie host because the embed can serve nested
+				// frames / redirect there in some flows. (frame-ancestors below
+				// is unrelated — it governs who may embed Aurora, not what
+				// Aurora may embed.)
+				"frame-src https://www.youtube-nocookie.com https://www.youtube.com; "+
 				"frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})

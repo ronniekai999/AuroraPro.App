@@ -1029,6 +1029,9 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			Studio:        firstNamed(detail.ProductionCompanies),
 			Network:       firstNamed(detail.Networks),
 			ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
+			// Use the videos already fetched via append_to_response so a manual
+			// match stores the trailer too (and avoids a later backfill call).
+			TrailerKey: strPtr(bestTrailerKey(detail.Videos)),
 		}
 		if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
 			if e.handleDuplicateMetadata(ctx, err, item.Title) {
@@ -1084,6 +1087,9 @@ func (e *Enricher) EnrichByTMDBID(ctx context.Context, item *models.MediaItem, t
 			Studio:        firstNamed(detail.ProductionCompanies),
 			Network:       firstNamed(detail.Networks),
 			ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
+			// See the show branch: store the trailer key from the videos already
+			// in the detail response so manual matches don't need a backfill.
+			TrailerKey: strPtr(bestTrailerKey(detail.Videos)),
 		}
 		if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
 			if e.handleDuplicateMetadata(ctx, err, item.Title) {
