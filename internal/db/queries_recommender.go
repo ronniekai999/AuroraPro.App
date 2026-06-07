@@ -158,6 +158,24 @@ func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int
 // layer.
 func PersonalizationThreshold() int { return minHistoryItems }
 
+// ProfileMaxAgeRating returns a profile's max_age_rating ('' when unrestricted
+// or the profile row is missing). The recommender expands it via
+// AllowedRatingsForMax to age-gate candidate pools without fetching the whole
+// profile row on every rail build.
+func (q *Queries) ProfileMaxAgeRating(ctx context.Context, profileID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx,
+		`SELECT COALESCE(max_age_rating, '') FROM user_profiles WHERE id = $1`,
+		profileID).Scan(&rating)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("profile max age rating: %w", err)
+	}
+	return rating, nil
+}
+
 // NearestUnwatched returns the top-N items by cosine distance to the given
 // vector, excluding anything the profile has watch_progress on OR has seeded
 // via taste onboarding (we don't recommend back a title they told us they
@@ -165,7 +183,7 @@ func PersonalizationThreshold() int { return minHistoryItems }
 // are deduplicated cross-library (same tmdb_id) keeping the richest copy.
 //
 // Items without a backdrop are filtered out — the hero needs an image.
-func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int) ([]*models.MediaItem, error) {
+func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 12
 	}
@@ -186,6 +204,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		  WHERE m.embedding IS NOT NULL
 		    AND m.backdrop_path IS NOT NULL
 		    AND m.backdrop_path <> ''
+		    AND ($4::text[] IS NULL OR m.content_rating = ANY($4))
 		    AND NOT EXISTS (
 		      SELECT 1 FROM watch_progress wp
 		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
@@ -202,7 +221,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		FROM ranked
 		ORDER BY distance ASC
 		LIMIT $3`,
-		profileID, vectorLit, limit,
+		profileID, vectorLit, limit, allowedRatings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("nearest unwatched: %w", err)
@@ -247,7 +266,7 @@ type RailCandidate struct {
 // Payload note: 384-dim vectors at 6-digit precision are ~7 KB each. For
 // limit=36 that's ~250 KB over the wire — acceptable for a rail that
 // loads on home-page navigation, not per-frame.
-func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vectorLit string, limit int) ([]*RailCandidate, error) {
+func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string) ([]*RailCandidate, error) {
 	if limit <= 0 {
 		limit = 24
 	}
@@ -269,6 +288,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		  WHERE m.embedding IS NOT NULL
 		    AND m.backdrop_path IS NOT NULL
 		    AND m.backdrop_path <> ''
+		    AND ($4::text[] IS NULL OR m.content_rating = ANY($4))
 		    AND NOT EXISTS (
 		      SELECT 1 FROM watch_progress wp
 		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
@@ -285,7 +305,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		FROM ranked
 		ORDER BY distance ASC
 		LIMIT $3`,
-		profileID, vectorLit, limit,
+		profileID, vectorLit, limit, allowedRatings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("nearest unwatched rich: %w", err)
@@ -471,7 +491,7 @@ type TasteAnchor struct {
 // PopularUnwatched is the cold-start fallback: top-rated items the profile
 // hasn't started, with backdrops. Used when BuildProfileVector returns
 // ErrInsufficientHistory.
-func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit int) ([]*models.MediaItem, error) {
+func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 12
 	}
@@ -486,6 +506,7 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		FROM media_items m
 		WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
 		  AND m.rating > 0
+		  AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
 		  AND NOT EXISTS (
 		    SELECT 1 FROM watch_progress wp
 		    WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
@@ -496,7 +517,7 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		  )
 		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
 		LIMIT $2`,
-		profileID, limit*2,
+		profileID, limit*2, allowedRatings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("popular unwatched: %w", err)

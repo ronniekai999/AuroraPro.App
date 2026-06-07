@@ -315,7 +315,8 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		return nil, nil
 	}
 
-	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, discoverPoolSize)
+	allowed := h.allowedRatings(ctx, profileID)
+	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, discoverPoolSize, allowed)
 	if err != nil {
 		slog.Warn("discover: nearest-unwatched failed", "profile", profileID, "error", err)
 		return nil, nil

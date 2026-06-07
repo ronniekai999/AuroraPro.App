@@ -251,6 +251,7 @@ func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*mode
 		limit = 24
 	}
 
+	allowed := h.allowedRatings(ctx, profileID)
 	var items []*models.MediaItem
 	vec, err := h.q.BuildProfileVector(ctx, profileID)
 	if err == nil {
@@ -261,7 +262,7 @@ func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*mode
 		if poolSize < limit {
 			poolSize = limit
 		}
-		cands, fetchErr := h.q.NearestUnwatchedRich(ctx, profileID, vec, poolSize)
+		cands, fetchErr := h.q.NearestUnwatchedRich(ctx, profileID, vec, poolSize, allowed)
 		if fetchErr != nil {
 			slog.Warn("rail: nearest-unwatched-rich failed, falling back to popular",
 				"profile", profileID, "error", fetchErr)
@@ -291,7 +292,7 @@ func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*mode
 	}
 
 	if len(items) == 0 {
-		popular, err := h.q.PopularUnwatched(ctx, profileID, limit)
+		popular, err := h.q.PopularUnwatched(ctx, profileID, limit, allowed)
 		if err != nil {
 			return nil, err
 		}
@@ -441,11 +442,12 @@ func (h *Hero) epochFor(profileID int64) *atomic.Int64 {
 func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQuality, error) {
 	var picks []HeroPick
 	var quality poolQuality
+	allowed := h.allowedRatings(ctx, profileID)
 
 	// Tier 1: personalized via taste vector.
 	vec, err := h.q.BuildProfileVector(ctx, profileID)
 	if err == nil {
-		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.candidatePool)
+		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.candidatePool, allowed)
 		if err != nil {
 			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
 				"profile", profileID, "error", err)
@@ -459,7 +461,7 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 
 	// Tier 2: cold-start popular pool, no blurbs.
 	if picks == nil {
-		popular, err := h.q.PopularUnwatched(ctx, profileID, h.poolSize*2)
+		popular, err := h.q.PopularUnwatched(ctx, profileID, h.poolSize*2, allowed)
 		if err != nil {
 			return nil, qualityFallback, fmt.Errorf("hero popular fallback: %w", err)
 		}
@@ -1083,4 +1085,21 @@ type cacheEntry struct {
 	picks   []HeroPick
 	builtAt time.Time
 	quality poolQuality
+}
+
+// allowedRatings resolves the content ratings a profile may be recommended,
+// expanding its max_age_rating through the shared ladder (db.AllowedRatingsForMax).
+// Returns nil for an unrestricted profile, and also nil on a lookup error
+// (logged) so a transient failure degrades to today's behavior rather than
+// emptying every rail. The candidate queries treat a nil/empty slice as "no
+// age filter". Without this, restricted/kid profiles received recommendations
+// above their rating — browse was age-gated but the recommender was not.
+func (h *Hero) allowedRatings(ctx context.Context, profileID int64) []string {
+	maxRating, err := h.q.ProfileMaxAgeRating(ctx, profileID)
+	if err != nil {
+		slog.Warn("recommender: profile age-rating lookup failed; not age-filtering this build",
+			"profile", profileID, "error", err)
+		return nil
+	}
+	return db.AllowedRatingsForMax(maxRating)
 }
