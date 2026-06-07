@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   getOnboardingStatus,
   getOnboardingGrid,
@@ -74,24 +74,56 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
   const minPicks = status.min_picks || 5
   const previewThreshold = status.threshold || 3
 
-  const [grid, setGrid] = useState<UIMedia[]>([])
+  const [grid, setGrid] = useState<UIMedia[]>([]) // popularity pool (grows via "Show more")
   const [gridLoading, setGridLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(true)
+  const [reactive, setReactive] = useState<UIMedia[]>([]) // "more like your picks"
   const [selected, setSelected] = useState<number[]>([])
   const [preview, setPreview] = useState<UIMedia[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Load the poster grid once.
+  // seenRef tracks every poster id already shown (grid + reactive) so appends
+  // dedupe across both sections; popLoadedRef is the popularity page cursor.
+  const seenRef = useRef<Set<number>>(new Set())
+  const popLoadedRef = useRef(0)
+
+  // remember keeps only the not-yet-shown items, marks them seen, and returns
+  // them — so every append (Show more, reactive) is dedup'd in one place.
+  const remember = useCallback((items: UIMedia[]): UIMedia[] => {
+    const fresh: UIMedia[] = []
+    for (const m of items) {
+      if (!seenRef.current.has(m.id)) {
+        seenRef.current.add(m.id)
+        fresh.push(m)
+      }
+    }
+    return fresh
+  }, [])
+
+  // Initial popularity load; resets all pools when the profile changes.
   useEffect(() => {
     let cancelled = false
     const ac = new AbortController()
     setGridLoading(true)
-    getOnboardingGrid(profileId ?? undefined, 40, ac.signal)
+    setGrid([])
+    setReactive([])
+    setHasMore(true)
+    seenRef.current = new Set()
+    popLoadedRef.current = 0
+    getOnboardingGrid({ profileId: profileId ?? undefined, limit: 40, offset: 0, signal: ac.signal })
       .then((items) => {
-        if (!cancelled) setGrid(items)
+        if (cancelled) return
+        setGrid(remember(items))
+        popLoadedRef.current = items.length
+        setHasMore(items.length >= 40)
       })
       .catch(() => {
-        if (!cancelled) setGrid([])
+        if (!cancelled) {
+          setGrid([])
+          setHasMore(false)
+        }
       })
       .finally(() => {
         if (!cancelled) setGridLoading(false)
@@ -100,7 +132,51 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
       cancelled = true
       ac.abort()
     }
-  }, [profileId])
+  }, [profileId, remember])
+
+  // "Show more" pulls the next page of popular titles and appends it.
+  const showMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return
+    setLoadingMore(true)
+    try {
+      const items = await getOnboardingGrid({
+        profileId: profileId ?? undefined,
+        limit: 40,
+        offset: popLoadedRef.current,
+      })
+      popLoadedRef.current += items.length
+      setGrid((prev) => [...prev, ...remember(items)])
+      setHasMore(items.length >= 40)
+    } catch {
+      setHasMore(false)
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [loadingMore, hasMore, profileId, remember])
+
+  // Reactive: once enough titles are picked, append "more like your picks"
+  // (nearest neighbors of the running selection) as the user keeps choosing.
+  useEffect(() => {
+    if (selected.length < previewThreshold) return
+    const ac = new AbortController()
+    const t = setTimeout(() => {
+      getOnboardingGrid({
+        profileId: profileId ?? undefined,
+        limit: 24,
+        offset: 0,
+        selected,
+        signal: ac.signal,
+      })
+        .then((items) => setReactive((prev) => [...prev, ...remember(items)]))
+        .catch(() => {
+          /* transient — leave the reactive section as-is */
+        })
+    }, 450)
+    return () => {
+      clearTimeout(t)
+      ac.abort()
+    }
+  }, [selected, previewThreshold, profileId, remember])
 
   // Debounced instant preview once enough picks are selected.
   useEffect(() => {
@@ -239,53 +315,39 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
-            {grid.map((m) => {
-              const isSel = selectedSet.has(m.id)
-              return (
+          <>
+            <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+              {grid.map((m) => (
+                <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} onToggle={toggle} />
+              ))}
+            </div>
+
+            {hasMore && (
+              <div className="mt-6 flex justify-center">
                 <button
                   type="button"
-                  key={m.id}
-                  onClick={() => toggle(m.id)}
-                  aria-pressed={isSel}
-                  className={
-                    'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-all ' +
-                    (isSel
-                      ? 'border-transparent outline outline-2 outline-[#a981ff] shadow-[0_0_0_1px_#a981ff,0_14px_38px_-12px_rgba(169,129,255,0.55)]'
-                      : 'border-white/[0.08] hover:-translate-y-1 hover:shadow-2xl')
-                  }
+                  onClick={showMore}
+                  disabled={loadingMore}
+                  className="rounded-full border border-white/[0.12] bg-white/[0.04] px-6 py-2.5 text-sm font-semibold text-white/80 transition-colors hover:bg-white/[0.08] disabled:opacity-50"
                 >
-                  {m.poster ? (
-                    <img
-                      src={m.poster}
-                      alt={m.title}
-                      loading="lazy"
-                      className="absolute inset-0 h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="absolute inset-0 bg-gradient-to-br from-[#1d1330] to-[#050409]" />
-                  )}
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
-                  <span
-                    className={
-                      'absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition-all ' +
-                      (isSel
-                        ? 'border-transparent bg-gradient-to-br from-[#a981ff] to-[#c8a6ff]'
-                        : 'border-white/60 bg-black/30 backdrop-blur-sm')
-                    }
-                  >
-                    {isSel && <CheckIcon />}
-                  </span>
-                  <div className="absolute bottom-2 left-2.5 right-2.5 z-[1]">
-                    <div className="line-clamp-2 text-[13px] font-bold leading-tight text-white drop-shadow">
-                      {m.title}
-                    </div>
-                    {m.year > 0 && <div className="mt-0.5 text-[11px] text-white/65">{m.year}</div>}
-                  </div>
+                  {loadingMore ? 'Loading…' : 'Show more'}
                 </button>
-              )
-            })}
-          </div>
+              </div>
+            )}
+
+            {reactive.length > 0 && (
+              <section className="mt-10">
+                <h3 className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-white/70">
+                  <SparkleIcon className="h-4 w-4" /> More like your picks
+                </h3>
+                <div className="grid grid-cols-3 gap-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6">
+                  {reactive.map((m) => (
+                    <PosterTile key={m.id} m={m} selected={selectedSet.has(m.id)} onToggle={toggle} />
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
         )}
       </main>
 
@@ -323,6 +385,58 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
         </div>
       )}
     </div>
+  )
+}
+
+function PosterTile({
+  m,
+  selected,
+  onToggle,
+}: {
+  m: UIMedia
+  selected: boolean
+  onToggle: (id: number) => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(m.id)}
+      aria-pressed={selected}
+      className={
+        'group relative aspect-[2/3] overflow-hidden rounded-xl border text-left transition-all ' +
+        (selected
+          ? 'border-transparent outline outline-2 outline-[#a981ff] shadow-[0_0_0_1px_#a981ff,0_14px_38px_-12px_rgba(169,129,255,0.55)]'
+          : 'border-white/[0.08] hover:-translate-y-1 hover:shadow-2xl')
+      }
+    >
+      {m.poster ? (
+        <img
+          src={m.poster}
+          alt={m.title}
+          loading="lazy"
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+      ) : (
+        <div className="absolute inset-0 bg-gradient-to-br from-[#1d1330] to-[#050409]" />
+      )}
+      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
+      <span
+        className={
+          'absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full border-2 transition-all ' +
+          (selected
+            ? 'border-transparent bg-gradient-to-br from-[#a981ff] to-[#c8a6ff]'
+            : 'border-white/60 bg-black/30 backdrop-blur-sm')
+        }
+      >
+        {selected && <CheckIcon />}
+      </span>
+      <div className="absolute bottom-2 left-2.5 right-2.5 z-[1]">
+        <div className="line-clamp-2 text-[13px] font-bold leading-tight text-white drop-shadow">
+          {m.title}
+        </div>
+        {m.year > 0 && <div className="mt-0.5 text-[11px] text-white/65">{m.year}</div>}
+      </div>
+    </button>
   )
 }
 

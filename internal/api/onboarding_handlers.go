@@ -101,9 +101,31 @@ func (h *OnboardingHandler) Grid(w http.ResponseWriter, r *http.Request) {
 	} else if limit > 100 {
 		limit = 100
 	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	// Age-filter the pool for restricted profiles (nil = unrestricted, no filter).
 	allowed := allowedRatingsForMax(profile.MaxAgeRating)
-	items, err := h.queries.OnboardingGrid(r.Context(), profile.ID, limit, allowed)
+
+	// Reactive mode: once enough titles are picked, bias the grid toward them
+	// (nearest neighbors of the partial taste vector) so picking surfaces "more
+	// like your picks". Falls back to the popularity grid when there aren't
+	// enough embedded picks yet (or the partial vector can't be built).
+	if selected := parseIDList(r.URL.Query().Get("selected"), onboardingMaxSeeds); len(selected) >= db.PersonalizationThreshold() {
+		if vec, verr := h.queries.PartialTasteVector(r.Context(), selected); verr == nil {
+			ritems, gerr := h.queries.OnboardingGridReactive(r.Context(), profile.ID, vec, limit, offset, allowed)
+			if gerr != nil {
+				slog.Warn("onboarding: reactive grid failed", "profile", profile.ID, "error", gerr)
+				writeError(w, http.StatusInternalServerError, "failed to build grid")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"items": filterOutIDs(ritems, selected)})
+			return
+		}
+	}
+
+	items, err := h.queries.OnboardingGrid(r.Context(), profile.ID, limit, offset, allowed)
 	if err != nil {
 		slog.Warn("onboarding: grid failed", "profile", profile.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to build grid")
