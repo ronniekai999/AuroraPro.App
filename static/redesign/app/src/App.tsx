@@ -1441,7 +1441,7 @@ interface HomeViewProps {
   // current hero pick. Undefined / 0 (cold-start) → HeroSection falls back
   // to its derived rating-based estimate.
   heroMatch?: number
-  onRefreshHero?: () => void
+  onSurprise?: () => void
   onHeroPauseChange?: (paused: boolean) => void
   // Cold-start hint info — passed through from the /api/me/hero response.
   // null = unknown (initial load); set when the response lands.
@@ -1495,12 +1495,12 @@ interface HomeViewProps {
   // onJoinParty — join a specific active party by code (Watch-together card);
   // same path as PartyHubModal's onJoin (join by code, open the party panel).
   onJoinParty?: (code: string) => Promise<{ ok: boolean; error?: string }>
-  // onRefreshHero — "Surprise me": pull a whole fresh personalized pool.
-  // onNextPick    — "Not tonight": advance to the next pick already in the
-  //   loaded pool (instant, no refetch). Distinct affordances.
+  // onSurprise — "Surprise me": immediately play a RANDOM recommended pick
+  //   (excludes the one on screen). onNextPick — "Not tonight": advance to the
+  //   next pick already in the loaded pool (instant, no refetch). Distinct.
   onNextPick?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onRefreshHero, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1558,9 +1558,11 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
             )}
           </div>
         </div>
-        {onRefreshHero && (
+        {onSurprise && (
           <button
-            onClick={onRefreshHero}
+            onClick={onSurprise}
+            title="Surprise me — play a random recommended title"
+            aria-label="Surprise me — play a random recommended title"
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
           >
             <Icon name="sparkle" size={15} /> Surprise me
@@ -8418,6 +8420,20 @@ export default function App() {
     setRotEpoch(e => e + 1)
   }, [heroPool, reloadHeroPool])
 
+  // "Surprise me" — immediately START a random recommended pick, EXCLUDING the
+  // one currently on screen so it always feels like a fresh surprise. (Was
+  // wired to reloadHeroPool, which only refetched the pool and — on a stable
+  // recommender — visibly did nothing.) Falls back to the current hero when the
+  // pool is too small to offer a different title.
+  const onSurprise = useCallback(() => {
+    const others = heroPool.filter((_, i) => i !== heroIndex)
+    const choices = others.length ? others : heroPool
+    const media = choices.length
+      ? choices[Math.floor(Math.random() * choices.length)].media
+      : homeHero
+    if (media) void handlePlay(media)
+  }, [heroPool, heroIndex, homeHero, handlePlay])
+
   // "{N} worth your time" counts the real AI-curated set — the
   // personalized hero picks plus the items on the "✨ AI PICK" rails
   // (Discover + "Because you watched"), deduped by id. Varies with the
@@ -8802,8 +8818,8 @@ export default function App() {
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
               heroMatch={heroPool[heroIndex]?.match}
-              // "Surprise me" — a whole fresh personalized pool.
-              onRefreshHero={() => void reloadHeroPool(true)}
+              // "Surprise me" — play a random recommended pick (not the one shown).
+              onSurprise={onSurprise}
               // "Not tonight" — advance to the next pick in the loaded pool.
               onNextPick={advanceHero}
               onHeroPauseChange={setHeroPaused}
