@@ -793,6 +793,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/grid", onboardingH.Grid)
 				r.Get("/preview", onboardingH.Preview)
 				r.Post("/seeds", onboardingH.SaveSeeds)
+				r.Post("/skip", onboardingH.Skip)
 				r.Delete("/seeds", onboardingH.Reset)
 			})
 

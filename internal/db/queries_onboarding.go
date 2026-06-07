@@ -146,10 +146,10 @@ func (q *Queries) PartialTasteVector(ctx context.Context, mediaItemIDs []int64) 
 // OnboardingGrid returns the embedded, poster-bearing, popularity-ranked titles
 // the profile hasn't watched or already seeded — the pool the "Pick What You
 // Love" grid draws from. Embedding-gated so the picks always clear the vector
-// threshold. (Phase 0: popularity order; diversity sampling lands in Phase 1.
-// Age filtering is handled by the caller, which only offers onboarding to
-// unrestricted profiles for now.)
-func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int) ([]*models.MediaItem, error) {
+// threshold. allowedRatings (from allowedRatingsForMax) age-filters the pool for
+// restricted profiles; pass nil to disable the filter (unrestricted profile).
+// (Phase 0: popularity order; diversity sampling lands in Phase 1.)
+func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 40
 	}
@@ -170,6 +170,7 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int
 		  WHERE m.embedding IS NOT NULL
 		    AND m.poster_path IS NOT NULL
 		    AND m.poster_path <> ''
+		    AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
 		    AND NOT EXISTS (
 		      SELECT 1 FROM watch_progress wp
 		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
@@ -186,7 +187,7 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int
 		FROM ranked
 		ORDER BY popularity DESC, rating DESC
 		LIMIT $2`,
-		profileID, limit,
+		profileID, limit, allowedRatings,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("onboarding grid: %w", err)
@@ -206,6 +207,26 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// CountSeedsOutsideRatings reports how many of the given ids have a content
+// rating that is unknown or NOT within the allowed set — used to reject
+// onboarding picks above a restricted profile's max_age_rating before they ever
+// reach taste_seeds (and thus the profile's taste vector). allowed comes from
+// allowedRatingsForMax; nil/empty means "unrestricted" → returns 0, no query.
+func (q *Queries) CountSeedsOutsideRatings(ctx context.Context, ids []int64, allowed []string) (int, error) {
+	if len(ids) == 0 || len(allowed) == 0 {
+		return 0, nil
+	}
+	var n int
+	if err := q.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM media_items
+		WHERE id = ANY($1::bigint[])
+		  AND (content_rating IS NULL OR content_rating = '' OR NOT (content_rating = ANY($2::text[])))`,
+		ids, allowed).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count seeds outside ratings: %w", err)
+	}
+	return n, nil
 }
 
 // GetOrCreateFavoritesWatchlist returns the id of the profile's Favorites
