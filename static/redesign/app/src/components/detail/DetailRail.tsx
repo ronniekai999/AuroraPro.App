@@ -37,6 +37,8 @@ interface DetailRailProps {
   // secondary "from start" (only when resuming)
   secondaryLabel?: string
   onSecondary?: () => void
+  // "Watch Trailer" — only set when the item has a trailer
+  onWatchTrailer?: () => void
   // 3-up tiles
   inLibrary: boolean
   onToggleLibrary: () => void
@@ -101,6 +103,7 @@ export function DetailRail({
   primaryTitle,
   secondaryLabel,
   onSecondary,
+  onWatchTrailer,
   inLibrary,
   onToggleLibrary,
   onAddToList,
@@ -166,6 +169,17 @@ export function DetailRail({
           >
             <RestartIcon size={16} />
             {secondaryLabel}
+          </button>
+        )}
+        {onWatchTrailer && (
+          <button
+            type="button"
+            onClick={onWatchTrailer}
+            title="Watch the trailer"
+            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-white/85 transition-all"
+          >
+            <PlayIcon size={16} />
+            Watch Trailer
           </button>
         )}
         <div className={cn('grid gap-2.5 pt-1', tileCount === 3 ? 'grid-cols-3' : tileCount === 2 ? 'grid-cols-2' : 'grid-cols-1')}>

@@ -178,6 +178,10 @@ func (e *Enricher) enrichMovie(ctx context.Context, item *models.MediaItem, titl
 		Studio:        firstNamed(detail.ProductionCompanies),
 		Network:       firstNamed(detail.Networks),
 		ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
+		// strPtr is always non-nil, so this also marks the item as
+		// trailer-checked ("" when no YouTube trailer) — videos come free
+		// via append_to_response, so there's no extra TMDB call here.
+		TrailerKey: strPtr(bestTrailerKey(detail.Videos)),
 	}
 
 	if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
@@ -308,6 +312,9 @@ func (e *Enricher) applyTMDBShowMatch(ctx context.Context, item *models.MediaIte
 		Studio:        firstNamed(detail.ProductionCompanies),
 		Network:       firstNamed(detail.Networks),
 		ReleaseDate:   firstNonEmpty(detail.ReleaseDate, detail.FirstAirDate),
+		// See enrichMovie: stores the trailer key (or "" = none) from the
+		// videos already in the detail response; also marks it checked.
+		TrailerKey: strPtr(bestTrailerKey(detail.Videos)),
 	}
 
 	if err := e.queries.UpdateMediaMetadata(ctx, update); err != nil {
@@ -906,6 +913,23 @@ func (e *Enricher) BackfillBlurhashes(ctx context.Context, imgProxy *ImageProxy,
 }
 
 // --- Helpers ---
+
+// FetchTrailerKey resolves the best YouTube trailer id for a TMDB id (movie or
+// show). It returns (key, ok): ok=false on a TMDB error (caller should NOT
+// persist, so a transient outage doesn't permanently mark the item as
+// trailer-less); ok=true with key="" means "checked, genuinely no trailer".
+// Used by the lazy backfill in GetEnriched for items enriched before trailer
+// support existed.
+func (e *Enricher) FetchTrailerKey(ctx context.Context, tmdbID int, isShow bool) (string, bool) {
+	if e.tmdb == nil || tmdbID <= 0 {
+		return "", false
+	}
+	vids, err := e.tmdb.GetVideos(ctx, tmdbID, isShow)
+	if err != nil {
+		return "", false
+	}
+	return bestTrailerKey(vids), true
+}
 
 func nilIfEmpty(s string) *string {
 	if s == "" {

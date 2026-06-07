@@ -283,6 +283,24 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lazy trailer backfill (migration 034): items enriched before trailer
+	// support have trailer_key = NULL. Resolve it once from TMDB on first
+	// detail view and persist, so the "Watch Trailer" button appears without a
+	// full re-enrich. Best-effort + bounded: on success store the key (or "" =
+	// none) so we never re-fetch; on a TMDB error leave it NULL to retry on a
+	// later view rather than mark it permanently trailer-less.
+	if !enriched.TrailerChecked && enriched.TMDBID != nil && *enriched.TMDBID > 0 && h.enricher != nil {
+		bctx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		key, ok := h.enricher.FetchTrailerKey(bctx, *enriched.TMDBID, enriched.Type == models.MediaShow)
+		cancel()
+		if ok {
+			if serr := h.queries.SetTrailerKey(r.Context(), id, key); serr != nil {
+				slog.Warn("trailer backfill: persist failed", "media_id", id, "error", serr)
+			}
+			enriched.TrailerKey = key
+		}
+	}
+
 	// Build image URLs
 	if enriched.PosterPath != "" {
 		enriched.PosterURL = metadata.ImageURL(enriched.PosterPath, metadata.PosterLarge)

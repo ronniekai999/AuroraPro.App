@@ -1010,6 +1010,10 @@ export interface MediaDetail extends ServerMediaItem {
   studio?: string // first production company (movies)
   network?: string // first network (TV)
   release_date?: string // ISO "YYYY-MM-DD" (movie release / TV first-air)
+  // YouTube video id for the "Watch Trailer" button (migration 034). Absent or
+  // empty = no trailer (button hidden). Populated by the enricher, or lazily on
+  // first detail view for items enriched before trailer support.
+  trailer_key?: string
 }
 
 export async function getMedia(id: number, signal?: AbortSignal): Promise<MediaDetail> {

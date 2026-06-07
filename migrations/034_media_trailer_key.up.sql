@@ -1,0 +1,11 @@
+-- Trailer support: store the best YouTube trailer key per movie/show so the
+-- detail view can render a "Watch Trailer" button without a live TMDB call on
+-- every view. The enricher already pulls TMDB videos (append_to_response), so
+-- it populates this for free going forward; items enriched before this
+-- migration are backfilled lazily on first detail view.
+--
+-- Semantics:
+--   NULL        = not yet checked  → triggers the one-time lazy backfill
+--   '' (empty)  = checked, no trailer available → no button, no re-fetch
+--   non-empty   = YouTube video id (the trailer)
+ALTER TABLE media_items ADD COLUMN IF NOT EXISTS trailer_key VARCHAR(32);

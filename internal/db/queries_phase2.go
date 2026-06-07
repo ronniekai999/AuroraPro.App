@@ -128,6 +128,9 @@ func (q *Queries) UpdateMediaMetadata(ctx context.Context, u *models.MetadataUpd
 	if u.ReleaseDate != nil {
 		addField("release_date", *u.ReleaseDate)
 	}
+	if u.TrailerKey != nil {
+		addField("trailer_key", *u.TrailerKey)
+	}
 
 	// Always update last_metadata timestamp
 	addField("last_metadata", time.Now())
@@ -1361,23 +1364,39 @@ func (q *Queries) GetMediaItemEnriched(ctx context.Context, id int64) (*models.M
 		       content_rating, added_at, updated_at,
 		       tmdb_id, COALESCE(imdb_id, ''), COALESCE(tagline, ''),
 		       COALESCE(poster_path, ''), COALESCE(backdrop_path, ''),
-		       COALESCE(studio, ''), COALESCE(network, ''), COALESCE(release_date, '')
+		       COALESCE(studio, ''), COALESCE(network, ''), COALESCE(release_date, ''),
+		       trailer_key
 		FROM media_items WHERE id = $1`, id)
 
 	item := &models.MediaItem{}
 	enriched := &models.MediaItemEnriched{MediaItem: item}
 
+	// trailer_key is read raw (nullable): NULL → not yet checked, so
+	// TrailerChecked stays false and GetEnriched backfills it; non-NULL (a key
+	// or "") → already checked.
+	var trailerKey *string
 	err := row.Scan(&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
 		&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin, &item.ContentRating,
 		&item.AddedAt, &item.UpdatedAt,
 		&enriched.TMDBID, &enriched.IMDbID, &enriched.Tagline,
 		&item.PosterPath, &item.BackdropPath,
-		&item.Studio, &item.Network, &item.ReleaseDate)
+		&item.Studio, &item.Network, &item.ReleaseDate, &trailerKey)
 	if err != nil {
 		return nil, err
 	}
+	if trailerKey != nil {
+		enriched.TrailerKey = *trailerKey
+		enriched.TrailerChecked = true
+	}
 
 	return enriched, nil
+}
+
+// SetTrailerKey persists the resolved trailer key for an item: the YouTube id,
+// or "" for "checked, no trailer". Used by the lazy backfill in GetEnriched.
+func (q *Queries) SetTrailerKey(ctx context.Context, id int64, key string) error {
+	_, err := q.pool.Exec(ctx, `UPDATE media_items SET trailer_key = $2 WHERE id = $1`, id, key)
+	return err
 }
 
 // GetMediaFileByID returns a media file by its primary key.
