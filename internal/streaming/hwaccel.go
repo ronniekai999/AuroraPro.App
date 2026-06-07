@@ -206,7 +206,15 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 		// the profile constraint. Adding format=yuv420p to the filter
 		// graph guarantees 8-bit input arrives at the encoder, matching
 		// the libx264 path's contract.
-		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "vbr",
+		//
+		// -tune hq (high quality), NOT ll (low latency): this is on-demand
+		// VOD transcoding, not a real-time capture/conferencing stream. The
+		// `ll` tune trades compression efficiency for latency (shallower
+		// lookahead, fewer B-frames), which made transcodes look worse at the
+		// same bitrate budget for zero benefit here — segments are served from
+		// disk, so encode latency never reaches the viewer. `hq` restores the
+		// lookahead/B-frame quality NVENC is capable of.
+		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	case HWAccelQSV:
 		return []string{"-c:v", "h264_qsv", "-preset", "faster",
@@ -229,16 +237,16 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 	}
 }
 
-// h264Profile returns the appropriate H.264 profile for a given output height.
-// High profile for resolutions above 1080p (4K) enables B-frames and CABAC
-// entropy coding, which provides ~25% better compression — critical at tight
-// 4K bitrate budgets. Baseline profile for 1080p and below maximises
-// compatibility with low-power devices and older browsers.
+// h264Profile returns the H.264 profile for the encoder. We use High at every
+// resolution: it enables CABAC, the 8x8 transform, and B-frames for ~10-20%
+// better quality at the same bitrate than Baseline, and every target the
+// player runs on (modern browsers / MSE, Chromecast, AirPlay) decodes High up
+// to Level 5.1. Baseline was needlessly conservative for a browser-based
+// server. MUST stay in sync with hlsCodecString() in streaming.go, which
+// advertises avc1.6400.. (High) to match. The height arg is retained for
+// call-site symmetry with h264Level and any future per-tier tuning.
 func h264Profile(height int) string {
-	if height > 1080 {
-		return "high"
-	}
-	return "baseline"
+	return "high"
 }
 
 // h264Level returns the appropriate H.264 level string for a given output height.

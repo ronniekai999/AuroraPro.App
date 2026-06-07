@@ -108,9 +108,11 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 		result.Bitrate, _ = strconv.ParseInt(probe.Format.BitRate, 10, 64)
 	}
 
-	// Track counters for audio and subtitle indexing
+	// Audio track index is AUDIO-RELATIVE (0 = first audio stream), which is
+	// what FFmpeg's `-map 0:a:N` selector and the playback decision engine
+	// expect. Subtitle tracks, by contrast, are keyed by their ABSOLUTE
+	// ffprobe stream index (see the subtitle case below).
 	audioIdx := 0
-	subtitleIdx := 0
 
 	// Streams — collect ALL audio and subtitle tracks
 	for _, stream := range probe.Streams {
@@ -143,8 +145,15 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 				result.AudioCodec = stream.CodecName
 			}
 		case "subtitle":
+			// Subtitle Index is the ABSOLUTE ffprobe stream index, NOT a
+			// subtitle-relative counter. This matches streaming.ProbeSubtitles
+			// (the runtime probe every serve/burn-in path uses) and the
+			// `-map 0:N` / ExtractSubtitleVTT extraction, which address
+			// subtitles by absolute index. Storing a relative counter here
+			// gave the same track two different "Index" meanings between scan
+			// time and serve time — a latent wrong-track footgun.
 			track := models.SubtitleTrack{
-				Index:    subtitleIdx,
+				Index:    stream.Index,
 				Language: stream.Tags["language"],
 				Title:    stream.Tags["title"],
 				Codec:    stream.CodecName,
@@ -152,7 +161,6 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 				Default:  stream.Disposition.Default == 1,
 			}
 			result.SubtitleTracks = append(result.SubtitleTracks, track)
-			subtitleIdx++
 		}
 	}
 

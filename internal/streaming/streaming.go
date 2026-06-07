@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,16 +35,22 @@ var (
 	reSubsSegment  = regexp.MustCompile(`^subs_\d+_\d+\.vtt$`)
 )
 
-// DirectPlayCodecs lists video codecs with reliable cross-browser support
-// for the STATIC fallback path (nil clientCaps). HEVC is excluded here because
-// the static path has no way to know if the browser supports it. When client
-// capabilities are provided, the client-aware DecidePlayback engine handles
-// HEVC via direct play (MP4) or remux (MKV → HLS .ts with hevc_mp4toannexb BSF)
-// depending on the browser's reported codec support.
+// DirectPlayCodecs lists video codecs the STATIC fallback path (nil
+// clientCaps) may serve as direct play. This list must contain ONLY codecs
+// that are safe to ASSUME playable when we cannot probe the client, because a
+// wrong "yes" here means a black/failed <video> with no transcode fallback.
+//
+// HEVC and AV1 are deliberately EXCLUDED: neither is universally decodable
+// (HEVC needs Safari/HW; AV1 is absent on Safari and many devices), so the
+// static path treats them as "unknown → transcode" rather than risk a hard
+// playback failure. AV1 was previously listed here and caused exactly that
+// failure on AV1-incapable browsers. When the client reports real
+// capabilities, the client-aware DecidePlayback engine gates HEVC/AV1 on the
+// browser's actual support (direct play in a native container, or HEVC remux
+// to HLS .ts with hevc_mp4toannexb) — so capable clients still get them.
 var DirectPlayCodecs = map[string]bool{
 	"h264": true, "avc": true, "avc1": true,
 	"vp8": true, "vp9": true,
-	"av1": true,
 }
 
 // DirectPlayContainers lists containers browsers handle natively.
@@ -370,6 +378,25 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	}
 }
 
+// SelectAudioCodecOut decides the audio codec for an HLS session's RE-ENCODE
+// path. Default "aac" (stereo downmix — universally safe in MPEG-TS via
+// hls.js). Returns "ac3" only when audio is actually being re-encoded, the
+// source is multichannel (>2), and the client reports AC-3 support.
+//
+// The "ac3" client cap is derived on the frontend STRICTLY from
+// MediaSource.isTypeSupported('audio/mp4; codecs="ac-3"') — exactly what
+// hls.js's MPEG-TS demuxer gates AC-3 on — so an "ac3" cap here means the
+// hls.js/MSE delivery path can genuinely decode AC-3, not merely that the
+// browser has a native AC-3 decoder. (A canPlayType-derived signal would
+// over-report and let hls.js silently drop the audio.) Copied audio is
+// unaffected; it keeps the source codec.
+func SelectAudioCodecOut(needsRecode bool, caps *ClientCaps, channels int) string {
+	if needsRecode && caps != nil && caps.AudioCodecs["ac3"] && channels > 2 {
+		return "ac3"
+	}
+	return "aac"
+}
+
 // decideStatic is the backward-compatible fallback using static allowlists.
 func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDecision {
 	// H.264 10-bit: browsers universally reject this via MSE. Force transcode.
@@ -565,6 +592,7 @@ type TranscodeManager struct {
 	hwAccel         HWAccelInfo
 	cfg             config.TranscodeConfig
 	enabledProfiles []string
+	maxCacheBytes   int64 // disk ceiling for the transcode output tree (always > 0)
 	done            chan struct{}
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
@@ -593,6 +621,10 @@ type TranscodeSession struct {
 	BurnSubIndex    int    `json:"burn_sub_index,omitempty"` // -1 = no burn-in
 	BurnSubExternal string `json:"-"`                        // path to external sub file
 	BurnSubBitmap   bool   `json:"burn_sub_bitmap,omitempty"`
+	// BurnSubRelIndex is the precomputed subtitle-relative index for burn-in
+	// (see BurnInOpts.RelIndex). -1 = unknown → injectBurnInFilter does a
+	// short bounded probe instead of one under the session lock.
+	BurnSubRelIndex int `json:"-"`
 	// HDR-to-SDR tonemapping: set when transcoding 10-bit HEVC HDR to 8-bit H.264
 	HDRTonemap bool `json:"hdr_tonemap,omitempty"`
 	// Bandwidth estimation: total bytes served for this session
@@ -606,6 +638,11 @@ type TranscodeSession struct {
 	AudioTrackIndex int `json:"-"`
 	// Source audio channel count for bitrate scaling (0 = default to 2)
 	AudioChannels int `json:"-"`
+	// AudioCodecOut is the codec the re-encode path should emit: "" / "aac" =
+	// stereo AAC (default), "ac3" = AC-3 5.1 surround (chosen when the client
+	// supports AC-3 and the source is multichannel). Ignored when audio is
+	// copied. See audioEncodeArgs + hlsCodecString.
+	AudioCodecOut string `json:"-"`
 	// Source video codec for BSF selection in remux mode (e.g., "hevc" needs hevc_mp4toannexb)
 	SourceVideoCodec string `json:"-"`
 	// StartSec is the resume seek offset passed to FFmpeg via -ss. When > 0,
@@ -663,6 +700,14 @@ type QualityVariant struct {
 // radius. Operators who genuinely want more must set an explicit positive cap.
 const defaultMaxSessions = 8
 
+// defaultMaxCacheBytes bounds the transcode output tree on disk when the
+// configured cap (TranscodeConfig.MaxCacheBytes) is <= 0. The HLS EVENT
+// playlists retain every segment of a title so seek-back works, so a handful
+// of concurrent long transcodes can otherwise grow /var/cache without bound
+// until the disk fills and ALL transcodes stall. 20 GiB is generous for a
+// self-hosted box while still bounding the blast radius.
+const defaultMaxCacheBytes = 20 << 30 // 20 GiB
+
 // variantRestartMax is the max number of in-place FFmpeg restarts we'll
 // attempt for a single variant. After this, the variant is considered
 // permanently dead and the frontend must create a fresh session. One
@@ -685,6 +730,31 @@ func ffmpegDone(v *QualityVariant) bool {
 		return true
 	}
 	return false
+}
+
+// readinessTimeout bounds how long the playlist/segment handlers — and the
+// startVariantImpl polling goroutine — wait for a variant's first output to
+// appear. A hardware remux emits its first segment almost immediately, but a
+// software encode of a 4K source, especially with the CPU-heavy HDR→SDR
+// zscale tonemap chain, can take far longer than the historical fixed 40s and
+// would 503 with "transcode not ready" on weak hosts before FFmpeg ever got
+// going. Scale the budget to the work the pipeline actually has to do.
+func (tm *TranscodeManager) readinessTimeout(s *TranscodeSession) time.Duration {
+	d := 40 * time.Second
+	if s == nil || s.Remux {
+		return d // codec copy primes almost instantly
+	}
+	if s.HDRTonemap {
+		d += 90 * time.Second // zscale tonemap is extremely CPU-heavy
+	}
+	if tm.hwAccel.Type == HWAccelNone && s.SourceHeight >= 1440 {
+		d += 60 * time.Second // software encode of 1440p/4K is slow to prime
+	}
+	const maxReadiness = 180 * time.Second
+	if d > maxReadiness {
+		d = maxReadiness
+	}
+	return d
 }
 
 // SessionInfo is the public API response for a session.
@@ -734,12 +804,18 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 
 	hwAccel := DetectHWAccel(tcCfg.HWAccel)
 
+	maxCache := tcCfg.MaxCacheBytes
+	if maxCache <= 0 {
+		maxCache = defaultMaxCacheBytes
+	}
+
 	tm := &TranscodeManager{
 		sessions:        make(map[string]*TranscodeSession),
 		baseDir:         baseDir,
 		hwAccel:         hwAccel,
 		cfg:             tcCfg,
 		enabledProfiles: tcCfg.Profiles,
+		maxCacheBytes:   maxCache,
 		done:            make(chan struct{}),
 	}
 
@@ -789,12 +865,22 @@ func (tm *TranscodeManager) Close() {
 func (tm *TranscodeManager) cleanupLoop() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	tick := 0
 	for {
 		select {
 		case <-ticker.C:
 		case <-tm.done:
 			return
 		}
+		tick++
+
+		// Every ~4th tick (~2 min), bound the on-disk transcode cache by
+		// evicting least-recently-used IDLE sessions. Kept off the 30s idle
+		// sweep cadence so the directory walk doesn't run every tick.
+		if tick%4 == 0 {
+			tm.enforceDiskCap()
+		}
+
 		timeout := tm.cfg.SessionTimeout
 		if timeout == 0 {
 			timeout = 5 * time.Minute
@@ -840,6 +926,118 @@ func (tm *TranscodeManager) cleanupLoop() {
 	}
 }
 
+// enforceDiskCap evicts least-recently-used sessions when the transcode output
+// tree exceeds maxCacheBytes. Sessions accessed within the last 30s (i.e.
+// almost certainly streaming right now) are never evicted — if the cache is
+// over cap purely because of active streams, we log and leave them rather than
+// kill a live playback. Two-phase like the idle sweep: select under tm.mu,
+// then cancel FFmpeg + RemoveAll without the lock so slow I/O never blocks
+// session create/get/keepalive.
+func (tm *TranscodeManager) enforceDiskCap() {
+	if tm.maxCacheBytes <= 0 {
+		return
+	}
+
+	// Snapshot session dirs + last-access under the lock (no disk I/O here).
+	type sessSnap struct {
+		s          *TranscodeSession
+		lastAccess time.Time
+	}
+	tm.mu.Lock()
+	snaps := make([]sessSnap, 0, len(tm.sessions))
+	for _, s := range tm.sessions {
+		snaps = append(snaps, sessSnap{s: s, lastAccess: s.LastAccess})
+	}
+	tm.mu.Unlock()
+
+	// Measure on-disk size per session WITHOUT holding the lock.
+	var total int64
+	sizes := make(map[string]int64, len(snaps))
+	for _, sn := range snaps {
+		sz := dirSize(sn.s.OutputDir)
+		sizes[sn.s.ID] = sz
+		total += sz
+	}
+	if total <= tm.maxCacheBytes {
+		return
+	}
+
+	// Over cap: evict oldest-accessed first, skipping anything that looks
+	// actively streaming.
+	sort.Slice(snaps, func(i, j int) bool {
+		return snaps[i].lastAccess.Before(snaps[j].lastAccess)
+	})
+	activeCutoff := time.Now().Add(-30 * time.Second)
+
+	var evicted []*TranscodeSession
+	tm.mu.Lock()
+	for _, sn := range snaps {
+		if total <= tm.maxCacheBytes {
+			break
+		}
+		if sn.lastAccess.After(activeCutoff) {
+			continue // actively streaming — don't kill it
+		}
+		if _, ok := tm.sessions[sn.s.ID]; !ok {
+			continue // idle sweep already removed it
+		}
+		delete(tm.sessions, sn.s.ID)
+		evicted = append(evicted, sn.s)
+		total -= sizes[sn.s.ID]
+	}
+	stillOver := total > tm.maxCacheBytes
+	tm.mu.Unlock()
+
+	for _, s := range evicted {
+		slog.Warn("evicting transcode session to enforce cache cap",
+			"session_id", s.ID, "user_id", s.UserID, "file", s.FileName,
+			"cap_bytes", tm.maxCacheBytes)
+		if tm.OnSessionEvent != nil {
+			tm.OnSessionEvent("expired", map[string]interface{}{
+				"session_id": s.ID,
+				"user_id":    s.UserID,
+				"username":   s.Username,
+				"file_name":  s.FileName,
+				"status":     "expired",
+				"profile":    tm.primaryProfileName(s),
+			})
+		}
+		s.variantMu.Lock()
+		for _, v := range s.Variants {
+			if v.Cancel != nil {
+				v.Cancel()
+			}
+		}
+		s.variantMu.Unlock()
+		os.RemoveAll(s.OutputDir)
+	}
+
+	if stillOver {
+		slog.Warn("transcode cache still over cap after evicting idle sessions; active streams exceed the limit",
+			"cap_bytes", tm.maxCacheBytes, "used_bytes", total)
+	}
+}
+
+// dirSize sums the byte sizes of all regular files under dir. Errors (missing
+// dir, races with RemoveAll) are swallowed — a best-effort measurement is fine
+// for cache accounting.
+func dirSize(dir string) int64 {
+	var total int64
+	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
 // ============================================================
 // Session Lifecycle
 // ============================================================
@@ -849,6 +1047,13 @@ type BurnInOpts struct {
 	SubIndex     int    // Embedded subtitle stream index (-1 or unused = none)
 	ExternalPath string // Path to external subtitle file (empty = none)
 	IsBitmap     bool   // True for PGS/VOBSUB bitmap subs
+	// RelIndex is the SUBTITLE-RELATIVE index for SubIndex (which is absolute),
+	// precomputed by the caller from an already-probed track list. The
+	// `subtitles` filter's stream_index is subtitle-relative, so supplying it
+	// here lets startVariant skip an ffprobe that would otherwise run while
+	// holding the session's variantMu. -1 = unknown (startVariant falls back
+	// to a short, bounded probe).
+	RelIndex int
 }
 
 // HLSSubtitleTrack carries the info needed to add a subtitle output chain
@@ -871,6 +1076,7 @@ type SessionOpts struct {
 	AudioPassthrough bool   // true = copy audio stream instead of re-encoding (full transcode mode)
 	AudioTrackIndex  int    // 0-based audio track to select via -map; -1 = FFmpeg default
 	AudioChannels    int    // source audio channel count for bitrate scaling (0 = default to 2)
+	AudioCodecOut    string // "" / "aac" = stereo AAC, "ac3" = AC-3 5.1 surround (re-encode path)
 	HDRTonemap       bool   // true = inject HDR-to-SDR tonemapping filters (10-bit HEVC → 8-bit H.264)
 	SourceVideoCodec string // source video codec (e.g., "hevc", "h264") for BSF selection in remux mode
 	StartSec         int    // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
@@ -936,6 +1142,7 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		SourceWidth:     sourceWidth,
 		SourceHeight:    sourceHeight,
 		BurnSubIndex:    -1,
+		BurnSubRelIndex: -1,
 		AudioTrackIndex: -1,
 		initPTS90kHz:    -1, // not yet probed
 	}
@@ -947,12 +1154,14 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 			session.BurnSubIndex = o.BurnIn.SubIndex
 			session.BurnSubExternal = o.BurnIn.ExternalPath
 			session.BurnSubBitmap = o.BurnIn.IsBitmap
+			session.BurnSubRelIndex = o.BurnIn.RelIndex
 		}
 		session.Remux = o.Remux
 		session.RemuxAudioCopy = o.RemuxAudioCopy
 		session.AudioPassthrough = o.AudioPassthrough
 		session.AudioTrackIndex = o.AudioTrackIndex
 		session.AudioChannels = o.AudioChannels
+		session.AudioCodecOut = o.AudioCodecOut
 		session.HDRTonemap = o.HDRTonemap
 		session.SourceVideoCodec = strings.ToLower(o.SourceVideoCodec)
 		session.StartSec = o.StartSec
@@ -965,7 +1174,7 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// Remux: codec string is unknown at creation time (omitted, valid per HLS spec).
 	if !session.Remux {
 		for i := range profiles {
-			profiles[i].CodecString = hlsCodecString(profiles[i].Height)
+			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut)
 		}
 		session.Profiles = profiles
 	}
@@ -1494,14 +1703,17 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 	return highest
 }
 
-// hlsCodecString returns the HLS CODECS attribute string for a given output height.
-// Format: avc1.PPCCLL where PP=profile_idc, CC=constraint_set flags, LL=level_idc in hex.
-// Paired with AAC-LC (mp4a.40.2).
+// hlsCodecString returns the HLS CODECS attribute for a transcoded variant.
+// Video format: avc1.PPCCLL where PP=profile_idc, CC=constraint_set flags,
+// LL=level_idc in hex. The audio part depends on what the encoder emits.
 //
-// Profile selection must match h264Profile() in hwaccel.go:
-//   - Above 1080p: High profile (64=0x64) — enables B-frames + CABAC for 4K quality
-//   - 1080p and below: Baseline profile (42=0x42) — maximum device compatibility
-func hlsCodecString(height int) string {
+// MUST agree with what FFmpeg actually produces, or hls.js sets up the wrong
+// MSE SourceBuffer and playback fails:
+//   - Video: High profile (64=0x64) at every resolution — matches h264Profile()
+//     in hwaccel.go (which now always returns "high").
+//   - Audio: AAC-LC (mp4a.40.2) by default, or AC-3 (ac-3) when audioCodec=="ac3"
+//     (the surround path — see audioEncodeArgs).
+func hlsCodecString(height int, audioCodec string) string {
 	// Level selection per H.264 Annex A:
 	//   Level 3.0 (1e): up to 480p (40,500 MB/s)
 	//   Level 3.1 (1f): up to 720p (108,000 MB/s)
@@ -1519,11 +1731,34 @@ func hlsCodecString(height int) string {
 		level = "1e" // Level 3.0 for 480p and below
 	}
 
-	// High profile (6400) for 4K, Baseline (4200) for everything else
-	if height > 1080 {
-		return fmt.Sprintf("avc1.6400%s,mp4a.40.2", level)
+	audio := "mp4a.40.2" // AAC-LC
+	if audioCodec == "ac3" {
+		audio = "ac-3"
 	}
-	return fmt.Sprintf("avc1.4200%s,mp4a.40.2", level)
+	// High profile (6400) at all resolutions.
+	return fmt.Sprintf("avc1.6400%s,%s", level, audio)
+}
+
+// audioEncodeArgs returns the FFmpeg audio-encoding flags for a transcode/remux
+// session whose audio must be RE-ENCODED (the copy/passthrough cases are
+// handled by the caller). Default is stereo AAC, because multichannel AAC in an
+// MPEG-TS segment trips hls.js's ADTS→fMP4 path and Chrome's MSE rejects the
+// resulting AudioSpecificConfig. When the decision engine determined the client
+// can decode AC-3 AND the source is multichannel, we instead emit AC-3 (which
+// hls.js CAN demux from .ts and AC-3-capable clients play via MSE), preserving
+// 5.1 surround instead of collapsing to stereo. AC-3 tops out at 5.1, so 7.1+
+// sources are capped at 6 channels. Explicit -ar 48000 avoids the sample-rate
+// mismatch that produced deep/slow audio when 48 kHz sources were re-encoded
+// without a declared output rate.
+func audioEncodeArgs(session *TranscodeSession) []string {
+	if session.AudioCodecOut == "ac3" {
+		ch := session.AudioChannels
+		if ch <= 0 || ch > 6 {
+			ch = 6
+		}
+		return []string{"-c:a", "ac3", "-ac", strconv.Itoa(ch), "-ar", "48000", "-b:a", "448k"}
+	}
+	return []string{"-c:a", "aac", "-ac", "2", "-ar", "48000", "-b:a", "192k"}
 }
 
 // audioBitrate returns an appropriate AAC bitrate string scaled by channel
@@ -1679,21 +1914,11 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		if session.RemuxAudioCopy {
 			args = append(args, "-c:a", "copy")
 		} else {
-			// Audio needs transcoding (e.g., EAC3/DTS/TrueHD → AAC for browser).
-			// Force stereo downmix (-ac 2) for HLS .ts output: HLS.js's TS demuxer
-			// remuxes audio into fMP4 for MediaSource, and multichannel AAC (5.1/7.1)
-			// in .ts segments causes "audio SourceBuffer error" in Chrome because the
-			// ADTS-to-fMP4 conversion produces an AudioSpecificConfig that Chrome's
-			// MSE implementation rejects. Stereo AAC is universally supported.
-			// Explicit -ar 48000 prevents sample-rate mismatch that causes
-			// deep/slow audio when EAC3 48kHz is transcoded to AAC without a
-			// declared output rate.
-			args = append(args,
-				"-c:a", "aac",
-				"-ac", "2",
-				"-ar", "48000",
-				"-b:a", "192k",
-			)
+			// Audio needs re-encoding (e.g. EAC3/DTS/TrueHD, or selecting a
+			// non-default track). audioEncodeArgs picks stereo AAC by default,
+			// or AC-3 5.1 when the client supports AC-3 and the source is
+			// multichannel — preserving surround instead of downmixing.
+			args = append(args, audioEncodeArgs(session)...)
 		}
 	} else {
 		// ── Full transcode mode ──
@@ -1721,21 +1946,26 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}
 		args = append(args, "-maxrate", p.MaxRate, "-bufsize", p.BufSize)
 
+		// Force an IDR keyframe at every segment boundary so segments come out
+		// exactly segDuration long AND keyframe-aligned across quality variants
+		// — the precondition for seamless ABR switching and accurate seeking.
+		// Without it the encoders keyframe on their own GOP / scene-cut cadence
+		// (libx264's default keyint is ~250 frames ≈ 10s), so -hls_time only
+		// splits at the next keyframe → variable, oversized, cross-variant-
+		// misaligned segments. Encoder-agnostic; for NVENC we additionally mark
+		// the forced frames IDR so they are true seek points.
+		args = append(args, "-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", segDuration))
+		if tm.hwAccel.Type == HWAccelNVENC {
+			args = append(args, "-forced-idr", "1")
+		}
+
 		// Audio
 		if session.AudioPassthrough {
 			args = append(args, "-c:a", "copy")
 		} else {
-			// Transcode audio to AAC with stereo downmix for HLS .ts output.
-			// HLS.js's TS-to-fMP4 remuxer produces AudioSpecificConfig that
-			// Chrome's MSE rejects for multichannel (5.1/7.1) AAC in .ts.
-			// Explicit -ar 48000 prevents sample-rate mismatch causing
-			// deep/slow audio playback.
-			args = append(args,
-				"-c:a", "aac",
-				"-ac", "2",
-				"-ar", "48000",
-				"-b:a", "192k",
-			)
+			// Re-encode: stereo AAC by default, or AC-3 5.1 for surround on
+			// AC-3-capable clients (see audioEncodeArgs).
+			args = append(args, audioEncodeArgs(session)...)
 		}
 	}
 
@@ -1872,9 +2102,15 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// goroutine to exit early if FFmpeg crashes immediately.
 		cmdDone := make(chan struct{})
 
-		// Wait for first segment to appear
+		// Wait for first segment to appear. The budget scales with the
+		// pipeline's expected warmup so heavy HDR/4K software encodes aren't
+		// declared "timed out" before FFmpeg produces segment 0.
+		readyPolls := int(tm.readinessTimeout(session) / (500 * time.Millisecond))
+		if readyPolls < 1 {
+			readyPolls = 1
+		}
 		go func() {
-			for i := 0; i < 80; i++ {
+			for i := 0; i < readyPolls; i++ {
 				if _, err := os.Stat(playlistPath); err == nil {
 					close(v.Ready)
 					return
@@ -2027,7 +2263,7 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 	case <-v.Ready:
 	case <-r.Context().Done():
 		return
-	case <-time.After(40 * time.Second):
+	case <-time.After(tm.readinessTimeout(s)):
 		http.Error(w, "transcode not ready", http.StatusServiceUnavailable)
 		return
 	}
@@ -2122,7 +2358,7 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 	case <-v.Ready:
 	case <-r.Context().Done():
 		return
-	case <-time.After(40 * time.Second):
+	case <-time.After(tm.readinessTimeout(s)):
 		http.Error(w, "transcode not ready", http.StatusServiceUnavailable)
 		return
 	}
@@ -2184,28 +2420,50 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Ensure at least one variant is running so subtitles have been produced.
-	// The first variant carries the subtitle output chains.
+	// Subtitles piggyback on whichever variant started FIRST (subtitlesAttached
+	// in startVariantImpl) and are written to the shared session OutputDir, so
+	// we only need SOME variant running to be producing them. We must NOT
+	// force-start Profiles[0] (the HIGHEST tier) just to serve subs — doing so
+	// spun up a full 1080p/4K transcode the client never watches whenever a
+	// default/auto-selected subtitle track loaded while ABR sat on a lower
+	// level. Reuse a running variant if there is one; only start a variant
+	// (the cheapest tier) when none is running yet.
 	var primaryVariant *QualityVariant
-	if len(s.Profiles) > 0 {
-		v, err := tm.EnsureVariant(s, s.Profiles[0].Name, s.StartSec)
+	s.variantMu.Lock()
+	for _, v := range s.Variants {
+		if v.started {
+			primaryVariant = v
+			break
+		}
+	}
+	s.variantMu.Unlock()
+
+	if primaryVariant == nil && len(s.Profiles) > 0 {
+		// Profiles is ordered high→low, so the last entry is the cheapest
+		// tier — start that one so subtitle extraction never triggers an
+		// expensive high-resolution encode on its own.
+		cheapest := s.Profiles[len(s.Profiles)-1].Name
+		v, err := tm.EnsureVariant(s, cheapest, s.StartSec)
 		if err != nil {
 			http.Error(w, "variant not ready", http.StatusInternalServerError)
 			return
 		}
+		primaryVariant = v
+	}
+
+	if primaryVariant != nil {
 		select {
-		case <-v.Ready:
+		case <-primaryVariant.Ready:
 		case <-r.Context().Done():
 			return
-		case <-time.After(40 * time.Second):
+		case <-time.After(tm.readinessTimeout(s)):
 			http.Error(w, "subtitle not ready", http.StatusServiceUnavailable)
 			return
 		}
-		if v.Err != nil {
+		if primaryVariant.Err != nil {
 			http.Error(w, "transcode failed", http.StatusInternalServerError)
 			return
 		}
-		primaryVariant = v
 	}
 
 	playlistPath := filepath.Join(s.OutputDir, subsFile)
@@ -2588,7 +2846,13 @@ func (tm *TranscodeManager) ServeSubtitleSegment(w http.ResponseWriter, r *http.
 func (tm *TranscodeManager) GetOrCreateSession(filePath string, startSec int, userID int64, username string, sourceWidth, sourceHeight int) (*TranscodeSession, error) {
 	tm.mu.Lock()
 	for _, s := range tm.sessions {
-		if s.FilePath == filePath && s.UserID == userID {
+		// Reuse only when the resume offset ALSO matches. The old condition
+		// matched on (filePath, userID) alone and returned a session still
+		// anchored at its original StartSec, so a second request with a
+		// different ?start= (a seek/resume) silently got the stale position
+		// instead of seeking. A different startSec must get a fresh session;
+		// the stale one idle-GCs.
+		if s.FilePath == filePath && s.UserID == userID && s.StartSec == startSec {
 			s.LastAccess = time.Now()
 			tm.mu.Unlock()
 			return s, nil
@@ -2776,14 +3040,25 @@ func injectBurnInFilter(args []string, session *TranscodeSession) []string {
 		escaped := escapeFFmpegPath(session.BurnSubExternal)
 		burnFilter = fmt.Sprintf("subtitles=%s", escaped)
 	} else {
-		// Audit MED — the `subtitles` filter's stream_index is counted over
-		// the file's SUBTITLE streams only, not all streams. session.BurnSubIndex
-		// is the ABSOLUTE ffprobe index, so translate it to the subtitle-relative
-		// index here. ProbeSubtitles applies its own timeout; on probe failure
-		// SubtitleRelativeIndex falls back to the absolute index (pre-fix behavior).
+		// The `subtitles` filter's stream_index is counted over the file's
+		// SUBTITLE streams only (audit MED). session.BurnSubIndex is the
+		// ABSOLUTE ffprobe index, so we need the subtitle-relative one. Prefer
+		// the value precomputed at session creation (BurnSubRelIndex) — that
+		// path already probed the tracks, and computing it here would run
+		// ffprobe while holding the session's variantMu. Only when it's
+		// unknown do we fall back to a SHORT, bounded probe (was
+		// context.Background(), which could pin the lock for ProbeSubtitles'
+		// full 30s timeout). On probe failure SubtitleRelativeIndex falls back
+		// to the absolute index (pre-fix behavior).
 		relIndex := session.BurnSubIndex
-		if tracks, _ := ProbeSubtitles(context.Background(), session.FilePath); len(tracks) > 0 {
-			relIndex = SubtitleRelativeIndex(tracks, session.BurnSubIndex)
+		if session.BurnSubRelIndex >= 0 {
+			relIndex = session.BurnSubRelIndex
+		} else {
+			pctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if tracks, _ := ProbeSubtitles(pctx, session.FilePath); len(tracks) > 0 {
+				relIndex = SubtitleRelativeIndex(tracks, session.BurnSubIndex)
+			}
+			cancel()
 		}
 		escaped := escapeFFmpegPath(session.FilePath)
 		burnFilter = fmt.Sprintf("subtitles=%s:stream_index=%d", escaped, relIndex)

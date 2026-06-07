@@ -11,7 +11,7 @@ func TestVideoEncoderArgs_Software(t *testing.T) {
 
 	assertContains(t, args, "-c:v", "libx264")
 	assertContains(t, args, "-preset", "veryfast")
-	assertContains(t, args, "-profile:v", "baseline")
+	assertContains(t, args, "-profile:v", "high")
 	assertContains(t, args, "-level", "4.0")
 	assertContainsVF(t, args, "scale=1920:-2")
 }
@@ -41,9 +41,9 @@ func TestVideoEncoderArgs_NVENC(t *testing.T) {
 
 	assertContains(t, args, "-c:v", "h264_nvenc")
 	assertContains(t, args, "-preset", "p4")
-	assertContains(t, args, "-tune", "ll")
+	assertContains(t, args, "-tune", "hq")
 	assertContains(t, args, "-rc", "vbr")
-	assertContains(t, args, "-profile:v", "baseline")
+	assertContains(t, args, "-profile:v", "high")
 	assertContains(t, args, "-level", "3.1")
 	assertContainsVF(t, args, "scale=1280:-2")
 }
@@ -55,7 +55,7 @@ func TestVideoEncoderArgs_QSV(t *testing.T) {
 
 	assertContains(t, args, "-c:v", "h264_qsv")
 	assertContains(t, args, "-preset", "faster")
-	assertContains(t, args, "-profile", "baseline")
+	assertContains(t, args, "-profile", "high")
 	assertContainsVF(t, args, "scale=854:-2")
 }
 
@@ -93,16 +93,16 @@ func TestVideoEncoderArgs_AMF(t *testing.T) {
 
 	assertContains(t, args, "-c:v", "h264_amf")
 	assertContains(t, args, "-quality", "speed")
-	assertContains(t, args, "-profile:v", "baseline")
+	assertContains(t, args, "-profile:v", "high")
 	assertContainsVF(t, args, "scale=640:-2")
 }
 
 // QA fix 2026-05-24 — without `format=yuv420p` in the filter chain,
-// libx264 with the baseline profile fails on 10-bit input (modern
-// HEVC SDR remuxes are commonly 10-bit). Asserts the downconvert is
-// part of the -vf for every CPU-side encoder pipeline. VAAPI is
-// excluded because it uses `format=nv12` for the equivalent
-// downconvert on hardware surfaces.
+// libx264 with an 8-bit profile (now High; High10 is a separate profile)
+// fails on 10-bit input (modern HEVC SDR remuxes are commonly 10-bit).
+// Asserts the downconvert is part of the -vf for every CPU-side encoder
+// pipeline. VAAPI is excluded because it uses `format=nv12` for the
+// equivalent downconvert on hardware surfaces.
 func TestVideoEncoderArgs_Forces8BitOutput(t *testing.T) {
 	types := []struct {
 		name string
@@ -121,9 +121,12 @@ func TestVideoEncoderArgs_Forces8BitOutput(t *testing.T) {
 	}
 }
 
-func TestVideoEncoderArgs_BaselineProfile(t *testing.T) {
-	// Verify baseline profile is present in all hardware encoder types
-	// (except VAAPI which doesn't support it)
+func TestVideoEncoderArgs_HighProfile(t *testing.T) {
+	// Verify the High profile is present in every CPU-side / hardware encoder
+	// type (VAAPI is excluded — it omits an explicit -profile flag and lets the
+	// driver choose). High replaced Baseline for ~10-20% better compression at
+	// the same bitrate; must stay in sync with h264Profile() and the avc1.6400
+	// codec string from hlsCodecString().
 	types := []struct {
 		name string
 		hw   HWAccelInfo
@@ -137,15 +140,15 @@ func TestVideoEncoderArgs_BaselineProfile(t *testing.T) {
 	for _, tt := range types {
 		t.Run(tt.name, func(t *testing.T) {
 			args := tt.hw.VideoEncoderArgs(1920, 1080)
-			hasBaseline := false
+			hasHigh := false
 			for i, a := range args {
-				if (a == "-profile:v" || a == "-profile") && i+1 < len(args) && args[i+1] == "baseline" {
-					hasBaseline = true
+				if (a == "-profile:v" || a == "-profile") && i+1 < len(args) && args[i+1] == "high" {
+					hasHigh = true
 					break
 				}
 			}
-			if !hasBaseline {
-				t.Errorf("%s encoder args missing baseline profile flag: %v", tt.name, args)
+			if !hasHigh {
+				t.Errorf("%s encoder args missing high profile flag: %v", tt.name, args)
 			}
 		})
 	}

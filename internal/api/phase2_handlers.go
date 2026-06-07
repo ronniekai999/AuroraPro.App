@@ -1134,6 +1134,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // copy audio instead of re-encoding
 		AudioTrackIndex  *int   `json:"audio_track_index,omitempty"` // 0-based audio track; nil = FFmpeg default
 		AudioChannels    int    `json:"audio_channels,omitempty"`    // source audio channel count for bitrate scaling
+		AudioCodecOut    string `json:"audio_codec_out,omitempty"`   // re-encode target: "aac" (stereo) or "ac3" (5.1 surround)
 		HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // apply HDR-to-SDR tonemapping
 		VideoCodec       string `json:"video_codec,omitempty"`       // source video codec for BSF selection in remux
 		StartSec         int    `json:"start_sec,omitempty"`         // resume position: FFmpeg -ss seek offset in seconds
@@ -1177,6 +1178,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AudioPassthrough: req.AudioPassthrough,
 		AudioTrackIndex:  audioTrackIdx,
 		AudioChannels:    req.AudioChannels,
+		AudioCodecOut:    req.AudioCodecOut,
 		HDRTonemap:       req.HDRTonemap,
 		SourceVideoCodec: req.VideoCodec,
 		StartSec:         req.StartSec,
@@ -1202,6 +1204,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		bi := &streaming.BurnInOpts{
 			SubIndex:     *req.BurnSubIndex,
 			ExternalPath: req.BurnSubExternal,
+			RelIndex:     -1, // computed below from the probed tracks (embedded subs)
 		}
 
 		// Validate external subtitle path: must be adjacent to the media file
@@ -1228,7 +1231,10 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 			bi.ExternalPath = absExt // Use the validated absolute path
 		}
 
-		// Auto-detect bitmap subtitles by probing the file's subtitle tracks
+		// Auto-detect bitmap subtitles by probing the file's subtitle tracks,
+		// and precompute the subtitle-relative burn-in index from the same
+		// probe so the transcode pipeline doesn't re-run ffprobe while holding
+		// the session lock (the `subtitles` filter wants a relative index).
 		if req.BurnSubExternal == "" {
 			tracks, _ := gatedProbeSubtitles(r.Context(), filePath)
 			for _, t := range tracks {
@@ -1236,6 +1242,9 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 					bi.IsBitmap = streaming.IsBitmapSubtitle(t.Codec)
 					break
 				}
+			}
+			if len(tracks) > 0 {
+				bi.RelIndex = streaming.SubtitleRelativeIndex(tracks, *req.BurnSubIndex)
 			}
 		}
 
@@ -1568,6 +1577,13 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	_ = videoPixFmt    // retained for future use (10-bit logging / metrics)
 	_ = colorPrimaries // retained for future use (wide-gamut SDR detection)
 
+	// Audio output codec for the re-encode path: stereo AAC by default, AC-3 5.1
+	// for multichannel sources on AC-3-capable clients (preserving surround
+	// instead of downmixing). The "ac3" client cap is MSE-isTypeSupported-derived
+	// on the frontend, matching hls.js's own AC-3 gate, so this never emits AC-3
+	// that the hls.js/MSE path would silently drop. See SelectAudioCodecOut.
+	audioCodecOut := streaming.SelectAudioCodecOut(pd.AudioNeedsRecode, clientCaps, audioChannels)
+
 	info := models.StreamInfo{
 		FileID:           fileID,
 		DirectPlay:       pd.Decision == "direct_play",
@@ -1584,6 +1600,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		Remux:            pd.Remux,
 		AudioPassthrough: pd.AudioPassthrough,
 		AudioChannels:    audioChannels,
+		AudioCodecOut:    audioCodecOut,
 		HDRTonemap:       hdrTonemap,
 	}
 

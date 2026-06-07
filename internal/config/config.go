@@ -235,6 +235,12 @@ type TranscodeConfig struct {
 	SessionTimeout  time.Duration
 	SegmentDuration int
 	Profiles        []string
+	// MaxCacheBytes bounds the total on-disk size of the transcode output
+	// tree (HLS EVENT playlists keep every segment of a title so seek-back
+	// works, so long/concurrent transcodes can grow it without bound). When
+	// exceeded, the manager evicts least-recently-used idle sessions. <= 0
+	// means "use the manager's built-in default" — never truly unbounded.
+	MaxCacheBytes int64
 }
 
 // --- YAML schema ---
@@ -292,6 +298,7 @@ type yamlConfig struct {
 		SessionTimeoutSec int      `yaml:"session_timeout_sec"`
 		SegmentDuration   int      `yaml:"segment_duration"`
 		Profiles          []string `yaml:"profiles"`
+		MaxCacheGB        int      `yaml:"max_cache_gb"`
 	} `yaml:"transcode"`
 	TLS struct {
 		Enabled  bool   `yaml:"enabled"`
@@ -387,11 +394,24 @@ func Load() (*Config, error) {
 			SubtitleDir:  "/var/cache/aurora/subtitles",
 		},
 		Transcode: TranscodeConfig{
-			MaxSessions:     0,
-			HWAccel:         "auto",
-			SessionTimeout:  120 * time.Second,
+			MaxSessions: 0,
+			HWAccel:     "auto",
+			// 5 minutes (was 120s). Keepalive pings every 10s, but browsers
+			// throttle/suspend timers in backgrounded tabs and on locked
+			// phones; a 2-minute idle window let a backgrounded stream's
+			// session get GC'd (segments deleted) before the tab returned,
+			// breaking playback on resume. 5 min covers typical background
+			// gaps while still reclaiming truly-abandoned sessions.
+			SessionTimeout:  300 * time.Second,
 			SegmentDuration: 6,
-			Profiles:        []string{"1080p", "720p", "480p"},
+			// 2160p included so 4K sources can be offered at full resolution
+			// when transcoding is unavoidable. It sits at the TOP of the ABR
+			// ladder and variants start on-demand, so low-bandwidth clients
+			// never trigger the (expensive) 4K encode — only clients that
+			// climb there do. The preferred 4K path is still direct play on
+			// capable clients (see DirectPlayCodecs / the caps engine).
+			Profiles:      []string{"2160p", "1080p", "720p", "480p"},
+			MaxCacheBytes: 20 << 30, // 20 GiB
 		},
 		Logging: LogConfig{
 			Dir:        "/var/log/aurora",
@@ -654,6 +674,9 @@ func loadYAML(cfg *Config) error {
 	if len(yc.Transcode.Profiles) > 0 {
 		cfg.Transcode.Profiles = yc.Transcode.Profiles
 	}
+	if yc.Transcode.MaxCacheGB > 0 {
+		cfg.Transcode.MaxCacheBytes = int64(yc.Transcode.MaxCacheGB) << 30
+	}
 	if yc.TLS.Enabled {
 		cfg.TLS.Enabled = true
 	}
@@ -883,6 +906,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("TRANSCODE_PROFILES"); v != "" {
 		cfg.Transcode.Profiles = splitCSV(v)
+	}
+	if v := os.Getenv("TRANSCODE_MAX_CACHE_GB"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.Transcode.MaxCacheBytes = int64(i) << 30
+		}
 	}
 	if v := os.Getenv("TLS_ENABLED"); v != "" {
 		cfg.TLS.Enabled = v == "true" || v == "1" || v == "yes"
