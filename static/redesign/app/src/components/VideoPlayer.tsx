@@ -2370,8 +2370,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             : 'relative w-full h-full max-w-[94vw] max-h-[88vh] flex flex-col rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10'
         }
       >
-        {/* Top bar */}
-        <div className="flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent z-10">
+        {/* Top bar. WINDOWED: a chrome strip above the video (part of the
+            theater card), always visible. FULLSCREEN: an auto-hiding OVERLAY —
+            positioned absolute so it no longer reserves layout space (the video
+            fills the whole screen edge-to-edge), and gated on controlsVisible so
+            the title / episode / "Remux · mkv" / Close fade out with the
+            controls when the pointer is idle, leaving a clean full-screen
+            picture. A mouse-move / touch reveals it again with the controls. */}
+        <div
+          className={
+            fullscreen
+              ? `absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-200 ${
+                  controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                }`
+              : 'flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent z-10'
+          }
+        >
           <div>
             <h2 className="text-white text-lg font-semibold">{target.title}</h2>
             {target.subtitle && <p className="text-white/60 text-sm">{target.subtitle}</p>}
@@ -2651,7 +2665,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   so it stays hidden there). */}
               {!party && airplayAvailable && !cast.status.connected && (
                 <div
-                  className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
+                  className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
                     controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
                   }`}
                 >
@@ -2668,7 +2682,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               )}
               {!party && cast.status.supported && (
                 <div
-                  className={`absolute top-4 right-4 flex items-center gap-2 transition-opacity duration-200 ${
+                  className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
                     controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
                   }`}
                 >
