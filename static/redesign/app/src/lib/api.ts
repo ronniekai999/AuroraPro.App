@@ -2399,15 +2399,22 @@ export async function getOnboardingStatus(
 }
 
 export async function getOnboardingGrid(
-  profileId?: number,
-  limit?: number,
-  signal?: AbortSignal,
+  opts: {
+    profileId?: number
+    limit?: number
+    offset?: number
+    /** When >= the personalization threshold, the grid re-ranks toward these picks. */
+    selected?: number[]
+    signal?: AbortSignal
+  } = {},
 ): Promise<UIMedia[]> {
   const extra: Record<string, string> = {}
-  if (limit) extra.limit = String(limit)
+  if (opts.limit) extra.limit = String(opts.limit)
+  if (opts.offset) extra.offset = String(opts.offset)
+  if (opts.selected && opts.selected.length > 0) extra.selected = opts.selected.join(',')
   const resp = await apiFetch<{ items?: ServerMediaItem[] }>(
-    `/api/onboarding/grid${onboardingQS(profileId, extra)}`,
-    { signal },
+    `/api/onboarding/grid${onboardingQS(opts.profileId, extra)}`,
+    { signal: opts.signal },
   )
   return (resp.items || []).map(mapMedia)
 }

@@ -148,8 +148,10 @@ func (q *Queries) PartialTasteVector(ctx context.Context, mediaItemIDs []int64) 
 // Love" grid draws from. Embedding-gated so the picks always clear the vector
 // threshold. allowedRatings (from allowedRatingsForMax) age-filters the pool for
 // restricted profiles; pass nil to disable the filter (unrestricted profile).
-// (Phase 0: popularity order; diversity sampling lands in Phase 1.)
-func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
+// Popularity order; offset paginates for the "Show more" control.
+// OnboardingGridReactive is the similarity-ordered sibling, used once the user
+// has picks to surface "more like your picks".
+func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit, offset int, allowedRatings []string) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 40
 	}
@@ -186,8 +188,8 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int
 		       added_at, updated_at
 		FROM ranked
 		ORDER BY popularity DESC, rating DESC
-		LIMIT $2`,
-		profileID, limit, allowedRatings,
+		LIMIT $2 OFFSET $4`,
+		profileID, limit, allowedRatings, offset,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("onboarding grid: %w", err)
@@ -203,6 +205,71 @@ func (q *Queries) OnboardingGrid(ctx context.Context, profileID int64, limit int
 			&item.AddedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan onboarding grid: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// OnboardingGridReactive is OnboardingGrid ordered by similarity to a partial
+// taste vector (the titles picked so far) instead of popularity — it backs the
+// "more like your picks" reactive expansion. Same exclusions (watched, seeded),
+// poster requirement, age filter, and offset pagination. vectorLit is a
+// pgvector text literal (from PartialTasteVector).
+func (q *Queries) OnboardingGridReactive(ctx context.Context, profileID int64, vectorLit string, limit, offset int, allowedRatings []string) ([]*models.MediaItem, error) {
+	if limit <= 0 {
+		limit = 24
+	}
+	rows, err := q.pool.Query(ctx, `
+		WITH ranked AS (
+		  SELECT DISTINCT ON (COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id))
+		         m.id, m.library_id, m.type, m.title, m.sort_title,
+		         COALESCE(m.year, 0) AS year,
+		         COALESCE(m.overview, '') AS overview,
+		         COALESCE(m.rating, 0) AS rating,
+		         COALESCE(m.runtime_minutes, 0) AS runtime_minutes,
+		         COALESCE(m.content_rating, '') AS content_rating,
+		         COALESCE(m.poster_path, '') AS poster_path,
+		         COALESCE(m.backdrop_path, '') AS backdrop_path,
+		         m.added_at, m.updated_at,
+		         (m.embedding <=> $2::vector) AS distance
+		  FROM media_items m
+		  WHERE m.embedding IS NOT NULL
+		    AND m.poster_path IS NOT NULL
+		    AND m.poster_path <> ''
+		    AND ($3::text[] IS NULL OR m.content_rating = ANY($3))
+		    AND NOT EXISTS (
+		      SELECT 1 FROM watch_progress wp
+		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM taste_seeds ts
+		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
+		    )
+		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
+		)
+		SELECT id, library_id, type, title, sort_title, year, overview, rating,
+		       runtime_minutes, content_rating, poster_path, backdrop_path,
+		       added_at, updated_at
+		FROM ranked
+		ORDER BY distance ASC
+		LIMIT $4 OFFSET $5`,
+		profileID, vectorLit, allowedRatings, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("onboarding grid reactive: %w", err)
+	}
+	defer rows.Close()
+	var items []*models.MediaItem
+	for rows.Next() {
+		item := &models.MediaItem{}
+		if err := rows.Scan(
+			&item.ID, &item.LibraryID, &item.Type, &item.Title, &item.SortTitle,
+			&item.Year, &item.Overview, &item.Rating, &item.RuntimeMin,
+			&item.ContentRating, &item.PosterPath, &item.BackdropPath,
+			&item.AddedAt, &item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan onboarding grid reactive: %w", err)
 		}
 		items = append(items, item)
 	}
