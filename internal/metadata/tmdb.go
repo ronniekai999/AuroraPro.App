@@ -303,6 +303,7 @@ type TMDBMovieDetail struct {
 	Images        *TMDBImages   `json:"images,omitempty"`
 	ContentRating string        `json:"-"` // filled from release_dates
 	ReleaseDates  *TMDBRelDates `json:"release_dates,omitempty"`
+	Videos        *TMDBVideos   `json:"videos,omitempty"`
 }
 
 type TMDBTVDetail struct {
@@ -320,6 +321,22 @@ type TMDBTVDetail struct {
 	Images         *TMDBImages     `json:"images,omitempty"`
 	ContentRatings *TMDBContentRat `json:"content_ratings,omitempty"`
 	ExternalIDs    *TMDBExtIDs     `json:"external_ids,omitempty"`
+	Videos         *TMDBVideos     `json:"videos,omitempty"`
+}
+
+// TMDBVideos / TMDBVideo model the /videos payload (trailers, teasers, clips),
+// available via append_to_response or the /videos sub-endpoint. Only YouTube
+// entries are usable by the frontend's embed; see bestTrailerKey for selection.
+type TMDBVideos struct {
+	Results []TMDBVideo `json:"results"`
+}
+
+type TMDBVideo struct {
+	Key      string `json:"key"`  // YouTube video id
+	Site     string `json:"site"` // "YouTube", "Vimeo", ...
+	Type     string `json:"type"` // "Trailer", "Teaser", "Clip", ...
+	Official bool   `json:"official"`
+	Name     string `json:"name"`
 }
 
 type TMDBSeason struct {
@@ -491,7 +508,7 @@ func (c *TMDBClient) GetMovie(ctx context.Context, tmdbID int) (*TMDBMovieDetail
 		imgLangs = c.language + "," + imgLangs
 	}
 	params := url.Values{
-		"append_to_response":     {"credits,images,release_dates"},
+		"append_to_response":     {"credits,images,release_dates,videos"},
 		"include_image_language": {imgLangs},
 	}
 	body, err := c.get(ctx, fmt.Sprintf("/movie/%d", tmdbID), params)
@@ -530,7 +547,7 @@ func (c *TMDBClient) GetTV(ctx context.Context, tmdbID int) (*TMDBTVDetail, erro
 		imgLangs = c.language + "," + imgLangs
 	}
 	params := url.Values{
-		"append_to_response":     {"credits,images,content_ratings,external_ids"},
+		"append_to_response":     {"credits,images,content_ratings,external_ids,videos"},
 		"include_image_language": {imgLangs},
 	}
 	body, err := c.get(ctx, fmt.Sprintf("/tv/%d", tmdbID), params)
@@ -542,6 +559,61 @@ func (c *TMDBClient) GetTV(ctx context.Context, tmdbID int) (*TMDBTVDetail, erro
 		return nil, fmt.Errorf("decode tv detail: %w", err)
 	}
 	return &detail, nil
+}
+
+// GetVideos fetches the trailers/teasers for a movie (isShow=false) or TV show
+// (isShow=true). Used by the lazy backfill path, which only has a tmdb_id and
+// wants just the videos rather than a full detail fetch.
+func (c *TMDBClient) GetVideos(ctx context.Context, tmdbID int, isShow bool) (*TMDBVideos, error) {
+	kind := "movie"
+	if isShow {
+		kind = "tv"
+	}
+	body, err := c.get(ctx, fmt.Sprintf("/%s/%d/videos", kind, tmdbID), nil)
+	if err != nil {
+		return nil, err
+	}
+	var v TMDBVideos
+	if err := json.Unmarshal(body, &v); err != nil {
+		return nil, fmt.Errorf("decode videos: %w", err)
+	}
+	return &v, nil
+}
+
+// bestTrailerKey returns the best YouTube trailer video id from a TMDB videos
+// list, or "" if none. Prefers Trailer > Teaser > Clip, and official over
+// unofficial within a type. Non-YouTube sites are ignored (the frontend embeds
+// YouTube), as are non-promo types (behind-the-scenes, bloopers, etc.).
+func bestTrailerKey(v *TMDBVideos) string {
+	if v == nil {
+		return ""
+	}
+	best, bestRank := "", -1
+	for _, vid := range v.Results {
+		if vid.Key == "" || !strings.EqualFold(vid.Site, "YouTube") {
+			continue
+		}
+		typeRank := 0
+		switch strings.ToLower(vid.Type) {
+		case "trailer":
+			typeRank = 3
+		case "teaser":
+			typeRank = 2
+		case "clip", "featurette":
+			typeRank = 1
+		}
+		if typeRank == 0 {
+			continue
+		}
+		rank := typeRank * 2
+		if vid.Official {
+			rank++
+		}
+		if rank > bestRank {
+			bestRank, best = rank, vid.Key
+		}
+	}
+	return best
 }
 
 // GetTVExternalIDs fetches just the external IDs (IMDB, TVDB) for a TV show.

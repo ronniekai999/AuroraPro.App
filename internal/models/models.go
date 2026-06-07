@@ -399,6 +399,7 @@ type MetadataUpdate struct {
 	Studio        *string
 	Network       *string
 	ReleaseDate   *string
+	TrailerKey    *string
 }
 
 type EpisodeMetadataUpdate struct {
@@ -565,6 +566,12 @@ type MediaItemEnriched struct {
 	SeasonCount  int            `json:"season_count,omitempty"`
 	EpisodeCount int            `json:"episode_count,omitempty"`
 	UserProgress *WatchProgress `json:"user_progress,omitempty"`
+	// TrailerKey is the YouTube id for the "Watch Trailer" button; "" = none.
+	TrailerKey string `json:"trailer_key,omitempty"`
+	// TrailerChecked reports whether trailer_key has been resolved yet (the DB
+	// value is NOT NULL). When false, GetEnriched lazily backfills it from
+	// TMDB. Not serialized — an internal signal for the handler.
+	TrailerChecked bool `json:"-"`
 }
 
 // SeasonDetail is the API response for a single season.

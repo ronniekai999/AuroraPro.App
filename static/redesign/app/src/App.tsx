@@ -124,6 +124,7 @@ import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { MediaListRow } from '@/components/MediaListRow'
 import { DetailHero } from '@/components/detail/DetailHero'
 import { DetailRail } from '@/components/detail/DetailRail'
+import { TrailerModal } from '@/components/detail/TrailerModal'
 import { DetailTabs, type DetailTab } from '@/components/detail/DetailTabs'
 import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
@@ -2452,6 +2453,8 @@ function DetailView({
   files, onPlayFile,
   resume,
 }: DetailViewProps) {
+  // Trailer modal (YouTube embed) — opened from the rail's "Watch Trailer".
+  const [trailerOpen, setTrailerOpen] = useState(false)
   // Prefer real metadata when available — overview, runtime, rating
   // straight from the server. Falls back to whatever the lightweight
   // Media object had so the page still shows something pre-fetch.
@@ -2690,6 +2693,7 @@ function DetailView({
             primaryTitle={resumeShown && ri ? `Resume from your last position (${formatResumeTime(ri.position_ms)})` : undefined}
             secondaryLabel={resumeShown ? 'Play from start' : undefined}
             onSecondary={resumeShown ? () => onPlay(media) : undefined}
+            onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
             inLibrary={inLibrary}
             onToggleLibrary={() => onToggleLib(media)}
             onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
@@ -2699,6 +2703,13 @@ function DetailView({
             onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
             onIdentify={onIdentify ? () => onIdentify(media) : undefined}
           />
+          {trailerOpen && detail?.trailer_key && (
+            <TrailerModal
+              youtubeKey={detail.trailer_key}
+              title={media.title}
+              onClose={() => setTrailerOpen(false)}
+            />
+          )}
 
           <div className="min-w-0 pt-1">
             <DetailTabs tabs={tabs} active={activeTab} onChange={setActiveTab} className="mb-6" />
