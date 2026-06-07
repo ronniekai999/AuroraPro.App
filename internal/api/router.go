@@ -786,7 +786,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// Taste onboarding ("Pick What You Love") — seeds the recommender
 			// for a brand-new profile so personalization works on first load.
 			// Per-profile (?profile_id= or the caller's default). Gated server-
-			// side on the library being embedded + the profile unrestricted.
+			// side on the library being embedded (restricted profiles are
+			// age-filtered, not excluded).
 			r.Route("/api/onboarding", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
 				r.Get("/status", onboardingH.Status)

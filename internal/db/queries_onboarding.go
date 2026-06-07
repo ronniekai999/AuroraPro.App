@@ -310,10 +310,26 @@ func (q *Queries) GetOrCreateFavoritesWatchlist(ctx context.Context, profileID i
 	if err != pgx.ErrNoRows {
 		return 0, fmt.Errorf("find favorites watchlist: %w", err)
 	}
-	if err := q.pool.QueryRow(ctx,
-		`INSERT INTO watchlists (profile_id, name, list_type) VALUES ($1, 'Favorites', 'favorites') RETURNING id`,
-		profileID).Scan(&id); err != nil {
+	// ON CONFLICT guards the watchlists UNIQUE(profile_id, name): if a list
+	// literally named "Favorites" already exists (e.g. a custom-typed one made
+	// via the watchlists API), the insert no-ops (RETURNING yields no row →
+	// ErrNoRows) and we adopt that existing list by name, rather than erroring
+	// and silently disabling the seeds→Favorites mirror.
+	err = q.pool.QueryRow(ctx,
+		`INSERT INTO watchlists (profile_id, name, list_type) VALUES ($1, 'Favorites', 'favorites')
+		 ON CONFLICT (profile_id, name) DO NOTHING
+		 RETURNING id`,
+		profileID).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != pgx.ErrNoRows {
 		return 0, fmt.Errorf("create favorites watchlist: %w", err)
+	}
+	if err := q.pool.QueryRow(ctx,
+		`SELECT id FROM watchlists WHERE profile_id = $1 AND name = 'Favorites' LIMIT 1`,
+		profileID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("find existing 'Favorites' watchlist: %w", err)
 	}
 	return id, nil
 }
