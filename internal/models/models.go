@@ -24,7 +24,7 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 	// LastLoginAt is the user's most recent authentication — password login,
 	// OAuth callback, or registration's immediate sign-in. Nil for users who
-	// haven't signed in since migration 035 added the column (rendered as
+	// haven't signed in since migration 036 added the column (rendered as
 	// "Never" in the admin UI). Deliberately NOT bumped on token refresh: that's
 	// a silent session continuation, not a re-login. Only GetAllUsers (the admin
 	// list) selects it; other user lookups leave it nil, so json omitempty drops

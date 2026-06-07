@@ -1,6 +1,6 @@
 package db
 
-// Integration tests for last_login_at (migration 035): UpdateLastLogin stamps
+// Integration tests for last_login_at (migration 036): UpdateLastLogin stamps
 // the column to the DB clock, and GetAllUsers reads it back — nil for a user who
 // has never signed in. Together these back the admin Users table's "Last Login"
 // column (UpdateLastLogin is called on the login/OAuth/register paths;
