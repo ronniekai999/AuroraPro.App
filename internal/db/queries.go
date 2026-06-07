@@ -284,7 +284,7 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 	var users []*models.User
 	for rows.Next() {
 		u := &models.User{}
-		// last_login_at is nullable (migration 035); scanned into *time.Time so a
+		// last_login_at is nullable (migration 036); scanned into *time.Time so a
 		// never-signed-in user stays nil → "Never" in the admin UI.
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.LastLoginAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
