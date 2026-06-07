@@ -43,11 +43,18 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
         className="relative w-full max-w-[min(92vw,1100px)] aspect-video rounded-2xl overflow-hidden bg-black shadow-2xl ring-1 ring-white/10"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* referrerPolicy overrides the SPA's `Referrer-Policy: no-referrer`
+            (set in router.go frontendHeaders) for THIS iframe only. Without a
+            referrer, YouTube's embed fails with "Error 153 — Video player
+            configuration error" because it can't see the embedding origin.
+            Sending the origin fixes it while keeping no-referrer everywhere
+            else. */}
         <iframe
           className="absolute inset-0 h-full w-full"
           src={src}
           title={title ? `${title} — Trailer` : 'Trailer'}
           allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+          referrerPolicy="strict-origin-when-cross-origin"
           allowFullScreen
         />
       </div>
