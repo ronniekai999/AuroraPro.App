@@ -1026,7 +1026,15 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
     >
       <div
         ref={rootRef}
-        className="w-full max-w-[560px] bg-[#0a0a0f] rounded-2xl border border-white/[0.08] shadow-2xl overflow-hidden"
+        // Cap the panel to the viewport and let it scroll its OWN content.
+        // Previously this was `overflow-hidden` with no max-height, so a form
+        // taller than the screen had nothing scrollable inside the modal and
+        // the wheel chained to the page behind it (reported: "can't scroll the
+        // Report a Bug window — it scrolls Aurora behind it"), leaving the
+        // Submit button below the fold unreachable. max-h + overflow-y-auto
+        // makes the modal scroll; overscroll-contain stops the chain at its
+        // scroll boundaries; overflow-x-hidden preserves the rounded corners.
+        className="w-full max-w-[560px] max-h-[90dvh] overflow-y-auto overflow-x-hidden overscroll-contain bg-[#0a0a0f] rounded-2xl border border-white/[0.08] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         // Holistic deep-debug M2 — drop aria-modal during recording
