@@ -2,11 +2,14 @@ package db
 
 import "testing"
 
-// TestAllowedRatingsForMax pins the parental-controls contract that the
-// recommender age-filter (and browse, and onboarding) all rely on: a
-// restricted/kid profile's allowed set must EXCLUDE the above-rating ratings.
-// The candidate queries apply `content_rating = ANY(allowed)`, so anything not
-// in this set is filtered out — making these exclusions the safety boundary.
+// TestAllowedRatingsForMax pins the parental-controls contract that browse, the
+// taste onboarding pool, and the recommender all rely on: a restricted/kid
+// profile's allowed set must EXCLUDE above-rating ratings — including across the
+// MPAA<->TV boundary. The candidate queries apply `content_rating = ANY(allowed)`,
+// so anything not in this set is filtered out, making these exclusions the
+// safety boundary. The TV-14 / TV-Y7 cases below guard the cross-system
+// collisions that a coarse shared 1–5 scale used to leak (R via TV-14, PG via
+// TV-Y7).
 func TestAllowedRatingsForMax(t *testing.T) {
 	has := func(allowed []string, r string) bool {
 		for _, a := range allowed {
@@ -30,12 +33,19 @@ func TestAllowedRatingsForMax(t *testing.T) {
 		include []string
 		exclude []string
 	}{
-		// PG-13 profile: no R/NC-17 (movies) or TV-14/TV-MA (TV).
+		// PG-13 (movie cap): no R/NC-17, and no TV-14/TV-MA on the TV side.
 		{"PG-13", []string{"G", "PG", "PG-13", "TV-PG"}, []string{"R", "NC-17", "TV-14", "TV-MA"}},
-		// PG profile.
-		{"PG", []string{"G", "PG", "TV-Y", "TV-Y7", "TV-G"}, []string{"PG-13", "R", "NC-17", "TV-PG", "TV-14", "TV-MA"}},
-		// G profile: most restrictive.
-		{"G", []string{"G", "TV-Y"}, []string{"PG", "PG-13", "R", "NC-17", "TV-Y7", "TV-G", "TV-PG", "TV-14", "TV-MA"}},
+		// PG (movie cap).
+		{"PG", []string{"G", "PG", "TV-Y", "TV-Y7", "TV-G"}, []string{"PG-13", "TV-PG", "R", "NC-17", "TV-14", "TV-MA"}},
+		// G (most restrictive): all-ages only — G, TV-Y, TV-G.
+		{"G", []string{"G", "TV-Y", "TV-G"}, []string{"PG", "PG-13", "R", "NC-17", "TV-Y7", "TV-PG", "TV-14", "TV-MA"}},
+		// TV-14 (TV cap) — the collision this fix closes: must NOT unlock R /
+		// NC-17 / TV-MA, but PG-13 and below are fine.
+		{"TV-14", []string{"G", "TV-Y7", "PG", "TV-PG", "PG-13", "TV-14"}, []string{"R", "NC-17", "TV-MA"}},
+		// TV-Y7 (young-kids TV cap) — must NOT unlock PG (the other collision).
+		{"TV-Y7", []string{"G", "TV-Y", "TV-G", "TV-Y7"}, []string{"PG", "TV-PG", "PG-13", "TV-14", "R", "TV-MA", "NC-17"}},
+		// TV-MA (adult TV cap): allows R, still excludes NC-17.
+		{"TV-MA", []string{"R", "TV-MA", "TV-14", "PG-13"}, []string{"NC-17"}},
 	}
 	for _, tc := range cases {
 		allowed := AllowedRatingsForMax(tc.max)
