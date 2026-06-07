@@ -2365,3 +2365,79 @@ export async function submitBugReport(
   }
   return (await parseBody()) as BugReportSubmitResult
 }
+
+// ──────────────────────────────────────────────────────────────────
+// Taste onboarding ("Pick What You Love")
+//
+// Seeds the recommender for a brand-new profile so hero / recommendations /
+// discover / anchor-rails personalize on first load. All endpoints are
+// per-profile: pass the active profile id, or omit it to use the account's
+// default profile (the server resolves it).
+
+export interface OnboardingStatus {
+  profile_id: number
+  completed: boolean
+  eligible: boolean
+  library_embedded: boolean
+  min_picks: number
+  threshold: number
+  seed_count: number
+}
+
+function onboardingQS(profileId?: number, extra?: Record<string, string>): string {
+  const params = new URLSearchParams(extra)
+  if (profileId) params.set('profile_id', String(profileId))
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export async function getOnboardingStatus(
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<OnboardingStatus> {
+  return apiFetch<OnboardingStatus>(`/api/onboarding/status${onboardingQS(profileId)}`, { signal })
+}
+
+export async function getOnboardingGrid(
+  profileId?: number,
+  limit?: number,
+  signal?: AbortSignal,
+): Promise<UIMedia[]> {
+  const extra: Record<string, string> = {}
+  if (limit) extra.limit = String(limit)
+  const resp = await apiFetch<{ items?: ServerMediaItem[] }>(
+    `/api/onboarding/grid${onboardingQS(profileId, extra)}`,
+    { signal },
+  )
+  return (resp.items || []).map(mapMedia)
+}
+
+export async function getOnboardingPreview(
+  selected: number[],
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<UIMedia[]> {
+  if (selected.length === 0) return []
+  const resp = await apiFetch<{ items?: ServerMediaItem[] }>(
+    `/api/onboarding/preview${onboardingQS(profileId, { selected: selected.join(',') })}`,
+    { signal },
+  )
+  return (resp.items || []).map(mapMedia)
+}
+
+export async function saveOnboardingSeeds(
+  mediaIds: number[],
+  profileId?: number,
+): Promise<{ completed: boolean; seed_count: number }> {
+  return apiFetch<{ completed: boolean; seed_count: number }>(
+    `/api/onboarding/seeds${onboardingQS(profileId)}`,
+    { method: 'POST', body: { media_ids: mediaIds } },
+  )
+}
+
+export async function skipOnboarding(profileId?: number): Promise<{ skipped: boolean }> {
+  return apiFetch<{ skipped: boolean }>(
+    `/api/onboarding/skip${onboardingQS(profileId)}`,
+    { method: 'POST' },
+  )
+}

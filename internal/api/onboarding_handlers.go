@@ -23,11 +23,11 @@ const (
 // hero / recommendations / discover / anchor-rails surfaces all personalize on
 // first load instead of falling back to the generic popular pool.
 //
-// Phase 0 is vector-only: the flow is gated on the library actually having
-// embeddings (otherwise seeds can't feed a vector) AND on the profile being
-// UNRESTRICTED (no max_age_rating). Age-aware grid filtering for kid profiles
-// lands in a later phase; until then a restricted profile is simply not offered
-// onboarding rather than risk showing it above-rating titles.
+// Vector-only: the flow is gated on the library actually having embeddings
+// (otherwise seeds can't feed a vector). It works for restricted/kid profiles
+// too — the grid, instant preview, and seed validation are all age-filtered by
+// the profile's max_age_rating via allowedRatingsForMax, so a kid profile only
+// ever sees and seeds age-appropriate titles.
 type OnboardingHandler struct {
 	queries *db.Queries
 	hero    HeroProvider
@@ -101,7 +101,9 @@ func (h *OnboardingHandler) Grid(w http.ResponseWriter, r *http.Request) {
 	} else if limit > 100 {
 		limit = 100
 	}
-	items, err := h.queries.OnboardingGrid(r.Context(), profile.ID, limit)
+	// Age-filter the pool for restricted profiles (nil = unrestricted, no filter).
+	allowed := allowedRatingsForMax(profile.MaxAgeRating)
+	items, err := h.queries.OnboardingGrid(r.Context(), profile.ID, limit, allowed)
 	if err != nil {
 		slog.Warn("onboarding: grid failed", "profile", profile.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to build grid")
@@ -133,7 +135,8 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
-	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 12)
+	// Over-fetch so the age filter + pick exclusion still leave a full rail.
+	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36)
 	if err != nil {
 		slog.Warn("onboarding: preview failed", "profile", profile.ID, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
@@ -142,6 +145,12 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	// The selected titles aren't seeds yet, so NearestUnwatched won't exclude
 	// them — drop any that slipped through so we never preview a pick back.
 	items = filterOutIDs(items, selected)
+	// NearestUnwatched isn't age-aware; filter to the profile's allowed ratings
+	// so a restricted profile never previews above-rating titles, then cap.
+	items = filterByRatings(items, allowedRatingsForMax(profile.MaxAgeRating))
+	if len(items) > 12 {
+		items = items[:12]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -194,6 +203,19 @@ func (h *OnboardingHandler) SaveSeeds(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "selected titles aren't ready for personalization yet")
 		return
 	}
+	// For a restricted profile, refuse picks above its rating so the taste
+	// vector (and everything it drives) can't be steered toward adult content.
+	if allowed := allowedRatingsForMax(profile.MaxAgeRating); allowed != nil {
+		bad, rErr := h.queries.CountSeedsOutsideRatings(r.Context(), ids, allowed)
+		if rErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to validate picks")
+			return
+		}
+		if bad > 0 {
+			writeError(w, http.StatusBadRequest, "some picks aren't allowed for this profile's age rating")
+			return
+		}
+	}
 	if err := h.queries.AddTasteSeeds(r.Context(), profile.ID, ids, "onboarding"); err != nil {
 		slog.Error("onboarding: add seeds failed", "profile", profile.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to save picks")
@@ -242,6 +264,26 @@ func (h *OnboardingHandler) Reset(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
 }
 
+// Skip marks onboarding complete WITHOUT seeding — the user chose "skip for
+// now". The profile stays on the popular cold-start pool and can run onboarding
+// later from Settings. Idempotent.
+func (h *OnboardingHandler) Skip(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	profile, ok := h.resolveProfile(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	if err := h.queries.SetTasteOnboardingCompleted(r.Context(), profile.ID, true); err != nil {
+		slog.Error("onboarding: skip failed", "profile", profile.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to skip onboarding")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skipped": true})
+}
+
 // resolveProfile returns the profile to operate on — ?profile_id=N (validated
 // to belong to the caller) wins, else the user's default profile — and a bool
 // indicating whether to proceed. On failure it writes the response and returns
@@ -274,15 +316,17 @@ func (h *OnboardingHandler) resolveProfile(w http.ResponseWriter, r *http.Reques
 }
 
 // eligibility reports (eligible, libraryEmbedded, error). Onboarding is offered
-// only when the library has embeddings (vector-only) and the profile is
-// unrestricted (no max_age_rating) — see the type doc for the Phase 0 rationale.
+// whenever the library has embeddings (vector-only). Restricted/kid profiles
+// are supported — the grid, preview, and seed validation age-filter by
+// max_age_rating — so eligibility no longer depends on the profile's rating.
+// profile is retained in the signature for callers and future per-profile gates.
 func (h *OnboardingHandler) eligibility(r *http.Request, profile *models.UserProfile) (bool, bool, error) {
+	_ = profile
 	libEmbedded, err := h.queries.LibraryHasEmbeddings(r.Context())
 	if err != nil {
 		return false, false, err
 	}
-	unrestricted := strings.TrimSpace(profile.MaxAgeRating) == ""
-	return libEmbedded && unrestricted, libEmbedded, nil
+	return libEmbedded, libEmbedded, nil
 }
 
 // parseIDList parses a comma-separated list of positive int64 ids — deduped,
@@ -346,6 +390,26 @@ func filterOutIDs(items []*models.MediaItem, exclude []int64) []*models.MediaIte
 			continue
 		}
 		out = append(out, it)
+	}
+	return out
+}
+
+// filterByRatings keeps only items whose content rating is in allowed. allowed
+// nil/empty (unrestricted profile) returns items unchanged. Items with an
+// unknown/empty rating are dropped under a restriction — we can't prove safe.
+func filterByRatings(items []*models.MediaItem, allowed []string) []*models.MediaItem {
+	if len(allowed) == 0 || len(items) == 0 {
+		return items
+	}
+	ok := make(map[string]struct{}, len(allowed))
+	for _, rating := range allowed {
+		ok[rating] = struct{}{}
+	}
+	out := make([]*models.MediaItem, 0, len(items))
+	for _, it := range items {
+		if _, allow := ok[it.ContentRating]; allow {
+			out = append(out, it)
+		}
 	}
 	return out
 }
