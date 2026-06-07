@@ -24,6 +24,8 @@
 // This module is intentionally I/O only — the React player component
 // owns the hls.js lifecycle and orchestrates calls in here.
 
+import Hls from 'hls.js'
+
 import { apiFetch } from './api'
 
 // /api/stream/info response — sparse subset of what the server returns,
@@ -60,6 +62,10 @@ export interface StreamDecision {
   audio_passthrough?: boolean
   audio_track_index?: number
   audio_channels?: number
+  // Re-encode target codec: 'aac' (stereo) or 'ac3' (5.1 surround). Echoed
+  // back to createSession so the server emits surround on AC-3-capable clients
+  // instead of downmixing to stereo.
+  audio_codec_out?: string
   hdr_tonemap?: boolean
 }
 
@@ -97,6 +103,7 @@ export interface CreateSessionRequest {
   audio_passthrough?: boolean
   audio_track_index?: number
   audio_channels?: number
+  audio_codec_out?: string
   hdr_tonemap?: boolean
   video_codec?: string
   // FFmpeg -ss seek offset in WHOLE SECONDS (V1's playMedia floors
@@ -115,18 +122,138 @@ export interface SessionResponse {
   start_sec?: number
 }
 
-// /api/stream/info call. caps is a base64-encoded JSON of client
-// capabilities (codecs, hwdecode flags). The detection logic lives
-// in V1's CLIENT_CAPS probe; Phase 2 ships without caps (server
-// falls back to a conservative profile) and Phase 2.5 will port the
-// probe — once ported, this signature accepts a `caps` string.
+// Client capability probe. The backend's playback-decision engine
+// (DecidePlayback) chooses direct play vs remux vs transcode based on what the
+// client can actually decode — but ONLY when we tell it. ParseClientCaps on
+// the server expects a comma-separated list of lowercase keys: video codecs
+// (h264, hevc/h265, vp8, vp9, av1), audio codecs (aac, mp3, ac3, eac3, opus,
+// flac, vorbis), containers (mp4_container, webm_container) and the delivery
+// hints hls_js / hls_native. Unknown keys are ignored server-side; only
+// SUPPORTED keys are emitted.
+//
+// Computed once per page load and cached — capabilities don't change within a
+// session, and the probe spins up a throwaway <video> element.
+let cachedCaps: string | null = null
+
+function supports(mse: string, file: string, el: HTMLVideoElement): boolean {
+  try {
+    if (
+      typeof MediaSource !== 'undefined' &&
+      typeof MediaSource.isTypeSupported === 'function' &&
+      MediaSource.isTypeSupported(mse)
+    ) {
+      return true
+    }
+  } catch {
+    // isTypeSupported can throw on old / locked-down engines — fall through.
+  }
+  try {
+    // canPlayType returns '', 'maybe', or 'probably'; non-empty = playable.
+    if (el.canPlayType(file) !== '') return true
+  } catch {
+    // defensive — canPlayType is universally implemented, but never throw.
+  }
+  return false
+}
+
+// supportsMSE is the STRICT Media Source Extensions probe — MediaSource
+// .isTypeSupported only, with NO canPlayType fallback. Use it for codecs Aurora
+// delivers through hls.js (MSE), whose own gate is isTypeSupported-only.
+// canPlayType reports NATIVE <video> decode ability, which over-reports for the
+// MSE path and would mislead the server into emitting media hls.js then
+// silently drops.
+function supportsMSE(mse: string): boolean {
+  try {
+    return (
+      typeof MediaSource !== 'undefined' &&
+      typeof MediaSource.isTypeSupported === 'function' &&
+      MediaSource.isTypeSupported(mse)
+    )
+  } catch {
+    return false
+  }
+}
+
+export function clientCaps(): string {
+  if (cachedCaps !== null) return cachedCaps
+  // Non-DOM contexts (SSR, tests): no probe possible → empty string makes the
+  // server fall back to its conservative static allowlist.
+  if (typeof document === 'undefined') {
+    cachedCaps = ''
+    return cachedCaps
+  }
+
+  const el = document.createElement('video')
+  const caps: string[] = []
+
+  // Video codecs — supported if the MSE/hls.js path OR native <video> can play.
+  if (supports('video/mp4; codecs="avc1.42E01E"', 'video/mp4; codecs="avc1.42E01E"', el)) {
+    caps.push('h264')
+  }
+  if (
+    supports('video/mp4; codecs="hvc1.1.6.L93.B0"', 'video/mp4; codecs="hvc1.1.6.L93.B0"', el) ||
+    supports('video/mp4; codecs="hev1.1.6.L93.B0"', 'video/mp4; codecs="hev1.1.6.L93.B0"', el)
+  ) {
+    caps.push('hevc', 'h265')
+  }
+  if (supports('video/webm; codecs="vp8"', 'video/webm; codecs="vp8"', el)) {
+    caps.push('vp8')
+  }
+  if (supports('video/webm; codecs="vp09.00.10.08"', 'video/mp4; codecs="vp09.00.10.08"', el)) {
+    caps.push('vp9')
+  }
+  if (supports('video/mp4; codecs="av01.0.04M.08"', 'video/mp4; codecs="av01.0.04M.08"', el)) {
+    caps.push('av1')
+  }
+
+  // Containers.
+  if (el.canPlayType('video/mp4') !== '') caps.push('mp4_container')
+  if (el.canPlayType('video/webm') !== '') caps.push('webm_container')
+
+  // Audio codecs.
+  if (supports('audio/mp4; codecs="mp4a.40.2"', 'audio/mp4; codecs="mp4a.40.2"', el)) caps.push('aac')
+  if (supports('audio/mpeg', 'audio/mpeg', el)) caps.push('mp3')
+  // AC-3 (Dolby Digital): gate STRICTLY on MediaSource.isTypeSupported, NOT the
+  // canPlayType OR. Aurora delivers transcoded/remuxed audio via hls.js, whose
+  // MPEG-TS demuxer only emits AC-3 when MediaSource.isTypeSupported(
+  // 'audio/mp4; codecs="ac-3"') is true and SILENTLY drops it otherwise (no
+  // error, no fallback → silent video). Matching hls.js's own typeSupported.ac3
+  // gate makes the platform matrix self-correct: Linux, Firefox, Windows 11
+  // 24H2, and Chromium-derived browsers all report false here.
+  if (supportsMSE('audio/mp4; codecs="ac-3"')) caps.push('ac3')
+  // E-AC-3: native-decode probe is fine — Aurora never muxes E-AC-3 into .ts
+  // (tsPassthroughSafe excludes it; the surround path re-encodes to AC-3), so
+  // this cap only ever gates native direct play.
+  if (supports('audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="ec-3"', el)) caps.push('eac3')
+  if (supports('audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"', el)) caps.push('opus')
+  if (supports('audio/ogg; codecs="flac"', 'audio/mp4; codecs="flac"', el)) caps.push('flac')
+  if (supports('audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"', el)) caps.push('vorbis')
+
+  // HLS delivery. The server restricts HLS audio handling when hls_js is set
+  // (hls.js's TS demuxer only does aac/mp3/ac3), so this flag is significant.
+  if (Hls.isSupported()) caps.push('hls_js')
+  if (el.canPlayType('application/vnd.apple.mpegurl') !== '') caps.push('hls_native')
+
+  cachedCaps = caps.join(',')
+  return cachedCaps
+}
+
+// /api/stream/info call. Sends the probed client capabilities (see clientCaps)
+// as a comma-separated `caps` param so the server's client-aware
+// DecidePlayback engine can choose direct play / remux / transcode based on
+// what THIS browser can actually decode (e.g. HEVC or HDR direct play on
+// Safari; AV1 only where supported). When caps is empty (non-DOM context) the
+// param is omitted and the server falls back to its conservative static
+// allowlist.
 export async function getStreamInfo(
   fileId: number,
   fileType: 'media' | 'episode' = 'media',
   signal?: AbortSignal,
 ): Promise<StreamInfo> {
+  const caps = clientCaps()
+  const capsParam = caps ? `&caps=${encodeURIComponent(caps)}` : ''
   return apiFetch<StreamInfo>(
-    `/api/stream/info/${fileId}?type=${fileType}`,
+    `/api/stream/info/${fileId}?type=${fileType}${capsParam}`,
     { signal },
   )
 }

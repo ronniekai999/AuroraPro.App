@@ -124,9 +124,12 @@ func TestDecidePlayback(t *testing.T) {
 	}
 	// macOS Safari: BOTH HLS.js and native HLS available. The frontend uses
 	// HLS.js whenever Hls.isSupported() is true, so remux/transcode paths
-	// go through HLS.js. HLS.js v1.6+ can demux HEVC and AAC/MP3/AC3 from
-	// .ts. EAC3 passthrough is unsafe for HLS.js paths, but direct play
-	// (MP4 served natively) is fine.
+	// go through HLS.js. HLS.js v1.6+ can demux HEVC and AAC/MP3 from .ts;
+	// AC-3 demux is CONDITIONAL on MediaSource.isTypeSupported('audio/mp4;
+	// codecs="ac-3"') — hls.js silently drops AC-3 otherwise — which is why the
+	// frontend derives the "ac3" cap from isTypeSupported only (not canPlayType).
+	// EAC3 passthrough is unsafe for HLS.js paths, but direct play (MP4 served
+	// natively) is fine.
 	macSafariCaps := &ClientCaps{
 		VideoCodecs: map[string]bool{"h264": true, "h265": true, "hevc": true},
 		AudioCodecs: map[string]bool{"aac": true, "mp3": true, "ac3": true, "eac3": true},
@@ -755,18 +758,51 @@ func TestGenerateMasterPlaylistCODECS(t *testing.T) {
 func TestHlsCodecString(t *testing.T) {
 	tests := []struct {
 		height int
+		audio  string
 		want   string
 	}{
-		{360, "avc1.42001e,mp4a.40.2"},  // Level 3.0
-		{480, "avc1.42001e,mp4a.40.2"},  // Level 3.0
-		{720, "avc1.42001f,mp4a.40.2"},  // Level 3.1
-		{1080, "avc1.420028,mp4a.40.2"}, // Level 4.0
-		{2160, "avc1.640033,mp4a.40.2"}, // High profile, Level 5.1 (4K)
+		{360, "aac", "avc1.64001e,mp4a.40.2"},  // High, Level 3.0
+		{480, "aac", "avc1.64001e,mp4a.40.2"},  // High, Level 3.0
+		{720, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		{1080, "aac", "avc1.640028,mp4a.40.2"}, // High, Level 4.0
+		{2160, "aac", "avc1.640033,mp4a.40.2"}, // High, Level 5.1 (4K)
+		{1080, "ac3", "avc1.640028,ac-3"},      // High + AC-3 surround
+		{720, "", "avc1.64001f,mp4a.40.2"},     // empty audio defaults to AAC
 	}
 	for _, tt := range tests {
-		got := hlsCodecString(tt.height)
+		got := hlsCodecString(tt.height, tt.audio)
 		if got != tt.want {
-			t.Errorf("hlsCodecString(%d) = %q, want %q", tt.height, got, tt.want)
+			t.Errorf("hlsCodecString(%d, %q) = %q, want %q", tt.height, tt.audio, got, tt.want)
+		}
+	}
+}
+
+func TestSelectAudioCodecOut(t *testing.T) {
+	// "ac3" cap here means MSE/hls.js can genuinely decode AC-3 (the frontend
+	// derives it from MediaSource.isTypeSupported only). So AC-3 surround is
+	// chosen ONLY for a re-encode of a multichannel source on such a client.
+	withAC3 := &ClientCaps{AudioCodecs: map[string]bool{"aac": true, "ac3": true}}
+	noAC3 := &ClientCaps{AudioCodecs: map[string]bool{"aac": true}}
+
+	tests := []struct {
+		name     string
+		recode   bool
+		caps     *ClientCaps
+		channels int
+		want     string
+	}{
+		{"recode + ac3 + 5.1 => ac3", true, withAC3, 6, "ac3"},
+		{"recode + ac3 + 7.1 => ac3", true, withAC3, 8, "ac3"},
+		{"recode + ac3 + stereo => aac", true, withAC3, 2, "aac"},
+		{"recode + no-ac3 + 5.1 => aac", true, noAC3, 6, "aac"},
+		{"copy (no recode) + ac3 + 5.1 => aac", false, withAC3, 6, "aac"},
+		{"nil caps (no client caps) => aac", true, nil, 6, "aac"},
+		{"unknown channel count => aac", true, withAC3, 0, "aac"},
+	}
+	for _, tt := range tests {
+		if got := SelectAudioCodecOut(tt.recode, tt.caps, tt.channels); got != tt.want {
+			t.Errorf("%s: SelectAudioCodecOut(%v, caps, %d) = %q, want %q",
+				tt.name, tt.recode, tt.channels, got, tt.want)
 		}
 	}
 }

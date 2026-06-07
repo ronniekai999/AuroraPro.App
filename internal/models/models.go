@@ -523,6 +523,7 @@ type StreamInfo struct {
 	Remux            bool   `json:"remux,omitempty"`             // Frontend should send remux:true to session
 	AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // Frontend should send audio_passthrough:true
 	AudioChannels    int    `json:"audio_channels,omitempty"`    // Source audio channel count for bitrate scaling
+	AudioCodecOut    string `json:"audio_codec_out,omitempty"`   // Re-encode target: "aac" (stereo) or "ac3" (5.1 surround); frontend echoes it to the session
 	HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // Frontend should send hdr_tonemap:true to session
 }
 

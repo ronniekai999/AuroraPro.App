@@ -1197,6 +1197,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // stream as audio_0; the session re-creates from scratch.
           audio_track_index: target.audioTrackIndex ?? stream.audio_track_index,
           audio_channels: stream.audio_channels,
+          // Surround hint: 'ac3' when the server decided this client can take
+          // AC-3 5.1 (vs the stereo-AAC default). Echoed from the stream-info
+          // decision; ignored server-side when audio is copied.
+          audio_codec_out: stream.audio_codec_out,
           hdr_tonemap: stream.hdr_tonemap,
           video_codec: stream.video_codec,
           start_sec: resumeSec > 0 ? resumeSec : undefined,
@@ -1523,11 +1527,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // target change, which is the right granularity.
   useEffect(() => {
     if (!target) return
-    const id = window.setInterval(() => {
+    const ping = () => {
       const sid = sessionIdRef.current
       if (sid) void keepalive(sid)
-    }, 10000)
-    return () => window.clearInterval(id)
+    }
+    const id = window.setInterval(ping, 10000)
+    // Background tabs and locked phones throttle or suspend setInterval, so
+    // the 10s ping can stall long enough for the server to GC the session
+    // (segments deleted → playback breaks on return). Ping the instant the
+    // tab becomes visible again to re-extend the session before the next
+    // segment fetch would otherwise 404.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') ping()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [target])
 
   // M10 Phase 4 — party sync. Two responsibilities:

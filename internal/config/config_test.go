@@ -70,8 +70,8 @@ func TestDefaults(t *testing.T) {
 	if cfg.Transcode.SegmentDuration != 6 {
 		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 6)
 	}
-	if cfg.Transcode.SessionTimeout != 120*time.Second {
-		t.Errorf("Transcode.SessionTimeout = %v, want %v", cfg.Transcode.SessionTimeout, 120*time.Second)
+	if cfg.Transcode.SessionTimeout != 300*time.Second {
+		t.Errorf("Transcode.SessionTimeout = %v, want %v", cfg.Transcode.SessionTimeout, 300*time.Second)
 	}
 }
 
