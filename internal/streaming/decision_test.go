@@ -807,6 +807,70 @@ func TestSelectAudioCodecOut(t *testing.T) {
 	}
 }
 
+func TestCastNeedsStereoClone(t *testing.T) {
+	// AC-3 sessions need a stereo clone for cast (receiver AC-3 unknowable);
+	// everything else is reused as-is.
+	cases := map[string]bool{
+		"ac3": true,
+		"aac": false,
+		"":    false,
+	}
+	for codec, want := range cases {
+		if got := CastNeedsStereoClone(codec); got != want {
+			t.Errorf("CastNeedsStereoClone(%q) = %v, want %v", codec, got, want)
+		}
+	}
+}
+
+func TestCastCloneOpts(t *testing.T) {
+	src := &TranscodeSession{
+		FilePath:         "/media/movie.mkv",
+		Remux:            true,
+		RemuxAudioCopy:   true, // source was copying AC-3
+		AudioPassthrough: true,
+		AudioCodecOut:    "ac3",
+		AudioTrackIndex:  2,
+		AudioChannels:    6,
+		HDRTonemap:       true,
+		SourceVideoCodec: "hevc",
+		StartSec:         120,
+		SubtitleTracks:   []HLSSubtitleTrack{{AbsoluteIndex: 3, Language: "eng"}},
+		BurnSubIndex:     -1,
+	}
+	opts := castCloneOpts(src)
+
+	// Audio is forced to a stereo AAC re-encode — never AC-3, never copy.
+	if opts.AudioCodecOut != "aac" {
+		t.Errorf("AudioCodecOut = %q, want aac", opts.AudioCodecOut)
+	}
+	if opts.RemuxAudioCopy {
+		t.Error("RemuxAudioCopy must be false (force stereo re-encode)")
+	}
+	if opts.AudioPassthrough {
+		t.Error("AudioPassthrough must be false (force stereo re-encode)")
+	}
+
+	// Video / subtitle / resume handling must carry over unchanged.
+	if !opts.Remux || opts.AudioTrackIndex != 2 || opts.AudioChannels != 6 ||
+		!opts.HDRTonemap || opts.SourceVideoCodec != "hevc" || opts.StartSec != 120 {
+		t.Errorf("non-audio opts not preserved: %+v", opts)
+	}
+	if len(opts.SubtitleTracks) != 1 || opts.SubtitleTracks[0].AbsoluteIndex != 3 {
+		t.Errorf("subtitle tracks not preserved: %+v", opts.SubtitleTracks)
+	}
+	if opts.BurnIn != nil {
+		t.Errorf("BurnIn should be nil when source had none, got %+v", opts.BurnIn)
+	}
+
+	// When the source had burn-in configured, it carries into the clone.
+	src.BurnSubIndex = 4
+	src.BurnSubRelIndex = 1
+	src.BurnSubBitmap = true
+	if bo := castCloneOpts(src).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
+		t.Errorf("BurnIn not preserved: %+v", bo)
+	}
+}
+
 func stringContains(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {

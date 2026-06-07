@@ -1102,18 +1102,34 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, "auth service not configured")
 		return
 	}
+	// Cast safety: an AC-3 session was chosen for the LOCAL browser's MSE, but
+	// the Cast receiver (Default Media Receiver / the TV or AVR behind it) may
+	// not decode AC-3, and that can't be probed reliably. Hand the receiver a
+	// stereo-AAC clone instead (same video/subtitles/resume; audio downmixed)
+	// rather than risk silent playback. Non-AC-3 sessions are reused unchanged.
+	// If the clone can't be created (e.g. session limit) we fall back to the
+	// original session so casting still works — it may be AC-3, which many
+	// sinks DO handle, and that's no worse than the pre-guard behavior.
+	castSessionID := sessionID
+	if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
+		slog.Warn("cast: stereo clone failed, casting original session",
+			"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
+	} else {
+		castSessionID = castSession.ID
+	}
+
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
-		claims.UserID, claims.Username, claims.Role, claims.TokenVersion, sessionID,
+		claims.UserID, claims.Username, claims.Role, claims.TokenVersion, castSessionID,
 	)
 	if err != nil {
-		slog.Error("generate cast token", "session_id", sessionID, "user_id", claims.UserID, "error", err)
+		slog.Error("generate cast token", "session_id", castSessionID, "user_id", claims.UserID, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to mint cast token")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"token":      tokenStr,
 		"expires_at": expiresAt.Unix(),
-		"playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8?token=%s", sessionID, tokenStr),
+		"playlist":   fmt.Sprintf("/api/stream/hls/%s/master.m3u8?token=%s", castSessionID, tokenStr),
 	})
 }
 

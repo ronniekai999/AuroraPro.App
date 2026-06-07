@@ -397,6 +397,71 @@ func SelectAudioCodecOut(needsRecode bool, caps *ClientCaps, channels int) strin
 	return "aac"
 }
 
+// CastNeedsStereoClone reports whether casting a session with the given
+// AudioCodecOut requires a fresh stereo-AAC clone before handing it to a
+// receiver. AC-3 sessions need it: the sender-side decision proved the LOCAL
+// browser's MSE can decode AC-3, but a Cast receiver (the Default Media
+// Receiver / the TV or AVR behind it) may not — and receiver AC-3 support
+// can't be probed reliably. Everything else (stereo AAC, copied AAC) is
+// already cast-safe and is reused as-is.
+func CastNeedsStereoClone(audioCodecOut string) bool {
+	return audioCodecOut == "ac3"
+}
+
+// castCloneOpts builds the SessionOpts for a stereo-AAC cast clone of src:
+// identical video / subtitle / resume handling, but audio forced to a stereo
+// AAC re-encode (never AC-3, never passthrough/copy) so any Cast receiver can
+// play it.
+func castCloneOpts(src *TranscodeSession) SessionOpts {
+	opts := SessionOpts{
+		Remux:            src.Remux,
+		RemuxAudioCopy:   false, // force a re-encode, never copy AC-3
+		AudioPassthrough: false, // force a re-encode, never copy
+		AudioCodecOut:    "aac", // stereo AAC — universally decodable
+		AudioTrackIndex:  src.AudioTrackIndex,
+		AudioChannels:    src.AudioChannels,
+		HDRTonemap:       src.HDRTonemap,
+		SourceVideoCodec: src.SourceVideoCodec,
+		StartSec:         src.StartSec,
+		SubtitleTracks:   src.SubtitleTracks,
+	}
+	if src.BurnSubIndex >= 0 || src.BurnSubExternal != "" {
+		opts.BurnIn = &BurnInOpts{
+			SubIndex:     src.BurnSubIndex,
+			ExternalPath: src.BurnSubExternal,
+			IsBitmap:     src.BurnSubBitmap,
+			RelIndex:     src.BurnSubRelIndex,
+		}
+	}
+	return opts
+}
+
+// CloneForCast returns the session whose playlist should be handed to a Cast
+// receiver for sessionID. When the session's audio is already cast-safe it
+// returns that session unchanged. When the session emits AC-3 (chosen for the
+// local browser, but unsafe to assume on a receiver) it creates and returns a
+// fresh stereo-AAC clone — same video / subtitles / resume position, audio
+// downmixed to AAC — so the cast never plays silent on a non-AC-3 sink. The
+// clone is owned by userID so the cast-token access check passes; it inherits
+// the source's StartSec so the receiver's playlist-time domain matches the
+// local player's (the cast load request seeks by the local currentTime).
+func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID string) (*TranscodeSession, error) {
+	src, ok := tm.GetSession(sessionID)
+	if !ok || src == nil {
+		return nil, fmt.Errorf("session not found")
+	}
+	if !CastNeedsStereoClone(src.AudioCodecOut) {
+		return src, nil
+	}
+	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src))
+	if err != nil {
+		return nil, fmt.Errorf("create stereo cast session: %w", err)
+	}
+	slog.Info("cast: created stereo-AAC clone of AC-3 session for receiver compatibility",
+		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID)
+	return clone, nil
+}
+
 // decideStatic is the backward-compatible fallback using static allowlists.
 func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDecision {
 	// H.264 10-bit: browsers universally reject this via MSE. Force transcode.
