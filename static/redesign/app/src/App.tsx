@@ -39,6 +39,8 @@ import {
   posterURL,
   backdropURL,
   getAdminDashboard,
+  getEmbeddingStatus,
+  type EmbeddingStatus,
   listAdminActivity,
   listAdminLogs,
   listAdminUsers,
@@ -5626,6 +5628,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [stats, setStats] = useState<ServerStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsErr, setStatsErr] = useState<string | null>(null)
+  const [embStatus, setEmbStatus] = useState<EmbeddingStatus | null>(null)
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [usersLoading, setUsersLoading] = useState(false)
   const [usersErr, setUsersErr] = useState<string | null>(null)
@@ -5649,6 +5652,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
     if (stats !== null) return
     const ac = new AbortController()
     setStatsLoading(true)
+    getEmbeddingStatus(ac.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
     getAdminDashboard(ac.signal)
       .then(s => setStats(s))
       .catch(err => {
@@ -5777,7 +5781,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
           )}
           {stats && (
             <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+              <div className={`grid grid-cols-1 sm:grid-cols-2 ${embStatus?.enabled ? 'lg:grid-cols-5' : 'lg:grid-cols-4'} gap-4 mb-8`}>
                 {[
                   // QA BUG-002 — relabel "Total Media" → "Media File
                   // Entries" so it reads as raw row count, not the
@@ -5788,6 +5792,9 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
+                  ...(embStatus && embStatus.enabled
+                    ? [{ label: 'Embedded', value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`, icon: 'cpu', color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400' }]
+                    : []),
                 ].map(s => (
                   <div key={s.label} className="glass-panel rounded-xl p-5">
                     <div className="flex items-center gap-3 mb-3">

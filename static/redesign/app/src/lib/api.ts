@@ -1143,6 +1143,21 @@ export async function getAdminDashboard(signal?: AbortSignal): Promise<ServerSta
   return apiFetch<ServerStats>('/api/admin/dashboard', { signal })
 }
 
+// Embedding coverage for the admin dashboard. embedded/total count media_items
+// (movies + shows; episodes aren't embedded). `enabled` is false when the
+// LLM/Ollama embedder isn't configured.
+export interface EmbeddingStatus {
+  enabled: boolean
+  version: number
+  total: number
+  embedded: number
+  pending: number
+}
+
+export async function getEmbeddingStatus(signal?: AbortSignal): Promise<EmbeddingStatus> {
+  return apiFetch<EmbeddingStatus>('/api/admin/embedding-status', { signal })
+}
+
 export async function listAdminActivity(
   perPage = 50,
   signal?: AbortSignal,
