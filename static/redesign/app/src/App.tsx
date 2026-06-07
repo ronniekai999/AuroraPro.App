@@ -138,6 +138,7 @@ import { ScanProgressBar } from '@/components/ScanProgressBar'
 import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
+import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { CollectionsView } from '@/components/CollectionsView'
 import { CalendarView } from '@/components/CalendarView'
 import { GamificationCard } from '@/components/GamificationCard'
@@ -1035,7 +1036,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
             </svg>
           </div>
-          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA</h1>
+          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
           <p className="text-white/40 text-sm mt-1">Your personal media universe</p>
         </div>
 
@@ -1323,7 +1324,7 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
             <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
           </svg>
         </div>
-        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA</span>
+        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA PRO</span>
       </button>
 
       {/* Nav */}
@@ -9311,6 +9312,14 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Taste onboarding ("Pick What You Love") — self-gating: renders only
+          when the active/default profile is eligible and hasn't completed it.
+          Existing users get prompted once at next login. */}
+      <TasteOnboardingGate
+        profileId={activeProfileId}
+        onComplete={() => window.location.reload()}
+      />
 
       {collectionsModalOpen && (
         <CollectionsModal
