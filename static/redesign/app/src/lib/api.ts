@@ -1137,6 +1137,9 @@ export interface AdminUser {
   created_at: string
   updated_at: string
   oauth_provider?: string
+  // Absent (omitempty server-side) for users who haven't signed in since the
+  // column was added — rendered as "Never". Bumped on login/OAuth/register.
+  last_login_at?: string
 }
 
 export async function getAdminDashboard(signal?: AbortSignal): Promise<ServerStats> {

@@ -274,7 +274,7 @@ func (q *Queries) GetUsernamesByIDs(ctx context.Context, ids []int64) (map[int64
 
 func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at
+		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, last_login_at
 		 FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("get all users: %w", err)
@@ -284,7 +284,9 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 	var users []*models.User
 	for rows.Next() {
 		u := &models.User{}
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		// last_login_at is nullable (migration 035); scanned into *time.Time so a
+		// never-signed-in user stays nil → "Never" in the admin UI.
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.LastLoginAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		users = append(users, u)
@@ -293,6 +295,21 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 		return nil, fmt.Errorf("iterate users: %w", err)
 	}
 	return users, nil
+}
+
+// UpdateLastLogin stamps a user's last_login_at to the DB clock (NOW(), matching
+// the created_at/updated_at clock source). Called on every fresh authentication
+// — password login, OAuth callback, and registration's immediate sign-in — but
+// NOT on token refresh, which is a silent session continuation rather than a
+// re-login. Callers treat this as best-effort: the session is already valid by
+// the time it runs, so a write failure must not fail the login. Deliberately
+// does not touch updated_at, which tracks account mutations, not sign-ins.
+func (q *Queries) UpdateLastLogin(ctx context.Context, id int64) error {
+	_, err := q.pool.Exec(ctx, `UPDATE users SET last_login_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("update last login: %w", err)
+	}
+	return nil
 }
 
 // DeleteUser removes a user row. All foreign-key references to users(id) in

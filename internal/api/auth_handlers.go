@@ -123,6 +123,13 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		h.activity.LogLogin(r.Context(), user.ID, clientIP(r))
 	}
 
+	// Stamp last_login_at for the admin Users table's "Last Login" column.
+	// Best-effort: the session is already valid, so a write failure here must
+	// not fail the login — log and proceed.
+	if err := h.queries.UpdateLastLogin(r.Context(), user.ID); err != nil {
+		slog.Warn("failed to record last login", "user_id", user.ID, "err", err)
+	}
+
 	// Clear password hash before sending user object
 	user.PasswordHash = ""
 	// deep-debug H10 — set httpOnly cookies and return NO tokens in the body,
@@ -377,6 +384,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		rollbackUser(err)
 		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
 		return
+	}
+
+	// Registration logs the user straight in, so seed last_login_at now — a
+	// brand-new active account reads as "just now" rather than "Never". Best-
+	// effort, same as the password Login path.
+	if err := h.queries.UpdateLastLogin(r.Context(), user.ID); err != nil {
+		slog.Warn("failed to record last login", "user_id", user.ID, "err", err)
 	}
 
 	user.PasswordHash = "" // defense-in-depth: clear even though json:"-" prevents serialization

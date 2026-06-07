@@ -22,6 +22,14 @@ type User struct {
 	AvatarURL    string    `json:"avatar_url,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// LastLoginAt is the user's most recent authentication — password login,
+	// OAuth callback, or registration's immediate sign-in. Nil for users who
+	// haven't signed in since migration 035 added the column (rendered as
+	// "Never" in the admin UI). Deliberately NOT bumped on token refresh: that's
+	// a silent session continuation, not a re-login. Only GetAllUsers (the admin
+	// list) selects it; other user lookups leave it nil, so json omitempty drops
+	// the field from those responses.
+	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
 	// TokenVersion is stamped into the JWT at issue time so a password change
 	// (which bumps this column) immediately invalidates all outstanding
 	// access tokens via the auth middleware's TokenVersionStore.

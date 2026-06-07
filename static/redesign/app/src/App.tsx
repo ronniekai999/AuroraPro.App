@@ -5920,6 +5920,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                   <th>Role</th>
                   <th>Sign-in</th>
                   <th>Created</th>
+                  <th>Last login</th>
                   <th></th>
                 </tr>
               </thead>
@@ -5946,6 +5947,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                       <span className="text-white/60 text-sm">{u.oauth_provider ? u.oauth_provider : 'password'}</span>
                     </td>
                     <td className="text-white/40">{fmtRelative(u.created_at)}</td>
+                    <td className="text-white/40">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
                     <td>
                       {/* Phase 5.2 parity — Delete user. Server-side
                           also refuses self-delete with a 4xx; this
@@ -5971,7 +5973,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                   </tr>
                 ))}
                 {users.length === 0 && (
-                  <tr><td colSpan={5} className="text-white/40 text-sm text-center py-6">No users found.</td></tr>
+                  <tr><td colSpan={6} className="text-white/40 text-sm text-center py-6">No users found.</td></tr>
                 )}
               </tbody>
             </table>

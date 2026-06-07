@@ -1,0 +1,11 @@
+-- Track each user's most recent authentication so the admin Users table can
+-- show a "Last Login" column. Stamped on password login, OAuth callback, and
+-- registration's immediate sign-in (auth_handlers.go / oauth_handlers.go) — but
+-- NOT on silent token refresh, which would conflate "still holds a valid
+-- session" with "actually re-authenticated".
+--
+-- Nullable and deliberately NOT backfilled: there is no historical login record
+-- to derive a real timestamp from, and backfilling from created_at would invent
+-- a sign-in that may never have happened. Existing users read as "Never" until
+-- their next sign-in, which is accurate.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
