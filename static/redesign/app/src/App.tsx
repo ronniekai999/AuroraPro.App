@@ -1036,7 +1036,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
             </svg>
           </div>
-          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA</h1>
+          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
           <p className="text-white/40 text-sm mt-1">Your personal media universe</p>
         </div>
 
@@ -1324,7 +1324,7 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
             <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
           </svg>
         </div>
-        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA</span>
+        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA PRO</span>
       </button>
 
       {/* Nav */}
