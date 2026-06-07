@@ -523,6 +523,13 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// Stamp last_login_at for the admin Users table's "Last Login" column —
+	// parity with the password Login path. Best-effort: the session is already
+	// valid, so a write failure must not derail the OAuth success redirect.
+	if err := h.queries.UpdateLastLogin(r.Context(), user.ID); err != nil {
+		slog.Warn("oauth callback: failed to record last login", "user_id", user.ID, "err", err)
+	}
+
 	// Read + clear the join cookie (if any) for the success-page redirect.
 	// Cookie was set in Start when the caller passed ?join=CODE; reading
 	// here means the deep-link survives the OAuth round-trip and the user
