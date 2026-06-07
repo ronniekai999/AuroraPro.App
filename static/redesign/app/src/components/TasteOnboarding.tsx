@@ -218,7 +218,9 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
         </div>
       </header>
 
-      <main className="relative mx-auto max-w-6xl px-6 pb-40 pt-6">
+      {/* Bottom padding clears the fixed preview dock so it never covers the
+          last grid row; only reserve that space while the dock is visible. */}
+      <main className={'relative mx-auto max-w-6xl px-6 pt-6 ' + (preview.length > 0 ? 'pb-80' : 'pb-24')}>
         {error && (
           <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-200">
             {error}
