@@ -62,15 +62,39 @@ const minHistoryItems = 3
 //
 // Returns ErrInsufficientHistory when fewer than minHistoryItems embedded
 // items are available — the caller should switch to a non-personalized pool.
+//
+// Taste onboarding: a profile's taste_seeds (the "Pick What You Love" picks)
+// are UNION'd into the same recency slice as completed watches, so a brand-new
+// profile with zero watch history but >= minHistoryItems seeds still yields a
+// vector — that's the cold-start bootstrap. Seeds the profile has since watched
+// are skipped (the real watch row supersedes them), which is also how the
+// onboarding prior fades out as genuine history accrues. Seeds stay in the
+// unweighted slice — nothing to weight, so the HARD-LEARNED note above holds.
 func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (string, error) {
 	row := q.pool.QueryRow(ctx, `
 		WITH recent AS (
-		  SELECT m.embedding
-		  FROM watch_progress wp
-		  JOIN media_items m ON m.id = wp.media_item_id
-		  WHERE wp.profile_id = $1
-		    AND m.embedding IS NOT NULL
-		  ORDER BY wp.completed DESC, wp.updated_at DESC
+		  SELECT embedding FROM (
+		    SELECT m.embedding,
+		           wp.completed  AS completed,
+		           wp.updated_at AS ts
+		    FROM watch_progress wp
+		    JOIN media_items m ON m.id = wp.media_item_id
+		    WHERE wp.profile_id = $1
+		      AND m.embedding IS NOT NULL
+		    UNION ALL
+		    SELECT m.embedding,
+		           TRUE          AS completed,
+		           ts.created_at AS ts
+		    FROM taste_seeds ts
+		    JOIN media_items m ON m.id = ts.media_item_id
+		    WHERE ts.profile_id = $1
+		      AND m.embedding IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watch_progress wp2
+		        WHERE wp2.profile_id = $1 AND wp2.media_item_id = ts.media_item_id
+		      )
+		  ) src
+		  ORDER BY completed DESC, ts DESC
 		  LIMIT 20
 		)
 		SELECT
@@ -93,20 +117,29 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 	return *vec, nil
 }
 
-// PersonalizationHistoryCount returns the number of distinct watch_progress
-// rows for the profile where the joined media has an embedding — i.e. the
-// inputs that BuildProfileVector would count. Exposed for UI cold-start
-// hints ("Watch X more titles to unlock personalized picks").
+// PersonalizationHistoryCount returns the number of embedded inputs
+// BuildProfileVector would count for the profile: embedded watch_progress rows
+// PLUS embedded taste_seeds the profile hasn't watched yet. Exposed for UI
+// cold-start hints ("Watch X more titles to unlock personalized picks"); once a
+// profile has finished taste onboarding this reads as already-personalized.
 //
 // Capped at 20 to mirror BuildProfileVector's LIMIT — past that we're
 // fully personalized and the exact count stops mattering for UX.
 func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int64) (int, error) {
 	row := q.pool.QueryRow(ctx, `
-		SELECT COUNT(*)
-		FROM watch_progress wp
-		JOIN media_items m ON m.id = wp.media_item_id
-		WHERE wp.profile_id = $1
-		  AND m.embedding IS NOT NULL`,
+		SELECT
+		  (SELECT COUNT(*)
+		     FROM watch_progress wp
+		     JOIN media_items m ON m.id = wp.media_item_id
+		     WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL)
+		  +
+		  (SELECT COUNT(*)
+		     FROM taste_seeds ts
+		     JOIN media_items m ON m.id = ts.media_item_id
+		     WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
+		       AND NOT EXISTS (
+		         SELECT 1 FROM watch_progress wp2
+		         WHERE wp2.profile_id = $1 AND wp2.media_item_id = ts.media_item_id))`,
 		profileID,
 	)
 	var n int
@@ -126,7 +159,9 @@ func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int
 func PersonalizationThreshold() int { return minHistoryItems }
 
 // NearestUnwatched returns the top-N items by cosine distance to the given
-// vector, excluding anything the profile has any watch_progress on. Results
+// vector, excluding anything the profile has watch_progress on OR has seeded
+// via taste onboarding (we don't recommend back a title they told us they
+// love). Results
 // are deduplicated cross-library (same tmdb_id) keeping the richest copy.
 //
 // Items without a backdrop are filtered out — the hero needs an image.
@@ -154,6 +189,10 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		    AND NOT EXISTS (
 		      SELECT 1 FROM watch_progress wp
 		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM taste_seeds ts
+		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
 		)
@@ -233,6 +272,10 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		    AND NOT EXISTS (
 		      SELECT 1 FROM watch_progress wp
 		      WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
+		    )
+		    AND NOT EXISTS (
+		      SELECT 1 FROM taste_seeds ts
+		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
 		)
@@ -446,6 +489,10 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		  AND NOT EXISTS (
 		    SELECT 1 FROM watch_progress wp
 		    WHERE wp.profile_id = $1 AND wp.media_item_id = m.id
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM taste_seeds ts
+		    WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		  )
 		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
 		LIMIT $2`,

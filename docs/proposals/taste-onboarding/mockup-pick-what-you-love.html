@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aurora — Pick What You Love (mockup)</title>
+<style>
+  /* ───────────────────────────────────────────────────────────
+     Static mockup. No build, no network. Open in any browser.
+     Decisions locked 2026-06-07: vector-only · min picks 5 ·
+     instant preview appears at 3 and sharpens through 5.
+     Demonstrates the four v1 twists:
+       1. Instant preview (bottom rail slides up at 3 picks)
+       2. Diversity-sampled grid (tiles span genres/clusters)
+       3. Reactive grid (related tiles glow as you pick)
+       4. Vibe chips (mood chips bias the grid)
+     ─────────────────────────────────────────────────────────── */
+  :root {
+    --bg:            #07060c;
+    --panel:         rgba(18, 15, 28, 0.55);
+    --line:          rgba(255,255,255,0.08);
+    --line-strong:   rgba(255,255,255,0.16);
+    --text:          #ece9f5;
+    --muted:         #9b94b4;
+    --accent:        #a981ff;
+    --accent-2:      #6ad7ff;
+    --accent-glow:   rgba(169,129,255,0.55);
+    --ok:            #58e6a8;
+    --radius:        16px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--font);
+    color: var(--text);
+    background:
+      radial-gradient(1200px 700px at 18% -10%, rgba(123,76,196,0.30), transparent 60%),
+      radial-gradient(1000px 600px at 95% 0%, rgba(56,140,180,0.16), transparent 55%),
+      radial-gradient(900px 900px at 50% 120%, rgba(150,90,255,0.10), transparent 60%),
+      var(--bg);
+    min-height: 100%;
+    padding-bottom: 230px; /* room for the preview dock */
+  }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 0 28px; }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  header {
+    position: sticky; top: 0; z-index: 40;
+    backdrop-filter: blur(18px) saturate(140%);
+    background: linear-gradient(to bottom, rgba(7,6,12,0.92), rgba(7,6,12,0.55));
+    border-bottom: 1px solid var(--line);
+  }
+  .head-row { display: flex; align-items: center; gap: 18px; padding: 20px 0 16px; }
+  .title-block h1 {
+    margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.02em;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .spark { width: 26px; height: 26px; filter: drop-shadow(0 0 10px var(--accent-glow)); }
+  .title-block p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+  .head-spacer { flex: 1; }
+  .btn {
+    font: inherit; cursor: pointer; border-radius: 999px; border: 1px solid var(--line-strong);
+    padding: 10px 20px; font-weight: 600; font-size: 14px; color: var(--text);
+    background: rgba(255,255,255,0.04); transition: all .18s ease;
+  }
+  .btn:hover { background: rgba(255,255,255,0.09); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+  .btn.ghost:hover { color: var(--text); }
+  .btn.primary {
+    border-color: transparent; color: #160f24; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent), #c8a6ff);
+    box-shadow: 0 8px 30px -8px var(--accent-glow);
+  }
+  .btn.primary:disabled { background: rgba(255,255,255,0.08); color: var(--muted); box-shadow: none; cursor: not-allowed; }
+
+  /* progress hint */
+  .hint { display: flex; align-items: center; gap: 12px; padding: 0 0 16px; color: var(--muted); font-size: 13px; }
+  .pips { display: flex; gap: 6px; }
+  .pip { width: 24px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.12); transition: all .25s; }
+  .pip.on { background: linear-gradient(90deg, var(--accent), var(--accent-2)); box-shadow: 0 0 10px -1px var(--accent-glow); }
+  /* the 3rd pip marks the "preview unlocks here" line */
+  .pip.gate { position: relative; }
+  .pip.gate::after { content: ""; position: absolute; right: -4px; top: -3px; bottom: -3px; width: 1.5px; background: rgba(255,255,255,0.28); }
+  #hintText.live { color: var(--accent-2); font-weight: 600; }
+  #hintText.ok { color: var(--ok); font-weight: 600; }
+
+  /* ── Vibe chips ─────────────────────────────────────────── */
+  .chips { display: flex; gap: 10px; padding: 18px 0 4px; flex-wrap: wrap; }
+  .chip {
+    cursor: pointer; user-select: none; border-radius: 999px; padding: 9px 16px;
+    font-size: 13.5px; font-weight: 600; color: var(--text);
+    border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(8px);
+    transition: all .18s ease; display: inline-flex; align-items: center; gap: 8px;
+  }
+  .chip:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+  .chip.active {
+    border-color: transparent; color: #160f24;
+    background: linear-gradient(135deg, var(--accent-2), var(--accent));
+    box-shadow: 0 6px 22px -8px var(--accent-glow);
+  }
+  .chip .emo { font-size: 15px; }
+  .chips-note { color: var(--muted); font-size: 12.5px; padding: 6px 2px 0; min-height: 18px; }
+
+  /* ── Grid ───────────────────────────────────────────────── */
+  .grid { display: grid; gap: 16px; padding: 14px 0 40px; grid-template-columns: repeat(auto-fill, minmax(146px, 1fr)); }
+  .card {
+    position: relative; aspect-ratio: 2/3; border-radius: var(--radius); cursor: pointer;
+    overflow: hidden; border: 1px solid var(--line);
+    transition: transform .18s ease, box-shadow .25s ease, opacity .25s ease, outline-color .2s;
+    outline: 2px solid transparent; outline-offset: 2px;
+  }
+  .card:hover { transform: translateY(-4px) scale(1.012); box-shadow: 0 18px 40px -16px rgba(0,0,0,0.8); }
+  .poster { position: absolute; inset: 0; }
+  .poster::after { content: ""; position: absolute; inset: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.82) 0%, rgba(0,0,0,0.12) 46%, rgba(0,0,0,0.05) 100%); }
+  .meta { position: absolute; left: 11px; right: 11px; bottom: 10px; z-index: 2; }
+  .meta .t { font-weight: 800; font-size: 14px; line-height: 1.12; letter-spacing: -0.01em; text-shadow: 0 2px 8px rgba(0,0,0,0.6); }
+  .meta .s { margin-top: 3px; font-size: 11px; color: rgba(255,255,255,0.72); display:flex; gap:6px; align-items:center; }
+  .gtag { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; padding: 2px 6px; border-radius: 999px; background: rgba(255,255,255,0.14); color:#fff; }
+  .sel {
+    position: absolute; top: 9px; right: 9px; z-index: 3; width: 26px; height: 26px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.65); background: rgba(0,0,0,0.28); backdrop-filter: blur(4px);
+    display: grid; place-items: center; transition: all .16s ease;
+  }
+  .sel svg { width: 14px; height: 14px; opacity: 0; transform: scale(.5); transition: all .16s ease; }
+  .card.selected { outline-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 14px 38px -12px var(--accent-glow); }
+  .card.selected .sel { background: linear-gradient(135deg, var(--accent), #c8a6ff); border-color: transparent; }
+  .card.selected .sel svg { opacity: 1; transform: scale(1); }
+  .card.related::before {
+    content: "More like this"; position: absolute; z-index: 3; top: 9px; left: 9px;
+    font-size: 9.5px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase;
+    color: #160f24; padding: 3px 7px; border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent-2), #b6f0ff);
+    box-shadow: 0 4px 14px -4px var(--accent-2); animation: pop .3s ease;
+  }
+  .card.related { outline-color: rgba(106,215,255,0.7); box-shadow: 0 0 22px -6px rgba(106,215,255,0.5); }
+  @keyframes pop { from { transform: translateY(-4px); opacity: 0 } to { transform: none; opacity: 1 } }
+  .card.dim { opacity: 0.28; filter: saturate(0.5); }
+  .card.dim:hover { transform: none; }
+
+  /* ── Instant preview dock (twist #1) ────────────────────── */
+  .dock {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    transform: translateY(115%); transition: transform .45s cubic-bezier(.2,.8,.2,1);
+    background: linear-gradient(to top, rgba(10,8,18,0.97), rgba(12,10,22,0.82));
+    backdrop-filter: blur(22px) saturate(150%);
+    border-top: 1px solid var(--line-strong); box-shadow: 0 -20px 60px -20px rgba(0,0,0,0.9);
+  }
+  body.previewing .dock { transform: translateY(0); }
+  .dock-inner { max-width: 1320px; margin: 0 auto; padding: 16px 28px 20px; }
+  .dock h2 { margin: 0; font-size: 16px; font-weight: 800; display: flex; align-items: center; gap: 9px; letter-spacing: -0.01em; }
+  .dock h2 .spark { width: 18px; height: 18px; }
+  .dock .sub { margin: 3px 0 14px; color: var(--muted); font-size: 12.5px; }
+  .dock .sub b { color: var(--accent); font-weight: 700; }
+  .rail { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+  .rec { flex: 0 0 132px; }
+  .rec .p { position: relative; aspect-ratio: 2/3; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+  .rec .p::after { content:""; position:absolute; inset:0; background: linear-gradient(to top, rgba(0,0,0,0.7), transparent 55%); }
+  .rec .rt { font-weight: 700; font-size: 12.5px; margin: 8px 2px 2px; line-height: 1.15; }
+  .rec .rr { font-size: 11px; color: var(--muted); line-height: 1.25; }
+  .rec .rr em { color: var(--accent-2); font-style: normal; }
+  .footer-note { color: var(--muted); font-size: 12px; text-align: center; padding: 8px 0 2px; opacity: .8; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="head-row">
+      <div class="title-block">
+        <h1>
+          <svg class="spark" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2l1.9 5.6L19.5 9l-5.6 1.9L12 16l-1.9-5.1L4.5 9l5.6-1.4L12 2z" fill="#c8a6ff"/>
+            <path d="M19 14l.8 2.3L22 17l-2.2.7L19 20l-.8-2.3L16 17l2.2-.7L19 14z" fill="#6ad7ff"/>
+          </svg>
+          Pick what you love
+        </h1>
+        <p>Pick five you love — Aurora tunes your recommendations <b style="color:var(--text)">instantly</b>, from your own library.</p>
+      </div>
+      <div class="head-spacer"></div>
+      <button class="btn ghost">Skip</button>
+      <button class="btn primary" id="doneBtn" disabled>Done</button>
+    </div>
+    <div class="hint">
+      <div class="pips" id="pips"></div>
+      <span id="hintText">Choose at least 5 — your AI picks unlock here.</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="chips" id="chips"></div>
+  <div class="chips-note" id="chipsNote"></div>
+  <div class="grid" id="grid"></div>
+</main>
+
+<!-- Instant preview dock (twist #1) -->
+<div class="dock" id="dock">
+  <div class="dock-inner">
+    <h2>
+      <svg class="spark" viewBox="0 0 24 24"><path d="M12 2l1.9 5.6L19.5 9l-5.6 1.9L12 16l-1.9-5.1L4.5 9l5.6-1.4L12 2z" fill="#c8a6ff"/></svg>
+      Your first recommendations
+    </h2>
+    <p class="sub" id="dockSub">Because you picked <b>…</b></p>
+    <div class="rail" id="rail"></div>
+    <p class="footer-note">These appear on your Home the moment you finish — powered by the same taste vector your watch history will feed.</p>
+  </div>
+</div>
+
+<script>
+const MIN_PICKS = 5;   // "Done" unlocks here
+const PREVIEW_AT = 3;  // vector is computable here → preview rail appears
+
+/* ── Genre → poster gradient (stands in for real artwork) ── */
+const G = {
+  scifi:['#10243f','#2b6fb0'], fantasy:['#1d1330','#7b4bc4'], crime:['#1a1413','#7a4a3a'],
+  hero:['#0e1a3a','#c0392b'], war:['#1c1a12','#8a7a3a'], comedy:['#2a1c34','#e08bd0'],
+  horror:['#180c12','#b0303a'], drama:['#101820','#3a8a8a'], adventure:['#12241a','#3aa06a'],
+};
+function poster(g){ const [a,b]=G[g]||G.drama;
+  return `background:radial-gradient(120% 90% at 30% 10%, ${b}, ${a} 70%), linear-gradient(160deg, ${a}, #050409);`; }
+
+/* ── The library grid (diversity-sampled across clusters). ──
+   cluster = a taste neighborhood; drives the "reactive" glow. */
+const TITLES = [
+  {t:"Interstellar",y:2014,g:"scifi",c:"space"}, {t:"Inception",y:2010,g:"scifi",c:"mind"},
+  {t:"The Lord of the Rings",y:2003,g:"fantasy",c:"epic"}, {t:"Blade Runner 2049",y:2017,g:"scifi",c:"space"},
+  {t:"The Dark Knight",y:2008,g:"hero",c:"vigilante"}, {t:"Goodfellas",y:1990,g:"crime",c:"mob"},
+  {t:"Arrival",y:2016,g:"scifi",c:"mind"}, {t:"Mad Max: Fury Road",y:2015,g:"adventure",c:"chase"},
+  {t:"The Grand Budapest Hotel",y:2014,g:"comedy",c:"whimsy"}, {t:"Hereditary",y:2018,g:"horror",c:"dread"},
+  {t:"Dune",y:2021,g:"scifi",c:"space"}, {t:"Pulp Fiction",y:1994,g:"crime",c:"mob"},
+  {t:"Spirited Away",y:2001,g:"fantasy",c:"whimsy"}, {t:"Whiplash",y:2014,g:"drama",c:"obsession"},
+  {t:"Avengers: Endgame",y:2019,g:"hero",c:"vigilante"}, {t:"Parasite",y:2019,g:"drama",c:"twist"},
+  {t:"The Shining",y:1980,g:"horror",c:"dread"}, {t:"Gladiator",y:2000,g:"war",c:"epic"},
+  {t:"Her",y:2013,g:"drama",c:"obsession"}, {t:"Tenet",y:2020,g:"scifi",c:"mind"},
+  {t:"No Country for Old Men",y:2007,g:"crime",c:"twist"}, {t:"The Witch",y:2015,g:"horror",c:"dread"},
+  {t:"Jojo Rabbit",y:2019,g:"comedy",c:"whimsy"}, {t:"1917",y:2019,g:"war",c:"chase"},
+];
+
+const CLUSTER_NAME = {
+  space:"epic sci-fi", mind:"mind-bending sci-fi", epic:"sweeping epics", vigilante:"comic-book action",
+  mob:"crime sagas", chase:"relentless thrill-rides", whimsy:"playful, stylized stories",
+  dread:"slow-burn horror", obsession:"intense character dramas", twist:"twisty thrillers",
+};
+
+const chips = [
+  {id:"surprise", emo:"✨", label:"Surprise me", clusters:null},
+  {id:"mind", emo:"🧠", label:"Mind-benders", clusters:["mind","twist"]},
+  {id:"cozy", emo:"😌", label:"Cozy comfort", clusters:["whimsy"]},
+  {id:"edge", emo:"😱", label:"Edge-of-seat", clusters:["dread","chase"]},
+  {id:"epic", emo:"🏔️", label:"Epics", clusters:["epic","space"]},
+  {id:"crime", emo:"🕶️", label:"Crime & capers", clusters:["mob","twist"]},
+];
+
+const selected = new Set();
+let activeChip = null;
+
+/* ── Render grid ── */
+const grid = document.getElementById('grid');
+TITLES.forEach((m, i) => {
+  const card = document.createElement('div');
+  card.className = 'card'; card.dataset.i = i; card.dataset.cluster = m.c; card.dataset.genre = m.g;
+  card.innerHTML = `
+    <div class="poster" style="${poster(m.g)}"></div>
+    <div class="sel"><svg viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4.2 4.2L19 7" stroke="#160f24" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div class="meta"><div class="t">${m.t}</div><div class="s"><span class="gtag">${m.g}</span><span>${m.y}</span></div></div>`;
+  card.addEventListener('click', () => toggle(i, card));
+  grid.appendChild(card);
+});
+
+/* ── Render chips ── */
+const chipsEl = document.getElementById('chips');
+chips.forEach(c => {
+  const el = document.createElement('div');
+  el.className = 'chip'; el.dataset.id = c.id;
+  el.innerHTML = `<span class="emo">${c.emo}</span>${c.label}`;
+  el.addEventListener('click', () => toggleChip(c, el));
+  chipsEl.appendChild(el);
+});
+
+/* ── Pips (5; the 3rd marks the preview gate) ── */
+const pipsEl = document.getElementById('pips');
+for (let i=0;i<MIN_PICKS;i++){ const p=document.createElement('div'); p.className='pip'+(i===PREVIEW_AT-1?' gate':''); pipsEl.appendChild(p); }
+
+/* ── Selection + reactive grid (twist #3) ── */
+function toggle(i, card){
+  if (selected.has(i)) { selected.delete(i); card.classList.remove('selected'); }
+  else { selected.add(i); card.classList.add('selected'); }
+  reactToSelection(); updateChrome(); renderPreview();
+}
+function reactToSelection(){
+  const liveClusters = new Set([...selected].map(i => TITLES[i].c));
+  document.querySelectorAll('.card').forEach(card => {
+    card.classList.remove('related');
+    const i = +card.dataset.i;
+    if (!selected.has(i) && !card.classList.contains('dim') && liveClusters.has(card.dataset.cluster))
+      card.classList.add('related');
+  });
+}
+
+/* ── Vibe chips (twist #4): bias the grid toward a mood ── */
+function toggleChip(c, el){
+  if (activeChip === c.id) { activeChip = null; el.classList.remove('active'); applyChip(null); }
+  else { document.querySelectorAll('.chip').forEach(x => x.classList.remove('active')); el.classList.add('active'); activeChip = c.id; applyChip(c); }
+}
+function applyChip(c){
+  const note = document.getElementById('chipsNote');
+  const cards = [...document.querySelectorAll('.card')];
+  if (!c || !c.clusters) {
+    cards.forEach(card => card.classList.remove('dim'));
+    note.textContent = c ? "Showing a little of everything — pick what jumps out." : "";
+  } else {
+    const set = new Set(c.clusters); let n = 0;
+    cards.forEach(card => { const match = set.has(card.dataset.cluster); card.classList.toggle('dim', !match); if (match) n++; });
+    note.textContent = `Showing ${n} titles that match “${c.label}”. Tap the chip again to see everything.`;
+  }
+  reactToSelection();
+}
+
+/* ── Header / progress chrome ── */
+function updateChrome(){
+  const n = selected.size;
+  document.querySelectorAll('.pip').forEach((p,idx)=> p.classList.toggle('on', idx < n));
+  const done = document.getElementById('doneBtn');
+  done.disabled = n < MIN_PICKS;
+  done.textContent = n >= MIN_PICKS ? `Done · ${n}` : 'Done';
+  document.body.classList.toggle('previewing', n >= PREVIEW_AT);
+  document.body.classList.toggle('ready', n >= MIN_PICKS);
+
+  const h = document.getElementById('hintText');
+  h.className = '';
+  if (n >= MIN_PICKS)      { h.classList.add('ok');   h.textContent = '✓ Locked in — these go straight to your Home.'; }
+  else if (n >= PREVIEW_AT){ h.classList.add('live'); h.textContent = `✨ Preview's live below — pick ${MIN_PICKS - n} more to finish.`; }
+  else                     { h.textContent = `Choose at least ${MIN_PICKS} — your AI picks unlock here. (${n}/${MIN_PICKS})`; }
+}
+
+/* ── Instant preview rail (twist #1) — shows at 3, sharpens to 5 ── */
+function renderPreview(){
+  const rail = document.getElementById('rail');
+  const sub = document.getElementById('dockSub');
+  rail.innerHTML = '';
+  if (selected.size < PREVIEW_AT) return;
+
+  const picks = [...selected].map(i => TITLES[i]);
+  const pickClusters = new Set(picks.map(p => p.c));
+  sub.innerHTML = 'Because you picked <b>' + picks.map(p=>p.t).join('</b>, <b>') + '</b>';
+
+  const recs = TITLES.map((m,i)=>({m,i}))
+    .filter(o => !selected.has(o.i) && pickClusters.has(o.m.c)).slice(0, 10);
+  if (recs.length < 6) TITLES.forEach((m,i)=>{ if(recs.length<6 && !selected.has(i) && !recs.find(o=>o.i===i)) recs.push({m,i}); });
+
+  recs.forEach(({m})=>{
+    const why = CLUSTER_NAME[m.c] || 'your taste';
+    const el = document.createElement('div'); el.className = 'rec';
+    el.innerHTML = `<div class="p" style="${poster(m.g)}"></div>
+      <div class="rt">${m.t}</div><div class="rr">Because you like <em>${why}</em></div>`;
+    rail.appendChild(el);
+  });
+}
+
+updateChrome();
+</script>
+</body>
+</html>

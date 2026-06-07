@@ -606,6 +606,9 @@ type UserProfile struct {
 	SubtitleMode string    `json:"subtitle_mode"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// TasteOnboardingCompleted flips true once the profile finishes the
+	// "Pick What You Love" flow; gates the one-time first-run redirect.
+	TasteOnboardingCompleted bool `json:"taste_onboarding_completed"`
 }
 
 type CreateProfileRequest struct {
