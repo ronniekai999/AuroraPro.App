@@ -7,11 +7,28 @@ package db
 // identically; a second copy of this ladder would be a drift hazard (a kid
 // profile seeing adult content because one copy lagged the other).
 
-// ageRatingOrder maps content rating strings to a numeric severity level.
-// Both MPAA (movie) and TV Parental Guidelines ratings are supported.
+// ageRatingOrder keys each rating by an approximate minimum-recommended age so
+// the MPAA (movie) and TV-Parental-Guidelines ladders compose correctly when a
+// profile's cap is in one system and a title is rated in the other. Only the
+// ORDER matters — AllowedRatingsForMax compares with `<=`.
+//
+// Load-bearing boundaries: R / NC-17 / TV-MA sit ABOVE TV-14, so a TV-14 cap
+// does NOT unlock R-rated movies; and PG / TV-PG sit above TV-Y7, so a TV-Y7 cap
+// does NOT unlock PG. (The previous coarse 1–5 scale collided R==TV-14,
+// NC-17==TV-MA, and PG==TV-Y7, leaking above-rating titles to kid profiles.)
 var ageRatingOrder = map[string]int{
-	"G": 1, "PG": 2, "PG-13": 3, "R": 4, "NC-17": 5,
-	"TV-Y": 1, "TV-Y7": 2, "TV-G": 2, "TV-PG": 3, "TV-14": 4, "TV-MA": 5,
+	// general / all ages
+	"G": 0, "TV-Y": 0, "TV-G": 0,
+	// directed to older children
+	"TV-Y7": 7,
+	// parental guidance
+	"PG": 8, "TV-PG": 10,
+	// teen
+	"PG-13": 13, "TV-14": 14,
+	// restricted / mature (17+)
+	"R": 17, "TV-MA": 17,
+	// adults only
+	"NC-17": 18,
 }
 
 // AllowedRatingsForMax returns all rating strings whose severity is at or below
