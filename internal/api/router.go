@@ -407,6 +407,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	progressH.SetGamificationEngine(gamifyEngine)
 	gamifyH := NewGamificationHandler(deps.Queries)
 	profileH := NewProfileHandler(deps.Queries)
+	onboardingH := NewOnboardingHandler(deps.Queries)
+	if deps.HeroProv != nil {
+		onboardingH.SetHeroProvider(deps.HeroProv)
+	}
 	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.DirectPlay, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
 	if deps.AIBackfill != nil {
@@ -777,6 +781,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/{profileId}/watchlists/{listId}/items", profileH.GetWatchlistItems)
 				r.Post("/{profileId}/watchlists/{listId}/items", profileH.AddToWatchlist)
 				r.Delete("/{profileId}/watchlists/{listId}/items/{itemId}", profileH.RemoveFromWatchlist)
+			})
+
+			// Taste onboarding ("Pick What You Love") — seeds the recommender
+			// for a brand-new profile so personalization works on first load.
+			// Per-profile (?profile_id= or the caller's default). Gated server-
+			// side on the library being embedded + the profile unrestricted.
+			r.Route("/api/onboarding", func(r chi.Router) {
+				r.Use(middleware.Timeout(60 * time.Second))
+				r.Get("/status", onboardingH.Status)
+				r.Get("/grid", onboardingH.Grid)
+				r.Get("/preview", onboardingH.Preview)
+				r.Post("/seeds", onboardingH.SaveSeeds)
+				r.Delete("/seeds", onboardingH.Reset)
 			})
 
 			// Phase 6 — Collections. Visible to any signed-in user
