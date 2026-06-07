@@ -71,8 +71,8 @@ interface OverlayProps {
 }
 
 function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
-  const minPicks = status.min_picks || 5
-  const previewThreshold = status.threshold || 3
+  const minPicks = status.min_picks ?? 5
+  const previewThreshold = status.threshold ?? 3
 
   const [grid, setGrid] = useState<UIMedia[]>([]) // popularity pool (grows via "Show more")
   const [gridLoading, setGridLoading] = useState(true)
@@ -109,6 +109,8 @@ function TasteOnboardingOverlay({ profileId, status, onDone }: OverlayProps) {
     setGridLoading(true)
     setGrid([])
     setReactive([])
+    setSelected([])
+    setPreview([])
     setHasMore(true)
     seenRef.current = new Set()
     popLoadedRef.current = 0

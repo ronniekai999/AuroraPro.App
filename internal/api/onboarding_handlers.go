@@ -157,18 +157,19 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
-	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 12, allowedRatingsForMax(profile.MaxAgeRating))
+	// Over-fetch so the pick-exclusion below still leaves a full rail.
+	// NearestUnwatched already age-filters by `allowed` in SQL, so no Go-side
+	// rating pass is needed here.
+	allowed := allowedRatingsForMax(profile.MaxAgeRating)
+	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36, allowed)
 	if err != nil {
 		slog.Warn("onboarding: preview failed", "profile", profile.ID, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
 		return
 	}
 	// The selected titles aren't seeds yet, so NearestUnwatched won't exclude
-	// them — drop any that slipped through so we never preview a pick back.
+	// them — drop any that slipped through so we never preview a pick back, then cap.
 	items = filterOutIDs(items, selected)
-	// NearestUnwatched isn't age-aware; filter to the profile's allowed ratings
-	// so a restricted profile never previews above-rating titles, then cap.
-	items = filterByRatings(items, allowedRatingsForMax(profile.MaxAgeRating))
 	if len(items) > 12 {
 		items = items[:12]
 	}
@@ -411,26 +412,6 @@ func filterOutIDs(items []*models.MediaItem, exclude []int64) []*models.MediaIte
 			continue
 		}
 		out = append(out, it)
-	}
-	return out
-}
-
-// filterByRatings keeps only items whose content rating is in allowed. allowed
-// nil/empty (unrestricted profile) returns items unchanged. Items with an
-// unknown/empty rating are dropped under a restriction — we can't prove safe.
-func filterByRatings(items []*models.MediaItem, allowed []string) []*models.MediaItem {
-	if len(allowed) == 0 || len(items) == 0 {
-		return items
-	}
-	ok := make(map[string]struct{}, len(allowed))
-	for _, rating := range allowed {
-		ok[rating] = struct{}{}
-	}
-	out := make([]*models.MediaItem, 0, len(items))
-	for _, it := range items {
-		if _, allow := ok[it.ContentRating]; allow {
-			out = append(out, it)
-		}
 	}
 	return out
 }
