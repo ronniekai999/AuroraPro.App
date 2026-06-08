@@ -1589,11 +1589,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
             {nPicks > 0 && (
               <>
                 <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
-                <span><b className="text-white font-semibold">{nPicks}</b> worth your time</span>
+                <span>
+                  <b className="text-white font-semibold">{nPicks}</b> titles worth your time
+                  {libraryTotal != null && libraryTotal > 0 && (
+                    <> out of the <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</>
+                  )}
+                </span>
               </>
             )}
             {/* TODO(redesign-net-new): wire a real library-count if a lightweight endpoint exists. */}
-            {libraryTotal != null && libraryTotal > 0 && (
+            {nPicks === 0 && libraryTotal != null && libraryTotal > 0 && (
               <>
                 <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
                 <span>picked from <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</span>
