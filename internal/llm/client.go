@@ -48,9 +48,17 @@ type Config struct {
 	// reasoning trace (37s + empty content on the hero surface); "low" keeps it
 	// brief and reliable. Only applied on the OpenAI /v1 path.
 	ReasoningEffort string
-	Dims            int           // target embedding dimensionality (truncated if model is wider)
-	HTTPTimeout     time.Duration // per-request budget; embedding is fast, chat is not
-	Debug           bool          // initial debug-logging state; hot-swap later via SetDebug
+	// Cross-encoder reranker (Phase B). RerankModel is a Qwen3-Reranker-family
+	// model served by a LOCAL Ollama (rerankers aren't in the Cloud catalog);
+	// empty → reranking disabled (graceful no-op — callers keep their vector
+	// order). RerankURL overrides where to reach it; empty → the embed URL (the
+	// reranker is local, like embeddings). Scored via the yes-token logprob on
+	// the OpenAI /v1 path, with a yes/no-text fallback. See rerank.go.
+	RerankModel string
+	RerankURL   string
+	Dims        int           // target embedding dimensionality (truncated if model is wider)
+	HTTPTimeout time.Duration // per-request budget; embedding is fast, chat is not
+	Debug       bool          // initial debug-logging state; hot-swap later via SetDebug
 }
 
 // Client is safe for concurrent use; the underlying http.Client handles pooling

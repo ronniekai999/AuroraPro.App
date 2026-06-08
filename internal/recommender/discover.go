@@ -319,7 +319,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	}
 
 	allowed := h.allowedRatings(ctx, profileID)
-	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, discoverPoolSize, allowed)
+	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.discoverRecallPool(), allowed)
 	if err != nil {
 		slog.Warn("discover: nearest-unwatched failed", "profile", profileID, "error", err)
 		return nil, nil
@@ -339,6 +339,16 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		// like the system is broken.
 		return nil, nil
 	}
+
+	// Phase B: cross-encoder rerank the (larger) recall pool down to the prompt
+	// pool by taste relevance, then debias the candidate order so the LLM curates
+	// on merit not position. Both no-op gracefully when the reranker is off
+	// (rerankCandidates caps the slice; debiasOrder just reorders). Rerank runs
+	// BEFORE annotateGenres so we only genre-annotate the candidates that survive.
+	if h.rerankEnabled() {
+		candidates = h.rerankCandidates(ctx, anchors, candidates, discoverPoolSize)
+	}
+	candidates = debiasOrder(candidates, profileID)
 
 	// Genre-annotate candidates so the prompt has the same depth of
 	// signal the search reranker gets. One batched query, no N+1.

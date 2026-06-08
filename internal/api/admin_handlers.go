@@ -168,9 +168,14 @@ type LLMSettings struct {
 	ChatModelSmart    string `json:"chat_model_smart"`
 	StructuredOutputs bool   `json:"structured_outputs"`
 	ReasoningEffort   string `json:"reasoning_effort"` // gpt-oss /v1 reasoning level: low|medium|high|none|""
-	DebugLog          bool   `json:"debug_log"`        // persisted setting in DB
-	LiveDebugLog      bool   `json:"live_debug_log"`   // in-memory state of the *active* client
-	ClientLoaded      bool   `json:"client_loaded"`    // false when LLM is disabled at startup
+	// Phase B cross-encoder reranker. RerankModel empty ⇒ reranking disabled
+	// (graceful no-op). RerankURL empty ⇒ the embed URL (reranker runs local).
+	// Restart-required, like the other model fields.
+	RerankModel  string `json:"rerank_model"`
+	RerankURL    string `json:"rerank_url"`
+	DebugLog     bool   `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog bool   `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded bool   `json:"client_loaded"`  // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -178,6 +183,7 @@ type LLMSettings struct {
 var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
 	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
+	RerankModel, RerankURL                                                 string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -190,6 +196,8 @@ var llmSettingKeys = struct {
 	ChatModelSmart:    "llm_chat_model_smart",
 	StructuredOutputs: "llm_structured_outputs",
 	ReasoningEffort:   "llm_reasoning_effort",
+	RerankModel:       "llm_reranker_model",
+	RerankURL:         "llm_reranker_url",
 }
 
 // validReasoningEffort reports whether v is an accepted gpt-oss /v1
@@ -231,6 +239,8 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 	out.ChatModelFast = byKey[llmSettingKeys.ChatModelFast]
 	out.ChatModelSmart = byKey[llmSettingKeys.ChatModelSmart]
 	out.ReasoningEffort = byKey[llmSettingKeys.ReasoningEffort]
+	out.RerankModel = byKey[llmSettingKeys.RerankModel]
+	out.RerankURL = byKey[llmSettingKeys.RerankURL]
 	if v := byKey[llmSettingKeys.StructuredOutputs]; v != "" {
 		out.StructuredOutputs = v == "true"
 	}
@@ -267,6 +277,8 @@ type llmUpdateRequest struct {
 	ChatModelFast     *string `json:"chat_model_fast,omitempty"`
 	ChatModelSmart    *string `json:"chat_model_smart,omitempty"`
 	ReasoningEffort   *string `json:"reasoning_effort,omitempty"`
+	RerankModel       *string `json:"rerank_model,omitempty"`
+	RerankURL         *string `json:"rerank_url,omitempty"`
 	StructuredOutputs *bool   `json:"structured_outputs,omitempty"`
 	DebugLog          *bool   `json:"debug_log,omitempty"`
 }
@@ -303,6 +315,12 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 	if req.EmbedURL != nil && *req.EmbedURL != "" {
 		if err := validateLLMURL(*req.EmbedURL); err != nil {
 			writeError(w, http.StatusBadRequest, "embed_url: "+err.Error())
+			return
+		}
+	}
+	if req.RerankURL != nil && *req.RerankURL != "" {
+		if err := validateLLMURL(*req.RerankURL); err != nil {
+			writeError(w, http.StatusBadRequest, "rerank_url: "+err.Error())
 			return
 		}
 	}
@@ -343,6 +361,8 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.ChatModelFast, req.ChatModelFast},
 		{llmSettingKeys.ChatModelSmart, req.ChatModelSmart},
 		{llmSettingKeys.ReasoningEffort, req.ReasoningEffort},
+		{llmSettingKeys.RerankModel, req.RerankModel},
+		{llmSettingKeys.RerankURL, req.RerankURL},
 	} {
 		if err := apply(p.key, p.val); err != nil {
 			slog.Warn("UpdateLLMSettings: write failed", "key", p.key, "error", err)

@@ -5459,6 +5459,14 @@ function AdminLLMTab() {
         </select>
         <span className="text-white/40 text-xs">gpt-oss · structured /v1 path · restart required</span>
       </label>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker Model (optional)</span>
+          <input value={s.rerank_model ?? ''} onChange={e => setS({ ...s, rerank_model: e.target.value })} placeholder="cross-encoder · e.g. dengcao/Qwen3-Reranker-0.6B · blank = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker URL (optional)</span>
+          <input value={s.rerank_url ?? ''} onChange={e => setS({ ...s, rerank_url: e.target.value })} placeholder="blank = Embed URL (reranker runs local)" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
+      </div>
       <button
         disabled={saving}
         onClick={async () => {
@@ -5469,6 +5477,7 @@ function AdminLLMTab() {
               chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
               chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
               structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
+              rerank_model: s.rerank_model ?? '', rerank_url: s.rerank_url ?? '',
             }
             if (apiKeyEdit) body.api_key = apiKeyEdit
             const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
