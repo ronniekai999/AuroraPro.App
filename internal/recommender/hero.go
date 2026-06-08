@@ -468,11 +468,26 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 	// Tier 1: personalized via taste vector.
 	vec, err := h.q.BuildProfileVector(ctx, profileID)
 	if err == nil {
-		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.candidatePool, allowed)
+		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.heroRecallPool(), allowed)
 		if err != nil {
 			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
 				"profile", profileID, "error", err)
 		} else if len(candidates) > 0 {
+			// Phase B: cross-encoder rerank the (larger) recall pool down to
+			// candidatePool by taste relevance, so the listwise LLM works from a
+			// sharper set than raw cosine order. No-op when the reranker is off
+			// (rerankCandidates just caps the slice — see rerank_stage.go).
+			if h.rerankEnabled() {
+				if anchors, aErr := h.q.RecentTasteAnchors(ctx, profileID, rerankAnchorCount); aErr != nil {
+					slog.Warn("hero: anchors for rerank failed, skipping rerank", "profile", profileID, "error", aErr)
+					candidates = capCandidates(candidates, h.candidatePool)
+				} else {
+					candidates = h.rerankCandidates(ctx, anchors, candidates, h.candidatePool)
+				}
+			}
+			// Position-bias correction: debias the order the listwise LLM sees so
+			// it judges on merit, not "listed first." Applies on both paths.
+			candidates = debiasOrder(candidates, profileID)
 			// Pre-score the candidates so the reranker optimizes fit × variety ×
 			// novelty ON TOP of proven quality, instead of picking blind to the
 			// Aurora Score. The same scores drive the degraded-path fallback

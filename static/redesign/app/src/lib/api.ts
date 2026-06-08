@@ -1331,6 +1331,8 @@ export interface LLMSettings {
   chat_model_smart?: string
   structured_outputs?: boolean
   reasoning_effort?: string
+  rerank_model?: string
+  rerank_url?: string
   debug_log: boolean
   live_debug_log: boolean
   client_loaded: boolean
@@ -1349,6 +1351,8 @@ export async function updateAdminLLM(body: Partial<{
   chat_model_smart: string
   structured_outputs: boolean
   reasoning_effort: string
+  rerank_model: string
+  rerank_url: string
   debug_log: boolean
 }>): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { method: 'PUT', body })

@@ -1090,6 +1090,9 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	get("llm_chat_model_fast", &cfg.ChatModelFast)
 	get("llm_chat_model_smart", &cfg.ChatModelSmart)
 	get("llm_reasoning_effort", &cfg.ReasoningEffort)
+	// Phase B cross-encoder reranker (optional). Empty model → disabled.
+	get("llm_reranker_model", &cfg.RerankModel)
+	get("llm_reranker_url", &cfg.RerankURL)
 	if v, ok, _ := queries.GetSettingExists(ctx, "llm_structured_outputs"); ok {
 		// Accept the env-style truthy set too, so a hand-edited server_settings
 		// row ("1"/"yes") isn't silently ignored (matches config.go's parse).
