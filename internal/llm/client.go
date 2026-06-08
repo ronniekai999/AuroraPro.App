@@ -398,7 +398,7 @@ func (c *Client) UseStructured() bool { return c.cfg.StructuredOutputs }
 // decide whether taking the /v1 path actually buys reasoning suppression: an
 // empty value means gpt-oss runs its full default reasoning on /v1 — the
 // runaway / empty-content case — so a surface like Discover should prefer the
-// native path unless this is set. See shouldDiscoverUseV1 in the recommender.
+// native path unless this is set. See shouldUseStructuredV1 in the recommender.
 func (c *Client) ReasoningEffort() string { return c.cfg.ReasoningEffort }
 
 // ChatJSON is the back-compatible entry point: native structured output on the
