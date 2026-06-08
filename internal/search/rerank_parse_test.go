@@ -107,3 +107,24 @@ func TestValidMediaType(t *testing.T) {
 		}
 	}
 }
+
+// TestMediaItemsTypeFilter pins the storage-domain translation: media_items.type
+// stores TV as 'show', so a search "tv" must become "show" before it hits the
+// SQL filter — else every TV-typed query matches zero rows (the empty AI
+// collection bug). The full pipeline a TV query takes is validMediaType→this.
+func TestMediaItemsTypeFilter(t *testing.T) {
+	cases := map[string]string{
+		"tv":    "show", // the fix: TMDB 'tv' → media_items 'show'
+		"movie": "movie",
+		"":      "",
+	}
+	for in, want := range cases {
+		if got := mediaItemsTypeFilter(in); got != want {
+			t.Errorf("mediaItemsTypeFilter(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// End-to-end: a "tv" query out of the LLM lands as the storage value 'show'.
+	if got := mediaItemsTypeFilter(validMediaType("TV")); got != "show" {
+		t.Errorf("validMediaType+mediaItemsTypeFilter(\"TV\") = %q, want \"show\"", got)
+	}
+}

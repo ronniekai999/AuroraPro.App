@@ -121,7 +121,7 @@ func (q *Queries) SetItemEmbeddingIfStale(ctx context.Context, itemID int64, vec
 // SemanticFilter narrows ANN search to a structured slice of the catalog.
 // Empty fields are no-ops; pass the zero value to search everywhere.
 type SemanticFilter struct {
-	MediaType  string   // "movie" | "tv" | ""
+	MediaType  string   // media_items.type domain: "movie" | "show" | "" (NOT "tv" — that matches no rows)
 	Genres     []string // ANY-match: item must have at least one of these genres
 	YearMin    int      // 0 = no floor
 	YearMax    int      // 0 = no ceiling
