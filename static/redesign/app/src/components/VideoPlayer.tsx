@@ -1990,11 +1990,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const vid = videoRef.current
     if (!vid) return
     const localSec = sec - (startSecRef.current ?? 0)
-    // Backward-seek BEFORE the session's start_sec offset isn't
-    // possible without session rebuild; clamp to the start of the
-    // local timeline.
+    // Party gate is shared by both the backward-seek and forward-seek
+    // rebuild paths below; compute it once here.
+    const isPartySyncingThisMedia = !!party
+      && party.partyMediaItemId !== undefined
+      && target?.mediaItemId === party.partyMediaItemId
+    // Backward-seek BEFORE the session's start_sec offset requires a
+    // session rebuild — FFmpeg can't rewind a sequential transcode.
+    // Use the same rebuild gate as the forward-seek path: if
+    // onSeekRebuild is wired and we're not party-syncing, kick off a
+    // new session anchored at the requested position. Otherwise clamp
+    // to the local timeline start (legacy fallback).
     if (localSec < 0) {
-      try { vid.currentTime = 0 } catch { /* defensive */ }
+      if (onSeekRebuild && !isPartySyncingThisMedia) {
+        onSeekRebuild(Math.max(0, sec))
+      } else {
+        try { vid.currentTime = 0 } catch { /* defensive */ }
+      }
       return
     }
     // Audit H3 fix — forward-seek past the buffered range stalls
@@ -2027,9 +2039,6 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // rebuild would desync guests; tracked as a follow-up). See
     // App.tsx where the player is mounted for the rebuild wiring.
     const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
-    const isPartySyncingThisMedia = !!party
-      && party.partyMediaItemId !== undefined
-      && target?.mediaItemId === party.partyMediaItemId
     if (safeBufferedEnd > 0 && localSec >= safeBufferedEnd - 0.5) {
       if (onSeekRebuild && !isPartySyncingThisMedia) {
         // No interim status — the play effect's teardown immediately
