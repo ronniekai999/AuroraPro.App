@@ -233,9 +233,11 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 	// Vector recall: broad, lightly filtered. We DON'T pass genres/year filters
 	// from the parser to the DB — the LLM rerank handles that downstream. Tight
 	// SQL filters were the source of the "intersection produces empty results"
-	// bug. The one filter we DO keep is media_type, and only when validated.
+	// bug. The one filter we DO keep is media_type, and only when validated —
+	// translated to the media_items.type domain ('show', not 'tv') so a TV-typed
+	// query doesn't filter to `m.type = 'tv'` and match zero rows.
 	filter := db.SemanticFilter{
-		MediaType: validMediaType(parsed.MediaType),
+		MediaType: mediaItemsTypeFilter(validMediaType(parsed.MediaType)),
 	}
 
 	hits, err := s.q.SemanticSearch(ctx, llm.FormatVector(queryVec), filter, vectorRecallSize)

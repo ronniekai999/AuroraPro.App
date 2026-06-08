@@ -405,3 +405,17 @@ func validMediaType(raw string) string {
 		return ""
 	}
 }
+
+// mediaItemsTypeFilter maps a validated search media_type ("movie"|"tv"|"") to
+// the value actually stored in media_items.type, which uses 'show' for
+// television — NOT 'tv'. The LLM parser emits the TMDB-style 'tv' (and the
+// requests table uses 'tv' too), so without this translation a TV-typed query
+// filters to `m.type = 'tv'`, which matches ZERO rows and returns an empty
+// result set (observed 2026-06-08: an AI "comedy TV series" collection came
+// back empty). Movies and the no-filter case pass through unchanged.
+func mediaItemsTypeFilter(searchType string) string {
+	if searchType == "tv" {
+		return "show"
+	}
+	return searchType
+}
