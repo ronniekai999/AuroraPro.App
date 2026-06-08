@@ -167,10 +167,13 @@ Respond with ONLY the JSON object. No preamble.`
 
 // discoverSchema documents the OUTPUT SHAPE the discover surface expects.
 //
-// IMPORTANT: as of May 14, 2026 this schema is NOT sent to the LLM (see
-// buildDiscover — we pass nil to ChatJSON). It's kept here as the canonical
-// description of what the parser accepts, since the system prompt also
-// describes the shape but in human-readable terms.
+// IMPORTANT: this schema is NOT sent to the LLM (see buildDiscover — we pass a
+// nil schema). It's kept here as the canonical description of what the parser
+// accepts, since the system prompt also describes the shape but in
+// human-readable terms. buildDiscover still routes through the /v1 path
+// (schemaless) when structured outputs are on, purely to apply reasoning_effort
+// — sending this schema there would hit the same Ollama Cloud 500 documented
+// below.
 //
 // History — why we stopped sending it:
 //
@@ -359,19 +362,26 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	defer cancel()
 
 	prompt := buildDiscoverPrompt(anchors, candidates)
-	// Pass nil for schema — see discoverSchema's doc comment for the full
-	// history. Ollama Cloud's structured-output engine fails deterministically
-	// on the rails→picks→index/reason nesting, even with all count
-	// constraints removed. The system prompt + tolerant parser already
-	// constrain the output shape; the format field was a belt-and-suspenders
-	// that the cloud provider can't process for this schema.
+	// Schema stays nil — see discoverSchema's doc comment for the full history.
+	// Ollama Cloud's structured-output engine fails deterministically on the
+	// rails→picks→index/reason nesting, even with all count constraints removed,
+	// so we never send it; the system prompt + tolerant parser constrain the
+	// shape instead.
+	//
+	// We DO route through the /v1 path when structured outputs are on
+	// (UseStructured) — schemaless, but enough to apply reasoning_effort. On the
+	// native /api/chat path gpt-oss ignores `think:false` and burns 40-48s on a
+	// ~4k-token hidden reasoning trace for this big prompt; the /v1 path with
+	// llm_reasoning_effort=low cuts that to single digits. When structured
+	// outputs are off this falls back to native (the prior, slow behavior) —
+	// the explicit "don't use the OpenAI path" choice.
 	raw, err := chatJSONWithRetryOn5xx(
 		llmCtx,
 		func(c context.Context) (string, error) {
 			// Smart model for the heavy, 24h-cached curation. Schema stays nil
-			// (native /api/chat) — the nested rails→picks json_schema is
-			// re-enabled in Phase C once Discover is flattened to one-rail-per-call.
-			return h.llm.ChatJSONWith(c, h.llm.ChatModelSmart(), discoverSystem, prompt, nil, false)
+			// (no response_format); structured=UseStructured() selects the /v1
+			// path so reasoning_effort can rein in gpt-oss.
+			return h.llm.ChatJSONWith(c, h.llm.ChatModelSmart(), discoverSystem, prompt, nil, h.llm.UseStructured())
 		},
 		func(err error) {
 			slog.Warn("discover: LLM 5xx, retrying once",

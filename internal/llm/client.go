@@ -379,11 +379,13 @@ func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) 
 }
 
 // ChatJSONWith sends a structured-output chat request on an explicit model.
-// When structured && schema != nil it uses the OpenAI-compatible
-// /v1/chat/completions response_format=json_schema path; otherwise Ollama's
-// native /api/chat `format` field. An empty model falls back to the configured
-// default. Cloud models can ignore the schema on EITHER path, so callers MUST
-// still run a tolerant parser on the returned string.
+// When structured it uses the OpenAI-compatible /v1/chat/completions path
+// (response_format=json_schema when schema != nil, otherwise a plain /v1 call);
+// when not structured it uses Ollama's native /api/chat `format` field. The /v1
+// path is also where reasoning_effort is applied, so a *schemaless* /v1 call is
+// how Discover suppresses gpt-oss's runaway reasoning. An empty model falls back
+// to the configured default. Cloud models can ignore the schema on EITHER path,
+// so callers MUST still run a tolerant parser on the returned string.
 //
 // Temperature is fixed low (0.1) — curation/parsing should be deterministic,
 // not creative.
@@ -391,7 +393,14 @@ func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, s
 	if model == "" {
 		model = c.cfg.ChatModel
 	}
-	if structured && schema != nil {
+	if structured {
+		// OpenAI-compatible /v1 path. The schema is OPTIONAL here: when it's nil
+		// we omit response_format entirely but still take this path — that's how
+		// Discover gets reasoning_effort applied (the only lever that stops
+		// gpt-oss's runaway hidden reasoning) WITHOUT sending its nested
+		// rails→picks schema, which 500s on Ollama Cloud. Hero passes a flat
+		// schema, which the model honors-ish; either way the tolerant parser is
+		// the real safety net.
 		return c.chatOpenAISchema(ctx, model, system, user, schema)
 	}
 	return c.chatNative(ctx, model, system, user, schema)
@@ -451,20 +460,33 @@ func (c *Client) chatNative(ctx context.Context, model, system, user string, sch
 	return out.Message.Content, nil
 }
 
-// chatOpenAISchema uses the OpenAI-compatible endpoint with a json_schema
-// response_format. strict is false on purpose: our schemas use keywords
-// (minItems/maxItems) that strict mode rejects on some providers, and the
-// tolerant parser is the real safety net — we want strong guidance, not hard
-// validation that 400s the request. The error string keeps the
-// "ollama chat: status N" shape so isLLMServerError (discover.go) still matches
-// for the 5xx retry.
+// chatOpenAISchema uses the OpenAI-compatible /v1/chat/completions endpoint.
+// When schema != nil it sends a json_schema response_format; when schema == nil
+// it sends a plain chat request (no response_format) — Discover takes the latter
+// to dodge the nested rails→picks schema that 500s on Ollama Cloud while still
+// reaching this path for reasoning_effort. strict is false on purpose: our
+// schemas use keywords (minItems/maxItems) that strict mode rejects on some
+// providers, and the tolerant parser is the real safety net — we want strong
+// guidance, not hard validation that 400s the request. The error string keeps
+// the "ollama chat: status N" shape so isLLMServerError (discover.go) still
+// matches for the 5xx retry.
 //
-// Caveat: unlike chatNative this path sends no thinking-suppression signal, so a
-// reasoning model/gateway that folds its trace into `content` can defeat the
-// tolerant parser (degrading to the score-ordered fallback). Until Phase C adds
-// reasoning suppression here, pair llm_structured_outputs with a non-thinking
-// fast model.
+// Thinking suppression on this path comes from ReasoningEffort (the gpt-oss
+// reasoning_effort field), NOT the native `think:false` — gpt-oss ignores the
+// latter on Cloud. With reasoning_effort unset a reasoning model can still burn
+// its budget on the hidden trace and return empty content (guarded below); set
+// llm_reasoning_effort=low to keep it brief.
 func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user string, schema any) (string, error) {
+	// Schema is optional: nil → omit response_format (omitempty on the pointer)
+	// so the request is a plain /v1 chat. Discover relies on this to avoid the
+	// nested-schema 500 while still getting reasoning_effort applied below.
+	var responseFormat *oaiResponseFormat
+	if schema != nil {
+		responseFormat = &oaiResponseFormat{
+			Type:       "json_schema",
+			JSONSchema: oaiJSONSchema{Name: "result", Schema: schema, Strict: false},
+		}
+	}
 	body, err := json.Marshal(oaiChatRequest{
 		Model: model,
 		Messages: []ChatMessage{
@@ -473,10 +495,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user strin
 		},
 		Temperature:     0.1,
 		ReasoningEffort: c.cfg.ReasoningEffort, // omitempty when unset
-		ResponseFormat: &oaiResponseFormat{
-			Type:       "json_schema",
-			JSONSchema: oaiJSONSchema{Name: "result", Schema: schema, Strict: false},
-		},
+		ResponseFormat:  responseFormat,        // nil → omitted; Discover sends no schema
 	})
 	if err != nil {
 		return "", err
