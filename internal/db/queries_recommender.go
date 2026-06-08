@@ -159,7 +159,7 @@ func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int
 // layer.
 func PersonalizationThreshold() int { return minHistoryItems }
 
-// ProfileMaxAgeRating returns a profile's max_age_rating ('' when unrestricted
+// ProfileMaxAgeRating returns a profile's max_age_rating (” when unrestricted
 // or the profile row is missing). The recommender expands it via
 // AllowedRatingsForMax to age-gate candidate pools without fetching the whole
 // profile row on every rail build.
@@ -184,7 +184,14 @@ func (q *Queries) ProfileMaxAgeRating(ctx context.Context, profileID int64) (str
 // are deduplicated cross-library (same tmdb_id) keeping the richest copy.
 //
 // Items without a backdrop are filtered out — the hero needs an image.
-func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string) ([]*models.MediaItem, error) {
+// surface + withinSeconds drive Phase B2 anti-repetition: when surface != ""
+// (and a positive window), items recently SHOWN to this profile on that surface
+// (recently_surfaced_items) are DEMOTED — ordered after fresh items — so
+// successive rebuilds rotate instead of returning the same top-by-cosine pool.
+// It's a demotion, not an exclusion: stale items still backfill if too few fresh
+// ones exist (no starvation). surface == "" makes the whole thing a no-op
+// (unchanged behavior — that's how NearestUnwatchedRich/anchor-rails stay clean).
+func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string, surface string, withinSeconds int64) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 12
 	}
@@ -200,7 +207,13 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		         COALESCE(m.poster_path, '') AS poster_path,
 		         COALESCE(m.backdrop_path, '') AS backdrop_path,
 		         m.added_at, m.updated_at,
-		         (m.embedding <=> $2::vector) AS distance
+		         (m.embedding <=> $2::vector) AS distance,
+		         ($5::text <> '' AND EXISTS (
+		             SELECT 1 FROM recently_surfaced_items rsi
+		             WHERE rsi.profile_id = $1 AND rsi.media_item_id = m.id
+		               AND rsi.surface = $5
+		               AND rsi.surfaced_at > NOW() - INTERVAL '1 second' * $6
+		         )) AS recently_surfaced
 		  FROM media_items m
 		  WHERE m.embedding IS NOT NULL
 		    AND m.backdrop_path IS NOT NULL
@@ -214,15 +227,15 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
+		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
 		       added_at, updated_at, distance
 		FROM ranked
-		ORDER BY distance ASC
+		ORDER BY recently_surfaced ASC, distance ASC
 		LIMIT $3`,
-		profileID, vectorLit, limit, allowedRatings,
+		profileID, vectorLit, limit, allowedRatings, surface, withinSeconds,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("nearest unwatched: %w", err)
@@ -298,7 +311,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
 		    )
-		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector
+		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
 		       runtime_minutes, content_rating, poster_path, backdrop_path,

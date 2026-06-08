@@ -1333,6 +1333,7 @@ export interface LLMSettings {
   reasoning_effort?: string
   rerank_model?: string
   rerank_url?: string
+  repeat_window_hours?: number
   debug_log: boolean
   live_debug_log: boolean
   client_loaded: boolean
@@ -1353,6 +1354,7 @@ export async function updateAdminLLM(body: Partial<{
   reasoning_effort: string
   rerank_model: string
   rerank_url: string
+  repeat_window_hours: number
   debug_log: boolean
 }>): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { method: 'PUT', body })
