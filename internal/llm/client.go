@@ -72,6 +72,20 @@ type Client struct {
 // NewClient applies defaults and returns a ready-to-use client. It does NOT
 // dial Ollama — call Ping if you want a startup-time liveness check.
 func NewClient(cfg Config) *Client {
+	// Trim stray whitespace on operator-entered names/URLs BEFORE defaulting, so
+	// a value that's all spaces still falls back to the default. A trailing space
+	// (trivially pasted into the admin form) otherwise silently breaks model
+	// lookup with a confusing "model not found" / reranker "unreachable" error —
+	// observed 2026-06-08 with "dengcao/Qwen3-Reranker-8B:Q3_K_M ".
+	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
+	cfg.EmbedURL = strings.TrimSpace(cfg.EmbedURL)
+	cfg.RerankURL = strings.TrimSpace(cfg.RerankURL)
+	cfg.ChatModel = strings.TrimSpace(cfg.ChatModel)
+	cfg.ChatModelFast = strings.TrimSpace(cfg.ChatModelFast)
+	cfg.ChatModelSmart = strings.TrimSpace(cfg.ChatModelSmart)
+	cfg.EmbedModel = strings.TrimSpace(cfg.EmbedModel)
+	cfg.RerankModel = strings.TrimSpace(cfg.RerankModel)
+
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "http://ollama:11434"
 	}
@@ -384,7 +398,7 @@ func (c *Client) UseStructured() bool { return c.cfg.StructuredOutputs }
 // decide whether taking the /v1 path actually buys reasoning suppression: an
 // empty value means gpt-oss runs its full default reasoning on /v1 — the
 // runaway / empty-content case — so a surface like Discover should prefer the
-// native path unless this is set. See shouldDiscoverUseV1 in the recommender.
+// native path unless this is set. See shouldUseStructuredV1 in the recommender.
 func (c *Client) ReasoningEffort() string { return c.cfg.ReasoningEffort }
 
 // ChatJSON is the back-compatible entry point: native structured output on the

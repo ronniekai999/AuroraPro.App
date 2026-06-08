@@ -37,6 +37,15 @@ func TestParseRerankResponse(t *testing.T) {
 			wantLen:   1,
 			wantFirst: heroRerankPick{Index: 4, Reason: "fenced"},
 		},
+		{
+			// deepseek-v4-flash real fixture (2026-06-08): "candidates" wrapper +
+			// title-only picks (with year suffix). Before the alias was added this
+			// failed to parse and the hero fell back to score order.
+			name:      "candidates wrapper + title-only (deepseek-v4-flash)",
+			raw:       `{"candidates":[{"title":"The Conjuring: Last Rites (2025)","reason":"Paranormal mystery like Ghost Whisperer."},{"title":"Holland (2025)","reason":"Mystery thriller."}]}`,
+			wantLen:   2,
+			wantFirst: heroRerankPick{Index: 0, Title: "The Conjuring: Last Rites (2025)", Reason: "Paranormal mystery like Ghost Whisperer."},
+		},
 	}
 
 	for _, tc := range cases {

@@ -50,6 +50,31 @@ func TestScoreFromRerankResponse(t *testing.T) {
 	}
 }
 
+// TestNewClientTrimsConfig: stray whitespace on operator-entered names/URLs is
+// trimmed at construction, so a pasted trailing space can't silently break model
+// lookup (the reranker "unreachable" footgun). A spaces-only value still falls
+// back to the default.
+func TestNewClientTrimsConfig(t *testing.T) {
+	c := NewClient(Config{
+		RerankModel: " dengcao/Qwen3-Reranker-0.6B ",
+		ChatModel:   " gpt-oss:20b ",
+		RerankURL:   "  http://127.0.0.1:11434 ",
+	})
+	if got := c.RerankModelName(); got != "dengcao/Qwen3-Reranker-0.6B" {
+		t.Errorf("RerankModel not trimmed: %q", got)
+	}
+	if got := c.ChatModel(); got != "gpt-oss:20b" {
+		t.Errorf("ChatModel not trimmed: %q", got)
+	}
+	if got := c.rerankBaseURL(); got != "http://127.0.0.1:11434" {
+		t.Errorf("RerankURL not trimmed: %q", got)
+	}
+	// Spaces-only model still defaults (trim happens before the default check).
+	if got := NewClient(Config{ChatModel: "   "}).ChatModel(); got != "qwen2.5:1.5b-instruct" {
+		t.Errorf("spaces-only ChatModel should default, got %q", got)
+	}
+}
+
 // TestRerankDisabled: no reranker model configured → (nil, nil), so callers skip.
 func TestRerankDisabled(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://x"})
