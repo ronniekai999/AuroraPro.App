@@ -76,14 +76,17 @@ type rerankLogprobs struct {
 // cross-encoder reranker (Qwen3-Reranker family) on the local reranker URL,
 // returning one score per doc in the same order.
 //
-// Returns (nil, nil) when no reranker model is configured — callers then skip
-// reranking and keep their existing order. Individual pair failures score 0 (that
-// candidate just sinks); but if EVERY pair fails (reranker down/unreachable) it
-// returns an error so the caller falls back wholesale to the un-reranked order
-// rather than trusting an all-zero ranking.
-func (c *Client) Rerank(ctx context.Context, query string, docs []string) ([]float64, error) {
+// Returns (nil, 0, nil) when no reranker model is configured — callers then skip
+// reranking and keep their existing order. The middle return is the COUNT of docs
+// that actually scored (a successful pair call); callers use it to detect partial
+// coverage (a slow/saturated reranker that only scored a subset before the budget
+// fired — the rest sink to 0) and decide whether the ranking is trustworthy.
+// Individual pair failures score 0 (that candidate just sinks); but if EVERY pair
+// fails (reranker down/unreachable) it returns an error so the caller falls back
+// wholesale to the un-reranked order rather than trusting an all-zero ranking.
+func (c *Client) Rerank(ctx context.Context, query string, docs []string) ([]float64, int, error) {
 	if c.cfg.RerankModel == "" || len(docs) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	scores := make([]float64, len(docs))
 	var ok int32
@@ -109,9 +112,9 @@ func (c *Client) Rerank(ctx context.Context, query string, docs []string) ([]flo
 	}
 	wg.Wait()
 	if ok == 0 {
-		return nil, fmt.Errorf("reranker %q scored no documents (unreachable?)", c.cfg.RerankModel)
+		return nil, 0, fmt.Errorf("reranker %q scored no documents (unreachable?)", c.cfg.RerankModel)
 	}
-	return scores, nil
+	return scores, int(ok), nil
 }
 
 // rerankPair scores one (query, document) pair. Best-effort: any transport or
@@ -138,8 +141,10 @@ func (c *Client) rerankPair(ctx context.Context, query, doc string) (float64, er
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.APIKey != "" {
-		// Harmless for a local Ollama (ignored); covers an authed reranker URL.
+	// Only attach the bearer when an EXPLICIT reranker URL is set (a remote,
+	// possibly-authed endpoint). Never leak the Cloud key to the default local
+	// reranker box — mirrors the embed path, which omits auth for the local URL.
+	if c.cfg.APIKey != "" && c.cfg.RerankURL != "" {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}
 	resp, err := c.http.Do(req)

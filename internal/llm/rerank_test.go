@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -52,31 +53,39 @@ func TestScoreFromRerankResponse(t *testing.T) {
 // TestRerankDisabled: no reranker model configured → (nil, nil), so callers skip.
 func TestRerankDisabled(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://x"})
-	got, err := c.Rerank(context.Background(), "q", []string{"d"})
-	if err != nil || got != nil {
-		t.Errorf("disabled reranker: want (nil, nil), got (%v, %v)", got, err)
+	got, scored, err := c.Rerank(context.Background(), "q", []string{"d"})
+	if err != nil || got != nil || scored != 0 {
+		t.Errorf("disabled reranker: want (nil, 0, nil), got (%v, %d, %v)", got, scored, err)
 	}
 }
 
 // TestRerankScores: with a reranker configured it POSTs to /v1/chat/completions on
 // the reranker URL and returns one score per doc.
 func TestRerankScores(t *testing.T) {
+	// Rerank fans out one goroutine per doc, so the handler runs concurrently —
+	// guard the captured path to keep `go test -race` clean.
+	var mu sync.Mutex
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		gotPath = r.URL.Path
+		mu.Unlock()
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"yes"},"logprobs":{"content":[{"token":"yes","top_logprobs":[{"token":"yes","logprob":-0.1},{"token":"no","logprob":-3}]}]}}]}`)
 	}))
 	defer srv.Close()
 	c := NewClient(Config{BaseURL: "http://unused", RerankModel: "rr", RerankURL: srv.URL})
-	scores, err := c.Rerank(context.Background(), "taste", []string{"a", "b", "c"})
+	scores, scored, err := c.Rerank(context.Background(), "taste", []string{"a", "b", "c"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if gotPath != "/v1/chat/completions" {
-		t.Errorf("path = %q, want /v1/chat/completions", gotPath)
+	mu.Lock()
+	gp := gotPath
+	mu.Unlock()
+	if gp != "/v1/chat/completions" {
+		t.Errorf("path = %q, want /v1/chat/completions", gp)
 	}
-	if len(scores) != 3 {
-		t.Fatalf("want 3 scores, got %d", len(scores))
+	if len(scores) != 3 || scored != 3 {
+		t.Fatalf("want 3 scores + scored=3, got len=%d scored=%d", len(scores), scored)
 	}
 	for i, s := range scores {
 		if s <= 0.5 {
@@ -94,7 +103,7 @@ func TestRerankAllFail(t *testing.T) {
 	}))
 	defer bad.Close()
 	c := NewClient(Config{BaseURL: "http://unused", RerankModel: "rr", RerankURL: bad.URL})
-	if _, err := c.Rerank(context.Background(), "q", []string{"a", "b"}); err == nil {
+	if _, _, err := c.Rerank(context.Background(), "q", []string{"a", "b"}); err == nil {
 		t.Errorf("all pairs failing should return an error")
 	}
 }

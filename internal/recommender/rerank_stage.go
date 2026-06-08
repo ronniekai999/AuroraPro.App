@@ -70,13 +70,26 @@ func (h *Hero) rerankCandidates(ctx context.Context, anchors []db.TasteAnchor, c
 	}
 	rctx, cancel := context.WithTimeout(ctx, rerankBudget)
 	defer cancel()
-	scores, err := h.llm.Rerank(rctx, query, docs)
+	scores, scored, err := h.llm.Rerank(rctx, query, docs)
 	if err != nil || len(scores) != len(candidates) {
 		if err != nil {
 			slog.Warn("rerank: cross-encoder failed, keeping vector order",
 				"error", err, "candidates", len(candidates))
 		}
 		return capCandidates(candidates, keep)
+	}
+	// Coverage guard: a slow/saturated reranker may only score a SUBSET before the
+	// budget fires (unscored docs stay 0 → they sink to vector order at the
+	// bottom). The pre-allocated full-length scores slice means the count check
+	// above can never catch this, so surface it explicitly — and below half-scored
+	// the ranking isn't trustworthy, so keep the clean vector order rather than
+	// caching a half-reranked pool for 24h.
+	if scored < len(docs) {
+		slog.Warn("rerank: partial coverage, some candidates kept vector order",
+			"scored", scored, "total", len(docs))
+		if scored*2 < len(docs) {
+			return capCandidates(candidates, keep)
+		}
 	}
 	order := make([]int, len(candidates))
 	for i := range order {

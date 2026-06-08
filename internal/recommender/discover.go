@@ -340,36 +340,35 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		return nil, nil
 	}
 
+	// Detach the heavy tail (cross-encoder rerank + LLM curation) from the
+	// request lifetime UP FRONT. Discover runs inside singleflight (DiscoverFor)
+	// and is cached 24h, so a client that navigates away mid-build — the SPA
+	// aborts the /api/me/discover fetch via its AbortController — must NOT cancel
+	// work that other waiters are blocked on. Critically this now also covers the
+	// rerank: on the raw request ctx, a mid-rerank abort would silently drop to
+	// vector order and cache THAT degraded build for 24h. WithoutCancel keeps ctx
+	// values (auth/trace) but drops the caller's cancellation + deadline;
+	// discoverBudget (60s) is the single bound for rerank (≤8s) + annotate + the
+	// LLM call. Same detached-build rationale as rail_reasons' async fill.
+	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
+	defer cancel()
+
 	// Phase B: cross-encoder rerank the (larger) recall pool down to the prompt
 	// pool by taste relevance, then debias the candidate order so the LLM curates
 	// on merit not position. Both no-op gracefully when the reranker is off
 	// (rerankCandidates caps the slice; debiasOrder just reorders). Rerank runs
 	// BEFORE annotateGenres so we only genre-annotate the candidates that survive.
 	if h.rerankEnabled() {
-		candidates = h.rerankCandidates(ctx, anchors, candidates, discoverPoolSize)
+		candidates = h.rerankCandidates(llmCtx, anchors, candidates, discoverPoolSize)
 	}
 	candidates = debiasOrder(candidates, profileID)
 
 	// Genre-annotate candidates so the prompt has the same depth of
 	// signal the search reranker gets. One batched query, no N+1.
-	if err := h.annotateGenres(ctx, candidates); err != nil {
+	if err := h.annotateGenres(llmCtx, candidates); err != nil {
 		slog.Warn("discover: genre annotate failed (continuing without)",
 			"profile", profileID, "error", err)
 	}
-
-	// Detach the LLM round-trip from the request lifetime. Discover runs inside
-	// singleflight (DiscoverFor) and is cached 24h, so a client that navigates
-	// away mid-build — the SPA aborts the /api/me/discover fetch via its
-	// AbortController — must NOT cancel an expensive curation that other waiters
-	// are blocked on. Before this, that abort surfaced as
-	// `ollama chat: ... context canceled` warnings (more often once the smart
-	// model made the call slower) and dropped Discover to the vector-rail
-	// fallback. WithoutCancel keeps ctx values (auth/trace) but drops the
-	// caller's cancellation + deadline; discoverBudget stays the only bound, and
-	// the build now completes and populates the cache even if the original
-	// caller is gone. Same detached-build rationale as rail_reasons' async fill.
-	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
-	defer cancel()
 
 	prompt := buildDiscoverPrompt(anchors, candidates)
 	// Schema stays nil — see discoverSchema's doc comment for the full history.
