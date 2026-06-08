@@ -47,9 +47,21 @@ const (
 	qualityFinal                       // LLM-reranked with reasons
 )
 
+// Surface names for the recently-surfaced anti-repetition memory (Phase B2).
+// Kept independent so a title shown in the hero can still appear in discover —
+// the memory is per-surface temporal de-dup, not cross-surface.
+const (
+	surfaceHero     = "hero"
+	surfaceDiscover = "discover"
+)
+
 const (
 	cacheTTLFallback = 30 * time.Minute
 	cacheTTLFinal    = 24 * time.Hour
+	// surfacedRepeatWindowDefault is how long an item shown to a profile is
+	// demoted from that surface's recall before it can resurface (Phase B2
+	// anti-repetition). Overridable per-deployment via SetRepeatWindow; 0 = off.
+	surfacedRepeatWindowDefault = 72 * time.Hour
 	// scoreStatsTTL bounds how stale the global Aurora Score calibration
 	// (library mean rating + composite mean/σ) can get. The quality/freshness
 	// distribution drifts slowly — new scans, metadata refreshes — so 30m
@@ -130,6 +142,11 @@ type Hero struct {
 	cache         sync.Map // key: profileID (int64), val: cacheEntry
 	candidatePool int
 	poolSize      int
+	// repeatWindow is the Phase B2 anti-repetition horizon: items shown to a
+	// profile are demoted from that surface's recall for this long. 0 disables
+	// the feature (no surface arg passed → NearestUnwatched behaves as before).
+	// Defaulted in New, overridable via SetRepeatWindow from the admin setting.
+	repeatWindow time.Duration
 	// buildGroup deduplicates concurrent build() calls for the same profile.
 	// Without it, a cache expiry plus N parallel requests for the same
 	// profile produced N parallel LLM rerank calls — wasted Ollama budget
@@ -179,7 +196,62 @@ func New(q *db.Queries, llmClient *llm.Client) *Hero {
 		llm:           llmClient,
 		candidatePool: 12,
 		poolSize:      5,
+		repeatWindow:  surfacedRepeatWindowDefault,
 	}
+}
+
+// SetRepeatWindow sets the Phase B2 anti-repetition demotion window. A value of
+// 0 disables anti-repetition entirely (recall behaves exactly as before).
+// Called once at startup from the recommender_repeat_window_hours setting.
+func (h *Hero) SetRepeatWindow(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	h.repeatWindow = d
+}
+
+// surfaceArgs returns the (surface, withinSeconds) pair to pass to
+// NearestUnwatched. When anti-repetition is disabled it returns ("", 0), which
+// makes the recall query a no-op for the feature.
+func (h *Hero) surfaceArgs(surface string) (string, int64) {
+	if h.repeatWindow <= 0 {
+		return "", 0
+	}
+	return surface, int64(h.repeatWindow.Seconds())
+}
+
+// recordSurfaced remembers (best-effort) the item IDs just shown to a profile on
+// a surface, so the next build demotes them. Fire-and-forget on a DETACHED
+// context (the request may finish or cancel before the write lands) with a short
+// timeout — kept off the build's response path since it's a side-effect, and
+// only logs on failure (a missed record costs a little rotation, never a
+// response). Safe from goroutine pileup: builds are singleflighted + cached, so
+// this fires at most once per profile per rebuild. No-op when off. Prunes rows
+// older than 2× the window so the table stays bounded.
+func (h *Hero) recordSurfaced(ctx context.Context, profileID int64, surface string, itemIDs []int64) {
+	if h.repeatWindow <= 0 || len(itemIDs) == 0 {
+		return
+	}
+	window := h.repeatWindow
+	go func() {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := h.q.RecordSurfaced(rctx, profileID, surface, itemIDs, 2*window); err != nil {
+			slog.Warn("recommender: record surfaced failed",
+				"profile", profileID, "surface", surface, "error", err)
+		}
+	}()
+}
+
+// pickItemIDs extracts the underlying media item IDs from hero picks.
+func pickItemIDs(picks []HeroPick) []int64 {
+	ids := make([]int64, 0, len(picks))
+	for _, p := range picks {
+		if p.Item != nil {
+			ids = append(ids, p.Item.ID)
+		}
+	}
+	return ids
 }
 
 // PoolFor returns the hero pool for a profile, using the cache when fresh.
@@ -237,6 +309,9 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 				builtAt: time.Now(),
 				quality: quality,
 			})
+			// Remember what we just showed so the next rebuild rotates (B2).
+			// Only here (epoch-guarded Store) so cache hits don't churn it.
+			h.recordSurfaced(ctx, profileID, surfaceHero, pickItemIDs(picks))
 		}
 		return picks, nil
 	})
@@ -468,7 +543,8 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 	// Tier 1: personalized via taste vector.
 	vec, err := h.q.BuildProfileVector(ctx, profileID)
 	if err == nil {
-		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.heroRecallPool(), allowed)
+		surface, within := h.surfaceArgs(surfaceHero)
+		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.heroRecallPool(), allowed, surface, within)
 		if err != nil {
 			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
 				"profile", profileID, "error", err)

@@ -172,11 +172,17 @@ type LLMSettings struct {
 	// disabled (graceful no-op). RerankURL empty ⇒ the chat endpoint; set only to
 	// run rerank on a separate/local Ollama. Restart-required, like the other
 	// model fields.
-	RerankModel  string `json:"rerank_model"`
-	RerankURL    string `json:"rerank_url"`
-	DebugLog     bool   `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog bool   `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded bool   `json:"client_loaded"`  // false when LLM is disabled at startup
+	RerankModel string `json:"rerank_model"`
+	RerankURL   string `json:"rerank_url"`
+	// Phase B2 anti-repetition: hours an item shown to a profile is demoted from
+	// hero/discover recall before it can resurface. 0 disables. Restart-required.
+	// Pointer + omitempty so "no row yet" (fresh install → recommender runs at its
+	// 72h default) is distinguishable from an explicit 0 (off): absent → the UI's
+	// `?? 72` shows/saves the real default instead of silently writing 0.
+	RepeatWindowHours *int `json:"repeat_window_hours,omitempty"`
+	DebugLog          bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog      bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded      bool `json:"client_loaded"`  // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -184,7 +190,7 @@ type LLMSettings struct {
 var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
 	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
-	RerankModel, RerankURL                                                 string
+	RerankModel, RerankURL, RepeatWindowHours                              string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -199,6 +205,7 @@ var llmSettingKeys = struct {
 	ReasoningEffort:   "llm_reasoning_effort",
 	RerankModel:       "llm_reranker_model",
 	RerankURL:         "llm_reranker_url",
+	RepeatWindowHours: "recommender_repeat_window_hours",
 }
 
 // validReasoningEffort reports whether v is an accepted gpt-oss /v1
@@ -242,6 +249,13 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 	out.ReasoningEffort = byKey[llmSettingKeys.ReasoningEffort]
 	out.RerankModel = byKey[llmSettingKeys.RerankModel]
 	out.RerankURL = byKey[llmSettingKeys.RerankURL]
+	// Only set when a row actually exists — absent ⇒ omitted ⇒ the UI falls back
+	// to the 72h default (matches what the recommender is actually running).
+	if v := byKey[llmSettingKeys.RepeatWindowHours]; v != "" {
+		if hrs, perr := strconv.Atoi(v); perr == nil {
+			out.RepeatWindowHours = &hrs
+		}
+	}
 	if v := byKey[llmSettingKeys.StructuredOutputs]; v != "" {
 		out.StructuredOutputs = v == "true"
 	}
@@ -280,6 +294,7 @@ type llmUpdateRequest struct {
 	ReasoningEffort   *string `json:"reasoning_effort,omitempty"`
 	RerankModel       *string `json:"rerank_model,omitempty"`
 	RerankURL         *string `json:"rerank_url,omitempty"`
+	RepeatWindowHours *int    `json:"repeat_window_hours,omitempty"`
 	StructuredOutputs *bool   `json:"structured_outputs,omitempty"`
 	DebugLog          *bool   `json:"debug_log,omitempty"`
 }
@@ -384,6 +399,24 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 			if err := h.queries.SetSetting(r.Context(), llmSettingKeys.StructuredOutputs, val); err != nil {
 				slog.Warn("UpdateLLMSettings: structured_outputs write failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "failed to save structured outputs toggle")
+				return
+			}
+			restartRequired = true
+		}
+	}
+
+	// RepeatWindowHours (Phase B2) is an int but, like StructuredOutputs,
+	// restart-required (the recommender reads it at startup via SetRepeatWindow).
+	if req.RepeatWindowHours != nil {
+		hrs := *req.RepeatWindowHours
+		if hrs < 0 {
+			hrs = 0
+		}
+		val := strconv.Itoa(hrs)
+		if current, _, _ := h.queries.GetSettingExists(r.Context(), llmSettingKeys.RepeatWindowHours); current != val {
+			if err := h.queries.SetSetting(r.Context(), llmSettingKeys.RepeatWindowHours, val); err != nil {
+				slog.Warn("UpdateLLMSettings: repeat_window_hours write failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to save repeat window")
 				return
 			}
 			restartRequired = true

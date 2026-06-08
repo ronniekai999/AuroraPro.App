@@ -311,6 +311,13 @@ func main() {
 		embedder = embedding.New(llmClient, queries, cfg.LLM.BackfillWorkers, cfg.LLM.BackfillBatch)
 		semanticSearcher = search.New(llmClient, queries)
 		heroRecommender = recommender.New(queries, llmClient)
+		// Phase B2 anti-repetition window (hours; 0 disables). Restart-required,
+		// like the other recommender/LLM tuning knobs. Absent → New's default.
+		if v, ok, _ := queries.GetSettingExists(ctx, "recommender_repeat_window_hours"); ok {
+			if hrs, perr := strconv.Atoi(v); perr == nil && hrs >= 0 {
+				heroRecommender.SetRepeatWindow(time.Duration(hrs) * time.Hour)
+			}
+		}
 
 		// AI re-matcher for items the heuristic enricher flagged as
 		// 'needs_review'. The matcher reuses LLM_CHAT_MODEL (same model

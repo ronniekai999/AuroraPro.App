@@ -89,7 +89,10 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 		// EmbeddingText is already in that exact format, so we pass it
 		// through without re-parsing/re-formatting. Same code path the
 		// centroid rail uses; only the input vector differs.
-		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch, allowed)
+		// "", 0 → no anti-repetition demotion: the "Because You Watched X" anchor
+		// rails are intentionally anchor-pinned, not part of B2's per-surface
+		// temporal de-dup.
+		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch, allowed, "", 0)
 		if ierr != nil {
 			slog.Warn("anchor rails: kNN failed",
 				"anchor", a.Title, "profile", profileID, "error", ierr)

@@ -288,6 +288,8 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 				rails:   rails,
 				builtAt: time.Now(),
 			})
+			// Remember the surfaced rail items so the next rebuild rotates (B2).
+			h.recordSurfaced(ctx, profileID, surfaceDiscover, railItemIDs(rails))
 		}
 		return rails, nil
 	})
@@ -295,6 +297,20 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 		return nil, err
 	}
 	return result.([]DiscoverRail), nil
+}
+
+// railItemIDs flattens the media item IDs across all rails for the B2
+// recently-surfaced memory. (RecordSurfaced de-dups, so we don't here.)
+func railItemIDs(rails []DiscoverRail) []int64 {
+	ids := make([]int64, 0, 16)
+	for _, r := range rails {
+		for _, it := range r.Items {
+			if it != nil {
+				ids = append(ids, it.ID)
+			}
+		}
+	}
+	return ids
 }
 
 // buildDiscover does the actual work — vector recall, anchor fetch, LLM
@@ -319,7 +335,8 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	}
 
 	allowed := h.allowedRatings(ctx, profileID)
-	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.discoverRecallPool(), allowed)
+	surface, within := h.surfaceArgs(surfaceDiscover)
+	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.discoverRecallPool(), allowed, surface, within)
 	if err != nil {
 		slog.Warn("discover: nearest-unwatched failed", "profile", profileID, "error", err)
 		return nil, nil

@@ -161,7 +161,7 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	// NearestUnwatched already age-filters by `allowed` in SQL, so no Go-side
 	// rating pass is needed here.
 	allowed := allowedRatingsForMax(profile.MaxAgeRating)
-	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36, allowed)
+	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36, allowed, "", 0)
 	if err != nil {
 		slog.Warn("onboarding: preview failed", "profile", profile.ID, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})

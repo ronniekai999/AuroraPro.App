@@ -5466,6 +5466,9 @@ function AdminLLMTab() {
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker URL (optional)</span>
           <input value={s.rerank_url ?? ''} onChange={e => setS({ ...s, rerank_url: e.target.value })} placeholder="blank = chat endpoint · set only to run rerank on a local box" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Repeat window (hrs)</span>
+          <input type="number" min={0} value={s.repeat_window_hours ?? 72} onChange={e => setS({ ...s, repeat_window_hours: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} placeholder="anti-repetition · 0 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
       </div>
       <button
         disabled={saving}
@@ -5478,6 +5481,7 @@ function AdminLLMTab() {
               chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
               structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
               rerank_model: s.rerank_model ?? '', rerank_url: s.rerank_url ?? '',
+              repeat_window_hours: s.repeat_window_hours ?? 72,
             }
             if (apiKeyEdit) body.api_key = apiKeyEdit
             const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
