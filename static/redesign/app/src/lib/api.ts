@@ -622,9 +622,12 @@ export async function searchMedia(
 export interface HeroPick {
   media: UIMedia
   reason?: string
-  // Integer "match %" (0-100) from the recommender's taste-vector
+  // Global Aurora Score (0-100): how feature-worthy the title is, the same for
+  // everyone. The hero ring shows this when there's no personal match.
+  score?: number
+  // Personal "% for you" (0-100) from the recommender's taste-vector
   // similarity. Undefined / 0 for the cold-start popular pool (no centroid),
-  // in which case the hero ring falls back to its derived rating estimate.
+  // in which case the ring shows `score` (or a derived estimate as a last resort).
   match?: number
 }
 export interface HeroPersonalization {
@@ -646,13 +649,13 @@ export async function getHeroPool(
   if (profileId) params.set('profile_id', String(profileId))
   const qs = params.toString()
   const resp = await apiFetch<{
-    picks: { item: ServerMediaItem; reason?: string; match?: number }[],
+    picks: { item: ServerMediaItem; reason?: string; score?: number; match?: number }[],
     personalization?: { cold_start?: boolean; history_count?: number; threshold?: number },
   }>(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
   return {
-    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason, match: p.match })),
+    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason, score: p.score, match: p.match })),
     // Defaults preserve the pre-personalization-field behavior for any
     // server older than this change (cold_start=false hides the hint).
     personalization: {

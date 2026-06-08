@@ -1016,7 +1016,7 @@ func (a heroAdapter) PoolFor(ctx context.Context, profileID int64) ([]api.HeroPi
 	}
 	out := make([]api.HeroPick, len(picks))
 	for i, p := range picks {
-		out[i] = api.HeroPick{Item: p.Item, Reason: p.Reason, Match: p.Score}
+		out[i] = api.HeroPick{Item: p.Item, Reason: p.Reason, Score: p.Score, Match: p.Match}
 	}
 	return out, nil
 }

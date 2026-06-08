@@ -324,27 +324,23 @@ function greetingFirstName(username?: string): string {
 }
 
 // Stable, deterministic "match %" for the hero ring — the COLD-START
-// FALLBACK only. The recommender now returns a real taste-vector match
-// (HeroPick.match, threaded as heroMatch) for the personalized pool; this
-// derived value is used solely when that's absent or 0 (the popular
-// cold-start pool has no taste centroid). It produces a plausible,
-// CONSISTENT-per-title value (same title → same %, never random) from the
-// media's rating, clamped to a flattering 82–98 band, hashing the id when
-// rating is missing so every cold-start hero still gets a number.
+// FALLBACK only. The recommender now returns a real Aurora Score
+// (HeroPick.score, threaded as `match`) for EVERY pick, so this fires only
+// if that's somehow absent. Deliberately NOT clamped to the old flattering
+// 82–98 band — that band is exactly what made every hero read the same. It
+// maps the TMDB rating onto an honest spread (a 6 reads ~58, a 9 reads ~88),
+// CONSISTENT-per-title (same title → same %), hashing the id when rating is
+// missing so every hero still gets a number.
 function heroMatchScore(media: { id: number; rating?: number }): number {
   const r = media.rating ?? 0
-  let score: number
   if (r > 0) {
-    // TMDB ratings are 0–10. Map the realistic 6.5–9.5 band onto 82–98
-    // so well-rated titles read high without ever hitting a fake 100%.
-    const norm = Math.max(0, Math.min(1, (r - 6.5) / 3))
-    score = 82 + norm * 16
-  } else {
-    // No rating — derive a deterministic value from the id so it's
-    // stable across renders/rotations rather than jumping around.
-    score = 85 + (media.id % 13)
+    // TMDB 0–10 → ~10..97, linear with real spread and capped just under 100
+    // so we never show a fake perfect match.
+    return Math.round(Math.max(5, Math.min(97, r * 9.5 + 2)))
   }
-  return Math.round(Math.max(82, Math.min(98, score)))
+  // No rating — deterministic mid-spread from the id so it's stable across
+  // renders but not clustered at the top of the scale.
+  return 35 + (media.id % 31)
 }
 
 // "{Xh Ym left}" / "{Ym left}" remaining-time label for a Continue
@@ -385,13 +381,17 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
-  // Real recommender "match %" (0-100) for the current hero. Undefined / 0
-  // (cold-start popular pool, no centroid) → fall back to heroMatchScore.
+  // Personal "% for you" (0-100) for the current hero. Undefined / 0
+  // (cold-start popular pool, no centroid) → fall back to the global Aurora
+  // `score`, then to a derived estimate.
   match?: number
+  // Global Aurora Score (0-100) — shown on the ring when there's no personal
+  // match. Same for every viewer (title quality, not personal fit).
+  score?: number
   // 2026-06-05 (Home redesign B) — My Library state for the hero's
   // "＋ My List / ✓ In My List" toggle. Both must be present for the
   // button to render (same contract as MediaCardCinema's lib badge).
@@ -444,11 +444,12 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onNextPick
   // Backdrop → poster → gradient fallback chain (some TMDB rows have
   // no backdrop image).
   const bgImage = hero.backdrop || hero.poster || ''
-  // 2026-06-05 (Home redesign B) — match % for the ring. Prefer the REAL
-  // recommender score (match, from /api/me/hero) when present and positive;
-  // otherwise fall back to the stable derived value (cold-start pool, where
-  // there's no taste centroid). Same title → same value either way.
-  const matchScore = match && match > 0 ? match : heroMatchScore(hero)
+  // Ring value: the personal Match when we have one (personalized pool), else
+  // the global Aurora Score (cold-start), else a derived estimate as a last
+  // resort. `showingPersonal` drives the ring's label so "92% Match" only
+  // appears when it's genuinely personal — otherwise it reads "92 Score".
+  const showingPersonal = !!(match && match > 0)
+  const matchScore = (match && match > 0) ? match : (score && score > 0) ? score : heroMatchScore(hero)
   const matchCircumference = 2 * Math.PI * 36
   // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
   // doesn't feel like a static still. The transition smooths cursor
@@ -546,7 +547,7 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onNextPick
       <div
         className="absolute top-6 right-6 md:top-8 md:right-8 z-20 flex flex-col items-center gap-1.5"
         role="img"
-        aria-label={`${matchScore} percent match`}
+        aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
       >
         <div className="relative w-[84px] h-[84px]">
           <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
@@ -567,7 +568,7 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, onNextPick
             {matchScore}%
           </span>
         </div>
-        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold" aria-hidden="true">Match</span>
+        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
       </div>
 
       {/* Subtitle */}
@@ -1445,6 +1446,7 @@ interface HomeViewProps {
   // current hero pick. Undefined / 0 (cold-start) → HeroSection falls back
   // to its derived rating-based estimate.
   heroMatch?: number
+  heroScore?: number
   onSurprise?: () => void
   onHeroPauseChange?: (paused: boolean) => void
   // Cold-start hint info — passed through from the /api/me/hero response.
@@ -1504,7 +1506,7 @@ interface HomeViewProps {
   //   next pick already in the loaded pool (instant, no refetch). Distinct.
   onNextPick?: () => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1579,6 +1581,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         onInfo={onSelect}
         reason={heroReason}
         match={heroMatch}
+        score={heroScore}
         onNextPick={onNextPick}
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
@@ -8839,6 +8842,7 @@ export default function App() {
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
               heroMatch={heroPool[heroIndex]?.match}
+              heroScore={heroPool[heroIndex]?.score}
               // "Surprise me" — play a random recommended pick (not the one shown).
               onSurprise={onSurprise}
               // "Not tonight" — advance to the next pick in the loaded pool.

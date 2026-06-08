@@ -49,12 +49,14 @@ type AnchorRail struct {
 // HeroPick is the API-layer shape of a hero pool entry. Mirrors
 // recommender.HeroPick at the boundary so internal types can evolve freely.
 //
-// Match is the integer "match %" (0-100) from the recommender's
-// taste-vector similarity; 0/omitted for the cold-start popular pool, in
-// which case the frontend falls back to its own derived estimate.
+// Score is the global Aurora Score (0-100): how feature-worthy the title is,
+// same for everyone. Match is the personal "% for you" (0-100) from the
+// profile's taste-vector similarity; 0/omitted for the cold-start popular pool,
+// where the frontend shows Score instead.
 type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
+	Score  int               `json:"score,omitempty"`
 	Match  int               `json:"match,omitempty"`
 }
 

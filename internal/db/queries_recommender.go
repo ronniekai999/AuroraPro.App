@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -540,6 +541,126 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		}
 	}
 	return items, rows.Err()
+}
+
+// ScoreRow is the per-item signal set the Aurora Score needs: rating + vote
+// count (Bayesian-shrunk quality), release year + added_at (freshness), and the
+// local engagement aggregates (heat, starts/finishes, favourite + collection
+// counts). Returned both by ScoringRows (the whole eligible library, the
+// population the score is standardized against) and ScoringSignalsByIDs
+// (specific hero picks). Zero engagement is the neutral baseline, so a fresh
+// library simply scores on quality + freshness.
+type ScoreRow struct {
+	ID          int64
+	Rating      float64
+	VoteCount   int
+	ReleaseYear int
+	AddedAt     time.Time
+
+	// Local engagement (Phase 2). Heat is a time-decayed sum of watch events;
+	// Starts/Finishes feed the Wilson completion-quality signal; FavCount /
+	// CollectionCount feed affinity.
+	Heat            float64
+	Starts          int
+	Finishes        int
+	FavCount        int
+	CollectionCount int
+}
+
+// scoringEngagementJoins decorates media_items (aliased m) with per-item
+// engagement aggregates: time-decayed heat, watch starts/finishes (for
+// completion quality), favourite count and collection count. $1 is the heat
+// e-folding scale in days. Shared verbatim by ScoringRows and
+// ScoringSignalsByIDs so both compute identical signals — the only difference
+// between them is the outer WHERE.
+const scoringEngagementJoins = `
+		LEFT JOIN (
+		    SELECT media_item_id,
+		           SUM((CASE WHEN completed THEN 1.0 ELSE 0.4 END)::float8
+		               * exp(-GREATEST(0, EXTRACT(EPOCH FROM (now() - COALESCE(completed_at, updated_at))) / 86400.0)::float8 / $1)) AS heat,
+		           (COUNT(*) FILTER (WHERE position_ms > 0 OR completed))::int AS starts,
+		           (COUNT(*) FILTER (WHERE completed))::int AS finishes
+		    FROM watch_progress
+		    GROUP BY media_item_id
+		) wp ON wp.media_item_id = m.id
+		LEFT JOIN (
+		    SELECT wi.media_item_id, COUNT(*)::int AS cnt
+		    FROM watchlist_items wi
+		    JOIN watchlists w ON w.id = wi.watchlist_id
+		    WHERE w.list_type = 'favorites'
+		    GROUP BY wi.media_item_id
+		) fav ON fav.media_item_id = m.id
+		LEFT JOIN (
+		    SELECT media_item_id, COUNT(*)::int AS cnt
+		    FROM collection_items
+		    GROUP BY media_item_id
+		) col ON col.media_item_id = m.id`
+
+// scoringSelectCols is the shared projection (order matches ScoreRow's scan).
+const scoringSelectCols = `m.id, COALESCE(m.rating, 0), COALESCE(m.vote_count, 0),
+		       COALESCE(m.year, 0), m.added_at,
+		       COALESCE(wp.heat, 0)::float8, COALESCE(wp.starts, 0), COALESCE(wp.finishes, 0),
+		       COALESCE(fav.cnt, 0), COALESCE(col.cnt, 0)`
+
+// scanScoreRow scans one row in the scoringSelectCols order.
+func scanScoreRow(rows pgx.Rows, r *ScoreRow) error {
+	return rows.Scan(&r.ID, &r.Rating, &r.VoteCount, &r.ReleaseYear, &r.AddedAt,
+		&r.Heat, &r.Starts, &r.Finishes, &r.FavCount, &r.CollectionCount)
+}
+
+// ScoringRows returns a ScoreRow for every item eligible to appear in the hero
+// (has a backdrop, has a rating) across all libraries. This is the population
+// the Aurora Score's z-score is calibrated against — a few thousand lightweight
+// rows, cheap to pull and cached by the caller on a TTL. No per-profile
+// filtering: the calibration is global, identical for every viewer.
+// heatDecayDays is the heat e-folding scale (the recommender owns the knob).
+func (q *Queries) ScoringRows(ctx context.Context, heatDecayDays float64) ([]ScoreRow, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT `+scoringSelectCols+`
+		FROM media_items m`+scoringEngagementJoins+`
+		WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
+		  AND m.rating > 0`, heatDecayDays)
+	if err != nil {
+		return nil, fmt.Errorf("scoring rows: %w", err)
+	}
+	defer rows.Close()
+	var out []ScoreRow
+	for rows.Next() {
+		var r ScoreRow
+		if err := scanScoreRow(rows, &r); err != nil {
+			return nil, fmt.Errorf("scan scoring row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ScoringSignalsByIDs returns the ScoreRow for each requested item id, keyed by
+// id. Unlike ScoringRows it applies NO eligibility filter — a personalized hero
+// pick may be unrated or backdrop-less and still needs a score. Ids absent from
+// the result (e.g. deleted between build and lookup) are simply missing from
+// the map; empty input returns an empty map.
+func (q *Queries) ScoringSignalsByIDs(ctx context.Context, ids []int64, heatDecayDays float64) (map[int64]ScoreRow, error) {
+	out := make(map[int64]ScoreRow, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT `+scoringSelectCols+`
+		FROM media_items m`+scoringEngagementJoins+`
+		WHERE m.id = ANY($2)`, heatDecayDays, ids)
+	if err != nil {
+		return nil, fmt.Errorf("scoring signals: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r ScoreRow
+		if err := scanScoreRow(rows, &r); err != nil {
+			return nil, fmt.Errorf("scan scoring signal: %w", err)
+		}
+		out[r.ID] = r
+	}
+	return out, rows.Err()
 }
 
 // pgxOK lets us reference pgx.ErrNoRows without an import-cycle if a future
