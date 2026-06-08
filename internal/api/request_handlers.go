@@ -1428,7 +1428,15 @@ func (m *RequestMonitor) notifyRequest(ctx context.Context, req *models.Request,
 		MediaType: req.MediaType,
 		RequestID: &reqID,
 	}
-	created, err := m.queries.CreateNotification(ctx, n)
+	// Detach the durable write from the cancellable poll ctx. The status UPDATE
+	// has already committed, so a graceful shutdown here must NOT drop the
+	// notification — it's the "source of truth" for offline users, and the
+	// monitor only re-polls 'processing' rows, so a missed write is never
+	// retried. WithoutCancel keeps ctx values but drops cancellation/deadline;
+	// the timeout still bounds it. Mirrors dispatchToARR's rootCtx+timeout.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	created, err := m.queries.CreateNotification(writeCtx, n)
 	if err != nil {
 		slog.Error("request monitor: failed to persist notification",
 			"request_id", req.ID, "type", notifType, "error", err)

@@ -6973,10 +6973,25 @@ export default function App() {
     const ac = new AbortController()
     listNotifications(ac.signal)
       .then(res => {
-        if (!cancelled) {
-          setNotifications(res.notifications)
-          setUnreadCount(res.unread)
-        }
+        if (cancelled) return
+        // Merge, don't overwrite. The WS opens on the same render, so a live
+        // 'notification' may have already been prepended by onNotification
+        // before this GET resolves. Union by id (newest-first) so that live
+        // arrival isn't clobbered, and never let the snapshot's unread count
+        // drop below what live events already bumped it to.
+        setNotifications(prev => {
+          if (prev.length === 0) return res.notifications
+          const seen = new Set<number>()
+          const merged: AppNotification[] = []
+          for (const n of [...prev, ...res.notifications]) {
+            if (seen.has(n.id)) continue
+            seen.add(n.id)
+            merged.push(n)
+          }
+          merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+          return merged
+        })
+        setUnreadCount(prev => Math.max(res.unread, prev))
       })
       .catch(() => {
         /* non-fatal — the bell just stays empty */
