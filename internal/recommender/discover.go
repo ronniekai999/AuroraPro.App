@@ -389,7 +389,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	// without an effort we deliberately stay native: slow, but functional. (Hero
 	// makes the analogous /v1 call ungated because its empty-content fallback is
 	// benign — score-ordered picks, just no LLM reasons.)
-	useV1 := shouldDiscoverUseV1(h.llm.UseStructured(), h.llm.ReasoningEffort())
+	useV1 := shouldUseStructuredV1(h.llm.UseStructured(), h.llm.ReasoningEffort())
 	raw, err := chatJSONWithRetryOn5xx(
 		llmCtx,
 		func(c context.Context) (string, error) {
@@ -499,22 +499,25 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	return out, nil
 }
 
-// shouldDiscoverUseV1 decides whether the Discover curation call takes the
-// schemaless OpenAI /v1 path (where reasoning_effort suppresses gpt-oss) or the
-// native /api/chat path. It returns true ONLY when structured outputs is on AND
-// a reasoning_effort is configured.
+// shouldUseStructuredV1 decides whether an LLM surface (hero rerank OR Discover
+// curation) takes the OpenAI /v1 path (where reasoning_effort suppresses a
+// reasoning model) or the native /api/chat path. It returns true ONLY when
+// structured outputs is on AND a reasoning_effort is configured.
 //
-// The AND on a non-empty effort is the regression guard: routing to /v1 with no
-// effort set hands gpt-oss its full default reasoning, which on /v1 returns
-// empty content → buildDiscover gets a non-5xx error → no retry → nil rails →
-// uncached vector fallback on every build. That is strictly worse than native,
-// which is slow but returns parseable rails. So with effort unset we stay
-// native. Kept as a pure function so this load-bearing gate is unit-testable
-// without standing up the full buildDiscover harness.
+// The AND on a non-empty effort is the regression guard. On /v1 with NO effort a
+// reasoning model runs its full default reasoning:
+//   - Discover: returns empty content → nil rails → uncached vector fallback.
+//   - Hero: a 20-40s reasoning runaway (deepseek-v4-flash) before any pick.
+//
+// Native (think:false) is strictly better in that state — gpt-oss ignores
+// think:false but still returns content (slow), while deepseek RESPECTS it and
+// is fast. So with effort unset both surfaces stay native; once an effort is set
+// they get the fast suppressed /v1 path. Pure function so the load-bearing gate
+// is unit-testable.
 //
 // Note "none" counts as set — it's an explicit operator choice that suppresses
 // reasoning, so /v1 is safe; only the empty (omitted) case is the footgun.
-func shouldDiscoverUseV1(structuredOutputs bool, reasoningEffort string) bool {
+func shouldUseStructuredV1(structuredOutputs bool, reasoningEffort string) bool {
 	return structuredOutputs && reasoningEffort != ""
 }
 

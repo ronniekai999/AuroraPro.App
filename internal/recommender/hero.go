@@ -680,7 +680,12 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 	llmCtx, cancel := context.WithTimeout(ctx, heroRerankBudget)
 	defer cancel()
 
-	raw, err := h.llm.ChatJSONWith(llmCtx, h.llm.ChatModelFast(), heroRerankSystem, user, heroRerankSchema, h.llm.UseStructured())
+	// Gate the /v1 path on a reasoning_effort being set (same rule as Discover):
+	// structured-ON + no-effort on /v1 is a reasoning runaway (deepseek-v4-flash
+	// burned ~24s + a parse-failing dump). With no effort we use native, where
+	// deepseek respects think:false (fast) and gpt-oss at least returns content.
+	useV1 := shouldUseStructuredV1(h.llm.UseStructured(), h.llm.ReasoningEffort())
+	raw, err := h.llm.ChatJSONWith(llmCtx, h.llm.ChatModelFast(), heroRerankSystem, user, heroRerankSchema, useV1)
 	if err != nil {
 		slog.Warn("hero: LLM rerank failed, returning vector order", "error", err)
 		return topNScored(candidates, candScores, h.poolSize), qualityFallback
@@ -849,6 +854,10 @@ var heroRerankSchema = map[string]any{
 var heroArrayKeyAliases = []string{
 	"picks", "featured", "selected", "selected_candidates",
 	"results", "selection", "recommendations", "items", "matches",
+	// deepseek-v4-flash wraps its picks under "candidates" — without this the
+	// ExtractArray finds nothing, parsing fails, and the hero silently falls
+	// back to score order (no LLM curation). Observed 2026-06-08.
+	"candidates",
 }
 
 // heroRerankPick is one entry from the LLM's chosen results.
