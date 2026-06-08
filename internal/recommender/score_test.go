@@ -119,7 +119,7 @@ func TestComputeLibraryScoreStats_ProducesSpread(t *testing.T) {
 
 	lo, hi, inOldBand := 101, -1, 0
 	for _, r := range rows {
-		core := coreScore(r.Rating, r.VoteCount, r.ReleaseYear, r.AddedAt, now, stats.ratingMean, defaultWeights)
+		core := coreScore(r, now, stats.ratingMean, defaultWeights)
 		s := auroraDisplay(core, stats.coreMean, stats.coreStd)
 		if s < lo {
 			lo = s
@@ -144,5 +144,75 @@ func TestComputeLibraryScoreStats_Empty(t *testing.T) {
 	stats := computeLibraryScoreStats(nil, now, defaultWeights)
 	if stats.n != 0 || stats.coreStd != 1 || stats.ratingMean != neutralRatingMean {
 		t.Errorf("empty library should yield neutral stats, got %+v", stats)
+	}
+}
+
+func TestSaturate(t *testing.T) {
+	if got := saturate(0, 5); got != 0 {
+		t.Errorf("saturate(0) should be 0, got %v", got)
+	}
+	if got := saturate(-3, 5); got != 0 {
+		t.Errorf("negative input should be 0, got %v", got)
+	}
+	if got := saturate(5, 5); !approx(got, 1-math.Exp(-1), 1e-9) {
+		t.Errorf("x==scale should be ~0.632, got %v", got)
+	}
+	if got := saturate(100, 5); got < 0.99 {
+		t.Errorf("large x should saturate toward 1, got %v", got)
+	}
+	if got := saturate(5, 0); got != 0 {
+		t.Errorf("scale<=0 disabled, got %v", got)
+	}
+}
+
+func TestWilsonLower(t *testing.T) {
+	// The canonical example: 2/2 must NOT outrank 180/200.
+	small := wilsonLower(2, 2, wilsonZ)
+	big := wilsonLower(180, 200, wilsonZ)
+	if !(small < big) {
+		t.Errorf("2/2 (%.3f) should rank below 180/200 (%.3f)", small, big)
+	}
+	// n=0 → 0.
+	if got := wilsonLower(0, 0, wilsonZ); got != 0 {
+		t.Errorf("n=0 should be 0, got %v", got)
+	}
+	// Lower bound sits below the point estimate.
+	if wb := wilsonLower(90, 100, wilsonZ); !(wb < 0.9) {
+		t.Errorf("lower bound should be below p̂=0.9, got %v", wb)
+	}
+	// Same rate, more evidence → tighter (higher) lower bound.
+	if !(wilsonLower(9, 10, wilsonZ) < wilsonLower(900, 1000, wilsonZ)) {
+		t.Error("same rate with more samples should raise the lower bound")
+	}
+	// pos clamped to n — no NaN / out-of-range.
+	if got := wilsonLower(5, 3, wilsonZ); got <= 0 || got > 1 {
+		t.Errorf("clamped pos should yield a valid proportion, got %v", got)
+	}
+}
+
+func TestCompletionQuality(t *testing.T) {
+	// Below the minimum starts → neutral, neither rewarded nor punished.
+	if got := completionQuality(3, 3); got != completionNeutral {
+		t.Errorf("sparse starts should be neutral %v, got %v", completionNeutral, got)
+	}
+	// Plenty of starts: mostly-finished reads high, mostly-abandoned reads low.
+	bingey := completionQuality(170, 200)
+	bouncy := completionQuality(30, 200)
+	if !(bingey > 0.6 && bouncy < 0.4 && bingey > bouncy) {
+		t.Errorf("expected binge>0.6 (got %.3f) and bounce<0.4 (got %.3f)", bingey, bouncy)
+	}
+}
+
+// TestCoreScore_EngagementLiftsScore verifies the proprietary engagement
+// signals actually move the score: an item your viewers are watching,
+// finishing, and favouriting outscores an identical title with no local
+// engagement.
+func TestCoreScore_EngagementLiftsScore(t *testing.T) {
+	now := time.Date(2026, 6, 7, 0, 0, 0, 0, time.UTC)
+	base := db.ScoreRow{Rating: 7.5, VoteCount: 1000, ReleaseYear: 2015, AddedAt: now.AddDate(-1, 0, 0)}
+	hot := base
+	hot.Heat, hot.Starts, hot.Finishes, hot.FavCount, hot.CollectionCount = 12, 200, 180, 8, 3
+	if !(coreScore(hot, now, 7.0, defaultWeights) > coreScore(base, now, 7.0, defaultWeights)) {
+		t.Error("strong local engagement should outscore an identical item without it")
 	}
 }

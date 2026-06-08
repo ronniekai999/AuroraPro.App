@@ -2,24 +2,37 @@
 // items, computed from signals AuroraPro actually owns rather than a rescaled
 // TMDB rating.
 //
-// The score is a weighted blend of independent sub-signals (Phase 1 ships two;
-// Phase 2 adds local engagement), standardized against the library's own
-// distribution and squashed through a logistic so the displayed numbers spread
-// across the full range instead of pinning in the 80s–90s.
+// The score is a weighted blend of independent sub-signals, standardized
+// against the library's own distribution and squashed through a logistic so the
+// displayed numbers spread across the full range instead of pinning in the
+// 80s–90s.
+//
+// Signals:
+//
+//   - quality    — Bayesian-shrunk TMDB rating (IMDb's weighted-rating formula):
+//     a 9.1 from 12 votes is pulled toward the library mean so it can't outrank
+//     an 8.4 from 40k.
+//   - freshness  — release recency + "new to this library" (added_at).
+//   - heat       — time-decayed sum of local watch events. The signal nobody
+//     else has: what THIS server's viewers are actually watching, now.
+//   - affinity   — how many viewers favourited it / how many collections it's in.
+//   - completion — Wilson lower bound on finishes/starts: do people who start it
+//     actually finish it? Separates "binge-y" from "looked good, everyone bailed".
 //
 // Two ideas do the heavy lifting:
 //
-//  1. Bayesian shrinkage (IMDb's weighted-rating formula). A raw 9.1 from 12
-//     votes shouldn't outrank an 8.4 from 40k. Each rating is pulled toward the
-//     library mean in proportion to how few votes back it, so low-confidence
-//     ratings stop dominating.
+//  1. Bayesian shrinkage + Wilson lower bound stop low-sample signals (few
+//     votes, few starts) from dominating with noisy extremes.
 //
 //  2. z-score → logistic calibration. The old code clamped a single signal into
 //     a flattering [82,98] band, which is why every hero read the same. Here the
 //     composite is standardized against the eligible library (mean/σ) and mapped
-//     through a logistic: the library median reads ~50, clearly-good titles
-//     ~70, elite ~90, weak ~30. Spread is produced by construction, and a 94
-//     means "top of THIS library", not "TMDB ≥ 9".
+//     through a logistic: median ~50, clearly-good ~70, elite ~90, weak ~30.
+//     This also gives graceful degradation for free — on a small/new library the
+//     engagement signals are ~constant (≈0 heat, neutral completion) across every
+//     item, so they contribute no variance and quality+freshness drive the
+//     spread; as real viewing accrues, heat/affinity/completion start to vary and
+//     pull their weight.
 //
 // All functions here are pure (time is passed in, never read) so the math is
 // unit-testable; the DB plumbing and caching live in hero.go.
@@ -32,26 +45,27 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 )
 
-// scoreWeights controls the Aurora Score blend. Phase 1 uses quality +
-// freshness; Phase 2 wires in heat / affinity / completion. Weights need NOT
-// sum to 1: the composite is z-scored against the library before display, so
-// only the RELATIVE sizes matter (they set how much each signal drives the
-// spread). Quality is intentionally dominant.
+// scoreWeights controls the Aurora Score blend. Weights need NOT sum to 1: the
+// composite is z-scored against the library before display, so only the
+// RELATIVE sizes matter (they set how much each signal drives the spread).
 type scoreWeights struct {
 	quality    float64
 	freshness  float64
-	heat       float64 // Phase 2
-	affinity   float64 // Phase 2
-	completion float64 // Phase 2
+	heat       float64
+	affinity   float64
+	completion float64
 }
 
-// defaultWeights is the live blend. Phase 1: quality-dominant with a freshness
-// nudge so just-released / just-added titles don't read identically to decade-
-// old catalog. The Phase 2 weights are 0 until their signals are wired so the
-// composite is well-defined at every phase.
+// defaultWeights is the live blend. Quality and local engagement (heat +
+// completion) lead; freshness and affinity nudge. Tunable — these are the
+// single policy knob, and because the composite is z-scored only their ratios
+// matter, not their absolute scale.
 var defaultWeights = scoreWeights{
-	quality:   0.75,
-	freshness: 0.25,
+	quality:    0.30,
+	freshness:  0.10,
+	heat:       0.28,
+	affinity:   0.14,
+	completion: 0.18,
 }
 
 const (
@@ -69,19 +83,44 @@ const (
 	freshnessReleaseScaleYears = 8.0
 
 	// freshnessAddedScaleDays is the e-folding time for "new to THIS library":
-	// just-scanned titles read ~1.0 and decay to ~0.37 over ~6 weeks. This is
-	// what surfaces a freshly-added film in the hero before it's buried.
+	// just-scanned titles read ~1.0 and decay to ~0.37 over ~6 weeks.
 	freshnessAddedScaleDays = 45.0
+
+	// heatDecayDays is the e-folding recency of a single watch event in the
+	// local-heat signal: a completion today counts ~1.0, one ~30 days ago ~0.37.
+	// Passed into the SQL aggregate so the knob lives here, not in the query.
+	heatDecayDays = 30.0
+
+	// heatSatScale shapes how decayed heat saturates onto 0..1 (see saturate):
+	// heat == heatSatScale → ~0.63. ~6 weighted recent completions reads "hot".
+	heatSatScale = 6.0
+
+	// affinitySatScale shapes how favourites+collections saturate onto 0..1.
+	affinitySatScale = 4.0
+
+	// collectionAffinityWeight discounts collection membership relative to an
+	// explicit favourite — a favourite is a stronger, individual signal than
+	// being swept into an admin/AI-built collection.
+	collectionAffinityWeight = 0.5
+
+	// wilsonZ is the z-score for the Wilson lower bound (~95% one-sided).
+	wilsonZ = 1.96
+
+	// minStartsForCompletion gates the completion-quality signal: below this
+	// many starts the finish ratio is too noisy to trust, so we return neutral.
+	minStartsForCompletion = 5
+
+	// completionNeutral is the completion-quality value used when starts are
+	// below minStartsForCompletion — "no opinion", neither rewarded nor punished.
+	completionNeutral = 0.5
 
 	// auroraLogisticK sets how steeply the standardized composite maps to the
 	// 0..100 display. With k=0.9: median (z=0)→50, +1σ→71, +2σ→86, +3σ→94,
-	// −1σ→29. Bigger k = more contrast (top items pushed toward 100); smaller
-	// k = flatter. This is the single spread-tuning knob.
+	// −1σ→29. Bigger k = more contrast. This is the spread-tuning knob.
 	auroraLogisticK = 0.9
 
 	// neutralRatingMean is the Bayesian prior used only when the library stats
-	// can't be computed yet (empty/error). 7.0 mirrors TMDB's global mean so a
-	// cold deployment still produces sane shrinkage.
+	// can't be computed yet (empty/error). 7.0 mirrors TMDB's global mean.
 	neutralRatingMean = 7.0
 )
 
@@ -113,9 +152,9 @@ func decay(age, scale float64) float64 {
 }
 
 // freshness is a 0..1 recency signal: the stronger of "recently released" and
-// "recently added to the library". Either input may be absent (year==0 /
-// zero time) and contributes 0; if both are absent the item reads 0 (no
-// freshness boost, not a penalty — the z-score handles the baseline).
+// "recently added to the library". Either input may be absent (year==0 / zero
+// time) and contributes 0; if both are absent the item reads 0 (no boost, not a
+// penalty — the z-score handles the baseline).
 func freshness(releaseYear int, addedAt, now time.Time) float64 {
 	var rel, add float64
 	if releaseYear > 0 {
@@ -127,15 +166,59 @@ func freshness(releaseYear int, addedAt, now time.Time) float64 {
 	return math.Max(rel, add)
 }
 
-// coreScore is the raw (pre-display) Aurora composite for one item. Takes
-// primitives so it's testable without DB types. quality is the Bayesian-shrunk
-// rating normalized to 0..1; freshness is 0..1. The result is an unbounded-ish
-// weighted sum that only becomes a 0..100 number after standardization in
-// auroraDisplay.
-func coreScore(rating float64, votes, releaseYear int, addedAt, now time.Time, ratingMean float64, w scoreWeights) float64 {
-	q := bayesianQuality(rating, votes, ratingMean, bayesPriorVotes) / 10.0
-	f := freshness(releaseYear, addedAt, now)
-	return w.quality*q + w.freshness*f
+// saturate folds a non-negative magnitude onto 0..1 via 1-exp(-x/scale): 0 at
+// 0, ~0.63 at x==scale, asymptotic to 1. Used to put unbounded engagement
+// counts (heat, favourites) on a comparable scale before blending. x<=0 or
+// scale<=0 returns 0.
+func saturate(x, scale float64) float64 {
+	if scale <= 0 || x <= 0 {
+		return 0
+	}
+	return 1 - math.Exp(-x/scale)
+}
+
+// wilsonLower is the lower bound of the Wilson score interval for a binomial
+// proportion pos/n at confidence set by z. It answers "given the finishes I've
+// observed, what's a conservative estimate of the true finish rate?" so a 2/2
+// can't outrank a 180/200. n<=0 returns 0; pos is clamped to [0,n].
+func wilsonLower(pos, n int, z float64) float64 {
+	if n <= 0 {
+		return 0
+	}
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > n {
+		pos = n
+	}
+	nf := float64(n)
+	phat := float64(pos) / nf
+	z2 := z * z
+	denom := 1 + z2/nf
+	centre := phat + z2/(2*nf)
+	margin := z * math.Sqrt((phat*(1-phat)+z2/(4*nf))/nf)
+	return (centre - margin) / denom
+}
+
+// completionQuality is the 0..1 "do people finish it?" signal: the Wilson lower
+// bound of finishes/starts, or a neutral 0.5 when starts are too few to trust.
+func completionQuality(finishes, starts int) float64 {
+	if starts < minStartsForCompletion {
+		return completionNeutral
+	}
+	return wilsonLower(finishes, starts, wilsonZ)
+}
+
+// coreScore is the raw (pre-display) Aurora composite for one item: each
+// sub-signal folded onto 0..1, then weighted. The result only becomes a 0..100
+// number after standardization in auroraDisplay.
+func coreScore(r db.ScoreRow, now time.Time, ratingMean float64, w scoreWeights) float64 {
+	q := bayesianQuality(r.Rating, r.VoteCount, ratingMean, bayesPriorVotes) / 10.0
+	f := freshness(r.ReleaseYear, r.AddedAt, now)
+	h := saturate(r.Heat, heatSatScale)
+	a := saturate(float64(r.FavCount)+collectionAffinityWeight*float64(r.CollectionCount), affinitySatScale)
+	c := completionQuality(r.Finishes, r.Starts)
+	return w.quality*q + w.freshness*f + w.heat*h + w.affinity*a + w.completion*c
 }
 
 // auroraDisplay maps a raw composite to the 0..100 ring value by standardizing
@@ -172,9 +255,9 @@ func neutralScoreStats(now time.Time) libraryScoreStats {
 }
 
 // computeLibraryScoreStats derives the calibration from the eligible library
-// rows. Two passes: first the mean rating (the Bayesian prior C), then the
-// mean/σ of every item's composite computed against that prior. `now` is passed
-// so freshness is evaluated at a single consistent instant.
+// rows. Two passes: first the mean rating (the Bayesian prior), then the mean/σ
+// of every item's composite computed against that prior. `now` is passed so
+// freshness and heat are evaluated at a single consistent instant.
 func computeLibraryScoreStats(rows []db.ScoreRow, now time.Time, w scoreWeights) libraryScoreStats {
 	n := len(rows)
 	if n == 0 {
@@ -184,12 +267,12 @@ func computeLibraryScoreStats(rows []db.ScoreRow, now time.Time, w scoreWeights)
 	for _, r := range rows {
 		sumR += r.Rating
 	}
-	c := sumR / float64(n)
+	ratingMean := sumR / float64(n)
 
 	cores := make([]float64, n)
 	var sumC float64
 	for i, r := range rows {
-		cores[i] = coreScore(r.Rating, r.VoteCount, r.ReleaseYear, r.AddedAt, now, c, w)
+		cores[i] = coreScore(r, now, ratingMean, w)
 		sumC += cores[i]
 	}
 	mu := sumC / float64(n)
@@ -201,7 +284,7 @@ func computeLibraryScoreStats(rows []db.ScoreRow, now time.Time, w scoreWeights)
 	}
 	std := math.Sqrt(ss / float64(n))
 
-	return libraryScoreStats{ratingMean: c, coreMean: mu, coreStd: std, n: n, builtAt: now}
+	return libraryScoreStats{ratingMean: ratingMean, coreMean: mu, coreStd: std, n: n, builtAt: now}
 }
 
 // clampInt bounds v to [lo,hi].

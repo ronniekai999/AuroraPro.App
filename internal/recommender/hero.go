@@ -511,7 +511,7 @@ func (h *Hero) libraryStats(ctx context.Context) libraryScoreStats {
 	if s := h.scoreStats.Load(); s != nil && time.Since(s.builtAt) < scoreStatsTTL {
 		return *s
 	}
-	rows, err := h.q.ScoringRows(ctx)
+	rows, err := h.q.ScoringRows(ctx, heatDecayDays)
 	if err != nil {
 		slog.Warn("hero: scoring-rows failed, using neutral score calibration", "error", err)
 		s := neutralScoreStats(time.Now())
@@ -539,7 +539,7 @@ func (h *Hero) scorePicks(ctx context.Context, picks []HeroPick) {
 			ids = append(ids, p.Item.ID)
 		}
 	}
-	signals, err := h.q.ScoringSignalsByIDs(ctx, ids)
+	signals, err := h.q.ScoringSignalsByIDs(ctx, ids, heatDecayDays)
 	if err != nil {
 		slog.Warn("hero: scoring-signals failed, keeping derived scores", "error", err)
 		return
@@ -557,7 +557,7 @@ func (h *Hero) scorePicks(ctx context.Context, picks []HeroPick) {
 		if !ok {
 			r = db.ScoreRow{ID: it.ID, Rating: it.Rating, ReleaseYear: it.Year, AddedAt: it.AddedAt}
 		}
-		core := coreScore(r.Rating, r.VoteCount, r.ReleaseYear, r.AddedAt, now, stats.ratingMean, defaultWeights)
+		core := coreScore(r, now, stats.ratingMean, defaultWeights)
 		picks[i].Score = auroraDisplay(core, stats.coreMean, stats.coreStd)
 	}
 }
