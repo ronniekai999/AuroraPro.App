@@ -1,4 +1,59 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+/* Self-hosted variable fonts (latin). Replaces the Google Fonts CDN
+   @import so type renders even when the deploy environment can't reach
+   fonts.googleapis.com (the silent CDN-fallback-to-system-sans failure
+   mode). One variable .woff2 per family covers every weight we use
+   (300–800); the browser only fetches the families referenced by the
+   active data-font system. The seven families back the four typeface
+   systems users pick in Settings → Appearance → Typeface. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter Tight';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/inter-tight.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('./fonts/space-grotesk.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Sora';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('./fonts/sora.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Bricolage Grotesque';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('./fonts/bricolage-grotesque.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Outfit';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/outfit.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Plus Jakarta Sans';
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url('./fonts/plus-jakarta-sans.woff2') format('woff2');
+}
 
 @tailwind base;
 @tailwind components;
@@ -26,6 +81,14 @@
     --input: 0 0% 14%;
     --ring: 270 91% 65%;
     --radius: 0.625rem;
+
+    /* Typeface system tokens — drive body + display type everywhere
+       (body, .font-display, .holo-text all read these vars). Default
+       (no data-font attribute) is "NOVA": Sora display + Inter Tight
+       body. Users override via Settings → Appearance → Typeface, which
+       writes data-font="current" | "eclipse" | "halo" on <html>. */
+    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Sora', 'Inter Tight', sans-serif;
 
     /* Glow theme tokens — drive the white/purple edge + halo on
        .glass-panel, .glass-card, and .media-card. Default is
@@ -68,6 +131,25 @@
       0 0 96px rgba(255, 255, 255, 0.18);
   }
 
+  /* Typeface systems — see Settings → Appearance → Typeface. The
+     default (NOVA: Sora + Inter Tight) lives in the :root tokens above;
+     these blocks override per the user's choice. "current" is the
+     original Space Grotesk + Inter pairing (labelled "Classic" in UI). */
+  html[data-font="current"] {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Space Grotesk', 'Inter', sans-serif;
+  }
+
+  html[data-font="eclipse"] {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
+  }
+
+  html[data-font="halo"] {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+  }
+
   /* Cinematic watch-party overlay — reduce-transparency / blur budget.
      The minimal-mode overlay surfaces (VoicePill, MiniDock, the floating
      rail card) layer backdrop-blur over PLAYING video, which repaints
@@ -85,7 +167,7 @@
 
   body {
     @apply bg-background text-foreground;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: var(--font-sans);
     overflow-x: hidden;
   }
 
@@ -96,7 +178,7 @@
 
 @layer utilities {
   .font-display {
-    font-family: 'Space Grotesk', 'Inter', sans-serif;
+    font-family: var(--font-display);
   }
 
   .text-gradient {
@@ -337,7 +419,7 @@
 
 /* Holographic text effect */
 .holo-text {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: var(--font-display);
   font-weight: 700;
   letter-spacing: 10px;
   text-transform: uppercase;

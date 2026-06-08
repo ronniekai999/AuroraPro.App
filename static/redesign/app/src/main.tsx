@@ -48,6 +48,24 @@ try {
   }
 } catch { /* ignore — fall through to default */ }
 
+// Apply the user's typeface preference BEFORE first paint so headings
+// and body render in the chosen font on the very first frame (no flash
+// of the default face). Default is "NOVA" (Sora + Inter Tight), defined
+// as the unprefixed :root tokens in index.css — so we only set the
+// attribute when the user has explicitly chosen another system.
+try {
+  const raw = localStorage.getItem('aurora_prefs')
+  if (raw) {
+    const parsed: unknown = JSON.parse(raw)
+    const font = parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>).font_choice
+      : null
+    if (font === 'current' || font === 'eclipse' || font === 'halo') {
+      document.documentElement.setAttribute('data-font', font)
+    }
+  }
+} catch { /* ignore — fall through to default (NOVA) */ }
+
 // 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
 // render-time throw anywhere in the tree shows a fallback instead of
 // a blank white page. The boundary is OUTSIDE BrowserRouter so a
