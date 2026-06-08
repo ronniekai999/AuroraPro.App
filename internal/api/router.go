@@ -427,6 +427,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 		adminH.SetLLMClient(deps.LLMClient)
 	}
 	requestH := NewRequestHandler(deps.Queries, deps.Hub, deps.Activity, deps.ArrClients, deps.Tmdb, deps.Tvdb)
+	notificationH := NewNotificationHandler(deps.Queries)
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
 		// Reconcile requests orphaned in 'pending' by a dispatch goroutine that
@@ -818,6 +819,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// achievement catalog). Per-user; reads from
 			// claims.UserID.
 			r.Get("/api/me/gamification", gamifyH.Stats)
+
+			// Per-user in-app notifications (bell + Notifications panel). Mounted
+			// here (not under the /api/me Route group) to avoid inheriting that
+			// group's 90s LLM timeout — these are sub-millisecond DB reads/writes.
+			r.Get("/api/me/notifications", notificationH.List)
+			r.Post("/api/me/notifications/read-all", notificationH.MarkAllRead)
+			r.Post("/api/me/notifications/{id}/read", notificationH.MarkRead)
 
 			// Admin (Phase 4)
 			r.Route("/api/admin", func(r chi.Router) {

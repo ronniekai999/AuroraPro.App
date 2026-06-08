@@ -16,6 +16,11 @@ const (
 	EventRequestStatus   = "request_status"
 	EventRequestProgress = "request_progress"
 
+	// Per-user in-app notification (bell + Notifications panel). Carries a
+	// persisted notification row's id so the client can render it and mark it
+	// read; see internal/db/queries_notifications.go.
+	EventNotification = "notification"
+
 	// Watch Party feature
 	EventPartyInvite = "party_invite"
 	EventPartyUpdate = "party_update"
