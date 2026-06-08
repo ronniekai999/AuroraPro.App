@@ -4,6 +4,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // trailingBracketTag matches a trailing "[content]" tag with optional
@@ -12,6 +15,92 @@ import (
 // "Show [Region 1] Edition" — only the prompt-shape `[type]` /
 // `[show]` / `[movie]` suffix that LLMs mirror from the candidate list.
 var trailingBracketTag = regexp.MustCompile(`\s*\[\S+\]\s*$`)
+
+// foldAccents folds diacritics to their base letter (é → e) via NFD
+// decomposition + dropping combining marks, so an accented candidate title
+// still matches an LLM that emitted the unaccented form.
+func foldAccents(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range norm.NFD.String(s) {
+		if unicode.Is(unicode.Mn, r) {
+			continue // combining mark
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// normalizeTitle produces a loose comparison key: accents folded, lowercased,
+// "&" → "and", and every run of non-alphanumeric chars collapsed to one space
+// (so superscripts, punctuation, and subtitle colons drop out). "The Accountant²"
+// and "The Accountant" both normalize to "the accountant"; "Drake & Josh" →
+// "drake and josh". Used ONLY for the collision-excluded loose-key tier in
+// ResolveByTitle — never as a primary lookup, since a loose match is weaker than
+// the exact / lowercase / year / tag forms.
+func normalizeTitle(s string) string {
+	s = strings.ToLower(foldAccents(s))
+	s = strings.ReplaceAll(s, "&", " and ")
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			space = false
+		} else if !space {
+			b.WriteByte(' ')
+			space = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// seedLooseKeys adds collision-excluded "loose" keys so ResolveByTitle can
+// recover LLM title drift — dropped superscripts ("The Accountant²" →
+// "The Accountant"), dropped subtitles ("The Conjuring: Last Rites" →
+// "The Conjuring"), accents, and &/and. For each candidate it offers the
+// normalized full title and the normalized pre-colon part. A loose key that
+// maps to MORE THAN ONE candidate is ambiguous and dropped entirely (never
+// resolves), so we never fuzzy-match into the wrong pick; a loose key that would
+// shadow an existing exact/lowercase key for a DIFFERENT index is also skipped.
+// Loose keys are NOT counted toward the collision total (they're seeded after
+// the counted pass). Keys shorter than 3 chars are skipped as too weak.
+func seedLooseKeys[T any](idx map[string]int, items []T, extract func(T) (title string, year int)) {
+	cand := make(map[string]map[int]struct{})
+	add := func(key string, i int) {
+		if len(key) < 3 {
+			return
+		}
+		if cand[key] == nil {
+			cand[key] = make(map[int]struct{})
+		}
+		cand[key][i] = struct{}{}
+	}
+	for i, item := range items {
+		title, _ := extract(item)
+		if title == "" {
+			continue
+		}
+		add(normalizeTitle(title), i)
+		if before, _, found := strings.Cut(title, ":"); found {
+			add(normalizeTitle(before), i)
+		}
+	}
+	for key, idxs := range cand {
+		if len(idxs) != 1 {
+			continue // ambiguous loose key → never resolve
+		}
+		var only int
+		for k := range idxs {
+			only = k
+		}
+		if existing, ok := idx[key]; ok && existing != only {
+			continue // would shadow an exact/lowercase key for a different item
+		}
+		idx[key] = only
+	}
+}
 
 // Title-fallback resolution for LLM-emitted picks.
 //
@@ -113,6 +202,7 @@ func BuildCandidateTitleIndexWithCollisions[T any](items []T, extract func(T) (t
 			put(strings.ToLower(withYear), i)
 		}
 	}
+	seedLooseKeys(idx, items, extract)
 	return idx, collisions
 }
 
@@ -161,6 +251,17 @@ func ResolveByTitle(idx CandidateTitleIndex, pickTitle string) (int, bool) {
 			return i, true
 		}
 		if i, ok := idx[strings.ToLower(cleaned)]; ok {
+			return i, true
+		}
+	}
+
+	// Loose tier (last resort): an accent/superscript/subtitle/&-tolerant
+	// normalized key. Only collision-excluded keys were seeded (seedLooseKeys),
+	// so a hit here is unambiguous — and exact/lowercase/year/tag forms always
+	// win first. Recovers drift like "The Accountant" → "The Accountant²" and
+	// "The Conjuring" → "The Conjuring: Last Rites".
+	if n := normalizeTitle(pickTitle); len(n) >= 3 {
+		if i, ok := idx[n]; ok {
 			return i, true
 		}
 	}

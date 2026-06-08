@@ -5395,6 +5395,17 @@ function AdminLLMTab() {
         <input type="checkbox" checked={s.structured_outputs ?? false} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
         Structured outputs <span className="text-white/40 text-xs">(OpenAI json_schema path for the hero rerank — restart required)</span>
       </label>
+      <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
+        Reasoning effort
+        <select value={s.reasoning_effort ?? ''} onChange={e => setS({ ...s, reasoning_effort: e.target.value })} className="px-2 py-1 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+          <option value="">Default (model decides)</option>
+          <option value="low">Low — fastest, recommended for gpt-oss</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="none">None</option>
+        </select>
+        <span className="text-white/40 text-xs">gpt-oss · structured /v1 path · restart required</span>
+      </label>
       <button
         disabled={saving}
         onClick={async () => {
@@ -5404,7 +5415,7 @@ function AdminLLMTab() {
               provider: s.provider, ollama_url: s.ollama_url, embed_url: s.embed_url,
               chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
               chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
-              structured_outputs: s.structured_outputs ?? false,
+              structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
             }
             if (apiKeyEdit) body.api_key = apiKeyEdit
             const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])

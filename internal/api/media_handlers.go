@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
@@ -390,6 +391,27 @@ func semanticFirst(mode, query string, semanticConfigured bool) bool {
 	return mode == "semantic" || wantsRecommendations(query)
 }
 
+// retryListQuery runs fn, and on a transient (non-canceled) error retries it
+// once after a short, context-aware backoff. This absorbs a brief DB blip — e.g.
+// pool/connection exhaustion while the startup metadata-refresh worker hammers
+// the DB, which surfaced as a fast 500 on the library list. The retry reuses the
+// request context (a context-error retry would be doomed, so we skip it), and
+// the backoff aborts immediately if the request is canceled. Extracted so the
+// retry policy is unit-testable without a database.
+func retryListQuery(ctx context.Context, fn func() ([]*models.MediaItem, int64, error)) ([]*models.MediaItem, int64, error) {
+	items, total, err := fn()
+	if err == nil || ctx.Err() != nil {
+		return items, total, err
+	}
+	slog.Warn("media list query failed, retrying once", "error", err)
+	select {
+	case <-time.After(75 * time.Millisecond):
+	case <-ctx.Done():
+		return items, total, ctx.Err()
+	}
+	return fn()
+}
+
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	filter := models.MediaFilter{
@@ -411,8 +433,19 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	// GetMediaItems now performs cross-library deduplication at the SQL level
 	// using DISTINCT ON, so COUNT and OFFSET operate on the deduped result set.
 	// No application-level overfetch/dedup/trim needed.
-	items, total, err := h.queries.GetMediaItems(r.Context(), filter, params)
+	items, total, err := retryListQuery(r.Context(), func() ([]*models.MediaItem, int64, error) {
+		return h.queries.GetMediaItems(r.Context(), filter, params)
+	})
 	if err != nil {
+		// A canceled request (client walked away, or the retry's backoff was
+		// cut short) isn't a server error — don't log it as one or write a 500
+		// nobody will read.
+		if r.Context().Err() != nil {
+			return
+		}
+		// Log the real error — previously it was swallowed, leaving the 500 a
+		// mystery with no diagnostic trail.
+		slog.Error("media list query failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to query media")
 		return
 	}

@@ -173,3 +173,76 @@ func TestChatJSONWithStructuredDecodeError(t *testing.T) {
 		t.Errorf("want decode error, got %v", err)
 	}
 }
+
+// TestChatJSONWithStructuredReasoningEffort: when ReasoningEffort is configured,
+// the /v1 request carries reasoning_effort (the knob that stops gpt-oss runaway
+// reasoning / empty content on the hero surface).
+func TestChatJSONWithStructuredReasoningEffort(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{\"ok\":1}"}}]}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m", ReasoningEffort: "low"})
+	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, true); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got, _ := body["reasoning_effort"].(string); got != "low" {
+		t.Errorf("reasoning_effort = %q, want low; body=%v", got, body)
+	}
+}
+
+// TestChatJSONWithStructuredNoReasoningEffortWhenUnset: unset → field omitted.
+func TestChatJSONWithStructuredNoReasoningEffortWhenUnset(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"}}]}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m"})
+	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, true); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if _, present := body["reasoning_effort"]; present {
+		t.Errorf("reasoning_effort should be omitted when unset; body=%v", body)
+	}
+}
+
+// TestChatJSONWithStructuredEmptyContent: a 200 with empty content (reasoning ran
+// long) is surfaced as an error so the caller falls back cleanly — not handed an
+// empty string the downstream parser chokes on.
+func TestChatJSONWithStructuredEmptyContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":""}}]}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m"})
+	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, true); err == nil || !strings.Contains(err.Error(), "empty content") {
+		t.Errorf("want 'empty content' error, got %v", err)
+	}
+}
+
+// TestChatJSONNativeOmitsReasoningEffort pins the invariant that reasoning_effort
+// is a /v1-only field: even with ReasoningEffort configured, the native
+// /api/chat request must NOT carry it (a future struct-unification could
+// regress this silently).
+func TestChatJSONNativeOmitsReasoningEffort(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &body)
+		_, _ = io.WriteString(w, `{"message":{"content":"{}"}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m", ReasoningEffort: "low"})
+	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, false); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if _, present := body["reasoning_effort"]; present {
+		t.Errorf("native /api/chat must NOT carry reasoning_effort; body=%v", body)
+	}
+}

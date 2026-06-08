@@ -281,3 +281,78 @@ func TestBuildCandidateTitleIndexWithCollisions_CaseCollision(t *testing.T) {
 		t.Errorf("expected 1 collision (lowercase only), got %d", count)
 	}
 }
+
+// TestResolveByTitle_LooseSuperscriptDrop: the observed production drift —
+// gpt-oss emitted "The Accountant" for the candidate "The Accountant²". The
+// loose normalized key recovers it.
+func TestResolveByTitle_LooseSuperscriptDrop(t *testing.T) {
+	items := []fakeCand{{title: "The Accountant²", year: 2025}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if got, ok := ResolveByTitle(idx, "The Accountant"); !ok || got != 0 {
+		t.Errorf("dropped-superscript title should resolve via loose key, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_LooseSubtitleDrop: model drops the subtitle.
+func TestResolveByTitle_LooseSubtitleDrop(t *testing.T) {
+	items := []fakeCand{{title: "The Conjuring: Last Rites", year: 2025}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if got, ok := ResolveByTitle(idx, "The Conjuring"); !ok || got != 0 {
+		t.Errorf("dropped-subtitle title should resolve via loose key, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_LooseAmpersand: "&" vs "and".
+func TestResolveByTitle_LooseAmpersand(t *testing.T) {
+	items := []fakeCand{{title: "Drake & Josh", year: 2004}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if got, ok := ResolveByTitle(idx, "Drake and Josh"); !ok || got != 0 {
+		t.Errorf("'and' vs '&' should resolve via loose key, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_LooseAccentFold: accented candidate, unaccented pick.
+func TestResolveByTitle_LooseAccentFold(t *testing.T) {
+	items := []fakeCand{{title: "Amélie", year: 2001}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if got, ok := ResolveByTitle(idx, "Amelie"); !ok || got != 0 {
+		t.Errorf("accent-folded title should resolve via loose key, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_LooseAmbiguousDropped: two candidates share a pre-colon
+// part, so that loose key is ambiguous and must NOT resolve — we never fuzzy
+// match into the wrong pick.
+func TestResolveByTitle_LooseAmbiguousDropped(t *testing.T) {
+	items := []fakeCand{
+		{title: "The Thing: Alpha", year: 2020},
+		{title: "The Thing: Beta", year: 2021},
+	}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if _, ok := ResolveByTitle(idx, "The Thing"); ok {
+		t.Error("ambiguous loose key (two subtitled candidates) must NOT resolve")
+	}
+}
+
+// TestResolveByTitle_ExactBeatsLoose: the loose tier is LAST resort — an exact
+// match on one candidate wins even when another candidate has a loose key.
+func TestResolveByTitle_ExactBeatsLoose(t *testing.T) {
+	items := []fakeCand{
+		{title: "Heat", year: 1995},     // exact owner of "Heat"
+		{title: "Heaters²", year: 2025}, // loose-normalizes to "heaters"
+	}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if got, ok := ResolveByTitle(idx, "Heat"); !ok || got != 0 {
+		t.Errorf("exact match must win over any loose key, got %d ok=%v", got, ok)
+	}
+}
+
+// TestResolveByTitle_ShortPickSkipsLoose: a <3-char pick never reaches the loose
+// tier (length-guarded), so it cleanly misses rather than over-matching.
+func TestResolveByTitle_ShortPickSkipsLoose(t *testing.T) {
+	items := []fakeCand{{title: "Severance", year: 2022}}
+	idx := BuildCandidateTitleIndex(items, extractFake)
+	if _, ok := ResolveByTitle(idx, "Se"); ok {
+		t.Error("2-char pick should not resolve via the loose tier")
+	}
+}
