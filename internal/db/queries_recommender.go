@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -540,6 +541,75 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		}
 	}
 	return items, rows.Err()
+}
+
+// ScoreRow is the minimal per-item signal set the Aurora Score needs: rating +
+// vote count (for Bayesian-shrunk quality) and release year + added_at (for
+// freshness). Returned both by ScoringRows (the whole eligible library, the
+// population the score is standardized against) and ScoringSignalsByIDs
+// (specific hero picks). Kept tiny so pulling the full library is cheap.
+type ScoreRow struct {
+	ID          int64
+	Rating      float64
+	VoteCount   int
+	ReleaseYear int
+	AddedAt     time.Time
+}
+
+// ScoringRows returns a ScoreRow for every item eligible to appear in the hero
+// (has a backdrop, has a rating) across all libraries. This is the population
+// the Aurora Score's z-score is calibrated against — a few thousand lightweight
+// rows, cheap to pull and cached by the caller on a TTL. No per-profile
+// filtering: the calibration is global, identical for every viewer.
+func (q *Queries) ScoringRows(ctx context.Context) ([]ScoreRow, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT m.id, COALESCE(m.rating, 0), COALESCE(m.vote_count, 0),
+		       COALESCE(m.year, 0), m.added_at
+		FROM media_items m
+		WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
+		  AND m.rating > 0`)
+	if err != nil {
+		return nil, fmt.Errorf("scoring rows: %w", err)
+	}
+	defer rows.Close()
+	var out []ScoreRow
+	for rows.Next() {
+		var r ScoreRow
+		if err := rows.Scan(&r.ID, &r.Rating, &r.VoteCount, &r.ReleaseYear, &r.AddedAt); err != nil {
+			return nil, fmt.Errorf("scan scoring row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ScoringSignalsByIDs returns the ScoreRow for each requested item id, keyed by
+// id. Unlike ScoringRows it applies NO eligibility filter — a personalized hero
+// pick may be unrated or backdrop-less and still needs a score. Ids absent from
+// the result (e.g. deleted between build and lookup) are simply missing from
+// the map; empty input returns an empty map.
+func (q *Queries) ScoringSignalsByIDs(ctx context.Context, ids []int64) (map[int64]ScoreRow, error) {
+	out := make(map[int64]ScoreRow, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT m.id, COALESCE(m.rating, 0), COALESCE(m.vote_count, 0),
+		       COALESCE(m.year, 0), m.added_at
+		FROM media_items m
+		WHERE m.id = ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("scoring signals: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r ScoreRow
+		if err := rows.Scan(&r.ID, &r.Rating, &r.VoteCount, &r.ReleaseYear, &r.AddedAt); err != nil {
+			return nil, fmt.Errorf("scan scoring signal: %w", err)
+		}
+		out[r.ID] = r
+	}
+	return out, rows.Err()
 }
 
 // pgxOK lets us reference pgx.ErrNoRows without an import-cycle if a future

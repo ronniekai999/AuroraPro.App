@@ -49,6 +49,12 @@ const (
 const (
 	cacheTTLFallback = 30 * time.Minute
 	cacheTTLFinal    = 24 * time.Hour
+	// scoreStatsTTL bounds how stale the global Aurora Score calibration
+	// (library mean rating + composite mean/σ) can get. The quality/freshness
+	// distribution drifts slowly — new scans, metadata refreshes — so 30m
+	// amortizes the eligible-rows scan across many hero builds without the
+	// displayed numbers visibly moving between page loads.
+	scoreStatsTTL = 30 * time.Minute
 	// heroRerankBudget caps the LLM rerank wall-clock. Originally 30s on the
 	// theory that hero's small prompt (~12 items) would land in 4–10s and
 	// 30s left margin. Production logs disproved that assumption — under
@@ -90,14 +96,12 @@ const (
 type HeroPick struct {
 	Item   *models.MediaItem `json:"item"`
 	Reason string            `json:"reason,omitempty"`
-	// Score is the integer "match %" (0-100) derived from the item's
-	// cosine similarity to the profile's taste vector via calibrateMatch (a
-	// piecewise-linear curve, see scoreFromMatch). It's >0 only for the
-	// personalized
-	// (taste-vector) pool; the cold-start popular pool has no centroid so
-	// Score stays 0 and the frontend falls back to its derived rating-based
-	// estimate. Computed once here so the distance→percent mapping lives in
-	// one place server-side.
+	// Score is the integer Aurora Score (0-100) — a global, proprietary
+	// "feature-worthiness" rating computed by scorePicks from Bayesian-shrunk
+	// quality + freshness (Phase 2 adds local engagement), standardized against
+	// the library distribution so it spreads across the full range instead of
+	// pinning in the 80s–90s. It's the same for every viewer (quality of the
+	// title, not personal fit). Populated once in build() before caching.
 	Score int `json:"score,omitempty"`
 }
 
@@ -148,6 +152,15 @@ type Hero struct {
 	// floor and the next request triggers a fresh build. Same gen-
 	// counter shape as the modal-system fix shipped earlier.
 	invalEpoch sync.Map // key: profileID (int64), val: *atomic.Int64
+
+	// scoreStats holds the GLOBAL Aurora Score calibration (library mean
+	// rating + composite mean/σ). Unlike the per-profile pool cache it's
+	// identical for every viewer, so it lives in a single atomic pointer
+	// refreshed on scoreStatsTTL rather than keyed by profile. scoreStatsMu
+	// serializes the (rare) refresh so a cold cache under concurrent hero
+	// builds runs the eligible-rows scan once, not once per goroutine.
+	scoreStats   atomic.Pointer[libraryScoreStats]
+	scoreStatsMu sync.Mutex
 }
 
 // New constructs a Hero recommender. Pass nil for llmClient to disable blurb
@@ -479,7 +492,74 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 	}
 
 	h.annotatePicks(ctx, picks)
+	h.scorePicks(ctx, picks)
 	return picks, quality, nil
+}
+
+// libraryStats returns the global Aurora Score calibration, refreshing it from
+// the DB when the cached copy is missing or older than scoreStatsTTL. On query
+// failure it caches a neutral calibration (everything reads ~50) so scoring
+// degrades rather than fails. The double-checked lock keeps a cold cache under
+// concurrent hero builds from firing N identical ScoringRows scans.
+func (h *Hero) libraryStats(ctx context.Context) libraryScoreStats {
+	if s := h.scoreStats.Load(); s != nil && time.Since(s.builtAt) < scoreStatsTTL {
+		return *s
+	}
+	h.scoreStatsMu.Lock()
+	defer h.scoreStatsMu.Unlock()
+	// Re-check: another goroutine may have refreshed while we waited.
+	if s := h.scoreStats.Load(); s != nil && time.Since(s.builtAt) < scoreStatsTTL {
+		return *s
+	}
+	rows, err := h.q.ScoringRows(ctx)
+	if err != nil {
+		slog.Warn("hero: scoring-rows failed, using neutral score calibration", "error", err)
+		s := neutralScoreStats(time.Now())
+		h.scoreStats.Store(&s)
+		return s
+	}
+	s := computeLibraryScoreStats(rows, time.Now(), defaultWeights)
+	h.scoreStats.Store(&s)
+	return s
+}
+
+// scorePicks computes the global Aurora Score for each pick and writes it to
+// pick.Score, replacing the cosine-similarity placeholder set upstream. Runs
+// once per build after annotatePicks, before the pool is cached. On
+// signal-fetch failure the existing scores are left untouched — a hero with
+// slightly-off numbers still beats no hero.
+func (h *Hero) scorePicks(ctx context.Context, picks []HeroPick) {
+	if len(picks) == 0 {
+		return
+	}
+	stats := h.libraryStats(ctx)
+	ids := make([]int64, 0, len(picks))
+	for _, p := range picks {
+		if p.Item != nil {
+			ids = append(ids, p.Item.ID)
+		}
+	}
+	signals, err := h.q.ScoringSignalsByIDs(ctx, ids)
+	if err != nil {
+		slog.Warn("hero: scoring-signals failed, keeping derived scores", "error", err)
+		return
+	}
+	now := time.Now()
+	for i := range picks {
+		it := picks[i].Item
+		if it == nil {
+			continue
+		}
+		// Prefer the DB signal row; fall back to whatever the item carries.
+		// rating/year/added_at are populated on every pick; vote_count isn't,
+		// so an unrated fallback shrinks to the library mean — a sane neutral.
+		r, ok := signals[it.ID]
+		if !ok {
+			r = db.ScoreRow{ID: it.ID, Rating: it.Rating, ReleaseYear: it.Year, AddedAt: it.AddedAt}
+		}
+		core := coreScore(r.Rating, r.VoteCount, r.ReleaseYear, r.AddedAt, now, stats.ratingMean, defaultWeights)
+		picks[i].Score = auroraDisplay(core, stats.coreMean, stats.coreStd)
+	}
 }
 
 // annotatePicks fills Genres + Has4K on each pick's Item, in place, before

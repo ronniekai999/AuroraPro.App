@@ -324,27 +324,23 @@ function greetingFirstName(username?: string): string {
 }
 
 // Stable, deterministic "match %" for the hero ring — the COLD-START
-// FALLBACK only. The recommender now returns a real taste-vector match
-// (HeroPick.match, threaded as heroMatch) for the personalized pool; this
-// derived value is used solely when that's absent or 0 (the popular
-// cold-start pool has no taste centroid). It produces a plausible,
-// CONSISTENT-per-title value (same title → same %, never random) from the
-// media's rating, clamped to a flattering 82–98 band, hashing the id when
-// rating is missing so every cold-start hero still gets a number.
+// FALLBACK only. The recommender now returns a real Aurora Score
+// (HeroPick.score, threaded as `match`) for EVERY pick, so this fires only
+// if that's somehow absent. Deliberately NOT clamped to the old flattering
+// 82–98 band — that band is exactly what made every hero read the same. It
+// maps the TMDB rating onto an honest spread (a 6 reads ~58, a 9 reads ~88),
+// CONSISTENT-per-title (same title → same %), hashing the id when rating is
+// missing so every hero still gets a number.
 function heroMatchScore(media: { id: number; rating?: number }): number {
   const r = media.rating ?? 0
-  let score: number
   if (r > 0) {
-    // TMDB ratings are 0–10. Map the realistic 6.5–9.5 band onto 82–98
-    // so well-rated titles read high without ever hitting a fake 100%.
-    const norm = Math.max(0, Math.min(1, (r - 6.5) / 3))
-    score = 82 + norm * 16
-  } else {
-    // No rating — derive a deterministic value from the id so it's
-    // stable across renders/rotations rather than jumping around.
-    score = 85 + (media.id % 13)
+    // TMDB 0–10 → ~10..97, linear with real spread and capped just under 100
+    // so we never show a fake perfect match.
+    return Math.round(Math.max(5, Math.min(97, r * 9.5 + 2)))
   }
-  return Math.round(Math.max(82, Math.min(98, score)))
+  // No rating — deterministic mid-spread from the id so it's stable across
+  // renders but not clustered at the top of the scale.
+  return 35 + (media.id % 31)
 }
 
 // "{Xh Ym left}" / "{Ym left}" remaining-time label for a Continue
