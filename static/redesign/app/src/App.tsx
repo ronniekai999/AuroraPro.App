@@ -3531,6 +3531,55 @@ function SettingsView({ user: settingsUser, onLogout, onToast }: SettingsViewPro
                 )
               })}
             </div>
+
+            {/* Typeface — writes aurora_prefs.font_choice and live-updates
+                <html data-font> so all display + body text reflows into the
+                chosen system immediately (CSS vars --font-sans/--font-display
+                in index.css). Default ("nova": Sora + Inter Tight) is the
+                unprefixed :root token set; only the other three set the
+                attribute. Each chip previews its own display face. */}
+            <div className="pt-1">
+              <p className="text-white/80 text-sm font-medium">Typeface</p>
+              <p className="text-white/40 text-xs">Display and body fonts used across the app.</p>
+            </div>
+            <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
+              {([
+                { id: 'nova',    label: 'Nova',    desc: 'Futuristic · default', font: "'Sora', sans-serif" },
+                { id: 'eclipse', label: 'Eclipse', desc: 'Editorial',            font: "'Bricolage Grotesque', sans-serif" },
+                { id: 'halo',    label: 'Halo',    desc: 'Polished',             font: "'Outfit', sans-serif" },
+                { id: 'current', label: 'Classic', desc: 'Original',             font: "'Space Grotesk', sans-serif" },
+              ] as const).map(opt => {
+                const stored = rawRef.current.font_choice
+                const current = typeof stored === 'string' ? stored : 'nova'
+                const active = current === opt.id
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => {
+                      rawRef.current = { ...rawRef.current, font_choice: opt.id }
+                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
+                      // "nova" is the default — no attribute (matches the unprefixed
+                      // :root tokens in index.css and keeps a clean DOM).
+                      if (opt.id === 'nova') document.documentElement.removeAttribute('data-font')
+                      else document.documentElement.setAttribute('data-font', opt.id)
+                      // Force re-render so the active chip updates.
+                      setSettings(s => ({ ...s }))
+                    }}
+                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                      active
+                        ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
+                        : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                    }`}
+                  >
+                    <p className={`text-base font-semibold ${active ? 'text-white' : 'text-white/80'}`} style={{ fontFamily: opt.font }}>{opt.label}</p>
+                    <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                  </button>
+                )
+              })}
+            </div>
           </div>
         </div>
 

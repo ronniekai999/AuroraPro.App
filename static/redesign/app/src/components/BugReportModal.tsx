@@ -537,11 +537,10 @@ export function BugReportModal({ prefillName, onClose, onSubmitted, tokenHealthy
             !(node instanceof HTMLElement
               && node.dataset.screenshotExclude === 'true'),
           // Deep-debug H1 — `skipFonts: true` prevents the library
-          // from fetching @font-face binaries (Aurora's CSS @imports
-          // Inter + Space Grotesk from Google Fonts). Without this,
-          // every Capture click pings fonts.googleapis.com +
-          // fonts.gstatic.com — adds 200ms-2s latency and silently
-          // fails on offline / corporate-proxy users. The DOM is
+          // from re-fetching @font-face binaries. Aurora self-hosts its
+          // variable fonts (src/fonts/*.woff2 via @font-face), so without
+          // this every Capture click refetches those woff2 files — adds
+          // latency and needlessly re-embeds fonts. The DOM is
           // already painted with the user's chosen font; the
           // captured PNG matches what they see on screen via the
           // browser's font cache (NOT via re-embedding the font in
