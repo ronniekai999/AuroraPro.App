@@ -430,8 +430,15 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onN
         <div className="text-center px-8">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
             <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
-              <circle cx="18" cy="18" r="16" stroke="#A855F7" strokeWidth="2.5" opacity="0.5" />
-              <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
+              <defs>
+                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stopColor="#A855F7" />
+                  <stop offset="0.5" stopColor="#7C3AED" />
+                  <stop offset="1" stopColor="#22D3EE" />
+                </linearGradient>
+              </defs>
+              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
+              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
           <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
@@ -1035,8 +1042,15 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
         <div className="text-center mb-10">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
             <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
-              <circle cx="18" cy="18" r="16" stroke="#A855F7" strokeWidth="2.5" opacity="0.5" />
-              <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
+              <defs>
+                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stopColor="#A855F7" />
+                  <stop offset="0.5" stopColor="#7C3AED" />
+                  <stop offset="1" stopColor="#22D3EE" />
+                </linearGradient>
+              </defs>
+              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
+              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
           <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
@@ -1323,8 +1337,15 @@ function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setSe
       >
         <div className="w-9 h-9 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
           <svg width="20" height="20" viewBox="0 0 36 36" fill="none">
-            <circle cx="18" cy="18" r="16" stroke="#A855F7" strokeWidth="2.5" opacity="0.5" />
-            <path d="M14 11L26 18L14 25Z" fill="#A855F7" />
+            <defs>
+              <linearGradient id="auroraMarkB" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#A855F7" />
+                <stop offset="0.5" stopColor="#7C3AED" />
+                <stop offset="1" stopColor="#22D3EE" />
+              </linearGradient>
+            </defs>
+            <circle cx="18" cy="18" r="16" fill="url(#auroraMarkB)" />
+            <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
           </svg>
         </div>
         <span className="text-white font-bold text-lg font-display tracking-wider">AURORA PRO</span>

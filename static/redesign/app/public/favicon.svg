@@ -1,8 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36">
-  <!-- Aurora favicon — matches the in-app sidebar logo at App.tsx:946-950.
-       Filled purple circle on transparent background + white play triangle.
-       Solid fill works better at favicon sizes than the in-app stroked
-       circle (anti-aliasing eats the stroke at 16x16). -->
-  <circle cx="18" cy="18" r="16" fill="#A855F7" />
+  <!-- Aurora favicon — report-gradient mark: violet→cyan circle + white play
+       triangle. Mirrors the in-app marks in App.tsx (auroraMarkA/B). A solid
+       gradient fill reads cleanly down to 16x16 where a stroke would alias. -->
+  <defs>
+    <linearGradient id="auroraFav" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#A855F7" />
+      <stop offset="0.5" stop-color="#7C3AED" />
+      <stop offset="1" stop-color="#22D3EE" />
+    </linearGradient>
+  </defs>
+  <circle cx="18" cy="18" r="16" fill="url(#auroraFav)" />
   <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
 </svg>
