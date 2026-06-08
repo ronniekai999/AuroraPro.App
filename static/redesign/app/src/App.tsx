@@ -548,6 +548,18 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onN
           background: 'radial-gradient(ellipse 60% 70% at 20% 60%, rgba(168, 85, 247, 0.35), transparent 65%)',
         }}
       />
+      {/* Top-right corner scrim — the Match ring lives here, but the scrims
+          above only cover bottom + left, so on a backdrop that's bright in
+          this corner (blown-out art, e.g. Person of Interest) the white score
+          number + ring vanished. A soft radial vignette anchored top-right
+          guarantees contrast regardless of the image, fading to transparent
+          toward the focal point so it doesn't darken the artwork. */}
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          background: 'radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)',
+        }}
+      />
 
       {/* 2026-06-05 (Home redesign B) — Match ring, top-right of the
           hero. A circular purple→cyan arc showing a stable, derived
@@ -575,11 +587,11 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onN
               strokeDasharray={`${(matchScore / 100) * matchCircumference} ${matchCircumference}`}
             />
           </svg>
-          <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white" aria-hidden="true">
+          <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white [text-shadow:0_1px_4px_rgba(0,0,0,0.55)]" aria-hidden="true">
             {matchScore}%
           </span>
         </div>
-        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
+        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
       </div>
 
       {/* Subtitle */}
