@@ -371,6 +371,14 @@ func (c *Client) ChatModelSmart() string {
 // unchanged behavior.
 func (c *Client) UseStructured() bool { return c.cfg.StructuredOutputs }
 
+// ReasoningEffort returns the configured gpt-oss reasoning level for the /v1
+// path ("low"|"medium"|"high"|"none", or "" when unset). Callers use it to
+// decide whether taking the /v1 path actually buys reasoning suppression: an
+// empty value means gpt-oss runs its full default reasoning on /v1 — the
+// runaway / empty-content case — so a surface like Discover should prefer the
+// native path unless this is set. See shouldDiscoverUseV1 in the recommender.
+func (c *Client) ReasoningEffort() string { return c.cfg.ReasoningEffort }
+
 // ChatJSON is the back-compatible entry point: native structured output on the
 // default chat model. Equivalent to ChatJSONWith(ctx, "", system, user, schema,
 // false).

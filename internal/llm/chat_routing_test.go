@@ -135,12 +135,12 @@ func TestChatJSONBackCompat(t *testing.T) {
 // honored when set.
 func TestChatModelAccessorsFallback(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://x", ChatModel: "base"})
-	if c.ChatModelFast() != "base" || c.ChatModelSmart() != "base" || c.UseStructured() {
-		t.Errorf("unset: fast=%q smart=%q structured=%v", c.ChatModelFast(), c.ChatModelSmart(), c.UseStructured())
+	if c.ChatModelFast() != "base" || c.ChatModelSmart() != "base" || c.UseStructured() || c.ReasoningEffort() != "" {
+		t.Errorf("unset: fast=%q smart=%q structured=%v effort=%q", c.ChatModelFast(), c.ChatModelSmart(), c.UseStructured(), c.ReasoningEffort())
 	}
-	c2 := NewClient(Config{BaseURL: "http://x", ChatModel: "base", ChatModelFast: "f", ChatModelSmart: "s", StructuredOutputs: true})
-	if c2.ChatModelFast() != "f" || c2.ChatModelSmart() != "s" || !c2.UseStructured() {
-		t.Errorf("set: fast=%q smart=%q structured=%v", c2.ChatModelFast(), c2.ChatModelSmart(), c2.UseStructured())
+	c2 := NewClient(Config{BaseURL: "http://x", ChatModel: "base", ChatModelFast: "f", ChatModelSmart: "s", StructuredOutputs: true, ReasoningEffort: "low"})
+	if c2.ChatModelFast() != "f" || c2.ChatModelSmart() != "s" || !c2.UseStructured() || c2.ReasoningEffort() != "low" {
+		t.Errorf("set: fast=%q smart=%q structured=%v effort=%q", c2.ChatModelFast(), c2.ChatModelSmart(), c2.UseStructured(), c2.ReasoningEffort())
 	}
 }
 
