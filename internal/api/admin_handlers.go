@@ -162,23 +162,32 @@ type LLMSettings struct {
 	HasAPIKey    bool   `json:"has_api_key"`
 	ChatModel    string `json:"chat_model"`
 	EmbedModel   string `json:"embed_model"`
-	DebugLog     bool   `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog bool   `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded bool   `json:"client_loaded"`  // false when LLM is disabled at startup
+	// Phase A per-surface routing. Empty fast/smart ⇒ fall back to ChatModel.
+	// Restart-required (the client captures Config at NewClient), like ChatModel.
+	ChatModelFast     string `json:"chat_model_fast"`
+	ChatModelSmart    string `json:"chat_model_smart"`
+	StructuredOutputs bool   `json:"structured_outputs"`
+	DebugLog          bool   `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog      bool   `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded      bool   `json:"client_loaded"`  // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
 // Centralized so GetLLMSettings + UpdateLLMSettings can't drift.
 var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
+	ChatModelFast, ChatModelSmart, StructuredOutputs                       string
 }{
-	Provider:   "llm_provider",
-	OllamaURL:  "llm_ollama_url",
-	EmbedURL:   "llm_embed_url",
-	APIKey:     "llm_api_key",
-	ChatModel:  "llm_chat_model",
-	EmbedModel: "llm_embed_model",
-	DebugLog:   "llm_debug_log",
+	Provider:          "llm_provider",
+	OllamaURL:         "llm_ollama_url",
+	EmbedURL:          "llm_embed_url",
+	APIKey:            "llm_api_key",
+	ChatModel:         "llm_chat_model",
+	EmbedModel:        "llm_embed_model",
+	DebugLog:          "llm_debug_log",
+	ChatModelFast:     "llm_chat_model_fast",
+	ChatModelSmart:    "llm_chat_model_smart",
+	StructuredOutputs: "llm_structured_outputs",
 }
 
 // GetLLMSettings returns the current persisted LLM configuration plus the
@@ -205,6 +214,11 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 	out.EmbedURL = byKey[llmSettingKeys.EmbedURL]
 	out.ChatModel = byKey[llmSettingKeys.ChatModel]
 	out.EmbedModel = byKey[llmSettingKeys.EmbedModel]
+	out.ChatModelFast = byKey[llmSettingKeys.ChatModelFast]
+	out.ChatModelSmart = byKey[llmSettingKeys.ChatModelSmart]
+	if v := byKey[llmSettingKeys.StructuredOutputs]; v != "" {
+		out.StructuredOutputs = v == "true"
+	}
 	if v := byKey[llmSettingKeys.DebugLog]; v != "" {
 		out.DebugLog = v == "true"
 	}
@@ -229,13 +243,16 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 // alone". The frontend sends a sparse object with only changed fields, which
 // is what lets DebugLog flips return restart_required:false.
 type llmUpdateRequest struct {
-	Provider   *string `json:"provider,omitempty"`
-	OllamaURL  *string `json:"ollama_url,omitempty"`
-	EmbedURL   *string `json:"embed_url,omitempty"`
-	APIKey     *string `json:"api_key,omitempty"` // empty string clears; absence leaves alone
-	ChatModel  *string `json:"chat_model,omitempty"`
-	EmbedModel *string `json:"embed_model,omitempty"`
-	DebugLog   *bool   `json:"debug_log,omitempty"`
+	Provider          *string `json:"provider,omitempty"`
+	OllamaURL         *string `json:"ollama_url,omitempty"`
+	EmbedURL          *string `json:"embed_url,omitempty"`
+	APIKey            *string `json:"api_key,omitempty"` // empty string clears; absence leaves alone
+	ChatModel         *string `json:"chat_model,omitempty"`
+	EmbedModel        *string `json:"embed_model,omitempty"`
+	ChatModelFast     *string `json:"chat_model_fast,omitempty"`
+	ChatModelSmart    *string `json:"chat_model_smart,omitempty"`
+	StructuredOutputs *bool   `json:"structured_outputs,omitempty"`
+	DebugLog          *bool   `json:"debug_log,omitempty"`
 }
 
 // UpdateLLMSettings persists the supplied fields to server_settings and
@@ -302,11 +319,31 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.APIKey, req.APIKey},
 		{llmSettingKeys.ChatModel, req.ChatModel},
 		{llmSettingKeys.EmbedModel, req.EmbedModel},
+		{llmSettingKeys.ChatModelFast, req.ChatModelFast},
+		{llmSettingKeys.ChatModelSmart, req.ChatModelSmart},
 	} {
 		if err := apply(p.key, p.val); err != nil {
 			slog.Warn("UpdateLLMSettings: write failed", "key", p.key, "error", err)
 			writeError(w, http.StatusInternalServerError, "failed to save LLM settings")
 			return
+		}
+	}
+
+	// StructuredOutputs is a bool (like DebugLog) but restart-required (the
+	// client captures it at NewClient), so it bumps restart_required rather
+	// than hot-applying.
+	if req.StructuredOutputs != nil {
+		val := "false"
+		if *req.StructuredOutputs {
+			val = "true"
+		}
+		if current, _, _ := h.queries.GetSettingExists(r.Context(), llmSettingKeys.StructuredOutputs); current != val {
+			if err := h.queries.SetSetting(r.Context(), llmSettingKeys.StructuredOutputs, val); err != nil {
+				slog.Warn("UpdateLLMSettings: structured_outputs write failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to save structured outputs toggle")
+				return
+			}
+			restartRequired = true
 		}
 	}
 

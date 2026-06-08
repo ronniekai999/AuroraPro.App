@@ -357,7 +357,10 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	raw, err := chatJSONWithRetryOn5xx(
 		llmCtx,
 		func(c context.Context) (string, error) {
-			return h.llm.ChatJSON(c, discoverSystem, prompt, nil)
+			// Smart model for the heavy, 24h-cached curation. Schema stays nil
+			// (native /api/chat) — the nested rails→picks json_schema is
+			// re-enabled in Phase C once Discover is flattened to one-rail-per-call.
+			return h.llm.ChatJSONWith(c, h.llm.ChatModelSmart(), discoverSystem, prompt, nil, false)
 		},
 		func(err error) {
 			slog.Warn("discover: LLM 5xx, retrying once",

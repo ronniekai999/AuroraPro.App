@@ -5377,6 +5377,12 @@ function AdminLLMTab() {
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed Model</span>
           <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Fast Model (optional)</span>
+          <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Smart Model (optional)</span>
+          <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder="Discover curation · blank = Chat Model" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
           <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
@@ -5384,6 +5390,10 @@ function AdminLLMTab() {
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
         <input type="checkbox" checked={s.debug_log} onChange={e => setS({ ...s, debug_log: e.target.checked })} />
         Debug log <span className="text-white/40 text-xs">(verbose LLM call traces — adds disk I/O)</span>
+      </label>
+      <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
+        <input type="checkbox" checked={s.structured_outputs ?? false} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
+        Structured outputs <span className="text-white/40 text-xs">(OpenAI json_schema path for the hero rerank — restart required)</span>
       </label>
       <button
         disabled={saving}
@@ -5393,6 +5403,8 @@ function AdminLLMTab() {
             const body: Record<string, unknown> = {
               provider: s.provider, ollama_url: s.ollama_url, embed_url: s.embed_url,
               chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
+              chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
+              structured_outputs: s.structured_outputs ?? false,
             }
             if (apiKeyEdit) body.api_key = apiKeyEdit
             const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
