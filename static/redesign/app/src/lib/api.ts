@@ -2074,6 +2074,42 @@ export async function getRequestsConfig(signal?: AbortSignal): Promise<RequestsC
   return apiFetch<RequestsConfig>('/api/requests/config', { signal })
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Notifications (per-user bell + panel). Named AppNotification to avoid
+// shadowing the DOM `Notification` global.
+
+export interface AppNotification {
+  id: number
+  user_id: number
+  type: string // 'request_available' | 'request_failed'
+  title: string
+  media_type?: string
+  request_id?: number
+  read_at?: string | null // null/absent ⇒ unread
+  created_at: string
+}
+
+export interface NotificationsResponse {
+  notifications: AppNotification[]
+  unread: number
+}
+
+// listNotifications returns the caller's recent notifications + unread count.
+// The persisted feed is the source of truth seeded on login/reconnect; the
+// 'notification' WebSocket event is best-effort live delivery on top.
+export async function listNotifications(signal?: AbortSignal): Promise<NotificationsResponse> {
+  const res = await apiFetch<NotificationsResponse>('/api/me/notifications', { signal })
+  return res || { notifications: [], unread: 0 }
+}
+
+export async function markNotificationRead(id: number): Promise<void> {
+  await apiFetch(`/api/me/notifications/${id}/read`, { method: 'POST' })
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await apiFetch('/api/me/notifications/read-all', { method: 'POST' })
+}
+
 // TMDB-via-Aurora search for the request-create form. Aurora proxies
 // TMDB so users don't need their own API keys. Returns a small shape
 // — we only display poster + title + year + tmdb_id (used in the

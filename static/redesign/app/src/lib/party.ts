@@ -269,6 +269,17 @@ export function buildCompanionWsUrl(token: string): string {
   return `${buildWsUrl('/ws/party-room', token)}&companion=1`
 }
 
+// Build the app-wide hub socket URL (the general /ws endpoint behind the shared
+// websocket.Hub — request_status, notification, etc.). No ?token= is needed for
+// the SPA: this is a same-origin upgrade, so the browser sends the httpOnly
+// access cookie, and the server's requireQueryTokenClaims falls back to reading
+// that cookie when the query token is absent (helpers.go). Non-same-origin
+// clients (Cast/AirPlay) don't use this hub.
+export function buildAppWsUrl(): string {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${location.host}/ws`
+}
+
 // Validate a code format before any network round-trip — same constraint
 // V1 uses: 6 chars, uppercased. The backend ALSO validates (server is
 // authoritative); this is purely a UX guard so we don't fire WebSocket

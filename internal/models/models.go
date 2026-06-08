@@ -863,6 +863,32 @@ type Request struct {
 	Username string `json:"username,omitempty"`
 }
 
+// ============================================================
+// Notifications
+// ============================================================
+
+// Notification type constants. v1 covers request lifecycle outcomes; the type
+// drives the icon/copy the frontend renders.
+const (
+	NotificationRequestAvailable = "request_available"
+	NotificationRequestFailed    = "request_failed"
+)
+
+// Notification is a durable, per-user in-app notification backing the bell +
+// Notifications panel. Created by the request monitor on a status transition and
+// also pushed live over the 'notification' WebSocket event; the persisted row is
+// the source of truth for users who were offline when the event fired.
+type Notification struct {
+	ID        int64      `json:"id"`
+	UserID    int64      `json:"user_id"`
+	Type      string     `json:"type"`                 // request_available | request_failed
+	Title     string     `json:"title"`                // media title, e.g. "Hook"
+	MediaType string     `json:"media_type,omitempty"` // movie | tv
+	RequestID *int64     `json:"request_id,omitempty"` // source request, when applicable
+	ReadAt    *time.Time `json:"read_at,omitempty"`    // nil ⇒ unread
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 // CreateRequestPayload is the JSON body for POST /api/requests.
 type CreateRequestPayload struct {
 	MediaType    string `json:"media_type"`

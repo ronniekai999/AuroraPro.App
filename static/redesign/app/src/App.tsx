@@ -117,6 +117,9 @@ import {
   triggerUpdate,
   type UpdateStatus,
   type UpdateState,
+  listNotifications,
+  markAllNotificationsRead,
+  type AppNotification,
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
@@ -147,6 +150,7 @@ import { GamificationCard } from '@/components/GamificationCard'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
 import { useParty } from '@/hooks/useParty'
+import { useRealtime } from '@/hooks/useRealtime'
 
 /* ─────────────────────── TYPES ─────────────────────── */
 interface Media {
@@ -6241,13 +6245,23 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
 // NotificationPanel surfaces recent admin activity log entries.
 // Real-time WS-driven notifications are TODO; non-admins see an
 // empty state.
-function NotificationPanel({ open, isAdmin, onClose }: {
+function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRead }: {
   open: boolean
   isAdmin: boolean
   onClose: () => void
+  notifications: AppNotification[]
+  onMarkAllRead: () => void
 }) {
   const [entries, setEntries] = useState<ActivityEntry[]>([])
   const [loading, setLoading] = useState(false)
+  // Mark the user's notifications read when the panel opens (clears the badge).
+  // Via a ref so this open→true effect doesn't depend on the parent's inline
+  // callback identity, which changes every render.
+  const onMarkAllReadRef = useRef(onMarkAllRead)
+  onMarkAllReadRef.current = onMarkAllRead
+  useEffect(() => {
+    if (open) onMarkAllReadRef.current()
+  }, [open])
   useEffect(() => {
     if (!open || !isAdmin) return
     let cancelled = false
@@ -6282,34 +6296,58 @@ function NotificationPanel({ open, isAdmin, onClose }: {
   // (content scrolls inside).
   //
   // z-[45] — same layering rationale as ServerPanel above.
+  const notifLine = (n: AppNotification): string =>
+    n.type === 'request_failed' ? `Request failed: ${n.title}` : `${n.title} is now available`
+
   return (
     <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
-        <h3 className="text-white font-semibold">{isAdmin ? 'Recent Activity' : 'Notifications'}</h3>
+        <h3 className="text-white font-semibold">Notifications</h3>
         <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
           <Icon name="x" size={16} />
         </button>
       </div>
       <div>
-        {!isAdmin && (
+        {notifications.length === 0 && (
           <div className="p-8 text-center">
-            <p className="text-white/40 text-sm">No notifications</p>
-            <p className="text-white/30 text-xs mt-2">Real-time alerts arrive in Phase 5.3.</p>
+            <p className="text-white/40 text-sm">No notifications yet</p>
+            <p className="text-white/30 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
           </div>
         )}
-        {isAdmin && loading && entries.length === 0 && (
-          <p className="p-4 text-white/40 text-sm">Loading…</p>
-        )}
-        {isAdmin && !loading && entries.length === 0 && (
-          <div className="p-8 text-center"><p className="text-white/40 text-sm">No recent activity.</p></div>
-        )}
-        {isAdmin && entries.map(e => (
-          <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-            <h4 className="text-white/90 text-sm font-medium">{e.event_type.replace(/_/g, ' ')}</h4>
-            {e.username && <p className="text-white/50 text-xs mt-0.5">{e.username}</p>}
-            <p className="text-white/30 text-xs mt-1">{fmtRel(e.created_at)}</p>
+        {notifications.map(n => (
+          <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
+            <span
+              className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${n.type === 'request_failed' ? 'bg-red-400' : 'bg-emerald-400'}`}
+              aria-hidden="true"
+            />
+            <div className="min-w-0">
+              <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
+              <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
+            </div>
           </div>
         ))}
+
+        {/* Admin activity log, kept below the user's own notifications. */}
+        {isAdmin && (
+          <>
+            <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
+              <h4 className="text-white/40 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
+            </div>
+            {loading && entries.length === 0 && (
+              <p className="px-4 pb-4 text-white/40 text-sm">Loading…</p>
+            )}
+            {!loading && entries.length === 0 && (
+              <p className="px-4 pb-4 text-white/40 text-sm">No recent activity.</p>
+            )}
+            {entries.map(e => (
+              <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                <h4 className="text-white/90 text-sm font-medium">{e.event_type.replace(/_/g, ' ')}</h4>
+                {e.username && <p className="text-white/50 text-xs mt-0.5">{e.username}</p>}
+                <p className="text-white/30 text-xs mt-1">{fmtRel(e.created_at)}</p>
+              </div>
+            ))}
+          </>
+        )}
       </div>
     </div>
   )
@@ -6783,6 +6821,10 @@ export default function App() {
   const [bugReportConfig, setBugReportConfig] = useState<BugReportConfig | null>(null)
   // M10 Phase 4.5 — Requests view real data.
   const [requestsList, setRequestsList] = useState<MediaRequest[] | null>(null)
+  // Per-user notification feed (bell + panel). Seeded on login, kept live by the
+  // 'notification' WS event; unreadCount drives the sidebar bell badge.
+  const [notifications, setNotifications] = useState<AppNotification[]>([])
+  const [unreadCount, setUnreadCount] = useState(0)
 
   // Load profiles once the user is logged in.
   useEffect(() => {
@@ -6891,6 +6933,74 @@ export default function App() {
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
+
+  // App-wide realtime hub: live request-status patches + push notifications.
+  // One socket for the whole session, enabled only while logged in.
+  const realtimeUserId = user && typeof user === 'object' ? user.id : null
+  useRealtime({
+    enabled: realtimeUserId != null,
+    onRequestStatus: (ev) => {
+      // Patch the matching row's status in place — NEVER insert. The create
+      // flow already optimistically prepends the new row, and the failure
+      // path may carry an error_message; dedupe strictly by request id.
+      setRequestsList(prev =>
+        prev
+          ? prev.map(r =>
+              r.id === ev.request_id
+                ? { ...r, status: ev.status, ...(ev.error_message ? { error_message: ev.error_message } : {}) }
+                : r,
+            )
+          : prev,
+      )
+    },
+    onNotification: (n) => {
+      // Prepend (dedupe by id in case a reconnect replays), bump the badge, and
+      // surface a transient toast.
+      setNotifications(prev => (prev.some(x => x.id === n.id) ? prev : [n, ...prev]))
+      setUnreadCount(c => c + 1)
+      addToast(
+        n.type === 'request_failed' ? `Request failed: ${n.title}` : `${n.title} is now available`,
+        n.type === 'request_failed' ? 'error' : 'success',
+      )
+    },
+  })
+
+  // Seed the notification feed + unread badge on login (once per user id). The
+  // WS keeps it live thereafter; resetUserState clears it on logout.
+  useEffect(() => {
+    if (realtimeUserId == null) return
+    let cancelled = false
+    const ac = new AbortController()
+    listNotifications(ac.signal)
+      .then(res => {
+        if (cancelled) return
+        // Merge, don't overwrite. The WS opens on the same render, so a live
+        // 'notification' may have already been prepended by onNotification
+        // before this GET resolves. Union by id (newest-first) so that live
+        // arrival isn't clobbered, and never let the snapshot's unread count
+        // drop below what live events already bumped it to.
+        setNotifications(prev => {
+          if (prev.length === 0) return res.notifications
+          const seen = new Set<number>()
+          const merged: AppNotification[] = []
+          for (const n of [...prev, ...res.notifications]) {
+            if (seen.has(n.id)) continue
+            seen.add(n.id)
+            merged.push(n)
+          }
+          merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+          return merged
+        })
+        setUnreadCount(prev => Math.max(res.unread, prev))
+      })
+      .catch(() => {
+        /* non-fatal — the bell just stays empty */
+      })
+    return () => {
+      cancelled = true
+      ac.abort()
+    }
+  }, [realtimeUserId])
 
   const handleNavigate = useCallback((v: string) => {
     // QA 2026-05-25 — clicking the *current* view's nav item should
@@ -7411,6 +7521,8 @@ export default function App() {
     showsLoadMoreAcRef.current?.abort()
     showsLoadMoreAcRef.current = null
     setRequestsList(null)
+    setNotifications([])
+    setUnreadCount(0)
     setLibrary([])
     setSelectedMedia(null)
     setDetailItem(null)
@@ -8684,7 +8796,7 @@ export default function App() {
         setServerOpen={setServerOpen}
         notifOpen={notifOpen}
         setNotifOpen={setNotifOpen}
-        notifCount={0 /* Real unread-count needs the global WS + server unread-state; show 0 until that lands rather than a permanently-wrong badge. */}
+        notifCount={unreadCount}
         mobileOpen={sidebarMobileOpen}
         onMobileClose={() => setSidebarMobileOpen(false)}
       />
@@ -8729,6 +8841,16 @@ export default function App() {
         open={notifOpen}
         isAdmin={user.role === 'admin'}
         onClose={() => setNotifOpen(false)}
+        notifications={notifications}
+        onMarkAllRead={() => {
+          if (unreadCount === 0) return
+          setUnreadCount(0)
+          const now = new Date().toISOString()
+          setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
+          markAllNotificationsRead().catch(() => {
+            /* non-fatal — local state is already cleared */
+          })
+        }}
       />
 
       {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}

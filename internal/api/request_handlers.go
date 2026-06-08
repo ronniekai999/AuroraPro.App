@@ -913,6 +913,9 @@ func (h *RequestHandler) ApproveRequest(w http.ResponseWriter, r *http.Request) 
 	// Dispatch now that the request is admitted. dispatchToARR re-reads the row
 	// and drives it to processing/failed; lifecycle is tied to h.rootCtx.
 	req.Status = models.RequestPending
+	// Make the approval flip real-time: previously the client only saw movement
+	// once dispatch flipped the row to processing/failed.
+	h.broadcastRequestStatus(req, models.RequestPending)
 	go h.dispatchToARR(req)
 
 	if h.activity != nil {
@@ -1168,6 +1171,8 @@ func (m *RequestMonitor) checkRequest(ctx context.Context, req *models.Request) 
 			"status":     models.RequestAvailable,
 			"media_type": req.MediaType,
 		})
+		// Durable "now available" notification (bell + panel); also pushed live.
+		m.notifyRequest(ctx, req, models.NotificationRequestAvailable)
 		// Trigger library scan so the new file appears in Aurora's catalog
 		m.triggerMatchingLibraryScan(ctx, req)
 	}
@@ -1352,6 +1357,7 @@ func (m *RequestMonitor) handleCheckFailure(ctx context.Context, req *models.Req
 			"status":     models.RequestFailed,
 			"media_type": req.MediaType,
 		})
+		m.notifyRequest(ctx, req, models.NotificationRequestFailed)
 	}
 }
 
@@ -1403,6 +1409,49 @@ func (m *RequestMonitor) handleGone(ctx context.Context, req *models.Request) {
 		"title":      req.Title,
 		"status":     models.RequestFailed,
 		"media_type": req.MediaType,
+	})
+	m.notifyRequest(ctx, req, models.NotificationRequestFailed)
+}
+
+// notifyRequest persists a per-user notification for a request lifecycle outcome
+// and pushes it live over the 'notification' WebSocket event. CreateNotification
+// dedupes by (user, request, type), so the 5s monitor poll re-entering a row
+// cannot spawn duplicate notifications — and we only push over WS when a NEW row
+// was actually created. Best-effort: a persistence failure is logged, never
+// allowed to disrupt the status transition that triggered it.
+func (m *RequestMonitor) notifyRequest(ctx context.Context, req *models.Request, notifType string) {
+	reqID := req.ID
+	n := &models.Notification{
+		UserID:    req.UserID,
+		Type:      notifType,
+		Title:     req.Title,
+		MediaType: req.MediaType,
+		RequestID: &reqID,
+	}
+	// Detach the durable write from the cancellable poll ctx. The status UPDATE
+	// has already committed, so a graceful shutdown here must NOT drop the
+	// notification — it's the "source of truth" for offline users, and the
+	// monitor only re-polls 'processing' rows, so a missed write is never
+	// retried. WithoutCancel keeps ctx values but drops cancellation/deadline;
+	// the timeout still bounds it. Mirrors dispatchToARR's rootCtx+timeout.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	created, err := m.queries.CreateNotification(writeCtx, n)
+	if err != nil {
+		slog.Error("request monitor: failed to persist notification",
+			"request_id", req.ID, "type", notifType, "error", err)
+		return
+	}
+	if !created {
+		return // already notified for this (user, request, type) — don't re-push
+	}
+	m.hub.BroadcastToUser(req.UserID, ws.EventNotification, map[string]interface{}{
+		"id":         n.ID,
+		"type":       n.Type,
+		"title":      n.Title,
+		"media_type": n.MediaType,
+		"request_id": req.ID,
+		"created_at": n.CreatedAt,
 	})
 }
 
