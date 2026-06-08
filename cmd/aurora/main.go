@@ -1085,6 +1085,15 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	get("llm_api_key", &cfg.APIKey)
 	get("llm_chat_model", &cfg.ChatModel)
 	get("llm_embed_model", &cfg.EmbedModel)
+	// Phase A per-surface routing (optional). Empty → ChatModel, so a
+	// deployment that sets none is unchanged.
+	get("llm_chat_model_fast", &cfg.ChatModelFast)
+	get("llm_chat_model_smart", &cfg.ChatModelSmart)
+	if v, ok, _ := queries.GetSettingExists(ctx, "llm_structured_outputs"); ok {
+		// Accept the env-style truthy set too, so a hand-edited server_settings
+		// row ("1"/"yes") isn't silently ignored (matches config.go's parse).
+		cfg.StructuredOutputs = v == "true" || v == "1" || v == "yes"
+	}
 
 	if v, ok, _ := queries.GetSettingExists(ctx, "llm_debug_log"); ok {
 		cfg.Debug = v == "true"

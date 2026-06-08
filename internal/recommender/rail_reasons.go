@@ -252,7 +252,9 @@ func (h *Hero) fillReasonsBackground(profileID int64, items []*models.MediaItem)
 	}
 
 	prompt := buildRailReasonPrompt(anchors, items)
-	raw, err := h.llm.ChatJSON(ctx, railReasonSystem, prompt, railReasonSchema)
+	// Fast model — this is a frequent, latency-sensitive async fill. Native
+	// /api/chat (the flat reasons schema already works there).
+	raw, err := h.llm.ChatJSONWith(ctx, h.llm.ChatModelFast(), railReasonSystem, prompt, railReasonSchema, false)
 	if err != nil {
 		slog.Warn("rail reasons: LLM call failed", "profile", profileID, "error", err)
 		return

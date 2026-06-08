@@ -1327,6 +1327,9 @@ export interface LLMSettings {
   has_api_key: boolean
   chat_model: string
   embed_model: string
+  chat_model_fast?: string
+  chat_model_smart?: string
+  structured_outputs?: boolean
   debug_log: boolean
   live_debug_log: boolean
   client_loaded: boolean
@@ -1341,6 +1344,9 @@ export async function updateAdminLLM(body: Partial<{
   api_key: string
   chat_model: string
   embed_model: string
+  chat_model_fast: string
+  chat_model_smart: string
+  structured_outputs: boolean
   debug_log: boolean
 }>): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { method: 'PUT', body })

@@ -30,14 +30,21 @@ const maxLoggedBody = 8 * 1024 * 1024
 // Config controls how the client talks to Ollama. All fields have sensible
 // defaults applied by NewClient when zero — callers only set what they want.
 type Config struct {
-	BaseURL     string        // e.g. "http://ollama:11434" or "https://ollama.com"
-	EmbedURL    string        // optional; override for embeddings only (used when chat is on Cloud but embed is local)
-	APIKey      string        // optional bearer token for Ollama Cloud
-	EmbedModel  string        // e.g. "nomic-embed-text"
-	ChatModel   string        // e.g. "gemma3:12b", "gpt-oss:20b", "qwen2.5:1.5b-instruct"
-	Dims        int           // target embedding dimensionality (truncated if model is wider)
-	HTTPTimeout time.Duration // per-request budget; embedding is fast, chat is not
-	Debug       bool          // initial debug-logging state; hot-swap later via SetDebug
+	BaseURL    string // e.g. "http://ollama:11434" or "https://ollama.com"
+	EmbedURL   string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
+	APIKey     string // optional bearer token for Ollama Cloud
+	EmbedModel string // e.g. "nomic-embed-text"
+	ChatModel  string // e.g. "gemma3:12b", "gpt-oss:20b", "qwen2.5:1.5b-instruct"
+	// Per-surface routing (Phase A). Empty → fall back to ChatModel, so a
+	// deployment that sets none behaves exactly as before. Fast = frequent,
+	// latency-sensitive surfaces (hero rerank, rail reasons); Smart = the
+	// heavy, 24h-cached Discover curation.
+	ChatModelFast     string
+	ChatModelSmart    string
+	StructuredOutputs bool          // use the OpenAI-compatible response_format=json_schema path (hero pilot); default false → native /api/chat
+	Dims              int           // target embedding dimensionality (truncated if model is wider)
+	HTTPTimeout       time.Duration // per-request budget; embedding is fast, chat is not
+	Debug             bool          // initial debug-logging state; hot-swap later via SetDebug
 }
 
 // Client is safe for concurrent use; the underlying http.Client handles pooling
@@ -306,16 +313,88 @@ type chatResponse struct {
 	Message ChatMessage `json:"message"`
 }
 
-// ChatJSON sends a structured-output chat request. `schema` is a JSON Schema
-// describing the expected output shape; Ollama enforces it on local models —
-// but hosted Cloud models often ignore the schema, so callers MUST use a
-// tolerant parser on the returned string.
-//
-// Temperature is fixed low (0.1) — query parsing should be deterministic, not
-// creative. Bump it via Options if a future caller needs variety.
+// OpenAI-compatible request/response shapes for the /v1/chat/completions path
+// used by ChatJSONWith when structured outputs are enabled. Ollama exposes this
+// endpoint alongside /api/chat; newer cloud models honor response_format=
+// json_schema there more reliably than Ollama's native `format` field (which
+// 500s on nested schemas — see discover.go). This is the foundation Phase C
+// will reuse to re-enable enforced schemas on Discover.
+type oaiChatRequest struct {
+	Model          string             `json:"model"`
+	Messages       []ChatMessage      `json:"messages"`
+	Temperature    float64            `json:"temperature"`
+	ResponseFormat *oaiResponseFormat `json:"response_format,omitempty"`
+}
+type oaiResponseFormat struct {
+	Type       string        `json:"type"` // "json_schema"
+	JSONSchema oaiJSONSchema `json:"json_schema"`
+}
+type oaiJSONSchema struct {
+	Name   string `json:"name"`
+	Schema any    `json:"schema"`
+	Strict bool   `json:"strict"`
+}
+type oaiChatResponse struct {
+	Choices []struct {
+		Message ChatMessage `json:"message"`
+	} `json:"choices"`
+}
+
+// ChatModelFast returns the model for high-frequency, latency-sensitive
+// surfaces (hero rerank, rail reasons), falling back to the default chat model
+// when unset.
+func (c *Client) ChatModelFast() string {
+	if c.cfg.ChatModelFast != "" {
+		return c.cfg.ChatModelFast
+	}
+	return c.cfg.ChatModel
+}
+
+// ChatModelSmart returns the model for the heavy, 24h-cached Discover curation,
+// falling back to the default chat model when unset.
+func (c *Client) ChatModelSmart() string {
+	if c.cfg.ChatModelSmart != "" {
+		return c.cfg.ChatModelSmart
+	}
+	return c.cfg.ChatModel
+}
+
+// UseStructured reports whether the OpenAI-compatible json_schema path is
+// enabled (llm_structured_outputs). Off by default → native /api/chat, i.e.
+// unchanged behavior.
+func (c *Client) UseStructured() bool { return c.cfg.StructuredOutputs }
+
+// ChatJSON is the back-compatible entry point: native structured output on the
+// default chat model. Equivalent to ChatJSONWith(ctx, "", system, user, schema,
+// false).
 func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) (string, error) {
+	return c.ChatJSONWith(ctx, c.cfg.ChatModel, system, user, schema, false)
+}
+
+// ChatJSONWith sends a structured-output chat request on an explicit model.
+// When structured && schema != nil it uses the OpenAI-compatible
+// /v1/chat/completions response_format=json_schema path; otherwise Ollama's
+// native /api/chat `format` field. An empty model falls back to the configured
+// default. Cloud models can ignore the schema on EITHER path, so callers MUST
+// still run a tolerant parser on the returned string.
+//
+// Temperature is fixed low (0.1) — curation/parsing should be deterministic,
+// not creative.
+func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, schema any, structured bool) (string, error) {
+	if model == "" {
+		model = c.cfg.ChatModel
+	}
+	if structured && schema != nil {
+		return c.chatOpenAISchema(ctx, model, system, user, schema)
+	}
+	return c.chatNative(ctx, model, system, user, schema)
+}
+
+// chatNative is the Ollama-native /api/chat path (the original ChatJSON body,
+// now parameterized by model).
+func (c *Client) chatNative(ctx context.Context, model, system, user string, schema any) (string, error) {
 	body, err := json.Marshal(chatRequest{
-		Model: c.cfg.ChatModel,
+		Model: model,
 		Messages: []ChatMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
@@ -331,7 +410,7 @@ func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) 
 	url := c.cfg.BaseURL + "/api/chat"
 	reqID := c.newReqID()
 	start := time.Now()
-	c.logRequest(reqID, url, c.cfg.ChatModel, body)
+	c.logRequest(reqID, url, model, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -363,6 +442,75 @@ func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) 
 		return "", fmt.Errorf("ollama chat: decode: %w", err)
 	}
 	return out.Message.Content, nil
+}
+
+// chatOpenAISchema uses the OpenAI-compatible endpoint with a json_schema
+// response_format. strict is false on purpose: our schemas use keywords
+// (minItems/maxItems) that strict mode rejects on some providers, and the
+// tolerant parser is the real safety net — we want strong guidance, not hard
+// validation that 400s the request. The error string keeps the
+// "ollama chat: status N" shape so isLLMServerError (discover.go) still matches
+// for the 5xx retry.
+//
+// Caveat: unlike chatNative this path sends no thinking-suppression signal, so a
+// reasoning model/gateway that folds its trace into `content` can defeat the
+// tolerant parser (degrading to the score-ordered fallback). Until Phase C adds
+// reasoning suppression here, pair llm_structured_outputs with a non-thinking
+// fast model.
+func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user string, schema any) (string, error) {
+	body, err := json.Marshal(oaiChatRequest{
+		Model: model,
+		Messages: []ChatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+		Temperature: 0.1,
+		ResponseFormat: &oaiResponseFormat{
+			Type:       "json_schema",
+			JSONSchema: oaiJSONSchema{Name: "result", Schema: schema, Strict: false},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	url := c.cfg.BaseURL + "/v1/chat/completions"
+	reqID := c.newReqID()
+	start := time.Now()
+	c.logRequest(reqID, url, model, body)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.cfg.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama chat: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, capErr := readCappedBody(resp.Body)
+	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama chat: status %d: %s", resp.StatusCode, snippet(raw, 512))
+	}
+	if capErr != nil {
+		return "", fmt.Errorf("ollama chat: %w", capErr)
+	}
+
+	var out oaiChatResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", fmt.Errorf("ollama chat: decode: %w", err)
+	}
+	if len(out.Choices) == 0 {
+		return "", fmt.Errorf("ollama chat: empty choices")
+	}
+	return out.Choices[0].Message.Content, nil
 }
 
 // newReqID returns a short correlation ID for matching → / ← log lines.
