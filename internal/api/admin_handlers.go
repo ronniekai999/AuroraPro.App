@@ -168,9 +168,10 @@ type LLMSettings struct {
 	ChatModelSmart    string `json:"chat_model_smart"`
 	StructuredOutputs bool   `json:"structured_outputs"`
 	ReasoningEffort   string `json:"reasoning_effort"` // gpt-oss /v1 reasoning level: low|medium|high|none|""
-	// Phase B cross-encoder reranker. RerankModel empty ⇒ reranking disabled
-	// (graceful no-op). RerankURL empty ⇒ the embed URL (reranker runs local).
-	// Restart-required, like the other model fields.
+	// Phase B listwise reranker (a fast chat model). RerankModel empty ⇒ reranking
+	// disabled (graceful no-op). RerankURL empty ⇒ the chat endpoint; set only to
+	// run rerank on a separate/local Ollama. Restart-required, like the other
+	// model fields.
 	RerankModel  string `json:"rerank_model"`
 	RerankURL    string `json:"rerank_url"`
 	DebugLog     bool   `json:"debug_log"`      // persisted setting in DB

@@ -48,12 +48,15 @@ type Config struct {
 	// reasoning trace (37s + empty content on the hero surface); "low" keeps it
 	// brief and reliable. Only applied on the OpenAI /v1 path.
 	ReasoningEffort string
-	// Cross-encoder reranker (Phase B). RerankModel is a Qwen3-Reranker-family
-	// model served by a LOCAL Ollama (rerankers aren't in the Cloud catalog);
-	// empty → reranking disabled (graceful no-op — callers keep their vector
-	// order). RerankURL overrides where to reach it; empty → the embed URL (the
-	// reranker is local, like embeddings). Scored via the yes-token logprob on
-	// the OpenAI /v1 path, with a yes/no-text fallback. See rerank.go.
+	// Reranker (Phase B). RerankModel is a fast chat/instruct model used for a
+	// single LISTWISE rerank pass (e.g. "gpt-oss:20b") — it reads all candidates
+	// in one call and scores each, so it works on a GPU-less box where the old
+	// per-pair cross-encoder couldn't. Empty → reranking disabled (graceful no-op,
+	// callers keep their vector order). RerankURL is where to run that call; empty
+	// → the chat BaseURL (rerank rides the chat endpoint, Cloud or local). Set it
+	// only to run rerank on a separate/local Ollama. When RerankURL points away
+	// from BaseURL the Cloud APIKey is NOT sent to it (no key leak to a local
+	// box). See rerank.go.
 	RerankModel string
 	RerankURL   string
 	Dims        int           // target embedding dimensionality (truncated if model is wider)
@@ -431,14 +434,17 @@ func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, s
 		// rails→picks schema, which 500s on Ollama Cloud. Hero passes a flat
 		// schema, which the model honors-ish; either way the tolerant parser is
 		// the real safety net.
-		return c.chatOpenAISchema(ctx, model, system, user, schema)
+		return c.chatOpenAISchema(ctx, c.cfg.BaseURL, true, model, system, user, schema)
 	}
-	return c.chatNative(ctx, model, system, user, schema)
+	return c.chatNative(ctx, c.cfg.BaseURL, true, model, system, user, schema)
 }
 
 // chatNative is the Ollama-native /api/chat path (the original ChatJSON body,
-// now parameterized by model).
-func (c *Client) chatNative(ctx context.Context, model, system, user string, schema any) (string, error) {
+// now parameterized by baseURL + model so the reranker can reuse it against a
+// different endpoint). sendAuth gates the bearer header — callers pass false to
+// avoid shipping the Cloud API key to a non-chat endpoint (e.g. a local
+// reranker URL); see Rerank.
+func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, model, system, user string, schema any) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model: model,
 		Messages: []ChatMessage{
@@ -453,7 +459,7 @@ func (c *Client) chatNative(ctx context.Context, model, system, user string, sch
 	if err != nil {
 		return "", err
 	}
-	url := c.cfg.BaseURL + "/api/chat"
+	url := baseURL + "/api/chat"
 	reqID := c.newReqID()
 	start := time.Now()
 	c.logRequest(reqID, url, model, body)
@@ -463,7 +469,7 @@ func (c *Client) chatNative(ctx context.Context, model, system, user string, sch
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.APIKey != "" {
+	if c.cfg.APIKey != "" && sendAuth {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}
 
@@ -506,7 +512,7 @@ func (c *Client) chatNative(ctx context.Context, model, system, user string, sch
 // latter on Cloud. With reasoning_effort unset a reasoning model can still burn
 // its budget on the hidden trace and return empty content (guarded below); set
 // llm_reasoning_effort=low to keep it brief.
-func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user string, schema any) (string, error) {
+func (c *Client) chatOpenAISchema(ctx context.Context, baseURL string, sendAuth bool, model, system, user string, schema any) (string, error) {
 	// Schema is optional: nil → omit response_format (omitempty on the pointer)
 	// so the request is a plain /v1 chat. Discover relies on this to avoid the
 	// nested-schema 500 while still getting reasoning_effort applied below.
@@ -530,7 +536,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user strin
 	if err != nil {
 		return "", err
 	}
-	url := c.cfg.BaseURL + "/v1/chat/completions"
+	url := baseURL + "/v1/chat/completions"
 	reqID := c.newReqID()
 	start := time.Now()
 	c.logRequest(reqID, url, model, body)
@@ -540,7 +546,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user strin
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.APIKey != "" {
+	if c.cfg.APIKey != "" && sendAuth {
 		req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	}
 

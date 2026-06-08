@@ -340,7 +340,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		return nil, nil
 	}
 
-	// Detach the heavy tail (cross-encoder rerank + LLM curation) from the
+	// Detach the heavy tail (listwise rerank + LLM curation) from the
 	// request lifetime UP FRONT. Discover runs inside singleflight (DiscoverFor)
 	// and is cached 24h, so a client that navigates away mid-build — the SPA
 	// aborts the /api/me/discover fetch via its AbortController — must NOT cancel
@@ -353,7 +353,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
 	defer cancel()
 
-	// Phase B: cross-encoder rerank the (larger) recall pool down to the prompt
+	// Phase B: listwise rerank the (larger) recall pool down to the prompt
 	// pool by taste relevance, then debias the candidate order so the LLM curates
 	// on merit not position. Both no-op gracefully when the reranker is off
 	// (rerankCandidates caps the slice; debiasOrder just reorders). Rerank runs
