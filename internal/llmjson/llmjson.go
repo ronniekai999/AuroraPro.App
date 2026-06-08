@@ -148,3 +148,47 @@ func ExtractArray(raw string, aliases []string) ([]any, error) {
 	return nil, fmt.Errorf("no array found under any of %v in top-level keys %v",
 		aliases, SortedKeys(top))
 }
+
+// ExtractArrayLoose is ExtractArray plus a generic last-resort recovery: when no
+// alias matches, it returns the LONGEST top-level value that is a non-empty array
+// OF OBJECTS. Cloud models keep inventing new wrapper keys for the same payload
+// (gpt-oss "selected"; deepseek-v4-flash has used "candidates" then "selections"
+// across runs) — this stops the per-key whack-a-mole.
+//
+// Use this ONLY for callers whose payload is a single wrapped array (the hero
+// rerank). Do NOT use it for callers that depend on a strict miss to trigger a
+// different shape recovery — notably Discover, whose flat-title-map fallback
+// (parseDiscoverFlatTitleMap) relies on ExtractArray FAILING on the
+// {railTitle: picksArray} shape; the loose grab would mis-read a picks array as
+// the rails array. Hence the deliberate split rather than folding this into
+// ExtractArray.
+//
+// The array-of-objects guard avoids grabbing a stray string array; SortedKeys
+// keeps the choice deterministic when several arrays are present.
+func ExtractArrayLoose(raw string, aliases []string) ([]any, error) {
+	if a, err := ExtractArray(raw, aliases); err == nil {
+		return a, nil
+	}
+	var top map[string]any
+	if err := json.Unmarshal([]byte(StripFences(raw)), &top); err != nil {
+		return nil, fmt.Errorf("decode top-level: %w", err)
+	}
+	var best []any
+	for _, key := range SortedKeys(top) {
+		a, ok := top[key].([]any)
+		if !ok || len(a) == 0 {
+			continue
+		}
+		if _, isObj := a[0].(map[string]any); !isObj {
+			continue
+		}
+		if len(a) > len(best) {
+			best = a
+		}
+	}
+	if best != nil {
+		return best, nil
+	}
+	return nil, fmt.Errorf("no array found under any of %v (no array-of-objects fallback) in top-level keys %v",
+		aliases, SortedKeys(top))
+}
