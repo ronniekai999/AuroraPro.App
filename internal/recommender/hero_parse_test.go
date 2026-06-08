@@ -46,6 +46,17 @@ func TestParseRerankResponse(t *testing.T) {
 			wantLen:   2,
 			wantFirst: heroRerankPick{Index: 0, Title: "The Conjuring: Last Rites (2025)", Reason: "Paranormal mystery like Ghost Whisperer."},
 		},
+		{
+			// deepseek-v4-flash rotated to "selections" the next run — NOT in the
+			// alias list. The generic array-of-objects fallback in ExtractArrayLoose
+			// (NOT strict ExtractArray — strict must keep MISSING so Discover's
+			// flat-title-map path triggers) recovers it, so the hero stops playing
+			// wrapper-key whack-a-mole.
+			name:      "selections wrapper via generic fallback (deepseek-v4-flash)",
+			raw:       `{"selections":[{"title":"The Conjuring: Last Rites (2025)","reason":"Supernatural mystery like Ghost Whisperer"}]}`,
+			wantLen:   1,
+			wantFirst: heroRerankPick{Index: 0, Title: "The Conjuring: Last Rites (2025)", Reason: "Supernatural mystery like Ghost Whisperer"},
+		},
 	}
 
 	for _, tc := range cases {

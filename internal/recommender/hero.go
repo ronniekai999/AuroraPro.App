@@ -884,7 +884,11 @@ type heroRerankPick struct {
 // Within each pick, accepts "id" as a fallback for "index" — gpt-oss:20b
 // emits `{"id": 6, ...}` instead of the schema's `{"index": 6, ...}`.
 func parseRerankResponse(raw string) ([]heroRerankPick, error) {
-	rawArr, err := llmjson.ExtractArray(raw, heroArrayKeyAliases)
+	// Loose: the hero payload is a single wrapped picks array, and deepseek keeps
+	// rotating the wrapper key (selected → candidates → selections → …). The loose
+	// extractor recovers any array-of-objects when the aliases miss. (Discover
+	// must NOT use this — it relies on a strict miss for its flat-title-map path.)
+	rawArr, err := llmjson.ExtractArrayLoose(raw, heroArrayKeyAliases)
 	if err != nil {
 		return nil, err
 	}
