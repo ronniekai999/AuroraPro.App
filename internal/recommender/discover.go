@@ -344,7 +344,18 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 			"profile", profileID, "error", err)
 	}
 
-	llmCtx, cancel := context.WithTimeout(ctx, discoverBudget)
+	// Detach the LLM round-trip from the request lifetime. Discover runs inside
+	// singleflight (DiscoverFor) and is cached 24h, so a client that navigates
+	// away mid-build — the SPA aborts the /api/me/discover fetch via its
+	// AbortController — must NOT cancel an expensive curation that other waiters
+	// are blocked on. Before this, that abort surfaced as
+	// `ollama chat: ... context canceled` warnings (more often once the smart
+	// model made the call slower) and dropped Discover to the vector-rail
+	// fallback. WithoutCancel keeps ctx values (auth/trace) but drops the
+	// caller's cancellation + deadline; discoverBudget stays the only bound, and
+	// the build now completes and populates the cache even if the original
+	// caller is gone. Same detached-build rationale as rail_reasons' async fill.
+	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
 	defer cancel()
 
 	prompt := buildDiscoverPrompt(anchors, candidates)
