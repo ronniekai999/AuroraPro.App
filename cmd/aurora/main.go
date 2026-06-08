@@ -303,7 +303,8 @@ func main() {
 		} else {
 			slog.Info("ollama reachable", "url", llmCfg.BaseURL,
 				"embed_url", llmCfg.EmbedURL,
-				"embed_model", llmCfg.EmbedModel, "chat_model", llmCfg.ChatModel)
+				"embed_model", llmCfg.EmbedModel, "chat_model", llmCfg.ChatModel,
+				"rerank_model", llmCfg.RerankModel)
 		}
 		pingCancel()
 
@@ -1090,7 +1091,7 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	get("llm_chat_model_fast", &cfg.ChatModelFast)
 	get("llm_chat_model_smart", &cfg.ChatModelSmart)
 	get("llm_reasoning_effort", &cfg.ReasoningEffort)
-	// Phase B cross-encoder reranker (optional). Empty model → disabled.
+	// Phase B listwise reranker (optional). Empty model → disabled.
 	get("llm_reranker_model", &cfg.RerankModel)
 	get("llm_reranker_url", &cfg.RerankURL)
 	if v, ok, _ := queries.GetSettingExists(ctx, "llm_structured_outputs"); ok {
@@ -1106,6 +1107,7 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	if provider != "" {
 		slog.Info("LLM config loaded from DB overrides", "provider", provider,
 			"chat_model", cfg.ChatModel, "embed_model", cfg.EmbedModel,
+			"rerank_model", cfg.RerankModel,
 			"has_api_key", cfg.APIKey != "", "debug", cfg.Debug)
 	}
 }

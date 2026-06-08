@@ -13,15 +13,15 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 )
 
-// Phase B — cross-encoder reranking + position-bias correction.
+// Phase B — listwise LLM reranking + position-bias correction.
 //
 // When a reranker model is configured we recall a LARGER pool from vector
-// search (so the cross-encoder has room to surface better candidates than the
-// bi-encoder cosine order), score every candidate against the user's taste with
-// the reranker, then keep the top-K for the existing Aurora + listwise-LLM
-// blend. With no reranker configured the recall pool stays the prior size and
-// the rerank step is skipped — behavior is unchanged except for the position
-// debias below, which applies on both paths.
+// search (so the reranker has room to surface better candidates than the
+// bi-encoder cosine order), score every candidate against the user's taste in a
+// single listwise LLM call, then keep the top-K for the existing Aurora +
+// listwise-LLM blend. With no reranker configured the recall pool stays the
+// prior size and the rerank step is skipped — behavior is unchanged except for
+// the position debias below, which applies on both paths.
 const (
 	rerankHeroRecall     = 40 // hero recall pool when reranking (narrowed to candidatePool)
 	rerankDiscoverRecall = 50 // discover recall pool when reranking (narrowed to discoverPoolSize)
@@ -29,13 +29,13 @@ const (
 	rerankBudget         = 8 * time.Second
 )
 
-// rerankEnabled reports whether a cross-encoder reranker is configured.
+// rerankEnabled reports whether a reranker model is configured.
 func (h *Hero) rerankEnabled() bool {
 	return h.llm != nil && h.llm.RerankModelName() != ""
 }
 
 // heroRecallPool / discoverRecallPool return how many candidates to pull from
-// vector search: a larger pool when reranking is on (the cross-encoder narrows
+// vector search: a larger pool when reranking is on (the reranker narrows
 // it back down), otherwise the existing pool size (unchanged behavior).
 func (h *Hero) heroRecallPool() int {
 	if h.rerankEnabled() {
@@ -51,7 +51,7 @@ func (h *Hero) discoverRecallPool() int {
 	return discoverPoolSize
 }
 
-// rerankCandidates reorders candidates by cross-encoder relevance to the user's
+// rerankCandidates reorders candidates by listwise LLM relevance to the user's
 // taste (built from anchors) and returns the top `keep`. Graceful in every
 // failure mode: if reranking is disabled, the taste query is empty (cold start),
 // the reranker errors/unreachable, or the score count mismatches, it returns the
@@ -73,23 +73,26 @@ func (h *Hero) rerankCandidates(ctx context.Context, anchors []db.TasteAnchor, c
 	scores, scored, err := h.llm.Rerank(rctx, query, docs)
 	if err != nil || len(scores) != len(candidates) {
 		if err != nil {
-			slog.Warn("rerank: cross-encoder failed, keeping vector order",
+			slog.Warn("rerank: listwise call failed, keeping vector order",
 				"error", err, "candidates", len(candidates))
 		}
 		return capCandidates(candidates, keep)
 	}
-	// Coverage guard: a slow/saturated reranker may only score a SUBSET before the
-	// budget fires (unscored docs stay 0 → they sink to vector order at the
-	// bottom). The pre-allocated full-length scores slice means the count check
-	// above can never catch this, so surface it explicitly — and below half-scored
-	// the ranking isn't trustworthy, so keep the clean vector order rather than
-	// caching a half-reranked pool for 24h.
+	// Coverage guard: a model that returns scores for only a SUBSET (lazy or
+	// truncated output) leaves the rest at 0 → they'd sink to the bottom. Below
+	// half-scored the ranking isn't trustworthy, so DISCARD it and keep the clean
+	// vector order rather than caching a half-reranked pool for 24h. With the
+	// single listwise call this should be rare (the model scores all in one shot),
+	// but it stays as defense-in-depth — and the log now says honestly whether we
+	// discarded or kept, instead of always claiming "kept vector order".
 	if scored < len(docs) {
-		slog.Warn("rerank: partial coverage, some candidates kept vector order",
-			"scored", scored, "total", len(docs))
 		if scored*2 < len(docs) {
+			slog.Warn("rerank: low coverage, discarding rerank and using vector order",
+				"scored", scored, "total", len(docs))
 			return capCandidates(candidates, keep)
 		}
+		slog.Warn("rerank: partial coverage, kept reranked prefix",
+			"scored", scored, "total", len(docs))
 	}
 	order := make([]int, len(candidates))
 	for i := range order {
@@ -114,7 +117,7 @@ func capCandidates(items []*models.MediaItem, keep int) []*models.MediaItem {
 }
 
 // buildTasteQuery turns the recent watch anchors into a one-line taste
-// description for the cross-encoder query. Anchors repeat the same title many
+// description for the rerank query. Anchors repeat the same title many
 // times (one row per play), so we dedupe by title and cap the breadth. Returns
 // "" when there are no usable anchors (cold start) so the caller skips reranking.
 func buildTasteQuery(anchors []db.TasteAnchor) string {
@@ -129,13 +132,16 @@ func buildTasteQuery(anchors []db.TasteAnchor) string {
 			continue
 		}
 		seen[t] = true
-		p := t
+		// Sanitize like every other LLM prompt path (sanitizePromptText folds line
+		// breaks, strips ```, neutralizes the UNTRUSTED_DATA fence markers) so a
+		// title/genre can't desync the numbered list or forge the fence.
+		p := sanitizePromptText(t, 120)
 		if len(a.Genres) > 0 {
 			gs := a.Genres
 			if len(gs) > 3 {
 				gs = gs[:3]
 			}
-			p += " (" + strings.Join(gs, ", ") + ")"
+			p += " (" + sanitizePromptText(strings.Join(gs, ", "), 80) + ")"
 		}
 		parts = append(parts, p)
 		if len(parts) >= 6 {
@@ -148,11 +154,17 @@ func buildTasteQuery(anchors []db.TasteAnchor) string {
 	return "A viewer who enjoys: " + strings.Join(parts, "; ")
 }
 
-// buildCandidateDoc renders a candidate as the cross-encoder "document":
+// buildCandidateDoc renders a candidate as the rerank "document":
 // title (year), genres (when annotated), and a clipped overview.
 func buildCandidateDoc(c *models.MediaItem) string {
+	// Every field is sanitized (sanitizePromptText folds line breaks, strips ```,
+	// neutralizes the UNTRUSTED_DATA fence markers) before it enters the numbered,
+	// fenced rerank prompt — a raw overview newline would desync the 1-based list
+	// and a literal "UNTRUSTED_DATA>>>" could forge the closing fence. This also
+	// replaces the old manual ov[:300] clip with the same length cap the sibling
+	// prompt builders use.
 	var b strings.Builder
-	b.WriteString(c.Title)
+	b.WriteString(sanitizePromptText(c.Title, 120))
 	if c.Year > 0 {
 		fmt.Fprintf(&b, " (%d)", c.Year)
 	}
@@ -162,22 +174,18 @@ func buildCandidateDoc(c *models.MediaItem) string {
 			gs = gs[:4]
 		}
 		b.WriteString(" — ")
-		b.WriteString(strings.Join(gs, ", "))
+		b.WriteString(sanitizePromptText(strings.Join(gs, ", "), 80))
 	}
 	if c.Overview != "" {
-		ov := c.Overview
-		if len(ov) > 300 {
-			ov = ov[:300]
-		}
 		b.WriteString(". ")
-		b.WriteString(ov)
+		b.WriteString(sanitizePromptText(c.Overview, 200))
 	}
 	return b.String()
 }
 
 // debiasOrder returns a deterministically-shuffled COPY of candidates so the
 // downstream listwise LLM judges on merit, not input position. LLMs over-weight
-// earlier-listed items, and after cross-encoder reranking the input arrives
+// earlier-listed items, and after reranking the input arrives
 // sorted best-first — which would compound that bias into "just take the top
 // few." Shuffling breaks the position↔pre-rank correlation while the Aurora
 // score (in the prompt) and the overview still let the model judge quality.

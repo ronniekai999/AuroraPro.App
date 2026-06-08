@@ -1,10 +1,15 @@
 package recommender
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/models"
 )
 
@@ -102,4 +107,75 @@ func TestDebiasOrder(t *testing.T) {
 	if got := debiasOrder(items[:2], 7); len(got) != 2 {
 		t.Errorf("tiny slice length = %d", len(got))
 	}
+}
+
+// TestRerankCandidatesCoverage exercises the reworked coverage guard end-to-end
+// through a stub reranker: full coverage reorders by score; below-half coverage
+// DISCARDS the rerank and keeps vector order; a failed call falls back too.
+// (Note: rerankCandidates does NOT debias — that's the caller's job — so the
+// post-rerank order is deterministic.)
+func TestRerankCandidatesCoverage(t *testing.T) {
+	anchors := []db.TasteAnchor{{Title: "Ghost Whisperer", Genres: []string{"Drama", "Mystery"}}}
+	mkCandidates := func() []*models.MediaItem {
+		return []*models.MediaItem{{ID: 1, Title: "A"}, {ID: 2, Title: "B"}, {ID: 3, Title: "C"}, {ID: 4, Title: "D"}}
+	}
+	heroWith := func(body string, status int) *Hero {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+				return
+			}
+			_, _ = io.WriteString(w, body)
+		}))
+		t.Cleanup(srv.Close)
+		return &Hero{llm: llm.NewClient(llm.Config{BaseURL: srv.URL, RerankModel: "rr"})}
+	}
+	ids := func(items []*models.MediaItem) []int64 {
+		out := make([]int64, len(items))
+		for i, it := range items {
+			out[i] = it.ID
+		}
+		return out
+	}
+
+	t.Run("full coverage reorders by score", func(t *testing.T) {
+		// Native /api/chat reply; scores reorder to 3,4,2,1 by descending score.
+		h := heroWith(`{"message":{"content":"{\"scores\":[{\"index\":1,\"score\":10},{\"index\":2,\"score\":20},{\"index\":3,\"score\":90},{\"index\":4,\"score\":50}]}"}}`, http.StatusOK)
+		got := ids(h.rerankCandidates(context.Background(), anchors, mkCandidates(), 4))
+		want := []int64{3, 4, 2, 1}
+		if !equalInt64(got, want) {
+			t.Errorf("order=%v, want %v (sorted by score desc)", got, want)
+		}
+	})
+
+	t.Run("low coverage discards rerank, keeps vector order", func(t *testing.T) {
+		// Only 1 of 4 scored → scored*2 < len → discard → original (vector) order.
+		h := heroWith(`{"message":{"content":"{\"scores\":[{\"index\":1,\"score\":99}]}"}}`, http.StatusOK)
+		got := ids(h.rerankCandidates(context.Background(), anchors, mkCandidates(), 4))
+		want := []int64{1, 2, 3, 4}
+		if !equalInt64(got, want) {
+			t.Errorf("order=%v, want %v (vector order on low coverage)", got, want)
+		}
+	})
+
+	t.Run("call failure falls back to vector order", func(t *testing.T) {
+		h := heroWith("", http.StatusInternalServerError)
+		got := ids(h.rerankCandidates(context.Background(), anchors, mkCandidates(), 4))
+		want := []int64{1, 2, 3, 4}
+		if !equalInt64(got, want) {
+			t.Errorf("order=%v, want %v (fallback on error)", got, want)
+		}
+	})
+}
+
+func equalInt64(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

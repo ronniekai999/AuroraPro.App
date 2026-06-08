@@ -473,7 +473,7 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
 				"profile", profileID, "error", err)
 		} else if len(candidates) > 0 {
-			// Phase B: cross-encoder rerank the (larger) recall pool down to
+			// Phase B: listwise rerank the (larger) recall pool down to
 			// candidatePool by taste relevance, so the listwise LLM works from a
 			// sharper set than raw cosine order. No-op when the reranker is off
 			// (rerankCandidates just caps the slice — see rerank_stage.go).
