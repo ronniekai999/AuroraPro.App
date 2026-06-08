@@ -119,6 +119,11 @@ const (
 	// −1σ→29. Bigger k = more contrast. This is the spread-tuning knob.
 	auroraLogisticK = 0.9
 
+	// matchLogisticK is auroraLogisticK's counterpart for the personal Match:
+	// the steepness of the per-user similarity→% curve. 1.0 → a candidate at
+	// +1σ ≈ 73, +2σ ≈ 88 within the user's own recommendation pool.
+	matchLogisticK = 1.0
+
 	// neutralRatingMean is the Bayesian prior used only when the library stats
 	// can't be computed yet (empty/error). 7.0 mirrors TMDB's global mean.
 	neutralRatingMean = 7.0
@@ -232,6 +237,49 @@ func auroraDisplay(core, mean, std float64) int {
 	}
 	z := (core - mean) / std
 	p := 1.0 / (1.0 + math.Exp(-auroraLogisticK*z))
+	return clampInt(int(math.Round(p*100)), 1, 100)
+}
+
+// meanStd returns the mean and population standard deviation of xs. An empty
+// slice yields (0,0); a single element yields (x,0). Used to standardize a
+// profile's candidate similarities for the personal Match.
+func meanStd(xs []float64) (mean, std float64) {
+	n := len(xs)
+	if n == 0 {
+		return 0, 0
+	}
+	var sum float64
+	for _, x := range xs {
+		sum += x
+	}
+	mean = sum / float64(n)
+	var ss float64
+	for _, x := range xs {
+		d := x - mean
+		ss += d * d
+	}
+	return mean, math.Sqrt(ss / float64(n))
+}
+
+// matchDisplay maps a taste-vector similarity to the personal "match %"
+// (0..100) by standardizing it against the distribution of the profile's own
+// candidate similarities (mean/std) then applying a logistic. This replaces the
+// old fixed calibrateMatch anchors: the spread auto-calibrates per user and
+// library instead of being hand-tuned. sim<=0 returns 0 (cold-start, no
+// centroid). A degenerate distribution (one candidate, or all identical) falls
+// back to a direct map of the typical recommendation band so a lone strong pick
+// still reads high rather than a meaningless 50.
+func matchDisplay(sim, mean, std float64) int {
+	if sim <= 0 {
+		return 0
+	}
+	if std <= 1e-9 {
+		// cos ~0.70..0.95 (the band real recommendations live in) → ~60..96.
+		p := (sim - 0.70) / 0.25
+		return clampInt(int(math.Round(60+p*36)), 1, 100)
+	}
+	z := (sim - mean) / std
+	p := 1.0 / (1.0 + math.Exp(-matchLogisticK*z))
 	return clampInt(int(math.Round(p*100)), 1, 100)
 }
 

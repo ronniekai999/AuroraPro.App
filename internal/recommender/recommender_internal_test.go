@@ -907,48 +907,42 @@ func TestChatJSONWithRetryOn5xx_NilOnRetryHook(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// scoreFromMatch — distance→percent mapping (Home net-new #2)
+// matchDisplay — per-user similarity → personal "% for you"
 // --------------------------------------------------------------------------
 
-// TestScoreFromMatch covers the MatchScore (similarity ∈[0,1]) → integer
-// "match %" mapping that drives the hero ring. The DB layer already converts
-// cosine distance to similarity via matchFromDistance; this is the second
-// half (similarity → rounded, clamped percent).
-func TestScoreFromMatch(t *testing.T) {
-	cases := []struct {
-		name  string
-		match float64
-		want  int
-	}{
-		{"perfect", 1.0, 100},
-		{"zero / cold-start", 0.0, 0},
-		// Calibration curve anchors + an interpolated point (see calibrateMatch).
-		{"anchor 0.72", 0.72, 62},
-		{"anchor 0.80", 0.80, 80},
-		{"anchor 0.85", 0.85, 90},
-		{"observed top pick ~0.84", 0.84, 88},
-		{"midband 0.60", 0.60, 46},
-		{"low 0.50", 0.50, 36},
-		// Defensive — matchFromDistance should never feed these, but
-		// scoreFromMatch must stay in [0,100] and never propagate NaN.
-		{"above one clamps", 1.4, 100},
-		{"negative clamps", -0.3, 0},
-		{"NaN clamps", math.NaN(), 0},
+// TestMatchDisplay covers the taste-vector similarity → integer personal
+// "match %" mapping that drives the hero ring for personalized picks. It
+// standardizes a similarity against the profile's candidate distribution
+// (mean/std) then applies a logistic, replacing the old fixed-anchor
+// calibrateMatch.
+func TestMatchDisplay(t *testing.T) {
+	// Cold-start / no centroid → 0 (the frontend shows the global Aurora Score).
+	if got := matchDisplay(0, 0.8, 0.05); got != 0 {
+		t.Errorf("sim<=0 should be 0, got %d", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := scoreFromMatch(tc.match); got != tc.want {
-				t.Errorf("scoreFromMatch(%v) = %d, want %d", tc.match, got, tc.want)
-			}
-		})
+	// Degenerate distribution (σ≈0): a strong similarity still reads high via
+	// the direct-band fallback rather than a meaningless 50.
+	if got := matchDisplay(0.9, 0.9, 0); got < 70 {
+		t.Errorf("degenerate σ: a 0.9 sim should still read high, got %d", got)
+	}
+	// Standardized: the distribution mean reads ~50; above-mean reads higher.
+	mean, std := 0.80, 0.05
+	if got := matchDisplay(mean, mean, std); got < 45 || got > 55 {
+		t.Errorf("at the mean, expected ~50, got %d", got)
+	}
+	if !(matchDisplay(mean+std, mean, std) > matchDisplay(mean, mean, std)) {
+		t.Error("an above-mean similarity should read higher than the mean")
 	}
 
-	// The display curve must be monotonic — a higher similarity can never
-	// produce a lower match %.
+	// Bounded [0,100] and monotonic in sim for a fixed distribution — a higher
+	// similarity can never produce a lower match %.
 	prev := -1
 	for s := 0.0; s <= 1.0001; s += 0.01 {
-		got := scoreFromMatch(s)
-		if got < prev {
+		got := matchDisplay(s, mean, std)
+		if got < 0 || got > 100 {
+			t.Fatalf("out of range at sim=%.2f: %d", s, got)
+		}
+		if s > 0 && got < prev {
 			t.Fatalf("non-monotonic at sim=%.2f: %d < previous %d", s, got, prev)
 		}
 		prev = got

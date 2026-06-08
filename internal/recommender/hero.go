@@ -98,11 +98,18 @@ type HeroPick struct {
 	Reason string            `json:"reason,omitempty"`
 	// Score is the integer Aurora Score (0-100) — a global, proprietary
 	// "feature-worthiness" rating computed by scorePicks from Bayesian-shrunk
-	// quality + freshness (Phase 2 adds local engagement), standardized against
-	// the library distribution so it spreads across the full range instead of
-	// pinning in the 80s–90s. It's the same for every viewer (quality of the
-	// title, not personal fit). Populated once in build() before caching.
+	// quality + freshness + local engagement, standardized against the library
+	// distribution so it spreads across the full range instead of pinning in the
+	// 80s–90s. It's the same for every viewer (quality of the title, not
+	// personal fit). Populated once in build() before caching.
 	Score int `json:"score,omitempty"`
+	// Match is the integer PERSONAL "% for you" (0-100): the item's taste-vector
+	// similarity standardized against this profile's candidate distribution
+	// (applyPersonalMatch → matchDisplay). >0 only for the personalized pool;
+	// the cold-start popular pool has no centroid so Match stays 0 and the
+	// frontend shows the global Score instead. This is the honest split — Score
+	// is "how good", Match is "how much it's for you" (Netflix-style).
+	Match int `json:"match,omitempty"`
 }
 
 // Hero is the per-profile recommender. Construct once at startup and reuse;
@@ -466,6 +473,10 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 				"profile", profileID, "error", err)
 		} else if len(candidates) > 0 {
 			picks, quality = h.rerankWithBlurbs(ctx, profileID, candidates)
+			// Personal "% for you", standardized against this profile's own
+			// candidate-similarity distribution (replaces the fixed-anchor
+			// calibrateMatch). Cold-start (Tier 2) skips this — Match stays 0.
+			applyPersonalMatch(picks, candidates)
 		}
 	} else if err != db.ErrInsufficientHistory {
 		slog.Warn("hero: profile vector failed, falling back to popular",
@@ -486,7 +497,7 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 			// PopularUnwatched has no taste centroid, so MatchScore is 0 here
 			// and Score resolves to 0 — the frontend falls back to its
 			// derived rating-based estimate for the cold-start hero.
-			picks = append(picks, HeroPick{Item: item, Score: scoreFromMatch(item.MatchScore)})
+			picks = append(picks, HeroPick{Item: item})
 		}
 		quality = qualityFallback
 	}
@@ -659,7 +670,6 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 		picks = append(picks, HeroPick{
 			Item:   candidates[idx],
 			Reason: strings.TrimSpace(p.Reason),
-			Score:  scoreFromMatch(candidates[idx].MatchScore),
 		})
 		if len(picks) >= h.poolSize {
 			break
@@ -673,7 +683,7 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 			if used[i] {
 				continue
 			}
-			picks = append(picks, HeroPick{Item: item, Score: scoreFromMatch(item.MatchScore)})
+			picks = append(picks, HeroPick{Item: item})
 			if len(picks) >= h.poolSize {
 				break
 			}
@@ -682,50 +692,26 @@ func (h *Hero) rerankWithBlurbs(ctx context.Context, profileID int64, candidates
 	return picks, qualityFinal
 }
 
-// scoreFromMatch maps an Item.MatchScore similarity (∈[0,1], set by the
-// recommender DB queries from cosine distance) to the integer "match %"
-// (0-100) the hero ring renders. Centralized so the distance→percent mapping
-// happens in exactly one place. Cold-start items have MatchScore==0 → 0, which
-// the frontend treats as "no real score, use the derived fallback".
-func scoreFromMatch(match float64) int {
-	// Cold-start / no-centroid items carry MatchScore==0 (NaN can't reach here
-	// — matchFromDistance guards it — but check anyway) → 0, so the frontend
-	// uses its derived fallback rather than a misleading low %.
-	if match <= 0 || math.IsNaN(match) {
-		return 0
-	}
-	return calibrateMatch(match)
-}
-
-// calibrateMatch maps a raw cosine similarity (0..1, vs the user's taste
-// vector) to a display match % (0..100). Text embeddings are anisotropic:
-// related items' cosine sims compress into a narrow high band (~0.78–0.90), so
-// a flat match*100 makes every strong pick read a uniform ~84%. This
-// piecewise-linear curve stretches that band — the slope is steepest where
-// real recommendations live (≈0.72–0.90), so genuine differences are amplified
-// and strong picks read in the 90s while clearly weaker ones fall off. The
-// anchors are the single tuning point; the mapping is monotonic (each anchor
-// ascends in both sim and pct) and bounded to [0,100].
-func calibrateMatch(sim float64) int {
-	anchors := [...]struct{ sim, pct float64 }{
-		{0.00, 0}, {0.55, 40}, {0.72, 62}, {0.80, 80},
-		{0.85, 90}, {0.92, 96}, {1.00, 100},
-	}
-	last := len(anchors) - 1
-	if sim <= anchors[0].sim {
-		return int(anchors[0].pct)
-	}
-	if sim >= anchors[last].sim {
-		return int(anchors[last].pct)
-	}
-	for i := 1; i <= last; i++ {
-		if sim <= anchors[i].sim {
-			a, b := anchors[i-1], anchors[i]
-			t := (sim - a.sim) / (b.sim - a.sim)
-			return int(math.Round(a.pct + t*(b.pct-a.pct)))
+// applyPersonalMatch sets each pick's Match — the personal "% for you" — by
+// standardizing the item's taste-vector similarity against the distribution of
+// THIS profile's candidate pool, then squashing through a logistic
+// (matchDisplay). It replaces the old fixed-anchor calibrateMatch: the spread
+// auto-calibrates per user and library instead of being hand-tuned. Only the
+// personalized tier calls this; cold-start picks (MatchScore==0) keep Match=0,
+// so the frontend shows the global Aurora Score instead.
+func applyPersonalMatch(picks []HeroPick, candidates []*models.MediaItem) {
+	sims := make([]float64, 0, len(candidates))
+	for _, c := range candidates {
+		if c != nil && c.MatchScore > 0 {
+			sims = append(sims, c.MatchScore)
 		}
 	}
-	return int(anchors[last].pct) // unreachable given the guards above
+	mean, std := meanStd(sims)
+	for i := range picks {
+		if it := picks[i].Item; it != nil && it.MatchScore > 0 {
+			picks[i].Match = matchDisplay(it.MatchScore, mean, std)
+		}
+	}
 }
 
 func topN(items []*models.MediaItem, n int) []HeroPick {
@@ -734,7 +720,7 @@ func topN(items []*models.MediaItem, n int) []HeroPick {
 	}
 	out := make([]HeroPick, n)
 	for i := 0; i < n; i++ {
-		out[i] = HeroPick{Item: items[i], Score: scoreFromMatch(items[i].MatchScore)}
+		out[i] = HeroPick{Item: items[i]}
 	}
 	return out
 }
