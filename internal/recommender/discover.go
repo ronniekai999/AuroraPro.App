@@ -167,10 +167,13 @@ Respond with ONLY the JSON object. No preamble.`
 
 // discoverSchema documents the OUTPUT SHAPE the discover surface expects.
 //
-// IMPORTANT: as of May 14, 2026 this schema is NOT sent to the LLM (see
-// buildDiscover — we pass nil to ChatJSON). It's kept here as the canonical
-// description of what the parser accepts, since the system prompt also
-// describes the shape but in human-readable terms.
+// IMPORTANT: this schema is NOT sent to the LLM (see buildDiscover — we pass a
+// nil schema). It's kept here as the canonical description of what the parser
+// accepts, since the system prompt also describes the shape but in
+// human-readable terms. buildDiscover still routes through the /v1 path
+// (schemaless) when structured outputs are on, purely to apply reasoning_effort
+// — sending this schema there would hit the same Ollama Cloud 500 documented
+// below.
 //
 // History — why we stopped sending it:
 //
@@ -359,19 +362,32 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	defer cancel()
 
 	prompt := buildDiscoverPrompt(anchors, candidates)
-	// Pass nil for schema — see discoverSchema's doc comment for the full
-	// history. Ollama Cloud's structured-output engine fails deterministically
-	// on the rails→picks→index/reason nesting, even with all count
-	// constraints removed. The system prompt + tolerant parser already
-	// constrain the output shape; the format field was a belt-and-suspenders
-	// that the cloud provider can't process for this schema.
+	// Schema stays nil — see discoverSchema's doc comment for the full history.
+	// Ollama Cloud's structured-output engine fails deterministically on the
+	// rails→picks→index/reason nesting, even with all count constraints removed,
+	// so we never send it; the system prompt + tolerant parser constrain the
+	// shape instead.
+	//
+	// useV1 selects the schemaless /v1 path (the only place reasoning_effort
+	// applies) ONLY when structured outputs is on AND an effort is configured.
+	// That second condition is load-bearing: on native /api/chat gpt-oss ignores
+	// `think:false` and burns 40-48s on a ~4k-token hidden reasoning trace for
+	// this big prompt; /v1 + llm_reasoning_effort=low cuts that to single digits
+	// — but /v1 with NO effort set gives gpt-oss its full default reasoning,
+	// which on this path returns EMPTY content (the runaway case) → a non-5xx
+	// error below → no retry → nil rails → uncached vector fallback on EVERY
+	// build, strictly worse than native's slow-but-parseable response. So
+	// without an effort we deliberately stay native: slow, but functional. (Hero
+	// makes the analogous /v1 call ungated because its empty-content fallback is
+	// benign — score-ordered picks, just no LLM reasons.)
+	useV1 := shouldDiscoverUseV1(h.llm.UseStructured(), h.llm.ReasoningEffort())
 	raw, err := chatJSONWithRetryOn5xx(
 		llmCtx,
 		func(c context.Context) (string, error) {
-			// Smart model for the heavy, 24h-cached curation. Schema stays nil
-			// (native /api/chat) — the nested rails→picks json_schema is
-			// re-enabled in Phase C once Discover is flattened to one-rail-per-call.
-			return h.llm.ChatJSONWith(c, h.llm.ChatModelSmart(), discoverSystem, prompt, nil, false)
+			// Smart model for the heavy, 24h-cached curation; schema nil (no
+			// response_format). useV1 picks the /v1 path so reasoning_effort can
+			// rein in gpt-oss — else native, slow but safe.
+			return h.llm.ChatJSONWith(c, h.llm.ChatModelSmart(), discoverSystem, prompt, nil, useV1)
 		},
 		func(err error) {
 			slog.Warn("discover: LLM 5xx, retrying once",
@@ -472,6 +488,25 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 	h.annotateDiscoverItems(ctx, out)
 
 	return out, nil
+}
+
+// shouldDiscoverUseV1 decides whether the Discover curation call takes the
+// schemaless OpenAI /v1 path (where reasoning_effort suppresses gpt-oss) or the
+// native /api/chat path. It returns true ONLY when structured outputs is on AND
+// a reasoning_effort is configured.
+//
+// The AND on a non-empty effort is the regression guard: routing to /v1 with no
+// effort set hands gpt-oss its full default reasoning, which on /v1 returns
+// empty content → buildDiscover gets a non-5xx error → no retry → nil rails →
+// uncached vector fallback on every build. That is strictly worse than native,
+// which is slow but returns parseable rails. So with effort unset we stay
+// native. Kept as a pure function so this load-bearing gate is unit-testable
+// without standing up the full buildDiscover harness.
+//
+// Note "none" counts as set — it's an explicit operator choice that suppresses
+// reasoning, so /v1 is safe; only the empty (omitted) case is the footgun.
+func shouldDiscoverUseV1(structuredOutputs bool, reasoningEffort string) bool {
+	return structuredOutputs && reasoningEffort != ""
 }
 
 // resolvePick maps a parsed pick to a candidate by 1-based index, falling

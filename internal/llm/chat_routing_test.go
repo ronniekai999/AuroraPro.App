@@ -78,21 +78,34 @@ func TestChatJSONWithStructured(t *testing.T) {
 	}
 }
 
-// TestChatJSONWithStructuredNilSchemaStaysNative: structured=true but schema==nil
-// must NOT use the OpenAI path (Discover passes nil today).
-func TestChatJSONWithStructuredNilSchemaStaysNative(t *testing.T) {
+// TestChatJSONWithStructuredNilSchema: structured=true with schema==nil takes the
+// OpenAI /v1 path but OMITS response_format. This is the Discover path — it can't
+// send its nested rails→picks schema (it 500s on Ollama Cloud) yet still needs
+// /v1 to apply reasoning_effort. (Before this change it stayed on native, which
+// left Discover unable to suppress gpt-oss's runaway reasoning — the ~48s
+// regression seen in production.)
+func TestChatJSONWithStructuredNilSchema(t *testing.T) {
 	var gotPath string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		_, _ = io.WriteString(w, `{"message":{"content":"{}"}}`)
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{}"}}]}`)
 	}))
 	defer srv.Close()
-	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m"})
+	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m", ReasoningEffort: "low"})
 	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", nil, true); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if gotPath != "/api/chat" {
-		t.Errorf("nil-schema structured path = %q, want /api/chat", gotPath)
+	if gotPath != "/v1/chat/completions" {
+		t.Errorf("nil-schema structured path = %q, want /v1/chat/completions", gotPath)
+	}
+	if _, present := gotBody["response_format"]; present {
+		t.Errorf("nil schema must omit response_format; body=%v", gotBody)
+	}
+	if got, _ := gotBody["reasoning_effort"].(string); got != "low" {
+		t.Errorf("schemaless /v1 must still carry reasoning_effort; got %q body=%v", got, gotBody)
 	}
 }
 
@@ -122,12 +135,12 @@ func TestChatJSONBackCompat(t *testing.T) {
 // honored when set.
 func TestChatModelAccessorsFallback(t *testing.T) {
 	c := NewClient(Config{BaseURL: "http://x", ChatModel: "base"})
-	if c.ChatModelFast() != "base" || c.ChatModelSmart() != "base" || c.UseStructured() {
-		t.Errorf("unset: fast=%q smart=%q structured=%v", c.ChatModelFast(), c.ChatModelSmart(), c.UseStructured())
+	if c.ChatModelFast() != "base" || c.ChatModelSmart() != "base" || c.UseStructured() || c.ReasoningEffort() != "" {
+		t.Errorf("unset: fast=%q smart=%q structured=%v effort=%q", c.ChatModelFast(), c.ChatModelSmart(), c.UseStructured(), c.ReasoningEffort())
 	}
-	c2 := NewClient(Config{BaseURL: "http://x", ChatModel: "base", ChatModelFast: "f", ChatModelSmart: "s", StructuredOutputs: true})
-	if c2.ChatModelFast() != "f" || c2.ChatModelSmart() != "s" || !c2.UseStructured() {
-		t.Errorf("set: fast=%q smart=%q structured=%v", c2.ChatModelFast(), c2.ChatModelSmart(), c2.UseStructured())
+	c2 := NewClient(Config{BaseURL: "http://x", ChatModel: "base", ChatModelFast: "f", ChatModelSmart: "s", StructuredOutputs: true, ReasoningEffort: "low"})
+	if c2.ChatModelFast() != "f" || c2.ChatModelSmart() != "s" || !c2.UseStructured() || c2.ReasoningEffort() != "low" {
+		t.Errorf("set: fast=%q smart=%q structured=%v effort=%q", c2.ChatModelFast(), c2.ChatModelSmart(), c2.UseStructured(), c2.ReasoningEffort())
 	}
 }
 
