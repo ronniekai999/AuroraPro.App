@@ -167,16 +167,17 @@ type LLMSettings struct {
 	ChatModelFast     string `json:"chat_model_fast"`
 	ChatModelSmart    string `json:"chat_model_smart"`
 	StructuredOutputs bool   `json:"structured_outputs"`
-	DebugLog          bool   `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog      bool   `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded      bool   `json:"client_loaded"`  // false when LLM is disabled at startup
+	ReasoningEffort   string `json:"reasoning_effort"` // gpt-oss /v1 reasoning level: low|medium|high|none|""
+	DebugLog          bool   `json:"debug_log"`        // persisted setting in DB
+	LiveDebugLog      bool   `json:"live_debug_log"`   // in-memory state of the *active* client
+	ClientLoaded      bool   `json:"client_loaded"`    // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
 // Centralized so GetLLMSettings + UpdateLLMSettings can't drift.
 var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
-	ChatModelFast, ChatModelSmart, StructuredOutputs                       string
+	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -188,6 +189,19 @@ var llmSettingKeys = struct {
 	ChatModelFast:     "llm_chat_model_fast",
 	ChatModelSmart:    "llm_chat_model_smart",
 	StructuredOutputs: "llm_structured_outputs",
+	ReasoningEffort:   "llm_reasoning_effort",
+}
+
+// validReasoningEffort reports whether v is an accepted gpt-oss /v1
+// reasoning_effort value ("" = unset/omit). Guards against a typo'd setting
+// (e.g. "minimal", which Ollama rejects) silently 400ing every hero rerank —
+// which would degrade the hero to vector order on every call with no retry.
+func validReasoningEffort(v string) bool {
+	switch v {
+	case "", "low", "medium", "high", "none":
+		return true
+	}
+	return false
 }
 
 // GetLLMSettings returns the current persisted LLM configuration plus the
@@ -216,6 +230,7 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 	out.EmbedModel = byKey[llmSettingKeys.EmbedModel]
 	out.ChatModelFast = byKey[llmSettingKeys.ChatModelFast]
 	out.ChatModelSmart = byKey[llmSettingKeys.ChatModelSmart]
+	out.ReasoningEffort = byKey[llmSettingKeys.ReasoningEffort]
 	if v := byKey[llmSettingKeys.StructuredOutputs]; v != "" {
 		out.StructuredOutputs = v == "true"
 	}
@@ -251,6 +266,7 @@ type llmUpdateRequest struct {
 	EmbedModel        *string `json:"embed_model,omitempty"`
 	ChatModelFast     *string `json:"chat_model_fast,omitempty"`
 	ChatModelSmart    *string `json:"chat_model_smart,omitempty"`
+	ReasoningEffort   *string `json:"reasoning_effort,omitempty"`
 	StructuredOutputs *bool   `json:"structured_outputs,omitempty"`
 	DebugLog          *bool   `json:"debug_log,omitempty"`
 }
@@ -263,6 +279,11 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 	var req llmUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.ReasoningEffort != nil && !validReasoningEffort(*req.ReasoningEffort) {
+		writeError(w, http.StatusBadRequest, "reasoning_effort must be empty or one of: low, medium, high, none")
 		return
 	}
 
@@ -321,6 +342,7 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.EmbedModel, req.EmbedModel},
 		{llmSettingKeys.ChatModelFast, req.ChatModelFast},
 		{llmSettingKeys.ChatModelSmart, req.ChatModelSmart},
+		{llmSettingKeys.ReasoningEffort, req.ReasoningEffort},
 	} {
 		if err := apply(p.key, p.val); err != nil {
 			slog.Warn("UpdateLLMSettings: write failed", "key", p.key, "error", err)

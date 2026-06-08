@@ -41,10 +41,16 @@ type Config struct {
 	// heavy, 24h-cached Discover curation.
 	ChatModelFast     string
 	ChatModelSmart    string
-	StructuredOutputs bool          // use the OpenAI-compatible response_format=json_schema path (hero pilot); default false → native /api/chat
-	Dims              int           // target embedding dimensionality (truncated if model is wider)
-	HTTPTimeout       time.Duration // per-request budget; embedding is fast, chat is not
-	Debug             bool          // initial debug-logging state; hot-swap later via SetDebug
+	StructuredOutputs bool // use the OpenAI-compatible response_format=json_schema path (hero pilot); default false → native /api/chat
+	// ReasoningEffort sets the gpt-oss reasoning level on the /v1 path:
+	// "low" | "medium" | "high" | "none" | "" (unset → omitted). gpt-oss
+	// ignores `think:false` on Cloud and can burn its whole budget on the hidden
+	// reasoning trace (37s + empty content on the hero surface); "low" keeps it
+	// brief and reliable. Only applied on the OpenAI /v1 path.
+	ReasoningEffort string
+	Dims            int           // target embedding dimensionality (truncated if model is wider)
+	HTTPTimeout     time.Duration // per-request budget; embedding is fast, chat is not
+	Debug           bool          // initial debug-logging state; hot-swap later via SetDebug
 }
 
 // Client is safe for concurrent use; the underlying http.Client handles pooling
@@ -320,10 +326,11 @@ type chatResponse struct {
 // 500s on nested schemas — see discover.go). This is the foundation Phase C
 // will reuse to re-enable enforced schemas on Discover.
 type oaiChatRequest struct {
-	Model          string             `json:"model"`
-	Messages       []ChatMessage      `json:"messages"`
-	Temperature    float64            `json:"temperature"`
-	ResponseFormat *oaiResponseFormat `json:"response_format,omitempty"`
+	Model           string             `json:"model"`
+	Messages        []ChatMessage      `json:"messages"`
+	Temperature     float64            `json:"temperature"`
+	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
+	ResponseFormat  *oaiResponseFormat `json:"response_format,omitempty"`
 }
 type oaiResponseFormat struct {
 	Type       string        `json:"type"` // "json_schema"
@@ -464,7 +471,8 @@ func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user strin
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		Temperature: 0.1,
+		Temperature:     0.1,
+		ReasoningEffort: c.cfg.ReasoningEffort, // omitempty when unset
 		ResponseFormat: &oaiResponseFormat{
 			Type:       "json_schema",
 			JSONSchema: oaiJSONSchema{Name: "result", Schema: schema, Strict: false},
@@ -510,7 +518,16 @@ func (c *Client) chatOpenAISchema(ctx context.Context, model, system, user strin
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("ollama chat: empty choices")
 	}
-	return out.Choices[0].Message.Content, nil
+	content := out.Choices[0].Message.Content
+	if strings.TrimSpace(content) == "" {
+		// Reasoning models (gpt-oss) sometimes spend their whole token budget on
+		// the hidden reasoning trace and return EMPTY content. Surface that as an
+		// error so the caller logs it and falls back cleanly, instead of the
+		// downstream parser failing on "" with an opaque message. Setting
+		// llm_reasoning_effort=low prevents the runaway reasoning.
+		return "", fmt.Errorf("ollama chat: empty content (reasoning ran long — try llm_reasoning_effort=low)")
+	}
+	return content, nil
 }
 
 // newReqID returns a short correlation ID for matching → / ← log lines.
