@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // HeroProvider is the contract HeroHandler needs from the recommender.
@@ -290,6 +292,66 @@ func (h *HeroHandler) EngagementRails(w http.ResponseWriter, r *http.Request) {
 		rails = nil
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rails": rails})
+}
+
+// Feedback records a profile's thumb on a title (Phase D steerable thumbs) and
+// invalidates the profile's rec caches so the feed re-curates: 👍 ("up") feeds
+// the taste vector — more like this; 👎 ("down") excludes the title from every
+// recommendation surface — not interested; "clear" removes the thumb.
+// Body: {"media_item_id": N, "direction": "up"|"down"|"clear"}. Returns 204.
+func (h *HeroHandler) Feedback(w http.ResponseWriter, r *http.Request) {
+	if h.hero == nil {
+		writeError(w, http.StatusServiceUnavailable, "recommendations not configured")
+		return
+	}
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	var req struct {
+		MediaItemID int64  `json:"media_item_id"`
+		Direction   string `json:"direction"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.MediaItemID <= 0 {
+		writeError(w, http.StatusBadRequest, "media_item_id required")
+		return
+	}
+	switch req.Direction {
+	case "up", "down":
+		if err := h.queries.RecordItemFeedback(r.Context(), profileID, req.MediaItemID, req.Direction); err != nil {
+			// A positive-but-nonexistent id trips the media_items FK (23503):
+			// that's a client error, not a server fault — surface 404, not 500.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				writeError(w, http.StatusNotFound, "media item not found")
+				return
+			}
+			slog.Warn("feedback: record failed", "profile", profileID, "item", req.MediaItemID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to record feedback")
+			return
+		}
+	case "clear":
+		if err := h.queries.DeleteItemFeedback(r.Context(), profileID, req.MediaItemID); err != nil {
+			slog.Warn("feedback: clear failed", "profile", profileID, "item", req.MediaItemID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to clear feedback")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "direction must be 'up', 'down', or 'clear'")
+		return
+	}
+	// Re-curate live: drops hero/discover/engagement caches + bumps the epoch.
+	h.hero.Invalidate(profileID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resolveProfileID returns the profile to personalize for and a bool
