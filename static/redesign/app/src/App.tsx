@@ -147,6 +147,7 @@ import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
+import { NebulaAvatar, parseNebula } from '@/components/NebulaAvatar'
 import { CollectionsView } from '@/components/CollectionsView'
 import { CalendarView } from '@/components/CalendarView'
 import { GamificationCard } from '@/components/GamificationCard'
@@ -6640,10 +6641,15 @@ function pathToView(pathname: string): string {
 // so re-clicking the avatar dismisses without needing to outside-click.
 function UserMenu({
   user,
+  avatarUrl,
   onNavigate,
   onSignOut,
 }: {
   user: ApiUser
+  // Active profile's avatar. When it's a built-in nebula ("nebula:<id>") the
+  // trigger shows the living orb chosen in onboarding; otherwise it falls back
+  // to the username initial.
+  avatarUrl?: string
   onNavigate: (v: string) => void
   onSignOut: () => void
 }) {
@@ -6685,9 +6691,15 @@ function UserMenu({
         title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white font-bold text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/60"
+        className="w-10 h-10 rounded-full overflow-hidden flex items-center justify-center text-white font-bold text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/60 bg-gradient-to-br from-purple-500 to-purple-700"
       >
-        {user.username[0]?.toUpperCase() || 'U'}
+        {parseNebula(avatarUrl) ? (
+          <NebulaAvatar nebula={avatarUrl!} size={40} />
+        ) : avatarUrl && (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) ? (
+          <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
+        ) : (
+          user.username[0]?.toUpperCase() || 'U'
+        )}
       </button>
       {open && (
         <div
@@ -9180,6 +9192,7 @@ export default function App() {
                 Settings / Sign Out). */}
             <UserMenu
               user={user}
+              avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
               onNavigate={(v) => handleNavigate(v)}
               onSignOut={() => { void handleLogout() }}
             />
