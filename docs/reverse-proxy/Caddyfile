@@ -14,4 +14,20 @@ aurora.example.com {
         # which is critical for HLS segments and Server-Sent Events.
         flush_interval -1
     }
+
+    # Token hygiene: Chromecast/AirPlay receivers authenticate HLS requests
+    # with a short-lived cast token in the query string (?token=...). Aurora
+    # redacts it from its own logs; keep it out of Caddy's access logs too
+    # by logging without the query. (Skip this block entirely if you don't
+    # enable access logging — Caddy doesn't log requests by default.)
+    log {
+        format filter {
+            wrap console
+            fields {
+                request>uri query {
+                    delete token
+                }
+            }
+        }
+    }
 }

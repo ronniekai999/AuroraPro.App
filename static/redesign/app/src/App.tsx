@@ -4741,6 +4741,13 @@ function AdminServerSettingsTab() {
             </div>
             <div className="flex items-center justify-between">
               <div>
+                <p className="text-white/80 text-sm">Transcode max sessions per user</p>
+                <p className="text-white/40 text-xs">Streams one account may hold; 0 = default (3)</p>
+              </div>
+              <input type="number" min={0} max={100} value={val('transcode_max_sessions_per_user', '0')} onChange={e => setVal('transcode_max_sessions_per_user', e.target.value)} className="px-3 py-1.5 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm w-24" />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
                 <p className="text-white/80 text-sm">Scan interval (seconds)</p>
                 <p className="text-white/40 text-xs">Default for new libraries; 0 = manual only</p>
               </div>

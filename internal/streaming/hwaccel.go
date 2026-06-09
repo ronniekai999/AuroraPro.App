@@ -180,9 +180,9 @@ func vaapiTestArgs() ([]string, string) {
 // scale filter uses -2 to let FFmpeg auto-calculate the exact height from the
 // source aspect ratio (rounded to even, as required by H.264).
 //
-// Profile selection: High for resolutions above 1080p (enables B-frames + CABAC
-// for better quality at the tight 4K bitrate budget), Baseline for 1080p and below
-// (maximum browser/device compatibility).
+// Profile selection: High at every resolution (see h264Profile) — it enables
+// CABAC, 8x8 transform, and B-frames, and every supported playback target
+// decodes High. Must stay in sync with hlsCodecString in streaming.go.
 func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 	// scale=W:-2 preserves source aspect ratio with even-number rounding.
 	// This prevents distortion of ultrawide (2.4:1), 4:3, or other non-16:9 content.
@@ -217,8 +217,15 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	case HWAccelQSV:
+		// `-profile:v` with the explicit :v stream specifier — NOT bare
+		// `-profile`. An empty stream specifier applies the option to ALL
+		// output streams, including audio: when the session re-encodes audio
+		// (the default `-c:a aac`), the AAC encoder is asked to set
+		// profile=high, which is not a valid AAC profile constant
+		// (aac_low/aac_main/…), and FFmpeg aborts at encoder init before
+		// producing a single segment. Review 2026-06 finding B1.
 		return []string{"-c:v", "h264_qsv", "-preset", "faster",
-			"-profile", profile, "-level", level, "-vf", scale}
+			"-profile:v", profile, "-level", level, "-vf", scale}
 	case HWAccelVAAPI:
 		// VAAPI does not support explicit baseline profile constraint — leave as-is.
 		// The format=nv12 step here is the equivalent 8-bit downconvert.

@@ -230,11 +230,20 @@ type CacheConfig struct {
 }
 
 type TranscodeConfig struct {
-	MaxSessions     int
-	HWAccel         string
-	SessionTimeout  time.Duration
-	SegmentDuration int
-	Profiles        []string
+	MaxSessions int
+	// MaxSessionsPerUser bounds how many of the global transcode slots one
+	// account may hold. <= 0 means "use the manager's built-in default"
+	// (3) — never unlimited, so a single user or leaked token cannot pin
+	// every slot (streaming review 2026-06 finding S1).
+	MaxSessionsPerUser int
+	HWAccel            string
+	SessionTimeout     time.Duration
+	SegmentDuration    int
+	// SegmentFormat selects the HLS segment container: "fmp4" (default —
+	// CMAF fragmented MP4, required by Apple for HEVC, no client-side
+	// TS remux) or "ts" (legacy MPEG-TS, kept as a rollback path).
+	SegmentFormat string
+	Profiles      []string
 	// MaxCacheBytes bounds the total on-disk size of the transcode output
 	// tree (HLS EVENT playlists keep every segment of a title so seek-back
 	// works, so long/concurrent transcodes can grow it without bound). When
@@ -293,12 +302,14 @@ type yamlConfig struct {
 		SubtitleDir  string `yaml:"subtitle_dir"`
 	} `yaml:"cache"`
 	Transcode struct {
-		MaxSessions       int      `yaml:"max_sessions"`
-		HWAccel           string   `yaml:"hw_accel"`
-		SessionTimeoutSec int      `yaml:"session_timeout_sec"`
-		SegmentDuration   int      `yaml:"segment_duration"`
-		Profiles          []string `yaml:"profiles"`
-		MaxCacheGB        int      `yaml:"max_cache_gb"`
+		MaxSessions        int      `yaml:"max_sessions"`
+		MaxSessionsPerUser int      `yaml:"max_sessions_per_user"`
+		HWAccel            string   `yaml:"hw_accel"`
+		SessionTimeoutSec  int      `yaml:"session_timeout_sec"`
+		SegmentDuration    int      `yaml:"segment_duration"`
+		SegmentFormat      string   `yaml:"segment_format"`
+		Profiles           []string `yaml:"profiles"`
+		MaxCacheGB         int      `yaml:"max_cache_gb"`
 	} `yaml:"transcode"`
 	TLS struct {
 		Enabled  bool   `yaml:"enabled"`
@@ -395,7 +406,10 @@ func Load() (*Config, error) {
 		},
 		Transcode: TranscodeConfig{
 			MaxSessions: 0,
-			HWAccel:     "auto",
+			// 0 = manager default (3): one active stream + a seek-rebuild's
+			// transient second session + a stereo cast clone.
+			MaxSessionsPerUser: 0,
+			HWAccel:            "auto",
 			// 5 minutes (was 120s). Keepalive pings every 10s, but browsers
 			// throttle/suspend timers in backgrounded tabs and on locked
 			// phones; a 2-minute idle window let a backgrounded stream's
@@ -404,6 +418,10 @@ func Load() (*Config, error) {
 			// gaps while still reclaiming truly-abandoned sessions.
 			SessionTimeout:  300 * time.Second,
 			SegmentDuration: 6,
+			// fMP4 (CMAF) segments by default — Apple's HLS spec requires
+			// fMP4 for HEVC, and hls.js skips its TS→fMP4 remux entirely.
+			// Set "ts" to roll back to the legacy MPEG-TS pipeline.
+			SegmentFormat: "fmp4",
 			// 2160p included so 4K sources can be offered at full resolution
 			// when transcoding is unavoidable. It sits at the TOP of the ABR
 			// ladder and variants start on-demand, so low-bandwidth clients
@@ -671,6 +689,12 @@ func loadYAML(cfg *Config) error {
 	if yc.Transcode.SegmentDuration > 0 {
 		cfg.Transcode.SegmentDuration = yc.Transcode.SegmentDuration
 	}
+	if yc.Transcode.SegmentFormat != "" {
+		cfg.Transcode.SegmentFormat = yc.Transcode.SegmentFormat
+	}
+	if yc.Transcode.MaxSessionsPerUser > 0 {
+		cfg.Transcode.MaxSessionsPerUser = yc.Transcode.MaxSessionsPerUser
+	}
 	if len(yc.Transcode.Profiles) > 0 {
 		cfg.Transcode.Profiles = yc.Transcode.Profiles
 	}
@@ -902,6 +926,14 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("TRANSCODE_SEGMENT_DURATION"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {
 			cfg.Transcode.SegmentDuration = i
+		}
+	}
+	if v := os.Getenv("TRANSCODE_SEGMENT_FORMAT"); v != "" {
+		cfg.Transcode.SegmentFormat = v
+	}
+	if v := os.Getenv("TRANSCODE_MAX_SESSIONS_PER_USER"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			cfg.Transcode.MaxSessionsPerUser = i
 		}
 	}
 	if v := os.Getenv("TRANSCODE_PROFILES"); v != "" {

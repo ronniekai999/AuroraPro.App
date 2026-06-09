@@ -55,8 +55,16 @@ func TestVideoEncoderArgs_QSV(t *testing.T) {
 
 	assertContains(t, args, "-c:v", "h264_qsv")
 	assertContains(t, args, "-preset", "faster")
-	assertContains(t, args, "-profile", "high")
+	// MUST be -profile:v with the explicit stream specifier — bare -profile
+	// applies to the audio stream too, and the AAC encoder rejects "high",
+	// killing every QSV transcode that re-encodes audio (finding B1).
+	assertContains(t, args, "-profile:v", "high")
 	assertContainsVF(t, args, "scale=854:-2")
+	for _, a := range args {
+		if a == "-profile" {
+			t.Error("bare -profile must not appear in QSV args (applies to all streams; breaks AAC encoder init)")
+		}
+	}
 }
 
 func TestVideoEncoderArgs_VAAPI(t *testing.T) {

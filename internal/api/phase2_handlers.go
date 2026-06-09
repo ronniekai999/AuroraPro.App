@@ -873,7 +873,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
-		writeError(w, http.StatusInternalServerError, "transcode session failed")
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -954,7 +954,7 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
-		writeError(w, http.StatusInternalServerError, "transcode session failed")
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -1018,17 +1018,14 @@ func (h *StreamHandler) requireSessionAccess(w http.ResponseWriter, r *http.Requ
 		return true
 	}
 
-	// Regular access tokens: keep the existing 404 / 403 split. The
-	// information leak here is less severe because access tokens are
-	// account-scoped and short-lived (15min) — a logged-in user can
-	// already see most of their own resources via the regular API.
+	// Regular access tokens: uniform 404 for both "doesn't exist" and
+	// "exists but belongs to another user" (review 2026-06 finding S3 —
+	// previously a 404/403 split let any token holder confirm whether a
+	// session ID existed). Other users' sessions are simply not visible.
+	// Admins still pass the ownership check below and reach any session.
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
+	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
 		writeError(w, http.StatusNotFound, "session not found")
-		return false
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "session belongs to another user")
 		return false
 	}
 	return true
@@ -1103,13 +1100,11 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "missing sessionID")
 		return
 	}
+	// Uniform 404 for "doesn't exist" and "not yours" — same enumeration
+	// hardening as requireSessionAccess (review finding S3).
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
+	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "session belongs to another user")
 		return
 	}
 	if h.authSvc == nil {
@@ -1313,14 +1308,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	session, err := h.transcode.CreateSession(claims.UserID, claims.Username, filePath, srcW, srcH, opts)
 	if err != nil {
-		// "maximum transcode sessions reached" is user-relevant (they need to wait);
-		// all other errors may contain filesystem paths and should not be exposed.
-		if strings.Contains(err.Error(), "maximum transcode sessions") {
-			writeError(w, http.StatusTooManyRequests, "maximum transcode sessions reached, try again later")
-		} else {
-			slog.Error("failed to create transcode session", "user_id", claims.UserID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to create transcode session")
-		}
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -1400,14 +1388,11 @@ func (h *StreamHandler) DeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := chi.URLParam(r, "sessionID")
 
-	// Retrieve session info before stopping so we can log the file name
+	// Retrieve session info before stopping so we can log the file name.
+	// Uniform 404 for missing vs not-owned (review finding S3).
 	session, found := h.transcode.GetSession(sessionID)
-	if !found {
+	if !found || (session.UserID != claims.UserID && claims.Role != "admin") {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if session.UserID != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "cannot delete another user's session")
 		return
 	}
 
@@ -1439,13 +1424,10 @@ func (h *StreamHandler) KeepAlive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := chi.URLParam(r, "sessionID")
+	// Uniform 404 (review finding S3) — see requireSessionAccess.
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 {
+	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
 		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if owner != claims.UserID && claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "cannot keepalive another user's session")
 		return
 	}
 	if !h.transcode.KeepAlive(sessionID) {
@@ -1458,6 +1440,26 @@ func (h *StreamHandler) KeepAlive(w http.ResponseWriter, r *http.Request) {
 // HWAccelStatus returns detected hardware acceleration info.
 func (h *StreamHandler) HWAccelStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.transcode.HWAccelStatus())
+}
+
+// writeSessionCreateError maps a transcode session-creation failure onto the
+// right HTTP response. Session-limit errors are user-relevant (they need to
+// wait or close another stream) and return 429 with an actionable message;
+// all other errors may contain filesystem paths and are not exposed. Typed
+// sentinels first; the string check is kept as a safety net for any older
+// wrapped form. Shared by the explicit CreateSession endpoint and the legacy
+// auto-decision endpoints (StreamMediaFile/StreamEpisodeFile) so a quota hit
+// is never reported as a generic 500.
+func writeSessionCreateError(w http.ResponseWriter, userID int64, err error) {
+	switch {
+	case errors.Is(err, streaming.ErrUserSessionLimit):
+		writeError(w, http.StatusTooManyRequests, "you have too many active streams — close one and try again")
+	case errors.Is(err, streaming.ErrSessionLimit), strings.Contains(err.Error(), "maximum transcode sessions"):
+		writeError(w, http.StatusTooManyRequests, "maximum transcode sessions reached, try again later")
+	default:
+		slog.Error("failed to create transcode session", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create transcode session")
+	}
 }
 
 // parseResolution parses "1920x1080" into width, height. Returns 1920x1080 as default.
@@ -1491,6 +1493,11 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	var clientCaps *streaming.ClientCaps
 	if capsRaw := r.URL.Query().Get("caps"); capsRaw != "" {
 		clientCaps = streaming.ParseClientCaps(capsRaw)
+		// Server-side delivery context, not a client capability: tells the
+		// decision engine whether HLS segments are fMP4 (CMAF) — which
+		// Apple requires for HEVC remux on native players — or legacy
+		// MPEG-TS. See ClientCaps.FMP4.
+		clientCaps.FMP4 = h.transcode.FMP4Enabled()
 	}
 
 	var filePath, container, videoCodec, audioCodec, resolution, videoPixFmt string
