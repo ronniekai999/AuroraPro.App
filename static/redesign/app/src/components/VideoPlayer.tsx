@@ -273,11 +273,17 @@ const BW_ESTIMATE_DEFAULT = 8_000_000
 const BW_ESTIMATE_MIN = 1_000_000
 const BW_ESTIMATE_MAX = 200_000_000
 
+// Single clamp shared by load and save so the persisted and applied bounds
+// can never diverge.
+function clampBandwidth(bps: number): number {
+  return Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, bps))
+}
+
 function loadBandwidthEstimate(): number {
   try {
     const raw = localStorage.getItem(BW_ESTIMATE_KEY)
     const n = raw ? Number(raw) : NaN
-    if (Number.isFinite(n)) return Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, n))
+    if (Number.isFinite(n)) return clampBandwidth(n)
   } catch { /* private browsing / quota — fall through to default */ }
   return BW_ESTIMATE_DEFAULT
 }
@@ -285,7 +291,7 @@ function loadBandwidthEstimate(): number {
 function saveBandwidthEstimate(bps: number | undefined): void {
   if (!bps || !Number.isFinite(bps) || bps <= 0) return
   try {
-    localStorage.setItem(BW_ESTIMATE_KEY, String(Math.round(Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, bps)))))
+    localStorage.setItem(BW_ESTIMATE_KEY, String(Math.round(clampBandwidth(bps))))
   } catch { /* best-effort */ }
 }
 

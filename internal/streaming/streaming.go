@@ -306,18 +306,16 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// passthrough (E-AC-3 etc.) is a deliberate follow-up.
 	hlsCaps := clientCaps
 	if clientCaps.HLSJS {
-		hlsCaps = &ClientCaps{
-			VideoCodecs: clientCaps.VideoCodecs,
-			Containers:  clientCaps.Containers,
-			HLSNative:   clientCaps.HLSNative,
-			HLSJS:       clientCaps.HLSJS,
-			FMP4:        clientCaps.FMP4,
-			AudioCodecs: map[string]bool{
-				"aac": clientCaps.AudioCodecs["aac"],
-				"mp3": clientCaps.AudioCodecs["mp3"],
-				"ac3": clientCaps.AudioCodecs["ac3"],
-			},
+		// Shallow struct copy, then replace ONLY the audio map: new
+		// ClientCaps fields are carried automatically instead of each one
+		// needing to be remembered here (FMP4 was missed once this way).
+		restricted := *clientCaps
+		restricted.AudioCodecs = map[string]bool{
+			"aac": clientCaps.AudioCodecs["aac"],
+			"mp3": clientCaps.AudioCodecs["mp3"],
+			"ac3": clientCaps.AudioCodecs["ac3"],
 		}
+		hlsCaps = &restricted
 	}
 
 	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps)
@@ -522,6 +520,12 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 	// into MPEG-TS at all (FFmpeg emits them as private data streams that no
 	// HLS client demuxes) — the old code remuxed them anyway and produced
 	// unplayable sessions for caps-less clients. Review 2026-06 finding B3.
+	//
+	// Do NOT add HEVC here without replicating DecidePlayback's delivery
+	// gate: HEVC remux is only legal with fMP4 segments or an HLS.js >= 1.6
+	// client (Apple's HLS spec forbids HEVC-in-TS for native players), and
+	// the static path knows neither the segment format nor the client.
+	// H.264 is the only codec that is safe in every combination.
 	if videoCodec == "h264" || videoCodec == "avc" || videoCodec == "avc1" {
 		// Audio passthrough policy mirrors tsPassthroughSafe on the
 		// caps-aware path: only AAC (or no audio) is copied. MP3 framing in
@@ -1083,6 +1087,19 @@ func (tm *TranscodeManager) SetMaxSessions(n int) {
 	defer tm.mu.Unlock()
 	tm.cfg.MaxSessions = n
 	slog.Info("transcode max sessions updated", "max_sessions", n, "effective_cap", effectiveMaxSessions(n))
+}
+
+// SetMaxSessionsPerUser updates the per-user session cap at runtime — the
+// per-user counterpart to SetMaxSessions, wired to the admin API's
+// transcode_max_sessions_per_user setting so the quota is hot-reloadable
+// without a restart (review follow-up: the global knob had a setter, the
+// per-user knob didn't).
+func (tm *TranscodeManager) SetMaxSessionsPerUser(n int) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.cfg.MaxSessionsPerUser = n
+	slog.Info("transcode max sessions per user updated",
+		"max_sessions_per_user", n, "effective_cap", effectiveMaxSessionsPerUser(n))
 }
 
 // effectiveMaxSessions resolves the configured cap to an always-bounded ceiling.
@@ -1845,29 +1862,13 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 		// ffmpegDone is still false and we briefly return the dying variant;
 		// the next playlist poll (~3s) lands in this branch and resumes.
 		if v.reaped && ffmpegDone(v) {
-			highestSeg := highestSegmentNumber(v.OutputDir)
-			segDur := tm.cfg.SegmentDuration
-			if segDur <= 0 {
-				segDur = 6
-			}
-			resumeFromSec := startSec
-			resumeSegNum := 0
-			if highestSeg >= 0 {
-				resumeSegNum = highestSeg + 1
-				resumeFromSec = startSec + resumeSegNum*segDur
-			}
+			resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
 			slog.Info("resuming reaped variant on renewed access",
 				"session_id", session.ID,
 				"profile", profileName,
 				"resume_segment", resumeSegNum,
 			)
-			v.reaped = false
-			v.Ready = make(chan struct{})
-			v.started = false
-			v.exited = false
-			v.Err = nil
-			v.Cmd = nil
-			if err := tm.startVariantAt(session, v, resumeFromSec, resumeSegNum); err != nil {
+			if err := tm.relaunchVariantLocked(session, v, resumeFromSec, resumeSegNum); err != nil {
 				return nil, fmt.Errorf("variant %s resume after reap failed: %w", profileName, err)
 			}
 			return v, nil
@@ -1913,7 +1914,6 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 			// time — fixed now.
 			if v.restartAttempts < variantRestartMax {
 				v.restartAttempts++
-				highestSeg := highestSegmentNumber(v.OutputDir)
 				// Audit M3 — subtitles freeze at the crash point on
 				// restart. The original FFmpeg process produced both
 				// video and subtitle outputs in one invocation; on
@@ -1927,38 +1927,16 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 				// continuous video, subtitles end at the crash point.
 				// Operators see a Warn log so the limitation is
 				// visible in production.
+				resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
 				slog.Warn("variant FFmpeg crashed mid-stream, attempting auto-restart",
 					"session_id", session.ID,
 					"profile", profileName,
 					"attempt", v.restartAttempts,
-					"highest_segment", highestSeg,
+					"resume_segment", resumeSegNum,
 					"subtitles_freeze_at_crash", len(session.SubtitleTracks) > 0,
 					"prev_err", v.Err,
 				)
-				// Compute resume source-second: source was at
-				// startSec + (highestSeg + 1) * segDuration when crash
-				// occurred. New FFmpeg seeks there and continues writing
-				// from seg_{highestSeg+1}.
-				segDur := tm.cfg.SegmentDuration
-				if segDur <= 0 {
-					segDur = 6 // matches the fallback in startVariantImpl
-				}
-				resumeFromSec := startSec
-				resumeSegNum := 0
-				if highestSeg >= 0 {
-					resumeSegNum = highestSeg + 1
-					resumeFromSec = startSec + resumeSegNum*segDur
-				}
-				// Reset variant state for fresh startVariant. The Ready
-				// channel must be a fresh chan because the prior one was
-				// closed; reading from a closed chan never blocks so
-				// readers would see "ready" immediately on the stale chan.
-				v.Ready = make(chan struct{})
-				v.started = false
-				v.exited = false
-				v.Err = nil
-				v.Cmd = nil
-				if err := tm.startVariantAt(session, v, resumeFromSec, resumeSegNum); err != nil {
+				if err := tm.relaunchVariantLocked(session, v, resumeFromSec, resumeSegNum); err != nil {
 					// Restart failed — fall back to surfacing the original
 					// crash error to the caller. The restartAttempts bump
 					// above ensures we don't infinite-retry.
@@ -1984,6 +1962,40 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 	}
 
 	return v, nil
+}
+
+// resumePoint computes where a relaunched FFmpeg should continue for a
+// variant whose process stopped (crash or reap): the source-second to seek to
+// and the segment number to start writing at. The source was at
+// startSec + (highestCompleteSeg + 1) * segDuration when output stopped.
+// Shared by the crash-restart and reap-resume paths in EnsureVariant so the
+// resume math can never diverge between them. Caller holds variantMu.
+func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec, resumeSegNum int) {
+	segDur := tm.cfg.SegmentDuration
+	if segDur <= 0 {
+		segDur = 6 // matches the fallback in startVariantImpl
+	}
+	resumeFromSec = startSec
+	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
+		resumeSegNum = highestSeg + 1
+		resumeFromSec = startSec + resumeSegNum*segDur
+	}
+	return resumeFromSec, resumeSegNum
+}
+
+// relaunchVariantLocked resets a terminated variant's lifecycle state and
+// starts a fresh FFmpeg at the given resume point. The Ready channel must be
+// a fresh chan because the prior one was closed — reading from a closed chan
+// never blocks, so waiters on the stale chan would see "ready" immediately.
+// Caller holds variantMu (same contract as startVariantImpl).
+func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *QualityVariant, resumeFromSec, resumeSegNum int) error {
+	v.reaped = false
+	v.Ready = make(chan struct{})
+	v.started = false
+	v.exited = false
+	v.Err = nil
+	v.Cmd = nil
+	return tm.startVariantAt(session, v, resumeFromSec, resumeSegNum)
 }
 
 // highestSegmentNumber walks the variant output directory and returns the
@@ -2508,6 +2520,16 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 				// -avoid_negative_ts disabled: prevents FFmpeg from adding
 				// any PTS offset to subtitle cue times. With -copyts and
 				// -start_at_zero on the input, cue times are already correct.
+				//
+				// Known, bounded skew in fMP4 mode: the VIDEO output uses
+				// -avoid_negative_ts make_zero (mov muxer needs dts >= 0),
+				// which shifts video/audio by the B-frame reorder delay
+				// (<= ~2 frames, ~40-80ms) while these cue times stay
+				// unshifted — subtitles can render up to that much early.
+				// Per-output flags cannot align the two (each output shifts
+				// by ITS OWN min-dts), and the skew is within the same
+				// <100ms tolerance the TS path has always accepted from
+				// codec delay. X-TIMESTAMP-MAP stays 0 in fMP4 mode.
 				"-avoid_negative_ts", "disabled",
 				"-f", "segment",
 				"-segment_format", "webvtt",

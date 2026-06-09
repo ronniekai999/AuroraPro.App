@@ -811,6 +811,12 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			n, err := strconv.Atoi(v)
 			return err == nil && n >= 0 && n <= 1000
 		}},
+		// Per-user transcode quota (streaming review S1). 0 = manager
+		// default (3). Hot-applied below like the global cap.
+		"transcode_max_sessions_per_user": {func(v string) bool {
+			n, err := strconv.Atoi(v)
+			return err == nil && n >= 0 && n <= 100
+		}},
 		"filesystem_watch_enabled": {func(v string) bool {
 			return v == "true" || v == "false"
 		}},
@@ -871,6 +877,10 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		case "transcode_max_sessions":
 			if n, err := strconv.Atoi(value); err == nil && h.transcode != nil {
 				h.transcode.SetMaxSessions(n)
+			}
+		case "transcode_max_sessions_per_user":
+			if n, err := strconv.Atoi(value); err == nil && h.transcode != nil {
+				h.transcode.SetMaxSessionsPerUser(n)
 			}
 		case "scan_interval_default":
 			if n, err := strconv.Atoi(value); err == nil && h.watcher != nil {

@@ -239,9 +239,21 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// tokens are now simply NOT promoted here (no hard 401): a
 				// cookie-authed request with a vestigial ?token= keeps working
 				// via its cookie, and redaction below still scrubs the value.
-				if promote && strings.HasPrefix(r.URL.Path, "/api/stream/") && deps.AuthSvc != nil {
-					if _, castErr := deps.AuthSvc.ValidateCastToken(token); castErr != nil {
-						promote = false
+				//
+				// Fail CLOSED when AuthSvc is nil (test/embedding wiring): a
+				// token we cannot scope-check is not promoted, rather than
+				// silently reverting to the pre-hardening behavior.
+				//
+				// NOTE: this prefix must cover every STREAMING path listed in
+				// shouldPromoteToken. If a new streaming route tree is added
+				// there under a different prefix, extend this check too — a
+				// miss means regular tokens are promoted on the new routes.
+				if promote && strings.HasPrefix(r.URL.Path, "/api/stream/") {
+					promote = false
+					if deps.AuthSvc != nil {
+						if _, castErr := deps.AuthSvc.ValidateCastToken(token); castErr == nil {
+							promote = true
+						}
 					}
 				}
 				if promote {

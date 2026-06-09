@@ -23,6 +23,18 @@
 >   token-rewritten for cast receivers. The TS-era audio passthrough policy
 >   (AAC/AC-3 only) is retained in fMP4 mode for safety; widening it
 >   (E-AC-3 passthrough) is a follow-up.
+>
+> A 7-angle adversarial review of the implementation produced one further
+> round of fixes: quota errors on the legacy auto endpoints now return 429
+> (not 500); `transcode_max_sessions_per_user` is admin-hot-reloadable like
+> the global cap (setter + settings UI); the cast-scope query-token gate
+> fails closed when the auth service is absent; the reap-resume and
+> crash-restart paths share one resume helper so their math cannot diverge;
+> and the bounded (≤2-frame) fMP4 subtitle-cue skew from `make_zero` is
+> documented at the flag site. Known accepted risk: a user at their session
+> cap who casts an AC-3 stream falls back to casting the original session
+> (possible silent audio on non-AC-3 receivers) — pre-existing fallback,
+> logged server-side.
 
 Scope: the full playback stack — direct play, direct stream (remux), and HLS
 transcoding — across `internal/streaming/`, the API layer

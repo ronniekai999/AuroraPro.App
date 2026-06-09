@@ -873,7 +873,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
-		writeError(w, http.StatusInternalServerError, "transcode session failed")
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -954,7 +954,7 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
-		writeError(w, http.StatusInternalServerError, "transcode session failed")
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -1308,19 +1308,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	session, err := h.transcode.CreateSession(claims.UserID, claims.Username, filePath, srcW, srcH, opts)
 	if err != nil {
-		// Session-limit errors are user-relevant (they need to wait or close
-		// another stream); all other errors may contain filesystem paths and
-		// should not be exposed. Typed sentinels first; the string check is
-		// kept as a safety net for any older wrapped form.
-		switch {
-		case errors.Is(err, streaming.ErrUserSessionLimit):
-			writeError(w, http.StatusTooManyRequests, "you have too many active streams — close one and try again")
-		case errors.Is(err, streaming.ErrSessionLimit), strings.Contains(err.Error(), "maximum transcode sessions"):
-			writeError(w, http.StatusTooManyRequests, "maximum transcode sessions reached, try again later")
-		default:
-			slog.Error("failed to create transcode session", "user_id", claims.UserID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to create transcode session")
-		}
+		writeSessionCreateError(w, claims.UserID, err)
 		return
 	}
 
@@ -1452,6 +1440,26 @@ func (h *StreamHandler) KeepAlive(w http.ResponseWriter, r *http.Request) {
 // HWAccelStatus returns detected hardware acceleration info.
 func (h *StreamHandler) HWAccelStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.transcode.HWAccelStatus())
+}
+
+// writeSessionCreateError maps a transcode session-creation failure onto the
+// right HTTP response. Session-limit errors are user-relevant (they need to
+// wait or close another stream) and return 429 with an actionable message;
+// all other errors may contain filesystem paths and are not exposed. Typed
+// sentinels first; the string check is kept as a safety net for any older
+// wrapped form. Shared by the explicit CreateSession endpoint and the legacy
+// auto-decision endpoints (StreamMediaFile/StreamEpisodeFile) so a quota hit
+// is never reported as a generic 500.
+func writeSessionCreateError(w http.ResponseWriter, userID int64, err error) {
+	switch {
+	case errors.Is(err, streaming.ErrUserSessionLimit):
+		writeError(w, http.StatusTooManyRequests, "you have too many active streams — close one and try again")
+	case errors.Is(err, streaming.ErrSessionLimit), strings.Contains(err.Error(), "maximum transcode sessions"):
+		writeError(w, http.StatusTooManyRequests, "maximum transcode sessions reached, try again later")
+	default:
+		slog.Error("failed to create transcode session", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create transcode session")
+	}
 }
 
 // parseResolution parses "1920x1080" into width, height. Returns 1920x1080 as default.
