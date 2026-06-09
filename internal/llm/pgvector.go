@@ -43,8 +43,9 @@ func FormatVector(v []float32) string {
 // Contract: a nil error guarantees a non-empty result. An empty literal
 // ("[]") is rejected with an error rather than `(nil, nil)`, because for
 // every legitimate caller in this codebase a zero-dim vector is a bug
-// upstream — embeddings are 384-dim by construction, so "[]" means we
-// scanned a column where the embedding was NULL or the row was malformed.
+// upstream — embeddings are fixed-width by construction (768-dim as of
+// Phase E2), so "[]" means we scanned a column where the embedding was NULL
+// or the row was malformed.
 // Callers should treat the error path as "skip this candidate."
 func ParseVector(s string) ([]float32, error) {
 	s = strings.TrimSpace(s)

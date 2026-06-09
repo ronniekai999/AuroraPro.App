@@ -101,10 +101,10 @@ func TestParseVector_InteriorWhitespace(t *testing.T) {
 }
 
 func TestParseVector_LargeDim(t *testing.T) {
-	// Realistic pgvector text literal at the 384-dim size Aurora uses.
+	// Realistic pgvector text literal at the 768-dim size Aurora uses (Phase E2).
 	var b strings.Builder
 	b.WriteByte('[')
-	for i := 0; i < 384; i++ {
+	for i := 0; i < 768; i++ {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -113,9 +113,9 @@ func TestParseVector_LargeDim(t *testing.T) {
 	b.WriteByte(']')
 	v, err := ParseVector(b.String())
 	if err != nil {
-		t.Fatalf("384-dim parse failed: %v", err)
+		t.Fatalf("768-dim parse failed: %v", err)
 	}
-	if len(v) != 384 {
-		t.Fatalf("want 384 dims, got %d", len(v))
+	if len(v) != 768 {
+		t.Fatalf("want 768 dims, got %d", len(v))
 	}
 }

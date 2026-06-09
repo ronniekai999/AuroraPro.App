@@ -340,8 +340,8 @@ type RailCandidate struct {
 // Used by the rail when we want to do MMR / anchor matching client-side.
 // Same WHERE / ORDER BY as NearestUnwatched — embedding column added.
 //
-// Payload note: 384-dim vectors at 6-digit precision are ~7 KB each. For
-// limit=36 that's ~250 KB over the wire — acceptable for a rail that
+// Payload note: 768-dim vectors at 6-digit precision are ~14 KB each. For
+// limit=36 that's ~500 KB over the wire — acceptable for a rail that
 // loads on home-page navigation, not per-frame.
 func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string) ([]*RailCandidate, error) {
 	if limit <= 0 {

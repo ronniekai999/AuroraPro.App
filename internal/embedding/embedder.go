@@ -29,11 +29,15 @@ import (
 // re-embeds any rows whose stored version is < CurrentVersion.
 //
 // Bump rules:
-//   - 1 → 2: swapped embedding model (e.g. nomic → bge)
-//   - 1 → 2: changed BuildText format
+//   - swap the embedding model, or change BuildText format → bump.
+//
+// Version history:
+//   - 1: nomic-embed-text, 384-dim (truncated).
+//   - 2: Phase E2 — embeddinggemma, 768-dim (migration 040 re-types the column +
+//     nulls existing vectors; the bump makes RunBackfill re-embed everything).
 //
 // Do NOT bump for trivial code refactors that produce identical output.
-const CurrentVersion int16 = 1
+const CurrentVersion int16 = 2
 
 // Embedder coordinates the embedding model client with the database. Safe for
 // concurrent use; multiple goroutines may call EmbedItem in parallel.
