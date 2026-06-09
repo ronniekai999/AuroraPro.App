@@ -1237,9 +1237,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // stream as audio_0; the session re-creates from scratch.
           audio_track_index: target.audioTrackIndex ?? stream.audio_track_index,
           audio_channels: stream.audio_channels,
-          // Surround hint: 'ac3' when the server decided this client can take
-          // AC-3 5.1 (vs the stereo-AAC default). Echoed from the stream-info
-          // decision; ignored server-side when audio is copied.
+          // Audio output codec from the stream-info decision: the re-encode
+          // target ('aac' stereo / 'ac3' 5.1) or, when audio is copied, the
+          // SOURCE codec ('aac'/'ac3'/'eac3'). Echoed back verbatim; the
+          // server re-validates against its own track data
+          // (NormalizeSessionAudio), so a stale echo can never produce a
+          // manifest/segment codec mismatch.
           audio_codec_out: stream.audio_codec_out,
           hdr_tonemap: stream.hdr_tonemap,
           video_codec: stream.video_codec,

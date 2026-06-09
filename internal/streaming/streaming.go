@@ -130,6 +130,16 @@ type ClientCaps struct {
 	// fMP4 segments, so HEVC remux for native-HLS clients is only legal when
 	// this is true. Review 2026-06 finding B2 / M1.
 	FMP4 bool
+	// EAC3MSE is the frontend's MSE-strict E-AC-3 probe
+	// (MediaSource.isTypeSupported('audio/mp4; codecs="ec-3"'), caps key
+	// "eac3_mse"). A dedicated field — NOT an AudioCodecs entry — because it
+	// is a delivery-path capability, not a track codec: AudioCodecs keys are
+	// matched against ffprobe track codec names by findBestAudioTrack, and a
+	// pseudo-codec living in that namespace invites future code to treat it
+	// as one. Gates copying E-AC-3 into fMP4 segments on the hls.js path;
+	// the plain "eac3" cap (canPlayType OK) gates native direct play and the
+	// native-HLS path.
+	EAC3MSE bool
 }
 
 // PlaybackDecision is the result of analyzing a file against client capabilities.
@@ -140,6 +150,12 @@ type PlaybackDecision struct {
 	AudioNeedsRecode bool   // true if the chosen audio track needs transcoding
 	Remux            bool   // true if decision is direct_stream
 	AudioPassthrough bool   // true if audio can be copied as-is
+	// AudioCodec is the codec of the CHOSEN audio track (lowercased), "" when
+	// the file has no audio. When AudioPassthrough is true this is the codec
+	// the output will carry — the API layer uses it to set the session's
+	// AudioCodecOut so the master-playlist CODECS attribute and the cast
+	// stereo-clone guard reflect copied audio, not just re-encoded audio.
+	AudioCodec string
 }
 
 var knownVideoCodecs = map[string]bool{
@@ -168,6 +184,8 @@ func ParseClientCaps(raw string) *ClientCaps {
 			caps.HLSNative = true
 		case key == "hls_js":
 			caps.HLSJS = true
+		case key == "eac3_mse":
+			caps.EAC3MSE = true
 		case strings.HasSuffix(key, "_container"):
 			caps.Containers[key] = true
 		case knownVideoCodecs[key]:
@@ -278,12 +296,13 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// --- Direct play check (uses FULL client caps) ---
 	// Direct play serves the original file — no HLS, no .ts segments.
 	// The browser plays natively, so all MSE-reported codecs are valid.
-	dpIdx, _, dpAudioOK, dpIsDefault := findBestAudioTrack(audioTracks, clientCaps)
+	dpIdx, dpCodec, dpAudioOK, dpIsDefault := findBestAudioTrack(audioTracks, clientCaps)
 	if videoOK && containerOK && dpAudioOK && dpIsDefault {
 		return PlaybackDecision{
 			Decision:         "direct_play",
 			AudioTrackIndex:  dpIdx,
 			AudioPassthrough: true,
+			AudioCodec:       dpCodec,
 		}
 	}
 
@@ -299,11 +318,15 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// Only clients with HLSJS=false (e.g., iOS Safari) use native HLS,
 	// which supports all codecs the browser reports.
 	//
-	// NOTE on fMP4 mode: the aac/mp3/ac3 restriction is a TS-demuxer limit,
-	// and with fMP4 segments hls.js passes audio straight to MSE — stricter
-	// than necessary there. It stays because it is SAFE in both modes
-	// (AAC/AC-3 play everywhere we emit them); widening fMP4 audio
-	// passthrough (E-AC-3 etc.) is a deliberate follow-up.
+	// fMP4 mode widening: with fMP4 segments hls.js does NOT transmux — it
+	// passes the audio track straight to an MSE SourceBuffer — so the TS
+	// demuxer's codec list stops being the limit; MSE support is. E-AC-3 is
+	// the one codec we add: it is fully standard in fMP4 (dec3 box, "ec-3"),
+	// Apple's own HLS spec recommends it for surround, and the cap is gated
+	// on the frontend's MSE-strict eac3_mse probe (canPlayType over-reports
+	// for this path — same rationale as the ac3 cap). FLAC/Opus stay out:
+	// FFmpeg's mov muxer treats them as experimental and player handling of
+	// them inside HLS-fMP4 is patchy.
 	hlsCaps := clientCaps
 	if clientCaps.HLSJS {
 		// Shallow struct copy, then replace ONLY the audio map: new
@@ -315,22 +338,13 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 			"mp3": clientCaps.AudioCodecs["mp3"],
 			"ac3": clientCaps.AudioCodecs["ac3"],
 		}
+		if clientCaps.FMP4 {
+			restricted.AudioCodecs["eac3"] = clientCaps.EAC3MSE
+		}
 		hlsCaps = &restricted
 	}
 
 	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps)
-
-	// tsPassthroughSafe narrows the remux "copy audio into .ts" policy. HLS.js
-	// can *demux* mp3 from MPEG-TS, so audioOK is true for mp3 sources — but:
-	//   - Safari's native HLS decoder rejects or silently drops mp3-in-ts on
-	//     some OS versions.
-	//   - Non-standard sample-rate mp3 (22.05/24 kHz, common in older MKVs)
-	//     has framing edge cases across both Safari and hls.js.
-	// Re-encoding mp3→AAC on the remux path costs ~1% of a core and produces a
-	// format that every consumer accepts. The risk is not worth the savings.
-	tsPassthroughSafe := func(codec string) bool {
-		return codec == "aac" || codec == "ac3"
-	}
 
 	// For remux paths below, use remuxVideoOK instead of videoOK.
 	// This ensures HEVC files on HLS.js clients fall through to full
@@ -339,11 +353,11 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	if remuxVideoOK && containerOK && audioOK && !isDefaultTrack {
 		// Video + container OK, audio IS compatible but only a non-default
 		// track. Must remux to select the compatible track via -map 0:a:N.
-		// Force mp3 → AAC even here; see tsPassthroughSafe above.
-		safe := tsPassthroughSafe(bestCodec)
+		// Copy-safety still applies; see RemuxAudioCopySafe.
+		safe := RemuxAudioCopySafe(bestCodec, clientCaps.FMP4)
 		reason := fmt.Sprintf("compatible audio track %d is not the default; remux needed to select it", bestIdx)
 		if !safe {
-			reason = fmt.Sprintf("compatible audio track %d (%s) is not the default and mp3 is not ts-safe; remux + audio recode", bestIdx, bestCodec)
+			reason = fmt.Sprintf("compatible audio track %d (%s) is not the default and not copy-safe in HLS segments; remux + audio recode", bestIdx, bestCodec)
 		}
 		return PlaybackDecision{
 			Decision:         "direct_stream",
@@ -352,6 +366,7 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 			AudioNeedsRecode: !safe,
 			Remux:            true,
 			AudioPassthrough: safe,
+			AudioCodec:       bestCodec,
 		}
 	}
 
@@ -359,21 +374,23 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		// Video + container OK, but audio needs transcoding → remux for audio
 		return PlaybackDecision{
 			Decision:         "direct_stream",
-			TranscodeReason:  fmt.Sprintf("audio codec %q not supported by HLS.js TS demuxer", bestCodec),
+			TranscodeReason:  fmt.Sprintf("audio codec %q not supported on the HLS delivery path", bestCodec),
 			AudioTrackIndex:  bestIdx,
 			AudioNeedsRecode: true,
 			Remux:            true,
 			AudioPassthrough: false,
+			AudioCodec:       bestCodec,
 		}
 	}
 
 	if remuxVideoOK && !containerOK {
 		// Video OK but container needs remuxing (e.g., MKV → HLS).
-		// Audio passthrough is only safe for AAC/AC-3; mp3 is force-recoded.
-		safe := audioOK && tsPassthroughSafe(bestCodec)
+		// Audio is copied when RemuxAudioCopySafe allows (AAC/AC-3 always,
+		// E-AC-3 in fMP4 mode); otherwise re-encoded.
+		safe := audioOK && RemuxAudioCopySafe(bestCodec, clientCaps.FMP4)
 		reason := fmt.Sprintf("container %q not natively supported", nc)
 		if audioOK && !safe {
-			reason = fmt.Sprintf("container %q not natively supported; audio %q forced to AAC for ts-safety", nc, bestCodec)
+			reason = fmt.Sprintf("container %q not natively supported; audio %q not copy-safe in HLS segments, re-encoding", nc, bestCodec)
 		}
 		return PlaybackDecision{
 			Decision:         "direct_stream",
@@ -382,6 +399,7 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 			AudioNeedsRecode: !safe,
 			Remux:            true,
 			AudioPassthrough: safe,
+			AudioCodec:       bestCodec,
 		}
 	}
 
@@ -395,21 +413,115 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	} else if videoOK && !remuxVideoOK && (vc == "hevc" || vc == "h265") {
 		reason = "HEVC requires fMP4 HLS segments for native playback (Apple HLS spec); transcoding to H.264"
 	}
-	// Full-transcode path: audio passthrough is only safe when the source codec
-	// already matches the `mp4a.40.2` (AAC-LC) string that hlsCodecString()
-	// advertises in the master playlist. Any other codec — notably MP3, which
-	// `audioOK` evaluates true for under the HLS.js caps — would land in the
-	// .ts segments while the manifest promises AAC, causing `bufferAppendError`
-	// in HLS.js's MSE SourceBuffer. For AAC sources we copy (cheap); for
-	// anything else we re-encode to AAC (matches manifest).
-	aacSource := bestCodec == "aac"
+	// Full-transcode path: audio passthrough requires (a) the client decodes
+	// the codec on this delivery path (audioOK) AND (b) the master playlist's
+	// CODECS attribute can advertise it truthfully — hlsCodecString knows
+	// mp4a.40.2 (AAC), ac-3, and ec-3, and the API layer sets the session's
+	// AudioCodecOut from PlaybackDecision.AudioCodec when copying, so the
+	// manifest matches the segments. A mismatch (e.g. MP3 bits behind an AAC
+	// codec string) causes `bufferAppendError` in hls.js's SourceBuffer.
+	// In TS mode only AAC is copied (unchanged); in fMP4 mode AC-3/E-AC-3
+	// ride along too, preserving surround through a video transcode.
+	copySafe := audioOK && TranscodeAudioCopySafe(bestCodec, clientCaps.FMP4)
 	return PlaybackDecision{
 		Decision:         "transcode",
 		TranscodeReason:  reason,
 		AudioTrackIndex:  bestIdx,
-		AudioNeedsRecode: !aacSource,
-		AudioPassthrough: aacSource,
+		AudioNeedsRecode: !copySafe,
+		AudioPassthrough: copySafe,
+		AudioCodec:       bestCodec,
 	}
+}
+
+// RemuxAudioCopySafe is the "may this audio codec be COPIED into HLS segments
+// on the remux path" policy. The remux master playlist omits the CODECS
+// attribute (codec parameters are unknown at session create), so the only
+// constraints are the segment container and the decoders:
+//   - AAC, AC-3: safe in both MPEG-TS and fMP4 (hls.js demuxes both from TS;
+//     every client we gate on decodes them).
+//   - E-AC-3: fMP4 only. hls.js cannot demux E-AC-3 from TS (silent audio),
+//     but in fMP4 the track goes straight to MSE / the native player, both of
+//     which the eac3/eac3_mse caps vouch for. Standard dec3 box, Apple's
+//     recommended surround codec for HLS.
+//   - MP3 is deliberately NOT copied in either mode even though audioOK can
+//     be true for it: Safari rejects or drops mp3-in-TS on some OS versions,
+//     non-48k mp3 has framing edge cases, and mp3-in-fMP4 (mp4a.6b) decode
+//     via MSE is patchy. Re-encoding mp3→AAC costs ~1% of a core.
+func RemuxAudioCopySafe(codec string, fmp4 bool) bool {
+	switch codec {
+	case "aac", "ac3":
+		return true
+	case "eac3":
+		return fmp4
+	}
+	return false
+}
+
+// TranscodeAudioCopySafe is the copy policy for FULL-TRANSCODE sessions,
+// narrower than the remux policy in TS mode: transcode masters DO advertise
+// a CODECS attribute, and in TS mode the established, regression-free pairing
+// is mp4a.40.2 with AAC bits — so TS keeps the historical AAC-only copy.
+// In fMP4 mode AC-3/E-AC-3 are also safe: hlsCodecString advertises
+// ac-3/ec-3 and the bits go to MSE/native decoders the caps vouched for.
+func TranscodeAudioCopySafe(codec string, fmp4 bool) bool {
+	if codec == "aac" {
+		return true
+	}
+	if !fmp4 {
+		return false
+	}
+	return codec == "ac3" || codec == "eac3"
+}
+
+// OutputAudioCodec resolves the codec a session's audio OUTPUT will carry for
+// a given playback decision — the single source of truth the API layer
+// reports as audio_codec_out. Copied audio carries the source codec (so the
+// CODECS attribute and the cast stereo-clone guard reflect reality);
+// re-encoded audio uses SelectAudioCodecOut's stereo-AAC/AC-3-surround
+// choice. Lives in the decision engine rather than the handler so every
+// DecidePlayback consumer resolves it identically.
+func OutputAudioCodec(pd PlaybackDecision, caps *ClientCaps, channels int) string {
+	if pd.AudioPassthrough && pd.AudioCodec != "" {
+		return pd.AudioCodec
+	}
+	return SelectAudioCodecOut(pd.AudioNeedsRecode, caps, channels)
+}
+
+// NormalizeSessionAudio is the SERVER-SIDE trust boundary for the audio
+// fields a session-create request echoes back from a stream-info decision
+// (audio_passthrough, audio_codec_out). The echo keeps old frontends and new
+// servers in lockstep, but it must not be load-bearing for correctness: a
+// stale SPA build, a crafted request, or a decision made against a different
+// file state could ask for combinations the pipeline can't honor — copying a
+// codec the segment container can't carry (DTS into fMP4, E-AC-3 into TS),
+// or advertising ec-3 while the encoder emits AAC.
+//
+// Given the REQUESTED copy flag + output codec and the AUTHORITATIVE source
+// codec (from the library DB's per-track probe data; "" = unknown), it
+// returns the combination the session will actually use:
+//   - copy is honored only when the source codec is copy-safe for this
+//     session shape (RemuxAudioCopySafe / TranscodeAudioCopySafe) — unknown
+//     source codecs re-encode rather than copy blind;
+//   - when copying, codecOut is forced to the source codec (truthful CODECS);
+//   - when re-encoding, codecOut may only be "aac" or "ac3" (the only
+//     encode targets audioEncodeArgs implements); anything else — including
+//     "eac3", which is passthrough-only — normalizes to "aac".
+func NormalizeSessionAudio(remux, reqCopy bool, reqCodecOut, sourceCodec string, fmp4 bool) (copy bool, codecOut string) {
+	src := strings.ToLower(strings.TrimSpace(sourceCodec))
+	safe := false
+	if remux {
+		safe = RemuxAudioCopySafe(src, fmp4)
+	} else {
+		safe = TranscodeAudioCopySafe(src, fmp4)
+	}
+	copy = reqCopy && safe
+	if copy {
+		return true, src
+	}
+	if strings.ToLower(strings.TrimSpace(reqCodecOut)) == "ac3" {
+		return false, "ac3"
+	}
+	return false, "aac"
 }
 
 // SelectAudioCodecOut decides the audio codec for an HLS session's RE-ENCODE
@@ -433,23 +545,27 @@ func SelectAudioCodecOut(needsRecode bool, caps *ClientCaps, channels int) strin
 
 // CastNeedsStereoClone reports whether casting a session with the given
 // AudioCodecOut requires a fresh stereo-AAC clone before handing it to a
-// receiver. AC-3 sessions need it: the sender-side decision proved the LOCAL
-// browser's MSE can decode AC-3, but a Cast receiver (the Default Media
-// Receiver / the TV or AVR behind it) may not — and receiver AC-3 support
-// can't be probed reliably. Everything else (stereo AAC, copied AAC) is
-// already cast-safe and is reused as-is.
+// receiver. Dolby (AC-3 / E-AC-3) sessions need it — whether the Dolby audio
+// was RE-ENCODED (ac3 surround path) or COPIED (fMP4 passthrough): the
+// sender-side decision proved the LOCAL browser can decode it, but a Cast
+// receiver (the Default Media Receiver / the TV or AVR behind it) may not,
+// and receiver Dolby support can't be probed reliably. AudioCodecOut carries
+// the codec the session's output actually contains (the API layer sets it
+// from PlaybackDecision.AudioCodec when audio is copied — previously copied
+// AC-3 slipped past this guard because AudioCodecOut only described the
+// re-encode target). Stereo/copied AAC is cast-safe and reused as-is.
 func CastNeedsStereoClone(audioCodecOut string) bool {
-	return audioCodecOut == "ac3"
+	return audioCodecOut == "ac3" || audioCodecOut == "eac3"
 }
 
 // castCloneOpts builds the SessionOpts for a stereo-AAC cast clone of src:
 // identical video / subtitle / resume handling, but audio forced to a stereo
-// AAC re-encode (never AC-3, never passthrough/copy) so any Cast receiver can
-// play it.
+// AAC re-encode (never Dolby AC-3/E-AC-3, never passthrough/copy) so any Cast
+// receiver can play it.
 func castCloneOpts(src *TranscodeSession) SessionOpts {
 	opts := SessionOpts{
 		Remux:            src.Remux,
-		RemuxAudioCopy:   false, // force a re-encode, never copy AC-3
+		RemuxAudioCopy:   false, // force a re-encode, never copy Dolby audio
 		AudioPassthrough: false, // force a re-encode, never copy
 		AudioCodecOut:    "aac", // stereo AAC — universally decodable
 		AudioTrackIndex:  src.AudioTrackIndex,
@@ -472,10 +588,11 @@ func castCloneOpts(src *TranscodeSession) SessionOpts {
 
 // CloneForCast returns the session whose playlist should be handed to a Cast
 // receiver for sessionID. When the session's audio is already cast-safe it
-// returns that session unchanged. When the session emits AC-3 (chosen for the
-// local browser, but unsafe to assume on a receiver) it creates and returns a
-// fresh stereo-AAC clone — same video / subtitles / resume position, audio
-// downmixed to AAC — so the cast never plays silent on a non-AC-3 sink. The
+// returns that session unchanged. When the session emits Dolby audio — AC-3
+// or E-AC-3, whether re-encoded or COPIED from the source (chosen for the
+// local browser, but unsafe to assume on a receiver) — it creates and returns
+// a fresh stereo-AAC clone — same video / subtitles / resume position, audio
+// downmixed to AAC — so the cast never plays silent on a non-Dolby sink. The
 // clone is owned by userID so the cast-token access check passes; it inherits
 // the source's StartSec so the receiver's playlist-time domain matches the
 // local player's (the cast load request seeks by the local currentTime).
@@ -491,13 +608,22 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	if err != nil {
 		return nil, fmt.Errorf("create stereo cast session: %w", err)
 	}
-	slog.Info("cast: created stereo-AAC clone of AC-3 session for receiver compatibility",
-		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID)
+	slog.Info("cast: created stereo-AAC clone of Dolby-audio session for receiver compatibility",
+		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
+		"source_audio_codec", src.AudioCodecOut)
 	return clone, nil
 }
 
 // decideStatic is the backward-compatible fallback using static allowlists.
 func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDecision {
+	// Audio copy policy for EVERY static HLS branch (transcode and remux):
+	// only AAC (or no audio) is copied. MP3 is in DirectPlayAudioCodecs for
+	// DIRECT PLAY, but copying it into HLS segments mismatches the advertised
+	// mp4a.40.2 CODECS string and has mp3-in-TS framing edge cases — the same
+	// policy the caps-aware path enforces (review finding B3; previously the
+	// static transcode branches still copied mp3).
+	audioCopySafe := audioCodec == "" || audioCodec == "aac"
+
 	// H.264 10-bit: browsers universally reject this via MSE. Force transcode.
 	isH264_10bit := (videoCodec == "h264" || videoCodec == "avc" || videoCodec == "avc1") && strings.Contains(pixFmt, "10")
 	if isH264_10bit {
@@ -505,14 +631,15 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 			Decision:         "transcode",
 			TranscodeReason:  "H.264 10-bit (Hi10P) not supported by browser MediaSource API; transcoding to 8-bit H.264",
 			AudioTrackIndex:  -1,
-			AudioNeedsRecode: !DirectPlayAudioCodecs[audioCodec],
-			AudioPassthrough: DirectPlayAudioCodecs[audioCodec],
+			AudioNeedsRecode: !audioCopySafe,
+			AudioPassthrough: audioCopySafe,
+			AudioCodec:       audioCodec,
 		}
 	}
 	// Treat empty audio codec as compatible (silent video files)
 	audioOK := audioCodec == "" || DirectPlayAudioCodecs[audioCodec]
 	if DirectPlayContainers[container] && DirectPlayCodecs[videoCodec] && audioOK {
-		return PlaybackDecision{Decision: "direct_play", AudioTrackIndex: -1, AudioPassthrough: true}
+		return PlaybackDecision{Decision: "direct_play", AudioTrackIndex: -1, AudioPassthrough: true, AudioCodec: audioCodec}
 	}
 	// Remux eligibility is NARROWER than DirectPlayCodecs: only H.264 can be
 	// copied into HLS segments on the no-caps path. VP8/VP9 direct-play fine
@@ -527,11 +654,6 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 	// the static path knows neither the segment format nor the client.
 	// H.264 is the only codec that is safe in every combination.
 	if videoCodec == "h264" || videoCodec == "avc" || videoCodec == "avc1" {
-		// Audio passthrough policy mirrors tsPassthroughSafe on the
-		// caps-aware path: only AAC (or no audio) is copied. MP3 framing in
-		// MPEG-TS has Safari/hls.js edge cases and the master playlist
-		// advertises mp4a.40.2, so mp3 sources are force-recoded.
-		audioCopySafe := audioCodec == "" || audioCodec == "aac"
 		return PlaybackDecision{
 			Decision:         "direct_stream",
 			TranscodeReason:  "container requires remux",
@@ -539,14 +661,16 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 			AudioTrackIndex:  -1,
 			AudioNeedsRecode: !audioCopySafe,
 			AudioPassthrough: audioCopySafe,
+			AudioCodec:       audioCodec,
 		}
 	}
 	return PlaybackDecision{
 		Decision:         "transcode",
 		TranscodeReason:  "video codec requires transcoding",
 		AudioTrackIndex:  -1,
-		AudioNeedsRecode: !audioOK,
-		AudioPassthrough: audioOK,
+		AudioNeedsRecode: !audioCopySafe,
+		AudioPassthrough: audioCopySafe,
+		AudioCodec:       audioCodec,
 	}
 }
 
@@ -767,10 +891,13 @@ type TranscodeSession struct {
 	AudioTrackIndex int `json:"-"`
 	// Source audio channel count for bitrate scaling (0 = default to 2)
 	AudioChannels int `json:"-"`
-	// AudioCodecOut is the codec the re-encode path should emit: "" / "aac" =
-	// stereo AAC (default), "ac3" = AC-3 5.1 surround (chosen when the client
-	// supports AC-3 and the source is multichannel). Ignored when audio is
-	// copied. See audioEncodeArgs + hlsCodecString.
+	// AudioCodecOut is the codec the session's audio OUTPUT carries.
+	// Re-encode path: "" / "aac" = stereo AAC (default), "ac3" = AC-3 5.1
+	// surround (client supports AC-3 + multichannel source) — consumed by
+	// audioEncodeArgs. Copy path (AudioPassthrough/RemuxAudioCopy): the API
+	// layer sets it to the SOURCE codec ("aac"/"ac3"/"eac3") so
+	// hlsCodecString advertises the truth and CastNeedsStereoClone catches
+	// copied Dolby audio.
 	AudioCodecOut string `json:"-"`
 	// Source video codec for BSF selection in remux mode (e.g., "hevc" needs hevc_mp4toannexb)
 	SourceVideoCodec string `json:"-"`
@@ -1420,7 +1547,7 @@ type SessionOpts struct {
 	AudioPassthrough bool   // true = copy audio stream instead of re-encoding (full transcode mode)
 	AudioTrackIndex  int    // 0-based audio track to select via -map; -1 = FFmpeg default
 	AudioChannels    int    // source audio channel count for bitrate scaling (0 = default to 2)
-	AudioCodecOut    string // "" / "aac" = stereo AAC, "ac3" = AC-3 5.1 surround (re-encode path)
+	AudioCodecOut    string // codec the output audio carries: ""/"aac", "ac3", "eac3" (copied) — see TranscodeSession.AudioCodecOut
 	HDRTonemap       bool   // true = inject HDR-to-SDR tonemapping filters (10-bit HEVC → 8-bit H.264)
 	SourceVideoCodec string // source video codec (e.g., "hevc", "h264") for BSF selection in remux mode
 	StartSec         int    // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
@@ -2118,8 +2245,9 @@ func segmentNumberPart(name string) (string, bool) {
 // MSE SourceBuffer and playback fails:
 //   - Video: High profile (64=0x64) at every resolution — matches h264Profile()
 //     in hwaccel.go (which now always returns "high").
-//   - Audio: AAC-LC (mp4a.40.2) by default, or AC-3 (ac-3) when audioCodec=="ac3"
-//     (the surround path — see audioEncodeArgs).
+//   - Audio: AAC-LC (mp4a.40.2) by default, AC-3 (ac-3) when
+//     audioCodec=="ac3" (re-encoded surround OR fMP4 copy), or E-AC-3 (ec-3)
+//     when audioCodec=="eac3" (fMP4 passthrough only).
 func hlsCodecString(height int, audioCodec string) string {
 	// Level selection per H.264 Annex A:
 	//   Level 3.0 (1e): up to 480p (40,500 MB/s)
@@ -2139,8 +2267,13 @@ func hlsCodecString(height int, audioCodec string) string {
 	}
 
 	audio := "mp4a.40.2" // AAC-LC
-	if audioCodec == "ac3" {
+	switch audioCodec {
+	case "ac3":
 		audio = "ac-3"
+	case "eac3":
+		// E-AC-3 (Dolby Digital Plus) — only reachable via the fMP4
+		// passthrough path (TranscodeAudioCopySafe); never a re-encode target.
+		audio = "ec-3"
 	}
 	// High profile (6400) at all resolutions.
 	return fmt.Sprintf("avc1.6400%s,%s", level, audio)

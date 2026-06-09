@@ -20,9 +20,14 @@
 > - **M1** fMP4/CMAF segments are the default (`transcode.segment_format:
 >   fmp4`); `ts` remains as the rollback knob. HEVC remux gets `-tag:v hvc1`;
 >   Annex B bitstream filters apply only in TS mode; `#EXT-X-MAP` URIs are
->   token-rewritten for cast receivers. The TS-era audio passthrough policy
+>   token-rewritten for cast receivers. ~~The TS-era audio passthrough policy
 >   (AAC/AC-3 only) is retained in fMP4 mode for safety; widening it
->   (E-AC-3 passthrough) is a follow-up.
+>   (E-AC-3 passthrough) is a follow-up.~~ **Done in the follow-up PR:** in
+>   fMP4 mode, E-AC-3 is copied on the remux path and AC-3/E-AC-3 ride along
+>   on the transcode path (gated on the MSE-strict `eac3_mse` client cap;
+>   CODECS advertises ec-3/ac-3 truthfully via `PlaybackDecision.AudioCodec`;
+>   the cast stereo-clone guard now also covers COPIED Dolby audio — a
+>   pre-existing gap). TS mode is unchanged.
 >
 > A 7-angle adversarial review of the implementation produced one further
 > round of fixes: quota errors on the legacy auto endpoints now return 429
