@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,6 +16,25 @@ import (
 type ProfileHandler struct {
 	queries *db.Queries
 	hero    HeroProvider // optional; for cache invalidation on maturity_pref change
+}
+
+// nebulaAvatarRe matches the built-in animated-nebula avatar ids the onboarding
+// flow assigns ("nebula:aurora", "nebula:tidal", …). These are short opaque ids,
+// not image URLs, so avatar validation accepts them alongside http(s) URLs.
+var nebulaAvatarRe = regexp.MustCompile(`^nebula:[a-z0-9_-]{1,32}$`)
+
+// validAvatarValue reports whether v is an acceptable, non-empty avatar
+// reference: an http(s) URL (length already capped by callers) or a built-in
+// nebula id. Callers handle the empty string (means "leave unchanged"/"clear")
+// before calling this.
+func validAvatarValue(v string) bool {
+	if len(v) > 2048 {
+		return false
+	}
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		return true
+	}
+	return nebulaAvatarRe.MatchString(v)
 }
 
 func NewProfileHandler(queries *db.Queries) *ProfileHandler {
@@ -92,15 +112,9 @@ func (h *ProfileHandler) CreateProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.AvatarURL != "" {
-		if len(req.AvatarURL) > 2048 {
-			writeError(w, http.StatusBadRequest, "avatar URL too long")
-			return
-		}
-		if !strings.HasPrefix(req.AvatarURL, "http://") && !strings.HasPrefix(req.AvatarURL, "https://") {
-			writeError(w, http.StatusBadRequest, "avatar URL must use http or https")
-			return
-		}
+	if req.AvatarURL != "" && !validAvatarValue(req.AvatarURL) {
+		writeError(w, http.StatusBadRequest, "avatar must be an http(s) URL or a built-in avatar id")
+		return
 	}
 
 	profile := &models.UserProfile{
@@ -193,15 +207,9 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "language must be a non-empty BCP-47 tag (e.g. 'en')")
 		return
 	}
-	if req.AvatarURL != nil && *req.AvatarURL != "" {
-		if len(*req.AvatarURL) > 2048 {
-			writeError(w, http.StatusBadRequest, "avatar URL too long")
-			return
-		}
-		if !strings.HasPrefix(*req.AvatarURL, "http://") && !strings.HasPrefix(*req.AvatarURL, "https://") {
-			writeError(w, http.StatusBadRequest, "avatar URL must use http or https")
-			return
-		}
+	if req.AvatarURL != nil && *req.AvatarURL != "" && !validAvatarValue(*req.AvatarURL) {
+		writeError(w, http.StatusBadRequest, "avatar must be an http(s) URL or a built-in avatar id")
+		return
 	}
 
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {

@@ -1497,6 +1497,17 @@ export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
 export async function createProfile(name: string): Promise<Profile> {
   return apiFetch<Profile>('/api/profiles', { method: 'POST', body: { name } })
 }
+// updateProfile patches one profile — only the keys provided are written
+// (the server's UpdateProfileRequest uses optional pointers). The onboarding
+// flow uses this to persist the chosen nickname, nebula avatar, and the
+// age-derived content settings (max_age_rating ceiling + maturity_pref lean)
+// in a single request.
+export async function updateProfile(
+  id: number,
+  patch: { name?: string; avatar_url?: string; max_age_rating?: string; maturity_pref?: number },
+): Promise<Profile> {
+  return apiFetch<Profile>(`/api/profiles/${id}`, { method: 'PUT', body: patch })
+}
 export async function deleteProfile(id: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}`, { method: 'DELETE' })
 }
@@ -2541,19 +2552,6 @@ export async function getOnboardingGrid(
   const resp = await apiFetch<{ items?: ServerMediaItem[] }>(
     `/api/onboarding/grid${onboardingQS(opts.profileId, extra)}`,
     { signal: opts.signal },
-  )
-  return (resp.items || []).map(mapMedia)
-}
-
-export async function getOnboardingPreview(
-  selected: number[],
-  profileId?: number,
-  signal?: AbortSignal,
-): Promise<UIMedia[]> {
-  if (selected.length === 0) return []
-  const resp = await apiFetch<{ items?: ServerMediaItem[] }>(
-    `/api/onboarding/preview${onboardingQS(profileId, { selected: selected.join(',') })}`,
-    { signal },
   )
   return (resp.items || []).map(mapMedia)
 }
