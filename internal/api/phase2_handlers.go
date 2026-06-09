@@ -1176,7 +1176,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		req.StartSec = 0
 	}
 
-	var filePath, resolution string
+	var filePath, resolution, fileAudioCodec string
+	var fileAudioTracks []models.AudioTrack
 	if req.FileType == "episode" {
 		f, err := h.queries.GetEpisodeFileByID(r.Context(), req.FileID)
 		if err != nil {
@@ -1185,6 +1186,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		filePath = f.Path
 		resolution = f.Resolution
+		fileAudioCodec = f.AudioCodec
+		fileAudioTracks = f.AudioTracks
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), req.FileID)
 		if err != nil {
@@ -1193,6 +1196,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		}
 		filePath = f.Path
 		resolution = f.Resolution
+		fileAudioCodec = f.AudioCodec
+		fileAudioTracks = f.AudioTracks
 	}
 
 	srcW, srcH := parseResolution(resolution)
@@ -1202,25 +1207,40 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	if req.AudioTrackIndex != nil {
 		audioTrackIdx = *req.AudioTrackIndex
 	}
+
+	// Server-side trust boundary for the echoed audio fields. The request's
+	// audio_passthrough / audio_codec_out are an ECHO of our own stream-info
+	// decision (keeps old frontends and new servers in lockstep), but a stale
+	// SPA build or crafted request could ask for combinations the pipeline
+	// can't honor — copy a codec the segment container can't carry, or
+	// advertise ec-3 while the encoder emits AAC. Resolve the chosen track's
+	// codec from the library's OWN probe data and normalize.
+	sourceAudioCodec := fileAudioCodec
+	if audioTrackIdx >= 0 && audioTrackIdx < len(fileAudioTracks) {
+		sourceAudioCodec = fileAudioTracks[audioTrackIdx].Codec
+	} else if len(fileAudioTracks) > 0 {
+		sourceAudioCodec = fileAudioTracks[0].Codec
+	}
+	audioCopy, audioCodecOut := streaming.NormalizeSessionAudio(
+		req.Remux, req.AudioPassthrough, req.AudioCodecOut,
+		sourceAudioCodec, h.transcode.FMP4Enabled(),
+	)
+
 	opts := streaming.SessionOpts{
 		Remux:            req.Remux,
-		AudioPassthrough: req.AudioPassthrough,
+		AudioPassthrough: !req.Remux && audioCopy,
 		AudioTrackIndex:  audioTrackIdx,
 		AudioChannels:    req.AudioChannels,
-		AudioCodecOut:    req.AudioCodecOut,
+		AudioCodecOut:    audioCodecOut,
 		HDRTonemap:       req.HDRTonemap,
 		SourceVideoCodec: req.VideoCodec,
 		StartSec:         req.StartSec,
 	}
 
-	// In remux mode, determine whether audio can also be copied.
-	// Use the audio_passthrough flag from the decision engine (forwarded by the
-	// frontend) when available — it reflects client-specific codec support (e.g.,
-	// Safari supports AC3/EAC3, Chrome does not). Fall back to the static
-	// DirectPlayAudioCodecs list only when audio_passthrough is false, to avoid
-	// copying audio the browser can't decode.
 	if req.Remux {
-		opts.RemuxAudioCopy = req.AudioPassthrough
+		// Remux mode: the normalized copy flag drives RemuxAudioCopy (copy
+		// vs AAC/AC-3 re-encode alongside the copied video).
+		opts.RemuxAudioCopy = audioCopy
 		// Burn-in is incompatible with remux (can't apply filters with -c:v copy)
 		if req.BurnSubIndex != nil && *req.BurnSubIndex >= 0 {
 			writeError(w, http.StatusBadRequest, "subtitle burn-in requires transcoding, not remux")
@@ -1618,21 +1638,11 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	_ = videoPixFmt    // retained for future use (10-bit logging / metrics)
 	_ = colorPrimaries // retained for future use (wide-gamut SDR detection)
 
-	// Audio output codec. Re-encode path: stereo AAC by default, AC-3 5.1 for
-	// multichannel sources on AC-3-capable clients (preserving surround
-	// instead of downmixing). The "ac3" client cap is MSE-isTypeSupported-derived
-	// on the frontend, matching hls.js's own AC-3 gate, so this never emits AC-3
-	// that the hls.js/MSE path would silently drop. See SelectAudioCodecOut.
-	//
-	// Copy path: the output carries the SOURCE codec — report that instead, so
-	// the session's CODECS attribute advertises the truth (mp4a.40.2 / ac-3 /
-	// ec-3) and CastNeedsStereoClone catches copied Dolby audio (previously a
-	// remux that COPIED AC-3 was cast as-is because AudioCodecOut only ever
-	// described the re-encode target).
-	audioCodecOut := streaming.SelectAudioCodecOut(pd.AudioNeedsRecode, clientCaps, audioChannels)
-	if pd.AudioPassthrough && pd.AudioCodec != "" {
-		audioCodecOut = pd.AudioCodec
-	}
+	// Audio output codec — copied audio carries the source codec (truthful
+	// CODECS + cast stereo-clone coverage for copied Dolby audio), re-encoded
+	// audio uses the stereo-AAC / AC-3-surround choice. Resolved by the
+	// decision engine (OutputAudioCodec) so every consumer agrees.
+	audioCodecOut := streaming.OutputAudioCodec(pd, clientCaps, audioChannels)
 
 	info := models.StreamInfo{
 		FileID:           fileID,

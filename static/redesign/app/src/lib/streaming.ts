@@ -62,9 +62,10 @@ export interface StreamDecision {
   audio_passthrough?: boolean
   audio_track_index?: number
   audio_channels?: number
-  // Re-encode target codec: 'aac' (stereo) or 'ac3' (5.1 surround). Echoed
-  // back to createSession so the server emits surround on AC-3-capable clients
-  // instead of downmixing to stereo.
+  // Codec the session's audio output carries. Re-encode: 'aac' (stereo) or
+  // 'ac3' (5.1 surround). Copy (audio_passthrough): the SOURCE codec —
+  // 'aac'/'ac3'/'eac3' (E-AC-3 passthrough is fMP4-mode only). Echoed back to
+  // createSession; the server re-validates it against its own track data.
   audio_codec_out?: string
   hdr_tonemap?: boolean
 }

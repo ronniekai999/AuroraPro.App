@@ -19,11 +19,12 @@ import (
 func hlsjsDolbyCaps(fmp4 bool) *ClientCaps {
 	return &ClientCaps{
 		VideoCodecs: map[string]bool{"h264": true, "h265": true, "hevc": true},
-		AudioCodecs: map[string]bool{"aac": true, "mp3": true, "ac3": true, "eac3": true, "eac3_mse": true},
+		AudioCodecs: map[string]bool{"aac": true, "mp3": true, "ac3": true, "eac3": true},
 		Containers:  map[string]bool{"mp4_container": true},
 		HLSNative:   true,
 		HLSJS:       true,
 		FMP4:        fmp4,
+		EAC3MSE:     true,
 	}
 }
 
@@ -68,21 +69,22 @@ func TestDecidePlayback_EAC3FMP4Passthrough(t *testing.T) {
 			wantDec: "direct_stream", wantCopy: false, wantCodec: "eac3",
 		},
 		{
-			// eac3 cap WITHOUT eac3_mse (canPlayType-only, e.g. a browser
-			// with a native Dolby decoder but no MSE support for it): the
-			// hls.js fMP4 path feeds MSE, so copy must NOT happen.
+			// eac3 cap WITHOUT the MSE-strict probe (canPlayType-only, e.g. a
+			// browser with a native Dolby decoder but no MSE support for it):
+			// the hls.js fMP4 path feeds MSE, so copy must NOT happen.
 			name:      "hls.js eac3-without-MSE + fMP4 = remux, audio recoded",
 			container: "mkv", videoCodec: "h264", audio: eac3Track,
 			caps: &ClientCaps{
 				VideoCodecs: map[string]bool{"h264": true},
-				AudioCodecs: map[string]bool{"aac": true, "eac3": true}, // no eac3_mse
+				AudioCodecs: map[string]bool{"aac": true, "eac3": true},
 				Containers:  map[string]bool{"mp4_container": true},
 				HLSJS:       true,
 				FMP4:        true,
+				// EAC3MSE deliberately false
 			},
 			wantDec: "direct_stream", wantCopy: false,
 			// findBestAudioTrack under the restricted hls caps finds no
-			// compatible track (eac3 dropped without eac3_mse) → the chosen
+			// compatible track (eac3 dropped without EAC3MSE) → the chosen
 			// codec is still the default track's.
 			wantCodec: "eac3",
 		},
@@ -147,13 +149,76 @@ func TestParseClientCaps_EAC3MSE(t *testing.T) {
 	if !caps.AudioCodecs["eac3"] {
 		t.Error("eac3 cap not parsed")
 	}
-	if !caps.AudioCodecs["eac3_mse"] {
-		t.Error("eac3_mse cap not parsed")
+	if !caps.EAC3MSE {
+		t.Error("eac3_mse cap not parsed into EAC3MSE")
+	}
+	// The capability key must NOT leak into the track-codec namespace —
+	// AudioCodecs keys are matched against ffprobe track codec names.
+	if caps.AudioCodecs["eac3_mse"] {
+		t.Error("eac3_mse must not appear in AudioCodecs (capability, not a codec)")
 	}
 	// Old-style caps string without the new key must not imply it.
 	caps = ParseClientCaps("h264,aac,eac3")
-	if caps.AudioCodecs["eac3_mse"] {
-		t.Error("eac3_mse must not be inferred from eac3")
+	if caps.EAC3MSE {
+		t.Error("EAC3MSE must not be inferred from eac3")
+	}
+}
+
+func TestNormalizeSessionAudio(t *testing.T) {
+	tests := []struct {
+		name        string
+		remux       bool
+		reqCopy     bool
+		reqCodecOut string
+		srcCodec    string
+		fmp4        bool
+		wantCopy    bool
+		wantOut     string
+	}{
+		// Honest echoes pass through unchanged.
+		{"remux aac copy", true, true, "aac", "aac", true, true, "aac"},
+		{"remux eac3 copy fmp4", true, true, "eac3", "eac3", true, true, "eac3"},
+		{"transcode ac3 copy fmp4", false, true, "ac3", "ac3", true, true, "ac3"},
+		{"recode to ac3 surround", false, false, "ac3", "dts", true, false, "ac3"},
+		{"recode default aac", true, false, "aac", "eac3", false, false, "aac"},
+		// Crafted/stale combos are normalized, never obeyed blindly.
+		{"eac3 copy demoted in TS mode", true, true, "eac3", "eac3", false, false, "aac"},
+		{"copy of DTS demoted (not copy-safe)", false, true, "dts", "dts", true, false, "aac"},
+		{"eac3 as re-encode target demoted to aac", false, false, "eac3", "aac", true, false, "aac"},
+		{"unknown source codec never copies", true, true, "aac", "", true, false, "aac"},
+		{"garbage codecOut demoted to aac", false, false, "ffconcat", "aac", true, false, "aac"},
+		// Source codec is authoritative for the advertised output on copy.
+		{"copy advertises source not request", true, true, "aac", "ac3", true, true, "ac3"},
+		// Transcode TS mode keeps the historical AAC-only copy.
+		{"transcode ac3 copy demoted in TS", false, true, "ac3", "ac3", false, false, "ac3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCopy, gotOut := NormalizeSessionAudio(tt.remux, tt.reqCopy, tt.reqCodecOut, tt.srcCodec, tt.fmp4)
+			if gotCopy != tt.wantCopy || gotOut != tt.wantOut {
+				t.Errorf("NormalizeSessionAudio(%+v) = (%v, %q), want (%v, %q)",
+					tt, gotCopy, gotOut, tt.wantCopy, tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestOutputAudioCodec(t *testing.T) {
+	dolby := hlsjsDolbyCaps(true)
+	// Copied audio reports the source codec.
+	pd := PlaybackDecision{AudioPassthrough: true, AudioCodec: "eac3"}
+	if got := OutputAudioCodec(pd, dolby, 6); got != "eac3" {
+		t.Errorf("copied eac3: got %q, want eac3", got)
+	}
+	// Re-encoded multichannel on an AC-3 client → ac3 surround.
+	pd = PlaybackDecision{AudioNeedsRecode: true, AudioCodec: "dts"}
+	if got := OutputAudioCodec(pd, dolby, 6); got != "ac3" {
+		t.Errorf("recoded dts 5.1: got %q, want ac3", got)
+	}
+	// Silent file (no audio codec) falls back to the re-encode default.
+	pd = PlaybackDecision{AudioPassthrough: true, AudioCodec: ""}
+	if got := OutputAudioCodec(pd, dolby, 0); got != "aac" {
+		t.Errorf("silent file: got %q, want aac", got)
 	}
 }
 
