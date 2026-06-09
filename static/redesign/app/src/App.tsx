@@ -1623,35 +1623,6 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
           </button>
         )}
       </div>
-      {/* Phase D — conversational discovery: describe a vibe, hit Enter, get a
-          pinned rail. Reuses the semantic-search pipeline; fires on submit (not
-          per-keystroke) to bound LLM cost. */}
-      {onConversationalSearch && (
-        <div className="mb-5 max-w-2xl">
-          <div className="convo-search flex items-center">
-            <Icon name="sparkle" size={17} className="ml-4 mr-1.5 shrink-0 text-purple-300 pointer-events-none" />
-            <input
-              value={convoText}
-              onChange={e => setConvoText(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
-              aria-label="Describe what you're in the mood for"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
-            />
-            {convoText ? (
-              <button
-                onClick={() => { setConvoText(''); onConversationalSearch('') }}
-                aria-label="Clear search"
-                className="shrink-0 mr-2 px-3 py-1 rounded-full text-xs font-semibold text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-              >Clear</button>
-            ) : (
-              <span className="hidden sm:flex shrink-0 mr-3.5 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-purple-200/55 pointer-events-none">
-                <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-purple-100/80 not-italic">↵</kbd> to search
-              </span>
-            )}
-          </div>
-        </div>
-      )}
       <HeroSection
         hero={hero}
         onPlay={onPlay}
@@ -1666,6 +1637,37 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
         libraryIds={libraryIds}
         onToggleLib={onToggleLib}
       />
+      {/* Phase D — conversational discovery. Centered under the hero as a
+          deliberate "now describe your own vibe" moment between the one curated
+          pick and the browsable rails. Fires the semantic search on Enter (not
+          per-keystroke) to bound LLM cost. */}
+      {onConversationalSearch && (
+        <div className="mt-7 mb-8 max-w-2xl mx-auto">
+          <div className="convo-search flex items-center">
+            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
+            <input
+              value={convoText}
+              onChange={e => setConvoText(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
+              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
+              aria-label="Describe what you're in the mood for"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-3 text-white text-sm placeholder:text-white/40 outline-none"
+            />
+            {convoText ? (
+              <button
+                onClick={() => { setConvoText(''); onConversationalSearch('') }}
+                aria-label="Clear search"
+                className="shrink-0 mr-2.5 px-3 py-1.5 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+              >Clear</button>
+            ) : (
+              <span className="hidden sm:flex shrink-0 mr-4 items-center gap-1.5 text-[11px] font-medium text-purple-200/55 pointer-events-none">
+                <kbd className="grid place-items-center h-5 min-w-[1.3rem] px-1 rounded-md border border-white/15 bg-white/[0.07] text-purple-100/90 text-[11px] leading-none shadow-[inset_0_-1px_0_rgba(0,0,0,0.35)]">↵</kbd>
+                <span>to search</span>
+              </span>
+            )}
+          </div>
+        </div>
+      )}
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
           <div>
