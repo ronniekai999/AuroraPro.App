@@ -225,7 +225,11 @@
      calms down under data-glow="subtle". */
   .convo-search {
     position: relative;
-    border-radius: 9999px;
+    /* Rounded-rect, not a full pill: a full pill's semicircular end caps swept
+       empty space above/below the trailing "↵ to search" hint, so it read as
+       floating mid-bar even when flush. A defined vertical right edge lets the
+       hint actually hug it. */
+    border-radius: 1rem;
     background:
       linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
       linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
@@ -239,7 +243,7 @@
     content: '';
     position: absolute;
     inset: -3px;
-    border-radius: 9999px;
+    border-radius: 1.2rem;
     background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
     filter: blur(16px);
     opacity: 0.28;
