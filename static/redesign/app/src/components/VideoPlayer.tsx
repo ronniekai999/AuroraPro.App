@@ -258,6 +258,37 @@ function liftCuesAboveControls(tt: TextTrack | null | undefined): void {
   }
 }
 
+// 2026-06 streaming review (P2) — seed hls.js's bandwidth estimator from the
+// last session instead of its 500 kbps factory default. That default sits
+// below every tier Aurora's ABR ladder declares (480p = 2.2 Mbps), so hls.js
+// started EVERY transcode at the lowest rung — 480p on a gigabit LAN — and
+// only ramped after measuring real fragments (each up-switch also cold-starts
+// a new FFmpeg variant server-side). Persisting the measured estimate makes
+// the second-and-later plays start at the right tier immediately; the first
+// ever play uses a LAN-appropriate 8 Mbps prior. Clamped so one weird sample
+// (dev-tools throttling, a flaky hotel wifi session) can't poison the seed
+// outside sane bounds.
+const BW_ESTIMATE_KEY = 'aurora_bw_estimate'
+const BW_ESTIMATE_DEFAULT = 8_000_000
+const BW_ESTIMATE_MIN = 1_000_000
+const BW_ESTIMATE_MAX = 200_000_000
+
+function loadBandwidthEstimate(): number {
+  try {
+    const raw = localStorage.getItem(BW_ESTIMATE_KEY)
+    const n = raw ? Number(raw) : NaN
+    if (Number.isFinite(n)) return Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, n))
+  } catch { /* private browsing / quota — fall through to default */ }
+  return BW_ESTIMATE_DEFAULT
+}
+
+function saveBandwidthEstimate(bps: number | undefined): void {
+  if (!bps || !Number.isFinite(bps) || bps <= 0) return
+  try {
+    localStorage.setItem(BW_ESTIMATE_KEY, String(Math.round(Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, bps)))))
+  } catch { /* best-effort */ }
+}
+
 export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -1015,6 +1046,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // releases the worker thread. Skipping this leaks the segment
     // buffer; running it twice is a no-op.
     if (hlsRef.current) {
+      // Persist the measured bandwidth before teardown so the next session
+      // seeds its ABR at the right tier (review P2).
+      try { saveBandwidthEstimate(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
       try { hlsRef.current.destroy() } catch { /* defensive */ }
       hlsRef.current = null
     }
@@ -1247,6 +1281,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          // 2026-06 streaming review (P2) — ABR tuning for a self-hosted,
+          // LAN-dominant server:
+          //  * abrEwmaDefaultEstimate: seed from the last measured session
+          //    (8 Mbps first run). hls.js's 500 kbps factory default sits
+          //    below the whole ladder → every play started at 480p.
+          //  * capLevelToPlayerSize: don't pull 2160p fragments into a
+          //    small window; recomputed automatically on fullscreen.
+          //  * backBufferLength: the Infinity default keeps every played
+          //    byte in the SourceBuffer — on a 2h movie that's the whole
+          //    film in memory, relying on browser quota eviction. 90s of
+          //    back-buffer covers instant-replay seeks.
+          abrEwmaDefaultEstimate: loadBandwidthEstimate(),
+          capLevelToPlayerSize: true,
+          backBufferLength: 90,
           // Generous timeouts — transcode sessions take a beat to
           // produce the first segment. V1 uses 15s for remux and 45s
           // for transcode; we don't have the decision split yet so

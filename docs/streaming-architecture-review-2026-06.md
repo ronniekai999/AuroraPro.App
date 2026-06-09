@@ -1,5 +1,29 @@
 # Streaming Architecture Review — June 2026
 
+> **Implementation status (same PR):** all 10 action items below were
+> implemented after this review was written.
+>
+> - **B1** QSV `-profile:v` fix — hwaccel.go
+> - **B2** HEVC remux gated on fMP4-or-HLS.js delivery — DecidePlayback
+> - **B3** static fallback: remux only H.264, mp3 force-recoded — decideStatic
+> - **B4** variant state reads under `variantMu`; Ready-channel snapshots
+> - **B5** stale profile doc comment corrected
+> - **P1** idle-variant reaper (resumable, 75 s) + `-readrate 4.0` pacing
+>   (FFmpeg ≥ 5, version-probed)
+> - **P2** hls.js: persisted bandwidth estimate (8 Mbps first-run seed),
+>   `capLevelToPlayerSize`, `backBufferLength: 90`
+> - **Q1** VAAPI HDR: CPU hable tonemap before `hwupload`, GPU scale/encode
+> - **S1** per-user session quota (default 3, `max_sessions_per_user`) → 429;
+>   **S2** query-param auth on `/api/stream/*` accepts cast-scoped tokens
+>   only; **S3** uniform 404 on session access/keepalive/delete/cast-token;
+>   **S4** `Cache-Control: private` on segments
+> - **M1** fMP4/CMAF segments are the default (`transcode.segment_format:
+>   fmp4`); `ts` remains as the rollback knob. HEVC remux gets `-tag:v hvc1`;
+>   Annex B bitstream filters apply only in TS mode; `#EXT-X-MAP` URIs are
+>   token-rewritten for cast receivers. The TS-era audio passthrough policy
+>   (AAC/AC-3 only) is retained in fMP4 mode for safety; widening it
+>   (E-AC-3 passthrough) is a follow-up.
+
 Scope: the full playback stack — direct play, direct stream (remux), and HLS
 transcoding — across `internal/streaming/`, the API layer
 (`internal/api/phase2_handlers.go`, `router.go`, `cors.go`, auth middleware),

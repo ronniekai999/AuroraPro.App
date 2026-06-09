@@ -33,6 +33,11 @@ import (
 var (
 	reSubsPlaylist = regexp.MustCompile(`^subs_\d+\.m3u8$`)
 	reSubsSegment  = regexp.MustCompile(`^subs_\d+_\d+\.vtt$`)
+	// reMediaSegment locks media-segment names to the exact shapes FFmpeg
+	// produces: seg_<N>.ts (MPEG-TS mode), seg_<N>.m4s, or the literal
+	// init.mp4 (fMP4/CMAF mode). Tighter than the historical separator/..
+	// checks for the same reason as the subtitle patterns above.
+	reMediaSegment = regexp.MustCompile(`^(seg_\d+\.(ts|m4s)|init\.mp4)$`)
 )
 
 // DirectPlayCodecs lists video codecs the STATIC fallback path (nil
@@ -117,6 +122,14 @@ type ClientCaps struct {
 	Containers  map[string]bool // e.g. "mp4_container", "webm_container"
 	HLSNative   bool
 	HLSJS       bool
+	// FMP4 is NOT parsed from the client caps string — it is set by the
+	// SERVER (from TranscodeManager.FMP4Enabled) before calling
+	// DecidePlayback, and describes the delivery pipeline: HLS segments are
+	// fragmented MP4 (CMAF) rather than MPEG-TS. It changes which codecs may
+	// be remuxed: Apple's HLS Authoring Specification requires HEVC to be in
+	// fMP4 segments, so HEVC remux for native-HLS clients is only legal when
+	// this is true. Review 2026-06 finding B2 / M1.
+	FMP4 bool
 }
 
 // PlaybackDecision is the result of analyzing a file against client capabilities.
@@ -219,22 +232,35 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		videoOK = false // MSE/direct play will not work
 	}
 
-	// HEVC remux: HLS.js v1.6.0+ can demux HEVC NAL units from MPEG-TS
-	// (.ts) segments. Aurora's frontend ships HLS.js v1.6.15, so HEVC
-	// remux (MKV HEVC → HLS .ts with -c:v copy + hevc_mp4toannexb BSF)
-	// is safe when the client reports HEVC support via caps. The videoOK
-	// check above already gates on clientCaps.VideoCodecs["h265"/"hevc"],
-	// so no additional guard is needed for HEVC.
 	remuxVideoOK := videoOK
 	// H.264 10-bit cannot be remuxed — the browser rejects the encoded data
 	if isH264_10bit {
 		remuxVideoOK = false
 	}
-	// VP8/VP9/AV1 cannot be remuxed into .ts segments — HLS.js's TS demuxer
-	// only supports H.264 and HEVC NAL units. These codecs work in their
-	// native containers (WebM/MP4) for direct play, but the HLS remux path
-	// produces .ts segments that HLS.js cannot demux. Force full transcode.
-	if clientCaps.HLSJS && (vc == "vp8" || vc == "vp9" || vc == "av1") {
+	switch vc {
+	case "hevc", "h265":
+		// HEVC remux is legal on two delivery paths:
+		//   - fMP4 segments (clientCaps.FMP4, server-set): Apple's HLS
+		//     Authoring Specification requires HEVC in fMP4, and every
+		//     consumer (native HLS, hls.js, Cast CAF) accepts it there.
+		//   - MPEG-TS segments + HLS.js: hls.js v1.6.0+ demuxes HEVC NAL
+		//     units from .ts (Aurora ships v1.6.16).
+		// MPEG-TS + native-only HLS (iOS < 17.1 Safari, no MSE → no hls.js)
+		// is the forbidden combination: AVPlayer does not play HEVC-in-TS,
+		// and with no hls.js there is no MEDIA_ERROR→transcode fallback —
+		// playback just dies. Review 2026-06 finding B2.
+		if !clientCaps.FMP4 && !clientCaps.HLSJS {
+			remuxVideoOK = false
+		}
+	case "vp8", "vp9", "av1":
+		// VP8/VP9/AV1 are never remuxed into HLS segments. In MPEG-TS they
+		// have no standard stream type (FFmpeg muxes them as private data)
+		// and HLS.js's TS demuxer only handles H.264/HEVC — this guard was
+		// previously HLSJS-conditional, which left native-HLS clients with
+		// a broken private-data .ts remux. In fMP4 they would mux, but
+		// neither Apple's native player nor Cast receivers handle VP9/AV1
+		// HLS reliably enough to copy; capable browsers direct-play these
+		// codecs in their native containers instead. Force full transcode.
 		remuxVideoOK = false
 	}
 
@@ -272,6 +298,12 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	//
 	// Only clients with HLSJS=false (e.g., iOS Safari) use native HLS,
 	// which supports all codecs the browser reports.
+	//
+	// NOTE on fMP4 mode: the aac/mp3/ac3 restriction is a TS-demuxer limit,
+	// and with fMP4 segments hls.js passes audio straight to MSE — stricter
+	// than necessary there. It stays because it is SAFE in both modes
+	// (AAC/AC-3 play everywhere we emit them); widening fMP4 audio
+	// passthrough (E-AC-3 etc.) is a deliberate follow-up.
 	hlsCaps := clientCaps
 	if clientCaps.HLSJS {
 		hlsCaps = &ClientCaps{
@@ -279,6 +311,7 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 			Containers:  clientCaps.Containers,
 			HLSNative:   clientCaps.HLSNative,
 			HLSJS:       clientCaps.HLSJS,
+			FMP4:        clientCaps.FMP4,
 			AudioCodecs: map[string]bool{
 				"aac": clientCaps.AudioCodecs["aac"],
 				"mp3": clientCaps.AudioCodecs["mp3"],
@@ -354,12 +387,15 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		}
 	}
 
-	// Video codec not supported (or HEVC/VP9/AV1 on HLS.js client, or H.264 10-bit) → full transcode
+	// Video codec not supported (or a codec the HLS segment pipeline can't
+	// carry, or H.264 10-bit) → full transcode
 	reason := fmt.Sprintf("video codec %q not supported by browser", vc)
 	if isH264_10bit {
 		reason = "H.264 10-bit (Hi10P) not supported by browser MediaSource API; transcoding to 8-bit H.264"
 	} else if videoOK && !remuxVideoOK && (vc == "vp8" || vc == "vp9" || vc == "av1") {
-		reason = fmt.Sprintf("%s remux into HLS .ts segments not supported by HLS.js TS demuxer; transcoding to H.264", strings.ToUpper(vc))
+		reason = fmt.Sprintf("%s cannot be remuxed into HLS segments; transcoding to H.264", strings.ToUpper(vc))
+	} else if videoOK && !remuxVideoOK && (vc == "hevc" || vc == "h265") {
+		reason = "HEVC requires fMP4 HLS segments for native playback (Apple HLS spec); transcoding to H.264"
 	}
 	// Full-transcode path: audio passthrough is only safe when the source codec
 	// already matches the `mp4a.40.2` (AAC-LC) string that hlsCodecString()
@@ -480,14 +516,25 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 	if DirectPlayContainers[container] && DirectPlayCodecs[videoCodec] && audioOK {
 		return PlaybackDecision{Decision: "direct_play", AudioTrackIndex: -1, AudioPassthrough: true}
 	}
-	if DirectPlayCodecs[videoCodec] {
+	// Remux eligibility is NARROWER than DirectPlayCodecs: only H.264 can be
+	// copied into HLS segments on the no-caps path. VP8/VP9 direct-play fine
+	// in their native containers (handled above), but they cannot be muxed
+	// into MPEG-TS at all (FFmpeg emits them as private data streams that no
+	// HLS client demuxes) — the old code remuxed them anyway and produced
+	// unplayable sessions for caps-less clients. Review 2026-06 finding B3.
+	if videoCodec == "h264" || videoCodec == "avc" || videoCodec == "avc1" {
+		// Audio passthrough policy mirrors tsPassthroughSafe on the
+		// caps-aware path: only AAC (or no audio) is copied. MP3 framing in
+		// MPEG-TS has Safari/hls.js edge cases and the master playlist
+		// advertises mp4a.40.2, so mp3 sources are force-recoded.
+		audioCopySafe := audioCodec == "" || audioCodec == "aac"
 		return PlaybackDecision{
 			Decision:         "direct_stream",
 			TranscodeReason:  "container requires remux",
 			Remux:            true,
 			AudioTrackIndex:  -1,
-			AudioNeedsRecode: !audioOK,
-			AudioPassthrough: audioOK,
+			AudioNeedsRecode: !audioCopySafe,
+			AudioPassthrough: audioCopySafe,
 		}
 	}
 	return PlaybackDecision{
@@ -659,6 +706,19 @@ type TranscodeManager struct {
 	enabledProfiles []string
 	maxCacheBytes   int64 // disk ceiling for the transcode output tree (always > 0)
 	done            chan struct{}
+	// fmp4 selects fragmented-MP4 (CMAF) HLS segments instead of MPEG-TS.
+	// Set once at construction from TranscodeConfig.SegmentFormat. fMP4 is
+	// the default: it is what Apple's HLS Authoring Specification is written
+	// around (and REQUIRES for HEVC), and it spares hls.js the TS→fMP4
+	// transmux on every segment. `segment_format: ts` restores the legacy
+	// MPEG-TS pipeline. Review 2026-06 item M1.
+	fmp4 bool
+	// readrateOK reports whether the local ffmpeg supports `-readrate`
+	// (FFmpeg >= 5.0). Probed once at construction; when true, full
+	// transcodes are paced to readRateFactor× realtime so an encoder that
+	// outruns playback doesn't burn CPU/disk encoding the whole file
+	// up-front. Review 2026-06 item P1.
+	readrateOK bool
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
 	// change state (created, stopped, expired). The callback receives an event
@@ -722,6 +782,12 @@ type TranscodeSession struct {
 	// when multiple quality variants start (subtitle content is identical
 	// regardless of video resolution).
 	subtitlesAttached bool
+	// subsCarrierProfile names the variant whose FFmpeg carries the inline
+	// subtitle output chains. The idle reaper must never cancel that
+	// variant: a reap-resume relaunches only the video/audio chain (same
+	// limitation as crash restart), which would silently freeze subtitles
+	// for everyone routinely, not just on rare crashes. Guarded by variantMu.
+	subsCarrierProfile string
 	// initPTS90kHz caches the PTS (in 90kHz ticks) of the first PES packet
 	// in the first .ts segment. Used for X-TIMESTAMP-MAP in WebVTT subtitle
 	// segments to align cue times with the MPEG-TS PTS timeline. Lazily
@@ -755,6 +821,17 @@ type QualityVariant struct {
 	// 2026-05-16 P3 — auto-recovery for transient FFmpeg failures (OOM,
 	// codec hiccup, source I/O glitch). See EnsureVariant.
 	restartAttempts int
+	// lastFetch is the time of the most recent playlist/segment request for
+	// THIS variant (not the session — GetSession's LastAccess tracks that).
+	// The reaper uses it to stop encoders for tiers nobody is fetching:
+	// abandoned ABR rungs and paused players. Guarded by the session's
+	// variantMu. Review 2026-06 finding P1.
+	lastFetch time.Time
+	// reaped marks a variant whose FFmpeg was cancelled by the idle reaper
+	// (NOT a crash, NOT a clean completion). EnsureVariant treats it as
+	// "resume from the next segment" without consuming the crash-restart
+	// budget. Guarded by variantMu.
+	reaped bool
 }
 
 // defaultMaxSessions is the concurrency ceiling applied when the configured
@@ -764,6 +841,40 @@ type QualityVariant struct {
 // generous ceiling for a self-hosted server while still bounding the blast
 // radius. Operators who genuinely want more must set an explicit positive cap.
 const defaultMaxSessions = 8
+
+// defaultMaxSessionsPerUser bounds how many of the global session slots a
+// single account may hold when transcode_max_sessions_per_user is <= 0.
+// Without it, one user (or one leaked token) can pin every global slot and
+// deny transcoding to everyone else (review 2026-06 finding S1). 3 covers the
+// legitimate worst case: one active stream + the transient second session a
+// seek-rebuild creates before the old one is deleted + a stereo cast clone.
+const defaultMaxSessionsPerUser = 3
+
+// readRateFactor paces full-transcode FFmpeg input reads at N× realtime via
+// `-readrate` (FFmpeg >= 5.0). 4× keeps a comfortable encode-ahead buffer
+// (40 minutes encoded after 10 minutes watched) while preventing the
+// pathological case where every variant races to encode the entire file at
+// maximum speed regardless of whether anyone is still watching. Remux
+// sessions are NOT paced: codec copy is nearly free, and a fast-finishing
+// remux is beneficial (EnsureVariant serves the completed playlist).
+const readRateFactor = "4.0"
+
+// variantIdleTimeout is how long a started variant may go without any
+// playlist/segment fetch before the reaper cancels its FFmpeg (review
+// 2026-06 finding P1). hls.js polls the active level's EVENT playlist every
+// targetduration/2 (~3s), so an active viewer never trips this; an abandoned
+// ABR tier (started by a bandwidth ramp, then switched away from) or a
+// paused player stops fetching and gets its encoder stopped. The variant is
+// NOT torn down — segments stay on disk and EnsureVariant transparently
+// restarts FFmpeg from the next segment on the next request.
+const variantIdleTimeout = 75 * time.Second
+
+// Sentinel errors for session-creation limits so the API layer can map them
+// to 429 without string matching.
+var (
+	ErrSessionLimit     = fmt.Errorf("maximum transcode sessions reached")
+	ErrUserSessionLimit = fmt.Errorf("maximum transcode sessions for this user reached")
+)
 
 // defaultMaxCacheBytes bounds the transcode output tree on disk when the
 // configured cap (TranscodeConfig.MaxCacheBytes) is <= 0. The HLS EVENT
@@ -784,6 +895,9 @@ const variantRestartMax = 1
 // Two signals: our own `exited` flag (set by the cmd.Wait goroutine on
 // normal exit) and Cmd.ProcessState (set by exec.Cmd after Wait returns).
 // Either being non-nil/true means we should stop waiting for outputs.
+//
+// Caller MUST hold the session's variantMu: `exited` and `Cmd` are written
+// under it by the lifecycle goroutines (review finding B4).
 func ffmpegDone(v *QualityVariant) bool {
 	if v == nil {
 		return false
@@ -874,6 +988,20 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		maxCache = defaultMaxCacheBytes
 	}
 
+	// Segment container: fMP4 (CMAF) unless explicitly configured "ts".
+	// Unknown values fall back to fMP4 with a warning rather than failing
+	// startup — the knob exists for rollback, not as a load-bearing input.
+	fmp4 := true
+	switch strings.ToLower(strings.TrimSpace(tcCfg.SegmentFormat)) {
+	case "", "fmp4", "cmaf":
+		fmp4 = true
+	case "ts", "mpegts":
+		fmp4 = false
+	default:
+		slog.Warn("unknown transcode segment_format, using fmp4",
+			"configured", tcCfg.SegmentFormat)
+	}
+
 	tm := &TranscodeManager{
 		sessions:        make(map[string]*TranscodeSession),
 		baseDir:         baseDir,
@@ -882,17 +1010,69 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		enabledProfiles: tcCfg.Profiles,
 		maxCacheBytes:   maxCache,
 		done:            make(chan struct{}),
+		fmp4:            fmp4,
+		readrateOK:      ffmpegSupportsReadrate(),
 	}
 
 	go tm.cleanupLoop()
 
+	segFormat := "fmp4"
+	if !fmp4 {
+		segFormat = "ts"
+	}
 	slog.Info("transcode manager ready",
 		"hw_accel", hwAccel.DisplayName,
 		"max_sessions", tcCfg.MaxSessions,
+		"max_sessions_per_user", effectiveMaxSessionsPerUser(tcCfg.MaxSessionsPerUser),
 		"profiles", tcCfg.Profiles,
+		"segment_format", segFormat,
+		"readrate_pacing", tm.readrateOK,
 	)
 
 	return tm, nil
+}
+
+// FMP4Enabled reports whether HLS output uses fragmented-MP4 (CMAF) segments.
+// The API layer feeds this into ClientCaps.FMP4 so the playback decision
+// engine knows which codecs the segment container can legally carry.
+func (tm *TranscodeManager) FMP4Enabled() bool {
+	return tm.fmp4
+}
+
+// ffmpegSupportsReadrate reports whether the ffmpeg on PATH is >= 5.0, the
+// release that introduced `-readrate` (the supported way to pace input
+// reads; the old `-re` forces exactly 1× and would stall seeks). Best-effort:
+// any probe failure (no ffmpeg, unparseable banner — e.g. distro builds
+// reporting "n5.1.4" or git snapshots) disables pacing rather than erroring,
+// matching the manager's general posture that a missing ffmpeg surfaces at
+// session creation, not construction.
+func ffmpegSupportsReadrate() bool {
+	out, err := exec.Command("ffmpeg", "-version").Output()
+	if err != nil {
+		return false
+	}
+	return ffmpegMajorVersion(string(out)) >= 5
+}
+
+// ffmpegMajorVersion extracts the major version from `ffmpeg -version`
+// output ("ffmpeg version 6.1.1-3ubuntu5 ..."). Returns 0 when the banner
+// doesn't carry a leading numeric version (git builds: "ffmpeg version
+// N-109983-g4d216654ca") — callers treat 0 as "unknown → feature off".
+func ffmpegMajorVersion(banner string) int {
+	fields := strings.Fields(banner)
+	// Expected shape: ffmpeg version <ver> ...
+	if len(fields) < 3 || fields[0] != "ffmpeg" || fields[1] != "version" {
+		return 0
+	}
+	ver := strings.TrimPrefix(fields[2], "n") // FFmpeg release tags: n5.1.4
+	major := 0
+	for _, r := range ver {
+		if r < '0' || r > '9' {
+			break
+		}
+		major = major*10 + int(r-'0')
+	}
+	return major
 }
 
 // SetMaxSessions updates the maximum concurrent transcode sessions at runtime.
@@ -913,6 +1093,16 @@ func (tm *TranscodeManager) SetMaxSessions(n int) {
 func effectiveMaxSessions(configured int) int {
 	if configured <= 0 {
 		return defaultMaxSessions
+	}
+	return configured
+}
+
+// effectiveMaxSessionsPerUser mirrors effectiveMaxSessions for the per-user
+// cap: <= 0 ("unset/unlimited") clamps to defaultMaxSessionsPerUser so a
+// single account can never monopolize the global slots (finding S1).
+func effectiveMaxSessionsPerUser(configured int) int {
+	if configured <= 0 {
+		return defaultMaxSessionsPerUser
 	}
 	return configured
 }
@@ -945,6 +1135,10 @@ func (tm *TranscodeManager) cleanupLoop() {
 		if tick%4 == 0 {
 			tm.enforceDiskCap()
 		}
+
+		// Every tick: stop encoders for variants nobody is fetching
+		// (abandoned ABR tiers, paused players). Cheap — no disk I/O.
+		tm.reapIdleVariants()
 
 		timeout := tm.cfg.SessionTimeout
 		if timeout == 0 {
@@ -988,6 +1182,74 @@ func (tm *TranscodeManager) cleanupLoop() {
 			s.variantMu.Unlock()
 			os.RemoveAll(s.OutputDir)
 		}
+	}
+}
+
+// readyClosedLocked reports whether the variant's Ready channel has been
+// closed (first output produced, or startup failed). Caller must hold the
+// session's variantMu — Ready is replaced on restart under that lock.
+func readyClosedLocked(v *QualityVariant) bool {
+	select {
+	case <-v.Ready:
+		return true
+	default:
+		return false
+	}
+}
+
+// reapIdleVariants cancels the FFmpeg of every started variant that nothing
+// has fetched for variantIdleTimeout (review 2026-06 finding P1). Before
+// this, each variant a session ever touched kept encoding the ENTIRE file at
+// maximum speed — a single ABR up-switch left two encoders running the full
+// movie, and a paused player kept its encoder racing to EOF. Reaping is
+// reversible: segments stay on disk and EnsureVariant resumes the encoder
+// from the next segment on the next fetch (see the reaped branch there), so
+// the worst-case cost of a false positive is a few seconds of re-prime on
+// the next playlist poll.
+//
+// Deliberately skipped:
+//   - variants still priming (Ready not closed): a slow software HDR/4K
+//     encode can take longer than the idle window to produce its first
+//     segment while a client is genuinely blocked waiting on it;
+//   - the subtitle-carrier variant: a resume relaunches only video/audio,
+//     which would routinely freeze inline subtitles (acceptable for rare
+//     crash recovery, not for a scheduled sweep);
+//   - exited / already-reaped variants.
+func (tm *TranscodeManager) reapIdleVariants() {
+	tm.mu.Lock()
+	sessions := make([]*TranscodeSession, 0, len(tm.sessions))
+	for _, s := range tm.sessions {
+		sessions = append(sessions, s)
+	}
+	tm.mu.Unlock()
+
+	cutoff := time.Now().Add(-variantIdleTimeout)
+	for _, s := range sessions {
+		s.variantMu.Lock()
+		for name, v := range s.Variants {
+			if !v.started || v.exited || v.reaped {
+				continue
+			}
+			if name == s.subsCarrierProfile {
+				continue
+			}
+			if !readyClosedLocked(v) {
+				continue
+			}
+			if v.lastFetch.After(cutoff) {
+				continue
+			}
+			v.reaped = true
+			if v.Cancel != nil {
+				v.Cancel()
+			}
+			slog.Info("reaped idle transcode variant (no fetches; encoder stopped, resumable)",
+				"session_id", s.ID,
+				"profile", name,
+				"idle", time.Since(v.lastFetch).Round(time.Second),
+			)
+		}
+		s.variantMu.Unlock()
 	}
 }
 
@@ -1268,7 +1530,22 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	if len(tm.sessions) >= maxSessions {
 		tm.mu.Unlock()
 		os.RemoveAll(outputDir) // Clean up pre-created dirs
-		return nil, fmt.Errorf("maximum transcode sessions reached (%d)", maxSessions)
+		return nil, fmt.Errorf("%w (%d)", ErrSessionLimit, maxSessions)
+	}
+	// Per-user cap (finding S1): one account — or one leaked token — must
+	// not be able to pin every global slot. Checked in the same critical
+	// section as the insert so concurrent creates can't race past it.
+	maxPerUser := effectiveMaxSessionsPerUser(tm.cfg.MaxSessionsPerUser)
+	userSessions := 0
+	for _, s := range tm.sessions {
+		if s.UserID == userID {
+			userSessions++
+		}
+	}
+	if userSessions >= maxPerUser {
+		tm.mu.Unlock()
+		os.RemoveAll(outputDir)
+		return nil, fmt.Errorf("%w (%d)", ErrUserSessionLimit, maxPerUser)
 	}
 	tm.sessions[sessionID] = session
 	tm.mu.Unlock()
@@ -1554,8 +1831,47 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 	if !ok {
 		return nil, fmt.Errorf("unknown profile: %s", profileName)
 	}
+	// Every EnsureVariant call is (or precedes) a playlist/segment fetch —
+	// refresh the per-variant access time the idle reaper keys off.
+	v.lastFetch = time.Now()
 
 	if v.started {
+		// Reaped variant (idle reaper cancelled its FFmpeg because nothing
+		// fetched it for variantIdleTimeout): transparently resume from the
+		// next segment after the last complete one. This is the designed
+		// "wake up" path — it does NOT consume the crash-restart budget,
+		// because a reap is a deliberate stop, not a failure. If FFmpeg has
+		// not finished dying yet (cancel delivered microseconds ago),
+		// ffmpegDone is still false and we briefly return the dying variant;
+		// the next playlist poll (~3s) lands in this branch and resumes.
+		if v.reaped && ffmpegDone(v) {
+			highestSeg := highestSegmentNumber(v.OutputDir)
+			segDur := tm.cfg.SegmentDuration
+			if segDur <= 0 {
+				segDur = 6
+			}
+			resumeFromSec := startSec
+			resumeSegNum := 0
+			if highestSeg >= 0 {
+				resumeSegNum = highestSeg + 1
+				resumeFromSec = startSec + resumeSegNum*segDur
+			}
+			slog.Info("resuming reaped variant on renewed access",
+				"session_id", session.ID,
+				"profile", profileName,
+				"resume_segment", resumeSegNum,
+			)
+			v.reaped = false
+			v.Ready = make(chan struct{})
+			v.started = false
+			v.exited = false
+			v.Err = nil
+			v.Cmd = nil
+			if err := tm.startVariantAt(session, v, resumeFromSec, resumeSegNum); err != nil {
+				return nil, fmt.Errorf("variant %s resume after reap failed: %w", profileName, err)
+			}
+			return v, nil
+		}
 		// If ffmpeg died after Ready was closed (segments started flowing,
 		// then OOM-kill / signal / disk full mid-stream), the variant is
 		// dead but `started` stayed true. Without this check, EnsureVariant
@@ -1708,11 +2024,10 @@ func highestSegmentNumber(varDir string) int {
 		if ent.IsDir() {
 			continue
 		}
-		name := ent.Name()
-		if !strings.HasPrefix(name, "seg_") || !strings.HasSuffix(name, ".ts") {
+		numStr, ok := segmentNumberPart(ent.Name())
+		if !ok {
 			continue
 		}
-		numStr := strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".ts")
 		n, convErr := strconv.Atoi(numStr)
 		if convErr != nil {
 			continue
@@ -1752,11 +2067,10 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 	}
 	highest := -1
 	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "seg_") || !strings.HasSuffix(line, ".ts") {
+		numStr, ok := segmentNumberPart(strings.TrimSpace(line))
+		if !ok {
 			continue
 		}
-		numStr := strings.TrimSuffix(strings.TrimPrefix(line, "seg_"), ".ts")
 		n, convErr := strconv.Atoi(numStr)
 		if convErr != nil {
 			continue
@@ -1766,6 +2080,22 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 		}
 	}
 	return highest
+}
+
+// segmentNumberPart extracts the numeric part of a media segment name —
+// seg_<N>.ts (MPEG-TS mode) or seg_<N>.m4s (fMP4 mode) — returning ok=false
+// for anything else (init.mp4, playlists, partial temp files).
+func segmentNumberPart(name string) (string, bool) {
+	if !strings.HasPrefix(name, "seg_") {
+		return "", false
+	}
+	switch {
+	case strings.HasSuffix(name, ".ts"):
+		return strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".ts"), true
+	case strings.HasSuffix(name, ".m4s"):
+		return strings.TrimSuffix(strings.TrimPrefix(name, "seg_"), ".m4s"), true
+	}
+	return "", false
 }
 
 // hlsCodecString returns the HLS CODECS attribute for a transcoded variant.
@@ -1858,10 +2188,15 @@ func (tm *TranscodeManager) startVariant(session *TranscodeSession, v *QualityVa
 func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
 	p := v.Profile
 	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
-	segmentPath := filepath.Join(v.OutputDir, "seg_%05d.ts")
+	segExt := ".ts"
+	if tm.fmp4 {
+		segExt = ".m4s"
+	}
+	segmentPath := filepath.Join(v.OutputDir, "seg_%05d"+segExt)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	v.Cancel = cancel
+	v.lastFetch = time.Now()
 
 	segDuration := tm.cfg.SegmentDuration
 	if segDuration <= 0 {
@@ -1879,6 +2214,18 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	//
 	// Full transcode: both video and audio get fresh timestamps from their
 	// encoders, so genpts is safe and helps normalise any gaps.
+	// -avoid_negative_ts: the MPEG-TS muxer tolerates "disabled" (and needs
+	// it — otherwise it adds its own PTS offset that desyncs subtitles), but
+	// the mov/fMP4 muxer requires non-negative dts: with "disabled", a
+	// B-frame-reordered stream whose first dts < 0 makes the muxer error
+	// out. "make_zero" shifts mux-side so the first dts is exactly 0, which
+	// for fMP4 lands the first presentation time within one frame of 0 —
+	// the WebVTT X-TIMESTAMP-MAP uses 0 in fMP4 mode (see getSessionInitPTS).
+	avoidNegTS := "disabled"
+	if tm.fmp4 {
+		avoidNegTS = "make_zero"
+	}
+
 	var args []string
 	if session.Remux {
 		// Emby-style: -copyts preserves original A/V timing, -start_at_zero
@@ -1887,7 +2234,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// Without -avoid_negative_ts disabled, the mpegts muxer (used by
 		// both -f hls and -f segment) adds ~1.4s initial PTS offset, which
 		// desynchronizes subtitle cue times from the video PTS timeline.
-		args = []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", "disabled"}
+		args = []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", avoidNegTS}
 	} else if startSec > 0 {
 		// 2026-05-28 — Resume + full-transcode: use the same -copyts /
 		// -start_at_zero pattern as the remux path. With +genpts and
@@ -1914,7 +2261,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		args = []string{
 			"-fflags", "+discardcorrupt",
 			"-copyts", "-start_at_zero",
-			"-avoid_negative_ts", "disabled",
+			"-avoid_negative_ts", avoidNegTS,
 		}
 	} else {
 		// Fresh start (startSec=0): both streams already begin at file
@@ -1928,6 +2275,16 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	}
 	if startSec > 0 {
 		args = append(args, "-ss", strconv.Itoa(startSec))
+	}
+
+	// Pace full-transcode input reads to readRateFactor× realtime so an
+	// encoder that outruns playback doesn't burn CPU/disk encoding the whole
+	// file up-front (review 2026-06 finding P1). `-readrate` is an INPUT
+	// option (must precede -i) and exists on FFmpeg >= 5.0 only — older
+	// builds run unpaced, exactly as before. Remux is never paced: codec
+	// copy is nearly free and a fast-finishing remux playlist is beneficial.
+	if !session.Remux && tm.readrateOK {
+		args = append(args, "-readrate", readRateFactor)
 	}
 
 	args = append(args, "-i", session.FilePath)
@@ -1960,20 +2317,32 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// ── Remux mode: copy codecs, near-zero CPU ──
 		args = append(args, "-c:v", "copy")
 
-		// Bitstream filters for MKV/MP4 → MPEG-TS remux:
-		// MKV/MP4 store NAL units in length-prefixed (AVCC/HVCC) format,
-		// but MPEG-TS requires Annex B (start codes). FFmpeg's mpegts muxer
-		// usually handles h264 conversion automatically, but some h264
-		// streams (e.g., high-bitrate Blu-ray remuxes with MBAFF or complex
-		// reference structures) produce .ts segments that macOS VideoToolbox
-		// rejects with VTDecompressionOutputCallback error -12909. Explicit
-		// h264_mp4toannexb ensures clean NAL unit conversion for all h264
-		// sources, matching what Plex/Emby/Jellyfin do.
 		svc := session.SourceVideoCodec
-		if svc == "h264" || svc == "avc" || svc == "avc1" {
-			args = append(args, "-bsf:v", "h264_mp4toannexb")
+		if !tm.fmp4 {
+			// Bitstream filters for MKV/MP4 → MPEG-TS remux ONLY:
+			// MKV/MP4 store NAL units in length-prefixed (AVCC/HVCC) format,
+			// but MPEG-TS requires Annex B (start codes). FFmpeg's mpegts muxer
+			// usually handles h264 conversion automatically, but some h264
+			// streams (e.g., high-bitrate Blu-ray remuxes with MBAFF or complex
+			// reference structures) produce .ts segments that macOS VideoToolbox
+			// rejects with VTDecompressionOutputCallback error -12909. Explicit
+			// h264_mp4toannexb ensures clean NAL unit conversion for all h264
+			// sources, matching what Plex/Emby/Jellyfin do.
+			//
+			// fMP4 segments must NOT get these filters: the mov muxer wants the
+			// native AVCC/HVCC form — converting to Annex B would corrupt it.
+			if svc == "h264" || svc == "avc" || svc == "avc1" {
+				args = append(args, "-bsf:v", "h264_mp4toannexb")
+			} else if svc == "hevc" || svc == "h265" {
+				args = append(args, "-bsf:v", "hevc_mp4toannexb")
+			}
 		} else if svc == "hevc" || svc == "h265" {
-			args = append(args, "-bsf:v", "hevc_mp4toannexb")
+			// HEVC in fMP4: force the hvc1 sample-entry brand. FFmpeg's mov
+			// muxer defaults to hev1 (parameter sets in-band), which Apple's
+			// players reject — the HLS Authoring Specification requires hvc1
+			// (parameter sets in the hvcC box). Without this tag, HEVC remux
+			// plays in Chrome but black-screens on Safari/iOS.
+			args = append(args, "-tag:v", "hvc1")
 		}
 
 		if session.RemuxAudioCopy {
@@ -2065,9 +2434,12 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	if resumeSegNum > 0 {
 		hlsFlags = "independent_segments+append_list"
 	}
+	if !tm.fmp4 {
+		// -muxdelay 0 -muxpreload 0 are mpegts-muxer knobs (see the comment
+		// block above); meaningless for the mov-based fMP4 segments.
+		args = append(args, "-muxdelay", "0", "-muxpreload", "0")
+	}
 	args = append(args,
-		"-muxdelay", "0",
-		"-muxpreload", "0",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(segDuration),
 		"-hls_list_size", "0",
@@ -2075,6 +2447,16 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		"-hls_flags", hlsFlags,
 		"-hls_segment_filename", segmentPath,
 	)
+	if tm.fmp4 {
+		// CMAF segments: seg_NNNNN.m4s + a single init.mp4 carrying the
+		// codec configuration. The variant playlist references it via
+		// #EXT-X-MAP:URI="init.mp4" (token-rewritten for cast receivers in
+		// ServeVariantPlaylist). On a crash/reap resume (+append_list), the
+		// fresh FFmpeg rewrites init.mp4 with identical parameters — players
+		// that cached the old init continue seamlessly; a discontinuity-
+		// sensitive player at worst re-fetches one init segment.
+		args = append(args, "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4")
+	}
 	// On restart, resume segment numbering so seg_(crash+1).ts onwards
 	// are produced by the fresh FFmpeg without overwriting any pre-crash
 	// segments. The +append_list flag above ensures the playlist file is
@@ -2106,6 +2488,11 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// outputs (subtitle content is identical across quality levels).
 	if len(session.SubtitleTracks) > 0 && !session.subtitlesAttached {
 		session.subtitlesAttached = true
+		// Remember which variant carries the subtitle outputs so the idle
+		// reaper never cancels it (a resume relaunches only video/audio,
+		// freezing inline subs — acceptable for crash recovery, not as a
+		// routine sweep). Caller holds variantMu.
+		session.subsCarrierProfile = p.Name
 		for i, st := range session.SubtitleTracks {
 			subPlaylist := filepath.Join(session.OutputDir, fmt.Sprintf("subs_%d.m3u8", i))
 			subSegPattern := filepath.Join(session.OutputDir, fmt.Sprintf("subs_%d_%%05d.vtt", i))
@@ -2158,7 +2545,14 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 
 	go func() {
 		if err := cmd.Start(); err != nil {
+			// Take the session lock for the write: serve-path readers
+			// snapshot v.Err under variantMu (review 2026-06 finding B4),
+			// and this goroutine is the one v.Err writer that ran outside
+			// it. close(v.Ready) still publishes the value to pre-Ready
+			// waiters; the lock covers later readers.
+			session.variantMu.Lock()
 			v.Err = fmt.Errorf("start ffmpeg: %w", err)
+			session.variantMu.Unlock()
 			close(v.Ready)
 			return
 		}
@@ -2324,8 +2718,14 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Snapshot Ready under the lock — restart/resume paths replace the
+	// channel under variantMu (review finding B4).
+	s.variantMu.Lock()
+	ready := v.Ready
+	s.variantMu.Unlock()
+
 	select {
-	case <-v.Ready:
+	case <-ready:
 	case <-r.Context().Done():
 		return
 	case <-time.After(tm.readinessTimeout(s)):
@@ -2333,10 +2733,15 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if v.Err != nil {
+	// Snapshot under variantMu: the cmd.Wait goroutine can write v.Err at
+	// any time after Ready closes (mid-stream crash). Review finding B4.
+	s.variantMu.Lock()
+	vErr := v.Err
+	s.variantMu.Unlock()
+	if vErr != nil {
 		// Log the full error server-side but don't leak FFmpeg stderr
 		// (which contains filesystem paths) to the client
-		slog.Error("variant error on serve", "session_id", sessionID, "profile", profileName, "error", v.Err)
+		slog.Error("variant error on serve", "session_id", sessionID, "profile", profileName, "error", vErr)
 		http.Error(w, "transcode failed", http.StatusInternalServerError)
 		return
 	}
@@ -2364,11 +2769,16 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 			http.Error(w, "playlist not found", http.StatusNotFound)
 			return
 		}
-		// Append ?token= to .ts segment lines (not to #EXT directives).
+		// Append ?token= to segment lines (not to #EXT directives) — both
+		// .ts (legacy MPEG-TS mode) and .m4s (fMP4/CMAF mode). The fMP4
+		// playlist additionally references the init segment via
+		// `#EXT-X-MAP:URI="init.mp4"`; native/cast receivers fetch that URI
+		// with no Authorization header, so the token must be injected
+		// INSIDE the quoted URI attribute too.
 		// Trim \r from EVERY line — FFmpeg may produce playlists with
 		// \r\n line endings on some platforms, and stripping only the
 		// rewritten lines would produce a mixed-ending output (rewritten
-		// .ts lines get \n, EXT directives keep \r\n). HLS clients
+		// segment lines get \n, EXT directives keep \r\n). HLS clients
 		// tolerate either but mixed endings are sloppy and have
 		// occasionally tripped third-party parsers. Normalize to \n
 		// throughout for a clean, consistent body.
@@ -2376,9 +2786,12 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
 			trimmed := strings.TrimRight(line, "\r")
-			if strings.HasSuffix(trimmed, ".ts") {
+			switch {
+			case strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s"):
 				lines[i] = trimmed + tokenSuffix
-			} else {
+			case strings.HasPrefix(trimmed, "#EXT-X-MAP:") && strings.Contains(trimmed, `URI="init.mp4"`):
+				lines[i] = strings.Replace(trimmed, `URI="init.mp4"`, `URI="init.mp4`+tokenSuffix+`"`, 1)
+			default:
 				lines[i] = trimmed
 			}
 		}
@@ -2390,14 +2803,15 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 	http.ServeFile(w, r, playlistPath)
 }
 
-// ServeHLSSegment serves a .ts segment from a specific quality variant.
+// ServeHLSSegment serves a media segment from a specific quality variant:
+// seg_NNNNN.ts (MPEG-TS mode), seg_NNNNN.m4s or init.mp4 (fMP4/CMAF mode).
 func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Request, sessionID, profileName, segmentName string) {
-	if strings.Contains(segmentName, "/") || strings.Contains(segmentName, "\\") || strings.Contains(segmentName, "..") {
+	// Lock the name to the exact shapes FFmpeg produces (same rationale as
+	// reSubsPlaylist/reSubsSegment): digits-only segment numbers, fixed
+	// extensions, or the literal fMP4 init segment. Subsumes the previous
+	// separator/.. traversal checks.
+	if !reMediaSegment.MatchString(segmentName) {
 		http.Error(w, "invalid segment name", http.StatusBadRequest)
-		return
-	}
-	if !strings.HasSuffix(segmentName, ".ts") {
-		http.Error(w, "invalid segment", http.StatusBadRequest)
 		return
 	}
 
@@ -2409,9 +2823,18 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 
 	s.variantMu.Lock()
 	v, vOK := s.Variants[profileName]
+	started := false
+	var ready chan struct{}
+	if vOK {
+		started = v.started
+		ready = v.Ready
+		// Per-variant access time for the idle reaper (finding P1): segment
+		// fetches are the strongest "someone is watching this tier" signal.
+		v.lastFetch = time.Now()
+	}
 	s.variantMu.Unlock()
 
-	if !vOK || !v.started {
+	if !vOK || !started {
 		http.Error(w, "variant not active", http.StatusNotFound)
 		return
 	}
@@ -2420,7 +2843,7 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 	// Without this, requests that arrive between v.started=true and cmd.Start()
 	// completing would get 404s.
 	select {
-	case <-v.Ready:
+	case <-ready:
 	case <-r.Context().Done():
 		return
 	case <-time.After(tm.readinessTimeout(s)):
@@ -2428,7 +2851,12 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if v.Err != nil {
+	// Snapshot under variantMu — the cmd.Wait goroutine may write v.Err
+	// after Ready closes (review finding B4).
+	s.variantMu.Lock()
+	vErr := v.Err
+	s.variantMu.Unlock()
+	if vErr != nil {
 		http.Error(w, "transcode failed", http.StatusInternalServerError)
 		return
 	}
@@ -2460,8 +2888,18 @@ func (tm *TranscodeManager) ServeHLSSegment(w http.ResponseWriter, r *http.Reque
 		atomic.AddInt64(&s.BytesServed, info.Size())
 	}
 
-	w.Header().Set("Content-Type", "video/mp2t")
-	w.Header().Set("Cache-Control", "max-age=3600")
+	switch {
+	case strings.HasSuffix(segmentName, ".m4s"):
+		w.Header().Set("Content-Type", "video/iso.segment")
+	case segmentName == "init.mp4":
+		w.Header().Set("Content-Type", "video/mp4")
+	default:
+		w.Header().Set("Content-Type", "video/mp2t")
+	}
+	// `private`: segment URLs may carry a ?token= for cast/native clients —
+	// a shared cache must never store them (review finding S4). Browser
+	// caches still get the hour, which is plenty for replay/seek-back.
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 	http.ServeFile(w, r, segPath)
 }
 
@@ -2494,10 +2932,14 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 	// level. Reuse a running variant if there is one; only start a variant
 	// (the cheapest tier) when none is running yet.
 	var primaryVariant *QualityVariant
+	var primaryReady chan struct{}
 	s.variantMu.Lock()
 	for _, v := range s.Variants {
 		if v.started {
 			primaryVariant = v
+			// Snapshot Ready under the lock — restart/resume paths replace
+			// the channel under variantMu (review finding B4).
+			primaryReady = v.Ready
 			break
 		}
 	}
@@ -2514,18 +2956,24 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 			return
 		}
 		primaryVariant = v
+		s.variantMu.Lock()
+		primaryReady = v.Ready
+		s.variantMu.Unlock()
 	}
 
 	if primaryVariant != nil {
 		select {
-		case <-primaryVariant.Ready:
+		case <-primaryReady:
 		case <-r.Context().Done():
 			return
 		case <-time.After(tm.readinessTimeout(s)):
 			http.Error(w, "subtitle not ready", http.StatusServiceUnavailable)
 			return
 		}
-		if primaryVariant.Err != nil {
+		s.variantMu.Lock()
+		pErr := primaryVariant.Err
+		s.variantMu.Unlock()
+		if pErr != nil {
 			http.Error(w, "transcode failed", http.StatusInternalServerError)
 			return
 		}
@@ -2549,7 +2997,12 @@ func (tm *TranscodeManager) ServeSubtitlePlaylist(w http.ResponseWriter, r *http
 		// playlist (incompatible codec slipping past the filter, decoder
 		// error, mid-run OOM). Without this we used to spin the full 60s
 		// retry budget for a file that was never going to appear.
-		if primaryVariant != nil && ffmpegDone(primaryVariant) {
+		// ffmpegDone reads variant state the cmd.Wait goroutine writes under
+		// variantMu — take the lock for the check (review finding B4).
+		s.variantMu.Lock()
+		primaryDone := primaryVariant != nil && ffmpegDone(primaryVariant)
+		s.variantMu.Unlock()
+		if primaryDone {
 			slog.Warn("subtitle playlist abandoned: ffmpeg exited",
 				"session_id", sessionID, "file", subsFile)
 			http.Error(w, "transcode ended before subtitle was produced", http.StatusNotFound)
@@ -2751,6 +3204,15 @@ func extractFirstPTS(tsPath string) int64 {
 // in WebVTT subtitle segments must match this offset for HLS.js to
 // correctly synchronize cue times.
 func (tm *TranscodeManager) getSessionInitPTS(s *TranscodeSession) int64 {
+	// fMP4 mode: there is no MPEG-TS PES to probe and no mpegts mux offset
+	// to compensate for. -avoid_negative_ts make_zero anchors the first dts
+	// at exactly 0, so the first presentation time is within one frame of 0
+	// and hls.js derives its initPTS from the same tfdt baseline —
+	// X-TIMESTAMP-MAP:MPEGTS:0 maps cue times directly onto the timeline.
+	if tm.fmp4 {
+		return 0
+	}
+
 	// Fast path: already probed and cached.
 	cached := atomic.LoadInt64(&s.initPTS90kHz)
 	if cached >= 0 {
@@ -2870,7 +3332,7 @@ func (tm *TranscodeManager) ServeSubtitleSegment(w http.ResponseWriter, r *http.
 	if len(data) == 0 {
 		content := "WEBVTT\n" + timestampMap + "\n"
 		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-		w.Header().Set("Cache-Control", "max-age=3600")
+		w.Header().Set("Cache-Control", "private, max-age=3600")
 		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 		w.Write([]byte(content))
 		return
@@ -2896,7 +3358,7 @@ func (tm *TranscodeManager) ServeSubtitleSegment(w http.ResponseWriter, r *http.
 	}
 
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=3600")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 	if _, err := w.Write([]byte(content)); err != nil {
 		slog.Debug("write subtitle segment", "session_id", sessionID, "error", err)
@@ -3027,32 +3489,39 @@ func collectProcessResources(pids []int) *SessionResources {
 // HDR-to-SDR Tonemapping Filter Injection
 // ============================================================
 
+// tonemapChain is the CPU HDR→SDR conversion shared by every pipeline:
+// zscale(linearize) → float → zscale(bt709 primaries) → hable tonemap →
+// zscale(bt709 transfer/matrix, tv range) → 8-bit 4:2:0. Hable with desat=0
+// produces natural-looking SDR output.
+const tonemapChain = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p"
+
 // injectTonemapFilter replaces the video filter chain to add HDR-to-SDR
 // tonemapping. This is needed when transcoding 10-bit HEVC HDR content to
-// 8-bit H.264 to prevent washed-out colors. The Hable tonemapping algorithm
-// with desaturation produces natural-looking SDR output.
+// 8-bit H.264 to prevent washed-out colors.
 //
-// Software pipeline: zscale + tonemap + format conversion before scale.
-// VAAPI pipeline: tonemapping is not yet supported (filters are CPU-only);
-// a warning is logged and no tonemapping is applied.
+// Software/NVENC/QSV/AMF pipeline: tonemap on CPU frames, then CPU scale.
+// VAAPI pipeline: the tonemap filters are CPU-only and cannot run on
+// hardware surfaces — but this pipeline's DECODE side is already CPU (no
+// -hwaccel input flag), so the tonemap runs on the decoded CPU frames
+// BEFORE format=nv12,hwupload, keeping scale + encode on the GPU.
+// Previously this branch skipped tonemapping entirely and VAAPI hosts got
+// washed-out HDR transcodes (review 2026-06 finding Q1). Tonemapping 4K on
+// the CPU is heavy, but zscale is SIMD-optimized and readinessTimeout
+// already budgets +90s for HDRTonemap sessions.
 func injectTonemapFilter(args []string, width, height int) []string {
 	result := make([]string, 0, len(args)+2)
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-vf" && i+1 < len(args) {
 			existingVF := args[i+1]
 			if strings.Contains(existingVF, "hwupload") {
-				// VAAPI pipeline: tonemapping filters are CPU-only and cannot
-				// operate on hardware surfaces. Fall through without tonemapping.
-				slog.Warn("HDR tonemapping requested but VAAPI pipeline does not support CPU-side tonemap filters; skipping")
-				result = append(result, args[i], existingVF)
+				// VAAPI: CPU tonemap at source resolution, then the original
+				// upload + GPU scale chain (existingVF =
+				// "format=nv12,hwupload,scale_vaapi=…"). tonemapChain ends in
+				// yuv420p; the nv12 step hwupload needs is preserved.
+				result = append(result, "-vf", tonemapChain+","+existingVF)
 			} else {
-				// Software/NVENC/QSV/AMF pipeline: inject tonemap before scale.
-				// Chain: zscale(linearize) → format(float) → zscale(bt709) → tonemap → zscale(tv) → format(yuv420p) → scale
-				tonemap := fmt.Sprintf(
-					"zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,scale=%d:-2",
-					width,
-				)
-				result = append(result, "-vf", tonemap)
+				// CPU-frame pipelines: tonemap, then scale to the profile width.
+				result = append(result, "-vf", fmt.Sprintf("%s,scale=%d:-2", tonemapChain, width))
 			}
 			i++ // skip original filter value
 			continue
@@ -3091,6 +3560,11 @@ func injectBurnInFilter(args []string, session *TranscodeSession) []string {
 
 		// VAAPI pipeline: overlay must happen on CPU frames, before hwupload.
 		// Restructure: [0:v][0:N]overlay,<vaapi_pipeline>
+		// Known corner: on an HDR session the tonemap chain now lives inside
+		// existingVF, so the bitmap overlay composites BEFORE tonemapping and
+		// the subtitle bitmap is run through the HDR→SDR curve (slightly
+		// dimmed). Functionally fine; restructuring filter_complex to split
+		// around the tonemap isn't worth it for the PGS+HDR+VAAPI corner.
 		if strings.Contains(existingVF, "hwupload") {
 			return append(result, "-filter_complex",
 				fmt.Sprintf("[0:v][0:%d]overlay,%s", session.BurnSubIndex, existingVF))
@@ -3134,9 +3608,19 @@ func injectBurnInFilter(args []string, session *TranscodeSession) []string {
 		if args[i] == "-vf" && i+1 < len(args) {
 			existingVF := args[i+1]
 			if strings.Contains(existingVF, "hwupload") {
-				// VAAPI pipeline: subtitle filter is CPU-only, must run before hwupload.
-				// Prepend: subtitles=...,format=nv12,hwupload,scale_vaapi=...
-				result = append(result, "-vf", burnFilter+","+existingVF)
+				// VAAPI pipeline: subtitle filter is CPU-only, must run before
+				// hwupload. When the chain also tonemaps (HDR session), burn
+				// AFTER the tonemap so subtitles render onto SDR frames at
+				// their intended brightness — drawn pre-tonemap they'd be
+				// dimmed/tinted by the HDR→SDR curve. The upload step is the
+				// stable insertion anchor in both shapes.
+				if idx := strings.Index(existingVF, "format=nv12,hwupload"); idx > 0 {
+					result = append(result, "-vf", existingVF[:idx]+burnFilter+","+existingVF[idx:])
+				} else {
+					// SDR chain starts directly at format=nv12 (idx == 0) —
+					// prepend: subtitles=...,format=nv12,hwupload,scale_vaapi=...
+					result = append(result, "-vf", burnFilter+","+existingVF)
+				}
 			} else {
 				// CPU pipeline (NVENC/QSV/AMF/software): append after scale.
 				// Chain: scale=WxH,subtitles=...

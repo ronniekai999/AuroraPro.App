@@ -113,14 +113,25 @@ func TestDecidePlayback(t *testing.T) {
 		Containers:  map[string]bool{"mp4_container": true, "webm_container": true},
 		HLSJS:       true,
 	}
-	// iOS Safari: only native HLS, no HLS.js (Hls.isSupported() = false).
-	// HEVC remux into .ts is fine because native HLS handles it.
-	// All audio codecs (including EAC3) are fine in native HLS .ts.
+	// iOS Safari (pre-17.1): only native HLS, no HLS.js (Hls.isSupported()
+	// = false, no MSE/ManagedMediaSource). Apple's HLS Authoring Spec
+	// requires HEVC to be in fMP4 segments — AVPlayer does NOT play
+	// HEVC-in-TS — so HEVC remux for this client is only legal when the
+	// server emits fMP4 (ClientCaps.FMP4, set server-side).
 	safariCaps := &ClientCaps{
 		VideoCodecs: map[string]bool{"h264": true, "h265": true, "hevc": true},
 		AudioCodecs: map[string]bool{"aac": true, "mp3": true, "ac3": true, "eac3": true},
 		Containers:  map[string]bool{"mp4_container": true},
 		HLSNative:   true,
+	}
+	// Same client, but the server is in fMP4 (CMAF) segment mode — the
+	// default since the 2026-06 review. HEVC remux becomes legal.
+	safariFMP4Caps := &ClientCaps{
+		VideoCodecs: map[string]bool{"h264": true, "h265": true, "hevc": true},
+		AudioCodecs: map[string]bool{"aac": true, "mp3": true, "ac3": true, "eac3": true},
+		Containers:  map[string]bool{"mp4_container": true},
+		HLSNative:   true,
+		FMP4:        true,
 	}
 	// macOS Safari: BOTH HLS.js and native HLS available. The frontend uses
 	// HLS.js whenever Hls.isSupported() is true, so remux/transcode paths
@@ -208,8 +219,11 @@ func TestDecidePlayback(t *testing.T) {
 			wantDec: "direct_play", wantRemux: false, wantAudioP: true, wantIdx: 0,
 		},
 		{
+			// fMP4 caps: HEVC remux for a native-HLS client is only legal
+			// with fMP4 segments (B2) — this case exercises the container-
+			// remux mechanics, not the segment-format gate.
 			name:      "safari + mkv hevc aac = remux (container not supported)",
-			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariCaps,
+			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariFMP4Caps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
@@ -278,8 +292,10 @@ func TestDecidePlayback(t *testing.T) {
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{
+			// fMP4 caps: see the B2 gate — HEVC remux needs fMP4 for a
+			// native-only client; this case tests audio-track selection.
 			name:      "safari + mkv hevc dts+aac = remux, picks aac track",
-			container: "mkv", videoCodec: "hevc", audio: dtsAndAac, caps: safariCaps,
+			container: "mkv", videoCodec: "hevc", audio: dtsAndAac, caps: safariFMP4Caps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
@@ -404,9 +420,19 @@ func TestDecidePlayback(t *testing.T) {
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 1,
 		},
 		{
-			// Safari + MKV HEVC: native HLS handles HEVC in .ts natively → remux is fine.
-			name:      "safari + mkv hevc aac = remux (native HLS handles HEVC .ts)",
+			// Safari (native HLS only) + MKV HEVC in MPEG-TS mode: Apple's
+			// authoring spec requires HEVC in fMP4 — AVPlayer rejects
+			// HEVC-in-TS, and with no hls.js there is no error-fallback.
+			// Must transcode. (Review 2026-06 finding B2 — this case
+			// previously asserted remux.)
+			name:      "safari + mkv hevc aac + TS segments = transcode (HEVC-in-TS illegal for native HLS)",
 			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariCaps,
+			wantDec: "transcode", wantRemux: false, wantAudioP: true, wantIdx: 0,
+		},
+		{
+			// Same client, fMP4 segment mode: HEVC remux is legal and cheap.
+			name:      "safari + mkv hevc aac + fMP4 segments = remux",
+			container: "mkv", videoCodec: "hevc", audio: aacTrack, caps: safariFMP4Caps,
 			wantDec: "direct_stream", wantRemux: true, wantAudioP: true, wantIdx: 0,
 		},
 		{

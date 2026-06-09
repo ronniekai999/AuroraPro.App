@@ -226,8 +226,25 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Only routes that genuinely cannot use Authorization headers
 				// get the token promoted. Path-prefix check is OK because the
 				// router has not yet stripped /api etc.
-				if shouldPromoteToken(r.URL.Path) &&
-					r.Header.Get("Authorization") == "" && token != "" {
+				promote := shouldPromoteToken(r.URL.Path) &&
+					r.Header.Get("Authorization") == "" && token != ""
+				// Streaming routes additionally require the query token to be
+				// CAST-SCOPED (review 2026-06 finding S2). Every first-party
+				// streaming client authenticates without URL tokens — the SPA
+				// and same-origin native HLS ride httpOnly cookies; Chromecast/
+				// AirPlay receivers use session-bound cast tokens minted by
+				// CreateCastToken. Promoting a regular 15-min login JWT from a
+				// URL only ever served to widen the replay window when a
+				// stream URL leaked into an upstream proxy log. Non-cast query
+				// tokens are now simply NOT promoted here (no hard 401): a
+				// cookie-authed request with a vestigial ?token= keeps working
+				// via its cookie, and redaction below still scrubs the value.
+				if promote && strings.HasPrefix(r.URL.Path, "/api/stream/") && deps.AuthSvc != nil {
+					if _, castErr := deps.AuthSvc.ValidateCastToken(token); castErr != nil {
+						promote = false
+					}
+				}
+				if promote {
 					r.Header.Set("Authorization", "Bearer "+token)
 				}
 				q := r.URL.Query()
