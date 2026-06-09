@@ -240,6 +240,27 @@ func (q *Queries) ProfileMaxAgeRating(ctx context.Context, profileID int64) (str
 	return rating, nil
 }
 
+// maturityPenaltyExpr (Phase E2c) is a SELECT-list expression that adds a small
+// cosine-distance penalty to items whose maturity tier is far from the profile's
+// maturity_pref — a SOFT content-tone lean (the HARD ceiling is allowedRatings).
+// Self-contained on $1 (profileID) + m.content_rating, so it injects with NO new
+// bind param (mirrors dislikedNotExists). It yields 0 when the preference is off
+// (-1 → NULLIF → NULL arithmetic → COALESCE 0) or the item's rating is unknown
+// (tier NULL → same). 0.04 per tier-step ≈ ~10 recall ranks at the local cosine
+// density, so a 2-step gap (~0.08) is a clear lean without overriding the taste
+// match. Why text-embedding tone failed but this works: maturity is categorical
+// and lives in content_rating; encode it as a structured ranking term, not as a
+// few tokens the encoder drowns under the plot overview (Phase E2b, retired).
+const maturityPenaltyExpr = `COALESCE(0.04 * ABS(
+		           (CASE
+		              WHEN m.content_rating IN ('G','TV-Y','TV-Y7','TV-Y7-FV','TV-G','PG','TV-PG') THEN 0
+		              WHEN m.content_rating IN ('PG-13','TV-14') THEN 1
+		              WHEN m.content_rating IN ('R','TV-MA','NC-17','NC17','X') THEN 2
+		              ELSE NULL
+		            END)
+		           - NULLIF((SELECT maturity_pref FROM user_profiles WHERE id = $1), -1)
+		         ), 0)`
+
 // NearestUnwatched returns the top-N items by cosine distance to the given
 // vector, excluding anything the profile has watch_progress on OR has seeded
 // via taste onboarding (we don't recommend back a title they told us they
@@ -271,6 +292,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		         COALESCE(m.backdrop_path, '') AS backdrop_path,
 		         m.added_at, m.updated_at,
 		         (m.embedding <=> $2::vector) AS distance,
+		         `+maturityPenaltyExpr+` AS maturity_penalty,
 		         ($5::text <> '' AND EXISTS (
 		             SELECT 1 FROM recently_surfaced_items rsi
 		             WHERE rsi.profile_id = $1 AND rsi.media_item_id = m.id
@@ -296,7 +318,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
 		       added_at, updated_at, distance
 		FROM ranked
-		ORDER BY recently_surfaced ASC, distance ASC
+		ORDER BY recently_surfaced ASC, (distance + maturity_penalty) ASC
 		LIMIT $3`,
 		profileID, vectorLit, limit, allowedRatings, surface, withinSeconds,
 	)

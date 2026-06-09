@@ -1481,6 +1481,14 @@ export interface Profile {
   is_default: boolean
   created_at: string
   updated_at: string
+  // Phase E2c content-tone recall lean: -1 off, 0 family, 1 teen, 2 mature.
+  maturity_pref?: number
+}
+
+// setProfileMaturity sets a profile's content-tone preference (-1 off, 0 family,
+// 1 teen, 2 mature) — a soft recall bias toward that maturity tier.
+export async function setProfileMaturity(id: number, pref: number): Promise<void> {
+  await apiFetch(`/api/profiles/${id}`, { method: 'PUT', body: { maturity_pref: pref } })
 }
 export async function listProfiles(signal?: AbortSignal): Promise<Profile[]> {
   const res = await apiFetch<Profile[]>('/api/profiles', { signal })

@@ -14,11 +14,16 @@ import (
 
 type ProfileHandler struct {
 	queries *db.Queries
+	hero    HeroProvider // optional; for cache invalidation on maturity_pref change
 }
 
 func NewProfileHandler(queries *db.Queries) *ProfileHandler {
 	return &ProfileHandler{queries: queries}
 }
+
+// SetHeroProvider wires the recommender so a content-tone (maturity_pref) change
+// can invalidate the profile's cached hero/discover and re-curate promptly.
+func (h *ProfileHandler) SetHeroProvider(p HeroProvider) { h.hero = p }
 
 // ListProfiles returns all profiles for the authenticated user.
 func (h *ProfileHandler) ListProfiles(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +207,13 @@ func (h *ProfileHandler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 	if err := h.queries.UpdateProfile(r.Context(), profileID, &req); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
 		return
+	}
+
+	// A content-tone change reshapes recall (maturityPenaltyExpr), so drop the
+	// profile's cached hero/discover to re-curate on the next fetch instead of
+	// waiting out the 24h TTL.
+	if req.MaturityPref != nil && h.hero != nil {
+		h.hero.Invalidate(profileID)
 	}
 
 	updated, _ := h.queries.GetProfile(r.Context(), profileID)

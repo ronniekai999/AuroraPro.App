@@ -617,6 +617,10 @@ type UserProfile struct {
 	// TasteOnboardingCompleted flips true once the profile finishes the
 	// "Pick What You Love" flow; gates the one-time first-run redirect.
 	TasteOnboardingCompleted bool `json:"taste_onboarding_completed"`
+	// MaturityPref is the Phase E2c content-tone recall lean: -1 off (default),
+	// 0 family, 1 teen, 2 mature. A SOFT bias (distinct from MaxAgeRating's HARD
+	// ceiling) that nudges recall toward the chosen tier.
+	MaturityPref int `json:"maturity_pref"`
 }
 
 type CreateProfileRequest struct {
@@ -635,6 +639,9 @@ type UpdateProfileRequest struct {
 	Language     *string `json:"language,omitempty"`
 	SubtitleLang *string `json:"subtitle_lang,omitempty"`
 	SubtitleMode *string `json:"subtitle_mode,omitempty"`
+	// MaturityPref: -1 off, 0 family, 1 teen, 2 mature. Out-of-range clamps to
+	// -1 (off). nil = leave unchanged.
+	MaturityPref *int `json:"maturity_pref,omitempty"`
 }
 
 // ============================================================

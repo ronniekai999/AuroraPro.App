@@ -62,6 +62,7 @@ import {
   getAdminOAuth,
   updateAdminOAuth,
   listProfiles,
+  setProfileMaturity,
   createProfile,
   listWatchlists,
   createWatchlist,
@@ -3447,8 +3448,15 @@ interface SettingsViewProps {
   user?: ApiUser
   onLogout?: () => void
   onToast?: (message: string, type?: Toast['type']) => void
+  activeProfile?: Profile | null
+  onMaturityChange?: (pref: number) => void | Promise<void>
 }
-function SettingsView({ user: settingsUser, onLogout, onToast }: SettingsViewProps = {}) {
+function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange }: SettingsViewProps = {}) {
+  // Phase E2c content-tone dial. Optimistic local override so the chip flips
+  // instantly; reset when the active profile changes (server value wins again).
+  const [localMaturity, setLocalMaturity] = useState<number | null>(null)
+  useEffect(() => { setLocalMaturity(null) }, [activeProfile?.id])
+  const currentMaturity = localMaturity ?? activeProfile?.maturity_pref ?? -1
   // Persist to localStorage under `aurora_prefs`. We capture the raw
   // parsed object in a ref and merge before each write so any keys
   // this component doesn't know about (e.g. legacy `volume`, `muted`)
@@ -3642,6 +3650,58 @@ function SettingsView({ user: settingsUser, onLogout, onToast }: SettingsViewPro
             </div>
           </div>
         </div>
+
+        {/* Content Tone (Phase E2c) — per-profile maturity LEAN for recommendations.
+            A SOFT recall bias (the recommender adds a small distance penalty by
+            how far an item's rating tier is from this pick), distinct from a
+            profile's hard age limit. Writes maturity_pref via PUT /api/profiles/:id
+            and invalidates the hero cache so it re-curates on the next Home visit. */}
+        {onMaturityChange && activeProfile && (
+          <div className="glass-panel rounded-xl p-6">
+            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+              <Icon name="sparkle" size={18} className="text-purple-400" />
+              Content Tone
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <p className="text-white/80 text-sm font-medium">Recommendation lean for {activeProfile.name}</p>
+                <p className="text-white/40 text-xs">Nudges what surfaces first toward a maturity tier — it doesn't hide anything (that's the age limit). Applies on your next Home visit.</p>
+              </div>
+              <div role="radiogroup" aria-label="Content tone" className="grid grid-cols-2 gap-3">
+                {([
+                  { v: -1, label: 'Off', desc: 'No lean (default)' },
+                  { v: 0, label: 'Family', desc: 'Gentle · G–PG / TV-G' },
+                  { v: 1, label: 'Teen', desc: 'PG-13 · TV-14' },
+                  { v: 2, label: 'Mature', desc: 'Intense · R · TV-MA' },
+                ] as const).map(opt => {
+                  const active = currentMaturity === opt.v
+                  return (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => {
+                        const prev = currentMaturity
+                        setLocalMaturity(opt.v)
+                        // Roll back the optimistic selection if the save rejects.
+                        Promise.resolve(onMaturityChange(opt.v)).catch(() => setLocalMaturity(prev))
+                      }}
+                      className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                        active
+                          ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
+                          : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                      }`}
+                    >
+                      <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
+                      <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
 
         {sections.map(section => (
           <div key={section.title} className="glass-panel rounded-xl p-6">
@@ -9400,7 +9460,22 @@ export default function App() {
             />
           )}
           {view === 'search' && <SearchView query={searchQuery} onSelect={handleSelect} libraryIds={libraryIds} onToggleLib={handleToggleLib} />}
-          {view === 'settings' && <SettingsView user={user} onLogout={handleLogout} onToast={addToast} />}
+          {view === 'settings' && <SettingsView
+            user={user}
+            onLogout={handleLogout}
+            onToast={addToast}
+            activeProfile={profiles.find(p => p.id === activeProfileId) ?? null}
+            onMaturityChange={(pref) => {
+              if (!activeProfileId) return
+              // Return the promise so SettingsView can roll back its optimistic
+              // selection on failure; re-throw after toasting so that .catch fires.
+              return setProfileMaturity(activeProfileId, pref)
+                .then(() => listProfiles())
+                .then(setProfiles)
+                .then(() => addToast('Content tone updated — your feed will re-curate', 'success'))
+                .catch((e) => { addToast('Failed to update content tone', 'error'); throw e })
+            }}
+          />}
           {view === 'collections' && (
             <CollectionsView
               isAdmin={user.role === 'admin'}
