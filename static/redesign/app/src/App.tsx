@@ -1651,20 +1651,26 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
               placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
               aria-label="Describe what you're in the mood for"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-3 text-white text-sm placeholder:text-white/40 outline-none"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
             />
-            {convoText ? (
+            {convoText && (
               <button
                 onClick={() => { setConvoText(''); onConversationalSearch('') }}
                 aria-label="Clear search"
-                className="shrink-0 mr-2.5 px-3 py-1.5 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+                className="shrink-0 px-2.5 py-1 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
               >Clear</button>
-            ) : (
-              <span className="hidden sm:flex shrink-0 mr-1 items-center gap-1.5 text-[11px] font-medium text-purple-200/55 pointer-events-none">
-                <kbd className="grid place-items-center h-5 min-w-[1.3rem] px-1 rounded-md border border-white/15 bg-white/[0.07] text-purple-100/90 text-[11px] leading-none shadow-[inset_0_-1px_0_rgba(0,0,0,0.35)]">↵</kbd>
-                <span>to search</span>
-              </span>
             )}
+            {/* Solid Search chip pinned to the right edge — a filled element
+                reads as anchored-right even through the bar's glow halo, where
+                faint floating text did not. Clickable (Enter still works too). */}
+            <button
+              onClick={() => onConversationalSearch(convoText)}
+              aria-label="Search"
+              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/30 border border-purple-400/25 hover:border-purple-400/45 px-2.5 py-1.5 text-[11px] font-semibold text-purple-100/90 hover:text-white transition-colors"
+            >
+              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
+              <span className="hidden sm:inline">Search</span>
+            </button>
           </div>
         </div>
       )}
