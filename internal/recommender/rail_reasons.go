@@ -106,6 +106,10 @@ For each item, write ONE SENTENCE explaining why they'd enjoy it. Reasons must:
     GOOD: "Witty supernatural drama like Dead Boy Detectives"
 - Otherwise describe what makes it a fit:
     GOOD: "Cult horror with comedic undertones"
+- Stay tone-consistent: each item shows its genre tags and content rating in
+  brackets (e.g. "[show] [TV-MA] genres=Horror"). Never frame an [R]/[TV-MA]
+  pick as gentle, wholesome, or family, nor a [G]/[PG]/[Comedy] pick as dark or
+  haunting. Judge tone from those brackets, not the title or your memory.
 - AVOID generic tautologies:
     BAD: "Matches your taste"
     BAD: "You might like this"
@@ -337,6 +341,9 @@ func buildRailReasonPrompt(anchors []db.TasteAnchor, items []*models.MediaItem) 
 			fmt.Fprintf(&b, " (%d)", it.Year)
 		}
 		fmt.Fprintf(&b, " [%s]", it.Type)
+		if it.ContentRating != "" {
+			fmt.Fprintf(&b, " [%s]", sanitizePromptText(it.ContentRating, 16)) // Phase F: tone/maturity signal
+		}
 		if len(it.Genres) > 0 {
 			fmt.Fprintf(&b, " genres=%s",
 				sanitizePromptText(strings.Join(it.Genres, ","), 100))
