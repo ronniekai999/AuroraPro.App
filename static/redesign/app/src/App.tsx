@@ -15,6 +15,7 @@ import {
   getHeroPool,
   getDiscoverRails,
   getAnchorRails,
+  getEngagementRails,
   getGamificationStats,
   listActiveParties,
   type ActiveParty,
@@ -7769,15 +7770,16 @@ export default function App() {
         // (timeout simply yields an empty result, same code path as
         // the existing .catch). The fetches themselves still honor
         // the AbortController, so navigating away cancels them.
-        const personalizedDeadline = new Promise<{ discover: never[]; anchor: never[] }>(resolve =>
-          setTimeout(() => resolve({ discover: [], anchor: [] }), 12000),
+        const personalizedDeadline = new Promise<{ discover: never[]; anchor: never[]; engagement: never[] }>(resolve =>
+          setTimeout(() => resolve({ discover: [], anchor: [], engagement: [] }), 12000),
         )
         const personalizedFetch = Promise.all([
           getDiscoverRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
           getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
-        ]).then(([d, a]) => ({ discover: d, anchor: a }))
+          getEngagementRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
+        ]).then(([d, a, e]) => ({ discover: d, anchor: a, engagement: e }))
 
-        const { discover, anchor } = await Promise.race([
+        const { discover, anchor, engagement } = await Promise.race([
           personalizedFetch,
           personalizedDeadline,
         ])
@@ -7801,6 +7803,15 @@ export default function App() {
                 .filter(r => r.items.length > 0)
                 .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
                   aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' }))
+            : []),
+          // Phase C — signal-driven engagement rails (Trending Now / Hidden
+          // Gems / Finish It Tonight / Comfort Rewatch). Server description is
+          // the rail subtitle; aiPick chip + badges like the other rec rails.
+          ...(engagement.length > 0
+            ? engagement
+                .filter(r => r.items.length > 0)
+                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+                  aiPick: true, showBadges: true, subtitle: r.description || 'Built from what Aurora viewers actually finish' }))
             : []),
         ]
 

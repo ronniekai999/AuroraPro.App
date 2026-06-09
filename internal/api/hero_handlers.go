@@ -24,6 +24,7 @@ type HeroProvider interface {
 	RailFor(ctx context.Context, profileID int64, limit int) ([]*models.MediaItem, error)
 	DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail, error)
 	AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRail, error)
+	EngagementRailsFor(ctx context.Context, profileID int64) ([]EngagementRail, error)
 	Invalidate(profileID int64)
 }
 
@@ -44,6 +45,15 @@ type DiscoverRail struct {
 type AnchorRail struct {
 	Anchor *models.AnchorRef   `json:"anchor"`
 	Items  []*models.MediaItem `json:"items"`
+}
+
+// EngagementRail is one Phase C signal-driven section (Trending Now, Hidden
+// Gems, …). Mirrors recommender.EngagementRail at the boundary. Description is a
+// fixed (non-LLM) theme line the frontend renders as the rail subtitle.
+type EngagementRail struct {
+	Title       string              `json:"title"`
+	Description string              `json:"description,omitempty"`
+	Items       []*models.MediaItem `json:"items"`
 }
 
 // HeroPick is the API-layer shape of a hero pool entry. Mirrors
@@ -247,6 +257,36 @@ func (h *HeroHandler) AnchorRails(w http.ResponseWriter, r *http.Request) {
 	rails, err := h.hero.AnchorRailsFor(r.Context(), profileID)
 	if err != nil {
 		slog.Warn("anchor rails: fetch failed", "profile", profileID, "error", err)
+		rails = nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rails": rails})
+}
+
+// EngagementRails returns the Phase C signal-driven rails (Trending Now / Hidden
+// Gems / Finish It Tonight / Comfort Rewatch) for the active profile. No LLM —
+// pure first-party engagement signals, so it's fast and works even when the
+// Cloud LLM is down. Response shape: `{"rails": [{title, description, items}]}`.
+// Empty array is fine — the UI hides any empty rail.
+func (h *HeroHandler) EngagementRails(w http.ResponseWriter, r *http.Request) {
+	if h.hero == nil {
+		writeError(w, http.StatusServiceUnavailable, "engagement rails not configured")
+		return
+	}
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	if v := r.URL.Query().Get("refresh"); v == "1" || v == "true" {
+		h.hero.Invalidate(profileID)
+	}
+	rails, err := h.hero.EngagementRailsFor(r.Context(), profileID)
+	if err != nil {
+		slog.Warn("engagement rails: fetch failed", "profile", profileID, "error", err)
 		rails = nil
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rails": rails})
