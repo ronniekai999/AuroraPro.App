@@ -7134,6 +7134,14 @@ export default function App() {
     setSelectedMedia(m)
     setPrevView(view)
     setView('detail')
+    // Issue #261 — clicking into a movie/show must open the detail page
+    // at the top. The detail view swaps in via `view` state (it's not a
+    // pathname change, so the URL-keyed scroll effects don't fire), which
+    // means the window keeps whatever scroll offset the user had on the
+    // previous page (e.g. scrolled-down home). Reset to the top here.
+    // Instant (not smooth) because the page content is being replaced —
+    // a smooth scroll would animate over swapped-in content and look off.
+    window.scrollTo({ top: 0, behavior: 'auto' })
   }, [view])
 
   // Play resolution. The UI Media type doesn't carry server file
