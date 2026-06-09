@@ -1660,7 +1660,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
                 className="shrink-0 mr-2.5 px-3 py-1.5 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
               >Clear</button>
             ) : (
-              <span className="hidden sm:flex shrink-0 mr-2 items-center gap-1.5 text-[11px] font-medium text-purple-200/55 pointer-events-none">
+              <span className="hidden sm:flex shrink-0 mr-1 items-center gap-1.5 text-[11px] font-medium text-purple-200/55 pointer-events-none">
                 <kbd className="grid place-items-center h-5 min-w-[1.3rem] px-1 rounded-md border border-white/15 bg-white/[0.07] text-purple-100/90 text-[11px] leading-none shadow-[inset_0_-1px_0_rgba(0,0,0,0.35)]">↵</kbd>
                 <span>to search</span>
               </span>
