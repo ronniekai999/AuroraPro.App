@@ -446,6 +446,14 @@ func (s *Searcher) parseQuery(ctx context.Context, query string) (*ParsedQuery, 
 	// future caller reading parsed.MediaType (e.g. surfacing it to the UI)
 	// won't know to re-validate. Belt-and-suspenders.
 	parsed.MediaType = validMediaType(parsed.MediaType)
+	// An explicit type word the user literally typed ("movie"/"shows"/…) is
+	// authoritative — the LLM sometimes leaves media_type empty (or wrong) even
+	// when it's stated outright, which let TV shows leak into a "movie like …"
+	// query. A single unambiguous keyword overrides the model; mixed/absent
+	// defers to it. Applied before caching so the corrected value is reused.
+	if kw := inferMediaTypeFromQuery(query); kw != "" {
+		parsed.MediaType = kw
+	}
 	s.cache.set(cacheKey, &parsed)
 	return &parsed, nil
 }
