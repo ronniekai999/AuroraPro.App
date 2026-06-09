@@ -338,11 +338,20 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		slog.Warn("discover: anchor fetch failed (continuing without)",
 			"profile", profileID, "error", err)
 	}
+	seedsOnly := false
 	if len(anchors) == 0 {
-		// No anchors → LLM has nothing to ground reasons in. Skip
-		// rather than producing generic "good fit" reasons that look
-		// like the system is broken.
-		return nil, nil
+		// Cold-start: no watch history yet. Fall back to taste-onboarding
+		// seeds so newly-onboarded profiles see Discover rails immediately.
+		anchors, err = h.q.TasteSeedAnchors(ctx, profileID, discoverAnchorCount)
+		if err != nil {
+			slog.Warn("discover: seed anchor fallback failed", "profile", profileID, "error", err)
+		}
+		if len(anchors) == 0 {
+			// No seeds either (pre-onboarding cold start). Keep existing
+			// behaviour — no Discover rail until onboarding is done.
+			return nil, nil
+		}
+		seedsOnly = true
 	}
 
 	// Detach the heavy tail (listwise rerank + LLM curation) from the
@@ -375,7 +384,7 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 			"profile", profileID, "error", err)
 	}
 
-	prompt := buildDiscoverPrompt(anchors, candidates)
+	prompt := buildDiscoverPrompt(anchors, candidates, seedsOnly)
 	// Phase F: send the FLAT discoverSchema (single array of rail-tagged picks).
 	// The old nested rails→picks schema 500'd on Ollama Cloud's structured-output
 	// compiler; this flat shape is structurally identical to the hero schema that
@@ -624,11 +633,15 @@ func isLLMServerError(err error) bool {
 // untrusted section is wrapped in a clearly-delimited DATA block so a
 // malicious NFO overview can't steer the model, and per-field sanitization
 // strips break-out characters and any forged fence tokens.
-func buildDiscoverPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem) string {
+func buildDiscoverPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem, seedsOnly bool) string {
 	var b strings.Builder
 	b.WriteString(dataBlockNote)
 
-	b.WriteString("Recently watched:\n")
+	if seedsOnly {
+		b.WriteString("Selected during taste setup:\n")
+	} else {
+		b.WriteString("Recently watched:\n")
+	}
 	b.WriteString(dataBlockBegin)
 	b.WriteByte('\n')
 	for _, a := range anchors {

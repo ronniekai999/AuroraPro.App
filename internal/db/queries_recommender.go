@@ -575,6 +575,65 @@ func (q *Queries) RecentTasteAnchors(ctx context.Context, profileID int64, limit
 	return out, nil
 }
 
+// TasteSeedAnchors returns the most-recently-selected taste-onboarding seeds
+// for a profile, with title + type + year + genres, shaped exactly like
+// RecentTasteAnchors. This is the cold-start fallback for Discover: a
+// brand-new profile that finished "Pick What You Love" but has no watch
+// history has no RecentTasteAnchors, so buildDiscover falls back to these
+// seeds so the Discover rail appears immediately. NOT used by the anchor
+// rails or hero, which require real watch history to avoid incorrect
+// "Because you watched X" copy for titles the user only selected in onboarding.
+func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit int) ([]TasteAnchor, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0)
+		FROM taste_seeds ts
+		JOIN media_items m ON m.id = ts.media_item_id
+		WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
+		ORDER BY ts.created_at DESC
+		LIMIT $2`,
+		profileID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("taste seed anchors: %w", err)
+	}
+	defer rows.Close()
+	var out []TasteAnchor
+	var ids []int64
+	for rows.Next() {
+		var a TasteAnchor
+		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+		ids = append(ids, a.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Batch-attach genres so the rerank prompt can ground per-anchor
+	// reasoning in real metadata. Genre lookup failure is non-fatal —
+	// degrades to the prior anchor-without-genres behavior rather than
+	// failing the Discover build entirely. Log the failure so silent
+	// regression-to-buggy-behavior is observable in ops.
+	if len(ids) > 0 {
+		byID, gerr := q.GetMediaGenresBatch(ctx, ids)
+		if gerr != nil {
+			slog.Warn("taste seed anchors: genre attach failed; rationales will fall back to LLM-inferred genres",
+				"error", gerr, "profile_id", profileID, "anchor_count", len(ids))
+		} else {
+			for i := range out {
+				if g, ok := byID[out[i].ID]; ok {
+					out[i].Genres = g
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 // TasteAnchor is one row from RecentTasteAnchors — a recently-watched title
 // the user finished or made progress on, used as grounding for blurb generation.
 // Genres carries the anchor's actual genre tags; passed to the LLM so it
