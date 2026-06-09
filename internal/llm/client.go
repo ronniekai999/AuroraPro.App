@@ -93,13 +93,13 @@ func NewClient(cfg Config) *Client {
 		cfg.BaseURL = "http://ollama:11434"
 	}
 	if cfg.EmbedModel == "" {
-		cfg.EmbedModel = "nomic-embed-text"
+		cfg.EmbedModel = "embeddinggemma" // Phase E2 default (768-dim, MRL)
 	}
 	if cfg.ChatModel == "" {
 		cfg.ChatModel = "qwen2.5:1.5b-instruct"
 	}
 	if cfg.Dims == 0 {
-		cfg.Dims = 384
+		cfg.Dims = 768 // Phase E2: must match migration 040's vector(768)
 	}
 	if cfg.HTTPTimeout == 0 {
 		// 70s default = 10s margin over the longest per-call ctx budget
@@ -307,6 +307,15 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 			continue
 		}
 		result[i] = normalize(truncate(v, c.cfg.Dims))
+		// Guard a model/dimension mismatch. truncate() only SHORTENS, so a model
+		// NARROWER than cfg.Dims (e.g. a stale llm_embed_model=nomic at 384 against
+		// the Phase E2 vector(768) column) yields a too-short vector that pgvector
+		// rejects on write — and the backfill swallows that write error, so it
+		// would re-fetch and hot-spin the same rows forever. Fail loudly here
+		// instead: the backfill wave errors → backs off → gives up cleanly.
+		if len(result[i]) != c.cfg.Dims {
+			return nil, fmt.Errorf("ollama embed: model %q produced %d dims, want %d (llm_embed_model / EmbedDims must match the embedding column)", c.cfg.EmbedModel, len(result[i]), c.cfg.Dims)
+		}
 	}
 	return result, nil
 }
@@ -681,9 +690,11 @@ func snippet(body []byte, n int) string {
 }
 
 // truncate keeps the leading n dimensions of a Matryoshka-trained embedding.
-// nomic-embed-text and bge are both trained this way; the leading dims carry
-// the most signal, so 768 → 384 loses very little retrieval quality at half
-// the storage cost.
+// nomic-embed-text, bge, and embeddinggemma are all trained this way; the
+// leading dims carry the most signal, so a prefix loses very little retrieval
+// quality. As of Phase E2 the target (768) equals embeddinggemma's native dim,
+// so this is a no-op (n >= len(v) → returns v unchanged); it stays in place so a
+// future wider model (e.g. qwen3-embedding at 1024) can be truncated to 768.
 func truncate(v []float32, n int) []float32 {
 	if n <= 0 || n >= len(v) {
 		return v

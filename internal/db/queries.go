@@ -858,7 +858,7 @@ func (q *Queries) SearchMedia(ctx context.Context, query string, limit int) ([]*
 		 FROM media_items
 		 WHERE title % $1 OR title ILIKE '%' || $1 || '%'
 		    OR overview % $1 OR overview ILIKE '%' || $1 || '%'
-		 ORDER BY similarity(title, $1) DESC
+		 ORDER BY similarity(title, $1) DESC, id DESC
 		 LIMIT $2`,
 		query, limit,
 	)

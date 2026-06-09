@@ -5,7 +5,7 @@ package api
 // against the regressions it eliminates:
 //
 //   - Vector-row corruption from line-based filtering (the "0..074918"
-//     double-dot bug). A 384-dim embedding survives the roundtrip
+//     double-dot bug). A 768-dim embedding survives the roundtrip
 //     byte-for-byte.
 //   - Extension-privilege failures. The dump contains CREATE/COMMENT/
 //     ALTER EXTENSION statements that the unprivileged Aurora role
@@ -86,20 +86,20 @@ type seedRow struct {
 }
 
 // seedTestData inserts a user → library → media_item chain with a
-// representative 384-dim embedding. Returns the IDs so the assertion
+// representative 768-dim embedding. Returns the IDs so the assertion
 // step can locate the rows.
 func seedTestData(t *testing.T, pool *pgxpool.Pool) seedRow {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Build a representative 384-dim vector. Real embeddings have
-	// negative, positive, and zero values with varying magnitudes —
-	// emulate that so the test exercises the same code paths a real
-	// nomic-embed-text output would.
+	// Build a representative 768-dim vector (Phase E2 embeddinggemma size). Real
+	// embeddings have negative, positive, and zero values with varying
+	// magnitudes — emulate that so the test exercises the same code paths a real
+	// embedding output would.
 	var sb bytes.Buffer
 	sb.WriteByte('[')
-	for i := 0; i < 384; i++ {
+	for i := 0; i < 768; i++ {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
@@ -229,7 +229,7 @@ func callRestore(t *testing.T, dbURL string, dump []byte) {
 }
 
 // TestBackupRestoreRoundtrip — the canonical regression test for the
-// 2026-05-18 rearchitecture. Inserts a row with a 384-dim vector,
+// 2026-05-18 rearchitecture. Inserts a row with a 768-dim vector,
 // backs up, deletes the row, restores, verifies the row is back with
 // the original embedding intact.
 func TestBackupRestoreRoundtrip(t *testing.T) {
@@ -412,7 +412,7 @@ func TestBackupRestoreRoundtripMultiRow(t *testing.T) {
 		// Distinct embedding per row so order-swap regressions also fail.
 		var sb bytes.Buffer
 		sb.WriteByte('[')
-		for j := 0; j < 384; j++ {
+		for j := 0; j < 768; j++ {
 			if j > 0 {
 				sb.WriteByte(',')
 			}

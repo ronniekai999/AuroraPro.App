@@ -424,9 +424,9 @@ func Load() (*Config, error) {
 		LLM: LLMConfig{
 			Enabled:         true,
 			OllamaURL:       "http://ollama:11434",
-			EmbedModel:      "nomic-embed-text",
+			EmbedModel:      "embeddinggemma", // Phase E2: 768-dim, MRL, runs on CPU
 			ChatModel:       "qwen2.5:3b-instruct",
-			EmbedDims:       384,
+			EmbedDims:       768, // Phase E2: must match migration 040's vector(768)
 			BackfillWorkers: 2,
 			BackfillBatch:   16,
 			// 70s = 10s margin over the longest recommender per-call

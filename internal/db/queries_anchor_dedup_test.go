@@ -50,14 +50,14 @@ func seedShowWithEpisodes(t *testing.T, q *Queries, mediaItemID int64, n int) []
 	return ids
 }
 
-// setEmbedding gives a media item a non-null 384-dim embedding so it
+// setEmbedding gives a media item a non-null 768-dim embedding so it
 // qualifies as an anchor (RecentAnchorsWithEmbeddings filters on
 // embedding IS NOT NULL). The exact values don't matter for the dedup
 // query — only that the column is well-formed and non-null — so we use a
-// constant unit-ish vector ([1,0,0,…]).
+// constant unit-ish vector ([1,0,0,…]). 768 matches the Phase E2 vector(768).
 func setEmbedding(t *testing.T, q *Queries, mediaItemID int64) {
 	t.Helper()
-	parts := make([]string, 384)
+	parts := make([]string, 768)
 	for i := range parts {
 		parts[i] = "0"
 	}

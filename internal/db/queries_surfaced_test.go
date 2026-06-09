@@ -94,10 +94,10 @@ func TestRecordSurfaced(t *testing.T) {
 	}
 }
 
-// oneHotLit builds a 384-dim pgvector literal with a single 1 at idx (the same
-// dimensionality setEmbedding uses), so two items get distinct cosine distances.
+// oneHotLit builds a 768-dim pgvector literal with a single 1 at idx (matching
+// the Phase E2 vector(768) column), so two items get distinct cosine distances.
 func oneHotLit(idx int) string {
-	parts := make([]string, 384)
+	parts := make([]string, 768)
 	for i := range parts {
 		parts[i] = "0"
 	}

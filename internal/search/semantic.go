@@ -244,16 +244,58 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 	if err != nil {
 		return nil, parsed, fmt.Errorf("vector search: %w", err)
 	}
-	if len(hits) == 0 {
-		return nil, parsed, nil
+
+	// Phase E3 — HYBRID RETRIEVAL. Fuse the vector recall with a lexical (trigram)
+	// recall via weighted Reciprocal Rank Fusion: vector catches vibe matches, the
+	// trigram leg catches exact title/keyword matches the embedding ranks poorly
+	// (e.g. "movies like harry potter" → the actual Harry Potter titles). Lexical
+	// hits are type-filtered in Go so a movie query can't pull shows back in via
+	// trigram (preserving the explicit-media-type guarantee). See hybrid.go.
+	wantType := filter.MediaType // "movie" | "show" | ""
+	itemByID := make(map[int64]*models.MediaItem, len(hits))
+	distByID := make(map[int64]float64, len(hits))
+	vecIDs := make([]int64, 0, len(hits))
+	for _, h := range hits {
+		itemByID[h.Item.ID] = h.Item
+		distByID[h.Item.ID] = h.Distance
+		vecIDs = append(vecIDs, h.Item.ID)
+	}
+	rankedLists := [][]int64{vecIDs}
+	weights := []float64{hybridVectorWeight}
+	for _, lq := range lexicalQueries(parsed.SimilarToTitles, query) {
+		lexItems, lerr := s.q.SearchMedia(ctx, lq, lexicalRecallSize)
+		if lerr != nil {
+			slog.Warn("search: lexical recall failed (continuing)", "q", lq, "error", lerr)
+			continue
+		}
+		ids := make([]int64, 0, len(lexItems))
+		for _, it := range lexItems {
+			if wantType != "" && string(it.Type) != wantType {
+				continue // keep the explicit-media-type filter through the lexical leg
+			}
+			if _, ok := itemByID[it.ID]; !ok {
+				itemByID[it.ID] = it
+			}
+			ids = append(ids, it.ID)
+		}
+		if len(ids) > 0 {
+			rankedLists = append(rankedLists, ids)
+			weights = append(weights, hybridLexicalWeight)
+		}
 	}
 
-	// Promote SemanticHit to MediaItem list for dedup + genre annotation.
-	items := make([]*models.MediaItem, len(hits))
-	distByID := make(map[int64]float64, len(hits))
-	for i, h := range hits {
-		items[i] = h.Item
-		distByID[h.Item.ID] = h.Distance
+	fusedIDs := rrfFuse(rankedLists, weights)
+	if len(fusedIDs) == 0 {
+		return nil, parsed, nil
+	}
+	if len(fusedIDs) > vectorRecallSize {
+		fusedIDs = fusedIDs[:vectorRecallSize]
+	}
+	items := make([]*models.MediaItem, 0, len(fusedIDs))
+	for _, id := range fusedIDs {
+		if it := itemByID[id]; it != nil {
+			items = append(items, it)
+		}
 	}
 
 	// Cross-library dedup FIRST: same TMDB-ID items in different libraries
