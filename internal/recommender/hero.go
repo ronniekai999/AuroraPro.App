@@ -158,6 +158,11 @@ type Hero struct {
 	// versa) — they're independently expensive to rebuild.
 	discoverCache sync.Map // key: profileID (int64), val: discoverCacheEntry
 	discoverGroup singleflight.Group
+	// Phase C engagement rails (Trending Now / Hidden Gems / Finish It Tonight /
+	// Comfort Rewatch). Separate cache + singleflight from discover so the two
+	// surfaces refresh independently. See engagement.go.
+	engagementCache sync.Map // key: profileID (int64), val: engagementCacheEntry
+	engagementGroup singleflight.Group
 	// Phase 4: per-(profile, item) LLM-generated reason cache for the
 	// flat rail. Keyed by railReasonKey; values are railReasonEntry.
 	// Populated by a single inflight background goroutine per profile —
@@ -502,6 +507,7 @@ func (h *Hero) Invalidate(profileID int64) {
 	h.epochFor(profileID).Add(1)
 	h.cache.Delete(profileID)
 	h.discoverCache.Delete(profileID)
+	h.engagementCache.Delete(profileID)
 	// Walk reasonCache and drop any entry for this profile. sync.Map's
 	// Range is safe for concurrent Delete during iteration.
 	h.reasonCache.Range(func(k, _ any) bool {

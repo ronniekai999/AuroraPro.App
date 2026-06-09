@@ -1062,6 +1062,20 @@ func (a heroAdapter) AnchorRailsFor(ctx context.Context, profileID int64) ([]api
 	return out, nil
 }
 
+// EngagementRailsFor bridges recommender.EngagementRail to api.EngagementRail.
+// Same shape-translation pattern as DiscoverFor; pointers flow through.
+func (a heroAdapter) EngagementRailsFor(ctx context.Context, profileID int64) ([]api.EngagementRail, error) {
+	rails, err := a.h.EngagementRailsFor(ctx, profileID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]api.EngagementRail, len(rails))
+	for i, r := range rails {
+		out[i] = api.EngagementRail{Title: r.Title, Description: r.Description, Items: r.Items}
+	}
+	return out, nil
+}
+
 func (a heroAdapter) Invalidate(profileID int64) { a.h.Invalidate(profileID) }
 
 // applyLLMOverrides mutates cfg with values from server_settings, overriding

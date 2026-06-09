@@ -751,6 +751,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Pure vector retrieval, sub-300ms — sits comfortably
 				// under the wider /api/me timeout that Discover requires.
 				r.Get("/anchor-rails", heroH.AnchorRails)
+				// Phase C: signal-driven rails (Trending Now / Hidden Gems /
+				// Finish It Tonight / Comfort Rewatch). No LLM — pure first-party
+				// engagement signals, fast + resilient when the Cloud LLM is down.
+				r.Get("/engagement-rails", heroH.EngagementRails)
 			})
 
 			// Watch Progress

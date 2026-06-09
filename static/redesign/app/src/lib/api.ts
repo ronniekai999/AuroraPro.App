@@ -737,6 +737,35 @@ export async function getAnchorRails(
     }))
 }
 
+// Phase C — proprietary engagement-driven rails (Trending Now / Hidden Gems /
+// Finish It Tonight / Comfort Rewatch). No LLM — pure first-party engagement
+// signals, so fast and resilient when the Cloud LLM is down. Each rail has a
+// fixed title + a one-line description rendered as the rail subtitle.
+//
+// Response shape: `{rails: [{title, description, items: [...]}, ...]}`
+export interface EngagementRailUI {
+  title: string
+  description?: string
+  items: UIMedia[]
+}
+export async function getEngagementRails(
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<EngagementRailUI[]> {
+  const params = new URLSearchParams()
+  if (profileId) params.set('profile_id', String(profileId))
+  const qs = params.toString()
+  type Raw = { rails?: { title: string; description?: string; items?: ServerMediaItem[] }[] }
+  const resp = await apiFetch<Raw>(
+    qs ? `/api/me/engagement-rails?${qs}` : '/api/me/engagement-rails', { signal },
+  )
+  return (resp.rails || []).map(r => ({
+    title: r.title,
+    description: r.description,
+    items: (r.items || []).map(mapMedia),
+  }))
+}
+
 // Manual-match search: TMDB + optionally TVDB.
 //
 // Audit H1 (Phase 5.3 audit-8) — full rewrite. Server contract:
