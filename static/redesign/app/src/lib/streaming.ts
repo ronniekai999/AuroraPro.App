@@ -221,10 +221,19 @@ export function clientCaps(): string {
   // gate makes the platform matrix self-correct: Linux, Firefox, Windows 11
   // 24H2, and Chromium-derived browsers all report false here.
   if (supportsMSE('audio/mp4; codecs="ac-3"')) caps.push('ac3')
-  // E-AC-3: native-decode probe is fine — Aurora never muxes E-AC-3 into .ts
-  // (tsPassthroughSafe excludes it; the surround path re-encodes to AC-3), so
-  // this cap only ever gates native direct play.
+  // E-AC-3 (Dolby Digital Plus) ships as TWO caps because two delivery paths
+  // gate on different probes:
+  //  * eac3 — native-or-MSE (canPlayType fallback OK). Gates DIRECT PLAY of
+  //    e.g. mp4+h264+eac3, where the native <video> decoder is what matters,
+  //    and the remux path on native-HLS-only clients (no hls.js), where the
+  //    native HLS player decodes.
+  //  * eac3_mse — MediaSource.isTypeSupported ONLY. Gates the server copying
+  //    E-AC-3 into fMP4 HLS segments consumed by hls.js, which hands the
+  //    track straight to an MSE SourceBuffer — canPlayType over-reports for
+  //    that path (same rationale as the MSE-strict ac3 cap above). Servers
+  //    older than the eac3-passthrough change ignore the unknown key.
   if (supports('audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="ec-3"', el)) caps.push('eac3')
+  if (supportsMSE('audio/mp4; codecs="ec-3"')) caps.push('eac3_mse')
   if (supports('audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"', el)) caps.push('opus')
   if (supports('audio/ogg; codecs="flac"', 'audio/mp4; codecs="flac"', el)) caps.push('flac')
   if (supports('audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"', el)) caps.push('vorbis')

@@ -1618,12 +1618,21 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	_ = videoPixFmt    // retained for future use (10-bit logging / metrics)
 	_ = colorPrimaries // retained for future use (wide-gamut SDR detection)
 
-	// Audio output codec for the re-encode path: stereo AAC by default, AC-3 5.1
-	// for multichannel sources on AC-3-capable clients (preserving surround
+	// Audio output codec. Re-encode path: stereo AAC by default, AC-3 5.1 for
+	// multichannel sources on AC-3-capable clients (preserving surround
 	// instead of downmixing). The "ac3" client cap is MSE-isTypeSupported-derived
 	// on the frontend, matching hls.js's own AC-3 gate, so this never emits AC-3
 	// that the hls.js/MSE path would silently drop. See SelectAudioCodecOut.
+	//
+	// Copy path: the output carries the SOURCE codec — report that instead, so
+	// the session's CODECS attribute advertises the truth (mp4a.40.2 / ac-3 /
+	// ec-3) and CastNeedsStereoClone catches copied Dolby audio (previously a
+	// remux that COPIED AC-3 was cast as-is because AudioCodecOut only ever
+	// described the re-encode target).
 	audioCodecOut := streaming.SelectAudioCodecOut(pd.AudioNeedsRecode, clientCaps, audioChannels)
+	if pd.AudioPassthrough && pd.AudioCodec != "" {
+		audioCodecOut = pd.AudioCodec
+	}
 
 	info := models.StreamInfo{
 		FileID:           fileID,
