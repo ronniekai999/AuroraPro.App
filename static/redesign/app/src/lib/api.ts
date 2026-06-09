@@ -1481,6 +1481,8 @@ export interface Profile {
   is_default: boolean
   created_at: string
   updated_at: string
+  // Hard content ceiling (e.g. "PG", "TV-14"); empty/unset = unrestricted.
+  max_age_rating?: string
   // Phase E2c content-tone recall lean: -1 off, 0 family, 1 teen, 2 mature.
   maturity_pref?: number
 }

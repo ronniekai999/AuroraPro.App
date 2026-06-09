@@ -63,6 +63,7 @@ import {
   updateAdminOAuth,
   listProfiles,
   setProfileMaturity,
+  updateProfile,
   createProfile,
   listWatchlists,
   createWatchlist,
@@ -147,7 +148,9 @@ import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
-import { NebulaAvatar, parseNebula } from '@/components/NebulaAvatar'
+import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
+import { ProfileAvatar } from '@/components/ProfileAvatar'
+import { ProfileSwitcher } from '@/components/ProfileSwitcher'
 import { CollectionsView } from '@/components/CollectionsView'
 import { CalendarView } from '@/components/CalendarView'
 import { GamificationCard } from '@/components/GamificationCard'
@@ -3451,13 +3454,18 @@ interface SettingsViewProps {
   onToast?: (message: string, type?: Toast['type']) => void
   activeProfile?: Profile | null
   onMaturityChange?: (pref: number) => void | Promise<void>
+  onAvatarChange?: (avatarUrl: string) => void | Promise<void>
 }
-function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange }: SettingsViewProps = {}) {
+function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange, onAvatarChange }: SettingsViewProps = {}) {
   // Phase E2c content-tone dial. Optimistic local override so the chip flips
   // instantly; reset when the active profile changes (server value wins again).
   const [localMaturity, setLocalMaturity] = useState<number | null>(null)
   useEffect(() => { setLocalMaturity(null) }, [activeProfile?.id])
   const currentMaturity = localMaturity ?? activeProfile?.maturity_pref ?? -1
+  // Same optimistic pattern for the per-profile avatar picker.
+  const [localAvatar, setLocalAvatar] = useState<string | null>(null)
+  useEffect(() => { setLocalAvatar(null) }, [activeProfile?.id])
+  const currentAvatar = localAvatar ?? activeProfile?.avatar_url ?? ''
   // Persist to localStorage under `aurora_prefs`. We capture the raw
   // parsed object in a ref and merge before each write so any keys
   // this component doesn't know about (e.g. legacy `volume`, `muted`)
@@ -3651,6 +3659,49 @@ function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, on
             </div>
           </div>
         </div>
+
+        {/* Avatar — per-profile animated nebula. Optimistic localAvatar flips the
+            selection instantly; onAvatarChange persists via PUT /api/profiles/:id
+            and refreshes the profile list so the switcher + account menu update. */}
+        {onAvatarChange && activeProfile && (
+          <div className="glass-panel rounded-xl p-6">
+            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+              <Icon name="user" size={18} className="text-purple-400" />
+              Avatar
+            </h3>
+            <div className="space-y-3">
+              <div>
+                <p className="text-white/80 text-sm font-medium">Nebula for {activeProfile.name}</p>
+                <p className="text-white/40 text-xs">Your animated signature — shows in the profile switcher and account menu.</p>
+              </div>
+              <div role="radiogroup" aria-label="Avatar" className="grid grid-cols-5 gap-3 sm:grid-cols-10">
+                {NEBULAS.map(n => {
+                  const sel = parseNebula(currentAvatar)?.id === n.id
+                  return (
+                    <button
+                      key={n.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={sel}
+                      aria-label={n.name}
+                      title={n.name}
+                      onClick={() => {
+                        const prev = localAvatar
+                        setLocalAvatar(nebulaValue(n.id))
+                        Promise.resolve(onAvatarChange(nebulaValue(n.id))).catch(() => setLocalAvatar(prev))
+                      }}
+                      className={`relative aspect-square rounded-full transition-transform focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                        sel ? 'scale-110 ring-2 ring-white/50' : 'hover:scale-105'
+                      }`}
+                    >
+                      <NebulaAvatar nebula={n} active={sel} className="block h-full w-full" />
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Content Tone (Phase E2c) — per-profile maturity LEAN for recommendations.
             A SOFT recall bias (the recommender adds a small distance penalty by
@@ -6691,15 +6742,9 @@ function UserMenu({
         title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="w-10 h-10 rounded-full overflow-hidden flex items-center justify-center text-white font-bold text-sm focus:outline-none focus:ring-2 focus:ring-purple-400/60 bg-gradient-to-br from-purple-500 to-purple-700"
+        className="rounded-full focus:outline-none focus:ring-2 focus:ring-purple-400/60"
       >
-        {parseNebula(avatarUrl) ? (
-          <NebulaAvatar nebula={avatarUrl!} size={40} />
-        ) : avatarUrl && (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) ? (
-          <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-        ) : (
-          user.username[0]?.toUpperCase() || 'U'
-        )}
+        <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={40} />
       </button>
       {open && (
         <div
@@ -9170,20 +9215,14 @@ export default function App() {
                 <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#050505]" />
               )}
             </button>
-            {/* Phase 5 — profile picker. Shows when the user has at
-                least one profile defined. Hidden in single-profile
-                deployments to keep the top bar clean. */}
+            {/* Phase 5 — profile picker. Shows the active profile's nebula +
+                name; a static chip with one profile, a switch menu with several. */}
             {profiles.length > 0 && (
-              <select
-                value={activeProfileId ?? ''}
-                onChange={e => setActiveProfileId(e.target.value ? parseInt(e.target.value, 10) : null)}
-                title="Active profile (filters Continue Watching + recommendations)"
-                className="text-xs py-2 px-3 bg-white/[0.05] border border-white/[0.06] rounded-lg text-white/80 hover:bg-white/[0.08] focus:outline-none"
-              >
-                {profiles.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}{p.is_default ? ' ★' : ''}</option>
-                ))}
-              </select>
+              <ProfileSwitcher
+                profiles={profiles}
+                activeProfileId={activeProfileId}
+                onSelect={setActiveProfileId}
+              />
             )}
             {/* User — QA 2026-05-25: avatar now opens a dropdown menu
                 instead of deep-scrolling to the Account section of
@@ -9488,6 +9527,14 @@ export default function App() {
                 .then(() => addToast('Content tone updated — your feed will re-curate', 'success'))
                 .catch((e) => { addToast('Failed to update content tone', 'error'); throw e })
             }}
+            onAvatarChange={(avatarUrl) => {
+              if (!activeProfileId) return
+              return updateProfile(activeProfileId, { avatar_url: avatarUrl })
+                .then(() => listProfiles())
+                .then(setProfiles)
+                .then(() => addToast('Avatar updated', 'success'))
+                .catch((e) => { addToast('Failed to update avatar', 'error'); throw e })
+            }}
           />}
           {view === 'collections' && (
             <CollectionsView
@@ -9765,6 +9812,7 @@ export default function App() {
           Existing users get prompted once at next login. */}
       <TasteOnboardingGate
         profileId={activeProfileId}
+        profile={profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0] ?? null}
         onComplete={() => window.location.reload()}
       />
 

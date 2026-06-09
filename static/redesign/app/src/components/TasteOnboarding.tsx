@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
-import { getOnboardingStatus, type OnboardingStatus } from '@/lib/api'
+import { getOnboardingStatus, type OnboardingStatus, type Profile } from '@/lib/api'
 import { OnboardingFlow } from './OnboardingFlow'
 
 interface TasteOnboardingGateProps {
   /** Active profile id, or null to use the account's default profile. */
   profileId: number | null
+  /** The active profile, used to PRE-FILL the flow (name, avatar, current age
+   *  rating) so returning users don't have their existing settings clobbered. */
+  profile?: Profile | null
   /** Called after the user finishes or skips — host can refresh Home. */
   onComplete?: () => void
 }
@@ -20,7 +23,7 @@ type Phase = 'checking' | 'show' | 'hidden'
  * default to not-completed after the taste-seeds migration) get prompted once at
  * their next login.
  */
-export function TasteOnboardingGate({ profileId, onComplete }: TasteOnboardingGateProps) {
+export function TasteOnboardingGate({ profileId, profile, onComplete }: TasteOnboardingGateProps) {
   const [phase, setPhase] = useState<Phase>('checking')
   const [status, setStatus] = useState<OnboardingStatus | null>(null)
 
@@ -49,6 +52,7 @@ export function TasteOnboardingGate({ profileId, onComplete }: TasteOnboardingGa
   return (
     <OnboardingFlow
       profileId={profileId}
+      profile={profile}
       status={status}
       onDone={() => {
         setPhase('hidden')

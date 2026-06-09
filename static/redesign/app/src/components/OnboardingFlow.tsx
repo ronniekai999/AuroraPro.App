@@ -9,6 +9,7 @@ import {
   getEngagementRails,
   type UIMedia,
   type OnboardingStatus,
+  type Profile,
 } from '@/lib/api'
 import {
   FONT_OPTIONS,
@@ -20,11 +21,14 @@ import {
   type FontChoice,
   type GlowChoice,
 } from '@/lib/appearance'
-import { NEBULAS, NebulaAvatar, nebulaValue } from './NebulaAvatar'
+import { NEBULAS, NebulaAvatar, nebulaValue, parseNebula } from './NebulaAvatar'
 
 interface OnboardingFlowProps {
   /** Active profile id, or null to use the account's default profile. */
   profileId: number | null
+  /** The active profile, used to PRE-FILL identity steps so returning users
+   *  aren't forced to re-enter (and their existing settings aren't clobbered). */
+  profile?: Profile | null
   status: OnboardingStatus
   /** Called once everything is persisted and the rails are warmed. */
   onDone: () => void
@@ -62,14 +66,41 @@ const LOADING_MESSAGES = [
   'Polishing your discover rails…',
 ]
 
-export function OnboardingFlow({ profileId, status, onDone }: OnboardingFlowProps) {
+// ageForRating reverse-maps a profile's stored content ceiling to a
+// representative age, so the slider starts in the profile's CURRENT tier.
+// Leaving it untouched then preserves their existing setting (we only write
+// content settings when the user actually moves it).
+function ageForRating(maxRating?: string | null): number {
+  const r = (maxRating ?? '').trim()
+  if (!r) return 24
+  if (['G', 'TV-Y', 'TV-G', 'TV-Y7', 'PG', 'TV-PG'].includes(r)) return 10
+  if (['PG-13', 'TV-14'].includes(r)) return 15
+  return 24 // R / TV-MA / NC-17 / unknown → adult
+}
+
+export function OnboardingFlow({ profileId, profile, status, onDone }: OnboardingFlowProps) {
   const minPicks = status.min_picks ?? 5
   const previewThreshold = status.threshold ?? 3
 
   const [step, setStep] = useState<Step>('avatar')
-  const [avatarId, setAvatarId] = useState<string | null>(null)
-  const [name, setName] = useState('')
-  const [age, setAge] = useState(24)
+  // Pre-fill identity from the existing profile: an already-chosen nebula, the
+  // current nickname, and an age that reflects the current content rating.
+  const [avatarId, setAvatarId] = useState<string | null>(() => parseNebula(profile?.avatar_url)?.id ?? null)
+  const [name, setName] = useState(() => (profile?.name ?? '').slice(0, 24))
+  const [age, setAge] = useState(() => ageForRating(profile?.max_age_rating))
+  const [ageTouched, setAgeTouched] = useState(false)
+
+  // The profile can arrive AFTER mount (App's listProfiles can lose the race to
+  // the gate's getOnboardingStatus, so `profile` is briefly null). Back-fill the
+  // pre-fill when it lands, but only for fields the user hasn't set yet — never
+  // overwrite a choice already made.
+  useEffect(() => {
+    if (!profile) return
+    setAvatarId((prev) => prev ?? parseNebula(profile.avatar_url)?.id ?? null)
+    setName((prev) => (prev === '' ? (profile.name ?? '').slice(0, 24) : prev))
+    setAge((prev) => (ageTouched ? prev : ageForRating(profile.max_age_rating)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.id])
   const [font, setFont] = useState<FontChoice>(() => currentFont())
   const [glow, setGlow] = useState<GlowChoice>(() => currentGlow())
 
@@ -243,12 +274,25 @@ export function OnboardingFlow({ profileId, status, onDone }: OnboardingFlowProp
 
     ;(async () => {
       try {
-        const r = ratingForAge(age)
         // status.profile_id is the resolved (default) profile even when the
         // profileId prop is null, so we always have a concrete id to PUT.
         const pid = profileId ?? status.profile_id
+        // Identity always persists (nickname + chosen nebula). Content settings
+        // (age-derived ceiling + tone lean) persist ONLY if the user actually
+        // moved the age slider — so a returning profile that breezes past the
+        // pre-filled age keeps its existing rating/tone (e.g. a kids profile is
+        // never silently un-restricted).
+        const patch: { name: string; avatar_url: string; max_age_rating?: string; maturity_pref?: number } = {
+          name: name.trim(),
+          avatar_url: nebulaValue(avatarId ?? 'aurora'),
+        }
+        if (ageTouched) {
+          const r = ratingForAge(age)
+          patch.max_age_rating = r.maxRating
+          patch.maturity_pref = r.maturityPref
+        }
         // The critical writes + a best-effort hero warm:
-        //  1) persist identity (nickname, chosen nebula, age-derived content gate),
+        //  1) persist identity (+ content settings when the age step was used),
         //  2) save taste seeds — flips taste_onboarding_completed, mirrors picks to
         //     Favorites, invalidates the hero cache so the next build uses the new
         //     taste vector,
@@ -256,12 +300,7 @@ export function OnboardingFlow({ profileId, status, onDone }: OnboardingFlowProp
         //     hero rebuilds fast; discover/engagement run in the background (their
         //     LLM/SQL builds finish via Home's own loading path).
         const work = (async () => {
-          await updateProfile(pid, {
-            name: name.trim(),
-            avatar_url: nebulaValue(avatarId ?? 'aurora'),
-            max_age_rating: r.maxRating,
-            maturity_pref: r.maturityPref,
-          })
+          await updateProfile(pid, patch)
           await saveOnboardingSeeds(selected, profileId ?? undefined)
           await Promise.race([
             getHeroPool(true, profileId ?? undefined).then(() => {}).catch(() => {}),
@@ -524,7 +563,10 @@ export function OnboardingFlow({ profileId, status, onDone }: OnboardingFlowProp
           min={4}
           max={80}
           value={age}
-          onChange={(e) => setAge(parseInt(e.target.value, 10))}
+          onChange={(e) => {
+            setAge(parseInt(e.target.value, 10))
+            setAgeTouched(true)
+          }}
           className="onb-range mt-8 w-full"
           style={{ '--p': `${pct}%` } as CSSProperties}
         />
