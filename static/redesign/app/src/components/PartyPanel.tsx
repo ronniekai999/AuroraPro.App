@@ -37,6 +37,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
+import { highlightReelURL } from '@/lib/api'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
@@ -537,10 +538,13 @@ export function PartyPanel({
             ongoing party's reactions. If the party is too young /
             has no reactions yet, the server returns 404 and the
             browser shows a "couldn't load" page. Phase 4.7 may
-            gate visibility behind a "reel ready" event. */}
+            gate visibility behind a "reel ready" event.
+            Security review 2026-06 — the link authenticates via the
+            httpOnly auth cookie (same-origin GET); no ?token= so the
+            JWT never lands in history or proxy logs. */}
         {state.code && (
           <a
-            href={`/api/parties/${encodeURIComponent(state.code)}/highlight.mp4?token=${encodeURIComponent(localStorage.getItem('aurora_token') || '')}`}
+            href={highlightReelURL(state.code)}
             target="_blank"
             rel="noopener noreferrer"
             className="block text-center mt-3 py-2 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] rounded-lg text-white/70 hover:text-white text-xs transition-colors"

@@ -246,19 +246,22 @@ export interface CodeInfo {
   }
 }
 
-// Build a WebSocket URL with the access token in ?token=. The room and
-// sync endpoints are both on the token-promotion whitelist (router.go's
-// shouldPromoteToken includes /ws*). Once promoted, the per-message
-// auth check uses the JWT — the ws upgrade is the only place we can't
-// set an Authorization header from the browser.
+// Build a party WebSocket URL. The SPA authenticates the upgrade via the
+// httpOnly access cookie (same-origin handshake, deep-debug H10) — the
+// server's requireQueryTokenClaims falls back to the cookie when no
+// ?token= is present. A non-empty `token` is still honored for callers
+// that genuinely cannot send the cookie (none in the SPA today); the
+// empty-token case emits NO query param so the URL carries no
+// credential that could land in proxy logs (security review 2026-06).
 export function buildWsUrl(path: '/ws/party-room' | '/ws/party-sync', token: string): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${location.host}${path}?token=${encodeURIComponent(token)}`
+  const query = token ? `?token=${encodeURIComponent(token)}` : ''
+  return `${proto}//${location.host}${path}${query}`
 }
 
 // Build the room-socket URL for the MOBILE COMPANION (phone "second
 // screen"). Identical to buildWsUrl('/ws/party-room', token) plus a
-// `&companion=1` query param, which the server reads at upgrade time
+// `companion=1` query param, which the server reads at upgrade time
 // (PartyWSHandlerV3Room.ServeHTTP) to mark this participant's presence
 // as companion (chat/voice/emoji only — no /ws/party-sync, no video).
 // Any value other than the exact string "1" degrades to non-companion
@@ -266,7 +269,8 @@ export function buildWsUrl(path: '/ws/party-room' | '/ws/party-sync', token: str
 // this instead of buildWsUrl so the flag is present on the very first
 // (and every reconnect) upgrade.
 export function buildCompanionWsUrl(token: string): string {
-  return `${buildWsUrl('/ws/party-room', token)}&companion=1`
+  const base = buildWsUrl('/ws/party-room', token)
+  return `${base}${base.includes('?') ? '&' : '?'}companion=1`
 }
 
 // Build the app-wide hub socket URL (the general /ws endpoint behind the shared
