@@ -5529,6 +5529,9 @@ function AdminLLMTab() {
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Repeat window (hrs)</span>
           <input type="number" min={0} value={s.repeat_window_hours ?? 72} onChange={e => setS({ ...s, repeat_window_hours: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} placeholder="anti-repetition · 0 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Taste modes (1–3)</span>
+          <input type="number" min={1} max={3} value={s.taste_centroids ?? 3} onChange={e => setS({ ...s, taste_centroids: Math.min(3, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })} placeholder="multi-centroid taste · 1 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+        </label>
       </div>
       <button
         disabled={saving}
@@ -5542,6 +5545,7 @@ function AdminLLMTab() {
               structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
               rerank_model: s.rerank_model ?? '', rerank_url: s.rerank_url ?? '',
               repeat_window_hours: s.repeat_window_hours ?? 72,
+              taste_centroids: s.taste_centroids ?? 3,
             }
             if (apiKeyEdit) body.api_key = apiKeyEdit
             const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])

@@ -180,9 +180,13 @@ type LLMSettings struct {
 	// 72h default) is distinguishable from an explicit 0 (off): absent → the UI's
 	// `?? 72` shows/saves the real default instead of silently writing 0.
 	RepeatWindowHours *int `json:"repeat_window_hours,omitempty"`
-	DebugLog          bool `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog      bool `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded      bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	// Phase E1 multi-centroid taste: cap on taste modes per profile (1 = off,
+	// single averaged centroid). Pointer+omitempty so "no row" → the UI's `?? 3`
+	// default, distinguishable from an explicit value. Restart-required.
+	TasteCentroids *int `json:"taste_centroids,omitempty"`
+	DebugLog       bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog   bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded   bool `json:"client_loaded"`  // false when LLM is disabled at startup
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -190,7 +194,7 @@ type LLMSettings struct {
 var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
 	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
-	RerankModel, RerankURL, RepeatWindowHours                              string
+	RerankModel, RerankURL, RepeatWindowHours, TasteCentroids              string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -206,6 +210,7 @@ var llmSettingKeys = struct {
 	RerankModel:       "llm_reranker_model",
 	RerankURL:         "llm_reranker_url",
 	RepeatWindowHours: "recommender_repeat_window_hours",
+	TasteCentroids:    "recommender_taste_centroids",
 }
 
 // validReasoningEffort reports whether v is an accepted gpt-oss /v1
@@ -256,6 +261,11 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 			out.RepeatWindowHours = &hrs
 		}
 	}
+	if v := byKey[llmSettingKeys.TasteCentroids]; v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil {
+			out.TasteCentroids = &n
+		}
+	}
 	if v := byKey[llmSettingKeys.StructuredOutputs]; v != "" {
 		out.StructuredOutputs = v == "true"
 	}
@@ -295,6 +305,7 @@ type llmUpdateRequest struct {
 	RerankModel       *string `json:"rerank_model,omitempty"`
 	RerankURL         *string `json:"rerank_url,omitempty"`
 	RepeatWindowHours *int    `json:"repeat_window_hours,omitempty"`
+	TasteCentroids    *int    `json:"taste_centroids,omitempty"`
 	StructuredOutputs *bool   `json:"structured_outputs,omitempty"`
 	DebugLog          *bool   `json:"debug_log,omitempty"`
 }
@@ -417,6 +428,24 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 			if err := h.queries.SetSetting(r.Context(), llmSettingKeys.RepeatWindowHours, val); err != nil {
 				slog.Warn("UpdateLLMSettings: repeat_window_hours write failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "failed to save repeat window")
+				return
+			}
+			restartRequired = true
+		}
+	}
+
+	// TasteCentroids (Phase E1) — restart-required (read at startup via
+	// SetTasteCentroids). Clamp to >=1 (1 = off / single averaged centroid).
+	if req.TasteCentroids != nil {
+		n := *req.TasteCentroids
+		if n < 1 {
+			n = 1
+		}
+		val := strconv.Itoa(n)
+		if current, _, _ := h.queries.GetSettingExists(r.Context(), llmSettingKeys.TasteCentroids); current != val {
+			if err := h.queries.SetSetting(r.Context(), llmSettingKeys.TasteCentroids, val); err != nil {
+				slog.Warn("UpdateLLMSettings: taste_centroids write failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to save taste centroids")
 				return
 			}
 			restartRequired = true

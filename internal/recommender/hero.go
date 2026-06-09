@@ -147,6 +147,11 @@ type Hero struct {
 	// the feature (no surface arg passed → NearestUnwatched behaves as before).
 	// Defaulted in New, overridable via SetRepeatWindow from the admin setting.
 	repeatWindow time.Duration
+	// tasteCentroids is the Phase E1 cap on taste modes per profile. 1 disables
+	// clustering (single averaged centroid, the pre-Phase-E behavior); 2-3 split
+	// a diverse profile so each mode surfaces. Defaulted in New, overridable via
+	// SetTasteCentroids from the recommender_taste_centroids setting.
+	tasteCentroids int
 	// buildGroup deduplicates concurrent build() calls for the same profile.
 	// Without it, a cache expiry plus N parallel requests for the same
 	// profile produced N parallel LLM rerank calls — wasted Ollama budget
@@ -197,11 +202,12 @@ type Hero struct {
 // generation — the recommender will still personalize via the taste vector.
 func New(q *db.Queries, llmClient *llm.Client) *Hero {
 	return &Hero{
-		q:             q,
-		llm:           llmClient,
-		candidatePool: 12,
-		poolSize:      5,
-		repeatWindow:  surfacedRepeatWindowDefault,
+		q:              q,
+		llm:            llmClient,
+		candidatePool:  12,
+		poolSize:       5,
+		repeatWindow:   surfacedRepeatWindowDefault,
+		tasteCentroids: tasteCentroidsDefault,
 	}
 }
 
@@ -213,6 +219,16 @@ func (h *Hero) SetRepeatWindow(d time.Duration) {
 		d = 0
 	}
 	h.repeatWindow = d
+}
+
+// SetTasteCentroids sets the Phase E1 cap on taste modes per profile. A value of
+// 1 (or 0) disables clustering — recall uses the single averaged centroid,
+// exactly as before. Called once at startup from recommender_taste_centroids.
+func (h *Hero) SetTasteCentroids(n int) {
+	if n < 1 {
+		n = 1
+	}
+	h.tasteCentroids = n
 }
 
 // surfaceArgs returns the (surface, withinSeconds) pair to pass to
@@ -546,44 +562,44 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 	var quality poolQuality
 	allowed := h.allowedRatings(ctx, profileID)
 
-	// Tier 1: personalized via taste vector.
-	vec, err := h.q.BuildProfileVector(ctx, profileID)
-	if err == nil {
-		surface, within := h.surfaceArgs(surfaceHero)
-		candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.heroRecallPool(), allowed, surface, within)
-		if err != nil {
-			slog.Warn("hero: nearest-unwatched failed, falling back to popular",
+	// Tier 1: personalized via taste vector(s). tasteRecall clusters the
+	// profile's recency slice into K taste modes (Phase E1) and merges
+	// per-centroid recall, or falls back to the single averaged centroid —
+	// either way returning a candidate pool (or ErrInsufficientHistory for
+	// cold-start). Everything downstream operates on the merged pool unchanged.
+	surface, within := h.surfaceArgs(surfaceHero)
+	candidates, err := h.tasteRecall(ctx, profileID, h.heroRecallPool(), allowed, surface, within)
+	if err != nil {
+		if err != db.ErrInsufficientHistory {
+			slog.Warn("hero: taste recall failed, falling back to popular",
 				"profile", profileID, "error", err)
-		} else if len(candidates) > 0 {
-			// Phase B: listwise rerank the (larger) recall pool down to
-			// candidatePool by taste relevance, so the listwise LLM works from a
-			// sharper set than raw cosine order. No-op when the reranker is off
-			// (rerankCandidates just caps the slice — see rerank_stage.go).
-			if h.rerankEnabled() {
-				if anchors, aErr := h.q.RecentTasteAnchors(ctx, profileID, rerankAnchorCount); aErr != nil {
-					slog.Warn("hero: anchors for rerank failed, skipping rerank", "profile", profileID, "error", aErr)
-					candidates = capCandidates(candidates, h.candidatePool)
-				} else {
-					candidates = h.rerankCandidates(ctx, anchors, candidates, h.candidatePool)
-				}
-			}
-			// Position-bias correction: debias the order the listwise LLM sees so
-			// it judges on merit, not "listed first." Applies on both paths.
-			candidates = debiasOrder(candidates, profileID)
-			// Pre-score the candidates so the reranker optimizes fit × variety ×
-			// novelty ON TOP of proven quality, instead of picking blind to the
-			// Aurora Score. The same scores drive the degraded-path fallback
-			// ordering inside rerankWithBlurbs.
-			candScores := h.auroraScores(ctx, candidates)
-			picks, quality = h.rerankWithBlurbs(ctx, profileID, candidates, candScores)
-			// Personal "% for you", standardized against this profile's own
-			// candidate-similarity distribution (replaces the fixed-anchor
-			// calibrateMatch). Cold-start (Tier 2) skips this — Match stays 0.
-			applyPersonalMatch(picks, candidates)
 		}
-	} else if err != db.ErrInsufficientHistory {
-		slog.Warn("hero: profile vector failed, falling back to popular",
-			"profile", profileID, "error", err)
+	} else if len(candidates) > 0 {
+		// Phase B: listwise rerank the (larger) recall pool down to
+		// candidatePool by taste relevance, so the listwise LLM works from a
+		// sharper set than raw cosine order. No-op when the reranker is off
+		// (rerankCandidates just caps the slice — see rerank_stage.go).
+		if h.rerankEnabled() {
+			if anchors, aErr := h.q.RecentTasteAnchors(ctx, profileID, rerankAnchorCount); aErr != nil {
+				slog.Warn("hero: anchors for rerank failed, skipping rerank", "profile", profileID, "error", aErr)
+				candidates = capCandidates(candidates, h.candidatePool)
+			} else {
+				candidates = h.rerankCandidates(ctx, anchors, candidates, h.candidatePool)
+			}
+		}
+		// Position-bias correction: debias the order the listwise LLM sees so
+		// it judges on merit, not "listed first." Applies on both paths.
+		candidates = debiasOrder(candidates, profileID)
+		// Pre-score the candidates so the reranker optimizes fit × variety ×
+		// novelty ON TOP of proven quality, instead of picking blind to the
+		// Aurora Score. The same scores drive the degraded-path fallback
+		// ordering inside rerankWithBlurbs.
+		candScores := h.auroraScores(ctx, candidates)
+		picks, quality = h.rerankWithBlurbs(ctx, profileID, candidates, candScores)
+		// Personal "% for you", standardized against this profile's own
+		// candidate-similarity distribution (replaces the fixed-anchor
+		// calibrateMatch). Cold-start (Tier 2) skips this — Match stays 0.
+		applyPersonalMatch(picks, candidates)
 	}
 
 	// Tier 2: cold-start popular pool, no blurbs.

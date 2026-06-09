@@ -318,6 +318,13 @@ func main() {
 				heroRecommender.SetRepeatWindow(time.Duration(hrs) * time.Hour)
 			}
 		}
+		// Phase E1 multi-centroid taste: cap on taste modes per profile (1 = off).
+		// Restart-required. Absent → New's default (3).
+		if v, ok, _ := queries.GetSettingExists(ctx, "recommender_taste_centroids"); ok {
+			if n, perr := strconv.Atoi(v); perr == nil {
+				heroRecommender.SetTasteCentroids(n)
+			}
+		}
 
 		// AI re-matcher for items the heuristic enricher flagged as
 		// 'needs_review'. The matcher reuses LLM_CHAT_MODEL (same model

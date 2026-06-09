@@ -72,7 +72,35 @@ const minHistoryItems = 3
 // onboarding prior fades out as genuine history accrues. Seeds stay in the
 // unweighted slice — nothing to weight, so the HARD-LEARNED note above holds.
 func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (string, error) {
-	row := q.pool.QueryRow(ctx, `
+	row := q.pool.QueryRow(ctx, tasteRecentSliceCTE+`
+		SELECT
+		  COUNT(*),
+		  CASE WHEN COUNT(*) > 0
+		       THEN AVG(embedding)::text
+		       ELSE NULL
+		  END
+		FROM recent`,
+		profileID,
+	)
+	var count int
+	var vec *string
+	if err := row.Scan(&count, &vec); err != nil {
+		return "", fmt.Errorf("build profile vector: %w", err)
+	}
+	if count < minHistoryItems || vec == nil {
+		return "", ErrInsufficientHistory
+	}
+	return *vec, nil
+}
+
+// tasteRecentSliceCTE is the shared "recent taste slice": a profile's top-20
+// embedded items by recency — completed/in-progress watches UNION onboarding
+// taste_seeds UNION Phase D 👍 item_feedback, deduped. BuildProfileVector
+// AVERAGES this slice into a single centroid; ProfileEmbeddingSlice (Phase E1)
+// returns the rows UN-averaged for Go-side k-means. ONE const, two callers, so
+// the cluster input can never drift from the average input. Binds $1=profileID;
+// append a `SELECT … FROM recent` to use it.
+const tasteRecentSliceCTE = `
 		WITH recent AS (
 		  SELECT embedding FROM (
 		    SELECT m.embedding,
@@ -121,25 +149,36 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 		  ) src
 		  ORDER BY completed DESC, ts DESC
 		  LIMIT 20
-		)
-		SELECT
-		  COUNT(*),
-		  CASE WHEN COUNT(*) > 0
-		       THEN AVG(embedding)::text
-		       ELSE NULL
-		  END
-		FROM recent`,
+		)`
+
+// ProfileEmbeddingSlice returns the SAME recency slice BuildProfileVector
+// averages, but UN-averaged — one pgvector text literal per item — for Go-side
+// k-means clustering (Phase E1 multi-centroid taste). Same minHistoryItems gate
+// and ErrInsufficientHistory contract, so callers fall back identically.
+func (q *Queries) ProfileEmbeddingSlice(ctx context.Context, profileID int64) ([]string, error) {
+	rows, err := q.pool.Query(ctx, tasteRecentSliceCTE+`
+		SELECT embedding::text FROM recent`,
 		profileID,
 	)
-	var count int
-	var vec *string
-	if err := row.Scan(&count, &vec); err != nil {
-		return "", fmt.Errorf("build profile vector: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("profile embedding slice: %w", err)
 	}
-	if count < minHistoryItems || vec == nil {
-		return "", ErrInsufficientHistory
+	defer rows.Close()
+	out := make([]string, 0, 20)
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, fmt.Errorf("scan profile embedding slice: %w", err)
+		}
+		out = append(out, v)
 	}
-	return *vec, nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("profile embedding slice rows: %w", err)
+	}
+	if len(out) < minHistoryItems {
+		return nil, ErrInsufficientHistory
+	}
+	return out, nil
 }
 
 // PersonalizationHistoryCount returns the number of embedded inputs
