@@ -755,6 +755,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Finish It Tonight / Comfort Rewatch). No LLM — pure first-party
 				// engagement signals, fast + resilient when the Cloud LLM is down.
 				r.Get("/engagement-rails", heroH.EngagementRails)
+				// Phase D: steerable thumbs. 👍/👎 on a title reshapes the
+				// feed live (taste-vector boost / recall exclusion) + invalidates.
+				r.Post("/feedback", heroH.Feedback)
 			})
 
 			// Watch Progress

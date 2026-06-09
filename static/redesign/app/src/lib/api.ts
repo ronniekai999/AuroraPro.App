@@ -1535,6 +1535,22 @@ export async function addToWatchlist(
   })
 }
 
+// Phase D — steerable thumbs. 👍 'up' feeds the taste vector ("more like this"),
+// 👎 'down' excludes the title from every recommendation surface ("not
+// interested"), 'clear' removes the thumb. The server records it + invalidates
+// the profile's rec caches so the feed re-curates on the next build.
+export async function submitMediaFeedback(
+  mediaItemId: number,
+  direction: 'up' | 'down' | 'clear',
+  profileId?: number,
+): Promise<void> {
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  await apiFetch(`/api/me/feedback${qs}`, {
+    method: 'POST',
+    body: { media_item_id: mediaItemId, direction },
+  })
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Phase 6 — Collections
 //

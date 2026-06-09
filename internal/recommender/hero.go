@@ -496,8 +496,8 @@ func (h *Hero) annotateItems(ctx context.Context, items []*models.MediaItem) {
 // slot immediately rather than colliding with a stale-data writer.
 //
 // Note: AnchorRailsFor has NO cache (pure vector recall) so nothing to
-// clear there. Hero pool, Discover, and reason cache are the only three
-// caches in the recommender that hold per-profile state.
+// clear there. Hero pool, Discover, engagement rails, and reason cache are
+// the per-profile caches in the recommender that hold mutable state.
 func (h *Hero) Invalidate(profileID int64) {
 	// Bump the epoch FIRST so any in-flight build whose Store happens
 	// to interleave with our cache.Delete sees the new value and skips

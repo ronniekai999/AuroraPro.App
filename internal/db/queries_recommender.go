@@ -94,6 +94,30 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 		        SELECT 1 FROM watch_progress wp2
 		        WHERE wp2.profile_id = $1 AND wp2.media_item_id = ts.media_item_id
 		      )
+		    UNION ALL
+		    -- Phase D: 👍 "more like this" feedback steers the centroid like a
+		    -- taste seed (counts as completed, recency-weighted by created_at). It
+		    -- competes in the same top-20-by-recency slice as watches and seeds; a
+		    -- deliberate thumb is a strong signal, so letting fresh thumbs win that
+		    -- slice is intended. Deduped against BOTH watch_progress (the real watch
+		    -- supersedes the thumb) AND taste_seeds (the seed row already represents
+		    -- this title) so a seeded-and-thumbed item isn't double-weighted.
+		    SELECT m.embedding,
+		           TRUE          AS completed,
+		           fb.created_at AS ts
+		    FROM item_feedback fb
+		    JOIN media_items m ON m.id = fb.media_item_id
+		    WHERE fb.profile_id = $1
+		      AND fb.feedback = 'up'
+		      AND m.embedding IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watch_progress wp3
+		        WHERE wp3.profile_id = $1 AND wp3.media_item_id = fb.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM taste_seeds ts2
+		        WHERE ts2.profile_id = $1 AND ts2.media_item_id = fb.media_item_id
+		      )
 		  ) src
 		  ORDER BY completed DESC, ts DESC
 		  LIMIT 20
@@ -226,7 +250,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )
+		    )`+dislikedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -310,7 +334,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )
+		    )`+dislikedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -528,7 +552,7 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		  AND NOT EXISTS (
 		    SELECT 1 FROM taste_seeds ts
 		    WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		  )
+		  )`+dislikedNotExists+`
 		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
 		LIMIT $2`,
 		profileID, limit*2, allowedRatings,

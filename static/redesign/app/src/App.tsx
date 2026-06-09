@@ -67,6 +67,7 @@ import {
   createWatchlist,
   deleteWatchlist,
   addToWatchlist,
+  submitMediaFeedback,
   refreshMetadata,
   markWatched,
   clearProgress,
@@ -1543,12 +1544,16 @@ interface HomeViewProps {
   //   (excludes the one on screen). onNextPick — "Not tonight": advance to the
   //   next pick already in the loaded pool (instant, no refetch). Distinct.
   onNextPick?: () => void
+  // Phase D — conversational discovery: fired on Enter in the home "vibe" box.
+  onConversationalSearch?: (query: string) => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
   const effectiveRails = rails ?? []
+  // Phase D — local text for the conversational "describe a vibe" box.
+  const [convoText, setConvoText] = useState('')
   // Deep-debug H3 — keep the latest cwResume bundle in a ref so the
   // Resume pill click handler resolves the freshest ContinueWatchingItem
   // at click-time (not render-time). Without this, a mid-hover
@@ -1618,6 +1623,28 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
           </button>
         )}
       </div>
+      {/* Phase D — conversational discovery: describe a vibe, hit Enter, get a
+          pinned rail. Reuses the semantic-search pipeline; fires on submit (not
+          per-keystroke) to bound LLM cost. */}
+      {onConversationalSearch && (
+        <div className="mb-5 relative max-w-2xl">
+          <Icon name="sparkle" size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-purple-300/70 pointer-events-none" />
+          <input
+            value={convoText}
+            onChange={e => setConvoText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
+            placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
+            aria-label="Describe what you're in the mood for"
+            className="w-full pl-10 pr-20 py-2.5 rounded-full bg-white/[0.05] border border-white/[0.08] focus:border-purple-500/50 text-white text-sm placeholder:text-white/35 outline-none transition-colors"
+          />
+          {convoText && (
+            <button
+              onClick={() => { setConvoText(''); onConversationalSearch('') }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-white/50 hover:text-white px-2 py-1"
+            >Clear</button>
+          )}
+        </div>
+      )}
       <HeroSection
         hero={hero}
         onPlay={onPlay}
@@ -6754,6 +6781,22 @@ export default function App() {
           window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown'))
         })
       }},
+      // Phase D — steerable thumbs. 👍 feeds the taste vector; 👎 excludes the
+      // title from every rec surface. Both invalidate server-side; on 👎 we also
+      // optimistically drop the card from the home rails (no costly LLM rebuild).
+      { label: '👍 More like this', onClick: () => {
+        void submitMediaFeedback(m.id, 'up', activeProfileId ?? undefined).then(() => {
+          setToasts(prev => [...prev, { id: nextToastId(), message: `More like "${m.title}" — got it`, type: 'success' }])
+        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
+      }},
+      { label: '👎 Not interested', tone: 'danger', onClick: () => {
+        void submitMediaFeedback(m.id, 'down', activeProfileId ?? undefined).then(() => {
+          setToasts(prev => [...prev, { id: nextToastId(), message: `We'll show you less like "${m.title}"`, type: 'info' }])
+          setHomeRails(rails => rails ? rails.map(rl => ({ ...rl, items: rl.items.filter(it => it.id !== m.id) })) : rails)
+          // Also drop it from a pinned conversational rail, if one is showing.
+          setConvoResults(prev => prev.filter(it => it.id !== m.id))
+        }).catch(err => window.alert('Failed: ' + (err instanceof Error ? err.message : 'unknown')))
+      }},
     ]
     if (profiles.length > 0) {
       items.push({ label: 'Add to Watchlist…', onClick: () => setAddToListMedia(m) })
@@ -6764,7 +6807,7 @@ export default function App() {
     setContextMenu({ x: e.clientX, y: e.clientY, items })
   // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, user])
+  }, [profiles, user, activeProfileId])
 
   const [addToListMedia, setAddToListMedia] = useState<Media | null>(null)
   // Phase 6 — Collections modal open state. Triggered by the
@@ -6961,6 +7004,19 @@ export default function App() {
   // letting a genuine later click re-fire.
   const unavailableToastRef = useRef<Map<number, number>>(new Map())
   const [homeRails, setHomeRails] = useState<HomeViewProps['rails']>(undefined)
+  // Phase D — conversational discovery: the active vibe query + its results,
+  // pinned as the top home rail. Fires the existing semantic search on submit
+  // (Enter), not per-keystroke, to bound LLM cost.
+  const [convoQuery, setConvoQuery] = useState('')
+  const [convoResults, setConvoResults] = useState<Media[]>([])
+  const runConversational = useCallback((q: string) => {
+    const query = q.trim()
+    if (!query) { setConvoQuery(''); setConvoResults([]); return }
+    setConvoQuery(query)
+    void searchMedia(query, 12).then(res => {
+      setConvoResults(res.items as Media[])
+    }).catch(() => { /* keep prior results; the input retains the query */ })
+  }, [])
   const [homeLoading, setHomeLoading] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
   // 2026-06-05 (Home net-new #1) — real total library size for the greeting's
@@ -9066,9 +9122,14 @@ export default function App() {
               // warnings and the "click the old card, play the new
               // episode" confusion. LibraryView keeps every row.
               rails={(() => {
-                if (!homeRails && continueItems.length === 0) return undefined
+                // Phase D — conversational discovery: when a vibe search is
+                // active, pin its results as the first rail.
+                const convoRail: NonNullable<HomeViewProps['rails']> = convoResults.length > 0
+                  ? [{ title: convoQuery, items: convoResults, aspect: 'poster' as const, aiPick: true, showBadges: true, subtitle: 'Your conversational search' }]
+                  : []
+                if (!homeRails && continueItems.length === 0) return convoRail.length > 0 ? convoRail : undefined
                 const base = homeRails ?? []
-                if (continueItems.length === 0) return base
+                if (continueItems.length === 0) return [...convoRail, ...base]
                 const seen = new Set<number>()
                 const deduped = continueItems.filter(c => {
                   if (seen.has(c.media_item_id)) return false
@@ -9083,6 +9144,7 @@ export default function App() {
                 const cwSubtitles: Record<number, string> = {}
                 for (const c of deduped) cwSubtitles[c.media_item_id] = cwSubtitle(c)
                 return [
+                  ...convoRail,
                   {
                     title: 'Continue Watching',
                     items: deduped.map(c => mapContinueToMedia(c)) as Media[],
@@ -9109,6 +9171,7 @@ export default function App() {
               heroScore={heroPool[heroIndex]?.score}
               // "Surprise me" — play a random recommended pick (not the one shown).
               onSurprise={onSurprise}
+              onConversationalSearch={runConversational}
               // "Not tonight" — advance to the next pick in the loaded pool.
               onNextPick={advanceHero}
               onHeroPauseChange={setHeroPaused}
