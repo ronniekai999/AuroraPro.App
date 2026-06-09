@@ -218,6 +218,61 @@
     text-shadow: 0 0 20px rgba(168, 85, 247, 0.5), 0 0 40px rgba(168, 85, 247, 0.3);
   }
 
+  /* Phase D — conversational "mood box": a focal, on-brand search pill that
+     invites natural-language discovery. A violet→cyan gradient ring + soft halo
+     (the same palette as the rest of the UI) that intensifies on hover/focus
+     and breathes gently to draw the eye. Honors prefers-reduced-motion and
+     calms down under data-glow="subtle". */
+  .convo-search {
+    position: relative;
+    border-radius: 9999px;
+    background:
+      linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
+      linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
+    border: 1.5px solid transparent;
+    box-shadow:
+      0 8px 28px -10px rgba(124, 58, 237, 0.4),
+      0 0 20px -6px rgba(34, 211, 238, 0.25);
+    transition: box-shadow 0.35s ease;
+  }
+  .convo-search::before {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 9999px;
+    background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
+    filter: blur(16px);
+    opacity: 0.28;
+    z-index: -1;
+    animation: convo-breathe 5s ease-in-out infinite;
+  }
+  .convo-search:hover {
+    box-shadow:
+      0 10px 32px -10px rgba(124, 58, 237, 0.55),
+      0 0 26px -4px rgba(34, 211, 238, 0.4);
+  }
+  .convo-search:focus-within {
+    box-shadow:
+      0 0 0 1px rgba(168, 85, 247, 0.3),
+      0 12px 38px -10px rgba(124, 58, 237, 0.65),
+      0 0 32px -2px rgba(34, 211, 238, 0.5);
+  }
+  .convo-search:focus-within::before {
+    opacity: 0.55;
+    animation-play-state: paused;
+  }
+  @keyframes convo-breathe {
+    0%, 100% { opacity: 0.2; }
+    50% { opacity: 0.42; }
+  }
+  html[data-glow="subtle"] .convo-search::before {
+    opacity: 0.14;
+    animation: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .convo-search::before { animation: none; opacity: 0.3; }
+  }
+
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;

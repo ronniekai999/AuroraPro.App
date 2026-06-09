@@ -1627,22 +1627,29 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
           pinned rail. Reuses the semantic-search pipeline; fires on submit (not
           per-keystroke) to bound LLM cost. */}
       {onConversationalSearch && (
-        <div className="mb-5 relative max-w-2xl">
-          <Icon name="sparkle" size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-purple-300/70 pointer-events-none" />
-          <input
-            value={convoText}
-            onChange={e => setConvoText(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-            placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
-            aria-label="Describe what you're in the mood for"
-            className="w-full pl-10 pr-20 py-2.5 rounded-full bg-white/[0.05] border border-white/[0.08] focus:border-purple-500/50 text-white text-sm placeholder:text-white/35 outline-none transition-colors"
-          />
-          {convoText && (
-            <button
-              onClick={() => { setConvoText(''); onConversationalSearch('') }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-white/50 hover:text-white px-2 py-1"
-            >Clear</button>
-          )}
+        <div className="mb-5 max-w-2xl">
+          <div className="convo-search flex items-center">
+            <Icon name="sparkle" size={17} className="ml-4 mr-1.5 shrink-0 text-purple-300 pointer-events-none" />
+            <input
+              value={convoText}
+              onChange={e => setConvoText(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
+              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
+              aria-label="Describe what you're in the mood for"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
+            />
+            {convoText ? (
+              <button
+                onClick={() => { setConvoText(''); onConversationalSearch('') }}
+                aria-label="Clear search"
+                className="shrink-0 mr-2 px-3 py-1 rounded-full text-xs font-semibold text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              >Clear</button>
+            ) : (
+              <span className="hidden sm:flex shrink-0 mr-3.5 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-purple-200/55 pointer-events-none">
+                <kbd className="px-1.5 py-0.5 rounded bg-white/10 text-purple-100/80 not-italic">↵</kbd> to search
+              </span>
+            )}
+          </div>
         </div>
       )}
       <HeroSection
