@@ -377,8 +377,25 @@ func main() {
 		if embedder == nil {
 			return
 		}
-		if err := embedder.EmbedItem(ctx, item); err != nil {
-			slog.Warn("inline embedding failed", "item", item.Title, "error", err)
+		// The enricher persists TMDB overview / genres / content_rating to the DB
+		// but does NOT write them back onto `item`, so the passed struct is still
+		// pre-enrichment (title-only). Embedding it directly produces a degenerate
+		// vector — missing overview, genres, and the Phase E2b tone cue — and
+		// because EmbedItem stamps the current version, the backfill never
+		// re-selects it. Re-fetch the persisted row + its genres so the inline
+		// vector matches what the backfill would build.
+		fresh, err := queries.GetMediaItem(ctx, item.ID)
+		if err != nil || fresh == nil {
+			// Leave the embedding NULL; the backfill (WHERE embedding IS NULL)
+			// will catch it. An honest miss beats a stamped title-only vector.
+			slog.Warn("inline embedding: re-fetch failed, deferring to backfill", "item_id", item.ID, "error", err)
+			return
+		}
+		if byID, gErr := queries.GetMediaGenresBatch(ctx, []int64{fresh.ID}); gErr == nil {
+			fresh.Genres = byID[fresh.ID]
+		}
+		if err := embedder.EmbedItem(ctx, fresh); err != nil {
+			slog.Warn("inline embedding failed", "item", fresh.Title, "error", err)
 		}
 	}
 
