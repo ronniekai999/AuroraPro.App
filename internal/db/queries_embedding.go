@@ -13,12 +13,13 @@ import (
 // if the model version was bumped). The text fields are exactly what the
 // embedding template will be built from — no additional joins needed.
 type EmbeddingCandidate struct {
-	ID       int64
-	Title    string
-	Year     int
-	Overview string
-	Type     string   // "movie" | "tv"
-	Genres   []string // joined from media_genres
+	ID            int64
+	Title         string
+	Year          int
+	Overview      string
+	Type          string   // "movie" | "tv"
+	Genres        []string // joined from media_genres
+	ContentRating string   // e.g. "TV-G", "R" — Phase E2b audience/tone cue
 }
 
 // FetchEmbeddingCandidates returns up to `limit` rows that either have no
@@ -43,7 +44,8 @@ func (q *Queries) FetchEmbeddingCandidates(ctx context.Context, currentVersion i
 		          JOIN genres g ON g.id = mg.genre_id
 		          WHERE mg.media_item_id = m.id),
 		         ARRAY[]::text[]
-		       ) AS genres
+		       ) AS genres,
+		       COALESCE(m.content_rating, '')
 		FROM media_items m
 		WHERE m.embedding IS NULL
 		   OR m.embedding_version < $1
@@ -59,7 +61,7 @@ func (q *Queries) FetchEmbeddingCandidates(ctx context.Context, currentVersion i
 	var out []*EmbeddingCandidate
 	for rows.Next() {
 		c := &EmbeddingCandidate{}
-		if err := rows.Scan(&c.ID, &c.Title, &c.Year, &c.Overview, &c.Type, &c.Genres); err != nil {
+		if err := rows.Scan(&c.ID, &c.Title, &c.Year, &c.Overview, &c.Type, &c.Genres, &c.ContentRating); err != nil {
 			return nil, fmt.Errorf("scan embedding candidate: %w", err)
 		}
 		out = append(out, c)

@@ -35,9 +35,13 @@ import (
 //   - 1: nomic-embed-text, 384-dim (truncated).
 //   - 2: Phase E2 — embeddinggemma, 768-dim (migration 040 re-types the column +
 //     nulls existing vectors; the bump makes RunBackfill re-embed everything).
+//   - 3: Phase E2b — BuildText now folds the content-rating audience/tone cue
+//     into the text so gentle (TV-G) and intense (R) titles with near-identical
+//     overviews separate in the vector space. Same 768 dims → no migration; the
+//     bump alone makes RunBackfill re-embed in place.
 //
 // Do NOT bump for trivial code refactors that produce identical output.
-const CurrentVersion int16 = 2
+const CurrentVersion int16 = 3
 
 // Embedder coordinates the embedding model client with the database. Safe for
 // concurrent use; multiple goroutines may call EmbedItem in parallel.
@@ -67,12 +71,19 @@ func New(llmClient *llm.Client, q *db.Queries, workers, batch int) *Embedder {
 //
 // Output examples:
 //
-//	"Inception (2010). [movie] A thief who steals corporate secrets... Genres: Action, Sci-Fi."
-//	"Severance (2022). [tv] Office workers undergo a procedure... Genres: Drama, Mystery, Sci-Fi."
+//	"Inception (2010). [movie] A thief who steals corporate secrets... Genres: Action, Sci-Fi. For mature audiences."
+//	"Severance (2022). [tv] Office workers undergo a procedure... Genres: Drama, Mystery, Sci-Fi. For mature audiences."
 //
 // Empty fields are skipped rather than rendered as "(0)" or "Genres: ." so the
 // embedding model isn't confused by structural noise.
-func BuildText(title string, year int, mediaType, overview string, genres []string) string {
+//
+// Phase E2b: the content-rating audience cue (audienceClause) is appended as a
+// tone axis. Genre tags + overview alone don't separate a gentle TV-PG ghost
+// drama from an R ghost-horror film — their overviews are near-identical ("ghosts",
+// "hauntings") — so they cluster together. The audience phrase ("For family and
+// general audiences" vs "For mature audiences") gives the model a maturity/tone
+// signal that pulls them apart.
+func BuildText(title string, year int, mediaType, overview string, genres []string, contentRating string) string {
 	var b strings.Builder
 	b.WriteString(title)
 	if year > 0 {
@@ -83,12 +94,11 @@ func BuildText(title string, year int, mediaType, overview string, genres []stri
 		fmt.Fprintf(&b, "[%s] ", mediaType)
 	}
 	if overview != "" {
-		// Cap overview at ~2000 chars. nomic-embed-text accepts up to 8192
-		// tokens (~32 KB of typical English) and Ollama silently truncates
-		// beyond that, which produces degraded embeddings without a signal.
-		// Pathological NFO files from scraper plugins can carry multi-MB
-		// synopses; trimming up-front keeps the embedding quality
-		// predictable and the per-batch payload small.
+		// Cap overview at ~2000 chars. embeddinggemma accepts a 2048-token
+		// context and Ollama silently truncates beyond that, which produces
+		// degraded embeddings without a signal. Pathological NFO files from
+		// scraper plugins can carry multi-MB synopses; trimming up-front keeps
+		// the embedding quality predictable and the per-batch payload small.
 		const maxOverviewChars = 2000
 		if len(overview) > maxOverviewChars {
 			overview = overview[:maxOverviewChars]
@@ -104,7 +114,33 @@ func BuildText(title string, year int, mediaType, overview string, genres []stri
 		b.WriteString(strings.Join(genres, ", "))
 		b.WriteByte('.')
 	}
+	// Only fold in the audience/tone cue when there's real content to tone. For a
+	// title-only item (pre-enrichment scan, obscure unmatched media) the fixed
+	// phrase would DOMINATE the few tokens and cluster items by rating tier
+	// instead of content — a regression vs the honest title-only vector.
+	if overview != "" || len(genres) > 0 {
+		b.WriteString(audienceClause(contentRating))
+	}
 	return strings.TrimSpace(b.String())
+}
+
+// audienceClause maps a content rating to a natural-language audience/tone cue
+// for the embedding text, or "" when the rating is missing/unknown (NR, Unrated,
+// blank) so no misleading signal is added. The phrasing is deliberately tonal —
+// "mature" reads as darker/intense, "family" as lighter — which is the axis we
+// want the vector to encode. Returned with a leading space so the caller can
+// append unconditionally.
+func audienceClause(rating string) string {
+	switch strings.ToUpper(strings.TrimSpace(rating)) {
+	case "G", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "PG", "TV-PG":
+		return " For family and general audiences."
+	case "PG-13", "TV-14":
+		return " For teen and older audiences."
+	case "R", "TV-MA", "NC-17", "NC17", "X":
+		return " For mature audiences."
+	default:
+		return ""
+	}
 }
 
 // EmbedItem regenerates the embedding for a single media item. Called from the
@@ -114,7 +150,7 @@ func BuildText(title string, year int, mediaType, overview string, genres []stri
 // Errors are returned but the caller should log-and-continue: a missing
 // embedding only degrades search, never breaks ingestion.
 func (e *Embedder) EmbedItem(ctx context.Context, item *models.MediaItem) error {
-	text := BuildText(item.Title, item.Year, string(item.Type), item.Overview, item.Genres)
+	text := BuildText(item.Title, item.Year, string(item.Type), item.Overview, item.Genres, item.ContentRating)
 	vec, err := e.llm.Embed(ctx, text)
 	if err != nil {
 		return fmt.Errorf("embed item %d: %w", item.ID, err)
@@ -329,7 +365,7 @@ func chunkRanges(n, batch int) [][2]int {
 func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCandidate) error {
 	texts := make([]string, len(candidates))
 	for i, c := range candidates {
-		texts[i] = BuildText(c.Title, c.Year, c.Type, c.Overview, c.Genres)
+		texts[i] = BuildText(c.Title, c.Year, c.Type, c.Overview, c.Genres, c.ContentRating)
 	}
 	vectors, err := e.llm.EmbedBatch(ctx, texts)
 	if err != nil {
