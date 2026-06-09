@@ -407,6 +407,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	progressH.SetGamificationEngine(gamifyEngine)
 	gamifyH := NewGamificationHandler(deps.Queries)
 	profileH := NewProfileHandler(deps.Queries)
+	if deps.HeroProv != nil {
+		profileH.SetHeroProvider(deps.HeroProv)
+	}
 	onboardingH := NewOnboardingHandler(deps.Queries)
 	if deps.HeroProv != nil {
 		onboardingH.SetHeroProvider(deps.HeroProv)
