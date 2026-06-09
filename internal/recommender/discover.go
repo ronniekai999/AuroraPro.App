@@ -322,23 +322,17 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		return nil, nil
 	}
 
-	vec, err := h.q.BuildProfileVector(ctx, profileID)
-	if err != nil {
-		// Cold-start (insufficient history) or DB error: Discover is
-		// inherently a personalization feature, so no taste = no rails.
-		// The UI fallback (vector rail) handles cold-start more
-		// gracefully (popular-unwatched).
-		if err != db.ErrInsufficientHistory {
-			slog.Warn("discover: profile vector failed", "profile", profileID, "error", err)
-		}
-		return nil, nil
-	}
-
 	allowed := h.allowedRatings(ctx, profileID)
 	surface, within := h.surfaceArgs(surfaceDiscover)
-	candidates, err := h.q.NearestUnwatched(ctx, profileID, vec, h.discoverRecallPool(), allowed, surface, within)
+	// Phase E1: multi-centroid taste recall (falls back to the single averaged
+	// centroid). Cold-start (insufficient history) or any error → no rails:
+	// Discover is inherently a personalization feature, and the UI fallback
+	// (vector rail) handles cold-start more gracefully (popular-unwatched).
+	candidates, err := h.tasteRecall(ctx, profileID, h.discoverRecallPool(), allowed, surface, within)
 	if err != nil {
-		slog.Warn("discover: nearest-unwatched failed", "profile", profileID, "error", err)
+		if err != db.ErrInsufficientHistory {
+			slog.Warn("discover: taste recall failed", "profile", profileID, "error", err)
+		}
 		return nil, nil
 	}
 	if len(candidates) == 0 {
