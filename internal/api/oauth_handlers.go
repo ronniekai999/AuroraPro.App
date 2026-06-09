@@ -484,6 +484,17 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		_ = h.queries.UnclaimInviteCode(r.Context(), inviteClaimID)
 	}
 
+	// Auto-create default profile for new OAuth users (mirrors auth_handlers.go:338-342).
+	// Without this, a brand-new Google/Discord/etc. signup has no profiles, causing
+	// GET /api/onboarding/status to return 403/404 and the TasteOnboardingGate to
+	// silently skip onboarding entirely.
+	if isNewUser {
+		if _, err := h.queries.CreateDefaultProfileForUser(r.Context(), user.ID, user.Username); err != nil {
+			// Non-fatal: user is created, profile will be created on next server start via data migration.
+			_ = err
+		}
+	}
+
 	// Issue tokens — same path as the password login flow.
 	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion)
 	if err != nil {
