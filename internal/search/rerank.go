@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -418,4 +419,44 @@ func mediaItemsTypeFilter(searchType string) string {
 		return "show"
 	}
 	return searchType
+}
+
+// Word-boundary keyword sets for inferMediaTypeFromQuery. Kept deliberately
+// CONSERVATIVE to avoid false positives:
+//   - "movie"/"film" are virtually never verbs in a search query, so they're
+//     safe signals.
+//   - On the TV side we take only "shows" (PLURAL — "show me X" uses the
+//     singular verb, so the plural noun is the safe form), plus the
+//     unambiguous "tv"/"television"/"sitcom"/"miniseries". Bare singular
+//     "show" and the genuinely ambiguous "series" (a film series vs a TV
+//     series) are intentionally excluded — those defer to the LLM.
+var (
+	reMovieKeyword = regexp.MustCompile(`(?i)\b(movies?|films?)\b`)
+	reTVKeyword    = regexp.MustCompile(`(?i)\b(tv|television|shows|sitcoms?|miniseries)\b`)
+)
+
+// inferMediaTypeFromQuery extracts an explicit media type from literal keywords
+// in the user's raw query: "movie"/"film" → "movie", "tv"/"shows"/… → "tv". It
+// returns the parser-domain value ("movie"|"tv"|""), which Search() maps to
+// media_items.type via mediaItemsTypeFilter.
+//
+// Why this exists: the HyDE parse LLM sometimes leaves media_type empty even
+// when the user typed the word outright (observed 2026-06-08: deepseek-v4-pro
+// returned media_type:null for "movie like harry potter", so TV shows leaked
+// into a movie query). An explicit, unambiguous keyword is a stronger signal
+// than the model's inference, so the caller treats it as authoritative.
+//
+// Returns "" when the query names BOTH classes (e.g. "the movie that spawned
+// the tv series") or NEITHER — the ambiguous/absent case defers to the LLM.
+func inferMediaTypeFromQuery(q string) string {
+	movie := reMovieKeyword.MatchString(q)
+	tv := reTVKeyword.MatchString(q)
+	switch {
+	case movie && !tv:
+		return "movie"
+	case tv && !movie:
+		return "tv"
+	default:
+		return ""
+	}
 }
