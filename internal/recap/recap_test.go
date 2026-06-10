@@ -80,6 +80,18 @@ func TestSourceHashStableAndSensitive(t *testing.T) {
 	}
 }
 
+// A prompt change is shipped by bumping recapTemplateVersion; that must change
+// the digest so every cached recap regenerates on next request.
+func TestSourceHashVersionBustsCache(t *testing.T) {
+	eps := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
+	if sourceHashWith("v1", eps) == sourceHashWith("v2", eps) {
+		t.Error("a template-version bump must change the hash (so prompt changes invalidate the cache)")
+	}
+	if sourceHashWith("v1", eps) != sourceHashWith("v1", eps) {
+		t.Error("same version + inputs must hash identically (cache stability)")
+	}
+}
+
 func TestParseRecap(t *testing.T) {
 	cases := []struct {
 		name, raw, want string
