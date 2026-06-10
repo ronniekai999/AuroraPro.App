@@ -411,6 +411,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// LLM-curated rails splice in live instead of only after a page refresh.
 	heroH.SetHub(deps.Hub)
 	tvH := NewTVHandler(deps.Queries)
+	// "Previously" — spoiler-safe AI series recaps. LLMClient may be nil
+	// (LLM disabled); the handler then reports the feature unavailable.
+	recapH := NewRecapHandler(deps.Queries, deps.LLMClient)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
 	streamH := NewStreamHandler(deps.Queries, deps.Transcode, deps.DirectPlay, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
 	progressH := NewProgressHandler(deps.Queries, deps.Hub)
@@ -686,6 +689,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/{id}/seasons", tvH.GetSeasons)
 				r.Get("/{id}/seasons/{season}/episodes", tvH.GetEpisodes)
 				r.Get("/{id}/next-episode", tvH.GetNextEpisode)
+				// "Previously" — spoiler-safe AI recap for the resumed series.
+				r.Get("/{id}/recap", recapH.Get)
 
 				// Episode files (used by watch party auto-play)
 				r.Get("/episodes/{episodeId}/files", tvH.GetEpisodeFiles)
