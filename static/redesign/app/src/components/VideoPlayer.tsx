@@ -456,14 +456,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // `${kind}:${start_ms}` so the pill doesn't reappear when the
   // post-skip seek lands inside the same window's tail.
   const [skipDismissedKey, setSkipDismissedKey] = useState<string | null>(null)
-  // Credits-triggered next-up card lifecycle. 'spent' = fired or
-  // dismissed — never re-shown for this playback.
-  const [nextUpPhase, setNextUpPhase] = useState<'idle' | 'countdown' | 'prompt' | 'spent'>('idle')
+  // Credits-triggered next-up card lifecycle. 'finale' = the advance
+  // came back empty (series end) — brief feedback, then 'spent'.
+  // 'spent' = fired or dismissed; never re-shown for this playback.
+  const [nextUpPhase, setNextUpPhase] = useState<'idle' | 'countdown' | 'prompt' | 'finale' | 'spent'>('idle')
   const [nextUpSecs, setNextUpSecs] = useState(5)
   // True while an early advance (next-up card) is in flight or has
   // succeeded — gates the <video> 'ended' DOM handler so reaching the
   // real end of the credits can't double-advance past TWO episodes.
   const advanceFiredRef = useRef(false)
+  // Identity of the file the skip state belongs to. Audio-track
+  // switches and forward-seek session rebuilds change the TARGET
+  // identity (the play effect re-runs) but not the file — and a
+  // dismissed next-up card / skip pill must stay dismissed across
+  // those rebuilds, otherwise a rebuild mid-credits re-pops the card
+  // the user just closed and (autoplay on) auto-advances anyway.
+  const skipStateFileRef = useRef<string | null>(null)
   // Admin marker editor visibility (top-bar "Markers" menu).
   const [markersMenuOpen, setMarkersMenuOpen] = useState(false)
 
@@ -1132,7 +1140,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // session before the next one starts so we never have two ffmpeg
   // processes running for one user.
   useEffect(() => {
-    if (!target) return
+    if (!target) {
+      // Player closed: forget the skip-state file identity so a later
+      // re-open of the SAME file starts a fresh playback (dismissals
+      // and the next-up lifecycle are per-playback, not per-file-ever).
+      skipStateFileRef.current = null
+      return
+    }
     let cancelled = false
     const ac = new AbortController()
 
@@ -1154,15 +1168,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setRealDurationSec(0)
     setPlaying(false)
     serverDurationRef.current = false
-    // Smart Skip — reset per-playback state. Markers for the new
-    // target arrive with its stream-info below; the next-up card and
-    // skip-pill dismissals are strictly per-playback.
+    // Smart Skip — markers for the new target arrive with its
+    // stream-info below. Dismissals/next-up state reset only when the
+    // FILE changes: same-file session rebuilds (audio switch, forward-
+    // seek) must not resurrect a dismissed card or re-arm a fired
+    // advance.
     setSkipMarkers([])
-    setSkipDismissedKey(null)
-    setNextUpPhase('idle')
-    setNextUpSecs(5)
-    advanceFiredRef.current = false
     setMarkersMenuOpen(false)
+    {
+      const fileKey = `${target.fileType}:${target.fileId}`
+      if (skipStateFileRef.current !== fileKey) {
+        skipStateFileRef.current = fileKey
+        setSkipDismissedKey(null)
+        setNextUpPhase('idle')
+        setNextUpSecs(5)
+        advanceFiredRef.current = false
+      }
+    }
 
     ;(async () => {
       try {
@@ -2469,10 +2491,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     try {
       advanced = !!(await onEndedRef.current?.(force ? { force: true } : undefined))
     } catch { /* parent resolve failed — stay parked on this episode */ }
-    // No next episode (series end / autoplay off without force): let
-    // the natural 'ended' event flow again so close-out behavior
-    // (park on final frame) matches a playthrough without markers.
-    if (!advanced) advanceFiredRef.current = false
+    if (!advanced) {
+      // No next episode (series end) or the resolve failed. Re-arm the
+      // natural 'ended' flow so close-out behavior matches a playthrough
+      // without markers, and show brief "that's the last one" feedback
+      // instead of a card that promised a next episode and vanished.
+      advanceFiredRef.current = false
+      setNextUpPhase('finale')
+    }
   }, [])
 
   useEffect(() => {
@@ -2483,6 +2509,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setNextUpSecs(5)
     setNextUpPhase(readAutoplayPref() ? 'countdown' : 'prompt')
   }, [nextUpPhase, creditsMarker, playing, party, cast.status.connected, currentSec])
+
+  // Seeking back OUT of the credits window (rewatching the final
+  // scene) cancels an armed card — without this the countdown keeps
+  // ticking and yanks the viewer to the next episode mid-rewatch.
+  // Back to 'idle' so re-crossing the onset arms it again.
+  useEffect(() => {
+    if (nextUpPhase !== 'countdown' && nextUpPhase !== 'prompt') return
+    if (!creditsMarker) return
+    if (currentSec < creditsMarker.start_ms / 1000 - 1) {
+      setNextUpPhase('idle')
+    }
+  }, [nextUpPhase, creditsMarker, currentSec])
 
   // Countdown tick — freezes while paused (pausing mid-countdown is
   // a "wait, I'm not done" signal; resuming resumes the count).
@@ -2495,6 +2533,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const id = window.setTimeout(() => setNextUpSecs(s => s - 1), 1000)
     return () => window.clearTimeout(id)
   }, [nextUpPhase, nextUpSecs, playing, fireAdvance])
+
+  // Finale notice auto-dismisses to 'spent' (terminal for this
+  // playback) after a few seconds.
+  useEffect(() => {
+    if (nextUpPhase !== 'finale') return
+    const id = window.setTimeout(() => setNextUpPhase('spent'), 4000)
+    return () => window.clearTimeout(id)
+  }, [nextUpPhase])
 
   if (!target) return null
 
@@ -2516,6 +2562,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       const isMovieCredits = m.kind === 'credits' && target.fileType === 'media'
       if (!isOpener && !isMovieCredits) continue
       if (skipDismissedKey === `${m.kind}:${m.start_ms}`) continue
+      // Movie credits seek to ~EOF. On a sequential transcode that
+      // hasn't produced the tail yet, the jump would force a session
+      // rebuild anchored at (metadata-reported) EOF — which stalls
+      // when the metadata overshoots the real duration. Only offer
+      // the pill when the destination is already reachable: direct
+      // play (no session) or a transcode buffered to the end.
+      if (isMovieCredits && sessionIdRef.current !== null &&
+          m.end_ms / 1000 - 0.25 > bufferedSec - 1) continue
       if (currentSec >= m.start_ms / 1000 && currentSec < m.end_ms / 1000 - 1) return m
     }
     return null
@@ -3079,6 +3133,17 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                       <X size={14} />
                     </button>
                   </div>
+                </div>
+              )}
+              {/* Series end: the advance found nothing to play. Brief
+                  honest feedback (auto-dismisses) instead of a card
+                  that promised a next episode and silently vanished. */}
+              {nextUpPhase === 'finale' && (
+                <div
+                  role="status"
+                  className="absolute bottom-28 right-6 z-[55] rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl px-4 py-3"
+                >
+                  <p className="text-white/80 text-sm">That's the last episode — you're all caught up.</p>
                 </div>
               )}
               <PlayerControls

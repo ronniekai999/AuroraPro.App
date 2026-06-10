@@ -27,6 +27,12 @@ const (
 
 	// Credits never start before this fraction of the runtime.
 	creditsEarliestFrac = 0.60
+	// Silence-only evidence (no black frame) is weaker, and a quiet
+	// finale's long silent stretch could otherwise be mistaken for
+	// credits as early as creditsEarliestFrac — with auto-advance,
+	// that false positive skips a large chunk of the episode. Cap the
+	// silence-only blast radius to the last quarter of the runtime.
+	creditsSilenceEarliestFrac = 0.75
 
 	// A credits onset must leave at least this much tail...
 	creditsMinLenSec = 15.0
@@ -134,12 +140,12 @@ func creditsOnsetFromRanges(black, silence []timeRange, durationSec float64) (fl
 	if durationSec <= 0 {
 		return 0, 0, false
 	}
-	earliest := durationSec * creditsEarliestFrac
 	latest := durationSec - creditsMinLenSec
 
 	combined := append(append([]timeRange(nil), black...), silence...)
 
-	try := func(candidates []timeRange, ranges []timeRange, needCoverage float64) (float64, float64, bool) {
+	try := func(candidates []timeRange, ranges []timeRange, earliestFrac, needCoverage float64) (float64, float64, bool) {
+		earliest := durationSec * earliestFrac
 		onsets := make([]float64, 0, len(candidates))
 		for _, r := range candidates {
 			if r.start >= earliest && r.start <= latest {
@@ -160,10 +166,10 @@ func creditsOnsetFromRanges(black, silence []timeRange, durationSec float64) (fl
 		return 0, 0, false
 	}
 
-	if onset, conf, ok := try(black, combined, creditsBlackCoverage); ok {
+	if onset, conf, ok := try(black, combined, creditsEarliestFrac, creditsBlackCoverage); ok {
 		return onset, conf, ok
 	}
-	return try(silence, silence, creditsSilenceCoverage)
+	return try(silence, silence, creditsSilenceEarliestFrac, creditsSilenceCoverage)
 }
 
 // coverage computes what fraction of [from, until] the (possibly

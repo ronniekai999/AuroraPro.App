@@ -73,7 +73,10 @@ func decodeIntroPCM(ctx context.Context, path string) ([]int16, error) {
 	}
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stdout, stderr bytes.Buffer
-	stdout.Grow(maxDecodeBytes / 4)
+	// Pre-size for the full expected output (introScanSec of s16le) —
+	// the size is known up front, so one allocation instead of a
+	// doubling crawl through ~13 MB of redundant copies per episode.
+	stdout.Grow(maxDecodeBytes)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

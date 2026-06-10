@@ -138,51 +138,63 @@ func (w *Worker) sweep(ctx context.Context) {
 		}
 	}()
 
-	// Seasons. The seen-set guards against a season that makes no
-	// ledger progress (e.g. DB write failures) re-appearing from
-	// FetchPendingSkipSeasons forever within one sweep.
-	seen := map[int64]bool{}
+	// Seasons. Cursor-paged in ascending season-ID order so a season
+	// whose files persistently fail to ledger (recurring DB error,
+	// undecodable media) can't pin the fetch window and starve the
+	// rest of the backlog; failures are retried on the NEXT sweep,
+	// when the cursor restarts from zero.
+	var seasonCursor int64
 	for ctx.Err() == nil {
-		ids, err := w.q.FetchPendingSkipSeasons(ctx, Detector, seasonBatch)
+		ids, err := w.q.FetchPendingSkipSeasons(ctx, Detector, seasonCursor, seasonBatch)
 		if err != nil {
 			w.setErr("fetch pending seasons: " + err.Error())
 			return
 		}
-		progressed := false
+		if len(ids) == 0 {
+			break
+		}
 		for _, seasonID := range ids {
-			if seen[seasonID] || ctx.Err() != nil {
-				continue
+			if ctx.Err() != nil {
+				return
 			}
-			seen[seasonID] = true
-			progressed = true
+			if seasonID > seasonCursor {
+				seasonCursor = seasonID
+			}
 			analyzed += w.analyzeSeason(ctx, seasonID)
 			w.mu.Lock()
 			w.status.SweepAnalyzed = analyzed
 			w.mu.Unlock()
 		}
-		if len(ids) == 0 || !progressed {
-			break
-		}
 	}
 
-	// Movies (credits only).
-	seenMovies := map[int64]bool{}
+	// Movies (credits only). Same cursor pattern.
+	var movieCursor int64
 	for ctx.Err() == nil {
-		files, err := w.q.FetchPendingSkipMovieFiles(ctx, Detector, movieBatch)
+		files, err := w.q.FetchPendingSkipMovieFiles(ctx, Detector, movieCursor, movieBatch)
 		if err != nil {
 			w.setErr("fetch pending movies: " + err.Error())
 			return
 		}
-		progressed := false
+		if len(files) == 0 {
+			break
+		}
 		for _, f := range files {
-			if seenMovies[f.FileID] || ctx.Err() != nil {
-				continue
+			if ctx.Err() != nil {
+				return
 			}
-			seenMovies[f.FileID] = true
-			progressed = true
+			if f.FileID > movieCursor {
+				movieCursor = f.FileID
+			}
 
 			var markers []models.SkipMarker
-			if m, ok := w.detectCredits(ctx, f.Path, f.DurationMs); ok {
+			m, found, err := w.detectCredits(ctx, f.Path, f.DurationMs)
+			if err != nil {
+				// Transient failure (FFmpeg error/timeout, dead mount):
+				// do NOT ledger — the next sweep retries this file.
+				// detectCredits already logged the cause.
+				continue
+			}
+			if found {
 				markers = append(markers, m)
 			}
 			if err := w.q.ReplaceAutoSkipMarkers(ctx, f.FileID, false, markers, Detector); err != nil {
@@ -193,10 +205,6 @@ func (w *Worker) sweep(ctx context.Context) {
 			w.mu.Lock()
 			w.status.SweepAnalyzed = analyzed
 			w.mu.Unlock()
-			pace(ctx)
-		}
-		if len(files) == 0 || !progressed {
-			break
 		}
 	}
 }
@@ -210,6 +218,16 @@ func (w *Worker) setErr(msg string) {
 
 // analyzeSeason processes one season end-to-end and returns how many
 // pending files got their analysis recorded.
+//
+// Two classes of file get opener (recap/intro) detection:
+//   - Pending files (no ledger row for the current detector): full
+//     treatment — openers + credits + ledger.
+//   - Ledgered files WITHOUT any opener row: opener re-detection
+//     only, written when something was found. This is the airing-
+//     season path — episodes ledgered before the season had enough
+//     pairs to validate pick up their intro retroactively the next
+//     time a new episode triggers a season re-analysis. Their
+//     credits markers and ledger rows are left untouched.
 func (w *Worker) analyzeSeason(ctx context.Context, seasonID int64) int64 {
 	files, err := w.q.GetSeasonSkipAnalysisFiles(ctx, seasonID, Detector)
 	if err != nil {
@@ -223,12 +241,14 @@ func (w *Worker) analyzeSeason(ctx context.Context, seasonID int64) int64 {
 			EpisodeNumber: f.EpisodeNumber,
 			Path:          f.Path,
 			DurationMs:    f.DurationMs,
-			Pending:       f.Pending,
+			// The analyzer computes windows for every "Pending" file;
+			// opener-less ledgered files ride along for re-detection.
+			Pending: f.Pending || !f.HasOpener,
 		})
 	}
 
-	introMarkers := analyzeSeasonIntros(ctx, seasonFiles, func(ctx context.Context, f SeasonFile) ([]uint32, error) {
-		pace(ctx)
+	introMarkers, decodeFailed := analyzeSeasonIntros(ctx, seasonFiles, func(ctx context.Context, f SeasonFile) ([]uint32, error) {
+		pace(ctx) // pace immediately before each FFmpeg spawn
 		pcm, err := decodeIntroPCM(ctx, f.Path)
 		if err != nil {
 			return nil, err
@@ -241,51 +261,82 @@ func (w *Worker) analyzeSeason(ctx context.Context, seasonID int64) int64 {
 		return 0
 	}
 
-	var done int64
-	for _, f := range seasonFiles {
-		if !f.Pending || ctx.Err() != nil {
+	var done, retro int64
+	for _, f := range files {
+		if ctx.Err() != nil {
+			break
+		}
+		// A file whose own audio decode failed is skipped entirely —
+		// no ledger row, so the next sweep retries it instead of the
+		// transient failure becoming a sticky "nothing found".
+		if decodeFailed[f.FileID] {
 			continue
 		}
-		markers := introMarkers[f.FileID]
-		if m, ok := w.detectCredits(ctx, f.Path, f.DurationMs); ok {
-			markers = append(markers, m)
+		openers := introMarkers[f.FileID]
+
+		if !f.Pending {
+			// Retroactive opener pass for a ledgered, opener-less
+			// file. Improvement-only: nothing found → leave as-is.
+			if !f.HasOpener && len(openers) > 0 {
+				if err := w.q.ReplaceAutoOpenerMarkers(ctx, f.FileID, true, openers); err != nil {
+					slog.Warn("skipmarkers: store retroactive openers failed", "file_id", f.FileID, "error", err)
+					continue
+				}
+				retro++
+			}
+			continue
 		}
-		if ctx.Err() != nil {
-			return done
+
+		markers := openers
+		credits, found, cErr := w.detectCredits(ctx, f.Path, f.DurationMs)
+		if cErr != nil {
+			// Credits pass failed (likely transient): keep any openers
+			// we computed, but DON'T ledger — the next sweep retries
+			// the whole file.
+			if len(openers) > 0 {
+				if err := w.q.ReplaceAutoOpenerMarkers(ctx, f.FileID, true, openers); err != nil {
+					slog.Warn("skipmarkers: store openers failed", "file_id", f.FileID, "error", err)
+				}
+			}
+			continue
+		}
+		if found {
+			markers = append(markers, credits)
 		}
 		if err := w.q.ReplaceAutoSkipMarkers(ctx, f.FileID, true, markers, Detector); err != nil {
 			slog.Warn("skipmarkers: store episode markers failed", "file_id", f.FileID, "error", err)
 			continue
 		}
 		done++
-		pace(ctx)
 	}
-	if done > 0 {
-		slog.Info("skip-marker season analyzed", "season_id", seasonID, "files", done)
+	if done > 0 || retro > 0 {
+		slog.Info("skip-marker season analyzed", "season_id", seasonID, "files", done, "retro_openers", retro)
 	}
 	return done
 }
 
 // detectCredits runs the tail blackdetect/silencedetect pass for one
-// file. ok=false on any failure or when nothing credible was found —
-// credits markers are advisory, so "none" is always safe.
-func (w *Worker) detectCredits(ctx context.Context, path string, durationMs int64) (models.SkipMarker, bool) {
+// file. found=false with a nil error means "analyzed, nothing credible"
+// (a valid, sticky result); a non-nil error means the pass itself
+// failed (FFmpeg error/timeout) and the caller must treat the file as
+// not-yet-analyzed so it gets retried.
+func (w *Worker) detectCredits(ctx context.Context, path string, durationMs int64) (m models.SkipMarker, found bool, err error) {
 	durationSec := float64(durationMs) / 1000.0
 	tail := creditsTailSec(durationSec)
 	if tail <= 0 {
-		return models.SkipMarker{}, false
+		return models.SkipMarker{}, false, nil
 	}
-	pace(ctx)
+	pace(ctx) // pace immediately before each FFmpeg spawn
 	black, silence, err := runCreditsDetect(ctx, path, durationSec-tail)
 	if err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("skipmarkers: credits detect failed", "path", path, "error", err)
 		}
-		return models.SkipMarker{}, false
+		return models.SkipMarker{}, false, err
 	}
 	onset, conf, ok := creditsOnsetFromRanges(black, silence, durationSec)
 	if !ok {
-		return models.SkipMarker{}, false
+		return models.SkipMarker{}, false, nil
 	}
 	return models.SkipMarker{
 		Kind:       "credits",
@@ -293,7 +344,7 @@ func (w *Worker) detectCredits(ctx context.Context, path string, durationMs int6
 		EndMs:      durationMs,
 		Confidence: conf,
 		Detector:   Detector,
-	}, true
+	}, true, nil
 }
 
 // pace sleeps the inter-file gap, returning early on cancellation.

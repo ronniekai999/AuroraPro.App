@@ -84,7 +84,7 @@ func TestAnalyzeSeasonIntros(t *testing.T) {
 	offsets := map[int]int{1: 100, 2: 50, 3: 150, 4: 80}
 	fix := buildSeason(rng, introFrames, offsets, 0, nil)
 
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	if len(out) != 4 {
 		t.Fatalf("expected results for 4 files, got %d", len(out))
 	}
@@ -130,7 +130,7 @@ func TestAnalyzeSeasonRecapSplit(t *testing.T) {
 	recapOff := map[int]int{1: 30, 2: 140, 3: 20, 4: 200}
 	fix := buildSeason(rng, 300, introOff, 220, recapOff)
 
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	for _, f := range fix.files {
 		markers := out[f.FileID]
 		if markerByKind(markers, "intro") == nil {
@@ -155,7 +155,7 @@ func TestAnalyzeSeasonMergesContiguousRecapIntro(t *testing.T) {
 	recapOff := map[int]int{1: 30, 2: 30, 3: 30}
 	fix := buildSeason(rng, 300, introOff, 220, recapOff)
 
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	for _, f := range fix.files {
 		markers := out[f.FileID]
 		if len(markers) != 1 || markers[0].Kind != "intro" {
@@ -170,7 +170,7 @@ func TestAnalyzeSeasonMergesContiguousRecapIntro(t *testing.T) {
 func TestAnalyzeSeasonTooFewEpisodes(t *testing.T) {
 	rng := rand.New(rand.NewSource(23))
 	fix := buildSeason(rng, 300, map[int]int{1: 100, 2: 100}, 0, nil)
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	for id, markers := range out {
 		if markers != nil {
 			t.Fatalf("file %d: got markers %+v from a 2-episode season (single pair must not validate)", id, markers)
@@ -189,7 +189,7 @@ func TestAnalyzeSeasonNoSharedAudio(t *testing.T) {
 		f.files = append(f.files, SeasonFile{FileID: id, EpisodeNumber: ep, DurationMs: 45 * 60 * 1000, Pending: true})
 		f.sigs[id] = randSig(rng, 2000)
 	}
-	out := analyzeSeasonIntros(context.Background(), f.files, f.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), f.files, f.sigFor)
 	for id, markers := range out {
 		if markers != nil {
 			t.Fatalf("file %d: phantom markers %+v on unrelated episodes", id, markers)
@@ -212,7 +212,7 @@ func TestAnalyzeSeasonSecondaryVersionGetsOwnOffsets(t *testing.T) {
 	files := append(append([]SeasonFile{}, fix.files...), secFile)
 	fix.sigs[999] = secondary
 
-	out := analyzeSeasonIntros(context.Background(), files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), files, fix.sigFor)
 	m := markerByKind(out[999], "intro")
 	if m == nil {
 		t.Fatalf("secondary file got no intro marker: %+v", out[999])
@@ -227,7 +227,7 @@ func TestAnalyzeSeasonPendingOnlyWritten(t *testing.T) {
 	fix := buildSeason(rng, 300, map[int]int{1: 100, 2: 50, 3: 150}, 0, nil)
 	fix.files[0].Pending = false // episode 1 already analyzed
 
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, _ := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	if _, present := out[fix.files[0].FileID]; present {
 		t.Fatal("non-pending file present in result map")
 	}
@@ -243,9 +243,14 @@ func TestAnalyzeSeasonDecodeFailureDegrades(t *testing.T) {
 	// and (3,4) still validate the season; episodes 2-4 keep markers.
 	delete(fix.sigs, fix.files[0].FileID)
 
-	out := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
+	out, failed := analyzeSeasonIntros(context.Background(), fix.files, fix.sigFor)
 	if markers := out[fix.files[0].FileID]; markers != nil {
 		t.Fatalf("undecodable file got markers: %+v", markers)
+	}
+	// The failure must be reported so the worker skips the ledger row
+	// and the file is retried next sweep instead of going sticky.
+	if !failed[fix.files[0].FileID] {
+		t.Fatal("decode failure not reported in the failed map")
 	}
 	for _, f := range fix.files[1:] {
 		if markerByKind(out[f.FileID], "intro") == nil {

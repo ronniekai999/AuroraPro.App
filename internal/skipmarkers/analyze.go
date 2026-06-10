@@ -62,11 +62,14 @@ type fileWindow struct {
 }
 
 // analyzeSeasonIntros computes intro/recap markers for every PENDING
-// file in the season. Returns a map keyed by file ID; pending files
+// file in the season. Returns a map keyed by file ID — pending files
 // where nothing was detected are present with a nil slice so the
 // caller can distinguish "analyzed, nothing found" from "not
-// processed".
-func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatureFn) map[int64][]models.SkipMarker {
+// processed" — plus the set of files whose OWN audio decode failed.
+// The worker must NOT ledger decode-failed files: a transient failure
+// (dead NFS mount, FFmpeg timeout) would otherwise become a permanent
+// "analyzed, nothing found" that the periodic sweep never retries.
+func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatureFn) (map[int64][]models.SkipMarker, map[int64]bool) {
 	out := make(map[int64][]models.SkipMarker)
 	for _, f := range files {
 		if f.Pending {
@@ -87,9 +90,11 @@ func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatu
 	sort.Ints(epNums)
 	// Fewer than 3 episodes can't produce the 2 confirming pairs the
 	// validation gate requires ("never guesses from one episode" — or
-	// from a single pair).
+	// from a single pair). The caller still ledgers these files —
+	// the season simply can't validate yet — but the has-opener
+	// re-analysis path revisits them once enough episodes exist.
 	if len(epNums) < 3 {
-		return out
+		return out, nil
 	}
 
 	// Lazy signature cache; failed decodes are cached too so a corrupt
@@ -119,7 +124,7 @@ func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatu
 	pairWins := make([][]sharedWindow, len(epNums)-1)
 	for k := 0; k+1 < len(epNums); k++ {
 		if ctx.Err() != nil {
-			return out
+			return out, failed
 		}
 		a, b := sig(primary(epNums[k])), sig(primary(epNums[k+1]))
 		if a == nil || b == nil {
@@ -134,7 +139,7 @@ func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatu
 	if confirming < minConfirmingPairs {
 		slog.Debug("skipmarkers: season not validated",
 			"episodes", len(epNums), "confirming_pairs", confirming)
-		return out
+		return out, failed
 	}
 
 	// Emit markers for each pending file from its alignments with the
@@ -145,7 +150,7 @@ func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatu
 				continue
 			}
 			if ctx.Err() != nil {
-				return out
+				return out, failed
 			}
 			var fromPrev, fromNext []fileWindow
 			isPrimary := fi == 0
@@ -186,7 +191,7 @@ func analyzeSeasonIntros(ctx context.Context, files []SeasonFile, sigFor signatu
 			out[f.FileID] = classifyWindows(fromPrev, fromNext, medianLen, f.DurationMs)
 		}
 	}
-	return out
+	return out, failed
 }
 
 // validateSeason returns the median length (frames) of each pair's
@@ -257,7 +262,13 @@ func classifyWindows(fromPrev, fromNext []fileWindow, medianLen int, durationMs 
 	}
 
 	var markers []models.SkipMarker
-	mk := func(kind string, w fileWindow, corroborated bool) models.SkipMarker {
+	// mk converts a frame window to a marker, clamped to the file's
+	// duration. ok=false drops windows that a wrong/short duration_ms
+	// (bad ffprobe metadata) would otherwise turn into end<=start rows
+	// — those would violate the table CHECK, abort the whole
+	// ReplaceAutoSkipMarkers transaction, and leave the file pending
+	// forever (re-decoding the season every sweep).
+	mk := func(kind string, w fileWindow, corroborated bool) (models.SkipMarker, bool) {
 		conf := confidenceSinglePair
 		if corroborated {
 			conf = confidenceCorroborated
@@ -267,7 +278,10 @@ func classifyWindows(fromPrev, fromNext []fileWindow, medianLen int, durationMs 
 		if durationMs > 0 && endMs > durationMs {
 			endMs = durationMs
 		}
-		return models.SkipMarker{Kind: kind, StartMs: startMs, EndMs: endMs, Confidence: conf, Detector: Detector}
+		if startMs < 0 || endMs <= startMs {
+			return models.SkipMarker{}, false
+		}
+		return models.SkipMarker{Kind: kind, StartMs: startMs, EndMs: endMs, Confidence: conf, Detector: Detector}, true
 	}
 
 	if recapIdx >= 0 {
@@ -276,11 +290,18 @@ func classifyWindows(fromPrev, fromNext []fileWindow, medianLen int, durationMs 
 		if gap <= secToFrames(mergeGapSec) {
 			// Contiguous recap+intro: one combined intro marker.
 			combined := fileWindow{start: recap.win.start, end: intro.win.end, score: intro.win.score}
-			return []models.SkipMarker{mk("intro", combined, intro.corroborated && recap.corroborated)}
+			if m, ok := mk("intro", combined, intro.corroborated && recap.corroborated); ok {
+				return []models.SkipMarker{m}
+			}
+			return nil
 		}
-		markers = append(markers, mk("recap", recap.win, recap.corroborated))
+		if m, ok := mk("recap", recap.win, recap.corroborated); ok {
+			markers = append(markers, m)
+		}
 	}
-	markers = append(markers, mk("intro", intro.win, intro.corroborated))
+	if m, ok := mk("intro", intro.win, intro.corroborated); ok {
+		markers = append(markers, m)
+	}
 	return markers
 }
 

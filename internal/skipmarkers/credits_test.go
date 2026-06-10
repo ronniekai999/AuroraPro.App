@@ -119,6 +119,15 @@ func TestCreditsOnsetRejects(t *testing.T) {
 	if _, _, ok := creditsOnsetFromRanges(nil, []timeRange{{2200, 2280}}, dur); ok {
 		t.Fatal("accepted weak silence-only evidence")
 	}
+	// Silence-only onset before 75% of runtime — even with full tail
+	// coverage — is rejected (quiet-finale false-positive cap). The
+	// same onset WITH a black frame is fine (60% floor applies).
+	if _, _, ok := creditsOnsetFromRanges(nil, []timeRange{{1560, 2400}}, dur); ok {
+		t.Fatal("accepted silence-only onset at 65% of runtime")
+	}
+	if _, _, ok := creditsOnsetFromRanges([]timeRange{{1560, 1562}}, []timeRange{{1560, 2400}}, dur); !ok {
+		t.Fatal("rejected black-corroborated onset at 65% of runtime")
+	}
 	// Nothing at all.
 	if _, _, ok := creditsOnsetFromRanges(nil, nil, dur); ok {
 		t.Fatal("accepted empty evidence")
