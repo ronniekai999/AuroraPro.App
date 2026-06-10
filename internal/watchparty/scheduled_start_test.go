@@ -75,7 +75,7 @@ func TestV3_FireScheduledStart_SpoilerGateLeavesRetryable(t *testing.T) {
 	ps.Settings.SpoilerFreeStart = true
 	ps.Participants[2] = &Participant{
 		UserID: 2, Username: "guest", IsHost: false, Ready: false,
-		Suspensions: map[string]bool{}, LastSeen: time.Now(),
+		LastSeen: time.Now(),
 	}
 	ps.mu.Unlock()
 

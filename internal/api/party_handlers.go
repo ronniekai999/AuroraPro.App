@@ -554,19 +554,17 @@ func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState, include
 	defer ps.Unlock()
 
 	resp := map[string]interface{}{
-		"code":            ps.Code,
-		"party_name":      ps.PartyName,
-		"host_user_id":    ps.HostUserID,
-		"media_item_id":   ps.MediaItemID,
-		"episode_id":      ps.EpisodeID,
-		"media_title":     ps.MediaTitle,
-		"media_poster":    ps.MediaPoster,
-		"current_time_ms": ps.CurrentTimeMs,
-		// 2026-05-25 — V3 OR (same contract as BuildPartyStateMessage /
-		// ActiveParties). The pre-join detail endpoint was showing
-		// V3-only parties as paused, so the join UI claimed "Host is
-		// paused" even when actively playing.
-		"is_playing":         ps.IsPlaying || ps.Running,
+		"code":          ps.Code,
+		"party_name":    ps.PartyName,
+		"host_user_id":  ps.HostUserID,
+		"media_item_id": ps.MediaItemID,
+		"episode_id":    ps.EpisodeID,
+		"media_title":   ps.MediaTitle,
+		"media_poster":  ps.MediaPoster,
+		// V3 anchor — the live position, not the stale resume offset the
+		// dead V2 CurrentTimeMs used to report here (2026-06 V2 deletion).
+		"current_time_ms":    ps.CurrentAbsMs(),
+		"is_playing":         ps.Running,
 		"is_active":          true,
 		"participant_count":  len(ps.Participants),
 		"max_participants":   ps.MaxParticipants,

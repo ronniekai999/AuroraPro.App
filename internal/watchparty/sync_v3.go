@@ -277,7 +277,6 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 		Username:    username,
 		IsHost:      userID == ps.HostUserID,
 		IsBuffering: false,
-		Suspensions: make(map[string]bool),
 		LastSeen:    time.Now(),
 		Companion:   companion,
 	}
@@ -782,6 +781,28 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 
 	ps.setAnchorLocked(ps.AnchorAbsMs, true) // resume from wherever we paused
 	ps.HasEverPlayed = true
+
+	// First play stamps StartedAt and cancels any in-flight schedule timer
+	// (ported from the deleted V2 HandlePlaybackControl, 2026-06). Without
+	// this, a host who schedules a party and then impatiently hits play
+	// early would leave the countdown timer armed; fireScheduledStart's
+	// dedup guard (StartedAt/HasEverPlayed) makes the late fire a no-op,
+	// but cancelling here avoids the pointless wakeup, and StartedAt gives
+	// late joiners + analytics a stable start timestamp.
+	if ps.StartedAt == nil {
+		now := time.Now()
+		ps.StartedAt = &now
+		m.cancelScheduleTimerLocked(ps)
+		if ps.dbID > 0 && m.queries != nil {
+			// Persist async — best-effort; in-memory state is authoritative.
+			go func(id int64, t time.Time) {
+				if err := m.queries.MarkPartyStarted(context.Background(), id, t); err != nil {
+					slog.Warn("mark party started failed", "id", id, "error", err)
+				}
+			}(ps.dbID, now)
+		}
+	}
+
 	m.bumpRevLocked(ps)
 	m.startTickLoopLocked(ps)
 
