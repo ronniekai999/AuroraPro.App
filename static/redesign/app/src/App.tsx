@@ -2706,6 +2706,7 @@ function DetailView({
   // Rail Resume mapping — reuse the existing resume formatters.
   const resumeShown = !!resume && isResumable(resume.item)
   const ri = resume?.item
+  const hasWatchedEpisodes = (apiEpisodes ?? []).some(ep => ep.progress?.completed)
   const railResumeFraction = resumeShown && ri && ri.duration_ms
     ? Math.min(1, ri.position_ms / ri.duration_ms)
     : undefined
@@ -2852,7 +2853,7 @@ function DetailView({
             secondaryLabel={resumeShown ? 'Play from start' : undefined}
             onSecondary={resumeShown ? () => onPlay(media) : undefined}
             onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
-            onPrevious={isShow && resumeShown ? openRecap : undefined}
+            onPrevious={isShow && hasWatchedEpisodes ? openRecap : undefined}
             inLibrary={inLibrary}
             onToggleLibrary={() => onToggleLib(media)}
             onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
