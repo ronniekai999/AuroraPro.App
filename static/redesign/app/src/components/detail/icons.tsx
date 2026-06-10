@@ -50,6 +50,15 @@ export function PlayIcon({ size = 18, className }: IconProps) {
   )
 }
 
+// Four-point sparkle — marks the AI "Previously" recap action.
+export function SparkleIcon({ size = 16, className }: IconProps) {
+  return (
+    <svg {...fill(size, className)}>
+      <path d="M12 2l1.8 5.6a4 4 0 0 0 2.6 2.6L22 12l-5.6 1.8a4 4 0 0 0-2.6 2.6L12 22l-1.8-5.6a4 4 0 0 0-2.6-2.6L2 12l5.6-1.8a4 4 0 0 0 2.6-2.6z" />
+    </svg>
+  )
+}
+
 // counter-clockwise arrow — reads as "restart / from the beginning"
 export function RestartIcon({ size = 16, className }: IconProps) {
   return (

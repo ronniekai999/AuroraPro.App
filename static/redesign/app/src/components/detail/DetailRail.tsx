@@ -15,6 +15,7 @@ import {
   UsersIcon,
   RefreshIcon,
   InfoIcon,
+  SparkleIcon,
 } from './icons'
 
 export interface DetailRow {
@@ -39,6 +40,8 @@ interface DetailRailProps {
   onSecondary?: () => void
   // "Watch Trailer" — only set when the item has a trailer
   onWatchTrailer?: () => void
+  // "Previously" — spoiler-safe AI recap; only set for a show with a resume point
+  onPrevious?: () => void
   // 3-up tiles
   inLibrary: boolean
   onToggleLibrary: () => void
@@ -104,6 +107,7 @@ export function DetailRail({
   secondaryLabel,
   onSecondary,
   onWatchTrailer,
+  onPrevious,
   inLibrary,
   onToggleLibrary,
   onAddToList,
@@ -169,6 +173,17 @@ export function DetailRail({
           >
             <RestartIcon size={16} />
             {secondaryLabel}
+          </button>
+        )}
+        {onPrevious && (
+          <button
+            type="button"
+            onClick={onPrevious}
+            title="Catch up on the story so far — spoiler-free"
+            className="w-full h-11 inline-flex items-center justify-center gap-2 rounded-full font-medium bg-purple-500/10 hover:bg-purple-500/20 border border-purple-400/25 text-purple-100 transition-all"
+          >
+            <SparkleIcon size={16} />
+            Previously
           </button>
         )}
         {onWatchTrailer && (

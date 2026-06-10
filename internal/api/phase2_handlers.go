@@ -18,6 +18,7 @@ import (
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/recap"
 	"github.com/aurora-media/aurora/internal/streaming"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/go-chi/chi/v5"
@@ -1946,6 +1947,7 @@ type ProgressHandler struct {
 	hub     *ws.Hub
 	hero    HeroProvider        // optional — invalidated on explicit MarkWatched
 	gamify  *GamificationEngine // optional — awards XP on watch completion
+	recap   *recap.Service      // optional — prebuilds "Previously" recaps on episode completion
 }
 
 func NewProgressHandler(queries *db.Queries, hub *ws.Hub) *ProgressHandler {
@@ -1965,6 +1967,40 @@ func (h *ProgressHandler) SetHeroProvider(p HeroProvider) {
 // nil disables gamification entirely.
 func (h *ProgressHandler) SetGamificationEngine(g *GamificationEngine) {
 	h.gamify = g
+}
+
+// SetRecapService attaches the "Previously" recap service. When set, finishing
+// an episode warms the spoiler-safe recap for the next resume (see
+// prebuildRecapAsync). Optional; nil disables prebuilding (the on-demand GET
+// /api/media/{id}/recap still works and generates lazily).
+func (h *ProgressHandler) SetRecapService(s *recap.Service) {
+	h.recap = s
+}
+
+// recapPrebuildTimeout bounds a background prebuild. Slightly above the recap
+// service's own 30s LLM budget so the inner timeout governs, not this one.
+const recapPrebuildTimeout = 60 * time.Second
+
+// prebuildRecapAsync warms the "Previously" recap cache after an episode
+// completes. Finishing an episode makes it the viewer's new spoiler boundary,
+// so the recap they'll want when they return — bounded to this episode — is
+// exactly what Build produces now. Fire-and-forget on a context detached from
+// the request (which returns immediately); every failure mode (LLM disabled,
+// not enough history/overviews, transient) is swallowed at Debug because the
+// on-demand GET will simply regenerate. Single-flight in the shared service
+// collapses this with a near-simultaneous on-demand open.
+func (h *ProgressHandler) prebuildRecapAsync(profileID, mediaItemID int64) {
+	if h.recap == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), recapPrebuildTimeout)
+		defer cancel()
+		if _, err := h.recap.Build(ctx, profileID, mediaItemID); err != nil {
+			slog.Debug("recap prebuild skipped",
+				"profile_id", profileID, "media_item_id", mediaItemID, "error", err)
+		}
+	}()
 }
 
 func (h *ProgressHandler) resolveProgressProfileID(w http.ResponseWriter, r *http.Request, userID int64, requested *int64) (int64, bool) {
@@ -2089,6 +2125,12 @@ func (h *ProgressHandler) UpdateProgress(w http.ResponseWriter, r *http.Request)
 	var unlocks []AchievementDef
 	if h.gamify != nil && newlyCompleted {
 		unlocks = h.gamify.AwardForWatch(r.Context(), claims.UserID, time.Now().UTC())
+	}
+
+	// Warm the "Previously" recap for the next resume. Only for episodes
+	// (wp.EpisodeID != nil) and only on the completion transition.
+	if newlyCompleted && wp.EpisodeID != nil {
+		h.prebuildRecapAsync(profileID, mediaID)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -2277,6 +2319,11 @@ func (h *ProgressHandler) MarkWatched(w http.ResponseWriter, r *http.Request) {
 	var unlocks []AchievementDef
 	if h.gamify != nil && newlyCompleted {
 		unlocks = h.gamify.AwardForWatch(r.Context(), claims.UserID, time.Now().UTC())
+	}
+
+	// Warm the "Previously" recap for the next resume (episodes only).
+	if newlyCompleted && wp.EpisodeID != nil {
+		h.prebuildRecapAsync(profileID, mediaID)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

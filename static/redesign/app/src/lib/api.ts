@@ -1097,6 +1097,26 @@ export async function getEpisodes(
   )
 }
 
+// "Previously" — spoiler-safe AI series recap. GET /api/media/{id}/recap.
+// `available` is false (with a `reason`) whenever there's nothing to show
+// (AI off, no completed episodes, or too few synopses) — the caller renders
+// a friendly state instead of an error.
+export interface RecapResponse {
+  available: boolean
+  reason?: string
+  recap?: string
+  up_to?: { season: number; episode: number; title?: string }
+  cached?: boolean
+}
+export async function getRecap(
+  mediaId: number,
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<RecapResponse> {
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  return apiFetch<RecapResponse>(`/api/media/${mediaId}/recap${qs}`, { signal })
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Progress reporting (Phase 2)
 

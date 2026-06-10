@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Previously — Aurora spoiler-safe recap</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+<style>
+  /* Real Aurora design tokens (static/redesign/app/src/index.css):
+     bg #050505 · card 0 0% 6.7% · primary/purple 270 91% 65% (#A855F7) ·
+     gold ratings #facc15 · Inter body, Space Grotesk display. */
+  :root {
+    --bg: #050505;
+    --card: #111014;
+    --card-2: #17151c;
+    --border: rgba(255,255,255,.10);
+    --fg: #ffffff;
+    --muted: #9a96a6;
+    --purple: #a855f7;
+    --purple-dim: #7c3aed;
+    --gold: #facc15;
+    --green: #34d399;
+    --radius: 16px;
+    --glow: 0 0 0 1px rgba(168,85,247,.25), 0 20px 60px -20px rgba(168,85,247,.45);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(124,58,237,.18), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, rgba(168,85,247,.12), transparent 55%),
+      var(--bg);
+    color: var(--fg);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100%;
+    padding: 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 22px;
+  }
+  .display { font-family: 'Space Grotesk', 'Inter', sans-serif; }
+
+  /* top chrome */
+  .topbar {
+    width: 100%; max-width: 1100px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 18px;
+    background: rgba(20,18,26,.55);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+  .brand .dot {
+    width: 22px; height: 22px; border-radius: 7px;
+    background: conic-gradient(from 200deg, #a855f7, #6366f1, #22d3ee, #a855f7);
+    box-shadow: 0 0 18px rgba(168,85,247,.7);
+  }
+  .nav { display: flex; gap: 20px; color: var(--muted); font-size: 14px; }
+  .nav span:nth-child(2) { color: var(--fg); position: relative; }
+  .nav span:nth-child(2)::after {
+    content:""; position:absolute; left:0; right:0; bottom:-14px; height:3px;
+    background: var(--purple); border-radius: 3px;
+  }
+
+  /* the name banner — the star of the prototype */
+  .namecard {
+    width: 100%; max-width: 1100px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(168,85,247,.10), rgba(255,255,255,.01));
+    padding: 22px 26px;
+    display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  }
+  .namecard .kicker { color: var(--purple); font-weight: 600; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; }
+  .namecard h1 { font-size: 40px; line-height: 1.05; margin: 6px 0 4px; letter-spacing: -.5px; }
+  .namecard h1 .accent { color: var(--purple); }
+  .namecard p { color: var(--muted); font-size: 14.5px; max-width: 560px; }
+  .alts { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .chip {
+    font-size: 12px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 5px 11px; background: rgba(255,255,255,.02);
+  }
+  .chip b { color: #d7d2e0; font-weight: 600; }
+  .shield {
+    flex: 0 0 auto; width: 132px; height: 132px; border-radius: 18px;
+    background: radial-gradient(circle at 50% 35%, rgba(52,211,153,.22), rgba(20,18,26,.4));
+    border: 1px solid rgba(52,211,153,.4);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    text-align: center;
+  }
+  .shield .ic { font-size: 34px; }
+  .shield small { color: var(--green); font-size: 11px; font-weight: 600; letter-spacing: .3px; }
+
+  /* the resume card (where the button lives) */
+  .stage { width: 100%; max-width: 1100px; display: grid; grid-template-columns: 1.15fr .85fr; gap: 22px; }
+  @media (max-width: 880px){ .stage{ grid-template-columns: 1fr; } }
+
+  .resume {
+    position: relative; border-radius: var(--radius); overflow: hidden;
+    border: 1px solid var(--border); min-height: 320px;
+    background:
+      linear-gradient(180deg, rgba(5,5,5,.05) 0%, rgba(5,5,5,.85) 80%),
+      radial-gradient(120% 100% at 70% 0%, #243b55, #0b1622 60%, #050505);
+    display: flex; flex-direction: column; justify-content: flex-end; padding: 22px;
+  }
+  .resume .tag { position:absolute; top:16px; left:16px; font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:#cbd5e1; background:rgba(0,0,0,.35); border:1px solid var(--border); padding:5px 10px; border-radius:999px; }
+  .resume h2 { font-size: 30px; letter-spacing: -.4px; }
+  .resume .sub { color:#c7cdd6; font-size:14px; margin-top:4px; }
+  .progress { height:5px; background:rgba(255,255,255,.18); border-radius:4px; margin:16px 0 16px; overflow:hidden; }
+  .progress > i { display:block; height:100%; width:64%; background:linear-gradient(90deg,var(--purple),#22d3ee); }
+  .actions { display:flex; gap:12px; flex-wrap:wrap; }
+  .btn { border:none; cursor:pointer; font-family:inherit; font-weight:600; font-size:14.5px; border-radius:12px; padding:12px 18px; display:inline-flex; align-items:center; gap:9px; }
+  .btn-primary { background:#fff; color:#0b0b0f; }
+  .btn-previously {
+    background: linear-gradient(180deg, rgba(168,85,247,.95), rgba(124,58,237,.95));
+    color:#fff; box-shadow: var(--glow);
+  }
+  .btn-previously .spark { filter: drop-shadow(0 0 6px rgba(255,255,255,.8)); }
+  .btn-ghost { background:rgba(255,255,255,.06); color:#e7e3ef; border:1px solid var(--border); }
+
+  /* explainer column */
+  .explain { border:1px solid var(--border); border-radius:var(--radius); background:var(--card); padding:20px; }
+  .explain h3 { font-size:15px; display:flex; align-items:center; gap:8px; }
+  .explain ol { list-style:none; margin-top:14px; display:flex; flex-direction:column; gap:12px; }
+  .explain li { display:flex; gap:12px; font-size:13.5px; color:#cfcbd8; }
+  .num { flex:0 0 auto; width:24px; height:24px; border-radius:8px; background:rgba(168,85,247,.16); color:#d8b4fe; font-weight:700; font-size:12px; display:flex; align-items:center; justify-content:center; }
+  .boundary { margin-top:16px; padding:12px; border-radius:12px; background:rgba(52,211,153,.08); border:1px solid rgba(52,211,153,.25); font-size:12.5px; color:#bbf7d0; }
+
+  /* modal */
+  .scrim { position:fixed; inset:0; background:rgba(3,3,6,.72); backdrop-filter: blur(6px); display:none; align-items:center; justify-content:center; padding:24px; z-index:50; }
+  .scrim.open { display:flex; }
+  .modal {
+    width:100%; max-width:600px; border-radius:20px; overflow:hidden;
+    background: linear-gradient(180deg, #16131d, #100e15);
+    border:1px solid rgba(168,85,247,.30); box-shadow: 0 30px 80px -20px rgba(0,0,0,.8), var(--glow);
+    transform: translateY(8px) scale(.98); opacity:0; transition: all .28s cubic-bezier(.2,.8,.2,1);
+  }
+  .scrim.open .modal { transform:none; opacity:1; }
+  .modal .head { padding:22px 24px 16px; border-bottom:1px solid var(--border); position:relative; }
+  .modal .eyebrow { color:var(--purple); font-size:11px; letter-spacing:2px; text-transform:uppercase; font-weight:600; }
+  .modal h2 { font-size:26px; letter-spacing:-.4px; margin-top:6px; }
+  .modal h2 em { color:#d8b4fe; font-style:normal; }
+  .badge-row { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  .badge { font-size:11.5px; padding:5px 10px; border-radius:999px; border:1px solid var(--border); color:#cdd6df; display:inline-flex; gap:6px; align-items:center; }
+  .badge.safe { color:#bbf7d0; border-color:rgba(52,211,153,.35); background:rgba(52,211,153,.08); }
+  .modal .body { padding:20px 24px 8px; }
+  .recap { font-size:16.5px; line-height:1.7; color:#ece9f2; min-height:150px; }
+  .recap .caret { display:inline-block; width:9px; background:var(--purple); margin-left:2px; animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .foot { padding:16px 24px 22px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid var(--border); margin-top:8px; }
+  .foot .note { color:var(--muted); font-size:11.5px; max-width:280px; }
+  .foot .cta { display:flex; gap:10px; }
+  .sample { width:100%; max-width:1100px; text-align:center; color:#6b6776; font-size:11.5px; }
+</style>
+</head>
+<body>
+
+  <!-- top chrome (matches the shipped Library/Home mockups) -->
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span> Aurora</div>
+    <div class="nav"><span>Home</span><span>Continue</span><span>Search</span><span>Parties</span></div>
+    <div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#a855f7,#22d3ee)"></div>
+  </div>
+
+  <!-- THE NAME — front and center -->
+  <div class="namecard">
+    <div>
+      <div class="kicker">New surface · spoiler-safe AI catch-up</div>
+      <h1 class="display"><span class="accent">Previously</span><span style="color:#6b6776">,</span> on Aurora</h1>
+      <p>Resume any series and Aurora writes a short “where things stand” brief from the episodes <b style="color:#d7d2e0">you’ve already finished</b> — bounded to your exact spot, so it never spoils ahead.</p>
+      <div class="alts">
+        <span class="chip">name idea · <b>Previously</b> (picked)</span>
+        <span class="chip">alt · <b>Recall</b></span>
+        <span class="chip">alt · <b>Recapsule</b></span>
+      </div>
+    </div>
+    <div class="shield">
+      <div class="ic">🛡️</div>
+      <small>NO SPOILERS</small>
+      <small style="color:#9a96a6">by construction</small>
+    </div>
+  </div>
+
+  <!-- resume card + explainer -->
+  <div class="stage">
+    <div class="resume">
+      <span class="tag">Continue watching</span>
+      <h2 class="display">Severance</h2>
+      <div class="sub">Up next · Season 2 · Episode 5 — “Trojan’s Horse”</div>
+      <div class="progress"><i></i></div>
+      <div class="actions">
+        <button class="btn btn-primary">▶ Resume S2 E5</button>
+        <button class="btn btn-previously" id="openBtn">
+          <span class="spark">✨</span> Previously
+        </button>
+        <button class="btn btn-ghost">＋ Watchlist</button>
+      </div>
+    </div>
+
+    <div class="explain">
+      <h3>🧠 How “Previously” stays spoiler-free</h3>
+      <ol>
+        <li><span class="num">1</span><div>Your <b style="color:#e7e3ef">last finished episode</b> sets a boundary — here, <b style="color:#d8b4fe">S2 · E4</b>.</div></li>
+        <li><span class="num">2</span><div>The model is fed <b style="color:#e7e3ef">only</b> the synopses of episodes at or before that point.</div></li>
+        <li><span class="num">3</span><div>It can’t mention what it never saw — the guarantee is in the query, not the prompt.</div></li>
+      </ol>
+      <div class="boundary">✓ Generated up to S2·E4 &nbsp;·&nbsp; cached &amp; shared by anyone resuming at the same spot</div>
+    </div>
+  </div>
+
+  <div class="sample">Illustrative mockup · real Aurora design tokens · sample recap text (not a real episode synopsis)</div>
+
+  <!-- the recap modal -->
+  <div class="scrim" id="scrim">
+    <div class="modal">
+      <div class="head">
+        <div class="eyebrow">✨ Previously</div>
+        <h2 class="display">Previously, on <em>Severance</em></h2>
+        <div class="badge-row">
+          <span class="badge safe">🛡️ Spoiler-safe</span>
+          <span class="badge">Caught up to S2 · E4</span>
+          <span class="badge">⚡ Aurora AI</span>
+        </div>
+      </div>
+      <div class="body">
+        <div class="recap" id="recap"></div>
+      </div>
+      <div class="foot">
+        <div class="note">Built from the 4 episodes you’ve finished this season — nothing beyond E4.</div>
+        <div class="cta">
+          <button class="btn btn-ghost" id="closeBtn">Close</button>
+          <button class="btn btn-previously"><span>▶</span> Start S2 E5</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  // Sample recap — deliberately vague/illustrative, bounded "up to S2E4".
+  const RECAP =
+    "The severed floor is unraveling. After the overtime breach, Mark and his team return to a Lumon that's trying to paper over what they saw — new perks, a softer face, the same locked doors. Mark's outie is quietly chasing the truth about Gemma, while Helly's place among them feels increasingly uncertain. Trust on the team is fraying just as management tightens its grip, and the line between who they are inside and outside the elevator has never felt thinner.";
+
+  const scrim = document.getElementById('scrim');
+  const recapEl = document.getElementById('recap');
+  const openBtn = document.getElementById('openBtn');
+  const closeBtn = document.getElementById('closeBtn');
+  let typing = null;
+
+  function typewriter(text){
+    clearTimeout(typing);
+    recapEl.innerHTML = '<span class="caret">&nbsp;</span>';
+    let i = 0;
+    function step(){
+      i += Math.max(1, Math.round(Math.random()*2));
+      const shown = text.slice(0, i);
+      recapEl.innerHTML = shown + '<span class="caret">&nbsp;</span>';
+      if (i < text.length) { typing = setTimeout(step, 16); }
+      else { recapEl.textContent = text; }
+    }
+    step();
+  }
+
+  function open(){ scrim.classList.add('open'); typewriter(RECAP); }
+  function close(){ scrim.classList.remove('open'); clearTimeout(typing); }
+
+  openBtn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+  scrim.addEventListener('click', e => { if (e.target === scrim) close(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
+</script>
+</body>
+</html>
