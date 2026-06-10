@@ -1203,6 +1203,24 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, userID int64, password
 	return err
 }
 
+// UpdateUserRole sets a user's role (admin/user) and stamps updated_at (a role
+// change is an account mutation). Returns whether a row was affected — false
+// means no such user, which the handler maps to 404.
+//
+// The role is also baked into the JWT at issue time and RequireAdmin reads it
+// from the claims, so the caller MUST bump the target's token_version after
+// this for the change to take effect promptly rather than waiting out the
+// access-token lifetime. See AuthHandler.UpdateUserRole.
+func (q *Queries) UpdateUserRole(ctx context.Context, id int64, role models.UserRole) (bool, error) {
+	result, err := q.pool.Exec(ctx,
+		`UPDATE users SET role = $2, updated_at = NOW() WHERE id = $1`,
+		id, role)
+	if err != nil {
+		return false, fmt.Errorf("update user role: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
+}
+
 // GetMediaFilePathsForLibrary returns all media_file (id, path) pairs for a library.
 func (q *Queries) GetMediaFilePathsForLibrary(ctx context.Context, libraryID int64) (map[string]int64, error) {
 	rows, err := q.pool.Query(ctx,

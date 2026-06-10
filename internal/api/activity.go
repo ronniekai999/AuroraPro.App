@@ -85,6 +85,19 @@ func (a *ActivityLogger) LogUserDeleted(ctx context.Context, actorID, targetID i
 	})
 }
 
+// LogUserRoleChanged records an admin promoting or demoting another user.
+// actorID is the admin making the change; targetID + newRole capture who was
+// changed and to what, so a privilege escalation (or self-lockout attempt) can
+// be reconstructed forensically. Mirrors LogUserDeleted's actor/target shape.
+func (a *ActivityLogger) LogUserRoleChanged(ctx context.Context, actorID, targetID int64, newRole, ip string) {
+	a.log(ctx, &models.ActivityEntry{
+		UserID:    &actorID,
+		EventType: "user_role_changed",
+		IPAddress: ip,
+		Details:   map[string]interface{}{"target_user_id": targetID, "new_role": newRole},
+	})
+}
+
 // LogImageCachePurged records the admin who wiped the image cache.
 func (a *ActivityLogger) LogImageCachePurged(ctx context.Context, actorID int64, ip string, filesRemoved int64) {
 	a.log(ctx, &models.ActivityEntry{

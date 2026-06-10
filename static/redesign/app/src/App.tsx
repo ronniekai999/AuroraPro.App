@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
@@ -78,6 +79,7 @@ import {
   clearProgress,
   deleteRequest,
   deleteUser,
+  updateUserRole,
   listRooms,
   createRoom,
   deleteRoom,
@@ -5921,6 +5923,145 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   )
 }
 
+/* ──────────────────── ADMIN USER ROW ACTIONS (3-dot menu) ─────────────────── */
+// Per-user kebab menu in the admin Users table: promote/demote + delete.
+// Replaces the bare "Delete" button so role changes get a home too.
+//
+// The menu renders into a document.body portal with fixed positioning anchored
+// to the trigger's bounding rect. That's deliberate: the Users table lives in a
+// .glass-panel with `overflow-hidden` (clips an absolutely-positioned child)
+// AND a backdrop-filter (which makes `position: fixed` resolve against the
+// panel, not the viewport). A body portal escapes both traps so the menu is
+// never clipped, including on the last row. Closes on outside click, Escape,
+// and scroll/resize (the anchor would otherwise drift).
+function UserRowMenu({
+  user,
+  onRoleChanged,
+  onDeleted,
+}: {
+  user: AdminUser
+  onRoleChanged: (role: 'admin' | 'user') => void
+  onDeleted: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
+  const triggerRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+
+  // Anchor the portal under the trigger, right-aligned to it.
+  const place = useCallback(() => {
+    const t = triggerRef.current
+    if (!t) return
+    const r = t.getBoundingClientRect()
+    setPos({ top: r.bottom + 6, right: window.innerWidth - r.right })
+  }, [])
+
+  useEffect(() => {
+    if (!open) return
+    place()
+    const onDocClick = (e: MouseEvent) => {
+      const tgt = e.target as Node
+      if (triggerRef.current?.contains(tgt)) return
+      if (menuRef.current?.contains(tgt)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { setOpen(false); triggerRef.current?.focus() }
+    }
+    // Anchor coords are viewport-relative; a scroll/resize would strand the
+    // menu, so we just close it (matches native <select> behavior).
+    const onReflow = () => setOpen(false)
+    document.addEventListener('mousedown', onDocClick)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('resize', onReflow)
+    window.addEventListener('scroll', onReflow, true)
+    return () => {
+      document.removeEventListener('mousedown', onDocClick)
+      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', onReflow)
+      window.removeEventListener('scroll', onReflow, true)
+    }
+  }, [open, place])
+
+  const isAdmin = user.role === 'admin'
+
+  const handleRole = async () => {
+    const nextRole: 'admin' | 'user' = isAdmin ? 'user' : 'admin'
+    const verb = isAdmin ? 'Remove admin from' : 'Make'
+    if (!window.confirm(`${verb} "${user.username}"${isAdmin ? '' : ' an admin'}?`)) return
+    setBusy(true)
+    try {
+      await updateUserRole(user.id, nextRole)
+      onRoleChanged(nextRole)
+      setOpen(false)
+    } catch (err) {
+      window.alert('Role change failed: ' + (err instanceof Error ? err.message : 'unknown'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    if (!window.confirm(`Delete user "${user.username}"? This cannot be undone.`)) return
+    setBusy(true)
+    try {
+      await deleteUser(user.id)
+      onDeleted()
+      setOpen(false)
+    } catch (err) {
+      window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        onClick={() => setOpen(o => !o)}
+        disabled={busy}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Actions for ${user.username}`}
+        className="p-1.5 rounded-lg text-white/40 hover:text-white/80 hover:bg-white/[0.06] disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-purple-400/60"
+      >
+        <Icon name="moreVertical" size={16} />
+      </button>
+      {open && pos && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          style={{ position: 'fixed', top: pos.top, right: pos.right }}
+          className="w-48 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[60] overflow-hidden animate-fade-in"
+        >
+          <button
+            role="menuitem"
+            onClick={handleRole}
+            disabled={busy}
+            className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] disabled:opacity-50 flex items-center gap-2.5"
+          >
+            <Icon name="shield" size={14} className="text-purple-300/70" />
+            {isAdmin ? 'Remove admin' : 'Make admin'}
+          </button>
+          <div className="border-t border-white/[0.06]" />
+          <button
+            role="menuitem"
+            onClick={handleDelete}
+            disabled={busy}
+            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 disabled:opacity-50 flex items-center gap-2.5"
+          >
+            <Icon name="trash" size={14} className="text-red-400/60" />
+            Delete user
+          </button>
+        </div>,
+        document.body,
+      )}
+    </>
+  )
+}
+
 // AdminView wired to /api/admin/* endpoints. Each tab lazy-fetches
 // on first visit and caches for the session.
 function AdminView({ currentAdminId }: { currentAdminId: number }) {
@@ -6288,26 +6429,19 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                     </td>
                     <td className="text-white/40">{fmtRelative(u.created_at)}</td>
                     <td className="text-white/40">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
-                    <td>
-                      {/* Phase 5.2 parity — Delete user. Server-side
-                          also refuses self-delete with a 4xx; this
-                          double-check just hides the button when
-                          the row is the current admin's. */}
+                    <td className="text-right">
+                      {/* 3-dot actions: promote/demote + delete. Hidden on the
+                          current admin's own row — the server refuses both
+                          self-delete and self-role-change with a 4xx, so this
+                          just spares them a menu of dead options. */}
                       {currentAdminId !== u.id && (
-                        <button
-                          onClick={async () => {
-                            if (!window.confirm(`Delete user "${u.username}"? This cannot be undone.`)) return
-                            try {
-                              await deleteUser(u.id)
-                              setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev)
-                            } catch (err) {
-                              window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                            }
-                          }}
-                          className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs rounded"
-                        >
-                          Delete
-                        </button>
+                        <div className="flex justify-end">
+                          <UserRowMenu
+                            user={u}
+                            onRoleChanged={(role) => setUsers(prev => prev ? prev.map(x => x.id === u.id ? { ...x, role } : x) : prev)}
+                            onDeleted={() => setUsers(prev => prev ? prev.filter(x => x.id !== u.id) : prev)}
+                          />
+                        </div>
                       )}
                     </td>
                   </tr>

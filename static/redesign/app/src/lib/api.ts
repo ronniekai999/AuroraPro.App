@@ -1129,6 +1129,12 @@ export async function deleteRequest(id: number): Promise<void> {
 export async function deleteUser(id: number): Promise<void> {
   await apiFetch(`/api/users/${id}`, { method: 'DELETE' })
 }
+// Promote a user to admin or demote an admin to user. Admin-only; the server
+// rejects changing your own role. PUT (not PATCH) to match the shared
+// HttpMethod type and the rest of the admin update endpoints.
+export async function updateUserRole(id: number, role: 'admin' | 'user'): Promise<void> {
+  await apiFetch(`/api/users/${id}/role`, { method: 'PUT', body: { role } })
+}
 
 export async function reportProgress(
   mediaItemId: number,
