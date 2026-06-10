@@ -1977,9 +1977,9 @@ func (h *ProgressHandler) SetRecapService(s *recap.Service) {
 	h.recap = s
 }
 
-// recapPrebuildTimeout bounds a background prebuild. Slightly above the recap
-// service's own 30s LLM budget so the inner timeout governs, not this one.
-const recapPrebuildTimeout = 60 * time.Second
+// recapPrebuildTimeout bounds a background prebuild. Above the recap service's
+// own 60s LLM budget so the inner timeout governs, not this one.
+const recapPrebuildTimeout = 90 * time.Second
 
 // prebuildRecapAsync warms the "Previously" recap cache after an episode
 // completes. Finishing an episode makes it the viewer's new spoiler boundary,
