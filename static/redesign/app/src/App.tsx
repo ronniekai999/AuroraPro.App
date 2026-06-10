@@ -1474,6 +1474,7 @@ interface HomeViewProps {
   // simply won't appear in that case).
   onNavigate?: (view: string, opts?: { sortBy?: 'rating' | 'recent' | 'title' | 'year' }) => void
   loading?: boolean
+  convoLoading?: boolean
   error?: string | null
   onRetry?: () => void
   // 2028-05-28 (deep-debug Bug C) — `continueItems` and `onPlayContinue`
@@ -1552,7 +1553,7 @@ interface HomeViewProps {
   // Phase D — conversational discovery: fired on Enter in the home "vibe" box.
   onConversationalSearch?: (query: string) => void
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1676,6 +1677,17 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, error, onRetry, onCa
               <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
               <span className="hidden sm:inline">Search</span>
             </button>
+          </div>
+        </div>
+      )}
+      {convoLoading && (
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
+          <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
+          <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
+          <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
+          <div className="relative z-10 flex items-center gap-2 text-purple-200 text-sm font-medium animate-pulse">
+            <Icon name="sparkle" size={14} />
+            Sensing the vibe...
           </div>
         </div>
       )}
@@ -7156,11 +7168,17 @@ export default function App() {
     const query = q.trim()
     if (!query) { setConvoQuery(''); setConvoResults([]); return }
     setConvoQuery(query)
+    setConvoLoading(true)
     void searchMedia(query, 12, undefined, 'semantic').then(res => {
       setConvoResults(res.items as Media[])
-    }).catch(() => { /* keep prior results; the input retains the query */ })
+      setConvoLoading(false)
+    }).catch(() => {
+      setConvoLoading(false)
+      /* keep prior results; the input retains the query */
+    })
   }, [])
   const [homeLoading, setHomeLoading] = useState(false)
+  const [convoLoading, setConvoLoading] = useState(false)
   const [homeError, setHomeError] = useState<string | null>(null)
   // 2026-06-05 (Home net-new #1) — real total library size for the greeting's
   // "picked from X titles" clause. Fetched count-only on Home mount via a
@@ -9301,6 +9319,7 @@ export default function App() {
                 ]
               })()}
               loading={homeLoading}
+              convoLoading={convoLoading}
               error={homeError}
               onRetry={requestHomeReload}
               onCardContext={openCardContextMenu}
