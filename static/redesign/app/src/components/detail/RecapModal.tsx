@@ -9,6 +9,7 @@
 // other Aurora modals (TrailerModal).
 
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { SparkleIcon, PlayIcon } from './icons'
 
 export interface RecapUpTo {
@@ -98,7 +99,7 @@ export function RecapModal({
 
   const upToLabel = upTo ? `Caught up to S${upTo.season} · E${upTo.episode}` : undefined
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-fade-in"
       onClick={onClose}
@@ -195,6 +196,7 @@ export function RecapModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

@@ -10,6 +10,7 @@
 // allowed because opening the modal follows a user gesture (the button click).
 
 import { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 
 interface Props {
   youtubeKey: string
@@ -31,7 +32,7 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
     `https://www.youtube-nocookie.com/embed/${encodeURIComponent(youtubeKey)}` +
     `?autoplay=1&rel=0&modestbranding=1`
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/85 backdrop-blur-md p-4 animate-fade-in"
       onClick={onClose}
@@ -66,6 +67,7 @@ export function TrailerModal({ youtubeKey, title, onClose }: Props) {
       >
         Close
       </button>
-    </div>
+    </div>,
+    document.body,
   )
 }
