@@ -375,7 +375,7 @@ func wantsRecommendations(query string) bool {
 // real titles and caused #207. Descriptive queries without an explicit marker
 // are handled by the empty-trigram → semantic fallback instead.
 var recommendationMarkerRE = regexp.MustCompile(
-	`\b(like|similar|reminds? me|kind of|sort of|feels? like|recommend|suggest|what should)\b`,
+	`\b(like|similar|reminds? me|kind of|sort of|feels? like|recommend|suggest|what should|vibes|mood|feeling)\b`,
 )
 
 // semanticFirst decides whether a query should try the semantic LLM path

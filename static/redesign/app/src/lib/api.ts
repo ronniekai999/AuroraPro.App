@@ -599,9 +599,11 @@ export async function searchMedia(
   query: string,
   limit = 30,
   signal?: AbortSignal,
+  mode?: 'literal' | 'semantic',
 ): Promise<SearchResult> {
   if (!query.trim()) return { items: [], mode: 'literal' }
   const params = new URLSearchParams({ q: query, limit: String(limit) })
+  if (mode) params.set('mode', mode)
   const res = await apiFetchResponse(`/api/media/search?${params.toString()}`, {
     signal,
   })

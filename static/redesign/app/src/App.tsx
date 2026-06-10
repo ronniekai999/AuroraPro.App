@@ -7156,7 +7156,7 @@ export default function App() {
     const query = q.trim()
     if (!query) { setConvoQuery(''); setConvoResults([]); return }
     setConvoQuery(query)
-    void searchMedia(query, 12).then(res => {
+    void searchMedia(query, 12, undefined, 'semantic').then(res => {
       setConvoResults(res.items as Media[])
     }).catch(() => { /* keep prior results; the input retains the query */ })
   }, [])
