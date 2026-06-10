@@ -1679,10 +1679,29 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		"has_client_caps", clientCaps != nil,
 	)
 
+	// Smart Skip markers ride the call the player already makes —
+	// no extra round-trip on playback start. Source-time offsets; the
+	// player maps them onto the active timeline via the session's
+	// start_sec, exactly like watch progress. Zero-length rows (admin
+	// suppressions) are filtered here: they exist only to stop the
+	// analyzer re-adding a marker, never to reach the player. Best-
+	// effort — a marker lookup failure must not break playback.
+	markers := []models.SkipMarker{}
+	if all, mErr := h.queries.GetSkipMarkers(r.Context(), fileID, fileType == "episode"); mErr == nil {
+		for _, m := range all {
+			if m.EndMs > m.StartMs {
+				markers = append(markers, m)
+			}
+		}
+	} else {
+		slog.Warn("stream info: skip-marker lookup failed", "file_id", fileID, "error", mErr)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"stream":       info,
 		"subtitles":    subtitles,
 		"audio_tracks": audioTracks,
+		"markers":      markers,
 	})
 }
 

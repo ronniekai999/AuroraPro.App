@@ -64,6 +64,13 @@ type Scanner struct {
 
 	// OnNewItemByTVDBID is called when an .nfo file provides a TVDB ID (but no TMDB ID).
 	OnNewItemByTVDBID func(ctx context.Context, item *models.MediaItem, tvdbID int)
+
+	// OnScanComplete fires once per ScanLibrary call after the scan
+	// finished SUCCESSFULLY (not on failure), regardless of which
+	// entry point started it (API handler, watcher, periodic timer).
+	// The Smart Skip worker hooks this to sweep for unanalyzed files.
+	// Must be cheap/non-blocking — it runs on the scan goroutine.
+	OnScanComplete func(lib *models.Library)
 }
 
 func NewScanner(cfg config.ScannerConfig, queries *db.Queries) *Scanner {
@@ -126,9 +133,13 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		} else {
 			progress.Status = models.ScanComplete
 		}
+		completed := progress.Status == models.ScanComplete
 		s.mu.Unlock()
 		if progressCb != nil {
 			progressCb(progress)
+		}
+		if completed && s.OnScanComplete != nil {
+			s.OnScanComplete(lib)
 		}
 	}()
 

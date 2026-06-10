@@ -26,7 +26,7 @@
 
 import Hls from 'hls.js'
 
-import { apiFetch } from './api'
+import { apiFetch, type SkipMarker } from './api'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -36,6 +36,11 @@ export interface StreamInfo {
   stream: StreamDecision
   audio_tracks?: AudioTrack[]
   subtitles?: SubtitleTrack[]
+  // Smart Skip windows in SOURCE-FILE milliseconds (already filtered
+  // server-side to displayable, non-suppressed markers). The player
+  // maps them onto the active timeline via the session's start_sec —
+  // the same mapping watch progress uses.
+  markers?: SkipMarker[]
 }
 
 export interface StreamDecision {

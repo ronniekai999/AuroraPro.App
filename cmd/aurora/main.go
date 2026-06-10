@@ -30,6 +30,7 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/recommender"
 	"github.com/aurora-media/aurora/internal/search"
+	"github.com/aurora-media/aurora/internal/skipmarkers"
 	"github.com/aurora-media/aurora/internal/streaming"
 	"github.com/aurora-media/aurora/internal/watchparty"
 	ws "github.com/aurora-media/aurora/internal/websocket"
@@ -515,6 +516,19 @@ func main() {
 		embedItem(ctx, item)
 	}
 
+	// Smart Skip — background intro/recap/credits detection (proposal:
+	// docs/proposals/smart-skip/IMPLEMENTATION_PLAN.md). Always
+	// constructed: the worker self-gates on FFmpeg availability and the
+	// skip_markers_enabled server setting, and runs one niced FFmpeg at
+	// a time so it never competes with live transcodes. The boot sweep
+	// drains any backlog; scan completion re-triggers it for new files;
+	// the periodic tick catches stragglers.
+	skipWorker := skipmarkers.NewWorker(queries)
+	go skipWorker.Run(ctx)
+	scanner.OnScanComplete = func(lib *models.Library) {
+		skipWorker.TriggerSweep()
+	}
+
 	// Background cleanup of expired/revoked refresh tokens (hourly)
 	go func() {
 		ticker := time.NewTicker(time.Hour)
@@ -785,8 +799,9 @@ func main() {
 		// failed to construct. Router's nil check converts that to a
 		// 503 from the rematch endpoints — same shape as the
 		// embedding-status endpoint's nil-handling.
-		AIBackfill: aiBackfillIface(aiBackfill),
-		RootCtx:    ctx, // server-lifecycle ctx for background goroutines spawned in handlers
+		AIBackfill:  aiBackfillIface(aiBackfill),
+		SkipMarkers: skipWorker,
+		RootCtx:     ctx, // server-lifecycle ctx for background goroutines spawned in handlers
 	})
 
 	// HTTP Server
