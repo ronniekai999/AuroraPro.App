@@ -43,6 +43,13 @@ const (
 	// the prompt. Keeps the prompt in the size band the LLM surfaces handle
 	// reliably (the Discover saga showed prompt size is the failure axis).
 	maxRecapEpisodes = 12
+	// recapTemplateVersion is bumped whenever the prompt or input formatting
+	// changes. It feeds into sourceHash, so a bump transparently invalidates
+	// every cached recap on its next request — no migration, no manual purge.
+	// Before this, only a model-name change or a metadata refresh busted the
+	// cache, so a prompt-only improvement silently kept serving stale recaps.
+	// Bump this on any edit to recapSystem or buildPrompt.
+	recapTemplateVersion = "2026-06-10.smart-previously-on"
 	// recapBudget bounds a single generation call. Generous because recaps run
 	// on the SMART model (cached + prebuilt async, so latency is a non-issue)
 	// and quality matters more than speed here.
@@ -199,10 +206,18 @@ func tailWindow(eps []db.RecapEpisode, n int) ([]db.RecapEpisode, bool) {
 	return eps[len(eps)-n:], true
 }
 
-// sourceHash is a stable digest of the input overviews; a metadata refresh
-// that rewrites an overview changes it and invalidates the cached recap.
+// sourceHash is a stable digest of the prompt-template version plus the input
+// overviews. A metadata refresh that rewrites an overview changes it (as does a
+// recapTemplateVersion bump), so the cached recap is regenerated on next request.
 func sourceHash(eps []db.RecapEpisode) string {
+	return sourceHashWith(recapTemplateVersion, eps)
+}
+
+// sourceHashWith is the version-parameterized core of sourceHash, split out so
+// tests can prove a template-version change yields a different digest.
+func sourceHashWith(version string, eps []db.RecapEpisode) string {
 	h := sha256.New()
+	fmt.Fprintf(h, "tpl:%s\n", version)
 	for _, e := range eps {
 		fmt.Fprintf(h, "S%dE%d|%s|%s\n", e.SeasonNumber, e.EpisodeNumber, e.Title, e.Overview)
 	}
