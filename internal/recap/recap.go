@@ -28,6 +28,13 @@
 //     synopses (episode-level knowledge placement is unreliable, so its own
 //     knowledge could leak events from unwatched episodes just ahead).
 //
+// Note "sees" above is about the INPUT: in the closure modes the model may
+// additionally draw on its own training knowledge of those same watched
+// episodes — never of anything past the boundary. Known limitation: a
+// mid-season viewer's fully-watched PRIOR seasons still get grounded
+// treatment; a future refinement could allow knowledge of completed seasons
+// while keeping the current season synopsis-only.
+//
 // Recaps are cached by (show, boundary) — not by profile — because the text
 // depends only on which episodes were watched, so two viewers at the same
 // point share one recap. The mode folds into the cache hash, so a library
@@ -84,15 +91,20 @@ const (
 )
 
 // String is the stable identifier folded into sourceHash — renaming a value
-// here would silently invalidate every cached recap, so don't.
+// here would silently invalidate every cached recap, so don't (the exact
+// strings are pinned by TestRecapModeStringStable). The "unknown" fallback is
+// deliberate: a future mode added without a case here must hash DISTINCTLY
+// rather than silently colliding with grounded's cache entries.
 func (m recapMode) String() string {
 	switch m {
-	case modeCaughtUp:
-		return "caught-up"
+	case modeGrounded:
+		return "grounded"
 	case modeSeasonClosure:
 		return "season-closure"
+	case modeCaughtUp:
+		return "caught-up"
 	default:
-		return "grounded"
+		return "unknown"
 	}
 }
 
@@ -186,25 +198,21 @@ func (s *Service) Build(ctx context.Context, profileID, mediaItemID int64) (*Res
 		return nil, ErrInsufficientContext
 	}
 
-	// Boundary facts → mode (see package comment). Both checks fail safe to
-	// the strictest mode (grounded) on query error.
-	hasAfter, herr := s.q.HasEpisodeAfterBoundary(ctx, mediaItemID, boundary.SeasonNumber, boundary.EpisodeNumber)
-	if herr != nil {
-		slog.Warn("recap: caught-up check failed, using grounded mode", "media_item_id", mediaItemID, "error", herr)
-		hasAfter = true
+	// Boundary facts → mode (see package comment). One query, one snapshot —
+	// and a HARD error, not a fail-safe: the mode folds into the cache hash,
+	// so silently guessing a mode on a transient DB error would mismatch the
+	// cached row and trigger a spurious LLM regeneration (plus a flap back
+	// when the DB recovers). The queries before this one already hard-fail,
+	// so a sick DB aborts the build the same way it always did.
+	facts, err := s.q.GetRecapBoundaryFacts(ctx, mediaItemID, boundary.SeasonNumber, boundary.EpisodeNumber)
+	if err != nil {
+		return nil, err
 	}
-	seasonLast := false
-	if hasAfter {
-		// Only relevant when something exists ahead: is the boundary the last
-		// library episode of its own season (i.e. a season finale)?
-		var serr error
-		seasonLast, serr = s.q.IsLastEpisodeOfSeason(ctx, mediaItemID, boundary.SeasonNumber, boundary.EpisodeNumber)
-		if serr != nil {
-			slog.Warn("recap: season-finale check failed, using grounded mode", "media_item_id", mediaItemID, "error", serr)
-			seasonLast = false
-		}
-	}
-	mode := selectMode(hasAfter, seasonLast)
+	// Season-closure needs a real season number to phrase its bound ("recap
+	// Season N, never mention Season N+1"); a specials boundary (season 0)
+	// would render nonsense, so it stays grounded.
+	seasonLast := facts.BoundaryIsSeasonLast && boundary.SeasonNumber >= 1
+	mode := selectMode(facts.HasEpisodesAfter, seasonLast)
 	// Mode is the single most useful fact when debugging "why did my recap
 	// (not) include X" — log it on every build decision.
 	slog.Debug("recap: mode selected", "media_item_id", mediaItemID,
@@ -227,9 +235,15 @@ func (s *Service) Build(ctx context.Context, profileID, mediaItemID int64) (*Res
 		return &Result{Recap: cached.Recap, UpTo: boundaryUpTo(boundary), Cached: true}, nil
 	}
 
-	// Collapse concurrent builds for the same (show, boundary) into one LLM call.
+	// Collapse concurrent builds for the same (show, boundary, MODE) into one
+	// LLM call. The mode is part of the key: two concurrent callers can compute
+	// different modes when the library changes between their snapshots (e.g. a
+	// scan inserting Season 2), and without it the loser would receive a recap
+	// generated under the other caller's prompt (review finding). With mode in
+	// the key they generate independently; the cache row is last-writer-wins
+	// and self-consistent either way.
 	system := systemPromptFor(mode, boundary)
-	key := fmt.Sprintf("%d:%d", mediaItemID, boundary.EpisodeID)
+	key := fmt.Sprintf("%d:%d:%s", mediaItemID, boundary.EpisodeID, mode)
 	v, gerr, _ := s.sf.Do(key, func() (any, error) {
 		return s.generate(ctx, window, truncated, system, model, mediaItemID, boundary.EpisodeID, hash)
 	})

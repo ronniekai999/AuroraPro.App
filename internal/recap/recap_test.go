@@ -103,6 +103,31 @@ func TestSourceHashVersionBustsCache(t *testing.T) {
 	}
 }
 
+// The mode strings are folded into the cache hash — renaming one silently
+// orphans every cached recap, and an unmapped future mode must hash
+// DISTINCTLY from grounded rather than colliding with its cache entries.
+func TestRecapModeStringStable(t *testing.T) {
+	pinned := map[recapMode]string{
+		modeGrounded:      "grounded",
+		modeSeasonClosure: "season-closure",
+		modeCaughtUp:      "caught-up",
+	}
+	for m, want := range pinned {
+		if got := m.String(); got != want {
+			t.Errorf("recapMode(%d).String()=%q, want %q — renaming orphans the recap cache", int(m), got, want)
+		}
+	}
+	if got := recapMode(99).String(); got != "unknown" {
+		t.Errorf("unmapped mode String()=%q, want \"unknown\" (must never collide with a real mode)", got)
+	}
+	eps := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
+	for m := range pinned {
+		if sourceHash(recapMode(99), eps) == sourceHash(m, eps) {
+			t.Errorf("unmapped mode must not hash-collide with %s", m)
+		}
+	}
+}
+
 // The mode policy in one table: knowledge use is only enabled where the
 // forward boundary is robust (nothing ahead, or a season-level bound).
 func TestSelectMode(t *testing.T) {

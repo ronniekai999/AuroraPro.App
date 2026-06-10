@@ -173,8 +173,11 @@ export function RecapModal({
 
         {/* footer */}
         <div className="px-6 py-4 border-t border-white/10 flex items-center justify-between gap-3">
+          {/* Copy note: closure modes may enrich from the AI's knowledge OF
+              watched episodes (not just their synopses), so the promise is
+              framed around the spoiler boundary — the part that's guaranteed. */}
           <p className="text-white/40 text-[11.5px] max-w-[280px]">
-            Built only from episodes you’ve finished — nothing beyond your spot.
+            Based on what you’ve watched — never reveals anything past your spot.
           </p>
           <div className="flex items-center gap-2.5">
             <button
