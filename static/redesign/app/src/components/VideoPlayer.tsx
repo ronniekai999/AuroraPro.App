@@ -1749,7 +1749,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       const clockOffset = party.clockOffsetRef?.current ?? 0
       const correctedNow = Date.now() + clockOffset
       const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
-      const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
+      // 2026-06 review (bug 4) — a tick older than ~3s means the sync
+      // socket is down or the server stalled. The old fallback corrected
+      // against the FROZEN t.abs_ms, which during any outage longer than
+      // a few seconds produced a snap-back loop: the guest plays forward,
+      // drifts past the frozen target, and gets yanked back ~every 2s
+      // until sync recovers. Free-run instead: reset the rate and skip
+      // correction until a fresh tick/hello arrives (reconnect repopulates
+      // tickRef; the give-up paths in useParty null it entirely).
+      if (elapsedMs > 3000) {
+        if (vid.playbackRate !== 1.0) vid.playbackRate = 1.0
+        return
+      }
+      const projectedAbsMs = t.abs_ms + elapsedMs
       const targetSec = absMsToHlsSec(projectedAbsMs)
       const localSec = vid.currentTime
       const driftMs = (localSec - targetSec) * 1000

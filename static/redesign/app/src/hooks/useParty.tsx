@@ -263,10 +263,16 @@ export function useParty(currentUserId?: number): UseParty {
   // had hit play. Guests joining after that point saw is_playing=
   // false until the host pause+played again.
   //
-  // We store only the MOST RECENT pending intent — the host clicking
-  // play→pause→play in rapid succession should result in "play"
-  // being sent once the socket opens, not a queue of redundant ops.
-  const pendingSyncIntentRef = useRef<OutboundSyncMessage | null>(null)
+  // 2026-06 review (bug 3) — ONE SLOT PER INTENT KIND, not a single
+  // last-write-wins slot. The old single slot let the host-broadcast
+  // recovery's requestPlay() overwrite a buffered seek (host seeks
+  // before sync opens → recovery fires → seek lost). Seek and
+  // play/pause are buffered independently; play vs pause still
+  // last-write-wins against each other (only the final state matters).
+  // Flush order is seek FIRST, then play/pause: the server's seek
+  // preserves Running and play resumes from the (new) anchor, so this
+  // order is correct for every interleaving.
+  const pendingSyncIntentRef = useRef<{ seek?: OutboundSyncMessage; playPause?: OutboundSyncMessage }>({})
   // Phase 5 — media-change subscribers. Used by the App-level player
   // glue to swap playerTarget when the host advances to a new
   // episode mid-party.
@@ -417,10 +423,10 @@ export function useParty(currentUserId?: number): UseParty {
     setState(INITIAL_STATE)
     tickRef.current = null
     helloAbsMsRef.current = 0
-    // Audit H1 (P4) — clear any buffered sync intent so a stale
-    // play/pause from the previous party doesn't replay against
+    // Audit H1 (P4) — clear any buffered sync intents so a stale
+    // play/pause/seek from the previous party doesn't replay against
     // the next one when its sync socket opens.
-    pendingSyncIntentRef.current = null
+    pendingSyncIntentRef.current = {}
   }, [closeSockets, state.code, state.partyName, state.mediaTitle, state.hostUserId])
 
   const handleRoomMessage = useCallback((raw: string) => {
@@ -810,6 +816,11 @@ export function useParty(currentUserId?: number): UseParty {
 
       const attempt = reconnectAttemptRef.current
       if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        // 2026-06 review (bug 4) — drop the last tick so the player's
+        // drift loop stops mirroring frozen sync data (stale isPlaying /
+        // position) from before the outage. The party is unreachable;
+        // local playback free-runs until the user rejoins.
+        tickRef.current = null
         setStatePatch({
           roomConnected: false,
           reconnecting: false,
@@ -882,15 +893,19 @@ export function useParty(currentUserId?: number): UseParty {
       // clear the "sync lost" badge (mirrors the room socket's onopen).
       syncReconnectAttemptRef.current = 0
       setStatePatch({ syncConnected: true, syncReconnecting: false })
-      // Audit H1 (P4) — flush the buffered intent NOW that we're
+      // Audit H1 (P4) — flush the buffered intents NOW that we're
       // connected. The most common case: host's MANIFEST_PARSED
       // auto-fired vid.play() which called requestPlay before sync
       // was open. Without this replay, the server never learns the
-      // host is playing.
+      // host is playing. Seek flushes BEFORE play/pause (see the
+      // pendingSyncIntentRef doc for why that order is always right).
       const pending = pendingSyncIntentRef.current
-      if (pending) {
-        pendingSyncIntentRef.current = null
-        try { ws.send(JSON.stringify(pending)) } catch { /* defensive */ }
+      pendingSyncIntentRef.current = {}
+      if (pending.seek) {
+        try { ws.send(JSON.stringify(pending.seek)) } catch { /* defensive */ }
+      }
+      if (pending.playPause) {
+        try { ws.send(JSON.stringify(pending.playPause)) } catch { /* defensive */ }
       }
       // 2026-05-25 — start clock-offset estimation via repeated
       // time-syncs. We use a 5-shot burst at 250ms intervals to get a
@@ -976,6 +991,13 @@ export function useParty(currentUserId?: number): UseParty {
         // construction here) still healthy, so chat/participants keep
         // working and a future room party-state can still re-open sync.
         // We just stop the badge + the backoff loop.
+        //
+        // 2026-06 review (bug 4) — also drop the last tick: with sync
+        // permanently down, the drift loop would otherwise keep
+        // correcting against a frozen position (and the stale clock
+        // offset) indefinitely. Free-run until sync comes back; a fresh
+        // hello repopulates tickRef on reopen.
+        tickRef.current = null
         setStatePatch({ syncReconnecting: false })
         return
       }
@@ -1069,10 +1091,27 @@ export function useParty(currentUserId?: number): UseParty {
     const trimmed = message.trim()
     if (!trimmed) return
     const ws = roomWsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    // 2026-06 review (bug 5) — surface send failures instead of
+    // swallowing them. The composer clears the draft on send, so a
+    // silent drop meant the user's message vanished with no feedback.
+    // Server-side rejections (rate limit, chat disabled) already
+    // surface via the inbound `error` frame → state.error banner; this
+    // covers the client-side failure modes (socket not open / send
+    // threw). The next successful action clears the banner.
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setStatePatch({ error: 'Message not sent — reconnecting to the party. Try again in a moment.' })
+      return
+    }
     const out: OutboundRoomMessage = { type: 'chat', payload: { message: trimmed } }
-    try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
-  }, [])
+    try {
+      ws.send(JSON.stringify(out))
+      // A successful send clears any prior send-failure banner so the
+      // error doesn't linger after the connection recovers.
+      setStatePatch(prev => (prev.error ? { error: null } : {}))
+    } catch {
+      setStatePatch({ error: 'Message not sent — connection hiccup. Try again.' })
+    }
+  }, [setStatePatch])
 
   // Phase 4.6 — ready flag for spoiler-free start gate. Host
   // evaluates "everyone ready?" and decides whether to play; guests
@@ -1093,19 +1132,23 @@ export function useParty(currentUserId?: number): UseParty {
     try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
   }, [])
 
-  // Audit H1 (P4) — request* methods buffer the most recent intent
-  // when the sync socket isn't OPEN yet (it opens lazily after
-  // party-state arrives on the room socket — typically 100-300ms
-  // after the user joins). The replay happens in openSyncSocket's
-  // onopen handler. Each new request* overwrites the buffer so we
-  // don't replay stale intermediate states.
+  // Audit H1 (P4) — request* methods buffer the intent when the sync
+  // socket isn't OPEN yet (it opens lazily after party-state arrives
+  // on the room socket — typically 100-300ms after the user joins).
+  // The replay happens in openSyncSocket's onopen handler. Seek is
+  // buffered in its own slot so a later play/pause can't clobber it
+  // (2026-06 review, bug 3); within each slot the newest intent wins.
   const sendOrBuffer = useCallback((msg: OutboundSyncMessage) => {
     const ws = syncWsRef.current
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify(msg)) } catch { /* defensive */ }
       return
     }
-    pendingSyncIntentRef.current = msg
+    if (msg.type === 'request-seek') {
+      pendingSyncIntentRef.current.seek = msg
+    } else {
+      pendingSyncIntentRef.current.playPause = msg
+    }
   }, [])
   const requestPlay = useCallback(() => {
     sendOrBuffer({ type: 'request-play' })
