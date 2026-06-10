@@ -340,6 +340,13 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes aurora-drift {
+  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.6; }
+  33% { transform: translate(30px, -20px) scale(1.1); opacity: 0.8; }
+  66% { transform: translate(-20px, 20px) scale(0.9); opacity: 0.6; }
+}
+
+
 .animate-chromatic {
   animation: chromaticShift 4s ease infinite;
 }
@@ -377,6 +384,15 @@
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
 }
+
+.aurora-pulse-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(40px);
+  mix-blend-mode: screen;
+  animation: aurora-drift 8s ease-in-out infinite;
+}
+
 
 /* Phase 6 — Custom scrollbar (Aurora-themed).
    Replaces the previous bare 6px-track-no-corner scrollbar with a
