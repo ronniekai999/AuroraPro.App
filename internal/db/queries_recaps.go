@@ -105,6 +105,29 @@ func (q *Queries) RecapEpisodesUpToBoundary(ctx context.Context, mediaItemID int
 	return out, rows.Err()
 }
 
+// HasEpisodeAfterBoundary reports whether the show has any episode after the
+// (boundarySeason, boundaryEpisode) ordinal — i.e. whether the viewer has
+// episodes left to watch. False means they're caught up to the latest available
+// episode, which lets the recap safely give a complete, resolved summary.
+func (q *Queries) HasEpisodeAfterBoundary(ctx context.Context, mediaItemID int64, boundarySeason, boundaryEpisode int) (bool, error) {
+	var exists bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM tv_episodes e
+			JOIN tv_seasons s ON s.id = e.season_id AND s.media_item_id = e.media_item_id
+			WHERE e.media_item_id = $1
+			  AND ( s.season_number > $2
+			        OR (s.season_number = $2 AND e.episode_number > $3) )
+		)`,
+		mediaItemID, boundarySeason, boundaryEpisode,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has episode after boundary: %w", err)
+	}
+	return exists, nil
+}
+
 // GetCachedRecap returns the cached recap for a (show, boundary) pair, if one
 // exists. ok is false (with nil error) on a cache miss.
 func (q *Queries) GetCachedRecap(ctx context.Context, mediaItemID, upToEpisodeID int64) (CachedRecap, bool, error) {

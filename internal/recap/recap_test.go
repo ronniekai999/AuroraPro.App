@@ -72,11 +72,16 @@ func TestSourceHashStableAndSensitive(t *testing.T) {
 	a := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
 	b := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
 	c := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "y"}}
-	if sourceHash(a) != sourceHash(b) {
+	if sourceHash(false, a) != sourceHash(false, b) {
 		t.Error("identical inputs should hash identically (cache stability)")
 	}
-	if sourceHash(a) == sourceHash(c) {
+	if sourceHash(false, a) == sourceHash(false, c) {
 		t.Error("changed overview should change the hash (cache invalidation)")
+	}
+	// The two recap modes produce different text for the same episodes, so the
+	// cache must distinguish them.
+	if sourceHash(true, a) == sourceHash(false, a) {
+		t.Error("caught-up vs grounded mode must change the hash")
 	}
 }
 
@@ -84,10 +89,10 @@ func TestSourceHashStableAndSensitive(t *testing.T) {
 // the digest so every cached recap regenerates on next request.
 func TestSourceHashVersionBustsCache(t *testing.T) {
 	eps := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
-	if sourceHashWith("v1", eps) == sourceHashWith("v2", eps) {
+	if sourceHashWith("v1", false, eps) == sourceHashWith("v2", false, eps) {
 		t.Error("a template-version bump must change the hash (so prompt changes invalidate the cache)")
 	}
-	if sourceHashWith("v1", eps) != sourceHashWith("v1", eps) {
+	if sourceHashWith("v1", false, eps) != sourceHashWith("v1", false, eps) {
 		t.Error("same version + inputs must hash identically (cache stability)")
 	}
 }
