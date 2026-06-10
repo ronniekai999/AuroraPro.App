@@ -2706,6 +2706,7 @@ function DetailView({
   // Rail Resume mapping — reuse the existing resume formatters.
   const resumeShown = !!resume && isResumable(resume.item)
   const ri = resume?.item
+  const hasWatchedEpisodes = (apiEpisodes ?? []).some(ep => ep.progress?.completed)
   const railResumeFraction = resumeShown && ri && ri.duration_ms
     ? Math.min(1, ri.position_ms / ri.duration_ms)
     : undefined
