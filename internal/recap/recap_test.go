@@ -1,6 +1,7 @@
 package recap
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/db"
@@ -72,16 +73,21 @@ func TestSourceHashStableAndSensitive(t *testing.T) {
 	a := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
 	b := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
 	c := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "y"}}
-	if sourceHash(false, a) != sourceHash(false, b) {
+	if sourceHash(modeGrounded, a) != sourceHash(modeGrounded, b) {
 		t.Error("identical inputs should hash identically (cache stability)")
 	}
-	if sourceHash(false, a) == sourceHash(false, c) {
+	if sourceHash(modeGrounded, a) == sourceHash(modeGrounded, c) {
 		t.Error("changed overview should change the hash (cache invalidation)")
 	}
-	// The two recap modes produce different text for the same episodes, so the
-	// cache must distinguish them.
-	if sourceHash(true, a) == sourceHash(false, a) {
-		t.Error("caught-up vs grounded mode must change the hash")
+	// Each mode produces different text for the same episodes, so the cache
+	// must distinguish all three pairwise.
+	modes := []recapMode{modeGrounded, modeSeasonClosure, modeCaughtUp}
+	for i, m1 := range modes {
+		for _, m2 := range modes[i+1:] {
+			if sourceHash(m1, a) == sourceHash(m2, a) {
+				t.Errorf("modes %s and %s must hash differently", m1, m2)
+			}
+		}
 	}
 }
 
@@ -89,11 +95,54 @@ func TestSourceHashStableAndSensitive(t *testing.T) {
 // the digest so every cached recap regenerates on next request.
 func TestSourceHashVersionBustsCache(t *testing.T) {
 	eps := []db.RecapEpisode{{SeasonNumber: 1, EpisodeNumber: 1, Overview: "x"}}
-	if sourceHashWith("v1", false, eps) == sourceHashWith("v2", false, eps) {
+	if sourceHashWith("v1", modeGrounded, eps) == sourceHashWith("v2", modeGrounded, eps) {
 		t.Error("a template-version bump must change the hash (so prompt changes invalidate the cache)")
 	}
-	if sourceHashWith("v1", false, eps) != sourceHashWith("v1", false, eps) {
+	if sourceHashWith("v1", modeGrounded, eps) != sourceHashWith("v1", modeGrounded, eps) {
 		t.Error("same version + inputs must hash identically (cache stability)")
+	}
+}
+
+// The mode policy in one table: knowledge use is only enabled where the
+// forward boundary is robust (nothing ahead, or a season-level bound).
+func TestSelectMode(t *testing.T) {
+	cases := []struct {
+		hasAfter, seasonLast bool
+		want                 recapMode
+		name                 string
+	}{
+		{false, false, modeCaughtUp, "nothing ahead → caught-up"},
+		{false, true, modeCaughtUp, "nothing ahead wins even at a finale (tighter bound)"},
+		{true, true, modeSeasonClosure, "finale with later seasons → season-closure"},
+		{true, false, modeGrounded, "true mid-season → grounded"},
+	}
+	for _, c := range cases {
+		if got := selectMode(c.hasAfter, c.seasonLast); got != c.want {
+			t.Errorf("%s: selectMode(%v,%v)=%s want %s", c.name, c.hasAfter, c.seasonLast, got, c.want)
+		}
+	}
+}
+
+func TestSystemPromptFor(t *testing.T) {
+	b := &db.RecapBoundary{SeasonNumber: 1, EpisodeNumber: 8}
+	if got := systemPromptFor(modeGrounded, b); got != recapSystemGrounded {
+		t.Error("grounded mode must use the grounded prompt")
+	}
+	if got := systemPromptFor(modeCaughtUp, b); got != recapSystemCaughtUp {
+		t.Error("caught-up mode must use the caught-up prompt")
+	}
+	sc := systemPromptFor(modeSeasonClosure, b)
+	for _, want := range []string{
+		"Season 1 through episode 8", // the watched bound, stated twice over
+		"Season 2 or later",          // the forward season bound
+		"how its central conflicts resolved",
+	} {
+		if !strings.Contains(sc, want) {
+			t.Errorf("season-closure prompt missing %q", want)
+		}
+	}
+	if strings.Contains(sc, "%!") || strings.Contains(sc, "%[") {
+		t.Errorf("season-closure prompt has unrendered format verbs: %q", sc)
 	}
 }
 

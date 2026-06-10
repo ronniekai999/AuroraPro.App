@@ -128,6 +128,30 @@ func (q *Queries) HasEpisodeAfterBoundary(ctx context.Context, mediaItemID int64
 	return exists, nil
 }
 
+// IsLastEpisodeOfSeason reports whether (boundarySeason, boundaryEpisode) is
+// the highest-numbered episode of that season present in the library — i.e.
+// the viewer finished a season finale (as far as the library knows). Combined
+// with HasEpisodeAfterBoundary=true this selects the recap's season-closure
+// mode. Same corruption-proof JOIN shape as the other recap queries.
+func (q *Queries) IsLastEpisodeOfSeason(ctx context.Context, mediaItemID int64, boundarySeason, boundaryEpisode int) (bool, error) {
+	var hasLater bool
+	err := q.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM tv_episodes e
+			JOIN tv_seasons s ON s.id = e.season_id AND s.media_item_id = e.media_item_id
+			WHERE e.media_item_id = $1
+			  AND s.season_number = $2
+			  AND e.episode_number > $3
+		)`,
+		mediaItemID, boundarySeason, boundaryEpisode,
+	).Scan(&hasLater)
+	if err != nil {
+		return false, fmt.Errorf("is last episode of season: %w", err)
+	}
+	return !hasLater, nil
+}
+
 // GetCachedRecap returns the cached recap for a (show, boundary) pair, if one
 // exists. ok is false (with nil error) on a cache miss.
 func (q *Queries) GetCachedRecap(ctx context.Context, mediaItemID, upToEpisodeID int64) (CachedRecap, bool, error) {
