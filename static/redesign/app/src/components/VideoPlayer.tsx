@@ -65,7 +65,9 @@ export interface PartySync {
   // Live refs the player polls each second. tick.abs_ms is in
   // SOURCE coordinates; player adds back hello.hls_start_sec via
   // helloAbsMsRef → 0 mapping to map to hls.js currentTime.
-  tickRef: React.MutableRefObject<{ abs_ms: number; server_now_ms: number; running?: boolean; rev?: number } | null>
+  // receivedAtMs is client-local (Date.now() at frame receipt, stamped by
+  // useParty) — the drift loop's clock-skew-free staleness signal.
+  tickRef: React.MutableRefObject<{ abs_ms: number; server_now_ms: number; running?: boolean; rev?: number; receivedAtMs?: number } | null>
   helloAbsMsRef: React.MutableRefObject<number>
   // Server-reported hls_start_sec (FFmpeg -ss snapped offset). Tick
   // abs_ms minus this gives hls.js-relative seconds.
@@ -1746,10 +1748,37 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // that no rate-correction could close (the target keeps moving
       // away). The offset is filled by repeated time-syncs on the
       // sync socket (see useParty.tsx).
+      // 2026-06 review (bug 4) — a tick we received more than ~3s ago
+      // means the sync socket is down or the server stalled. The old
+      // fallback corrected against the FROZEN t.abs_ms, which during any
+      // outage longer than a few seconds produced a snap-back loop: the
+      // guest plays forward, drifts past the frozen target, and gets
+      // yanked back ~every 2s until sync recovers. Free-run instead:
+      // reset the rate and skip correction until a fresh tick/hello
+      // arrives (reconnect repopulates tickRef; the give-up paths in
+      // useParty null it entirely).
+      //
+      // Staleness is judged by LOCAL receipt age (receivedAtMs, stamped
+      // by useParty), NOT by Date.now() - t.server_now_ms: the latter
+      // includes client↔server clock skew, so before the time-sync
+      // offset converges a machine whose clock runs >3s fast would
+      // misclassify every fresh tick as stale and silently never correct.
+      const tickAgeMs = Date.now() - (t.receivedAtMs ?? Date.now())
+      if (tickAgeMs > 3000) {
+        if (vid.playbackRate !== 1.0) vid.playbackRate = 1.0
+        return
+      }
       const clockOffset = party.clockOffsetRef?.current ?? 0
       const correctedNow = Date.now() + clockOffset
-      const elapsedMs = Math.max(0, correctedNow - t.server_now_ms)
-      const projectedAbsMs = elapsedMs > 3000 ? t.abs_ms : (t.abs_ms + elapsedMs)
+      // Project the tick forward by elapsed server time, clamped to the
+      // local receipt age (+ a small jitter margin): with a fresh tick the
+      // true elapsed can't exceed how long ago we received it, so the
+      // clamp stops residual clock skew from inflating the target.
+      const elapsedMs = Math.min(
+        Math.max(0, correctedNow - t.server_now_ms),
+        tickAgeMs + 500,
+      )
+      const projectedAbsMs = t.abs_ms + elapsedMs
       const targetSec = absMsToHlsSec(projectedAbsMs)
       const localSec = vid.currentTime
       const driftMs = (localSec - targetSec) * 1000

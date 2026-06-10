@@ -281,7 +281,10 @@ func (h *PartyHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		slog.Warn("failed to create party", "error", err, "user_id", claims.UserID)
-		writeError(w, http.StatusConflict, err.Error())
+		// 2026-06 review — DB/internal errors (e.g. "insert party: …")
+		// must not reach the response body; user-facing manager errors
+		// ("you already have an active party") pass through.
+		writeError(w, http.StatusConflict, safeRESTError(err, "failed to create party"))
 		return
 	}
 
@@ -369,7 +372,7 @@ func (h *PartyHandler) Schedule(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.manager.SchedulePartyStart(r.Context(), code, req.ScheduledStartAt); err != nil {
 		slog.Warn("schedule party failed", "code", code, "error", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, safeRESTError(err, "failed to schedule party"))
 		return
 	}
 
@@ -554,19 +557,17 @@ func (h *PartyHandler) buildLivePartyResponse(ps *watchparty.PartyState, include
 	defer ps.Unlock()
 
 	resp := map[string]interface{}{
-		"code":            ps.Code,
-		"party_name":      ps.PartyName,
-		"host_user_id":    ps.HostUserID,
-		"media_item_id":   ps.MediaItemID,
-		"episode_id":      ps.EpisodeID,
-		"media_title":     ps.MediaTitle,
-		"media_poster":    ps.MediaPoster,
-		"current_time_ms": ps.CurrentTimeMs,
-		// 2026-05-25 — V3 OR (same contract as BuildPartyStateMessage /
-		// ActiveParties). The pre-join detail endpoint was showing
-		// V3-only parties as paused, so the join UI claimed "Host is
-		// paused" even when actively playing.
-		"is_playing":         ps.IsPlaying || ps.Running,
+		"code":          ps.Code,
+		"party_name":    ps.PartyName,
+		"host_user_id":  ps.HostUserID,
+		"media_item_id": ps.MediaItemID,
+		"episode_id":    ps.EpisodeID,
+		"media_title":   ps.MediaTitle,
+		"media_poster":  ps.MediaPoster,
+		// V3 anchor — the live position, not the stale resume offset the
+		// dead V2 CurrentTimeMs used to report here (2026-06 V2 deletion).
+		"current_time_ms":    ps.CurrentAbsMs(),
+		"is_playing":         ps.Running,
 		"is_active":          true,
 		"participant_count":  len(ps.Participants),
 		"max_participants":   ps.MaxParticipants,
@@ -613,7 +614,7 @@ func (h *PartyHandler) End(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.manager.EndParty(code, claims.UserID); err != nil {
 		slog.Warn("failed to end party", "code", code, "user_id", claims.UserID, "error", err)
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, safeRESTError(err, "failed to end party"))
 		return
 	}
 

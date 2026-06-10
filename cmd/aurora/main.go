@@ -691,19 +691,19 @@ func main() {
 	// Load saved ARR settings from DB — overrides env/yaml defaults
 	loadARRSettingsFromDB(ctx, queries, arrClients)
 
-	// Watch Party manager — sync protocol V2 (server-authoritative, anchored
-	// play via TimeSync, Ready/GroupWait state machine). Tunables are exposed
-	// under the `watchparty:` block in configs/aurora.yaml.
-	partyManager := watchparty.NewManagerWithConfig(queries, hub, watchparty.SyncConfig{
-		HeartbeatInterval: cfg.WatchParty.HeartbeatInterval,
-		TimeSyncInterval:  cfg.WatchParty.TimeSyncInterval,
-		BufferHysteresis:  cfg.WatchParty.BufferHysteresis,
-		PlayScheduleDelay: cfg.WatchParty.PlayScheduleDelay,
-		DriftIgnoreMs:     cfg.WatchParty.DriftIgnoreMs,
-		DriftRateAdjustMs: cfg.WatchParty.DriftRateAdjustMs,
-		DriftHardSeekMs:   cfg.WatchParty.DriftHardSeekMs,
-		DriftMaxAttempts:  cfg.WatchParty.DriftMaxAttempts,
-	})
+	// Watch Party manager — V3 sync protocol (server-authoritative anchor +
+	// tick broadcasts; see internal/watchparty/sync_v3.go).
+	//
+	// 2026-06 V2 deletion — the legacy `watchparty:` yaml tunables
+	// (heartbeat_interval_ms, buffer_hysteresis_ms, drift_*) configured the
+	// removed V2 group state machine; config.loadYAML logs a deprecation
+	// warning if an aurora.yaml still sets them. They are NOT mapped onto
+	// the V3 thresholds because their defaults (50ms/2000ms) differ from
+	// V3's tuned values (200ms/3000ms) and silently re-tightening every
+	// deployment's sync behavior would be worse than dropping stale knobs.
+	// V3 tuning uses DefaultSyncConfig; per-deployment overrides can be
+	// added to config as V3-named knobs if anyone ever needs them.
+	partyManager := watchparty.NewManagerWithConfig(queries, hub, watchparty.SyncConfig{})
 	// M9 — set the shutdown context BEFORE the cache dir so background
 	// goroutines (the reaper, in-flight ffmpeg renders) parent off it.
 	// On SIGTERM, ctx cancels and the renders unwind cleanly rather

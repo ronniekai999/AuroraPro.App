@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,33 +46,19 @@ func shouldPromoteToken(path string) bool {
 	// will still see the raw token in its own access logs — a defense
 	// the user must apply at that layer if they're concerned (typical
 	// fix: drop `?token=*` from upstream log formats).
+	// Security review 2026-06 (watch-party report, finding 1) — the
+	// highlight-reel path (/api/parties/{code}/highlight.mp4, audit H11)
+	// was REMOVED from this list. The SPA's reel link is a same-origin
+	// <a href> whose GET carries the httpOnly access cookie (post-H10),
+	// so promotion was only ever exercised by the SPA embedding its full
+	// login JWT in the URL — leaking it into browser history and any
+	// fronting proxy's access log. tokenFromRequest's cookie fallback
+	// keeps the route working with zero credentials in the URL.
 	return strings.HasPrefix(path, "/ws") ||
 		strings.HasPrefix(path, "/api/stream/") ||
 		strings.HasPrefix(path, "/api/images/") ||
-		path == "/api/admin/backup" ||
-		// Highlight-reel download. Opened via an <a href> in a new tab (same
-		// constraint as /api/admin/backup — anchors can't carry an
-		// Authorization header), so the access token rides as ?token= and is
-		// promoted here. Without this the route, which sits in the RequireAuth
-		// group, always 401'd. See audit H11.
-		//
-		// Matched with an anchored regexp on the EXACT route shape rather than a
-		// loose prefix+suffix (audit H11 follow-up): r.URL.Path is NOT cleaned
-		// for a raw chi handler (no CleanPath middleware is registered), so
-		// `strings.HasPrefix("/api/parties/") && HasSuffix("/highlight.mp4")`
-		// would also match traversal/extra-segment paths like
-		// `/api/parties/../admin/backup/highlight.mp4` or
-		// `/api/parties/x/y/highlight.mp4`. Those 404 today, but the loose match
-		// is brittle against future routes or a later CleanPath addition. The
-		// regexp pins a single alphanumeric party-code segment (codes are drawn
-		// from [A-Z2-9], see GenerateCode) and rejects `/` and `.` segments.
-		highlightReelPathRe.MatchString(path)
+		path == "/api/admin/backup"
 }
-
-// highlightReelPathRe matches exactly /api/parties/{code}/highlight.mp4 where
-// {code} is a single alphanumeric segment — used by shouldPromoteToken so the
-// ?token= promotion can't be coaxed onto any other path. See audit H11.
-var highlightReelPathRe = regexp.MustCompile(`^/api/parties/[A-Za-z0-9]+/highlight\.mp4$`)
 
 // GetDiskFreeGB returns available disk space in gigabytes for the filesystem
 // containing the given path. Returns 0 if the syscall fails (non-fatal).

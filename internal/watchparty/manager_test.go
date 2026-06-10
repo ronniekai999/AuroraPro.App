@@ -135,10 +135,10 @@ func TestCreateParty_HardLimit(t *testing.T) {
 }
 
 // ============================================================
-// JoinParty Tests
+// Room-Socket Join Tests (V3 membership)
 // ============================================================
 
-func TestJoinParty_MaxParticipants(t *testing.T) {
+func TestJoinPartyV3Room_MaxParticipants(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
@@ -146,7 +146,8 @@ func TestJoinParty_MaxParticipants(t *testing.T) {
 		HostUserID:      1,
 		MaxParticipants: 2,
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{AllowChat: true, AllowPause: true, MaxParticipants: 2},
 		CreatedAt:       time.Now(),
@@ -161,16 +162,16 @@ func TestJoinParty_MaxParticipants(t *testing.T) {
 	m.mu.Unlock()
 
 	// Try to add a third — should fail
-	_, err := m.JoinParty("ABCDEF", 3, "user3", nil)
+	_, err := m.JoinPartyV3Room("ABCDEF", 3, "user3", nil)
 	if err == nil {
-		t.Error("JoinParty should fail when party is full")
+		t.Error("JoinPartyV3Room should fail when party is full")
 	}
 	if !strings.Contains(err.Error(), "full") {
 		t.Errorf("error should mention full, got: %s", err.Error())
 	}
 }
 
-func TestJoinParty_Reconnect(t *testing.T) {
+func TestJoinPartyV3Room_ReconnectRefreshesLastSeen(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
@@ -178,7 +179,8 @@ func TestJoinParty_Reconnect(t *testing.T) {
 		HostUserID:      1,
 		MaxParticipants: 5,
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{AllowChat: true, AllowPause: true, MaxParticipants: 5},
 		CreatedAt:       time.Now(),
@@ -191,9 +193,9 @@ func TestJoinParty_Reconnect(t *testing.T) {
 	m.mu.Unlock()
 
 	// "Reconnect" the same user
-	_, err := m.JoinParty("ABCDEF", 1, "host", nil)
+	_, err := m.JoinPartyV3Room("ABCDEF", 1, "host", nil)
 	if err != nil {
-		t.Fatalf("JoinParty reconnect failed: %v", err)
+		t.Fatalf("JoinPartyV3Room reconnect failed: %v", err)
 	}
 
 	ps.mu.Lock()
@@ -205,37 +207,38 @@ func TestJoinParty_Reconnect(t *testing.T) {
 	}
 }
 
-func TestJoinParty_NotFound(t *testing.T) {
+func TestJoinPartyV3Room_NotFound(t *testing.T) {
 	m := mockPartyManager()
 
-	_, err := m.JoinParty("XXXXXX", 1, "user", nil)
+	_, err := m.JoinPartyV3Room("XXXXXX", 1, "user", nil)
 	if err == nil {
-		t.Error("JoinParty should fail for non-existent party")
+		t.Error("JoinPartyV3Room should fail for non-existent party")
 	}
 }
 
 // ============================================================
-// LeaveParty Tests
+// Room-Socket Leave Tests (V3 membership)
 // ============================================================
 
-func TestLeaveParty_NonExistent(t *testing.T) {
+func TestLeavePartyV3Room_NonExistent(t *testing.T) {
 	m := mockPartyManager()
 
 	// Should not error for non-existent party
-	err := m.LeaveParty("XXXXXX", 1)
+	err := m.LeavePartyV3Room("XXXXXX", 1)
 	if err != nil {
-		t.Errorf("LeaveParty for non-existent party should not error, got: %v", err)
+		t.Errorf("LeavePartyV3Room for non-existent party should not error, got: %v", err)
 	}
 }
 
-func TestLeaveParty_NotParticipant(t *testing.T) {
+func TestLeavePartyV3Room_NotParticipant(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
+		roomConns:    make(map[int64]*SafeConn),
+		syncConns:    make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -245,13 +248,13 @@ func TestLeaveParty_NotParticipant(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.LeaveParty("ABCDEF", 99)
+	err := m.LeavePartyV3Room("ABCDEF", 99)
 	if err != nil {
-		t.Errorf("LeaveParty for non-participant should not error, got: %v", err)
+		t.Errorf("LeavePartyV3Room for non-participant should not error, got: %v", err)
 	}
 }
 
-func TestLeaveParty_HostEndsParty(t *testing.T) {
+func TestLeavePartyV3Room_HostEndsParty(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
@@ -259,7 +262,8 @@ func TestLeaveParty_HostEndsParty(t *testing.T) {
 		HostUserID:      1,
 		MaxParticipants: 5,
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{},
 		CreatedAt:       time.Now(),
@@ -271,12 +275,12 @@ func TestLeaveParty_HostEndsParty(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.LeaveParty("ABCDEF", 1)
+	err := m.LeavePartyV3Room("ABCDEF", 1)
 	if err != nil {
-		t.Fatalf("LeaveParty (host) failed: %v", err)
+		t.Fatalf("LeavePartyV3Room (host) failed: %v", err)
 	}
 
-	// Party should be removed from memory
+	// Party should be removed from memory (explicit host leave ends it)
 	m.mu.RLock()
 	_, exists := m.parties["ABCDEF"]
 	m.mu.RUnlock()
@@ -286,74 +290,29 @@ func TestLeaveParty_HostEndsParty(t *testing.T) {
 }
 
 // ============================================================
-// Playback Control Tests
+// Playback Intent Tests (V3 — see sync_v3_test.go for the rest)
 // ============================================================
 
-func TestHandlePlaybackControl_HostOnly(t *testing.T) {
+// AllowPause lets a non-host guest pause the party. The negative case
+// (guest pause WITHOUT AllowPause) is covered by
+// TestV3_HandleRequestPause's sibling tests in sync_v3_medfix_test.go.
+func TestV3_HandleRequestPause_GuestAllowedWhenAllowPause(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
 		Code:            "ABCDEF",
 		HostUserID:      1,
 		MaxParticipants: 5,
-		CurrentTimeMs:   0,
-		IsPlaying:       false,
+		Running:         true,
+		AnchorAbsMs:     5000,
+		AnchorServerAt:  time.Now(),
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
-		ChatHistory:     make([]ChatMessage, 0),
-		Settings:        PartySettings{AllowPause: false},
-		CreatedAt:       time.Now(),
-	}
-	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
-	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: time.Now()}
-
-	m.mu.Lock()
-	m.parties["ABCDEF"] = ps
-	m.mu.Unlock()
-
-	// Viewer tries to play — should fail
-	err := m.HandlePlaybackControl("ABCDEF", 2, "play", 0)
-	if err == nil {
-		t.Error("non-host should not be able to play")
-	}
-
-	// Host plays — V2 transitions to Waiting (not Playing) until peers Ready.
-	err = m.HandlePlaybackControl("ABCDEF", 1, "play", 5000)
-	if err != nil {
-		t.Fatalf("host play failed: %v", err)
-	}
-
-	ps.mu.Lock()
-	if ps.GroupState != GroupStateWaiting {
-		t.Errorf("GroupState = %q, want %q (play must enter Waiting until all peers Ready)",
-			ps.GroupState, GroupStateWaiting)
-	}
-	if ps.IsPlaying {
-		t.Error("IsPlaying should be false while group is Waiting")
-	}
-	if ps.CurrentTimeMs != 5000 {
-		t.Errorf("CurrentTimeMs = %d, want 5000", ps.CurrentTimeMs)
-	}
-	ps.mu.Unlock()
-}
-
-func TestHandlePlaybackControl_AllowPause(t *testing.T) {
-	m := mockPartyManager()
-
-	ps := &PartyState{
-		Code:            "ABCDEF",
-		HostUserID:      1,
-		MaxParticipants: 5,
-		CurrentTimeMs:   5000,
-		IsPlaying:       true,
-		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{AllowPause: true},
 		CreatedAt:       time.Now(),
 	}
-	now := time.Now()
-	ps.PlayingSince = &now
 	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
 	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: time.Now()}
 
@@ -361,84 +320,18 @@ func TestHandlePlaybackControl_AllowPause(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	// Viewer pauses — should succeed when AllowPause is true
-	err := m.HandlePlaybackControl("ABCDEF", 2, "pause", 6000)
-	if err != nil {
+	if err := m.HandleRequestPause("ABCDEF", 2, 6000); err != nil {
 		t.Fatalf("viewer pause with AllowPause failed: %v", err)
 	}
 
 	ps.mu.Lock()
-	if ps.IsPlaying {
-		t.Error("IsPlaying should be false after pause")
+	if ps.Running {
+		t.Error("party should be Paused after guest pause")
+	}
+	if ps.AnchorAbsMs != 6000 {
+		t.Errorf("anchor after pause = %d, want 6000", ps.AnchorAbsMs)
 	}
 	ps.mu.Unlock()
-}
-
-func TestHandlePlaybackControl_Seek(t *testing.T) {
-	m := mockPartyManager()
-
-	ps := &PartyState{
-		Code:            "ABCDEF",
-		HostUserID:      1,
-		MaxParticipants: 5,
-		CurrentTimeMs:   10000,
-		IsPlaying:       true,
-		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
-		ChatHistory:     make([]ChatMessage, 0),
-		Settings:        PartySettings{},
-		CreatedAt:       time.Now(),
-	}
-	now := time.Now()
-	ps.PlayingSince = &now
-	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
-
-	m.mu.Lock()
-	m.parties["ABCDEF"] = ps
-	m.mu.Unlock()
-
-	err := m.HandlePlaybackControl("ABCDEF", 1, "seek", 60000)
-	if err != nil {
-		t.Fatalf("seek failed: %v", err)
-	}
-
-	ps.mu.Lock()
-	if ps.CurrentTimeMs != 60000 {
-		t.Errorf("CurrentTimeMs after seek = %d, want 60000", ps.CurrentTimeMs)
-	}
-	// V2: seek always enters Waiting, regardless of prior IsPlaying — every peer
-	// must re-buffer to the new position before playback resumes.
-	if ps.GroupState != GroupStateWaiting {
-		t.Errorf("GroupState after seek = %q, want %q", ps.GroupState, GroupStateWaiting)
-	}
-	if ps.IsPlaying {
-		t.Error("IsPlaying should be false while re-buffering after seek")
-	}
-	ps.mu.Unlock()
-}
-
-func TestHandlePlaybackControl_UnknownAction(t *testing.T) {
-	m := mockPartyManager()
-
-	ps := &PartyState{
-		Code:         "ABCDEF",
-		HostUserID:   1,
-		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
-		ChatHistory:  make([]ChatMessage, 0),
-		Settings:     PartySettings{},
-		CreatedAt:    time.Now(),
-	}
-	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
-
-	m.mu.Lock()
-	m.parties["ABCDEF"] = ps
-	m.mu.Unlock()
-
-	err := m.HandlePlaybackControl("ABCDEF", 1, "rewind", 0)
-	if err == nil {
-		t.Error("unknown action should return error")
-	}
 }
 
 // ============================================================
@@ -452,7 +345,6 @@ func TestHandleChat_Success(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0, chatHistoryMax),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -502,7 +394,6 @@ func TestHandleChat_RejectsInvisibleOnly(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0, chatHistoryMax),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -539,7 +430,6 @@ func TestHandleChat_TooLong(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -584,7 +474,6 @@ func TestHandleChat_StoresRawContent(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0, chatHistoryMax),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -632,7 +521,6 @@ func TestHandleChat_RingBuffer(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0, chatHistoryMax),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -667,7 +555,6 @@ func TestHandleChat_Disabled(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{AllowChat: false},
 		CreatedAt:    time.Now(),
@@ -691,7 +578,6 @@ func TestHandleChat_NonParticipant(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{AllowChat: true},
 		CreatedAt:    time.Now(),
@@ -719,7 +605,6 @@ func TestHandleReaction_ValidEmoji(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -752,7 +637,6 @@ func TestHandleReaction_InvalidEmoji(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -779,7 +663,6 @@ func TestHandleReaction_RingBufferCap(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -815,7 +698,6 @@ func TestHandleReaction_AbsMsClamp(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -857,7 +739,6 @@ func TestRecentReactions_SnapshotIsolated(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -915,7 +796,6 @@ func voiceTestParty(t *testing.T) (*Manager, *PartyState, int64, int64) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		roomConns:    make(map[int64]*SafeConn),
 		syncConns:    make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
@@ -1080,146 +960,68 @@ func TestLeavePartyV3Room_CleansUpVoice(t *testing.T) {
 }
 
 // ============================================================
-// Drift Calculation Tests
+// Sync Heartbeat Tests (V3 — heartbeats are informational only)
 // ============================================================
 
-func TestCalculateCurrentPosition_Paused(t *testing.T) {
+func TestHandleV3Heartbeat_PartyNotFound(t *testing.T) {
 	m := mockPartyManager()
 
-	ps := &PartyState{
-		CurrentTimeMs: 30000,
-		IsPlaying:     false,
-		PlayingSince:  nil,
-	}
-
-	pos := m.calculateCurrentPosition(ps)
-	if pos != 30000 {
-		t.Errorf("paused position = %d, want 30000", pos)
-	}
+	// Must not panic; missing party is a silent no-op.
+	m.HandleV3Heartbeat("XXXXXX", 1, 5000, 4)
 }
 
-func TestCalculateCurrentPosition_Playing(t *testing.T) {
-	m := mockPartyManager()
-
-	playStart := time.Now().Add(-5 * time.Second)
-	ps := &PartyState{
-		CurrentTimeMs: 30000,
-		IsPlaying:     true,
-		PlayingSince:  &playStart,
-	}
-
-	pos := m.calculateCurrentPosition(ps)
-	// Should be approximately 35000ms (30000 + 5000ms elapsed)
-	// Allow 500ms tolerance for test execution time
-	if pos < 34500 || pos > 35500 {
-		t.Errorf("playing position = %d, want ~35000", pos)
-	}
-}
-
-// A PAUSED V3 party holds its position in the anchor (setAnchorLocked on
-// pause), NOT the dead V2 CurrentTimeMs. The snapshot must report the anchor
-// so a (re)joining client lands where the party actually is — regression test
-// for the "rejoin didn't sync" watch-party bug.
-func TestCalculateCurrentPosition_V3PausedReportsAnchor(t *testing.T) {
+// Heartbeats are purely informational (LastSeen + buffering state). The
+// server never trusts a client-reported position — only the intent handlers
+// (request-play/pause/seek) are allowed to move the anchor.
+func TestHandleV3Heartbeat_DoesNotMutateAnchor(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
-		Running:        false,
-		AnchorAbsMs:    600000, // 10:00 — where the party paused
-		AnchorServerMs: time.Now().UnixMilli(),
-		CurrentTimeMs:  0, // dead V2 field — must NOT be reported
-		IsPlaying:      false,
-	}
-
-	pos := m.calculateCurrentPosition(ps)
-	if pos != 600000 {
-		t.Errorf("paused V3 position = %d, want 600000 (the anchor, not the stale V2 CurrentTimeMs)", pos)
-	}
-}
-
-// A RUNNING V3 party advances from the anchor by wall-clock elapsed.
-func TestCalculateCurrentPosition_V3RunningExtrapolates(t *testing.T) {
-	m := mockPartyManager()
-
-	ps := &PartyState{
+		Code:           "ABCDEF",
+		HostUserID:     1,
 		Running:        true,
-		AnchorAbsMs:    600000,
-		AnchorServerMs: time.Now().Add(-5 * time.Second).UnixMilli(),
-		CurrentTimeMs:  0,
+		AnchorAbsMs:    10000,
+		AnchorServerAt: time.Now(),
+		Participants:   make(map[int64]*Participant),
+		ChatHistory:    make([]ChatMessage, 0),
+		Settings:       PartySettings{},
+		CreatedAt:      time.Now(),
 	}
-
-	pos := m.calculateCurrentPosition(ps)
-	// ~605000ms (600000 + 5000 elapsed); allow 500ms tolerance.
-	if pos < 604500 || pos > 605500 {
-		t.Errorf("running V3 position = %d, want ~605000", pos)
-	}
-}
-
-// ============================================================
-// Sync Heartbeat Tests
-// ============================================================
-
-func TestHandleSyncHeartbeat_PartyNotFound(t *testing.T) {
-	m := mockPartyManager()
-
-	err := m.HandleSyncHeartbeat("XXXXXX", 1, 5000, false)
-	if err == nil {
-		t.Error("heartbeat for non-existent party should return error")
-	}
-}
-
-// V2: heartbeats are purely informational (LastSeen + buffering state). The
-// server never trusts a client-reported position — only the authoritative state
-// machine (play/pause/seek/ready) is allowed to mutate CurrentTimeMs.
-func TestHandleSyncHeartbeat_DoesNotMutatePosition(t *testing.T) {
-	m := mockPartyManager()
-
-	ps := &PartyState{
-		Code:          "ABCDEF",
-		HostUserID:    1,
-		CurrentTimeMs: 10000,
-		IsPlaying:     true,
-		Participants:  make(map[int64]*Participant),
-		conns:         make(map[int64]*SafeConn),
-		ChatHistory:   make([]ChatMessage, 0),
-		Settings:      PartySettings{},
-		CreatedAt:     time.Now(),
-	}
-	now := time.Now()
-	ps.PlayingSince = &now
-	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
+	earlier := time.Now().Add(-time.Minute)
+	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: earlier}
 
 	m.mu.Lock()
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.HandleSyncHeartbeat("ABCDEF", 1, 15000, false)
-	if err != nil {
-		t.Fatalf("host heartbeat failed: %v", err)
-	}
+	// Client claims abs_ms=15000 and readyState=2 (buffering).
+	m.HandleV3Heartbeat("ABCDEF", 1, 15000, 2)
 
 	ps.mu.Lock()
-	if ps.CurrentTimeMs != 10000 {
-		t.Errorf("heartbeat must not mutate CurrentTimeMs; got %d want 10000", ps.CurrentTimeMs)
+	if ps.AnchorAbsMs != 10000 {
+		t.Errorf("heartbeat must not move the anchor; got %d want 10000", ps.AnchorAbsMs)
 	}
-	if ps.Participants[1].LastSeen.Before(now) {
-		t.Error("heartbeat should at least update LastSeen")
+	if !ps.Participants[1].LastSeen.After(earlier) {
+		t.Error("heartbeat should refresh LastSeen")
+	}
+	if !ps.Participants[1].IsBuffering {
+		t.Error("readyState < 3 should set IsBuffering for presence display")
 	}
 	ps.mu.Unlock()
 }
 
-func TestHandleSyncHeartbeat_NonParticipant(t *testing.T) {
+func TestHandleV3Heartbeat_NonParticipant(t *testing.T) {
 	m := mockPartyManager()
 
 	ps := &PartyState{
-		Code:          "ABCDEF",
-		HostUserID:    1,
-		CurrentTimeMs: 10000,
-		Participants:  make(map[int64]*Participant),
-		conns:         make(map[int64]*SafeConn),
-		ChatHistory:   make([]ChatMessage, 0),
-		Settings:      PartySettings{},
-		CreatedAt:     time.Now(),
+		Code:           "ABCDEF",
+		HostUserID:     1,
+		AnchorAbsMs:    10000,
+		AnchorServerAt: time.Now(),
+		Participants:   make(map[int64]*Participant),
+		ChatHistory:    make([]ChatMessage, 0),
+		Settings:       PartySettings{},
+		CreatedAt:      time.Now(),
 	}
 	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
 
@@ -1227,11 +1029,14 @@ func TestHandleSyncHeartbeat_NonParticipant(t *testing.T) {
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	// User 99 is not a participant — should silently return nil
-	err := m.HandleSyncHeartbeat("ABCDEF", 99, 5000, false)
-	if err != nil {
-		t.Errorf("stale heartbeat from non-participant should not error: %v", err)
+	// User 99 is not a participant — silent no-op, must not panic or
+	// create a participant entry.
+	m.HandleV3Heartbeat("ABCDEF", 99, 5000, 4)
+	ps.mu.Lock()
+	if _, ok := ps.Participants[99]; ok {
+		t.Error("heartbeat from non-participant must not create a participant entry")
 	}
+	ps.mu.Unlock()
 }
 
 // ============================================================
@@ -1245,7 +1050,6 @@ func TestEndParty_HostOnly(t *testing.T) {
 		Code:         "ABCDEF",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -1299,7 +1103,6 @@ func TestCleanupOnce_RemovesStaleparties(t *testing.T) {
 		Code:         "STALE1",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now().Add(-30 * time.Minute),
@@ -1311,7 +1114,6 @@ func TestCleanupOnce_RemovesStaleparties(t *testing.T) {
 		Code:         "FRESH1",
 		HostUserID:   2,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now(),
@@ -1346,7 +1148,6 @@ func TestCleanupOnce_EmptyPartyStale(t *testing.T) {
 		Code:         "EMPTY1",
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		ChatHistory:  make([]ChatMessage, 0),
 		Settings:     PartySettings{},
 		CreatedAt:    time.Now().Add(-10 * time.Minute),
@@ -1436,8 +1237,8 @@ func TestPartyCount(t *testing.T) {
 	}
 
 	m.mu.Lock()
-	m.parties["A"] = &PartyState{Code: "A", Participants: make(map[int64]*Participant), conns: make(map[int64]*SafeConn)}
-	m.parties["B"] = &PartyState{Code: "B", Participants: make(map[int64]*Participant), conns: make(map[int64]*SafeConn)}
+	m.parties["A"] = &PartyState{Code: "A", Participants: make(map[int64]*Participant)}
+	m.parties["B"] = &PartyState{Code: "B", Participants: make(map[int64]*Participant)}
 	m.mu.Unlock()
 
 	if m.PartyCount() != 2 {
@@ -1455,10 +1256,10 @@ func TestActiveParties(t *testing.T) {
 		MediaTitle:      "Inception",
 		MediaPoster:     "/poster.jpg",
 		MaxParticipants: 10,
-		IsPlaying:       true,
-		CurrentTimeMs:   5000,
+		Running:         true,
+		AnchorAbsMs:     5000,
+		AnchorServerAt:  time.Now(),
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{},
 		CreatedAt:       time.Now(),
@@ -1488,57 +1289,34 @@ func TestActiveParties(t *testing.T) {
 }
 
 // ============================================================
-// V2 Sync Protocol Tests
+// Time-Sync Tests (NTP-style clock offset handshake — used by V3)
 // ============================================================
-//
-// These cover the Jellyfin-SyncPlay-inspired state machine added in sync.go:
-//   - TimeSync request/response (clock offset handshake)
-//   - Ready protocol (all non-suspended peers must Ready before Playing)
-//   - Buffer hysteresis (one stall doesn't pause the group; a sustained stall does)
-//   - Drift reports (thrashing clients get suspended, not disconnected)
-//   - StateRevision monotonicity
-//   - SyncConfig accessor / zero-value defaulting
 
-// partyWithHost is a small helper for V2 tests: builds a party in Idle with a
-// single host participant and installs it on m.
+// partyWithHost is a small helper: builds a paused party with a single host
+// participant and installs it on m.
 func partyWithHost(m *Manager, code string, hostID int64) *PartyState {
 	ps := &PartyState{
 		Code:            code,
 		HostUserID:      hostID,
 		MaxParticipants: 5,
-		GroupState:      GroupStateIdle,
 		StateRevision:   1,
+		AnchorServerAt:  time.Now(),
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{},
 		CreatedAt:       time.Now(),
 	}
 	ps.Participants[hostID] = &Participant{
 		UserID: hostID, Username: "host", IsHost: true,
-		ReadyAtMs: -1, LastSeen: time.Now(),
-		Suspensions: make(map[string]bool),
+		LastSeen: time.Now(),
 	}
 	m.mu.Lock()
 	m.parties[code] = ps
 	m.mu.Unlock()
 	return ps
 }
-
-// addGuest attaches a non-host participant to ps.
-func addGuest(ps *PartyState, userID int64, username string) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	ps.Participants[userID] = &Participant{
-		UserID: userID, Username: username,
-		ReadyAtMs: -1, LastSeen: time.Now(),
-		Suspensions: make(map[string]bool),
-	}
-}
-
-// ------------------------------------------------------------
-// TimeSync
-// ------------------------------------------------------------
 
 // HandleTimeSync is the server half of the NTP-style handshake. It echoes the
 // client's send timestamp (so the client can compute RTT without tracking
@@ -1589,332 +1367,8 @@ func TestRecordRTT_UpdatesParticipantFields(t *testing.T) {
 	m.RecordRTT("NOPARTY", 1, 10, 10)
 }
 
-// ------------------------------------------------------------
-// Ready / group state transitions
-// ------------------------------------------------------------
-
-// Play must enter Waiting (not Playing) until every non-suspended peer emits
-// Ready at the target position. This is the core of V2 — no more "play now"
-// commands that leave slow peers behind.
-func TestHandlePlaybackControl_PlayEntersWaiting(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	revBefore := ps.StateRevision
-
-	if err := m.HandlePlaybackControl("ABCDEF", 1, "play", 8000); err != nil {
-		t.Fatalf("play: %v", err)
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStateWaiting {
-		t.Errorf("GroupState = %q, want %q", ps.GroupState, GroupStateWaiting)
-	}
-	if ps.IsPlaying {
-		t.Error("IsPlaying must be false during Waiting")
-	}
-	if ps.CurrentTimeMs != 8000 {
-		t.Errorf("CurrentTimeMs = %d, want 8000", ps.CurrentTimeMs)
-	}
-	if ps.StateRevision <= revBefore {
-		t.Errorf("StateRevision did not advance: before=%d after=%d", revBefore, ps.StateRevision)
-	}
-}
-
-// With all non-suspended peers ready at the target, HandleReady flips the group
-// from Waiting → Playing and stamps PlayingSince in the near future (accounting
-// for PlayScheduleDelay).
-func TestHandleReady_AllReadyTransitionsToPlaying(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	if err := m.HandlePlaybackControl("ABCDEF", 1, "play", 10000); err != nil {
-		t.Fatalf("play: %v", err)
-	}
-
-	// Host reports ready first — group must remain Waiting.
-	if err := m.HandleReady("ABCDEF", 1, 10000); err != nil {
-		t.Fatalf("HandleReady(host): %v", err)
-	}
-	ps.mu.Lock()
-	if ps.GroupState != GroupStateWaiting {
-		t.Fatalf("after host-only ready: GroupState = %q, want %q", ps.GroupState, GroupStateWaiting)
-	}
-	ps.mu.Unlock()
-
-	// Guest reports ready → all Ready → Playing.
-	before := time.Now()
-	if err := m.HandleReady("ABCDEF", 2, 10000); err != nil {
-		t.Fatalf("HandleReady(guest): %v", err)
-	}
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStatePlaying {
-		t.Errorf("GroupState after all-ready = %q, want %q", ps.GroupState, GroupStatePlaying)
-	}
-	if !ps.IsPlaying {
-		t.Error("IsPlaying must flip to true on Playing")
-	}
-	if ps.PlayingSince == nil {
-		t.Fatal("PlayingSince must be set on Playing")
-	}
-	if ps.PlayingSince.Before(before) {
-		t.Errorf("PlayingSince = %v should be ≥ %v (scheduled in future)", ps.PlayingSince, before)
-	}
-}
-
-// A peer reporting Ready far from the target does NOT flip the group — the
-// server waits until every non-suspended peer is within DriftHardSeekMs.
-func TestHandleReady_OffTargetIgnored(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "slowpoke")
-
-	if err := m.HandlePlaybackControl("ABCDEF", 1, "play", 10000); err != nil {
-		t.Fatalf("play: %v", err)
-	}
-
-	_ = m.HandleReady("ABCDEF", 1, 10000)
-	// Guest reports ready way off target — must not resume.
-	_ = m.HandleReady("ABCDEF", 2, 10000+m.cfg.DriftHardSeekMs+500)
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStateWaiting {
-		t.Errorf("off-target ready must keep group Waiting; got %q", ps.GroupState)
-	}
-}
-
-// A suspended peer (e.g. "buffer") is skipped by the Ready quorum — the group
-// can resume without them, which is how SharePlay handles a peer that has
-// dropped out of sync.
-func TestHandleReady_SuspendedPeerNotRequired(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "buffering")
-
-	if err := m.HandlePlaybackControl("ABCDEF", 1, "play", 5000); err != nil {
-		t.Fatalf("play: %v", err)
-	}
-
-	// Mark guest as suspended and have host Ready — group should resume.
-	ps.mu.Lock()
-	ps.Participants[2].Suspensions["buffer"] = true
-	ps.mu.Unlock()
-
-	if err := m.HandleReady("ABCDEF", 1, 5000); err != nil {
-		t.Fatalf("HandleReady(host): %v", err)
-	}
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStatePlaying {
-		t.Errorf("suspended peer should not block quorum; GroupState = %q", ps.GroupState)
-	}
-}
-
-// ------------------------------------------------------------
-// Buffer hysteresis
-// ------------------------------------------------------------
-
-// A single transient-buffer heartbeat (BufferingSince = now) should NOT drop
-// the group into Waiting — only sustained buffering does.
-func TestHandleSyncHeartbeat_TransientBufferDoesNotPauseGroup(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	ps.mu.Lock()
-	ps.GroupState = GroupStatePlaying
-	ps.IsPlaying = true
-	now := time.Now()
-	ps.PlayingSince = &now
-	ps.CurrentTimeMs = 5000
-	ps.mu.Unlock()
-
-	// One buffering heartbeat — just started buffering, no elapsed time yet.
-	if err := m.HandleSyncHeartbeat("ABCDEF", 2, 5000, true); err != nil {
-		t.Fatalf("heartbeat: %v", err)
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStatePlaying {
-		t.Errorf("transient stall must not pause group; GroupState = %q", ps.GroupState)
-	}
-	if !ps.Participants[2].IsBuffering {
-		t.Error("participant.IsBuffering should reflect report")
-	}
-	if ps.Participants[2].BufferingSince == nil {
-		t.Error("BufferingSince must be set on 0→1 transition")
-	}
-}
-
-// A peer buffering for longer than BufferHysteresis should transition the
-// group from Playing → Waiting and mark the peer suspended:"buffer".
-func TestHandleSyncHeartbeat_SustainedBufferTransitionsToWaiting(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	ps.mu.Lock()
-	ps.GroupState = GroupStatePlaying
-	ps.IsPlaying = true
-	now := time.Now()
-	ps.PlayingSince = &now
-	ps.CurrentTimeMs = 5000
-	// Pre-seed BufferingSince far in the past so the next heartbeat crosses
-	// the hysteresis threshold without needing a real sleep.
-	old := now.Add(-10 * m.cfg.BufferHysteresis)
-	ps.Participants[2].IsBuffering = true
-	ps.Participants[2].BufferingSince = &old
-	ps.mu.Unlock()
-
-	if err := m.HandleSyncHeartbeat("ABCDEF", 2, 5200, true); err != nil {
-		t.Fatalf("heartbeat: %v", err)
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.GroupState != GroupStateWaiting {
-		t.Errorf("sustained buffer must pause group; GroupState = %q", ps.GroupState)
-	}
-	if ps.IsPlaying {
-		t.Error("IsPlaying must be false in Waiting")
-	}
-	if !ps.Participants[2].Suspensions["buffer"] {
-		t.Error("buffering peer should be marked suspended:buffer")
-	}
-}
-
-// Clearing the buffering flag must clear BufferingSince and drop the "buffer"
-// suspension so the peer can rejoin the Ready quorum.
-func TestHandleSyncHeartbeat_BufferClearRemovesSuspension(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	ps.mu.Lock()
-	now := time.Now()
-	ps.Participants[2].IsBuffering = true
-	ps.Participants[2].BufferingSince = &now
-	ps.Participants[2].Suspensions["buffer"] = true
-	ps.mu.Unlock()
-
-	if err := m.HandleSyncHeartbeat("ABCDEF", 2, 5000, false); err != nil {
-		t.Fatalf("heartbeat: %v", err)
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.Participants[2].IsBuffering {
-		t.Error("IsBuffering should be cleared")
-	}
-	if ps.Participants[2].BufferingSince != nil {
-		t.Error("BufferingSince should be cleared on 1→0 transition")
-	}
-	if ps.Participants[2].Suspensions["buffer"] {
-		t.Error("suspension 'buffer' should be removed on clear")
-	}
-}
-
-// ------------------------------------------------------------
-// Drift reports
-// ------------------------------------------------------------
-
-// A corrected drift report zeroes the failure counter regardless of prior state.
-func TestHandleDriftReport_CorrectedResetsCounter(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-
-	ps.mu.Lock()
-	ps.Participants[1].FailedSeekAttempts = 3
-	ps.mu.Unlock()
-
-	if err := m.HandleDriftReport("ABCDEF", 1, 100, true); err != nil {
-		t.Fatalf("HandleDriftReport: %v", err)
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.Participants[1].FailedSeekAttempts != 0 {
-		t.Errorf("corrected report must zero counter; got %d", ps.Participants[1].FailedSeekAttempts)
-	}
-}
-
-// Repeated uncorrected drift beyond DriftMaxAttempts must suspend the peer
-// with "desync" (they stay in chat but drop out of group playback).
-func TestHandleDriftReport_ExceedsMaxAttempts_SuspendsPeer(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "thrasher")
-
-	for i := 0; i < m.cfg.DriftMaxAttempts; i++ {
-		if err := m.HandleDriftReport("ABCDEF", 2, 5000, false); err != nil {
-			t.Fatalf("attempt %d: %v", i, err)
-		}
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if !ps.Participants[2].Suspensions["desync"] {
-		t.Errorf("peer exceeding DriftMaxAttempts=%d must be suspended:desync",
-			m.cfg.DriftMaxAttempts)
-	}
-	if ps.Participants[2].FailedSeekAttempts < m.cfg.DriftMaxAttempts {
-		t.Errorf("FailedSeekAttempts = %d, want ≥ %d",
-			ps.Participants[2].FailedSeekAttempts, m.cfg.DriftMaxAttempts)
-	}
-}
-
-// ------------------------------------------------------------
-// State revision / config accessors
-// ------------------------------------------------------------
-
-// Every state-mutating transition must strictly increase StateRevision so
-// clients can discard out-of-order snapshots. Because UDP-style out-of-order
-// WS writes are rare in practice this is cheap insurance.
-func TestStateRevisionIsMonotonic(t *testing.T) {
-	m := mockPartyManager()
-	ps := partyWithHost(m, "ABCDEF", 1)
-	addGuest(ps, 2, "viewer")
-
-	ps.mu.Lock()
-	rev0 := ps.StateRevision
-	ps.mu.Unlock()
-
-	// play → waiting
-	_ = m.HandlePlaybackControl("ABCDEF", 1, "play", 1000)
-	ps.mu.Lock()
-	rev1 := ps.StateRevision
-	ps.mu.Unlock()
-	if rev1 <= rev0 {
-		t.Errorf("rev after play = %d, want > %d", rev1, rev0)
-	}
-
-	// all ready → playing
-	_ = m.HandleReady("ABCDEF", 1, 1000)
-	_ = m.HandleReady("ABCDEF", 2, 1000)
-	ps.mu.Lock()
-	rev2 := ps.StateRevision
-	ps.mu.Unlock()
-	if rev2 <= rev1 {
-		t.Errorf("rev after ready quorum = %d, want > %d", rev2, rev1)
-	}
-
-	// seek → waiting (even from Playing)
-	_ = m.HandlePlaybackControl("ABCDEF", 1, "seek", 30000)
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	if ps.StateRevision <= rev2 {
-		t.Errorf("rev after seek = %d, want > %d", ps.StateRevision, rev2)
-	}
-}
-
-// SyncConfig() on the Manager returns the active config. Useful for the WS
-// handler to tell new clients the heartbeat cadence without a magic number.
+// SyncConfig() on the Manager returns the active config. Useful for handlers
+// and tests that need the advertised V3 thresholds without magic numbers.
 func TestSyncConfigAccessor_ReturnsActiveConfig(t *testing.T) {
 	m := mockPartyManager()
 	got := m.SyncConfig()
@@ -1925,35 +1379,29 @@ func TestSyncConfigAccessor_ReturnsActiveConfig(t *testing.T) {
 }
 
 // NewManagerWithConfig must backfill any zero/negative values with defaults —
-// operators specifying only a subset of YAML keys should not get pathological
+// callers specifying only a subset of knobs should not get pathological
 // zero-threshold behavior.
 func TestNewManagerWithConfig_BackfillsZeroValues(t *testing.T) {
-	// Only set HeartbeatInterval; the rest are zero and must be defaulted.
-	partial := SyncConfig{HeartbeatInterval: 100 * time.Millisecond}
+	// Only set TickInterval; the rest are zero and must be defaulted.
+	partial := SyncConfig{TickInterval: 100 * time.Millisecond}
 	m := NewManagerWithConfig(nil, nil, partial)
 	got := m.SyncConfig()
 	def := DefaultSyncConfig()
 
-	if got.HeartbeatInterval != 100*time.Millisecond {
-		t.Errorf("HeartbeatInterval = %v, want 100ms (explicit override)", got.HeartbeatInterval)
+	if got.TickInterval != 100*time.Millisecond {
+		t.Errorf("TickInterval = %v, want 100ms (explicit override)", got.TickInterval)
 	}
-	if got.TimeSyncInterval != def.TimeSyncInterval {
-		t.Errorf("TimeSyncInterval = %v, want default %v", got.TimeSyncInterval, def.TimeSyncInterval)
+	if got.V3DriftIgnoreMs != def.V3DriftIgnoreMs {
+		t.Errorf("V3DriftIgnoreMs = %d, want default %d", got.V3DriftIgnoreMs, def.V3DriftIgnoreMs)
 	}
-	if got.BufferHysteresis != def.BufferHysteresis {
-		t.Errorf("BufferHysteresis = %v, want default %v", got.BufferHysteresis, def.BufferHysteresis)
+	if got.V3DriftHardSeekMs != def.V3DriftHardSeekMs {
+		t.Errorf("V3DriftHardSeekMs = %d, want default %d", got.V3DriftHardSeekMs, def.V3DriftHardSeekMs)
 	}
-	if got.DriftIgnoreMs != def.DriftIgnoreMs {
-		t.Errorf("DriftIgnoreMs = %d, want default %d", got.DriftIgnoreMs, def.DriftIgnoreMs)
+	if got.V3CatchUpRate != def.V3CatchUpRate {
+		t.Errorf("V3CatchUpRate = %v, want default %v", got.V3CatchUpRate, def.V3CatchUpRate)
 	}
-	if got.DriftRateAdjustMs != def.DriftRateAdjustMs {
-		t.Errorf("DriftRateAdjustMs = %d, want default %d", got.DriftRateAdjustMs, def.DriftRateAdjustMs)
-	}
-	if got.DriftHardSeekMs != def.DriftHardSeekMs {
-		t.Errorf("DriftHardSeekMs = %d, want default %d", got.DriftHardSeekMs, def.DriftHardSeekMs)
-	}
-	if got.DriftMaxAttempts != def.DriftMaxAttempts {
-		t.Errorf("DriftMaxAttempts = %d, want default %d", got.DriftMaxAttempts, def.DriftMaxAttempts)
+	if got.V3EaseBackRate != def.V3EaseBackRate {
+		t.Errorf("V3EaseBackRate = %v, want default %v", got.V3EaseBackRate, def.V3EaseBackRate)
 	}
 }
 
@@ -1964,13 +1412,12 @@ func TestNewManagerWithConfig_BackfillsZeroValues(t *testing.T) {
 // TestFireScheduledStart_DedupsIfStartedAt locks in the dedup invariant
 // in fireScheduledStart. Production bug class: a host who schedules a
 // party and then manually clicks play before the scheduled moment would
-// (without the fix in HandlePlaybackControl) trigger a double-fire — the
+// (without the fix in HandleRequestPlay) trigger a double-fire — the
 // scheduled timer would still fire at the original moment, broadcasting
-// a second "party-starting" and kicking everyone back through the Ready
-// handshake mid-movie.
+// a second "party-starting" mid-movie.
 //
 // The fix has two parts:
-//  1. HandlePlaybackControl("play") stamps ps.StartedAt and cancels the
+//  1. HandleRequestPlay stamps ps.StartedAt on first play and cancels the
 //     schedule timer.
 //  2. fireScheduledStart guards on `ps.StartedAt != nil` and no-ops.
 //
@@ -1986,7 +1433,6 @@ func TestFireScheduledStart_DedupsIfStartedAt(t *testing.T) {
 		Code:         code,
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		syncConns:    make(map[int64]*SafeConn),
 		roomConns:    make(map[int64]*SafeConn),
 		// Pre-set StartedAt to simulate "the party already started" state.
@@ -2007,17 +1453,13 @@ func TestFireScheduledStart_DedupsIfStartedAt(t *testing.T) {
 	}
 }
 
-// TestHandlePlaybackControl_PlayStampsStartedAt verifies that a manual
-// host-play stamps ps.StartedAt on its first invocation. This is the
-// other half of the double-fire fix: by stamping StartedAt here, the
-// scheduled timer's dedup guard (above) becomes effective for the
-// manual-play-before-schedule-fire path.
-//
-// We don't assert on broadcasts because mockPartyManager has no Hub
-// (broadcasts to empty conns are no-ops). The behavioral guarantee is
-// "first play stamps StartedAt", which the dedup test then verifies
-// prevents double-firing.
-func TestHandlePlaybackControl_PlayStampsStartedAt(t *testing.T) {
+// TestHandleRequestPlay_StampsStartedAt verifies that a manual host-play
+// stamps ps.StartedAt on its first invocation. This is the other half of
+// the double-fire fix: by stamping StartedAt here, the scheduled timer's
+// dedup guard (above) becomes effective for the
+// manual-play-before-schedule-fire path. Ported from the deleted V2
+// HandlePlaybackControl during the 2026-06 V2 deletion.
+func TestHandleRequestPlay_StampsStartedAt(t *testing.T) {
 	m := mockPartyManager()
 
 	code := "TESTPL"
@@ -2026,13 +1468,11 @@ func TestHandlePlaybackControl_PlayStampsStartedAt(t *testing.T) {
 		HostUserID:      1,
 		MaxParticipants: 5,
 		Participants:    make(map[int64]*Participant),
-		conns:           make(map[int64]*SafeConn),
 		syncConns:       make(map[int64]*SafeConn),
 		roomConns:       make(map[int64]*SafeConn),
 		ChatHistory:     make([]ChatMessage, 0),
 		Settings:        PartySettings{AllowPause: false},
 		CreatedAt:       time.Now(),
-		GroupState:      GroupStateIdle,
 		StartedAt:       nil, // pre-condition: not yet started
 	}
 	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
@@ -2040,12 +1480,20 @@ func TestHandlePlaybackControl_PlayStampsStartedAt(t *testing.T) {
 	m.parties[code] = ps
 	m.mu.Unlock()
 
-	if err := m.HandlePlaybackControl(code, 1, "play", 0); err != nil {
-		t.Fatalf("HandlePlaybackControl(play) returned err: %v", err)
+	if err := m.HandleRequestPlay(code, 1); err != nil {
+		t.Fatalf("HandleRequestPlay returned err: %v", err)
 	}
+	// Stop the tick loop the play started so the test doesn't leak it.
+	defer func() {
+		ps.mu.Lock()
+		m.stopTickLoopLocked(ps)
+		ps.mu.Unlock()
+	}()
 
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
 	if ps.StartedAt == nil {
-		t.Error("HandlePlaybackControl(play) did not stamp StartedAt; double-fire dedup will be ineffective")
+		t.Error("HandleRequestPlay did not stamp StartedAt; double-fire dedup will be ineffective")
 	}
 }
 
@@ -2060,7 +1508,6 @@ func TestSchedulePartyStart_RejectsPastTimestamps(t *testing.T) {
 		Code:         code,
 		HostUserID:   1,
 		Participants: make(map[int64]*Participant),
-		conns:        make(map[int64]*SafeConn),
 		syncConns:    make(map[int64]*SafeConn),
 		roomConns:    make(map[int64]*SafeConn),
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
@@ -47,20 +49,113 @@ type PartySettings struct {
 	SpoilerFreeStart bool `json:"spoiler_free_start"`
 }
 
-// SafeConn wraps a gorilla/websocket.Conn with a write mutex.
+// SafeConn wraps a gorilla/websocket.Conn with a write mutex and a
+// buffered outbound queue drained by a per-connection write pump.
+//
 // gorilla/websocket does not support concurrent writers, so all writes
-// (including pings, broadcasts, and direct messages) must be serialized.
+// (pings, broadcasts, direct messages) serialize through writeMu.
+//
+// 2026-06 watch-party review (speed finding) — broadcasts used to call
+// WriteMessage synchronously, several of them while holding ps.mu. One
+// participant with a stalled TCP connection could block every state
+// mutation in the party (joins, pause, chat) for up to the 10s write
+// deadline. Broadcast paths now call Send, which enqueues onto `outbox`
+// without blocking; the pump goroutine owns the slow socket. A peer whose
+// queue overflows (outboxSize messages behind, ≈16s of ticks) is treated
+// as dead: the conn is closed so its read pump unblocks and the normal
+// disconnect cleanup runs. This is the standard gorilla chat-hub pattern.
 type SafeConn struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
+
+	// Write-pump state. nil outbox/done means a zero-value SafeConn
+	// (tests construct &SafeConn{} directly) — Send degrades to a
+	// direct write and Close to a plain conn close.
+	outbox    chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
-// NewSafeConn creates a SafeConn wrapping the given connection.
+// outboxSize bounds the per-connection send queue. At the 250ms tick
+// cadence, 64 messages is ~16s of sync traffic — far beyond what a
+// healthy client ever queues (writes complete in milliseconds), and a
+// reasonable burst allowance for chat/reaction fan-out.
+const outboxSize = 64
+
+// ErrConnClosed is returned by Send when the connection is closed (or
+// has just been closed because its outbound queue overflowed).
+var ErrConnClosed = errors.New("watchparty: connection closed")
+
+// NewSafeConn creates a SafeConn wrapping the given connection and starts
+// its write pump. Callers MUST call Close when done with the connection
+// (the WS handlers' deferred cleanup does) or the pump goroutine leaks.
 func NewSafeConn(conn *websocket.Conn) *SafeConn {
-	return &SafeConn{conn: conn}
+	sc := &SafeConn{
+		conn:   conn,
+		outbox: make(chan []byte, outboxSize),
+		done:   make(chan struct{}),
+	}
+	go sc.writePump()
+	return sc
 }
 
-// WriteMessage acquires the write mutex before writing.
+// writePump drains the outbox onto the socket. Owned by NewSafeConn.
+// Exits when Close is called or a write fails (in which case it closes
+// the conn itself so the read pump unblocks and cleanup runs).
+func (sc *SafeConn) writePump() {
+	for {
+		select {
+		case <-sc.done:
+			return
+		case data := <-sc.outbox:
+			// Fresh deadline per write — see broadcastWriteTimeout for
+			// the stale-deadline production bug this prevents.
+			_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
+			if err := sc.WriteMessage(websocket.TextMessage, data); err != nil {
+				_ = sc.Close()
+				return
+			}
+		}
+	}
+}
+
+// Send enqueues a text message for the write pump without blocking.
+// Returns ErrConnClosed when the connection is closed, or when the
+// outbound queue is full — in which case the peer is presumed dead/stuck
+// and the connection is closed so its cleanup path runs. Safe to call
+// while holding ps.mu (never blocks on socket I/O).
+func (sc *SafeConn) Send(data []byte) error {
+	if sc.outbox == nil {
+		// Zero-value SafeConn (tests): degrade to a direct write, or
+		// discard when there's no underlying conn at all.
+		if sc.conn == nil {
+			return nil
+		}
+		_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
+		return sc.WriteMessage(websocket.TextMessage, data)
+	}
+	select {
+	case <-sc.done:
+		return ErrConnClosed
+	default:
+	}
+	select {
+	case sc.outbox <- data:
+		return nil
+	case <-sc.done:
+		return ErrConnClosed
+	default:
+		// Queue overflow: the peer hasn't drained ~16s of traffic. Close
+		// the conn (unblocks its read pump → disconnect cleanup) rather
+		// than dropping arbitrary messages on a conn we'd keep trusting.
+		_ = sc.Close()
+		return ErrConnClosed
+	}
+}
+
+// WriteMessage acquires the write mutex before writing. Prefer Send for
+// anything called under ps.mu; direct writes are for per-client
+// request/response traffic in the WS handlers (hello, snapshots, errors).
 func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	sc.writeMu.Lock()
 	defer sc.writeMu.Unlock()
@@ -79,46 +174,42 @@ func (sc *SafeConn) SetWriteDeadline(t time.Time) error {
 	return sc.conn.SetWriteDeadline(t)
 }
 
-// Close closes the underlying connection.
+// Close stops the write pump and closes the underlying connection.
+// Idempotent — every teardown path (handler defer, endPartyInternal,
+// queue overflow, pump write failure) can call it safely.
 func (sc *SafeConn) Close() error {
-	return sc.conn.Close()
+	var err error
+	sc.closeOnce.Do(func() {
+		if sc.done != nil {
+			close(sc.done)
+		}
+		if sc.conn != nil {
+			err = sc.conn.Close()
+		}
+	})
+	return err
 }
 
 // Participant tracks a single connected user in a watch party.
 //
-// BufferingSince is set the first time the participant reports is_buffering=true
-// in a heartbeat and cleared when they report !is_buffering. The manager uses
-// (now - BufferingSince) >= BufferHysteresis to decide whether to transition
-// the group into Waiting, avoiding a full group pause on transient stalls.
+// IsBuffering mirrors the peer's last self-reported readyState
+// (< HAVE_FUTURE_DATA ⇒ buffering, see HandleV3Heartbeat) for presence
+// display only — V3 never blocks the group on a buffering peer.
 //
-// ReadyAtMs is the last position (ms) at which this participant reported ready
-// while the group was Waiting. Used by the resume gate.
-//
-// FailedSeekAttempts is incremented every time the client reports a drift
-// above DriftHardSeekMs that it could not correct; at DriftMaxAttempts the
-// client is dropped from the group rather than continuing to thrash.
-//
-// Suspensions is a SharePlay-style set of reasons this peer is currently out
-// of group playback (e.g. "buffer", "focus_loss", "seeking"). A non-empty set
-// means the peer is not in group time; the group stays in Waiting until it
-// empties across all peers.
+// LastSeen drives the stale-party reaper (CleanupStale). Refreshed on
+// join/reconnect, on room-socket heartbeats (TouchParticipant), and on
+// sync-socket heartbeats (HandleV3Heartbeat).
 type Participant struct {
-	UserID             int64           `json:"user_id"`
-	Username           string          `json:"username"`
-	IsHost             bool            `json:"is_host"`
-	IsBuffering        bool            `json:"is_buffering"`
-	BufferingSince     *time.Time      `json:"-"`
-	ReadyAtMs          int64           `json:"-"`
-	FailedSeekAttempts int             `json:"-"`
-	Suspensions        map[string]bool `json:"-"`
-	LastSeen           time.Time       `json:"last_seen"`
-	LastRTTms          int64           `json:"-"`
-	ClockOffsetMs      int64           `json:"-"`
+	UserID        int64     `json:"user_id"`
+	Username      string    `json:"username"`
+	IsHost        bool      `json:"is_host"`
+	IsBuffering   bool      `json:"is_buffering"`
+	LastSeen      time.Time `json:"last_seen"`
+	LastRTTms     int64     `json:"-"`
+	ClockOffsetMs int64     `json:"-"`
 	// Ready is the per-participant "I'm ready to start watching" signal
-	// for M5's spoiler-free start gate. Distinct from `ReadyAtMs` which
-	// is V2's buffered-to-target signal (always set on Ready protocol
-	// emit). This Ready is human-driven — the participant clicked
-	// "I'm Ready" in the lobby UI. Reset to false when the party
+	// for M5's spoiler-free start gate. Human-driven — the participant
+	// clicked "I'm Ready" in the lobby UI. Reset to false when the party
 	// transitions to a new session (e.g. media-change).
 	Ready bool `json:"ready"`
 
@@ -167,21 +258,6 @@ type ReactionRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// GroupState models the Jellyfin-style state machine for a watch party.
-// Idle: no media loaded yet.
-// Waiting: group is paused waiting for all participants to emit Ready at
-//
-//	CurrentTimeMs (triggered by initial play, seek, or buffer hysteresis).
-//
-// Playing: group is playing, anchored at CurrentTimeMs @ PlayingSince.
-type GroupState string
-
-const (
-	GroupStateIdle    GroupState = "idle"
-	GroupStateWaiting GroupState = "waiting"
-	GroupStatePlaying GroupState = "playing"
-)
-
 // HostDisconnectGracePeriod — how long the server keeps a party alive
 // after the host's room WebSocket drops unexpectedly. Lets the host
 // recover from a transient network blip, browser tab throttle, proxy
@@ -193,17 +269,17 @@ const (
 // longest a single network glitch could plausibly take to recover.
 const HostDisconnectGracePeriod = 90 * time.Second
 
-// broadcastWriteTimeout — max time to wait for a single broadcast
+// broadcastWriteTimeout — max time to wait for a single outbound
 // write to land on a participant's conn before considering it dead.
-// 2026-05-25 fix: every broadcast helper now calls
-// `conn.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))`
-// IMMEDIATELY before WriteMessage. Without this reset, the initial
-// party-state send (which sets a 10s deadline via the WS handler at
-// party_ws_v3_room.go) leaks its expired deadline forward and silently
-// breaks every subsequent broadcast to the host — symptom in
-// production: brother joins, server registers count 1→2, but host
-// sees no participant-join, no chat, no reactions because every
-// WriteMessage returns ErrDeadlineExceeded after the 10s elapsed.
+//
+// History: 2026-05-25, a stale 10s deadline set by the initial
+// party-state send silently broke every subsequent broadcast to the
+// host with ErrDeadlineExceeded (host saw no participant-join, chat,
+// or reactions). The fix was a fresh deadline immediately before each
+// write. 2026-06, broadcasts moved onto per-conn write pumps
+// (SafeConn.writePump) which set this deadline before every pump
+// write; the remaining direct-write call sites (hello, snapshots,
+// teardown party-ended) still set it explicitly.
 //
 // 10s matches partyWriteWait used elsewhere — a healthy LAN/WAN write
 // completes in milliseconds; if it takes 10s the conn is genuinely
@@ -211,8 +287,8 @@ const HostDisconnectGracePeriod = 90 * time.Second
 const broadcastWriteTimeout = 10 * time.Second
 
 // PartyState is the authoritative in-memory state for an active watch party.
-// The mu field is a per-party mutex that protects mutable fields (CurrentTimeMs,
-// IsPlaying, PlayingSince, Participants, ChatHistory, conns).
+// The mu field is a per-party mutex that protects the mutable fields
+// (anchor, Participants, ChatHistory, conn pools).
 // The Manager's top-level mu protects the parties map itself (add/remove/lookup).
 //
 // StateRevision increments on every broadcasted state change. Clients ignore
@@ -228,10 +304,6 @@ type PartyState struct {
 	MediaTitle    string
 	MediaPoster   string
 	PartyName     string
-	CurrentTimeMs int64
-	IsPlaying     bool
-	PlayingSince  *time.Time
-	GroupState    GroupState
 	StateRevision uint64
 	Participants  map[int64]*Participant
 	ChatHistory   []ChatMessage // ring buffer, max chatHistoryMax
@@ -247,7 +319,6 @@ type PartyState struct {
 	Reactions []ReactionRecord
 
 	Settings        PartySettings
-	conns           map[int64]*SafeConn
 	CreatedAt       time.Time
 	MaxParticipants int
 	dbID            int64 // database row ID for participant tracking
@@ -287,26 +358,29 @@ type PartyState struct {
 	HostDisconnectedAt *time.Time
 
 	// ============================================================
-	// V3 "Running/Paused" model (Phase 1 — coexists with V2).
+	// V3 "Running/Paused" model — the only sync protocol since the
+	// 2026-06 V2 deletion ("step 5" of the V3 execution plan).
 	// ============================================================
-	// V3 collapses V2's tri-state (Idle/Waiting/Playing) into a simple
-	// Running bool. Canonical position is derived from an anchor:
+	// Canonical position is derived from an anchor:
 	//
-	//   CurrentAbsMs() = AnchorAbsMs + (now - AnchorServerMs)   (if Running)
+	//   CurrentAbsMs() = AnchorAbsMs + (now - AnchorServerAt)   (if Running)
 	//                  = AnchorAbsMs                            (if Paused)
 	//
 	// The anchor is updated on request-play, request-pause, request-seek,
-	// and party-create (seeded from the host's resume offset). In Phase 1
-	// these fields are maintained in parallel with V2; the frontend still
-	// consumes V2 snapshots. Step 5 of the execution plan removes V2.
+	// media-change, and party-create (seeded from the host's resume offset).
+	//
+	// AnchorServerAt is a time.Time (not a unix-ms int) so the elapsed
+	// computation uses Go's monotonic clock — an NTP step on the server
+	// can no longer jump every running party's position (2026-06 review).
+	// Wall-clock values still go on the wire (server_now_ms) for client
+	// offset estimation; only the server-side elapsed math is monotonic.
 	Running        bool
 	AnchorAbsMs    int64
-	AnchorServerMs int64
+	AnchorServerAt time.Time
 
 	// Separate WebSocket pools for V3's two-socket model. Sync traffic
 	// (tick/pause/seek/heartbeat/time-sync) rides syncConns. Room traffic
-	// (chat/reaction/presence) rides roomConns. syncConns is additionally
-	// populated in Phase 1 but not yet broadcast to — see tick goroutine.
+	// (chat/reaction/presence) rides roomConns.
 	syncConns map[int64]*SafeConn
 	roomConns map[int64]*SafeConn
 
@@ -344,10 +418,15 @@ type PartyState struct {
 	ScheduledStartAt *time.Time
 	StartedAt        *time.Time
 	scheduleCancel   context.CancelFunc
+	// scheduleFiring is true while a fireScheduledStart invocation is in
+	// flight (between its dedup check and its play attempt). Collapses
+	// concurrent fires — countdown timer racing a retry — to one, so
+	// clients can't receive duplicate "party-starting" broadcasts.
+	scheduleFiring bool
 }
 
 // Lock acquires the party-level mutex. Exported for cross-package use by handlers
-// that need to read mutable fields (Participants, CurrentTimeMs, etc.).
+// that need to read mutable fields (Participants, the playback anchor, etc.).
 func (ps *PartyState) Lock() {
 	ps.mu.Lock()
 }
@@ -357,28 +436,21 @@ func (ps *PartyState) Unlock() {
 	ps.mu.Unlock()
 }
 
-// SyncConfig holds the tuning parameters for the sync protocol. Mirrors
-// config.WatchPartyConfig but lives in the watchparty package so this package
-// has no import cycle with config. Populated by NewManager.
+// SyncConfig holds the tuning parameters for the V3 sync protocol. Lives in
+// the watchparty package so this package has no import cycle with config.
+// Zero values are backfilled from DefaultSyncConfig in NewManagerWithConfig.
+//
+// 2026-06 V2 deletion — the V2 tunables (HeartbeatInterval, TimeSyncInterval,
+// BufferHysteresis, PlayScheduleDelay, Drift*) were removed along with the
+// protocol that consumed them; the corresponding aurora.yaml `watchparty:`
+// knobs are now inert (see main.go).
 type SyncConfig struct {
-	HeartbeatInterval time.Duration
-	TimeSyncInterval  time.Duration
-	BufferHysteresis  time.Duration
-	PlayScheduleDelay time.Duration
-	DriftIgnoreMs     int64
-	DriftRateAdjustMs int64
-	DriftHardSeekMs   int64
-	DriftMaxAttempts  int
-
-	// ============================================================
-	// V3 additions (Phase 1). Zero values are backfilled in
-	// NewManagerWithConfig from DefaultSyncConfig.
-	// ============================================================
 	// TickInterval is how often the server broadcasts a `tick` while
 	// Running. 250ms is Twitch-low-latency territory and keeps late
 	// joiners converged within one interval.
 	TickInterval time.Duration
-	// V3 catch-up thresholds. See docs/watchparty-v3.md §5.
+	// V3 catch-up thresholds, advertised to clients in the sync `hello`.
+	// See docs/watchparty-v3.md §5.
 	// |lag| <= V3DriftIgnoreMs           → do nothing
 	// lag in (V3DriftIgnoreMs, V3DriftHardSeekMs) → rate-adjust
 	// |lag| >= V3DriftHardSeekMs         → hard seek
@@ -388,23 +460,13 @@ type SyncConfig struct {
 	V3EaseBackRate    float64 // default 0.97 (ahead → slow down)
 }
 
-// DefaultSyncConfig returns the mpv-shim / Jellyfin-derived defaults. Used when
-// NewManager is called without a config, e.g. by tests.
+// DefaultSyncConfig returns the V3 defaults. Used when NewManager is called
+// without a config, e.g. by tests.
 func DefaultSyncConfig() SyncConfig {
 	return SyncConfig{
-		HeartbeatInterval: 500 * time.Millisecond,
-		TimeSyncInterval:  30 * time.Second,
-		BufferHysteresis:  750 * time.Millisecond,
-		PlayScheduleDelay: 300 * time.Millisecond,
-		DriftIgnoreMs:     50,
-		DriftRateAdjustMs: 300,
-		DriftHardSeekMs:   2000,
-		DriftMaxAttempts:  5,
-
-		// V3 defaults. Chosen in consultation with user (see
-		// docs/watchparty-v3.md §5): rate-adjust window is 200ms–3s,
-		// beyond 3s is a hard seek. Catch-up at 1.03× keeps pitch
-		// shift inaudible while still closing a 1s lag in ~33s.
+		// V3 defaults (see docs/watchparty-v3.md §5): rate-adjust window
+		// is 200ms–3s, beyond 3s is a hard seek. Catch-up at 1.03× keeps
+		// pitch shift inaudible while still closing a 1s lag in ~33s.
 		TickInterval:      250 * time.Millisecond,
 		V3DriftIgnoreMs:   200,
 		V3DriftHardSeekMs: 3000,
@@ -446,8 +508,8 @@ type Manager struct {
 	shutdownCtx context.Context
 }
 
-// SyncConfig returns the active sync tuning. Exposed so the WS handler can
-// tell new clients what heartbeat cadence to use.
+// SyncConfig returns the active sync tuning. Exposed for handlers and tests
+// that need to read the advertised V3 thresholds.
 func (m *Manager) SyncConfig() SyncConfig { return m.cfg }
 
 // SetShutdownContext wires the server-lifecycle context for background
@@ -616,9 +678,9 @@ const (
 	// codeAlphabet excludes confusable characters: 0, O, 1, I, L.
 	codeAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
-	// Drift correction lives on the client now (see SyncConfig.DriftIgnoreMs /
-	// DriftRateAdjustMs / DriftHardSeekMs). The server only coordinates state
-	// transitions (play/pause/seek/Ready) and per-peer buffer hysteresis.
+	// Drift correction lives on the client (see SyncConfig.V3DriftIgnoreMs /
+	// V3DriftHardSeekMs, advertised in the sync hello). The server only
+	// coordinates intent (play/pause/seek) and emits ticks.
 
 	// staleParticipantTimeout is how long a participant can be unseen before
 	// the party is considered stale (if ALL participants are stale).
@@ -649,6 +711,15 @@ const (
 	// late-delivery but tight enough that a malicious client can't
 	// fingerprint timestamps across the movie.
 	reactionAbsMsClampWindow = 5 * 60 * 1000
+
+	// maxPositionMs upper-bounds every client-supplied playback position
+	// (request-seek target, request-pause position) at 24h — anything
+	// beyond that is nonsense for media playback, and an unbounded value
+	// (e.g. math.MaxInt64) would overflow once CurrentAbsMs() adds elapsed
+	// wall-clock time, wrapping negative and propagating absurd tick
+	// positions to every peer. 2026-06 review: previously enforced only
+	// on seek; pause accepted unbounded positions through the same anchor.
+	maxPositionMs = 24 * 60 * 60 * 1000
 )
 
 // Allowed emoji reactions whitelist.
@@ -688,34 +759,6 @@ func NewManagerWithConfig(queries *db.Queries, hub *ws.Hub, cfg SyncConfig) *Man
 	// Sanity: fall back to defaults on any zero/negative value rather than
 	// producing a manager with pathological thresholds.
 	def := DefaultSyncConfig()
-	if cfg.HeartbeatInterval <= 0 {
-		cfg.HeartbeatInterval = def.HeartbeatInterval
-	}
-	if cfg.TimeSyncInterval <= 0 {
-		cfg.TimeSyncInterval = def.TimeSyncInterval
-	}
-	// BufferHysteresis == 0 means "pause on any stall" — pathological. Zero is
-	// backfilled along with negatives. PlayScheduleDelay == 0 is legitimate
-	// ("schedule play immediately") so only negatives are corrected there.
-	if cfg.BufferHysteresis <= 0 {
-		cfg.BufferHysteresis = def.BufferHysteresis
-	}
-	if cfg.PlayScheduleDelay < 0 {
-		cfg.PlayScheduleDelay = def.PlayScheduleDelay
-	}
-	if cfg.DriftIgnoreMs <= 0 {
-		cfg.DriftIgnoreMs = def.DriftIgnoreMs
-	}
-	if cfg.DriftRateAdjustMs <= 0 {
-		cfg.DriftRateAdjustMs = def.DriftRateAdjustMs
-	}
-	if cfg.DriftHardSeekMs <= 0 {
-		cfg.DriftHardSeekMs = def.DriftHardSeekMs
-	}
-	if cfg.DriftMaxAttempts <= 0 {
-		cfg.DriftMaxAttempts = def.DriftMaxAttempts
-	}
-	// V3 backfills.
 	if cfg.TickInterval <= 0 {
 		cfg.TickInterval = def.TickInterval
 	}
@@ -815,7 +858,7 @@ func (m *Manager) CreateParty(
 	for _, ps := range m.parties {
 		if ps.HostUserID == hostUserID {
 			m.mu.RUnlock()
-			return nil, fmt.Errorf("you already have an active party")
+			return nil, errUser("you already have an active party")
 		}
 	}
 	m.mu.RUnlock()
@@ -900,15 +943,10 @@ func (m *Manager) CreateParty(
 		MediaTitle:      mediaTitle,
 		MediaPoster:     mediaPoster,
 		PartyName:       partyName,
-		CurrentTimeMs:   initialPositionMs,
-		IsPlaying:       false,
-		PlayingSince:    nil,
-		GroupState:      GroupStateIdle,
 		StateRevision:   1,
 		Participants:    make(map[int64]*Participant),
 		ChatHistory:     make([]ChatMessage, 0, chatHistoryMax),
 		Settings:        settings,
-		conns:           make(map[int64]*SafeConn),
 		CreatedAt:       now,
 		MaxParticipants: maxParticipants,
 		dbID:            dbParty.ID,
@@ -917,12 +955,11 @@ func (m *Manager) CreateParty(
 		roomDBID:         dbRoom.ID,
 		IsRoomPersistent: dbRoom.IsPersistent,
 
-		// V3 fields (Phase 1). Seed the canonical anchor from the host's
-		// resume offset — same value V2 stores in CurrentTimeMs. Running
+		// Seed the canonical anchor from the host's resume offset. Running
 		// starts false; the tick loop won't spin up until request-play.
 		Running:        false,
 		AnchorAbsMs:    initialPositionMs,
-		AnchorServerMs: now.UnixMilli(),
+		AnchorServerAt: now,
 		syncConns:      make(map[int64]*SafeConn),
 		roomConns:      make(map[int64]*SafeConn),
 
@@ -939,11 +976,19 @@ func (m *Manager) CreateParty(
 	for _, existing := range m.parties {
 		if existing.HostUserID == hostUserID {
 			m.mu.Unlock()
-			// Best-effort cleanup: mark DB row inactive since we can't use it
+			// Best-effort cleanup: mark the party row inactive AND
+			// soft-delete the room we created for it. 2026-06 review
+			// (bug 1) — this path used to leak the room row, leaving its
+			// code reserved indefinitely (the non-race failure path above
+			// already rolled the room back; this one didn't).
 			if dbParty.ID > 0 {
 				_ = m.queries.EndWatchParty(ctx, dbParty.ID)
 			}
-			return nil, fmt.Errorf("you already have an active party")
+			if err := m.queries.SoftDeleteRoom(context.Background(), dbRoom.ID); err != nil {
+				slog.Error("party rollback: soft-delete of orphan room failed — code is now reserved indefinitely",
+					"room_id", dbRoom.ID, "code", dbRoom.Code, "delete_error", err)
+			}
+			return nil, errUser("you already have an active party")
 		}
 	}
 	m.parties[code] = ps
@@ -1113,15 +1158,10 @@ func (m *Manager) StartPartyInRoom(
 		MediaTitle:       mediaTitle,
 		MediaPoster:      mediaPoster,
 		PartyName:        room.Name,
-		CurrentTimeMs:    initialPositionMs,
-		IsPlaying:        false,
-		PlayingSince:     nil,
-		GroupState:       GroupStateIdle,
 		StateRevision:    1,
 		Participants:     make(map[int64]*Participant),
 		ChatHistory:      make([]ChatMessage, 0, chatHistoryMax),
 		Settings:         settings,
-		conns:            make(map[int64]*SafeConn),
 		CreatedAt:        now,
 		MaxParticipants:  maxParticipants,
 		dbID:             dbParty.ID,
@@ -1130,7 +1170,7 @@ func (m *Manager) StartPartyInRoom(
 
 		Running:        false,
 		AnchorAbsMs:    initialPositionMs,
-		AnchorServerMs: now.UnixMilli(),
+		AnchorServerAt: now,
 		syncConns:      make(map[int64]*SafeConn),
 		roomConns:      make(map[int64]*SafeConn),
 
@@ -1234,7 +1274,7 @@ func (m *Manager) SchedulePartyStart(ctx context.Context, code string, scheduled
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	// Validate future-tense if non-nil. Past timestamps are rejected here
@@ -1335,11 +1375,17 @@ func (m *Manager) cancelScheduleTimerLocked(ps *PartyState) {
 
 // fireScheduledStart is the goroutine body. Re-resolves the party by code
 // (it may have ended since the timer was scheduled), checks that the party
-// is still in pre-start state, then broadcasts "party-starting" and routes
-// through HandlePlaybackControl(play) to engage the existing sync path.
+// is still in pre-start state, engages playback via HandleRequestPlay, and
+// broadcasts "party-starting" once playback actually started.
 //
-// Marks the in-memory and persisted StartedAt so reconnecting clients can
-// compute elapsed time from a stable timestamp.
+// 2026-06 review — two ordering fixes:
+//   - "party-starting" is broadcast AFTER a successful play, not before
+//     the gate check, so clients never see "Starting now!" while the
+//     spoiler gate is still blocking (and a blocked fire is silent).
+//   - the scheduleFiring flag makes concurrent fires (countdown timer
+//     racing a maybeRetryScheduledStartLocked goroutine) collapse to one;
+//     the dedup-on-StartedAt alone couldn't, because StartedAt is stamped
+//     later inside HandleRequestPlay's own lock acquisition.
 func (m *Manager) fireScheduledStart(code string) {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
@@ -1349,21 +1395,45 @@ func (m *Manager) fireScheduledStart(code string) {
 		return
 	}
 
-	now := time.Now()
-
 	ps.mu.Lock()
-	// Dedup guard: skip if the party already started — a prior timer fire set
-	// StartedAt, or a manual host play set HasEverPlayed (HandleRequestPlay does
-	// not touch StartedAt). Checking both avoids a stray "party-starting"
-	// broadcast and a redundant play when the host beats the countdown.
-	if ps.StartedAt != nil || ps.HasEverPlayed {
+	// Dedup guard: skip if the party already started — a prior fire or a
+	// manual host play stamped StartedAt / set HasEverPlayed (both happen
+	// in HandleRequestPlay) — or another fire is in flight right now.
+	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring {
 		ps.mu.Unlock()
 		return
 	}
+	ps.scheduleFiring = true
+	ps.mu.Unlock()
 
+	// Engage playback via the V3 intent path (audit H6): HandleRequestPlay
+	// sets the anchor Running, starts the per-party tick loop, stamps
+	// StartedAt, persists MarkPartyStarted, and emits a synthetic tick that
+	// drives clients to actually play.
+	//
+	// HandleRequestPlay can return without engaging playback — the
+	// SpoilerFreeStart readiness gate returns a "waiting for: …" error, the
+	// host may not have joined their room socket yet ("not a participant"),
+	// or the party may have just ended. On failure StartedAt stays nil so a
+	// later manual host play still works and nothing persists a bogus start
+	// time; maybeRetryScheduledStartLocked re-fires when the gate's inputs
+	// change (ready toggle, blocker leaves, host (re)joins).
+	playErr := m.HandleRequestPlay(code, ps.HostUserID)
+
+	ps.mu.Lock()
+	ps.scheduleFiring = false
+	if playErr != nil {
+		ps.mu.Unlock()
+		slog.Warn("scheduled-start play did not engage; party left unstarted (retried when the gate unblocks)", "code", code, "error", playErr)
+		return
+	}
+	// Clear the cancel hook — the schedule is consumed (HandleRequestPlay
+	// already cancelled the timer; this is belt-and-suspenders).
+	ps.scheduleCancel = nil
 	// Broadcast "party-starting" so all clients show the "Starting now!"
-	// notification before playback engages. Includes server_now_ms so
-	// late-joiners' countdown widgets converge correctly.
+	// notification. Includes server_now_ms so late-joiners' countdown
+	// widgets converge correctly.
+	now := time.Now()
 	m.broadcastToPartyLocked(ps, map[string]interface{}{
 		"type": "party-starting",
 		"payload": map[string]interface{}{
@@ -1373,172 +1443,33 @@ func (m *Manager) fireScheduledStart(code string) {
 	})
 	ps.mu.Unlock()
 
-	// Engage playback via the V3 intent path. The live transport is V3-only
-	// (only /ws/party-sync and /ws/party-room are mounted), so playback must
-	// run through HandleRequestPlay: it sets the anchor Running, starts the
-	// per-party tick loop, and emits a synthetic tick that drives V3 clients to
-	// actually play. The previous HandlePlaybackControl("play") call only
-	// mutated the dead V2 tri-state and never started the tick loop, so V3
-	// clients showed "Starting now!" and then sat paused at the anchor forever
-	// — the entire host-scheduled countdown was a no-op for real clients. See
-	// audit H6.
-	//
-	// Mark the party started ONLY after a successful play (audit H6 follow-up).
-	// HandleRequestPlay can return without engaging playback — the
-	// SpoilerFreeStart readiness gate returns a "waiting for: …" error, or the
-	// party may have just ended — and stamping StartedAt / persisting
-	// MarkPartyStarted before that would record a false start the dedup guard
-	// then makes permanent, with no retry. On failure we leave StartedAt nil so
-	// a later manual host play (which doesn't consult StartedAt) still works and
-	// nothing persists a bogus start time.
-	if err := m.HandleRequestPlay(code, ps.HostUserID); err != nil {
-		slog.Warn("scheduled-start play did not engage; party left unstarted (retryable)", "code", code, "error", err)
-		return
-	}
-
-	ps.mu.Lock()
-	ps.StartedAt = &now
-	// Clear the cancel hook — timer has fired, cancellation is moot.
-	ps.scheduleCancel = nil
-	dbID := ps.dbID
-	ps.mu.Unlock()
-
-	// Persist started_at outside any lock. Best-effort; in-memory state
-	// is authoritative for live behavior.
-	if dbID > 0 {
-		if err := m.queries.MarkPartyStarted(context.Background(), dbID, now); err != nil {
-			slog.Warn("mark party started in DB failed", "code", code, "error", err)
-		}
-	}
-
 	slog.Info("scheduled watch party started", "code", code)
 }
 
-// JoinParty adds a user to an existing party. The WebSocket connection is
-// stored for direct messaging. Returns the party state for the initial sync.
-func (m *Manager) JoinParty(code string, userID int64, username string, sc *SafeConn) (*PartyState, error) {
-	m.mu.RLock()
-	ps, exists := m.parties[code]
-	m.mu.RUnlock()
-
-	if !exists {
-		return nil, fmt.Errorf("party not found or has ended")
+// maybeRetryScheduledStartLocked re-fires an overdue scheduled start when
+// the spoiler gate's inputs may have just changed. The 2026-06 review's
+// bug-2 fix originally hooked only the Ready toggle; the gate can also
+// unblock when the last not-ready guest LEAVES, or when the HOST (whom
+// HandleRequestPlay requires to be a current participant) (re)joins after
+// the countdown fired. All three events route through here.
+//
+// Cheap pre-checks only — fireScheduledStart re-validates everything and
+// dedups, so a spurious call is harmless. Caller MUST hold ps.mu; the
+// fire runs in a goroutine because it re-acquires the lock.
+func (m *Manager) maybeRetryScheduledStartLocked(ps *PartyState) {
+	if ps.ScheduledStartAt == nil || ps.ScheduledStartAt.After(time.Now()) {
+		return // no schedule, or not due yet (the timer goroutine owns it)
 	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	// Check if already in the party (reconnect case)
-	if existing, ok := ps.Participants[userID]; ok {
-		// Update connection and last seen
-		ps.conns[userID] = sc
-		existing.LastSeen = time.Now()
-		existing.IsBuffering = false
-		slog.Info("participant reconnected to party", "code", code, "user_id", userID, "username", username)
-	} else {
-		// Check max participants (host doesn't count against limit when re-joining)
-		currentCount := len(ps.Participants)
-		if currentCount >= ps.MaxParticipants {
-			return nil, fmt.Errorf("party is full (%d/%d)", currentCount, ps.MaxParticipants)
-		}
-
-		// Add new participant
-		ps.Participants[userID] = &Participant{
-			UserID:      userID,
-			Username:    username,
-			IsHost:      userID == ps.HostUserID,
-			IsBuffering: false,
-			Suspensions: make(map[string]bool),
-			LastSeen:    time.Now(),
-		}
-		ps.conns[userID] = sc
-
-		slog.Info("participant joined party", "code", code, "user_id", userID, "username", username)
+	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring {
+		return // already started or a fire is in flight
 	}
-
-	// Insert participant in DB (ON CONFLICT re-activates if they re-join)
-	if ps.dbID > 0 {
-		if err := m.queries.InsertParticipant(context.Background(), ps.dbID, userID); err != nil {
-			slog.Warn("failed to insert participant in DB", "error", err)
-		}
+	if _, ok := ps.Participants[ps.HostUserID]; !ok {
+		return // host not connected — HandleRequestPlay would reject
 	}
-
-	// Broadcast participant-join to other party members (exclude the joiner)
-	m.broadcastToPartyExcludeLocked(ps, map[string]interface{}{
-		"type": "participant-join",
-		"payload": map[string]interface{}{
-			"user_id":  userID,
-			"username": username,
-		},
-	}, userID)
-
-	// Send full party state to the joining user
-	if sc != nil {
-		stateMsg := m.BuildPartyStateMessage(ps)
-		if data, err := json.Marshal(stateMsg); err == nil {
-			// 2026-05-25 — set write deadline (see broadcastWriteTimeout).
-			_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
-			if err := sc.WriteMessage(websocket.TextMessage, data); err != nil {
-				slog.Debug("failed to send party state to joiner", "error", err)
-			}
-		}
+	if ps.Settings.SpoilerFreeStart && len(spoilerGateBlockersLocked(ps)) > 0 {
+		return // gate still blocked; a later event will retry
 	}
-
-	return ps, nil
-}
-
-// LeaveParty removes a user from a party. If the host leaves, the party ends.
-func (m *Manager) LeaveParty(code string, userID int64) error {
-	m.mu.RLock()
-	ps, exists := m.parties[code]
-	m.mu.RUnlock()
-
-	if !exists {
-		return nil // party already gone
-	}
-
-	ps.mu.Lock()
-
-	participant, ok := ps.Participants[userID]
-	if !ok {
-		ps.mu.Unlock()
-		return nil // not in the party
-	}
-
-	username := participant.Username
-	isHost := ps.HostUserID == userID
-
-	// Remove from in-memory state
-	delete(ps.Participants, userID)
-	delete(ps.conns, userID)
-
-	// Update DB
-	if ps.dbID > 0 {
-		if err := m.queries.UpdateParticipantLeft(context.Background(), ps.dbID, userID); err != nil {
-			slog.Warn("failed to update participant left in DB", "error", err)
-		}
-	}
-
-	if isHost {
-		// Host leaving ends the party
-		ps.mu.Unlock()
-		slog.Info("host left, ending party", "code", code, "user_id", userID)
-		return m.endPartyInternal(code, ps)
-	}
-
-	// Broadcast participant-left to remaining members
-	m.broadcastToPartyLocked(ps, map[string]interface{}{
-		"type": "participant-left",
-		"payload": map[string]interface{}{
-			"user_id":  userID,
-			"username": username,
-		},
-	})
-
-	ps.mu.Unlock()
-
-	slog.Info("participant left party", "code", code, "user_id", userID, "username", username)
-	return nil
+	go m.fireScheduledStart(ps.Code)
 }
 
 // EndParty ends a party. Only the host can end it via the REST endpoint.
@@ -1548,13 +1479,13 @@ func (m *Manager) EndParty(code string, userID int64) error {
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	if ps.HostUserID != userID {
 		ps.mu.Unlock()
-		return fmt.Errorf("only the host can end the party")
+		return errUser("only the host can end the party")
 	}
 	ps.mu.Unlock()
 
@@ -1612,71 +1543,29 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	// fire "party-starting" after the connections are closed.
 	m.cancelScheduleTimerLocked(ps)
 
-	// V3: stop the tick goroutine if it's running. MUST happen before we
+	// Stop the tick goroutine if it's running. MUST happen before we
 	// close the sync conns, otherwise the goroutine could emit one more
 	// tick into already-closed sockets. Idempotent — safe on a party that
-	// never started a tick loop (V2-only party, or never-played party).
+	// never started a tick loop (never-played party).
 	m.stopTickLoopLocked(ps)
 
-	// Broadcast party-ended to all connected participants (V2 pool).
-	m.broadcastToPartyLocked(ps, map[string]interface{}{
-		"type":    "party-ended",
-		"payload": map[string]interface{}{},
-	})
-	// V3 pools: broadcast the same signal on both sockets so clients
-	// speaking either protocol see the close. Piggybacks off the same
-	// message envelope; V3 clients will treat "party-ended" the same.
-	// 2026-05-25 — reset write deadline before each (see
-	// broadcastWriteTimeout). Critical here: if the host's conn has a
-	// stale expired deadline, the party-ended message never lands and
-	// the host's UI freezes on a dead party until they reload.
-	endDeadline := time.Now().Add(broadcastWriteTimeout)
-	for _, c := range ps.syncConns {
-		if c == nil {
-			continue
-		}
-		_ = c.SetWriteDeadline(endDeadline)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
-	}
-	for _, c := range ps.roomConns {
-		if c == nil {
-			continue
-		}
-		_ = c.SetWriteDeadline(endDeadline)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
-	}
-
-	// Close all WebSocket connections (V2 + V3 pools).
-	for uid, conn := range ps.conns {
-		if conn != nil {
-			conn.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
-				time.Now().Add(5*time.Second),
-			)
-			_ = conn.Close()
-		}
-		delete(ps.conns, uid)
-	}
+	// Snapshot + clear the conn pools under the lock; do the actual socket
+	// I/O (party-ended broadcast, close frames, Close) AFTER releasing it.
+	// 2026-06 review — the old in-lock direct writes contended on each
+	// conn's writeMu with a write pump potentially mid-write to a stalled
+	// peer (10s deadline), holding ps.mu — and, from cleanupOnce/Shutdown,
+	// the whole reaper — hostage for the duration. Clearing the maps first
+	// also makes the party invisible to broadcasts immediately.
+	closingConns := make([]*SafeConn, 0, len(ps.syncConns)+len(ps.roomConns))
 	for uid, conn := range ps.syncConns {
 		if conn != nil {
-			conn.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
-				time.Now().Add(5*time.Second),
-			)
-			_ = conn.Close()
+			closingConns = append(closingConns, conn)
 		}
 		delete(ps.syncConns, uid)
 	}
 	for uid, conn := range ps.roomConns {
 		if conn != nil {
-			conn.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
-				time.Now().Add(5*time.Second),
-			)
-			_ = conn.Close()
+			closingConns = append(closingConns, conn)
 		}
 		delete(ps.roomConns, uid)
 	}
@@ -1685,6 +1574,27 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	roomDBID := ps.roomDBID
 	isRoomPersistent := ps.IsRoomPersistent
 	ps.mu.Unlock()
+
+	// Broadcast party-ended on both sockets so every client surface sees
+	// the close (room handles UI teardown; sync stops the player mirror),
+	// then close. Direct writes (not Send) so the final message is flushed
+	// before Close rather than racing the pump's drain; blocking is
+	// acceptable here because no locks are held.
+	// 2026-05-25 — fresh write deadline before each (see
+	// broadcastWriteTimeout). Critical here: if the host's conn has a
+	// stale expired deadline, the party-ended message never lands and
+	// the host's UI freezes on a dead party until they reload.
+	endDeadline := time.Now().Add(broadcastWriteTimeout)
+	for _, c := range closingConns {
+		_ = c.SetWriteDeadline(endDeadline)
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
+		_ = c.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
+			time.Now().Add(5*time.Second),
+		)
+		_ = c.Close()
+	}
 
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
@@ -1728,239 +1638,22 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 }
 
 // ============================================================
-// Playback Control
-// ============================================================
-
-// HandlePlaybackControl processes play/pause/seek intents from participants.
-// Only the host can issue play/seek; pause is allowed for everyone if
-// AllowPause is set. Unlike the old implementation, this never trusts a
-// client's self-reported timestamp as authoritative — it only trusts the
-// *intent*, and computes the server-anchored time itself.
-//
-// play / seek always route through Waiting → Ready → Playing so every client
-// buffers to the same position before the group starts. Pause is immediate.
-func (m *Manager) HandlePlaybackControl(code string, userID int64, action string, timeMs int64) error {
-	m.mu.RLock()
-	ps, exists := m.parties[code]
-	m.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("party not found")
-	}
-
-	// 2026-05-19 audit (BE-H8) — clamp timeMs >= 0 at the top of the
-	// handler. The V2 path used to broadcast negative current_time_ms
-	// to all clients if a buggy host (or future bug in the wire layer)
-	// passed timeMs < 0. The V3 sync handler validates this; V2 didn't.
-	// A clamp here is safe because all legitimate playback positions
-	// are >= 0 (frame 0 is the start of the media).
-	if timeMs < 0 {
-		timeMs = 0
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	isHost := ps.HostUserID == userID
-
-	switch action {
-	case "play", "seek":
-		if !isHost {
-			return fmt.Errorf("only the host can %s", action)
-		}
-	case "pause":
-		if !isHost && !ps.Settings.AllowPause {
-			return fmt.Errorf("only the host can pause")
-		}
-	default:
-		return fmt.Errorf("unknown playback action: %s", action)
-	}
-
-	switch action {
-	case "play":
-		// First manual play: stamp StartedAt and cancel any in-flight
-		// schedule timer. Without this, a host who schedules a party and
-		// then impatiently hits play early would still see the timer fire
-		// at the original scheduled moment, double-engaging play and
-		// kicking everyone back to the Ready handshake. The dedup in
-		// fireScheduledStart checks StartedAt — by stamping it here we
-		// turn the manual-play path into "the party started, scheduled
-		// timer is moot". cancelScheduleTimerLocked is idempotent so
-		// non-scheduled parties pay only a nil check.
-		if ps.StartedAt == nil {
-			now := time.Now()
-			ps.StartedAt = &now
-			m.cancelScheduleTimerLocked(ps)
-			dbID := ps.dbID
-			// Persist async to avoid blocking the playback path on DB latency.
-			// Best-effort; in-memory state is authoritative for live behavior.
-			if dbID > 0 {
-				go func(id int64, t time.Time) {
-					if err := m.queries.MarkPartyStarted(context.Background(), id, t); err != nil {
-						slog.Warn("mark party started (manual play) failed", "id", id, "error", err)
-					}
-				}(dbID, now)
-			}
-		}
-		// Resume from current position, or at timeMs if the host specified one.
-		targetMs := ps.CurrentTimeMs
-		if timeMs > 0 {
-			targetMs = timeMs
-		}
-		// Host's client is already at targetMs; guests need to buffer there.
-		// Transition to Waiting and require Ready from everyone before resuming.
-		m.transitionToWaitingLocked(ps, targetMs, "host:play")
-
-	case "pause":
-		// Freeze the group at the last known server-computed position. Don't
-		// trust the requester's timeMs for position — compute from PlayingSince.
-		pos := m.calculateCurrentPosition(ps)
-		if timeMs > 0 {
-			pos = timeMs
-		}
-		ps.IsPlaying = false
-		ps.PlayingSince = nil
-		ps.CurrentTimeMs = pos
-		ps.GroupState = GroupStateWaiting
-		for _, p := range ps.Participants {
-			p.ReadyAtMs = -1
-		}
-		m.bumpRevLocked(ps)
-		m.broadcastStateSnapshotLocked(ps)
-
-	case "seek":
-		// Seek always re-enters Waiting; resume requires all Ready.
-		m.transitionToWaitingLocked(ps, timeMs, "host:seek")
-	}
-
-	return nil
-}
-
-// ============================================================
-// Sync Heartbeat
-// ============================================================
-
-// HandleSyncHeartbeat processes position reports from participants.
-//
-// Key semantic change from the previous protocol: the server NEVER updates
-// CurrentTimeMs from a heartbeat (not even the host's). Position is authored
-// exclusively by HandlePlaybackControl and advanced by PlayingSince. Heartbeats
-// are used for:
-//  1. LastSeen refresh (keeps stale-cleanup from dropping live peers).
-//  2. Buffer hysteresis: if a peer reports is_buffering for longer than
-//     cfg.BufferHysteresis, the group transitions to Waiting. A transient
-//     stall (one heartbeat's worth) does NOT pause the group.
-//  3. Buffer clear: when the last buffering peer reports not-buffering, the
-//     group stays in Waiting until each peer emits a Ready at CurrentTimeMs.
-//
-// Drift correction is entirely client-side (tiered: ignore / rate-adjust /
-// hard-seek) using the client's own computed server-time offset; the server's
-// only role in drift is counting failed attempts via HandleDriftReport.
-func (m *Manager) HandleSyncHeartbeat(code string, userID int64, currentTimeMs int64, isBuffering bool) error {
-	m.mu.RLock()
-	ps, exists := m.parties[code]
-	m.mu.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("party not found")
-	}
-
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-
-	p, ok := ps.Participants[userID]
-	if !ok {
-		return nil // not in the party (stale heartbeat)
-	}
-
-	now := time.Now()
-	p.LastSeen = now
-
-	// Peers that are suspended for non-buffer reasons (e.g. "desync" — kicked
-	// by HandleDriftReport) MUST NOT re-influence group state via heartbeat.
-	// Without this guard, a desync-kicked peer that re-buffers would trigger
-	// another transitionToWaitingLocked and effectively un-kick itself.
-	for reason := range p.Suspensions {
-		if reason != "buffer" {
-			return nil
-		}
-	}
-
-	wasBuffering := p.IsBuffering
-	p.IsBuffering = isBuffering
-
-	// Track BufferingSince for hysteresis — only set on the 0→1 transition so a
-	// peer that stays buffering across ticks accumulates duration correctly.
-	if isBuffering && !wasBuffering {
-		t := now
-		p.BufferingSince = &t
-	}
-	if !isBuffering && wasBuffering {
-		p.BufferingSince = nil
-		delete(p.Suspensions, "buffer")
-	}
-
-	// Hysteresis check: if this peer has been buffering for long enough and
-	// the group is still Playing, transition to Waiting. Avoids thrashing on
-	// transient stalls.
-	if isBuffering && p.BufferingSince != nil &&
-		ps.GroupState == GroupStatePlaying &&
-		now.Sub(*p.BufferingSince) >= m.cfg.BufferHysteresis {
-		if p.Suspensions == nil {
-			p.Suspensions = make(map[string]bool)
-		}
-		p.Suspensions["buffer"] = true
-		pos := m.calculateCurrentPosition(ps)
-		m.transitionToWaitingLocked(ps, pos, "buffer:"+p.Username)
-		return nil
-	}
-
-	return nil
-}
-
-// calculateCurrentPosition returns the authoritative playback position in ms,
-// accounting for time elapsed since PlayingSince if currently playing.
-// ps.mu must be held.
-//
-// 2026-05-25 deep-debug (High #1) — V3 awareness. For V3 parties, the
-// canonical position is `ps.CurrentAbsMs()` (anchor + wall-clock elapsed
-// when Running, anchor alone when Paused). The V2-only `IsPlaying +
-// PlayingSince + CurrentTimeMs` path returned a stale frozen position
-// for V3 mid-stream joiners — the BuildPartyStateMessage fix made the
-// joined payload's `is_playing` correct, but `current_time_ms` would
-// still be the resume-offset from 10 minutes ago.
-//
-// 2026-05-31 — extend the V3 preference to the PAUSED case too. V3 pause
-// writes the position to AnchorAbsMs (setAnchorLocked), NOT the dead V2
-// CurrentTimeMs, so a PAUSED V3 party used to fall through to the V2 branch
-// below and report a stale/zero current_time_ms to a (re)joining client
-// (the watch-party "rejoin didn't sync" symptom). Every live party is
-// anchored at create (AnchorServerMs is stamped in CreateParty and the
-// persistent-room path), so prefer the anchor whenever it is populated;
-// the V2 IsPlaying/PlayingSince fallback now only serves bare PartyState
-// values constructed in unit tests.
-func (m *Manager) calculateCurrentPosition(ps *PartyState) int64 {
-	if ps.Running || ps.AnchorServerMs != 0 {
-		return ps.CurrentAbsMs()
-	}
-	if !ps.IsPlaying || ps.PlayingSince == nil {
-		return ps.CurrentTimeMs
-	}
-	elapsed := time.Since(*ps.PlayingSince)
-	return ps.CurrentTimeMs + elapsed.Milliseconds()
-}
-
-// ============================================================
 // Chat
 // ============================================================
 
 // HandleChat processes a chat message from a participant.
 func (m *Manager) HandleChat(code string, userID int64, username string, message string) error {
 	if len(message) == 0 {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
-	if len(message) > chatMaxLength {
-		return fmt.Errorf("message too long (max %d characters)", chatMaxLength)
+	// 2026-06 review (bug 6) — count RUNES, not bytes. `len(message)`
+	// gave CJK/emoji users only ~125-250 characters against an error
+	// message promising 500. The frontend input's maxLength=500 counts
+	// UTF-16 units, so the two now roughly agree for the BMP. A byte
+	// cap is unnecessary here: the WS read limit (partyMaxMessageSize)
+	// already bounds the frame size.
+	if utf8.RuneCountInString(message) > chatMaxLength {
+		return errUser("message too long (max %d characters)", chatMaxLength)
 	}
 
 	m.mu.RLock()
@@ -1968,7 +1661,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -1976,12 +1669,12 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 
 	// Check chat is enabled
 	if !ps.Settings.AllowChat {
-		return fmt.Errorf("chat is disabled for this party")
+		return errUser("chat is disabled for this party")
 	}
 
 	// Verify user is a participant
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 
 	// Trim leading/trailing whitespace; otherwise store the message as-is.
@@ -2004,7 +1697,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 	// the prior store-escape + render-escape was the bug.
 	stored := strings.TrimSpace(message)
 	if stored == "" {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
 	// 2026-05-27 (deep-debug Bug 9 fix) — TrimSpace uses unicode.IsSpace
 	// which catches NBSP/tab/newline but NOT zero-width chars (U+200B
@@ -2021,7 +1714,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 		}
 	}
 	if !hasPrintable {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
 
 	// Generate message ID
@@ -2078,7 +1771,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 // movie-time".
 func (m *Manager) HandleReaction(code string, userID int64, username string, emoji string, clientAbsMs int64) error {
 	if !allowedReactions[emoji] {
-		return fmt.Errorf("emoji not in allowed reactions whitelist")
+		return errUser("emoji not in allowed reactions whitelist")
 	}
 
 	m.mu.RLock()
@@ -2086,7 +1779,7 @@ func (m *Manager) HandleReaction(code string, userID int64, username string, emo
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -2094,7 +1787,7 @@ func (m *Manager) HandleReaction(code string, userID int64, username string, emo
 
 	// Verify user is a participant
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 
 	// Resolve the timestamp the reaction is tagged against. Default to
@@ -2492,14 +2185,14 @@ func (m *Manager) JoinVoice(code string, userID int64, username string) ([]Voice
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return nil, fmt.Errorf("party not found")
+		return nil, errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if _, ok := ps.Participants[userID]; !ok {
-		return nil, fmt.Errorf("not a participant in this party")
+		return nil, errUser("not a participant in this party")
 	}
 
 	if ps.VoiceParticipants == nil {
@@ -2599,27 +2292,27 @@ func (m *Manager) leaveVoiceLocked(ps *PartyState, userID int64) error {
 // validation and the write — not worth surfacing).
 func (m *Manager) RelayVoiceSignal(code string, fromUserID, toUserID int64, signalType string, payload map[string]interface{}) error {
 	if signalType != "voice-offer" && signalType != "voice-answer" && signalType != "voice-ice" {
-		return fmt.Errorf("invalid voice signal type: %s", signalType)
+		return errUser("invalid voice signal type: %s", signalType)
 	}
 	if fromUserID == toUserID {
-		return fmt.Errorf("cannot signal to self")
+		return errUser("cannot signal to self")
 	}
 
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if ps.VoiceParticipants == nil || !ps.VoiceParticipants[fromUserID] {
-		return fmt.Errorf("sender not in voice")
+		return errUser("sender not in voice")
 	}
 	if !ps.VoiceParticipants[toUserID] {
-		return fmt.Errorf("recipient not in voice")
+		return errUser("recipient not in voice")
 	}
 	targetConn, ok := ps.roomConns[toUserID]
 	if !ok || targetConn == nil {
@@ -2647,11 +2340,10 @@ func (m *Manager) RelayVoiceSignal(code string, fromUserID, toUserID int64, sign
 	if err != nil {
 		return fmt.Errorf("voice signal marshal: %w", err)
 	}
-	targetConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	if err := targetConn.WriteMessage(1 /*TextMessage*/, data); err != nil {
-		// Best-effort: don't propagate write errors — the room-socket
+	if err := targetConn.Send(data); err != nil {
+		// Best-effort: don't propagate send errors — the room-socket
 		// read pump will detect the dead conn and clean up.
-		slog.Debug("voice signal write failed", "code", code, "to", toUserID, "err", err)
+		slog.Debug("voice signal send failed", "code", code, "to", toUserID, "err", err)
 	}
 	return nil
 }
@@ -2669,8 +2361,7 @@ func (m *Manager) broadcastToRoomPeersExcludeLocked(ps *PartyState, excludeUserI
 		if c == nil || uid == excludeUserID {
 			continue
 		}
-		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_ = c.WriteMessage(1 /*TextMessage*/, data)
+		_ = c.Send(data)
 	}
 }
 
@@ -2700,7 +2391,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -2710,7 +2401,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	// episode. (Future: allow with democratic vote if AllowPause-style
 	// settings expand.)
 	if ps.HostUserID != hostUserID {
-		return fmt.Errorf("only the host can change media")
+		return errUser("only the host can change media")
 	}
 
 	// Reset playback to a fresh-party state. V3 model: Paused at anchor=0,
@@ -2782,7 +2473,7 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -2790,9 +2481,10 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 
 	p, ok := ps.Participants[userID]
 	if !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 	p.Ready = ready
+	p.LastSeen = time.Now()
 	// Snapshot the participant list under the lock so the broadcast
 	// payload doesn't iterate a map that might be mutated concurrently.
 	snapshot := make([]map[string]interface{}, 0, len(ps.Participants))
@@ -2809,9 +2501,7 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 	}
 
 	// broadcastToPartyLocked requires ps.mu held — deferred Unlock above
-	// keeps the lock contract intact. Iterates both V2 conns and V3
-	// roomConns pools so V3 clients (the only real ones in production
-	// today) actually receive the broadcast.
+	// keeps the lock contract intact.
 	m.broadcastToPartyLocked(ps, map[string]interface{}{
 		"type": "ready-changed",
 		"payload": map[string]interface{}{
@@ -2820,6 +2510,10 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 			"participants": snapshot,
 		},
 	})
+
+	// 2026-06 review (bug 2) — a Ready toggle can unblock an overdue
+	// scheduled start whose first fire was held by the spoiler gate.
+	m.maybeRetryScheduledStartLocked(ps)
 
 	return nil
 }
@@ -2844,21 +2538,21 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 // the server doesn't know the available track count.
 func (m *Manager) BroadcastTrackChange(code string, hostUserID int64, kind string, index int) error {
 	if kind != "audio" && kind != "subtitle" {
-		return fmt.Errorf("invalid track kind: %q (want 'audio' or 'subtitle')", kind)
+		return errUser("invalid track kind: %q (want 'audio' or 'subtitle')", kind)
 	}
 
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if ps.HostUserID != hostUserID {
-		return fmt.Errorf("only the host can change tracks for the party")
+		return errUser("only the host can change tracks for the party")
 	}
 
 	// Broadcast to all participants INCLUDING the host. The host's local
@@ -2968,16 +2662,8 @@ func (m *Manager) broadcastToPartyLocked(ps *PartyState, msg interface{}) {
 // members except the user with the given excludeUserID (0 means no exclusion).
 // ps.mu must be held by the caller.
 //
-// Writes to BOTH the V2 `ps.conns` pool AND the V3 `ps.roomConns` pool.
-// In V3-only deployments (current state — the V2 /ws/party route was
-// deleted in M1), `ps.conns` is always empty so the V2 loop is a no-op
-// and only the room pool delivers. Without this fan-out, every
-// broadcast-based feature (chat, reactions, participant-join,
-// media-change, track-change, ready-changed) was silently failing in
-// production for V3 clients because the broadcasts went to an empty
-// map. Deep-debugger May 2026 caught this; fix mirrors the dual-pool
-// iteration already used by endPartyInternal.
-//
+// Delivers on the room pool — chat, reactions, participant-join,
+// media-change, track-change, and ready-changed all ride this.
 // Sync-only messages (tick, pause, seek) use a separate emit helper
 // that writes only to ps.syncConns — those don't ride this broadcaster.
 func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{}, excludeUserID int64) {
@@ -2987,42 +2673,11 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 		return
 	}
 
-	// 2026-05-25 — set a fresh write deadline before EACH conn write.
-	// Production bug: the WS handler set a 10s SetWriteDeadline on the
-	// host's conn when sending the initial party-state, and no other
-	// path reset it. After 10s, every subsequent broadcast write
-	// failed with ErrDeadlineExceeded — silently swallowed by the
-	// `_ = c.WriteMessage(...)` / "err := ; err != nil { log Debug; mark
-	// failed }" patterns below. Result: host sees no participant-join,
-	// chat, reactions, or any other server-pushed event after the
-	// 10-second mark, even though their WS is fully alive (their own
-	// reads + heartbeats keep arriving). Now: set deadline immediately
-	// before each Write so it never silently expires.
-	broadcastWriteDeadline := time.Now().Add(broadcastWriteTimeout)
-
-	// V2 conns pool (empty in V3-only deployments but kept for the case
-	// where V2 routes are re-added or tests inject V2 connections).
-	var failedV2 []int64
-	for uid, conn := range ps.conns {
-		if uid == excludeUserID {
-			continue
-		}
-		if conn == nil {
-			failedV2 = append(failedV2, uid)
-			continue
-		}
-		_ = conn.SetWriteDeadline(broadcastWriteDeadline)
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			slog.Debug("failed to write to party participant (v2)", "user_id", uid, "error", err)
-			failedV2 = append(failedV2, uid)
-		}
-	}
-	for _, uid := range failedV2 {
-		delete(ps.conns, uid)
-	}
-
-	// V3 room pool — this is where chat/reactions/presence/media-change/
-	// track-change/ready-changed actually deliver in production.
+	// 2026-06 — Send enqueues onto the per-conn write pump (fresh write
+	// deadline per write happens in the pump; see broadcastWriteTimeout
+	// for the stale-deadline production bug that design retires). Never
+	// blocks under ps.mu; a send failure means the conn is closed (dead
+	// peer or queue overflow) so it's pruned from the pool.
 	var failedRoom []int64
 	for uid, conn := range ps.roomConns {
 		if uid == excludeUserID {
@@ -3032,41 +2687,15 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 			failedRoom = append(failedRoom, uid)
 			continue
 		}
-		_ = conn.SetWriteDeadline(broadcastWriteDeadline)
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			slog.Debug("failed to write to party participant (v3-room)", "user_id", uid, "error", err)
+		if err := conn.Send(data); err != nil {
+			slog.Debug("failed to send to party participant (room)", "user_id", uid, "error", err)
 			failedRoom = append(failedRoom, uid)
 		}
 	}
 	for _, uid := range failedRoom {
 		delete(ps.roomConns, uid)
 	}
-	// Don't remove from Participants — they might reconnect on either pool.
-}
-
-// sendToUserLocked sends a JSON message to a specific user in the party.
-// ps.mu must be held by the caller.
-func (m *Manager) sendToUserLocked(ps *PartyState, userID int64, msg interface{}) {
-	conn, ok := ps.conns[userID]
-	if !ok || conn == nil {
-		return
-	}
-
-	data, err := json.Marshal(msg)
-	if err != nil {
-		slog.Error("failed to marshal party message", "error", err)
-		return
-	}
-
-	// 2026-05-25 — set fresh write deadline (see broadcastWriteTimeout
-	// doc earlier in this file). sendToUserLocked is the only direct-
-	// to-user write path; same silent-failure class as the broadcast
-	// helpers without this reset.
-	_ = conn.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
-	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		slog.Debug("failed to write to party participant", "user_id", userID, "error", err)
-		delete(ps.conns, userID)
-	}
+	// Don't remove from Participants — they might reconnect.
 }
 
 // ============================================================
@@ -3153,26 +2782,11 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 		})
 	}
 
-	var playAt int64
-	if ps.GroupState == GroupStatePlaying && ps.PlayingSince != nil {
-		playAt = ps.PlayingSince.UnixMilli()
-	} else {
-		playAt = time.Now().UnixMilli()
-	}
-
-	// 2026-05-25 — `is_playing` must reflect the V3 `Running` field, not
-	// the V2 `IsPlaying`. V3's HandleRequestPlay (sync_v3.go:706) calls
-	// setAnchorLocked(true) which sets ps.Running=true via the anchor
-	// path but NEVER touches ps.IsPlaying — the V2 field was left as the
-	// initial false from CreateParty. Result: a guest joining mid-stream
-	// received party-state{is_playing:false} even though the host was
-	// actively playing, so the client's auto-open-player useEffect
-	// (App.tsx) bailed on the !party.state.isPlaying guard and the guest
-	// saw the panel but no video. OR'ing covers the transitional period
-	// where both V2 and V3 are maintained in parallel (per the comment at
-	// manager.go:288 — "Step 5 of the execution plan removes V2").
-	isPlayingForClient := ps.IsPlaying || ps.Running
-
+	// `current_time_ms` / `is_playing` come from the V3 anchor — the only
+	// source of playback truth since the 2026-06 V2 deletion. The dead V2
+	// fields (group_state, play_at_server_ms, the `sync` tunables block)
+	// were dropped from the payload; the SPA never read them (verified
+	// against lib/party.ts PartyStateInnerParty before removal).
 	return map[string]interface{}{
 		"type": "party-state",
 		"payload": map[string]interface{}{
@@ -3184,23 +2798,13 @@ func (m *Manager) BuildPartyStateMessage(ps *PartyState) map[string]interface{} 
 				"media_title":        ps.MediaTitle,
 				"media_poster":       ps.MediaPoster,
 				"party_name":         ps.PartyName,
-				"current_time_ms":    m.calculateCurrentPosition(ps),
-				"is_playing":         isPlayingForClient,
-				"group_state":        string(ps.GroupState),
+				"current_time_ms":    ps.CurrentAbsMs(),
+				"is_playing":         ps.Running,
 				"revision":           ps.StateRevision,
-				"play_at_server_ms":  playAt,
 				"server_now_ms":      time.Now().UnixMilli(),
 				"max_participants":   ps.MaxParticipants,
 				"scheduled_start_at": ps.ScheduledStartAt,
 				"started_at":         ps.StartedAt,
-				"sync": map[string]interface{}{
-					"heartbeat_interval_ms": m.cfg.HeartbeatInterval.Milliseconds(),
-					"time_sync_interval_ms": m.cfg.TimeSyncInterval.Milliseconds(),
-					"drift_ignore_ms":       m.cfg.DriftIgnoreMs,
-					"drift_rate_adjust_ms":  m.cfg.DriftRateAdjustMs,
-					"drift_hard_seek_ms":    m.cfg.DriftHardSeekMs,
-					"drift_max_attempts":    m.cfg.DriftMaxAttempts,
-				},
 				"settings": map[string]interface{}{
 					"allow_pause": ps.Settings.AllowPause,
 					"allow_chat":  ps.Settings.AllowChat,
@@ -3236,12 +2840,6 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(snapshot))
 	for _, ps := range snapshot {
 		ps.mu.Lock()
-		// 2026-05-25 deep-debug (Medium #1) — same V2/V3 OR as
-		// BuildPartyStateMessage so the public listing endpoint
-		// (/api/parties/active) reports a V3 mid-stream party as
-		// "is_playing: true". Without this, a third-party joining
-		// via the listing UI saw an active party as paused and
-		// might have decided not to bother.
 		result = append(result, map[string]interface{}{
 			"code":               ps.Code,
 			"host_user_id":       ps.HostUserID,
@@ -3250,8 +2848,8 @@ func (m *Manager) ActiveParties() []map[string]interface{} {
 			"media_poster":       ps.MediaPoster,
 			"participant_count":  len(ps.Participants),
 			"max_participants":   ps.MaxParticipants,
-			"is_playing":         ps.IsPlaying || ps.Running,
-			"current_time_ms":    m.calculateCurrentPosition(ps),
+			"is_playing":         ps.Running,
+			"current_time_ms":    ps.CurrentAbsMs(),
 			"created_at":         ps.CreatedAt.Format(time.RFC3339),
 			"scheduled_start_at": ps.ScheduledStartAt,
 			"started_at":         ps.StartedAt,

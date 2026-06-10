@@ -119,7 +119,9 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// that's a deliberate user action, not a socket EOF.
 			_ = h.manager.LeavePartyV3RoomIfConn(code, claims.UserID, sc)
 		}
-		_ = conn.Close()
+		// Close via the SafeConn so its write pump stops too (2026-06 —
+		// closing only the raw conn would leak the pump goroutine).
+		_ = sc.Close()
 		slog.Debug("v3 room disconnected", "user_id", claims.UserID)
 	}()
 
@@ -152,7 +154,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 			ps, err := h.manager.JoinPartyV3RoomCompanion(p.PartyCode, claims.UserID, claims.Username, companion, sc)
 			if err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 				continue
 			}
 			codeMu.Lock()
@@ -160,15 +162,21 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			codeMu.Unlock()
 
 			// Send an initial room snapshot (participant list, chat
-			// history, media descriptor). Reuses V2's party-state builder
-			// for payload parity during coexistence.
+			// history, media descriptor). Built, marshalled, AND enqueued
+			// under ps.mu: the join already registered this conn for
+			// broadcasts, so enqueueing within the same lock the
+			// broadcasters hold guarantees the snapshot is ordered ahead
+			// of any broadcast that postdates it — and Send (vs a direct
+			// write) can't overtake older frames already in the outbox
+			// (2026-06 review: the direct write raced the pump on writeMu,
+			// letting a snapshot bypass queued chat frames it already
+			// contained, which the client then double-applied).
 			ps.Lock()
 			snap := h.manager.BuildPartyStateMessage(ps)
-			ps.Unlock()
 			if data, err := json.Marshal(snap); err == nil {
-				sc.SetWriteDeadline(time.Now().Add(partyWriteWait))
-				_ = sc.WriteMessage(websocket.TextMessage, data)
+				_ = sc.Send(data)
 			}
+			ps.Unlock()
 
 		case "leave-party":
 			codeMu.Lock()
@@ -190,8 +198,20 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// and the server's SetReadDeadline expired waiting for a pong
 			// that never made it through. Application-level data frames
 			// like this heartbeat DO reset every reasonable proxy's idle
-			// counter. No payload needed; the read itself is the value.
-			// Pure no-op on the server side.
+			// counter. No payload needed.
+			//
+			// 2026-06 review — also refresh the participant's LastSeen.
+			// This used to be a pure no-op, which meant NOTHING refreshed
+			// LastSeen for quietly-watching members and CleanupStale
+			// reaped their party at the 5-minute mark. The 25s heartbeat
+			// cadence keeps every connected member comfortably inside the
+			// staleParticipantTimeout window.
+			codeMu.Lock()
+			code := currentCode
+			codeMu.Unlock()
+			if code != "" {
+				h.manager.TouchParticipant(code, claims.UserID)
+			}
 
 		case "chat", "chat-message":
 			// 2026-05-25 — accept both "chat" and "chat-message" for the
@@ -222,7 +242,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleChat(code, claims.UserID, claims.Username, p.Message); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "reaction":
@@ -248,7 +268,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleReaction(code, claims.UserID, claims.Username, p.Emoji, p.AbsMs); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "change-media":
@@ -273,7 +293,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.ChangeMedia(code, claims.UserID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "track-change":
@@ -294,7 +314,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.BroadcastTrackChange(code, claims.UserID, p.Kind, p.Index); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "ready", "mark-ready":
@@ -338,7 +358,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.MarkReady(code, claims.UserID, p.Ready); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		// ============================================================
@@ -362,19 +382,20 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 			peers, err := h.manager.JoinVoice(code, claims.UserID, claims.Username)
 			if err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 				continue
 			}
 			// Reply to the JOINER with the list of existing peers so
 			// they can initiate outbound offers. The "newcomer initiates"
-			// pattern avoids offer-collision races.
+			// pattern avoids offer-collision races. Send (not a direct
+			// write) so the reply can't overtake frames already queued on
+			// this conn (2026-06 review — per-conn FIFO).
 			resp := map[string]interface{}{
 				"type":    "voice-peers",
 				"payload": map[string]interface{}{"peers": peers},
 			}
 			if data, err := json.Marshal(resp); err == nil {
-				sc.SetWriteDeadline(time.Now().Add(partyWriteWait))
-				_ = sc.WriteMessage(websocket.TextMessage, data)
+				_ = sc.Send(data)
 			}
 
 		case "voice-leave":
@@ -459,7 +480,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if err := h.manager.RelayVoiceSignal(code, claims.UserID, p.ToUserID, msg.Type, forward); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		default:

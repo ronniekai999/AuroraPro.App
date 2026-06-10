@@ -54,17 +54,13 @@ transcode:
     - "720p"
     - "480p"
 
-watchparty:
-  # Sync protocol tuning (inspired by Jellyfin SyncPlay + mpv-shim defaults).
-  # Clients send a client→server TimeSync ping to establish a shared clock,
-  # then report position + buffering state at heartbeat_interval_ms.
-  heartbeat_interval_ms: 500    # client position-report cadence (250–1000 sensible)
-  time_sync_interval_ms: 30000  # client re-runs NTP-style handshake this often
-  buffer_hysteresis_ms: 750     # must be buffering at least this long before group pauses
-  play_schedule_delay_ms: 300   # lead time added to play commands so all clients can start together
-  # Client-side tiered drift correction (server does not seek-correct):
-  drift_ignore_ms: 50           # below this, no action
-  drift_rate_adjust_ms: 300     # 50–300: nudge playback rate
-  drift_hard_seek_ms: 2000      # 300–2000: hard seek
-  # Above drift_hard_seek_ms for drift_max_attempts in a row → drop client from group.
-  drift_max_attempts: 5
+# watchparty:
+#   2026-06 — the V2 sync tunables that used to live here
+#   (heartbeat_interval_ms, time_sync_interval_ms, buffer_hysteresis_ms,
+#   play_schedule_delay_ms, drift_*) configured a protocol that has been
+#   removed. The V3 sync engine's tuning is built in (rate-adjust window
+#   200ms–3s, 250ms ticks; see internal/watchparty DefaultSyncConfig).
+#   Setting the old keys logs a startup warning and has no effect.
+#   Voice (WebRTC) ICE/TURN settings are configured via env vars
+#   (AURORA_VOICE_STUN_SERVERS / AURORA_TURN_URL / AURORA_TURN_USERNAME /
+#   AURORA_TURN_CREDENTIAL) — see internal/config.
