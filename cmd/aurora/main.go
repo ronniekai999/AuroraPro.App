@@ -1072,6 +1072,20 @@ func (a heroAdapter) DiscoverFor(ctx context.Context, profileID int64) ([]api.Di
 	return out, nil
 }
 
+// DiscoverCached bridges the cache-only read (no build) so the API can serve a
+// non-blocking /api/me/discover. Same shape translation as DiscoverFor.
+func (a heroAdapter) DiscoverCached(profileID int64) ([]api.DiscoverRail, bool) {
+	rails, ok := a.h.DiscoverCached(profileID)
+	if !ok {
+		return nil, false
+	}
+	out := make([]api.DiscoverRail, len(rails))
+	for i, r := range rails {
+		out[i] = api.DiscoverRail{Title: r.Title, Description: r.Description, Items: r.Items}
+	}
+	return out, true
+}
+
 // AnchorRailsFor bridges recommender.AnchorRail to api.AnchorRail.
 // Same shape-translation pattern as DiscoverFor; pointers flow through.
 func (a heroAdapter) AnchorRailsFor(ctx context.Context, profileID int64) ([]api.AnchorRail, error) {
