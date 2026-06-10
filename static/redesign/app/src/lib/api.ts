@@ -1241,6 +1241,95 @@ export async function getEmbeddingStatus(signal?: AbortSignal): Promise<Embeddin
   return apiFetch<EmbeddingStatus>('/api/admin/embedding-status', { signal })
 }
 
+// ── Smart Skip (intro/recap/credits markers) ──────────────────────
+//
+// Player-facing markers arrive inside /api/stream/info (see
+// lib/streaming.ts StreamInfo.markers); the functions here are the
+// ADMIN surface: coverage status, manual sweep trigger, and per-file
+// manual correction. Defined in api.ts (not streaming.ts) because
+// streaming.ts imports from this module — the type lives where the
+// dependency arrow already points.
+
+export interface SkipMarker {
+  kind: 'recap' | 'intro' | 'credits'
+  start_ms: number
+  end_ms: number
+  confidence?: number
+  // 'manual' = admin correction; anything else is the analyzer
+  // version (e.g. 'xcorr-v1'). A manual zero-length window
+  // (start_ms === end_ms === 0) means "suppressed" — the analyzer
+  // won't re-add it and the player never sees it.
+  detector?: string
+}
+
+export interface SkipMarkerStatus {
+  enabled: boolean
+  detector?: string
+  worker?: {
+    running: boolean
+    last_sweep_at?: string
+    last_error?: string
+    sweep_analyzed: number
+  }
+  episode_files_total?: number
+  episode_files_analyzed?: number
+  movie_files_total?: number
+  movie_files_analyzed?: number
+  intro_markers?: number
+  recap_markers?: number
+  credits_markers?: number
+  manual_markers?: number
+}
+
+export async function getSkipMarkerStatus(signal?: AbortSignal): Promise<SkipMarkerStatus> {
+  return apiFetch<SkipMarkerStatus>('/api/admin/skip-markers/status', { signal })
+}
+
+export async function triggerSkipMarkerSweep(): Promise<void> {
+  await apiFetch('/api/admin/skip-markers/sweep', { method: 'POST' })
+}
+
+// Admin read: ALL marker rows for a file, including zero-length
+// suppressions the player-facing stream-info response filters out.
+export async function getAdminSkipMarkers(
+  fileId: number,
+  fileType: 'media' | 'episode',
+  signal?: AbortSignal,
+): Promise<SkipMarker[]> {
+  const resp = await apiFetch<{ markers: SkipMarker[] }>(
+    `/api/admin/skip-markers/${fileId}?type=${fileType}`,
+    { signal },
+  )
+  return resp.markers || []
+}
+
+// Manual correction — writes a detector='manual' row the background
+// analyzer never overwrites. Returns the file's updated marker list.
+export async function putSkipMarker(
+  fileId: number,
+  fileType: 'media' | 'episode',
+  marker: { kind: SkipMarker['kind']; start_ms: number; end_ms: number },
+): Promise<SkipMarker[]> {
+  const resp = await apiFetch<{ markers: SkipMarker[] }>(
+    `/api/admin/skip-markers/${fileId}?type=${fileType}`,
+    { method: 'PUT', body: marker },
+  )
+  return resp.markers || []
+}
+
+// "Revert to auto": deletes the (file, kind) row and queues fresh
+// auto-detection for the file.
+export async function deleteSkipMarker(
+  fileId: number,
+  fileType: 'media' | 'episode',
+  kind: SkipMarker['kind'],
+): Promise<void> {
+  await apiFetch(
+    `/api/admin/skip-markers/${fileId}?type=${fileType}&kind=${kind}`,
+    { method: 'DELETE' },
+  )
+}
+
 export async function listAdminActivity(
   perPage = 50,
   signal?: AbortSignal,

@@ -1,11 +1,19 @@
 # Smart Skip + Seamless Binge — intro / recap / credits detection
 
 **Implementation plan**
-Status: proposal / for decision · Author: prepared for Ronnie · Date: 2026-06-10
+Status: ✅ **IMPLEMENTED** (all three phases, in one cut) · Author: prepared for Ronnie · Date: 2026-06-10
 
 > One of five feature plans drafted together. Siblings:
 > [aurora-concierge](../aurora-concierge/), [catch-me-up](../catch-me-up/),
 > [movie-night-matchmaker](../movie-night-matchmaker/), [aurora-rewind](../aurora-rewind/).
+
+> **Implemented — what landed (and where):**
+> - migration [`043_skip_markers`](../../../migrations/043_skip_markers.up.sql) — `skip_markers` (per-file recap/intro/credits windows, `detector`-versioned, `manual` rows win) + the `skip_marker_analysis` ledger ("analyzed, nothing found" is sticky; a detector bump reprocesses everything).
+> - [`internal/skipmarkers/`](../../../internal/skipmarkers/) — the pure-Go detector (decision: **no chromaprint dependency**): FFmpeg→mono-16 kHz PCM, Haitsma–Kalker spectral hash (own radix-2 FFT), cross-correlation of consecutive episodes with the ≥2-confirming-pairs season gate (`analyze.go`), `blackdetect`/`silencedetect` credits onset for episodes **and movies** (`credits.go`), and the sequential niced background worker (`worker.go`, detector `xcorr-v1`). Unit tests cover the FFT, alignment, season validation, recap/intro split, and credits parsing.
+> - [`internal/db/queries_skipmarkers.go`](../../../internal/db/queries_skipmarkers.go) — marker CRUD, pending-season/movie fetches, coverage counts.
+> - Markers ride the existing stream-info payload ([`GetStreamInfo`](../../../internal/api/phase2_handlers.go)) — no extra playback round-trip. Admin surface in [`skipmarker_handlers.go`](../../../internal/api/skipmarker_handlers.go): `GET /api/admin/skip-markers/status`, `POST …/sweep`, `GET/PUT/DELETE …/{fileID}` (manual correction / suppression / re-detect).
+> - Triggers: boot sweep + `Scanner.OnScanComplete` hook + 6 h periodic tick ([`cmd/aurora/main.go`](../../../cmd/aurora/main.go)). Kill switch: server setting `skip_markers_enabled=false`.
+> - Frontend ([`VideoPlayer.tsx`](../../../static/redesign/app/src/components/VideoPlayer.tsx)): **Skip Intro / Skip Recap** pill (advisory; party-guest- and cast-aware), credits-triggered **Next Episode** card driving the existing auto-advance path (5 s countdown with the autoplay pref on, explicit button when off), movie **Skip Credits**, and the admin in-player marker editor ("Start = now / End = now / Off / Auto"). Admin dashboard gets a Skip Markers coverage tile.
 
 ---
 

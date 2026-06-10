@@ -549,6 +549,24 @@ type TranscodeSession struct {
 	LastActive time.Time `json:"last_active"`
 }
 
+// SkipMarker is a Smart Skip time window on a media/episode file:
+// 'recap' | 'intro' | 'credits', in SOURCE-FILE milliseconds. The player
+// maps source time onto the active timeline the same way it maps watch
+// progress (real-file seconds = hls time + session start_sec).
+//
+// Detector records provenance: 'xcorr-v1' (audio cross-correlation),
+// heuristic credits detection, or 'manual' (admin correction — never
+// overwritten by the analyzer). A zero-length window (start==end==0)
+// is an admin suppression: stored so the analyzer won't re-add the
+// marker, filtered out of player-facing responses.
+type SkipMarker struct {
+	Kind       string  `json:"kind"` // "recap" | "intro" | "credits"
+	StartMs    int64   `json:"start_ms"`
+	EndMs      int64   `json:"end_ms"`
+	Confidence float64 `json:"confidence,omitempty"`
+	Detector   string  `json:"detector,omitempty"`
+}
+
 // SubtitleTrack represents an available subtitle for a media file.
 type SubtitleTrack struct {
 	Index    int    `json:"index"`

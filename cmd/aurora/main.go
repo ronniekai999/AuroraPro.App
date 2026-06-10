@@ -30,6 +30,7 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/recommender"
 	"github.com/aurora-media/aurora/internal/search"
+	"github.com/aurora-media/aurora/internal/skipmarkers"
 	"github.com/aurora-media/aurora/internal/streaming"
 	"github.com/aurora-media/aurora/internal/watchparty"
 	ws "github.com/aurora-media/aurora/internal/websocket"
@@ -127,6 +128,24 @@ func main() {
 	scanner := library.NewScanner(cfg.Scanner, queries)
 	hub := ws.NewHub(cfg.OriginAllowed)
 	activity := api.NewActivityLogger(queries)
+
+	// Smart Skip — background intro/recap/credits detection (proposal:
+	// docs/proposals/smart-skip/IMPLEMENTATION_PLAN.md). Always
+	// constructed: the worker self-gates on FFmpeg availability and the
+	// skip_markers_enabled server setting, and runs one niced FFmpeg at
+	// a time so it never competes with live transcodes. The boot sweep
+	// drains any backlog; scan completion re-triggers it for new files;
+	// the periodic tick catches stragglers.
+	//
+	// The OnScanComplete hook MUST be assigned before the watcher below
+	// starts — watcher-triggered scans can already be running (and
+	// finishing) during boot, and the scan goroutine reads this field
+	// in its completion path.
+	skipWorker := skipmarkers.NewWorker(queries)
+	go skipWorker.Run(ctx)
+	scanner.OnScanComplete = func(lib *models.Library) {
+		skipWorker.TriggerSweep()
+	}
 
 	// File watcher: triggers incremental rescan when files change on disk
 	watcher := library.NewWatcher(cfg.Scanner, scanner, func(lib *models.Library) {
@@ -785,8 +804,9 @@ func main() {
 		// failed to construct. Router's nil check converts that to a
 		// 503 from the rematch endpoints — same shape as the
 		// embedding-status endpoint's nil-handling.
-		AIBackfill: aiBackfillIface(aiBackfill),
-		RootCtx:    ctx, // server-lifecycle ctx for background goroutines spawned in handlers
+		AIBackfill:  aiBackfillIface(aiBackfill),
+		SkipMarkers: skipWorker,
+		RootCtx:     ctx, // server-lifecycle ctx for background goroutines spawned in handlers
 	})
 
 	// HTTP Server

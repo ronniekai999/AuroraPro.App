@@ -20,6 +20,7 @@ import (
 	"github.com/aurora-media/aurora/internal/logging"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/skipmarkers"
 	"github.com/aurora-media/aurora/internal/streaming"
 	"github.com/aurora-media/aurora/internal/watchparty"
 	ws "github.com/aurora-media/aurora/internal/websocket"
@@ -173,6 +174,7 @@ type RouterDeps struct {
 	EmbeddingVersion      int16                // current embedding.CurrentVersion at boot
 	LLMClient             *llm.Client          // optional — admin debug toggle target (Phase 6)
 	AIBackfill            AIBackfillController // optional — enables /admin/flagged/ai-rematch endpoints
+	SkipMarkers           *skipmarkers.Worker  // optional — Smart Skip status/sweep/correction endpoints
 	// RootCtx is the server-lifecycle context. Handlers that spawn long-
 	// lived background goroutines (e.g. ARR dispatch) parent off this so
 	// graceful shutdown stops them. May be nil; handlers must tolerate it.
@@ -446,6 +448,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// Auto-updater endpoints. Handler is stateless beyond the
 	// status-file path and unit name, both fixed by install.sh.
 	systemH := NewSystemHandler()
+	// Smart Skip — admin status / sweep trigger / manual marker
+	// correction. Worker may be nil in test wiring; handlers degrade
+	// to "disabled" responses.
+	skipMarkerH := NewSkipMarkerHandler(deps.Queries, deps.SkipMarkers)
 	// 2026-05-16 — wire the DB connection string for the pg_dump backup
 	// endpoint. Empty string is a clean disable (Backup returns 500 with
 	// "not configured" — no panic).
@@ -884,6 +890,18 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Post("/flagged/ai-rematch", adminH.AIRematchStart)
 				r.Get("/flagged/ai-rematch/status", adminH.AIRematchStatus)
 				r.Get("/embedding-status", adminH.EmbeddingStatus)
+				// Smart Skip (intro/recap/credits markers). Status +
+				// fire-and-forget sweep trigger mirror the embedding /
+				// ai-rematch pattern; PUT/DELETE are the manual
+				// correction surface (detector='manual' rows that the
+				// background analyzer never overwrites). File family is
+				// disambiguated via ?type=episode|media, matching
+				// /api/stream/info.
+				r.Get("/skip-markers/status", skipMarkerH.Status)
+				r.Post("/skip-markers/sweep", skipMarkerH.TriggerSweep)
+				r.Get("/skip-markers/{fileID}", skipMarkerH.GetMarkers)
+				r.Put("/skip-markers/{fileID}", skipMarkerH.UpsertMarker)
+				r.Delete("/skip-markers/{fileID}", skipMarkerH.DeleteMarker)
 				r.Get("/llm", adminH.GetLLMSettings)
 				r.Put("/llm", adminH.UpdateLLMSettings)
 				// Phase 3 (Google OAuth): admin-only configuration.

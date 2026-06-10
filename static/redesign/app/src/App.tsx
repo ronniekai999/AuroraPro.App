@@ -46,6 +46,8 @@ import {
   getAdminDashboard,
   getEmbeddingStatus,
   type EmbeddingStatus,
+  getSkipMarkerStatus,
+  type SkipMarkerStatus,
   listAdminActivity,
   listAdminLogs,
   listAdminUsers,
@@ -6142,6 +6144,9 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [statsLoading, setStatsLoading] = useState(false)
   const [statsErr, setStatsErr] = useState<string | null>(null)
   const [embStatus, setEmbStatus] = useState<EmbeddingStatus | null>(null)
+  // Smart Skip coverage (intro/credits markers) — same lazy-card
+  // pattern as the embedding status above.
+  const [skipStatus, setSkipStatus] = useState<SkipMarkerStatus | null>(null)
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [usersLoading, setUsersLoading] = useState(false)
   const [usersErr, setUsersErr] = useState<string | null>(null)
@@ -6166,6 +6171,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
     const ac = new AbortController()
     setStatsLoading(true)
     getEmbeddingStatus(ac.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
+    getSkipMarkerStatus(ac.signal).then(setSkipStatus).catch(() => { /* card hides if unavailable */ })
     getAdminDashboard(ac.signal)
       .then(s => setStats(s))
       .catch(err => {
@@ -6307,6 +6313,17 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
                   ...(embStatus && embStatus.enabled
                     ? [{ label: 'Embedded', value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`, icon: 'cpu', color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400' }]
+                    : []),
+                  // Smart Skip coverage: files analyzed for intro/
+                  // credits markers vs total (episodes + movies).
+                  // Amber while a backlog remains or a sweep runs.
+                  ...(skipStatus && skipStatus.enabled
+                    ? (() => {
+                        const analyzed = (skipStatus.episode_files_analyzed ?? 0) + (skipStatus.movie_files_analyzed ?? 0)
+                        const total = (skipStatus.episode_files_total ?? 0) + (skipStatus.movie_files_total ?? 0)
+                        const behind = analyzed < total || !!skipStatus.worker?.running
+                        return [{ label: 'Skip Markers', value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`, icon: 'film', color: behind ? 'text-amber-400' : 'text-emerald-400' }]
+                      })()
                     : []),
                 ].map(s => (
                   <div key={s.label} className="glass-panel rounded-xl p-5">
@@ -8839,7 +8856,10 @@ export default function App() {
   // playerState→IDLE (the local <video> is paused, so its 'ended' never
   // fires), and the player needs to know whether to re-point the receiver
   // at the new episode's session (true) or stop the cast (false).
-  const handlePlaybackEnded = useCallback(async (): Promise<boolean> => {
+  // Smart Skip — `opts.force` comes from the credits card's explicit
+  // "Play now" click, which outranks the passive autoplay preference
+  // (the toggle governs what happens when the user does NOTHING).
+  const handlePlaybackEnded = useCallback(async (opts?: { force?: boolean }): Promise<boolean> => {
     const ended = playerTargetRef.current
     if (!ended || ended.fileType !== 'episode') return false
     if (ended.seasonNumber == null || ended.episodeNumber == null) return false
@@ -8857,7 +8877,7 @@ export default function App() {
         else if (prefs.preferred_quality === '1080p') preferQuality = '1080p'
       }
     } catch { /* malformed prefs — keep defaults (autoplay ON) */ }
-    if (!autoplay) return false
+    if (!autoplay && !opts?.force) return false
 
     const mediaItemId = ended.mediaItemId
     const curSeason = ended.seasonNumber
@@ -9971,6 +9991,7 @@ export default function App() {
       <VideoPlayer
         target={playerTarget}
         onEnded={handlePlaybackEnded}
+        isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onClose={() => {
           setPlayerTarget(null)

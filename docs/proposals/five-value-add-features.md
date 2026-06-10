@@ -11,7 +11,7 @@ gamification, and the server-side image compositor — to do things mainstream m
 | 1 | **Aurora Concierge** | Conversational, agentic discovery — chat that searches your library *and* takes actions | LLM client, semantic search + rerank, watchlist/request/party handlers | L (phased) | [plan](./aurora-concierge/IMPLEMENTATION_PLAN.md) |
 | 2 | **Catch Me Up** → **“Previously”** ✅ **SHIPPED** | Spoiler-safe AI recaps when you resume a series after a gap | Episode overviews, per-profile `completed_at`, `ChatJSON` | **S** | [plan](./catch-me-up/IMPLEMENTATION_PLAN.md) |
 | 3 | **Movie-Night Matchmaker** | Blend 2+ profiles' taste → picks everyone likes → start a party | Taste centroids, `NearestUnwatched`, party create | **S** | [plan](./movie-night-matchmaker/IMPLEMENTATION_PLAN.md) |
-| 4 | **Smart Skip + Seamless Binge** | Auto-detect intro/recap/credits; "Skip Intro" + auto-advance | FFmpeg pipeline, episode grouping, next-episode autoplay | M–L | [plan](./smart-skip/IMPLEMENTATION_PLAN.md) |
+| 4 | **Smart Skip + Seamless Binge** ✅ **IMPLEMENTED** | Auto-detect intro/recap/credits; "Skip Intro" + auto-advance | FFmpeg pipeline, episode grouping, next-episode autoplay | M–L | [plan](./smart-skip/IMPLEMENTATION_PLAN.md) |
 | 5 | **Aurora Rewind** | Shareable, AI-narrated "year in film" recap card | Watch history, gamification, embeddings, **party-share PNG renderer** | M | [plan](./aurora-rewind/IMPLEMENTATION_PLAN.md) |
 
 ## Why these five together
@@ -27,7 +27,7 @@ the local LLM, per-user taste vectors, and the server-side image generator.
 2. **#3 Movie-Night Matchmaker** — tiny code, showcases the taste-vector moat, funnels into watch parties.
 3. **#5 Aurora Rewind** — reuses the party-share renderer + gamification; high virality.
 4. **#1 Aurora Concierge** — flagship, phased so Phase 1 (read-only) ships before the action surface.
-5. **#4 Smart Skip** — biggest engineering unknown (the DSP), isolated behind a versioned detector so it can improve independently.
+5. ~~**#4 Smart Skip**~~ → ✅ **implemented** (pure-Go `xcorr-v1` detector — the DSP unknown is solved; see the [plan](./smart-skip/IMPLEMENTATION_PLAN.md)'s "what landed" block).
 
 > These are **proposals for decision**, mirroring the format of the existing
 > [`docs/proposals/`](.) entries (taste-onboarding, library-redesign, watch-party-chat).

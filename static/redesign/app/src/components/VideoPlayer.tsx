@@ -27,11 +27,15 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
-import { Airplay, Cast, Maximize2, Pause, Play, StopCircle, X } from 'lucide-react'
+import { Airplay, Cast, Maximize2, Pause, Play, SkipForward, StopCircle, X } from 'lucide-react'
 import {
+  deleteSkipMarker,
   forceTokenRefresh,
+  getAdminSkipMarkers,
+  putSkipMarker,
   type EpisodeFile,
   type MediaFile,
+  type SkipMarker,
   reportProgress,
   withToken,
 } from '@/lib/api'
@@ -172,10 +176,20 @@ interface VideoPlayerProps {
   // episode-vs-movie, party state, etc.) — the player itself stays dumb
   // about the episode graph. Returns whether it advanced; the cast path
   // awaits this to decide between re-pointing the receiver and stopping.
-  onEnded?: () => boolean | Promise<boolean>
+  //
+  // Smart Skip — the credits-triggered "Next Episode" card drives the
+  // SAME callback early (before the media actually ends). When the
+  // user explicitly clicks the card's button, `force: true` asks the
+  // parent to advance even with the autoplay preference off — an
+  // explicit click outranks the passive-behavior setting.
+  onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
   // Reports whether the player has collapsed to the cast/AirPlay control
   // widget, so the parent can suppress Escape/back-to-close while casting.
   onMinimizedChange?: (minimized: boolean) => void
+  // Smart Skip — gates the in-player marker editor (manual correction
+  // writes through admin-only endpoints, so the UI only mounts for
+  // admins).
+  isAdmin?: boolean
 }
 
 // Pick a file to play from the available list.
@@ -218,6 +232,22 @@ export function pickFile(
     if (grouped[k].length > 0) return grouped[k][0]
   }
   return files[0]
+}
+
+// Smart Skip — read the "Auto-play next episode" preference straight
+// from the aurora_prefs localStorage bucket, the same cross-component
+// source of truth App.tsx's handlePlay / handlePlaybackEnded use.
+// Default ON, matching the Settings toggle's own default. Decides
+// whether the credits-triggered next-up card counts down on its own
+// (autoplay) or waits for an explicit click (prompt).
+function readAutoplayPref(): boolean {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+    if (raw && typeof raw === 'object' && (raw as Record<string, unknown>).autoplay === false) {
+      return false
+    }
+  } catch { /* malformed prefs — keep default (autoplay ON) */ }
+  return true
 }
 
 // 2026-05-28 — Lift subtitle cues clear of the bottom control bar.
@@ -297,7 +327,7 @@ function saveBandwidthEstimate(bps: number | undefined): void {
   } catch { /* best-effort */ }
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange }: VideoPlayerProps) {
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
@@ -416,6 +446,34 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // target. Without this, a chronically broken codec would loop
   // (fallback to transcode → also fails → fallback again).
   const mediaErrorFallbackTriedRef = useRef<boolean>(false)
+
+  // ── Smart Skip ───────────────────────────────────────────────────
+  // Markers arrive inside the stream-info payload (source-file ms);
+  // currentSec is already in real-file coords, so window membership
+  // is a direct comparison — no per-decision timeline math.
+  const [skipMarkers, setSkipMarkers] = useState<SkipMarker[]>([])
+  // Window the user already skipped/dismissed this playback, keyed
+  // `${kind}:${start_ms}` so the pill doesn't reappear when the
+  // post-skip seek lands inside the same window's tail.
+  const [skipDismissedKey, setSkipDismissedKey] = useState<string | null>(null)
+  // Credits-triggered next-up card lifecycle. 'finale' = the advance
+  // came back empty (series end) — brief feedback, then 'spent'.
+  // 'spent' = fired or dismissed; never re-shown for this playback.
+  const [nextUpPhase, setNextUpPhase] = useState<'idle' | 'countdown' | 'prompt' | 'finale' | 'spent'>('idle')
+  const [nextUpSecs, setNextUpSecs] = useState(5)
+  // True while an early advance (next-up card) is in flight or has
+  // succeeded — gates the <video> 'ended' DOM handler so reaching the
+  // real end of the credits can't double-advance past TWO episodes.
+  const advanceFiredRef = useRef(false)
+  // Identity of the file the skip state belongs to. Audio-track
+  // switches and forward-seek session rebuilds change the TARGET
+  // identity (the play effect re-runs) but not the file — and a
+  // dismissed next-up card / skip pill must stay dismissed across
+  // those rebuilds, otherwise a rebuild mid-credits re-pops the card
+  // the user just closed and (autoplay on) auto-advances anyway.
+  const skipStateFileRef = useRef<string | null>(null)
+  // Admin marker editor visibility (top-bar "Markers" menu).
+  const [markersMenuOpen, setMarkersMenuOpen] = useState(false)
 
   // ── Chromecast / AirPlay (Cast & AirPlay milestone) ─────────────
   // AirPlay is handled entirely by Safari's native UI: setting
@@ -1082,7 +1140,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // session before the next one starts so we never have two ffmpeg
   // processes running for one user.
   useEffect(() => {
-    if (!target) return
+    if (!target) {
+      // Player closed: forget the skip-state file identity so a later
+      // re-open of the SAME file starts a fresh playback (dismissals
+      // and the next-up lifecycle are per-playback, not per-file-ever).
+      skipStateFileRef.current = null
+      return
+    }
     let cancelled = false
     const ac = new AbortController()
 
@@ -1104,6 +1168,23 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setRealDurationSec(0)
     setPlaying(false)
     serverDurationRef.current = false
+    // Smart Skip — markers for the new target arrive with its
+    // stream-info below. Dismissals/next-up state reset only when the
+    // FILE changes: same-file session rebuilds (audio switch, forward-
+    // seek) must not resurrect a dismissed card or re-arm a fired
+    // advance.
+    setSkipMarkers([])
+    setMarkersMenuOpen(false)
+    {
+      const fileKey = `${target.fileType}:${target.fileId}`
+      if (skipStateFileRef.current !== fileKey) {
+        skipStateFileRef.current = fileKey
+        setSkipDismissedKey(null)
+        setNextUpPhase('idle')
+        setNextUpSecs(5)
+        advanceFiredRef.current = false
+      }
+    }
 
     ;(async () => {
       try {
@@ -1126,6 +1207,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // The backend already marks these with `bitmap: true` in
         // /api/stream/info/{id} (phase2_handlers.go:1447).
         setAvailableSubs((info.subtitles || []).filter(s => !s.bitmap))
+        // Smart Skip windows for this file (already filtered to
+        // displayable markers server-side).
+        setSkipMarkers(info.markers || [])
         // Phase 7 — capture REAL source-file duration from the
         // server. This is what the custom controls' time display
         // shows; without it the user only sees the growing HLS
@@ -1971,7 +2055,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // parent (auto-play-next decision lives there). 'ended' fires once
     // per playthrough; the parent re-targets on advance, which tears
     // down + rebuilds this effect for the next episode.
-    const onEndedDom = () => { void onEndedRef.current?.() }
+    //
+    // Smart Skip — when the credits-triggered next-up card already
+    // fired an early advance, the old <video> can still reach its real
+    // end before teardown; the guard stops that from advancing a
+    // SECOND time (skipping an episode).
+    const onEndedDom = () => {
+      if (advanceFiredRef.current) return
+      void onEndedRef.current?.()
+    }
     vid.addEventListener('play', onPlay)
     vid.addEventListener('pause', onPause)
     vid.addEventListener('timeupdate', onTimeUpdate)
@@ -2378,7 +2470,123 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     return () => window.clearInterval(id)
   }, [target])
 
+  // ── Smart Skip: credits-triggered "Next Episode" card ────────────
+  // Crossing the credits onset on a TV episode surfaces the next-up
+  // card: a 5s countdown when the autoplay preference is on, an
+  // explicit button when it's off. Both routes drive the SAME parent
+  // advance path the <video> 'ended' event uses — the card just moves
+  // the decision to the start of the credits instead of the end.
+  // Suppressed in watch parties (a unilateral advance would desync
+  // guests; same rule as the parent's 'ended' handling) and while
+  // casting (the receiver's IDLE transition owns end-of-media there).
+  const creditsMarker = target?.fileType === 'episode'
+    ? skipMarkers.find(m => m.kind === 'credits' && m.end_ms > m.start_ms) ?? null
+    : null
+
+  const fireAdvance = useCallback(async (force: boolean) => {
+    if (advanceFiredRef.current) return
+    advanceFiredRef.current = true
+    setNextUpPhase('spent')
+    let advanced = false
+    try {
+      advanced = !!(await onEndedRef.current?.(force ? { force: true } : undefined))
+    } catch { /* parent resolve failed — stay parked on this episode */ }
+    if (!advanced) {
+      // No next episode (series end) or the resolve failed. Re-arm the
+      // natural 'ended' flow so close-out behavior matches a playthrough
+      // without markers, and show brief "that's the last one" feedback
+      // instead of a card that promised a next episode and vanished.
+      advanceFiredRef.current = false
+      setNextUpPhase('finale')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (nextUpPhase !== 'idle' || !creditsMarker) return
+    if (!playing) return // don't pop the card under a paused frame
+    if (party || cast.status.connected) return
+    if (currentSec < creditsMarker.start_ms / 1000) return
+    setNextUpSecs(5)
+    setNextUpPhase(readAutoplayPref() ? 'countdown' : 'prompt')
+  }, [nextUpPhase, creditsMarker, playing, party, cast.status.connected, currentSec])
+
+  // Seeking back OUT of the credits window (rewatching the final
+  // scene) cancels an armed card — without this the countdown keeps
+  // ticking and yanks the viewer to the next episode mid-rewatch.
+  // Back to 'idle' so re-crossing the onset arms it again.
+  useEffect(() => {
+    if (nextUpPhase !== 'countdown' && nextUpPhase !== 'prompt') return
+    if (!creditsMarker) return
+    if (currentSec < creditsMarker.start_ms / 1000 - 1) {
+      setNextUpPhase('idle')
+    }
+  }, [nextUpPhase, creditsMarker, currentSec])
+
+  // Countdown tick — freezes while paused (pausing mid-countdown is
+  // a "wait, I'm not done" signal; resuming resumes the count).
+  useEffect(() => {
+    if (nextUpPhase !== 'countdown' || !playing) return
+    if (nextUpSecs <= 0) {
+      void fireAdvance(false)
+      return
+    }
+    const id = window.setTimeout(() => setNextUpSecs(s => s - 1), 1000)
+    return () => window.clearTimeout(id)
+  }, [nextUpPhase, nextUpSecs, playing, fireAdvance])
+
+  // Finale notice auto-dismisses to 'spent' (terminal for this
+  // playback) after a few seconds.
+  useEffect(() => {
+    if (nextUpPhase !== 'finale') return
+    const id = window.setTimeout(() => setNextUpPhase('spent'), 4000)
+    return () => window.clearTimeout(id)
+  }, [nextUpPhase])
+
   if (!target) return null
+
+  // Smart Skip — which skippable window is the playhead inside right
+  // now? Intro/recap pills on any file; the credits pill only for
+  // MOVIES (episodes route credits through the next-up card above).
+  // Hidden for party GUESTS (a guest seek would fight the host's
+  // sync; the host's skip propagates to everyone via the normal seek
+  // broadcast) and while casting (currentSec tracks the paused local
+  // element, not the receiver). The pill stays up for the whole
+  // window minus its last second — a skip that close to the boundary
+  // isn't worth a seek.
+  const activeSkipMarker = (() => {
+    if (cast.status.connected || minimizedActive || errorMsg) return null
+    if (party && !party.isHost) return null
+    for (const m of skipMarkers) {
+      if (m.end_ms <= m.start_ms) continue
+      const isOpener = m.kind === 'intro' || m.kind === 'recap'
+      const isMovieCredits = m.kind === 'credits' && target.fileType === 'media'
+      if (!isOpener && !isMovieCredits) continue
+      if (skipDismissedKey === `${m.kind}:${m.start_ms}`) continue
+      // Movie credits seek to ~EOF. On a sequential transcode that
+      // hasn't produced the tail yet, the jump would force a session
+      // rebuild anchored at (metadata-reported) EOF — which stalls
+      // when the metadata overshoots the real duration. Only offer
+      // the pill when the destination is already reachable: direct
+      // play (no session) or a transcode buffered to the end.
+      if (isMovieCredits && sessionIdRef.current !== null &&
+          m.end_ms / 1000 - 0.25 > bufferedSec - 1) continue
+      if (currentSec >= m.start_ms / 1000 && currentSec < m.end_ms / 1000 - 1) return m
+    }
+    return null
+  })()
+  const skipLabel = activeSkipMarker?.kind === 'recap'
+    ? 'Skip Recap'
+    : activeSkipMarker?.kind === 'credits' ? 'Skip Credits' : 'Skip Intro'
+  const handleSkip = () => {
+    if (!activeSkipMarker) return
+    setSkipDismissedKey(`${activeSkipMarker.kind}:${activeSkipMarker.start_ms}`)
+    // Movie credits: land just shy of EOF so 'ended' fires naturally
+    // (progress marks watched; player parks on the final frame).
+    const dest = activeSkipMarker.kind === 'credits'
+      ? Math.max(activeSkipMarker.start_ms / 1000, activeSkipMarker.end_ms / 1000 - 0.25)
+      : activeSkipMarker.end_ms / 1000
+    seekToRealSec(dest)
+  }
 
   // Minimized-widget control surface — drives the active remote: the
   // Chromecast receiver (via cast.remote / cast.playOrPause) or, for AirPlay,
@@ -2495,7 +2703,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             {availableAudio.length > 1 && (
               <div className="relative">
                 <button
-                  onClick={() => { setAudioMenuOpen(o => !o); setSubsMenuOpen(false) }}
+                  onClick={() => { setAudioMenuOpen(o => !o); setSubsMenuOpen(false); setMarkersMenuOpen(false) }}
                   className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
                   aria-label="Audio tracks"
                   title="Audio tracks"
@@ -2560,7 +2768,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   </div>
                 )}
                 <button
-                  onClick={() => { setSubsMenuOpen(o => !o); setAudioMenuOpen(false) }}
+                  onClick={() => { setSubsMenuOpen(o => !o); setAudioMenuOpen(false); setMarkersMenuOpen(false) }}
                   className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
                   aria-label="Subtitles"
                   title="Subtitles"
@@ -2592,6 +2800,33 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                       </button>
                     ))}
                   </div>
+                )}
+              </div>
+            )}
+            {/* Smart Skip — admin-only marker editor. Lives in the
+                player (not an admin page) because correcting a marker
+                means eyeballing the timeline: pause on the intro's
+                last frame, hit "End = now". Writes detector='manual'
+                rows the background analyzer never overwrites. Hidden
+                in parties — pausing/scrubbing to fix markers would
+                drag every guest along. */}
+            {isAdmin && !party && (
+              <div className="relative">
+                <button
+                  onClick={() => { setMarkersMenuOpen(o => !o); setAudioMenuOpen(false); setSubsMenuOpen(false) }}
+                  className="px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg text-sm transition-colors"
+                  aria-label="Edit skip markers"
+                  title="Edit skip markers (admin)"
+                >
+                  Markers
+                </button>
+                {markersMenuOpen && (
+                  <SkipMarkerEditor
+                    fileId={target.fileId}
+                    fileType={target.fileType}
+                    currentSec={currentSec}
+                    onMarkersChanged={(all) => setSkipMarkers(all.filter(m => m.end_ms > m.start_ms))}
+                  />
                 )}
               </div>
             )}
@@ -2848,6 +3083,69 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   Cast failed: {castError}
                 </div>
               )}
+              {/* Smart Skip pill — Netflix-style bottom-right button
+                  while the playhead is inside an intro/recap (or, for
+                  movies, credits) window. Always visible during the
+                  window regardless of controls auto-hide: surfacing
+                  it IS the feature. Advisory only — a click seeks,
+                  nothing ever auto-seeks. z-[55] floats it above the
+                  controls overlay (z-50) so it stays clickable over
+                  the gradient. */}
+              {activeSkipMarker && (
+                <button
+                  type="button"
+                  onClick={handleSkip}
+                  className="absolute bottom-28 right-6 z-[55] inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black/75 hover:bg-black/90 ring-1 ring-white/25 text-white text-sm font-medium shadow-xl backdrop-blur-sm transition-colors"
+                >
+                  {skipLabel}
+                  <SkipForward size={16} />
+                </button>
+              )}
+              {/* Smart Skip next-up card — appears when an episode
+                  crosses its credits onset. Countdown mode when the
+                  autoplay pref is on; explicit-button mode when off
+                  (the click then forces the advance past the pref —
+                  an explicit click outranks a passive setting). */}
+              {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (
+                <div className="absolute bottom-28 right-6 z-[55] w-72 rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl p-4">
+                  <p className="text-white/50 text-[11px] uppercase tracking-wide">Up next</p>
+                  <p className="text-white text-sm font-medium mt-1">
+                    {nextUpPhase === 'countdown'
+                      ? `Next episode in ${Math.max(0, nextUpSecs)}s`
+                      : 'Next episode'}
+                  </p>
+                  <div className="mt-3 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { void fireAdvance(true) }}
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors"
+                    >
+                      <Play size={14} />
+                      Play now
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNextUpPhase('spent')}
+                      aria-label="Dismiss next-episode card"
+                      title="Keep watching the credits"
+                      className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/80 text-sm transition-colors"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                </div>
+              )}
+              {/* Series end: the advance found nothing to play. Brief
+                  honest feedback (auto-dismisses) instead of a card
+                  that promised a next episode and silently vanished. */}
+              {nextUpPhase === 'finale' && (
+                <div
+                  role="status"
+                  className="absolute bottom-28 right-6 z-[55] rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl px-4 py-3"
+                >
+                  <p className="text-white/80 text-sm">That's the last episode — you're all caught up.</p>
+                </div>
+              )}
               <PlayerControls
                 playing={playing}
                 currentSec={currentSec}
@@ -2969,5 +3267,163 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       </div>
     )}
     </>
+  )
+}
+
+// ── Smart Skip: admin marker editor ─────────────────────────────────
+//
+// Per-kind manual correction panel, anchored under the top bar's
+// "Markers" button. Workflow: scrub/pause the video where the window
+// should start, hit "Start = now", same for the end, Save. "Off"
+// stores a zero-length suppression (the analyzer won't re-add the
+// marker; the player never shows it); "Auto" deletes the row and
+// queues fresh auto-detection server-side.
+
+const MARKER_KINDS: SkipMarker['kind'][] = ['recap', 'intro', 'credits']
+
+function fmtMarkerTime(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function SkipMarkerEditor({ fileId, fileType, currentSec, onMarkersChanged }: {
+  fileId: number
+  fileType: 'media' | 'episode'
+  currentSec: number
+  // Fires with the file's full updated marker list after every write
+  // so the player's live overlay state stays in sync (the caller
+  // filters out zero-length suppressions).
+  onMarkersChanged: (markers: SkipMarker[]) => void
+}) {
+  type Draft = { start_ms: number; end_ms: number; detector?: string }
+  const [drafts, setDrafts] = useState<Partial<Record<SkipMarker['kind'], Draft>>>({})
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const seedFromServer = useCallback((markers: SkipMarker[]) => {
+    const next: Partial<Record<SkipMarker['kind'], Draft>> = {}
+    for (const m of markers) {
+      next[m.kind] = { start_ms: m.start_ms, end_ms: m.end_ms, detector: m.detector }
+    }
+    setDrafts(next)
+  }, [])
+
+  // Load the FULL marker list (including suppressions) on mount.
+  useEffect(() => {
+    const ac = new AbortController()
+    getAdminSkipMarkers(fileId, fileType, ac.signal)
+      .then(markers => { seedFromServer(markers); setLoaded(true) })
+      .catch(e => {
+        if (e instanceof DOMException && e.name === 'AbortError') return
+        setErr('Failed to load markers')
+        setLoaded(true)
+      })
+    return () => ac.abort()
+  }, [fileId, fileType, seedFromServer])
+
+  const setNow = (kind: SkipMarker['kind'], field: 'start_ms' | 'end_ms') => {
+    const nowMs = Math.max(0, Math.round(currentSec * 1000))
+    setDrafts(prev => {
+      const d = prev[kind] ?? { start_ms: 0, end_ms: 0 }
+      return { ...prev, [kind]: { ...d, [field]: nowMs } }
+    })
+  }
+
+  const write = async (kind: SkipMarker['kind'], startMs: number, endMs: number) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      const markers = await putSkipMarker(fileId, fileType, { kind, start_ms: startMs, end_ms: endMs })
+      seedFromServer(markers)
+      onMarkersChanged(markers)
+    } catch {
+      setErr('Save failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const redetect = async (kind: SkipMarker['kind']) => {
+    setBusy(true)
+    setErr(null)
+    try {
+      await deleteSkipMarker(fileId, fileType, kind)
+      const markers = await getAdminSkipMarkers(fileId, fileType)
+      seedFromServer(markers)
+      onMarkersChanged(markers)
+    } catch {
+      setErr('Update failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="absolute top-full right-0 mt-1 w-80 bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-xl z-20 p-3">
+      <p className="text-white/50 text-[11px] uppercase tracking-wide mb-2">Skip markers (admin)</p>
+      {!loaded && <p className="text-white/40 text-sm">Loading…</p>}
+      {loaded && MARKER_KINDS.map(kind => {
+        const d = drafts[kind]
+        const suppressed = !!d && d.start_ms === 0 && d.end_ms === 0 && d.detector === 'manual'
+        const invalid = !!d && d.end_ms < d.start_ms
+        return (
+          <div key={kind} className="py-2 border-t border-white/[0.06] first:border-t-0">
+            <div className="flex items-center justify-between">
+              <span className="text-white/85 text-sm capitalize">{kind}</span>
+              <span className="text-white/40 text-xs font-mono">
+                {!d
+                  ? 'none'
+                  : suppressed
+                    ? 'disabled'
+                    : `${fmtMarkerTime(d.start_ms)} → ${fmtMarkerTime(d.end_ms)}${d.detector === 'manual' ? ' · manual' : ''}`}
+              </span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+              <MarkerEditButton label="Start = now" disabled={busy} onClick={() => setNow(kind, 'start_ms')} />
+              <MarkerEditButton label="End = now" disabled={busy} onClick={() => setNow(kind, 'end_ms')} />
+              <MarkerEditButton
+                label="Save"
+                emphasis
+                disabled={busy || !d || invalid}
+                onClick={() => { if (d) void write(kind, d.start_ms, d.end_ms) }}
+              />
+              <MarkerEditButton label="Off" disabled={busy || suppressed} onClick={() => void write(kind, 0, 0)} />
+              <MarkerEditButton label="Auto" disabled={busy || !d} onClick={() => void redetect(kind)} />
+            </div>
+            {invalid && <p className="text-amber-300/80 text-[11px] mt-1">End must be at or after start.</p>}
+          </div>
+        )
+      })}
+      {err && <p className="text-red-300 text-xs mt-2">{err}</p>}
+      <p className="text-white/30 text-[11px] mt-2 leading-snug">
+        Manual values stick — auto-detection never overwrites them.
+        "Off" hides the marker; "Auto" re-queues detection.
+      </p>
+    </div>
+  )
+}
+
+function MarkerEditButton({ label, onClick, disabled, emphasis }: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  emphasis?: boolean
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`px-2 py-1 rounded text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+        emphasis
+          ? 'bg-purple-600 hover:bg-purple-500 text-white'
+          : 'bg-white/10 hover:bg-white/15 text-white/80'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
