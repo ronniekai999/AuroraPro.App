@@ -643,6 +643,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Use(auth.RequireAdmin)
 				r.Get("/", authH.ListUsers)
 				r.Post("/invite", authH.CreateInvite)
+				r.Put("/{id}/role", authH.UpdateUserRole)
 				r.Delete("/{id}", authH.DeleteUser)
 			})
 

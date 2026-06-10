@@ -747,3 +747,83 @@ func (h *AuthHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "user deleted"})
 }
+
+// updateRoleRequest is the body for PUT /api/users/{id}/role.
+type updateRoleRequest struct {
+	Role string `json:"role"`
+}
+
+// UpdateUserRole promotes a user to admin or demotes an admin to user.
+// Admin-only (gated by the router). The acting admin cannot change their own
+// role: that guard both prevents an accidental self-demotion that could strand
+// the server with no admin (the only way to reach zero admins, since any other
+// admin can be re-promoted by a peer) and matches DeleteUser's self-guard.
+func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+
+	claims := auth.GetClaims(r.Context())
+	if claims.UserID == id {
+		writeError(w, http.StatusBadRequest, "cannot change your own role")
+		return
+	}
+
+	var req updateRoleRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	role := models.UserRole(req.Role)
+	if role != models.RoleAdmin && role != models.RoleUser {
+		writeError(w, http.StatusBadRequest, "role must be 'admin' or 'user'")
+		return
+	}
+
+	updated, lastAdmin, err := h.queries.UpdateUserRole(r.Context(), id, role)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update role")
+		return
+	}
+	if lastAdmin {
+		// Refused: demoting this user would leave the server with no admin.
+		writeError(w, http.StatusBadRequest, "cannot remove admin from the last remaining admin")
+		return
+	}
+	if !updated {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	// RequireAdmin reads the role from the JWT, so a DB-only change wouldn't
+	// take effect until the target's access token expired (~10 min). Bump
+	// token_version to invalidate the outstanding access token immediately: the
+	// next request 401s, the SPA silently refreshes, and Refresh re-reads the
+	// new role from the DB. Unlike password-change / delete we deliberately do
+	// NOT revoke refresh tokens — the user stays signed in and simply picks up
+	// the new role on the next refresh.
+	demotion := role == models.RoleUser
+	if _, err := h.queries.BumpUserTokenVersion(r.Context(), id); err != nil {
+		slog.Error("failed to bump token_version after role change", "user_id", id, "error", err)
+		if demotion {
+			// Demotion is the security-sensitive direction: until the version is
+			// bumped, the just-demoted admin's outstanding token still carries
+			// role=admin. Surface the failure (mirrors ChangePassword's fatal
+			// treatment) rather than reporting a clean success — the role IS
+			// already persisted, so a retry is idempotent and will re-bump.
+			writeError(w, http.StatusInternalServerError, "role updated but session revocation failed; retry to fully revoke admin access")
+			return
+		}
+		// Promotion: a missed bump is harmless — the user simply picks up admin
+		// on their next natural token refresh. Return success.
+	} else if h.tokenVerStore != nil {
+		h.tokenVerStore.Invalidate(id)
+	}
+
+	if h.activity != nil {
+		h.activity.LogUserRoleChanged(r.Context(), claims.UserID, id, string(role), clientIP(r))
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"role": string(role)})
+}
