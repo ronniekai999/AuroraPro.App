@@ -16,6 +16,9 @@ import {
   getDiscoverRails,
   getAnchorRails,
   getEngagementRails,
+  type DiscoverRailUI,
+  type AnchorRailUI,
+  type EngagementRailUI,
   getGamificationStats,
   listActiveParties,
   type ActiveParty,
@@ -1552,8 +1555,12 @@ interface HomeViewProps {
   onNextPick?: () => void
   // Phase D — conversational discovery: fired on Enter in the home "vibe" box.
   onConversationalSearch?: (query: string) => void
+  // Stage 3 — manual "Refresh picks": force a server rebuild of the LLM
+  // Discover rails. recsRefreshing disables the control while in flight.
+  onRefreshRecs?: () => void
+  recsRefreshing?: boolean
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1618,16 +1625,30 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             )}
           </div>
         </div>
-        {onSurprise && (
-          <button
-            onClick={onSurprise}
-            title="Surprise me — play a random recommended title"
-            aria-label="Surprise me — play a random recommended title"
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
-          >
-            <Icon name="sparkle" size={15} /> Surprise me
-          </button>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {onRefreshRecs && (
+            <button
+              onClick={onRefreshRecs}
+              disabled={recsRefreshing}
+              title="Refresh picks — rebuild your AI-curated Discover rails"
+              aria-label="Refresh picks — rebuild your AI-curated Discover rails"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
+              {recsRefreshing ? 'Refreshing…' : 'Refresh picks'}
+            </button>
+          )}
+          {onSurprise && (
+            <button
+              onClick={onSurprise}
+              title="Surprise me — play a random recommended title"
+              aria-label="Surprise me — play a random recommended title"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
+            >
+              <Icon name="sparkle" size={15} /> Surprise me
+            </button>
+          )}
+        </div>
       </div>
       <HeroSection
         hero={hero}
@@ -7260,6 +7281,12 @@ export default function App() {
         n.type === 'request_failed' ? 'error' : 'success',
       )
     },
+    onDiscoverReady: (ev) => {
+      // The LLM finished building this profile's Discover rails. Re-fetch the
+      // now-warm endpoint and splice them in live — no page refresh. Ignore
+      // events for a non-active profile (stale tab, profile switched away).
+      if (ev.profile_id === activeProfileId) void refetchDiscover(activeProfileId)
+    },
   })
 
   // Seed the notification feed + unread badge on login (once per user id). The
@@ -7920,6 +7947,78 @@ export default function App() {
   // wasteful full home-rails refetch.
   const [cwReloadNonce, setCwReloadNonce] = useState(0)
 
+  // ── Discover rails: progressive load + live "ready" handling ──────────
+  // Personalized home rails arrive from several sources at different speeds:
+  // anchor/engagement are fast (vector + first-party signals, no LLM); the
+  // LLM-curated Discover rail can take 60s+ on a cold cache. We hold each
+  // source in a ref and recompose the home layout whenever any lands, so a
+  // slow Discover result splices in LIVE — fixing the bug where it only
+  // appeared after a page refresh (the old code raced the fetch against a 12s
+  // deadline and discarded anything slower).
+  const coreRailsRef = useRef<NonNullable<HomeViewProps['rails']>>([])
+  const discoverRailsRef = useRef<DiscoverRailUI[]>([])
+  const anchorRailsRef = useRef<AnchorRailUI[]>([])
+  const engagementRailsRef = useRef<EngagementRailUI[]>([])
+  // True while the server is still building the LLM Discover rail; arms the
+  // discover_ready WS handler and the poll fallback effect below.
+  const [discoverBuilding, setDiscoverBuilding] = useState(false)
+  // True while a manual "Refresh picks" request is in flight (brief — the
+  // endpoint is non-blocking; the rebuild itself shows via discoverBuilding).
+  const [recsRefreshing, setRecsRefreshing] = useState(false)
+
+  // Recompose homeRails from the core set + whatever personalized rails have
+  // landed so far. Reads refs so it's a stable callback usable from the fetch
+  // effect, the WS handler, the poll, and the manual refresh.
+  const recomposeHomeRails = useCallback(() => {
+    const core = coreRailsRef.current
+    if (!core || core.length === 0) return // core not loaded yet
+    const personalized: NonNullable<HomeViewProps['rails']> = [
+      ...discoverRailsRef.current
+        .filter(r => r.items.length > 0)
+        .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+          aiPick: true, showBadges: true, subtitle: r.description || 'Hand-picked by Aurora for your taste' })),
+      ...anchorRailsRef.current
+        .filter(r => r.items.length > 0)
+        .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+          aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' })),
+      ...engagementRailsRef.current
+        .filter(r => r.items.length > 0)
+        .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
+          aiPick: true, showBadges: true, subtitle: r.description || 'Built from what Aurora viewers actually finish' })),
+    ]
+    if (personalized.length === 0) { setHomeRails(core); return }
+    // Splice personalized rails between Recently Added (index 0) and the Top
+    // Rated rails — same visual order the original effect produced.
+    setHomeRails([core[0], ...personalized, ...core.slice(1)])
+  }, [])
+
+  // Re-fetch the Discover endpoint and splice the rails in. Shared by the
+  // discover_ready WS push and the manual "Refresh picks" action. `refresh`
+  // forces a server-side rebuild (?refresh=1).
+  const refetchDiscover = useCallback(async (profileId: number | null, refresh = false) => {
+    try {
+      const { rails, building } = await getDiscoverRails(profileId ?? undefined, undefined, refresh)
+      if (rails.length > 0) {
+        discoverRailsRef.current = rails
+        recomposeHomeRails()
+        setDiscoverBuilding(false)
+      } else {
+        // Empty result: keep waiting if the server is still building, otherwise
+        // it's terminal (cold-start / LLM off) — stop the poll + spinner.
+        setDiscoverBuilding(building)
+      }
+    } catch { /* best-effort; the poll fallback / next event covers us */ }
+  }, [recomposeHomeRails])
+
+  // Stage 3 — manual "Refresh picks": force a server rebuild, then let the
+  // discover_ready push / poll deliver the fresh rails.
+  const handleRefreshRecs = useCallback(async () => {
+    setRecsRefreshing(true)
+    addToast('Refreshing your picks…', 'info')
+    await refetchDiscover(activeProfileId, true)
+    setRecsRefreshing(false)
+  }, [activeProfileId, refetchDiscover, addToast])
+
   useEffect(() => {
     if (!user) return
     const ac = new AbortController()
@@ -7989,72 +8088,50 @@ export default function App() {
         // spinner doesn't linger waiting on the personalized rails.
         setHomeLoading(false)
 
-        // Phase 2: personalized rails. Race against a 12s deadline so
-        // a hung discover endpoint doesn't permanently leave the home
-        // page personalization-less from the user's perspective
-        // (timeout simply yields an empty result, same code path as
-        // the existing .catch). The fetches themselves still honor
-        // the AbortController, so navigating away cancels them.
-        const personalizedDeadline = new Promise<{ discover: never[]; anchor: never[]; engagement: never[] }>(resolve =>
-          setTimeout(() => resolve({ discover: [], anchor: [], engagement: [] }), 12000),
-        )
-        const personalizedFetch = Promise.all([
-          getDiscoverRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
+        // Phase 2: personalized rails — loaded PROGRESSIVELY. We never discard
+        // a slow result (the old 12s race did, which is exactly why the
+        // LLM-curated Discover rail only appeared after a page refresh). Core
+        // rails already render above; each personalized source splices in via
+        // recomposeHomeRails() when it lands.
+        //
+        // Stash the core set and reset the per-load personalized buffers so a
+        // profile switch can't splice the previous profile's rails, and cancel
+        // any in-flight build poll.
+        coreRailsRef.current = coreRails
+        discoverRailsRef.current = []
+        anchorRailsRef.current = []
+        engagementRailsRef.current = []
+        setDiscoverBuilding(false)
+
+        // Fast rails (pure vector + first-party engagement signals, no LLM).
+        // Fire-and-forget: splice in as soon as they resolve, AbortController
+        // still cancels them on navigate/profile-switch.
+        void Promise.all([
           getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
           getEngagementRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
-        ]).then(([d, a, e]) => ({ discover: d, anchor: a, engagement: e }))
+        ]).then(([a, e]) => {
+          if (cancelled) return
+          anchorRailsRef.current = a
+          engagementRailsRef.current = e
+          recomposeHomeRails()
+        })
 
-        const { discover, anchor, engagement } = await Promise.race([
-          personalizedFetch,
-          personalizedDeadline,
-        ])
-        if (cancelled) return
-
-        // 2026-06-05 (Home redesign D / net-new #3) — the recommender-driven
-        // rails get the "✨ AI PICK" chip + a short "why it's here" subtitle +
-        // 4K/HDR badges. Discover rails now carry a REAL LLM-written
-        // description; fall back to the generic constant when the model
-        // omitted it. Anchor rails have no LLM description (pure vector
-        // retrieval), so they keep their hardcoded subtitle.
-        const personalizedRails = [
-          ...(discover.length > 0
-            ? discover
-                .filter(r => r.items.length > 0)
-                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-                  aiPick: true, showBadges: true, subtitle: r.description || 'Hand-picked by Aurora for your taste' }))
-            : []),
-          ...(anchor.length > 0
-            ? anchor
-                .filter(r => r.items.length > 0)
-                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-                  aiPick: true, showBadges: true, subtitle: 'More like the titles you finished' }))
-            : []),
-          // Phase C — signal-driven engagement rails (Trending Now / Hidden
-          // Gems / Finish It Tonight / Comfort Rewatch). Server description is
-          // the rail subtitle; aiPick chip + badges like the other rec rails.
-          ...(engagement.length > 0
-            ? engagement
-                .filter(r => r.items.length > 0)
-                .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
-                  aiPick: true, showBadges: true, subtitle: r.description || 'Built from what Aurora viewers actually finish' }))
-            : []),
-        ]
-
-        if (personalizedRails.length === 0) {
-          // Nothing to splice in — keep the core rails as-is. This is
-          // the path the 12s timeout took, or recommender returned
-          // empty (cold-start, LLM disabled).
-          return
-        }
-
-        // Splice the personalized rails between Recently Added (index
-        // 0) and Top Rated Movies (index 1 in the core set). Same
-        // visual order the old code produced.
-        setHomeRails([
-          coreRails[0],
-          ...personalizedRails,
-          ...coreRails.slice(1),
-        ])
+        // Slow rail (LLM-curated Discover). The endpoint is non-blocking: a
+        // warm cache returns rails immediately; a cold cache returns
+        // {building:true} with no rails and kicks a server-side build that
+        // notifies us via the discover_ready WS push (poll fallback below).
+        // Either way the result splices in without a refresh.
+        void getDiscoverRails(activeProfileId ?? undefined, ac.signal)
+          .then(({ rails, building }) => {
+            if (cancelled) return
+            if (rails.length > 0) {
+              discoverRailsRef.current = rails
+              recomposeHomeRails()
+            } else if (building) {
+              setDiscoverBuilding(true) // arms the WS handler + poll fallback
+            }
+          })
+          .catch(() => { /* best-effort; core rails already render */ })
       } catch (err) {
         if (cancelled) return
         if (err && (err as Error).name === 'AbortError') return
@@ -8072,6 +8149,46 @@ export default function App() {
       ac.abort()
     }
   }, [user, retryNonce, activeProfileId])
+
+  // Stage 2 fallback — if the Discover build is in progress and the
+  // discover_ready WS push never arrives (socket down, missed event), poll the
+  // non-blocking endpoint until the rails land or we hit the cap. The WS
+  // handler clears discoverBuilding the moment a push is handled, tearing this
+  // down early; a profile switch (activeProfileId) re-runs it cleanly.
+  useEffect(() => {
+    if (!user || !discoverBuilding) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const ac = new AbortController()
+    let attempts = 0
+    const MAX_ATTEMPTS = 20 // ~20 × 5s = 100s, comfortably past the 60s LLM budget
+    const POLL_MS = 5000
+    const tick = async () => {
+      if (cancelled) return
+      attempts += 1
+      try {
+        const { rails, building } = await getDiscoverRails(activeProfileId ?? undefined, ac.signal)
+        if (cancelled) return
+        if (rails.length > 0) {
+          discoverRailsRef.current = rails
+          recomposeHomeRails()
+          setDiscoverBuilding(false)
+          return
+        }
+        if (!building) { setDiscoverBuilding(false); return } // terminal (empty)
+      } catch {
+        if (cancelled) return // network blip — fall through and retry
+      }
+      if (attempts >= MAX_ATTEMPTS) { setDiscoverBuilding(false); return }
+      timer = setTimeout(tick, POLL_MS)
+    }
+    timer = setTimeout(tick, POLL_MS)
+    return () => {
+      cancelled = true
+      ac.abort()
+      if (timer) clearTimeout(timer)
+    }
+  }, [user, discoverBuilding, activeProfileId, recomposeHomeRails])
 
   // Movies list — fetch on first visit, cache for the session.
   // Shows uses the same pattern below.
@@ -9329,6 +9446,8 @@ export default function App() {
               // "Surprise me" — play a random recommended pick (not the one shown).
               onSurprise={onSurprise}
               onConversationalSearch={runConversational}
+              onRefreshRecs={handleRefreshRecs}
+              recsRefreshing={recsRefreshing}
               // "Not tonight" — advance to the next pick in the loaded pool.
               onNextPick={advanceHero}
               onHeroPauseChange={setHeroPaused}

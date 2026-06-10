@@ -6,10 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
+	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -25,9 +28,38 @@ type HeroProvider interface {
 	PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 	RailFor(ctx context.Context, profileID int64, limit int) ([]*models.MediaItem, error)
 	DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail, error)
+	// DiscoverCached returns cached Discover rails WITHOUT building. ok is true
+	// only on a fresh cache hit. Lets the handler answer instantly when warm
+	// and background-build (non-blocking) when cold.
+	DiscoverCached(profileID int64) ([]DiscoverRail, bool)
 	AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRail, error)
 	EngagementRailsFor(ctx context.Context, profileID int64) ([]EngagementRail, error)
 	Invalidate(profileID int64)
+}
+
+// HubBroadcaster is the slice of the WebSocket hub HeroHandler needs to push a
+// discover_ready event to a user. *websocket.Hub satisfies it; kept as an
+// interface so the handler doesn't depend on the concrete hub (and tests can
+// stub it).
+type HubBroadcaster interface {
+	BroadcastToUser(userID int64, eventType string, data interface{})
+}
+
+// discoverEmptyTTL suppresses re-kicking a background Discover build for a
+// profile whose last build produced zero rails (cold-start, LLM disabled, no
+// candidates). Short enough that a real taste change (a new watch →
+// Invalidate, or ?refresh=1) rebuilds promptly; long enough that the client's
+// poll fallback can't hammer the recommender. The client treats the resulting
+// "empty" status as terminal and hides the Discover section.
+const discoverEmptyTTL = 60 * time.Second
+
+// discoverBuilds tracks background /api/me/discover builds so the non-blocking
+// handler can report status ("building"/"empty") without re-kicking work the
+// recommender's singleflight is already collapsing.
+type discoverBuilds struct {
+	mu        sync.Mutex
+	inflight  map[int64]bool      // profileID -> a build goroutine is running
+	emptyTill map[int64]time.Time // profileID -> suppress re-kicks until (last build was empty)
 }
 
 // DiscoverRail is one LLM-curated themed section. Mirrors
@@ -78,16 +110,31 @@ type HeroPick struct {
 type HeroHandler struct {
 	queries *db.Queries
 	hero    HeroProvider
+	hub     HubBroadcaster
+	builds  *discoverBuilds
 }
 
 func NewHeroHandler(queries *db.Queries) *HeroHandler {
-	return &HeroHandler{queries: queries}
+	return &HeroHandler{
+		queries: queries,
+		builds: &discoverBuilds{
+			inflight:  make(map[int64]bool),
+			emptyTill: make(map[int64]time.Time),
+		},
+	}
 }
 
 // SetHeroProvider attaches the personalization backend. Pass nil (or never
 // call this) to keep the endpoint unavailable.
 func (h *HeroHandler) SetHeroProvider(p HeroProvider) {
 	h.hero = p
+}
+
+// SetHub attaches the realtime hub so cold-path Discover builds notify the user
+// (discover_ready) when their rails are ready. Optional — without it the
+// endpoint still works; the client falls back to polling.
+func (h *HeroHandler) SetHub(b HubBroadcaster) {
+	h.hub = b
 }
 
 // Get returns the personalized hero pool for the active profile.
@@ -222,18 +269,79 @@ func (h *HeroHandler) Discover(w http.ResponseWriter, r *http.Request) {
 
 	if v := r.URL.Query().Get("refresh"); v == "1" || v == "true" {
 		h.hero.Invalidate(profileID)
+		h.clearDiscoverEmpty(profileID) // force a rebuild even if the last build was empty
 	}
 
-	rails, err := h.hero.DiscoverFor(r.Context(), profileID)
-	if err != nil {
-		slog.Warn("discover: fetch failed", "profile", profileID, "error", err)
-		// Empty rails is fine — the UI gracefully falls back. Don't
-		// 500 here; that would turn a degraded experience into a
-		// broken one.
-		rails = nil
+	// Fast path: warm cache → return the rails immediately with status "ready".
+	if rails, ok := h.hero.DiscoverCached(profileID); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"rails": rails, "status": "ready"})
+		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"rails": rails})
+	// Cold path: the LLM build runs 60s+. Don't hold the request open (the
+	// client's old deadline timed out and DISCARDED the slow result, which is
+	// why rails only appeared after a refresh). Kick a detached background
+	// build (deduped per profile) and tell the client we're building — it
+	// splices the rails in when the discover_ready WS push lands (or via its
+	// bounded poll fallback). WithoutCancel keeps request values (trace/auth)
+	// but detaches from the request's cancellation so the build survives the
+	// handler returning.
+	status := h.kickDiscoverBuild(context.WithoutCancel(r.Context()), profileID, claims.UserID)
+	writeJSON(w, http.StatusOK, map[string]any{"rails": []DiscoverRail{}, "status": status})
+}
+
+// kickDiscoverBuild ensures a background Discover build is running for the
+// profile and returns the status to report: "building" when a build is (now)
+// in flight, "empty" when the most recent build produced no rails and we're
+// suppressing churn for discoverEmptyTTL. Safe to call concurrently.
+func (h *HeroHandler) kickDiscoverBuild(ctx context.Context, profileID, userID int64) string {
+	h.builds.mu.Lock()
+	if h.builds.inflight[profileID] {
+		h.builds.mu.Unlock()
+		return "building"
+	}
+	if t, ok := h.builds.emptyTill[profileID]; ok {
+		if time.Now().Before(t) {
+			h.builds.mu.Unlock()
+			return "empty"
+		}
+		delete(h.builds.emptyTill, profileID)
+	}
+	h.builds.inflight[profileID] = true
+	h.builds.mu.Unlock()
+
+	go func() {
+		// DiscoverFor bounds the LLM with discoverBudget (60s) internally and is
+		// singleflight-deduped, so concurrent waiters share one build.
+		rails, err := h.hero.DiscoverFor(ctx, profileID)
+
+		h.builds.mu.Lock()
+		delete(h.builds.inflight, profileID)
+		if err == nil && len(rails) == 0 {
+			h.builds.emptyTill[profileID] = time.Now().Add(discoverEmptyTTL)
+		}
+		h.builds.mu.Unlock()
+
+		if err != nil {
+			slog.Warn("discover: background build failed", "profile", profileID, "error", err)
+		}
+		// Notify even on empty/error so the client stops waiting and re-fetches
+		// the terminal state instead of polling to its cap. The re-fetch hits
+		// the now-warm cache (or the empty-suppression window).
+		if h.hub != nil {
+			h.hub.BroadcastToUser(userID, ws.EventDiscoverReady,
+				map[string]any{"profile_id": profileID})
+		}
+	}()
+	return "building"
+}
+
+// clearDiscoverEmpty drops the empty-suppression window for a profile so a
+// forced ?refresh=1 rebuilds even right after an empty build.
+func (h *HeroHandler) clearDiscoverEmpty(profileID int64) {
+	h.builds.mu.Lock()
+	delete(h.builds.emptyTill, profileID)
+	h.builds.mu.Unlock()
 }
 
 // AnchorRails returns up to 3 "Because You Watched X" rails for the

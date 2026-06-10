@@ -293,6 +293,24 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 	return result.([]DiscoverRail), nil
 }
 
+// DiscoverCached returns a profile's Discover rails from cache WITHOUT
+// triggering a build. ok is true only when a fresh (within-TTL) entry exists.
+//
+// It lets the API serve /api/me/discover without holding the request open for
+// the 60s+ LLM cold path: a warm cache returns rails instantly; a cold cache
+// lets the handler kick a detached background build and tell the client to
+// wait for the discover_ready push instead of blocking (or timing out and
+// discarding the result, which is what made the rails only appear on refresh).
+func (h *Hero) DiscoverCached(profileID int64) ([]DiscoverRail, bool) {
+	if cached, ok := h.discoverCache.Load(profileID); ok {
+		e := cached.(discoverCacheEntry)
+		if time.Since(e.builtAt) < discoverCacheTTL {
+			return e.rails, true
+		}
+	}
+	return nil, false
+}
+
 // railItemIDs flattens the media item IDs across all rails for the B2
 // recently-surfaced memory. (RecordSurfaced de-dups, so we don't here.)
 func railItemIDs(rails []DiscoverRail) []int64 {

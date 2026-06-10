@@ -683,22 +683,42 @@ export interface DiscoverRailUI {
   description?: string
   items: UIMedia[]
 }
+// Result of a Discover fetch. `building` is true when the server is still
+// generating the LLM rails (cold cache) and returned no rails YET — the home
+// view keeps the core rails and waits for the discover_ready WS push (or its
+// poll fallback) instead of treating the empty list as final.
+export interface DiscoverRailsResult {
+  rails: DiscoverRailUI[]
+  building: boolean
+}
 export async function getDiscoverRails(
   profileId?: number,
   signal?: AbortSignal,
-): Promise<DiscoverRailUI[]> {
+  // refresh=true sends ?refresh=1, forcing a server-side rebuild (and clearing
+  // the empty-suppression window). Used by the "Refresh picks" affordance.
+  refresh = false,
+): Promise<DiscoverRailsResult> {
   const params = new URLSearchParams()
   if (profileId) params.set('profile_id', String(profileId))
+  if (refresh) params.set('refresh', '1')
   const qs = params.toString()
-  type Raw = { rails?: { title: string; description?: string; items?: ServerMediaItem[] }[] }
+  type Raw = {
+    rails?: { title: string; description?: string; items?: ServerMediaItem[] }[]
+    // "ready" | "building" | "empty". Older servers omit it; absence is treated
+    // as "ready" so the rails (if any) render and we don't wait forever.
+    status?: string
+  }
   const resp = await apiFetch<Raw>(
     qs ? `/api/me/discover?${qs}` : '/api/me/discover', { signal },
   )
-  return (resp.rails || []).map(r => ({
-    title: r.title,
-    description: r.description,
-    items: (r.items || []).map(mapMedia),
-  }))
+  return {
+    rails: (resp.rails || []).map(r => ({
+      title: r.title,
+      description: r.description,
+      items: (r.items || []).map(mapMedia),
+    })),
+    building: resp.status === 'building',
+  }
 }
 
 // Phase 5.3 — "Because You Watched X" anchor rails. Fast vector

@@ -24,4 +24,10 @@ const (
 	// Watch Party feature
 	EventPartyInvite = "party_invite"
 	EventPartyUpdate = "party_update"
+
+	// EventDiscoverReady signals that a profile's LLM-curated Discover rails
+	// finished building (cold-cache path). Carries {profile_id} so the client
+	// re-fetches /api/me/discover and splices the rails in without a page
+	// refresh. Pushed per-user via BroadcastToUser.
+	EventDiscoverReady = "discover_ready"
 )

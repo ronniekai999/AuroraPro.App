@@ -407,6 +407,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.HeroProv != nil {
 		heroH.SetHeroProvider(deps.HeroProv)
 	}
+	// Lets cold-path Discover builds push discover_ready to the user so the
+	// LLM-curated rails splice in live instead of only after a page refresh.
+	heroH.SetHub(deps.Hub)
 	tvH := NewTVHandler(deps.Queries)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
 	streamH := NewStreamHandler(deps.Queries, deps.Transcode, deps.DirectPlay, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)

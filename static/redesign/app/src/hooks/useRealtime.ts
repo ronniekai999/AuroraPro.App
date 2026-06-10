@@ -13,11 +13,19 @@ export interface RequestStatusEvent {
   error_message?: string
 }
 
+// discover_ready WebSocket payload (server: hero_handlers.go kickDiscoverBuild
+// → BroadcastToUser). Fired when a profile's LLM-curated Discover rails finish
+// building on the cold path, so the client can re-fetch + splice them live.
+export interface DiscoverReadyEvent {
+  profile_id: number
+}
+
 export interface RealtimeHandlers {
   // Gate: open the socket only while logged in. Flipping false tears it down.
   enabled: boolean
   onRequestStatus?: (ev: RequestStatusEvent) => void
   onNotification?: (n: AppNotification) => void
+  onDiscoverReady?: (ev: DiscoverReadyEvent) => void
 }
 
 // useRealtime maintains ONE app-lifetime WebSocket to the shared hub (/ws) while
@@ -92,6 +100,11 @@ export function useRealtime(handlers: RealtimeHandlers): void {
           case 'notification':
             if (h.onNotification && msg.data && typeof msg.data === 'object') {
               h.onNotification(msg.data as AppNotification)
+            }
+            break
+          case 'discover_ready':
+            if (h.onDiscoverReady && msg.data && typeof msg.data === 'object') {
+              h.onDiscoverReady(msg.data as DiscoverReadyEvent)
             }
             break
           // request_progress / scan_progress / now_playing / party_* are not
