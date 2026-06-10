@@ -684,30 +684,12 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 	if semanticFirst(mode, query, h.semantic != nil) {
 		// Explicit recommendation/comparison query → LLM first.
 		sem, semOK := semantic()
-		if semOK && len(sem) > 0 {
-			items, searchMode = sem, "semantic"
-		} else {
-			// Semantic errored OR returned nothing. Fall back to trigram so an
-			// exact title that merely tripped a marker substring (e.g. the film
-			// "Like Crazy" or "As You Like It") still resolves from the library
-			// instead of returning an empty page. Mirrors the literal-first
-			// branch's fallback so neither route is a dead end (#207 deep-debug).
-			lit, err := trigram()
-			switch {
-			case err == nil && len(lit) > 0:
-				items, searchMode = lit, "literal"
-			case semOK:
-				// Genuine recommendation query with no library hit: surface the
-				// (possibly empty) semantic result.
-				items, searchMode = sem, "semantic"
-			case err == nil:
-				items = lit // both empty
-			default:
-				// Semantic failed and trigram errored — nothing to serve.
-				writeError(w, http.StatusInternalServerError, "search failed")
-				return
-			}
+		if !semOK {
+			writeError(w, http.StatusInternalServerError, "search failed")
+			return
 		}
+		items = sem
+		searchMode = "semantic"
 	} else {
 		// Title lookup → trigram first.
 		its, err := trigram()
