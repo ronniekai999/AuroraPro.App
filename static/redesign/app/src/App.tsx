@@ -395,7 +395,7 @@ function cwSubtitle(c: ContinueWatchingItem): string {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib }: {
+function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -414,6 +414,10 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onN
   // Phase 5.3 — personalization reason ("Because you finished
   // Severance"). Rendered above the title. Empty/undefined hides.
   reason?: string
+  // True when the hero is the catalog fallback (recent/top-rated) rather
+  // than a pick from the personalized pool. Renders "Recently Added"
+  // instead of "Featured" so the label is accurate.
+  isCatalogFallback?: boolean
   // "Not tonight" — advance to the next pick in the loaded hero pool
   // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
   // the button doesn't render.
@@ -616,6 +620,10 @@ function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onN
             {reason ? (
               <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/30">
                 <Icon name="sparkle" size={12} /> Aurora picked this for you
+              </span>
+            ) : isCatalogFallback ? (
+              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                <Icon name="clock" size={12} /> Recently Added
               </span>
             ) : (
               <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
@@ -1490,6 +1498,8 @@ interface HomeViewProps {
   onCardContext?: (e: React.MouseEvent, m: Media) => void
   // Phase 5.3 — hero reason + refresh + pause hooks.
   heroReason?: string
+  // True when homeHero is the rails-derived catalog fallback (not a pool pick).
+  heroIsCatalogFallback?: boolean
   // 2026-06-05 (Home net-new #2) — real recommender "match %" for the
   // current hero pick. Undefined / 0 (cold-start) → HeroSection falls back
   // to its derived rating-based estimate.
@@ -1560,7 +1570,7 @@ interface HomeViewProps {
   onRefreshRecs?: () => void
   recsRefreshing?: boolean
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -1655,6 +1665,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         onPlay={onPlay}
         onInfo={onSelect}
         reason={heroReason}
+        isCatalogFallback={heroIsCatalogFallback}
         match={heroMatch}
         score={heroScore}
         onNextPick={onNextPick}
@@ -7151,6 +7162,10 @@ export default function App() {
   // filtered out by HomeView so a fresh install with no media
   // doesn't render ghost rails.
   const [homeHero, setHomeHero] = useState<Media | null>(null)
+  // True when homeHero was set by the catalog fallback (recent/top-rated)
+  // rather than the personalized pool. Drives the "Recently Added" label
+  // in HeroSection instead of the misleading "Featured" pill.
+  const [homeHeroIsFallback, setHomeHeroIsFallback] = useState(false)
   // Phase 5.3 — personalized hero pool. Server returns 4-8 picks
   // with reason blurbs; client rotates every 9s with crossfade.
   // Falls back to listRecent[0] when /api/me/hero 503s (no LLM).
@@ -7827,6 +7842,7 @@ export default function App() {
   const resetUserState = useCallback(() => {
     setHomeRails(undefined)
     setHomeHero(null)
+    setHomeHeroIsFallback(false)
     // Clear hero pool too — without this, user A's personalized
     // blurb is briefly visible to user B after a cross-tab logout.
     setHeroPool([])
@@ -8058,7 +8074,7 @@ export default function App() {
         // already populated it.
         if (heroPoolRef.current.length === 0) {
           const hero = (recent[0] || movies[0] || null) as Media | null
-          if (hero) setHomeHero(hero)
+          if (hero) { setHomeHero(hero); setHomeHeroIsFallback(true) }
         }
 
         // Build the core rail set (no personalized yet). Order is the
@@ -9003,7 +9019,13 @@ export default function App() {
       setHeroPool(resp.picks)
       setHeroPersonalization(resp.personalization)
       setHeroIndex(0)
-      if (resp.picks.length > 0) setHomeHero(resp.picks[0].media)
+      if (resp.picks.length > 0) { setHomeHero(resp.picks[0].media); setHomeHeroIsFallback(false) }
+      // Empty pool: leave homeHero/flag as-is. On first load the hero
+      // hasn't been set yet, so the home-rails catalog fallback (which
+      // checks heroPoolRef.current.length === 0) will set it with
+      // isFallback=true. On a runtime refresh that returns empty, the
+      // displayed hero is still the previous pool pick — not catalog
+      // filler — so the existing label remains correct.
     } catch {
       // Non-fatal — keep whatever hero we had (listRecent fallback
       // from home-rails effect).
@@ -9026,7 +9048,7 @@ export default function App() {
     const next = (heroIndexRef.current + 1) % heroPool.length
     heroIndexRef.current = next
     setHeroIndex(next)
-    setHomeHero(heroPool[next].media)
+    setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
     // Restart the 9s auto-rotation dwell from this pick (see rotEpoch) so a
     // skip isn't cut short by the next tick when the hero isn't hover-paused.
     setRotEpoch(e => e + 1)
@@ -9093,7 +9115,7 @@ export default function App() {
     const id = window.setInterval(() => {
       const next = (heroIndexRef.current + 1) % heroPool.length
       setHeroIndex(next)
-      setHomeHero(heroPool[next].media)
+      setHomeHero(heroPool[next].media); setHomeHeroIsFallback(false)
     }, 9000)
     return () => window.clearInterval(id)
   }, [heroPool, heroPaused, rotEpoch])
@@ -9441,6 +9463,7 @@ export default function App() {
               onRetry={requestHomeReload}
               onCardContext={openCardContextMenu}
               heroReason={heroPool[heroIndex]?.reason}
+              heroIsCatalogFallback={homeHeroIsFallback}
               heroMatch={heroPool[heroIndex]?.match}
               heroScore={heroPool[heroIndex]?.score}
               // "Surprise me" — play a random recommended pick (not the one shown).
