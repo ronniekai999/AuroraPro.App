@@ -782,9 +782,14 @@ func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := h.queries.UpdateUserRole(r.Context(), id, role)
+	updated, lastAdmin, err := h.queries.UpdateUserRole(r.Context(), id, role)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update role")
+		return
+	}
+	if lastAdmin {
+		// Refused: demoting this user would leave the server with no admin.
+		writeError(w, http.StatusBadRequest, "cannot remove admin from the last remaining admin")
 		return
 	}
 	if !updated {
@@ -799,12 +804,20 @@ func (h *AuthHandler) UpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	// new role from the DB. Unlike password-change / delete we deliberately do
 	// NOT revoke refresh tokens — the user stays signed in and simply picks up
 	// the new role on the next refresh.
-	//
-	// Best-effort: the role IS already persisted, so a bump failure must not be
-	// reported as a failed change — it just delays the effect to natural token
-	// expiry. Log it and return success.
+	demotion := role == models.RoleUser
 	if _, err := h.queries.BumpUserTokenVersion(r.Context(), id); err != nil {
 		slog.Error("failed to bump token_version after role change", "user_id", id, "error", err)
+		if demotion {
+			// Demotion is the security-sensitive direction: until the version is
+			// bumped, the just-demoted admin's outstanding token still carries
+			// role=admin. Surface the failure (mirrors ChangePassword's fatal
+			// treatment) rather than reporting a clean success — the role IS
+			// already persisted, so a retry is idempotent and will re-bump.
+			writeError(w, http.StatusInternalServerError, "role updated but session revocation failed; retry to fully revoke admin access")
+			return
+		}
+		// Promotion: a missed bump is harmless — the user simply picks up admin
+		// on their next natural token refresh. Return success.
 	} else if h.tokenVerStore != nil {
 		h.tokenVerStore.Invalidate(id)
 	}

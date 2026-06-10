@@ -1203,22 +1203,69 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, userID int64, password
 	return err
 }
 
+// roleChangeLockKey is a transaction-scoped pg advisory-lock key that
+// serializes all role changes so the last-admin guard in UpdateUserRole cannot
+// race. The value is arbitrary but fixed ("AUROLE" in hex); it only has to be
+// distinct from any other advisory-lock key the app uses.
+const roleChangeLockKey int64 = 0x4155524F4C45
+
 // UpdateUserRole sets a user's role (admin/user) and stamps updated_at (a role
-// change is an account mutation). Returns whether a row was affected — false
-// means no such user, which the handler maps to 404.
+// change is an account mutation). Returns:
+//   - updated: a row was changed (false → no such user; handler maps to 404).
+//   - lastAdmin: the change was refused because it would demote the last
+//     remaining admin (handler maps to 400). Never set for a promotion.
+//
+// Zero-admin protection: the handler's self-guard already makes a *sequential*
+// path to zero admins impossible (you can't demote yourself, so demoting any
+// other admin always leaves you). The remaining hole is concurrency — two
+// admins demoting each other at the same instant would each read admin_count
+// == 2 and both succeed, stranding the server with no admin (unrecoverable,
+// since promotion is itself admin-gated). We close it by taking a
+// transaction-scoped advisory lock that serializes role changes, then checking
+// the live admin count inside the same transaction. The lock releases on
+// commit/rollback; role changes are rare admin actions, so global
+// serialization costs nothing.
 //
 // The role is also baked into the JWT at issue time and RequireAdmin reads it
 // from the claims, so the caller MUST bump the target's token_version after
 // this for the change to take effect promptly rather than waiting out the
 // access-token lifetime. See AuthHandler.UpdateUserRole.
-func (q *Queries) UpdateUserRole(ctx context.Context, id int64, role models.UserRole) (bool, error) {
-	result, err := q.pool.Exec(ctx,
+func (q *Queries) UpdateUserRole(ctx context.Context, id int64, role models.UserRole) (updated, lastAdmin bool, err error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("begin role tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, roleChangeLockKey); err != nil {
+		return false, false, fmt.Errorf("lock role change: %w", err)
+	}
+
+	if role == models.RoleUser {
+		// Single query: how many admins exist, and is the target one of them?
+		// BOOL_OR is NULL when there are no admin rows, hence the COALESCE.
+		var adminCount int
+		var targetIsAdmin bool
+		if err = tx.QueryRow(ctx,
+			`SELECT COUNT(*), COALESCE(BOOL_OR(id = $1), false) FROM users WHERE role = 'admin'`,
+			id).Scan(&adminCount, &targetIsAdmin); err != nil {
+			return false, false, fmt.Errorf("count admins: %w", err)
+		}
+		if targetIsAdmin && adminCount <= 1 {
+			return false, true, nil
+		}
+	}
+
+	result, err := tx.Exec(ctx,
 		`UPDATE users SET role = $2, updated_at = NOW() WHERE id = $1`,
 		id, role)
 	if err != nil {
-		return false, fmt.Errorf("update user role: %w", err)
+		return false, false, fmt.Errorf("update user role: %w", err)
 	}
-	return result.RowsAffected() > 0, nil
+	if err = tx.Commit(ctx); err != nil {
+		return false, false, fmt.Errorf("commit role change: %w", err)
+	}
+	return result.RowsAffected() > 0, false, nil
 }
 
 // GetMediaFilePathsForLibrary returns all media_file (id, path) pairs for a library.

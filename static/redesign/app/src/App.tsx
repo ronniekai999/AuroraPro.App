@@ -6007,12 +6007,14 @@ function UserRowMenu({
     setBusy(true)
     try {
       await deleteUser(user.id)
-      onDeleted()
+      // onDeleted() removes this row, unmounting the component — so close first
+      // and let it be the last statement on the success path. No setState runs
+      // after the unmount (unlike a finally{} block would).
       setOpen(false)
+      onDeleted()
     } catch (err) {
       window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-    } finally {
-      setBusy(false)
+      setBusy(false) // only reset on the error path, where the row stays mounted
     }
   }
 

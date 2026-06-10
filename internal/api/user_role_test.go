@@ -113,6 +113,23 @@ func TestUpdateUserRole_RejectsUnparseableID(t *testing.T) {
 	}
 }
 
+// assertRole fails the test unless the user exists and carries want. Guards the
+// (nil, nil) no-rows contract of GetUserByID so a missing row reports cleanly
+// instead of nil-derefing in the failure message.
+func assertRole(t *testing.T, q *db.Queries, id int64, want models.UserRole) {
+	t.Helper()
+	got, err := q.GetUserByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetUserByID(%d): %v", id, err)
+	}
+	if got == nil {
+		t.Fatalf("GetUserByID(%d) = nil; expected a row with role %v", id, want)
+	}
+	if got.Role != want {
+		t.Fatalf("role = %v, want %v", got.Role, want)
+	}
+}
+
 // --- behavior: opt-in DB ---
 
 func TestUpdateUserRole_PromoteThenDemote(t *testing.T) {
@@ -121,15 +138,22 @@ func TestUpdateUserRole_PromoteThenDemote(t *testing.T) {
 	const adminID = int64(1) // distinct from the seeded target
 	target := seedRoleUser(t, q)
 
-	// Promote → admin.
+	// Guarantee a second admin so demoting `target` below can't trip the
+	// last-admin guard regardless of what the shared test DB already holds.
+	keeper := seedRoleUser(t, q)
 	w := httptest.NewRecorder()
+	h.UpdateUserRole(w, roleReq(adminID, strconv.FormatInt(keeper, 10), "admin"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("seed-admin status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Promote → admin.
+	w = httptest.NewRecorder()
 	h.UpdateUserRole(w, roleReq(adminID, strconv.FormatInt(target, 10), "admin"))
 	if w.Code != http.StatusOK {
 		t.Fatalf("promote status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
-	if got, err := q.GetUserByID(context.Background(), target); err != nil || got.Role != models.RoleAdmin {
-		t.Fatalf("after promote role = %v (err %v), want admin", got.Role, err)
-	}
+	assertRole(t, q, target, models.RoleAdmin)
 
 	// Demote → user.
 	w = httptest.NewRecorder()
@@ -137,9 +161,7 @@ func TestUpdateUserRole_PromoteThenDemote(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("demote status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
-	if got, err := q.GetUserByID(context.Background(), target); err != nil || got.Role != models.RoleUser {
-		t.Fatalf("after demote role = %v (err %v), want user", got.Role, err)
-	}
+	assertRole(t, q, target, models.RoleUser)
 }
 
 func TestUpdateUserRole_MissingUserIs404(t *testing.T) {
