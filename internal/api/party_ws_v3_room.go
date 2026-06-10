@@ -119,7 +119,9 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// that's a deliberate user action, not a socket EOF.
 			_ = h.manager.LeavePartyV3RoomIfConn(code, claims.UserID, sc)
 		}
-		_ = conn.Close()
+		// Close via the SafeConn so its write pump stops too (2026-06 —
+		// closing only the raw conn would leak the pump goroutine).
+		_ = sc.Close()
 		slog.Debug("v3 room disconnected", "user_id", claims.UserID)
 	}()
 

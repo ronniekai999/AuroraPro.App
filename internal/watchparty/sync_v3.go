@@ -138,9 +138,12 @@ func (m *Manager) emitTick(ps *PartyState) {
 // broadcastToSyncPeers sends a message to every connection in
 // ps.syncConns. Takes ps.mu internally (unlike broadcastToPartyLocked,
 // which requires the caller to hold it) — tick emission is the hot path
-// and shouldn't make callers manage locking. Failed writes are logged;
-// the connection will be cleaned up by its own read loop's disconnect
-// handler.
+// and shouldn't make callers manage locking.
+//
+// 2026-06 — writes go through SafeConn.Send (per-conn write pump), which
+// never blocks: a slow peer's queue fills and their conn is closed
+// instead of stalling the broadcast. Failed sends are logged at Debug;
+// the conn's read loop handles disconnect cleanup.
 func (m *Manager) broadcastToSyncPeers(ps *PartyState, msg map[string]interface{}) {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -153,16 +156,9 @@ func (m *Manager) broadcastToSyncPeers(ps *PartyState, msg map[string]interface{
 		conns = append(conns, c)
 	}
 	ps.mu.Unlock()
-	// 2026-05-25 — reset write deadline before each conn write to
-	// prevent the silent ErrDeadlineExceeded class of bug (see
-	// broadcastWriteTimeout comment in manager.go). Sync ticks fire
-	// frequently (every ~250ms while Running) so this is the most
-	// affected path of the four broadcast helpers.
-	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range conns {
-		_ = c.SetWriteDeadline(deadline)
-		if err := c.WriteMessage(1 /*TextMessage*/, data); err != nil {
-			slog.Debug("v3: sync write failed", "err", err, "code", ps.Code)
+		if err := c.Send(data); err != nil {
+			slog.Debug("v3: sync send failed", "err", err, "code", ps.Code)
 		}
 	}
 }
@@ -181,17 +177,9 @@ func (m *Manager) broadcastToRoomPeers(ps *PartyState, msg map[string]interface{
 		conns = append(conns, c)
 	}
 	ps.mu.Unlock()
-	// 2026-05-25 — reset write deadline before each broadcast write.
-	// See broadcastWriteTimeout doc in manager.go for the production
-	// bug this prevents (host gets initial party-state with 10s
-	// deadline set by the WS handler, deadline expires, every
-	// subsequent broadcast write silently fails with
-	// ErrDeadlineExceeded).
-	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range conns {
-		_ = c.SetWriteDeadline(deadline)
-		if err := c.WriteMessage(websocket.TextMessage, data); err != nil {
-			slog.Debug("v3: room write failed", "err", err, "code", ps.Code)
+		if err := c.Send(data); err != nil {
+			slog.Debug("v3: room send failed", "err", err, "code", ps.Code)
 		}
 	}
 }
@@ -303,20 +291,14 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 			"companion": ps.Participants[userID].Companion,
 		},
 	})
-	// 2026-05-25 fix — set write deadline before each conn write.
-	// Without this, the host's stale 10s deadline from the initial
-	// party-state send had already expired by the time a brother joined
-	// (even seconds later), so this WriteMessage silently failed with
-	// ErrDeadlineExceeded and the host never saw the participant-join
-	// broadcast (even though server-side roomConns and Participants
-	// were correctly populated).
-	joinDeadline := time.Now().Add(broadcastWriteTimeout)
+	// Non-blocking enqueue per conn (write pump owns the socket; the
+	// pump sets a fresh deadline per write — see broadcastWriteTimeout
+	// for the stale-deadline bug class this design retires).
 	for uid, c := range ps.roomConns {
 		if uid == userID || c == nil {
 			continue
 		}
-		_ = c.SetWriteDeadline(joinDeadline)
-		_ = c.WriteMessage(websocket.TextMessage, joinMsg)
+		_ = c.Send(joinMsg)
 	}
 
 	slog.Info("v3: participant joined (room)", "code", code, "user_id", userID, "username", username)
@@ -639,16 +621,11 @@ func (m *Manager) broadcastToRoomPeersLocked(ps *PartyState, msg map[string]inte
 	if err != nil {
 		return
 	}
-	// 2026-05-25 — reset write deadline before each conn write to
-	// prevent the silent ErrDeadlineExceeded class of bug (see
-	// broadcastWriteTimeout comment in manager.go).
-	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.roomConns {
 		if c == nil {
 			continue
 		}
-		_ = c.SetWriteDeadline(deadline)
-		_ = c.WriteMessage(websocket.TextMessage, data)
+		_ = c.Send(data)
 	}
 }
 
@@ -656,27 +633,19 @@ func (m *Manager) broadcastToRoomPeersLocked(ps *PartyState, msg map[string]inte
 // used by intent handlers (pause, seek) that already hold ps.mu and would
 // deadlock if they called the unlocked variant.
 //
-// The tradeoff: we hold ps.mu across the socket writes. For step 2's rare
-// intent messages (pause/seek fire on explicit user action, not every tick)
-// this is fine — a slow peer's write timeout of partyWriteWait (10s) would
-// block the party, but that's strictly better than the status quo, which
-// was an indefinite deadlock. A Phase 3 refactor could move writes onto
-// per-conn outbound queues.
+// 2026-06 — Send enqueues onto the per-conn write pump without blocking,
+// so holding ps.mu across this loop is now safe (the "Phase 3 refactor"
+// the previous version of this comment promised).
 func (m *Manager) broadcastToSyncPeersLocked(ps *PartyState, msg map[string]interface{}) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	// 2026-05-25 — reset write deadline before each conn write to
-	// prevent silent ErrDeadlineExceeded (see broadcastWriteTimeout
-	// comment in manager.go).
-	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.syncConns {
 		if c == nil {
 			continue
 		}
-		_ = c.SetWriteDeadline(deadline)
-		_ = c.WriteMessage(websocket.TextMessage, data)
+		_ = c.Send(data)
 	}
 }
 
@@ -958,20 +927,17 @@ func (m *Manager) emitTickLocked(ps *PartyState) {
 			"rev":           ps.StateRevision,
 		},
 	}
-	// broadcast without releasing the lock — acceptable because writes
-	// don't block on anything else in the party, and this is called on
-	// the same goroutine that just mutated the anchor.
+	// Enqueue without releasing the lock — Send never blocks (per-conn
+	// write pump), and this is called on the same goroutine that just
+	// mutated the anchor.
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
-	// 2026-05-25 — reset write deadline (see broadcastWriteTimeout).
-	deadline := time.Now().Add(broadcastWriteTimeout)
 	for _, c := range ps.syncConns {
 		if c == nil {
 			continue
 		}
-		_ = c.SetWriteDeadline(deadline)
-		_ = c.WriteMessage(websocket.TextMessage, data)
+		_ = c.Send(data)
 	}
 }

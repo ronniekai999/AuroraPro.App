@@ -136,7 +136,9 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// the IfConn guard had been added but never wired here).
 			h.manager.LeavePartyV3SyncIfConn(code, claims.UserID, sc)
 		}
-		_ = conn.Close()
+		// Close via the SafeConn so its write pump stops too (2026-06 —
+		// closing only the raw conn would leak the pump goroutine).
+		_ = sc.Close()
 		slog.Debug("v3 sync disconnected", "user_id", claims.UserID)
 	}()
 

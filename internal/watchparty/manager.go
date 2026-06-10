@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -47,20 +48,113 @@ type PartySettings struct {
 	SpoilerFreeStart bool `json:"spoiler_free_start"`
 }
 
-// SafeConn wraps a gorilla/websocket.Conn with a write mutex.
+// SafeConn wraps a gorilla/websocket.Conn with a write mutex and a
+// buffered outbound queue drained by a per-connection write pump.
+//
 // gorilla/websocket does not support concurrent writers, so all writes
-// (including pings, broadcasts, and direct messages) must be serialized.
+// (pings, broadcasts, direct messages) serialize through writeMu.
+//
+// 2026-06 watch-party review (speed finding) — broadcasts used to call
+// WriteMessage synchronously, several of them while holding ps.mu. One
+// participant with a stalled TCP connection could block every state
+// mutation in the party (joins, pause, chat) for up to the 10s write
+// deadline. Broadcast paths now call Send, which enqueues onto `outbox`
+// without blocking; the pump goroutine owns the slow socket. A peer whose
+// queue overflows (outboxSize messages behind, ≈16s of ticks) is treated
+// as dead: the conn is closed so its read pump unblocks and the normal
+// disconnect cleanup runs. This is the standard gorilla chat-hub pattern.
 type SafeConn struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
+
+	// Write-pump state. nil outbox/done means a zero-value SafeConn
+	// (tests construct &SafeConn{} directly) — Send degrades to a
+	// direct write and Close to a plain conn close.
+	outbox    chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
-// NewSafeConn creates a SafeConn wrapping the given connection.
+// outboxSize bounds the per-connection send queue. At the 250ms tick
+// cadence, 64 messages is ~16s of sync traffic — far beyond what a
+// healthy client ever queues (writes complete in milliseconds), and a
+// reasonable burst allowance for chat/reaction fan-out.
+const outboxSize = 64
+
+// ErrConnClosed is returned by Send when the connection is closed (or
+// has just been closed because its outbound queue overflowed).
+var ErrConnClosed = errors.New("watchparty: connection closed")
+
+// NewSafeConn creates a SafeConn wrapping the given connection and starts
+// its write pump. Callers MUST call Close when done with the connection
+// (the WS handlers' deferred cleanup does) or the pump goroutine leaks.
 func NewSafeConn(conn *websocket.Conn) *SafeConn {
-	return &SafeConn{conn: conn}
+	sc := &SafeConn{
+		conn:   conn,
+		outbox: make(chan []byte, outboxSize),
+		done:   make(chan struct{}),
+	}
+	go sc.writePump()
+	return sc
 }
 
-// WriteMessage acquires the write mutex before writing.
+// writePump drains the outbox onto the socket. Owned by NewSafeConn.
+// Exits when Close is called or a write fails (in which case it closes
+// the conn itself so the read pump unblocks and cleanup runs).
+func (sc *SafeConn) writePump() {
+	for {
+		select {
+		case <-sc.done:
+			return
+		case data := <-sc.outbox:
+			// Fresh deadline per write — see broadcastWriteTimeout for
+			// the stale-deadline production bug this prevents.
+			_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
+			if err := sc.WriteMessage(websocket.TextMessage, data); err != nil {
+				_ = sc.Close()
+				return
+			}
+		}
+	}
+}
+
+// Send enqueues a text message for the write pump without blocking.
+// Returns ErrConnClosed when the connection is closed, or when the
+// outbound queue is full — in which case the peer is presumed dead/stuck
+// and the connection is closed so its cleanup path runs. Safe to call
+// while holding ps.mu (never blocks on socket I/O).
+func (sc *SafeConn) Send(data []byte) error {
+	if sc.outbox == nil {
+		// Zero-value SafeConn (tests): degrade to a direct write, or
+		// discard when there's no underlying conn at all.
+		if sc.conn == nil {
+			return nil
+		}
+		_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
+		return sc.WriteMessage(websocket.TextMessage, data)
+	}
+	select {
+	case <-sc.done:
+		return ErrConnClosed
+	default:
+	}
+	select {
+	case sc.outbox <- data:
+		return nil
+	case <-sc.done:
+		return ErrConnClosed
+	default:
+		// Queue overflow: the peer hasn't drained ~16s of traffic. Close
+		// the conn (unblocks its read pump → disconnect cleanup) rather
+		// than dropping arbitrary messages on a conn we'd keep trusting.
+		_ = sc.Close()
+		return ErrConnClosed
+	}
+}
+
+// WriteMessage acquires the write mutex before writing. Prefer Send for
+// anything called under ps.mu; direct writes are for per-client
+// request/response traffic in the WS handlers (hello, snapshots, errors).
 func (sc *SafeConn) WriteMessage(messageType int, data []byte) error {
 	sc.writeMu.Lock()
 	defer sc.writeMu.Unlock()
@@ -79,9 +173,20 @@ func (sc *SafeConn) SetWriteDeadline(t time.Time) error {
 	return sc.conn.SetWriteDeadline(t)
 }
 
-// Close closes the underlying connection.
+// Close stops the write pump and closes the underlying connection.
+// Idempotent — every teardown path (handler defer, endPartyInternal,
+// queue overflow, pump write failure) can call it safely.
 func (sc *SafeConn) Close() error {
-	return sc.conn.Close()
+	var err error
+	sc.closeOnce.Do(func() {
+		if sc.done != nil {
+			close(sc.done)
+		}
+		if sc.conn != nil {
+			err = sc.conn.Close()
+		}
+	})
+	return err
 }
 
 // Participant tracks a single connected user in a watch party.
@@ -163,17 +268,17 @@ type ReactionRecord struct {
 // longest a single network glitch could plausibly take to recover.
 const HostDisconnectGracePeriod = 90 * time.Second
 
-// broadcastWriteTimeout — max time to wait for a single broadcast
+// broadcastWriteTimeout — max time to wait for a single outbound
 // write to land on a participant's conn before considering it dead.
-// 2026-05-25 fix: every broadcast helper now calls
-// `conn.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))`
-// IMMEDIATELY before WriteMessage. Without this reset, the initial
-// party-state send (which sets a 10s deadline via the WS handler at
-// party_ws_v3_room.go) leaks its expired deadline forward and silently
-// breaks every subsequent broadcast to the host — symptom in
-// production: brother joins, server registers count 1→2, but host
-// sees no participant-join, no chat, no reactions because every
-// WriteMessage returns ErrDeadlineExceeded after the 10s elapsed.
+//
+// History: 2026-05-25, a stale 10s deadline set by the initial
+// party-state send silently broke every subsequent broadcast to the
+// host with ErrDeadlineExceeded (host saw no participant-join, chat,
+// or reactions). The fix was a fresh deadline immediately before each
+// write. 2026-06, broadcasts moved onto per-conn write pumps
+// (SafeConn.writePump) which set this deadline before every pump
+// write; the remaining direct-write call sites (hello, snapshots,
+// teardown party-ended) still set it explicitly.
 //
 // 10s matches partyWriteWait used elsewhere — a healthy LAN/WAN write
 // completes in milliseconds; if it takes 10s the conn is genuinely
@@ -2170,11 +2275,10 @@ func (m *Manager) RelayVoiceSignal(code string, fromUserID, toUserID int64, sign
 	if err != nil {
 		return fmt.Errorf("voice signal marshal: %w", err)
 	}
-	targetConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	if err := targetConn.WriteMessage(1 /*TextMessage*/, data); err != nil {
-		// Best-effort: don't propagate write errors — the room-socket
+	if err := targetConn.Send(data); err != nil {
+		// Best-effort: don't propagate send errors — the room-socket
 		// read pump will detect the dead conn and clean up.
-		slog.Debug("voice signal write failed", "code", code, "to", toUserID, "err", err)
+		slog.Debug("voice signal send failed", "code", code, "to", toUserID, "err", err)
 	}
 	return nil
 }
@@ -2192,8 +2296,7 @@ func (m *Manager) broadcastToRoomPeersExcludeLocked(ps *PartyState, excludeUserI
 		if c == nil || uid == excludeUserID {
 			continue
 		}
-		c.SetWriteDeadline(time.Now().Add(2 * time.Second))
-		_ = c.WriteMessage(1 /*TextMessage*/, data)
+		_ = c.Send(data)
 	}
 }
 
@@ -2502,17 +2605,11 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 		return
 	}
 
-	// 2026-05-25 — set a fresh write deadline before EACH conn write.
-	// Production bug: the WS handler set a 10s SetWriteDeadline on the
-	// host's conn when sending the initial party-state, and no other
-	// path reset it. After 10s, every subsequent broadcast write
-	// failed with ErrDeadlineExceeded — silently swallowed below.
-	// Result: host sees no participant-join, chat, reactions, or any
-	// other server-pushed event after the 10-second mark, even though
-	// their WS is fully alive. Now: set deadline immediately before
-	// each Write so it never silently expires.
-	broadcastWriteDeadline := time.Now().Add(broadcastWriteTimeout)
-
+	// 2026-06 — Send enqueues onto the per-conn write pump (fresh write
+	// deadline per write happens in the pump; see broadcastWriteTimeout
+	// for the stale-deadline production bug that design retires). Never
+	// blocks under ps.mu; a send failure means the conn is closed (dead
+	// peer or queue overflow) so it's pruned from the pool.
 	var failedRoom []int64
 	for uid, conn := range ps.roomConns {
 		if uid == excludeUserID {
@@ -2522,9 +2619,8 @@ func (m *Manager) broadcastToPartyExcludeLocked(ps *PartyState, msg interface{},
 			failedRoom = append(failedRoom, uid)
 			continue
 		}
-		_ = conn.SetWriteDeadline(broadcastWriteDeadline)
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			slog.Debug("failed to write to party participant (room)", "user_id", uid, "error", err)
+		if err := conn.Send(data); err != nil {
+			slog.Debug("failed to send to party participant (room)", "user_id", uid, "error", err)
 			failedRoom = append(failedRoom, uid)
 		}
 	}
