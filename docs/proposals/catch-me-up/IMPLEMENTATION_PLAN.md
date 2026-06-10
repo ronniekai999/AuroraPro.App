@@ -1,22 +1,24 @@
 # Catch Me Up — spoiler-safe AI series recaps
 
 **Implementation plan**
-Status: **prototype landed** (backend wired, builds green) · Author: prepared for Ronnie · Date: 2026-06-10
+Status: ✅ **SHIPPED** (live on `aurorapro.app`) · Author: prepared for Ronnie · Date: 2026-06-10
 
 > **Feature name: “Previously.”** It reframes the universal TV *“Previously on…”*
-> cold-open into a personalized, spoiler-safe lockup — *“Previously, on Severance.”*
+> cold-open into a personalized, spoiler-safe lockup — *“Previously, on Wednesday.”*
 > Instantly understood, elegant, and ownable as an Aurora surface alongside Discover /
 > Hero. Internal code stays neutral (`recap`); only user-facing strings say “Previously.”
 > Visual prototype: [`mockup-previously.html`](./mockup-previously.html) (open in a browser).
 > Alternatives considered: *Recall*, *Recapsule*.
 
-> **What's already built in this branch (prototype):**
-> - migration [`042_episode_recaps`](../../../migrations/042_episode_recaps.up.sql) — the (show, boundary) recap cache
-> - [`internal/db/queries_recaps.go`](../../../internal/db/queries_recaps.go) — `LastCompletedEpisode`, `RecapEpisodesUpToBoundary`, `GetCachedRecap`, `UpsertRecap`
-> - [`internal/recap/recap.go`](../../../internal/recap/recap.go) — the service (boundary enforcement, prompt, tolerant parse, single-flight, cache) + [`recap_test.go`](../../../internal/recap/recap_test.go)
-> - [`internal/api/recap_handlers.go`](../../../internal/api/recap_handlers.go) — `GET /api/media/{id}/recap` (profile-scoped, degrades gracefully)
-> - wired in [`router.go`](../../../internal/api/router.go). `go build ./...` green; recap unit tests pass.
-> Remaining: the SPA button/modal (mockup shows the target) + the optional completion-hook prebuild.
+> **Shipped — what landed (and where):**
+> - migration [`042_episode_recaps`](../../../migrations/042_episode_recaps.up.sql) — the (show, boundary) recap cache.
+> - [`internal/db/queries_recaps.go`](../../../internal/db/queries_recaps.go) — `LastCompletedEpisode`, `RecapEpisodesUpToBoundary`, `GetRecapBoundaryFacts`, `GetCachedRecap`, `UpsertRecap`.
+> - [`internal/recap/recap.go`](../../../internal/recap/recap.go) (+ [`recap_test.go`](../../../internal/recap/recap_test.go)) — the service: three-mode selection (grounded / season-closure / caught-up), boundary enforcement, tolerant LLM-JSON parse, single-flight, model+template+mode cache hashing.
+> - [`internal/api/recap_handlers.go`](../../../internal/api/recap_handlers.go) — `GET /api/media/{id}/recap` (profile-scoped, degrades gracefully).
+> - Completion-hook prebuild in [`phase2_handlers.go`](../../../internal/api/phase2_handlers.go) — finishing an episode warms the next recap.
+> - Frontend: the **“Previously”** action in [`DetailRail`](../../../static/redesign/app/src/components/detail/DetailRail.tsx) + the [`RecapModal`](../../../static/redesign/app/src/components/detail/RecapModal.tsx) (spoiler-safe badge, typewriter reveal, friendly unavailable states).
+>
+> **Shipped across:** #297 (backend prototype) → #298 (fully live: SPA + prebuild) → #303 (smart model + better prompt) → #304 (prompt-template cache busting) → #305 (caught-up mode) → #306 (season-closure mode + adversarial-review hardening). Verified end-to-end against the live server on *Wednesday* S1.
 
 > One of five feature plans drafted together. Siblings:
 > [aurora-concierge](../aurora-concierge/), [movie-night-matchmaker](../movie-night-matchmaker/),
