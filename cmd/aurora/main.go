@@ -696,10 +696,11 @@ func main() {
 	//
 	// 2026-06 V2 deletion — the legacy `watchparty:` yaml tunables
 	// (heartbeat_interval_ms, buffer_hysteresis_ms, drift_*) configured the
-	// removed V2 group state machine and are now inert; they are NOT mapped
-	// onto the V3 thresholds because their defaults (50ms/2000ms) differ
-	// from V3's tuned values (200ms/3000ms) and silently re-tightening every
-	// deployment's sync behavior would be worse than ignoring stale knobs.
+	// removed V2 group state machine; config.loadYAML logs a deprecation
+	// warning if an aurora.yaml still sets them. They are NOT mapped onto
+	// the V3 thresholds because their defaults (50ms/2000ms) differ from
+	// V3's tuned values (200ms/3000ms) and silently re-tightening every
+	// deployment's sync behavior would be worse than dropping stale knobs.
 	// V3 tuning uses DefaultSyncConfig; per-deployment overrides can be
 	// added to config as V3-named knobs if anyone ever needs them.
 	partyManager := watchparty.NewManagerWithConfig(queries, hub, watchparty.SyncConfig{})

@@ -321,3 +321,29 @@ func TestV3_StateRevision_MonotonicOnIntent(t *testing.T) {
 		t.Fatalf("pause: rev %d → %d, want increase", r2, r3)
 	}
 }
+
+// TestV3_HandleRequestPause_RejectsOutOfRangePosition — 2026-06 review:
+// pause writes the same anchor a seek does, so it needs the same 24h
+// upper bound. An unbounded at_ms (e.g. MaxInt64) would overflow
+// CurrentAbsMs() after the next play and broadcast absurd negative
+// positions to every peer.
+func TestV3_HandleRequestPause_RejectsOutOfRangePosition(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "PAUS02", 1)
+	ps.mu.Lock()
+	ps.setAnchorLocked(5_000, true)
+	ps.mu.Unlock()
+
+	if err := m.HandleRequestPause("PAUS02", 1, int64(1)<<62); err == nil {
+		t.Fatal("pause with an absurd at_ms should be rejected")
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if !ps.Running {
+		t.Error("rejected pause must not change Running")
+	}
+	if ps.AnchorAbsMs != 5_000 {
+		t.Errorf("rejected pause must not move the anchor; got %d", ps.AnchorAbsMs)
+	}
+	m.stopTickLoopLocked(ps)
+}

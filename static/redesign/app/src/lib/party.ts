@@ -153,6 +153,14 @@ export interface TickPayload {
   server_now_ms: number
   rev?: number
   running?: boolean
+  // CLIENT-LOCAL, not on the wire: Date.now() at the moment the frame was
+  // received, stamped by useParty when it stores the tick in tickRef. The
+  // drift loop uses it to decide whether the tick is STALE (sync socket
+  // down) — comparing two local timestamps is immune to client↔server
+  // clock skew, unlike `Date.now() - server_now_ms`, which before the
+  // time-sync offset converges would misclassify every fresh tick as
+  // stale on a machine whose clock runs >3s fast (2026-06 review).
+  receivedAtMs?: number
 }
 
 export interface PauseSeekPayload {

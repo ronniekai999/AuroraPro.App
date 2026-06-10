@@ -22,8 +22,6 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // CurrentAbsMs is the party's canonical position at the moment of the call.
@@ -111,75 +109,15 @@ func (m *Manager) tickLoop(ctx context.Context, ps *PartyState) {
 // transitioned to Paused since the goroutine last checked, this is a
 // no-op and the loop will exit on the next ctx.Done or the next
 // stopTickLoopLocked call.
+//
+// 2026-06 — single lock acquisition. The old version built the payload
+// under ps.mu, unlocked, then re-locked to snapshot the conn list into a
+// fresh slice — a dance that existed only because writes used to block.
+// Send never blocks, so the lock can be held across the whole emit.
 func (m *Manager) emitTick(ps *PartyState) {
 	ps.mu.Lock()
-	if !ps.Running {
-		ps.mu.Unlock()
-		return
-	}
-	msg := map[string]interface{}{
-		"type": "tick",
-		"payload": map[string]interface{}{
-			"abs_ms":        ps.CurrentAbsMs(),
-			"server_now_ms": time.Now().UnixMilli(),
-			"rev":           ps.StateRevision,
-		},
-	}
+	m.emitTickLocked(ps)
 	ps.mu.Unlock()
-	m.broadcastToSyncPeers(ps, msg)
-}
-
-// ============================================================
-// Sync-socket broadcast helper
-// ============================================================
-
-// broadcastToSyncPeers sends a message to every connection in
-// ps.syncConns. Takes ps.mu internally (unlike broadcastToPartyLocked,
-// which requires the caller to hold it) — tick emission is the hot path
-// and shouldn't make callers manage locking.
-//
-// 2026-06 — writes go through SafeConn.Send (per-conn write pump), which
-// never blocks: a slow peer's queue fills and their conn is closed
-// instead of stalling the broadcast. Failed sends are logged at Debug;
-// the conn's read loop handles disconnect cleanup.
-func (m *Manager) broadcastToSyncPeers(ps *PartyState, msg map[string]interface{}) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		slog.Warn("v3: marshal sync msg failed", "err", err, "code", ps.Code)
-		return
-	}
-	ps.mu.Lock()
-	conns := make([]*SafeConn, 0, len(ps.syncConns))
-	for _, c := range ps.syncConns {
-		conns = append(conns, c)
-	}
-	ps.mu.Unlock()
-	for _, c := range conns {
-		if err := c.Send(data); err != nil {
-			slog.Debug("v3: sync send failed", "err", err, "code", ps.Code)
-		}
-	}
-}
-
-// broadcastToRoomPeers is the symmetric helper for the room-socket pool
-// (chat, reactions, presence). Same semantics as broadcastToSyncPeers.
-func (m *Manager) broadcastToRoomPeers(ps *PartyState, msg map[string]interface{}) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		slog.Warn("v3: marshal room msg failed", "err", err, "code", ps.Code)
-		return
-	}
-	ps.mu.Lock()
-	conns := make([]*SafeConn, 0, len(ps.roomConns))
-	for _, c := range ps.roomConns {
-		conns = append(conns, c)
-	}
-	ps.mu.Unlock()
-	for _, c := range conns {
-		if err := c.Send(data); err != nil {
-			slog.Debug("v3: room send failed", "err", err, "code", ps.Code)
-		}
-	}
 }
 
 // ============================================================
@@ -250,6 +188,12 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 			slog.Info("v3: host reconnected within grace window", "code", code, "elapsed_ms", time.Since(*ps.HostDisconnectedAt).Milliseconds())
 			ps.HostDisconnectedAt = nil
 		}
+		// A returning host may be the missing piece of an overdue
+		// scheduled start (HandleRequestPlay requires the host to be a
+		// current participant) — 2026-06 review.
+		if userID == ps.HostUserID {
+			m.maybeRetryScheduledStartLocked(ps)
+		}
 		slog.Info("v3: participant reconnected (room)", "code", code, "user_id", userID)
 		return ps, nil
 	}
@@ -299,6 +243,14 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 		_ = c.Send(joinMsg)
 	}
 
+	// A first-time host join may be the missing piece of an overdue
+	// scheduled start — the countdown can fire before the host's room
+	// socket connects, and HandleRequestPlay rejects non-participants
+	// (2026-06 review).
+	if userID == ps.HostUserID {
+		m.maybeRetryScheduledStartLocked(ps)
+	}
+
 	slog.Info("v3: participant joined (room)", "code", code, "user_id", userID, "username", username)
 	return ps, nil
 }
@@ -323,18 +275,19 @@ func (m *Manager) JoinPartyV3Sync(code string, userID int64, sc *SafeConn) error
 	}
 	ps.syncConns[userID] = sc
 
-	// Build hello inside the lock so the snapshot is consistent.
+	// Build AND enqueue the hello inside the lock. Registering the conn
+	// makes it eligible for tick broadcasts immediately; enqueueing the
+	// hello in the same critical section guarantees it is the FIRST frame
+	// in this conn's outbox, so no tick can precede (or carry newer state
+	// than) the snapshot (2026-06 review — the old direct write could
+	// also overtake queued frames on writeMu, inverting FIFO). Send never
+	// blocks, so holding ps.mu here is fine.
 	hello := m.buildHelloLocked(ps)
+	if data, err := json.Marshal(hello); err == nil {
+		_ = sc.Send(data)
+	}
 	ps.mu.Unlock()
 
-	data, err := json.Marshal(hello)
-	if err != nil {
-		return nil // non-fatal — tick broadcasts will still land
-	}
-	// 2026-05-25 — set fresh write deadline (see broadcastWriteTimeout
-	// doc in manager.go for the bug class this prevents).
-	_ = sc.SetWriteDeadline(time.Now().Add(broadcastWriteTimeout))
-	_ = sc.WriteMessage(websocket.TextMessage, data)
 	slog.Info("v3: participant joined (sync)", "code", code, "user_id", userID)
 	return nil
 }
@@ -502,6 +455,9 @@ func (m *Manager) LeavePartyV3RoomGraceful(code string, userID int64) error {
 			"username": username,
 		},
 	})
+	// The leaver may have been the last not-ready blocker of an overdue
+	// scheduled start (2026-06 review).
+	m.maybeRetryScheduledStartLocked(ps)
 	ps.mu.Unlock()
 	return nil
 }
@@ -607,6 +563,9 @@ func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 			"username": username,
 		},
 	})
+	// The leaver may have been the last not-ready blocker of an overdue
+	// scheduled start (2026-06 review).
+	m.maybeRetryScheduledStartLocked(ps)
 	ps.mu.Unlock()
 	return nil
 }
@@ -732,16 +691,7 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 	// non-fatal toast — the host can either wait for the readies or
 	// toggle the setting off and play.
 	if !ps.HasEverPlayed && ps.Settings.SpoilerFreeStart {
-		var notReady []string
-		for _, p := range ps.Participants {
-			if p == nil || p.IsHost {
-				continue
-			}
-			if !p.Ready {
-				notReady = append(notReady, p.Username)
-			}
-		}
-		if len(notReady) > 0 {
+		if notReady := spoilerGateBlockersLocked(ps); len(notReady) > 0 {
 			return errUser("waiting for: %s", strings.Join(notReady, ", "))
 		}
 	}
@@ -781,6 +731,27 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 	return nil
 }
 
+// spoilerGateBlockersLocked returns the usernames of participants whose
+// missing Ready blocks the spoiler-free first play. Hosts are exempt
+// (clicking play implies readiness), and so are mobile COMPANIONS — the
+// phone "second screen" has no video player and no Ready affordance
+// (useCompanion never sends {type:"ready"}), so counting them made a
+// chat-only phone guest block the party's start forever (2026-06 review).
+// Callers MUST hold ps.mu. Shared by HandleRequestPlay's gate and the
+// scheduled-start retry pre-check so the two can never drift apart.
+func spoilerGateBlockersLocked(ps *PartyState) []string {
+	var notReady []string
+	for _, p := range ps.Participants {
+		if p == nil || p.IsHost || p.Companion {
+			continue
+		}
+		if !p.Ready {
+			notReady = append(notReady, p.Username)
+		}
+	}
+	return notReady
+}
+
 // HandleRequestPause transitions the party to Paused at the given
 // absolute position. If atAbsMs < 0, pause at the current canonical
 // position. Allowed by the host always; allowed by any participant if
@@ -807,6 +778,13 @@ func (m *Manager) HandleRequestPause(code string, userID int64, atAbsMs int64) e
 		return errUser("only the host can pause")
 	}
 
+	// 2026-06 review — clamp like HandleRequestSeek does. Pause writes the
+	// same anchor a seek does; an unbounded atAbsMs (math.MaxInt64) would
+	// overflow CurrentAbsMs() on the next play and broadcast absurd
+	// negative positions to every peer.
+	if atAbsMs > maxPositionMs {
+		return errUser("pause position out of range")
+	}
 	pos := atAbsMs
 	if pos < 0 {
 		pos = ps.CurrentAbsMs()
@@ -843,12 +821,7 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 	if toAbsMs < 0 {
 		return errUser("seek target must be non-negative")
 	}
-	// Upper-bound at 24h in ms — anything beyond that is nonsense for media
-	// playback and an unbounded toAbsMs (e.g. math.MaxInt64) would overflow
-	// once CurrentAbsMs() adds elapsed wall-clock time, wrapping to negative
-	// and propagating absurd tick positions to every peer.
-	const maxSeekMs = 24 * 60 * 60 * 1000
-	if toAbsMs > maxSeekMs {
+	if toAbsMs > maxPositionMs {
 		return errUser("seek target out of range")
 	}
 	ps.mu.Lock()

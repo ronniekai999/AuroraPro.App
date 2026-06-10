@@ -147,3 +147,124 @@ func TestV3_MarkReady_RetriesOverdueScheduledStart(t *testing.T) {
 	m.stopTickLoopLocked(ps)
 	ps.mu.Unlock()
 }
+
+// waitForScheduledStart polls until the party is Running with StartedAt
+// stamped, or fails the test. The retry hooks fire in goroutines, so the
+// transition is asynchronous.
+func waitForScheduledStart(t *testing.T, m *Manager, ps *PartyState, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ps.mu.Lock()
+		running := ps.Running
+		started := ps.StartedAt != nil
+		ps.mu.Unlock()
+		if running && started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ps.mu.Lock()
+	m.stopTickLoopLocked(ps)
+	ps.mu.Unlock()
+}
+
+// TestV3_LeaveRetriesOverdueScheduledStart — 2026-06 review follow-up:
+// the gate can also unblock when the last NOT-READY guest leaves the
+// party (everyone remaining is already Ready, so no further ready toggle
+// will ever fire). The leave path must re-fire the scheduled start.
+func TestV3_LeaveRetriesOverdueScheduledStart(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED5", 1)
+	overdue := time.Now().Add(-1 * time.Second)
+	ps.mu.Lock()
+	ps.Settings.SpoilerFreeStart = true
+	ps.ScheduledStartAt = &overdue
+	ps.Participants[2] = &Participant{
+		UserID: 2, Username: "ready-guest", IsHost: false, Ready: true,
+		LastSeen: time.Now(),
+	}
+	ps.Participants[3] = &Participant{
+		UserID: 3, Username: "blocker", IsHost: false, Ready: false,
+		LastSeen: time.Now(),
+	}
+	ps.mu.Unlock()
+
+	// Countdown fires while the blocker is not ready — blocked.
+	m.fireScheduledStart("SCHED5")
+	ps.mu.Lock()
+	if ps.Running || ps.StartedAt != nil {
+		ps.mu.Unlock()
+		t.Fatal("precondition failed: gate should have blocked the scheduled start")
+	}
+	ps.mu.Unlock()
+
+	// The blocker gives up and leaves — the gate is now satisfiable and
+	// no ready toggle will ever fire again.
+	if err := m.LeavePartyV3Room("SCHED5", 3); err != nil {
+		t.Fatalf("LeavePartyV3Room: %v", err)
+	}
+
+	waitForScheduledStart(t, m, ps,
+		"party never started after the blocking guest left (leave-path retry missing)")
+}
+
+// TestV3_HostJoinRetriesOverdueScheduledStart — 2026-06 review follow-up:
+// the countdown can fire before the host's room socket has joined
+// (HandleRequestPlay rejects non-participants), and if every guest was
+// already Ready no ready toggle will ever fire. The host's join must
+// re-fire the scheduled start.
+func TestV3_HostJoinRetriesOverdueScheduledStart(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED6", 1)
+	overdue := time.Now().Add(-1 * time.Second)
+	ps.mu.Lock()
+	ps.ScheduledStartAt = &overdue
+	// Host is NOT a participant yet (their room socket never joined —
+	// v3TestParty seeds them, so remove).
+	delete(ps.Participants, 1)
+	ps.mu.Unlock()
+
+	// Countdown fires with no host connected — play is rejected.
+	m.fireScheduledStart("SCHED6")
+	ps.mu.Lock()
+	if ps.Running || ps.StartedAt != nil {
+		ps.mu.Unlock()
+		t.Fatal("precondition failed: missing host should have blocked the scheduled start")
+	}
+	ps.mu.Unlock()
+
+	// Host's room socket joins — the join path must re-fire.
+	if _, err := m.JoinPartyV3Room("SCHED6", 1, "host", nil); err != nil {
+		t.Fatalf("JoinPartyV3Room: %v", err)
+	}
+
+	waitForScheduledStart(t, m, ps,
+		"party never started after the host joined (host-join retry missing)")
+}
+
+// TestV3_SpoilerGate_SkipsCompanions — 2026-06 review: a phone-companion
+// participant has no video player and no Ready affordance (useCompanion
+// never sends {type:"ready"}), so counting them in the spoiler gate made
+// a chat-only phone guest block the party's start forever.
+func TestV3_SpoilerGate_SkipsCompanions(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED7", 1)
+	ps.mu.Lock()
+	ps.Settings.SpoilerFreeStart = true
+	ps.Participants[2] = &Participant{
+		UserID: 2, Username: "phone-guest", IsHost: false, Ready: false,
+		Companion: true, LastSeen: time.Now(),
+	}
+	ps.mu.Unlock()
+
+	if err := m.HandleRequestPlay("SCHED7", 1); err != nil {
+		t.Fatalf("companion-only guest must not block the spoiler gate, got: %v", err)
+	}
+	ps.mu.Lock()
+	m.stopTickLoopLocked(ps)
+	ps.mu.Unlock()
+}

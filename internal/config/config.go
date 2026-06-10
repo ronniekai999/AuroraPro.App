@@ -97,19 +97,15 @@ type LLMConfig struct {
 	AIMatchRatePerSec    float64
 }
 
-// WatchPartyConfig controls the group-watch sync protocol. Exposing these
-// thresholds makes the system tunable per-deployment without recompiling;
-// defaults match Jellyfin SyncPlay / mpv-shim values that are known to work.
+// WatchPartyConfig holds watch-party deployment configuration.
+//
+// 2026-06 V2 deletion — the V2 sync tunables (HeartbeatInterval,
+// BufferHysteresis, Drift*, …) were removed along with the protocol that
+// consumed them; the V3 engine's thresholds live in
+// watchparty.DefaultSyncConfig. Setting the old `watchparty:` yaml keys
+// now logs a deprecation warning at startup (see loadYAML) instead of
+// being silently ignored.
 type WatchPartyConfig struct {
-	HeartbeatInterval time.Duration // client position-report cadence
-	TimeSyncInterval  time.Duration // client NTP-style handshake cadence
-	BufferHysteresis  time.Duration // min buffering duration before group pauses
-	PlayScheduleDelay time.Duration // lead time added to play-at-server-time commands
-	DriftIgnoreMs     int64         // <= this ms of drift → no action
-	DriftRateAdjustMs int64         // <= this ms → rate-nudge (else hard seek)
-	DriftHardSeekMs   int64         // <= this ms → hard seek (else counts as failed attempt)
-	DriftMaxAttempts  int           // consecutive failed-seek attempts before dropping client
-
 	// M8 — voice (WebRTC) ICE configuration. The defaults work for
 	// same-network and most home-NAT setups (Google's public STUN).
 	// For cross-NAT calls (friends behind symmetric or carrier-grade
@@ -346,6 +342,10 @@ type yamlConfig struct {
 			APIKey string `yaml:"api_key"`
 		} `yaml:"sonarr_4k"`
 	} `yaml:"requests"`
+	// 2026-06 V2 deletion — these keys configured the removed V2 sync
+	// protocol. They are still PARSED solely so loadYAML can warn an
+	// operator whose aurora.yaml sets them that they no longer do
+	// anything; the values are never applied.
 	WatchParty struct {
 		HeartbeatIntervalMs int   `yaml:"heartbeat_interval_ms"`
 		TimeSyncIntervalMs  int   `yaml:"time_sync_interval_ms"`
@@ -456,14 +456,6 @@ func Load() (*Config, error) {
 			AIMatchRatePerSec:    1.0,
 		},
 		WatchParty: WatchPartyConfig{
-			HeartbeatInterval: 500 * time.Millisecond,
-			TimeSyncInterval:  30 * time.Second,
-			BufferHysteresis:  750 * time.Millisecond,
-			PlayScheduleDelay: 300 * time.Millisecond,
-			DriftIgnoreMs:     50,
-			DriftRateAdjustMs: 300,
-			DriftHardSeekMs:   2000,
-			DriftMaxAttempts:  5,
 			// M8 — voice defaults. Public STUN works for most home-NAT
 			// setups; TURN is empty by default (no relay). Operators
 			// deploying coturn populate the TURN_* env vars at boot.
@@ -776,29 +768,16 @@ func loadYAML(cfg *Config) error {
 		cfg.Requests.Sonarr4K.APIKey = yc.Requests.Sonarr4K.APIKey
 	}
 
-	if yc.WatchParty.HeartbeatIntervalMs > 0 {
-		cfg.WatchParty.HeartbeatInterval = time.Duration(yc.WatchParty.HeartbeatIntervalMs) * time.Millisecond
-	}
-	if yc.WatchParty.TimeSyncIntervalMs > 0 {
-		cfg.WatchParty.TimeSyncInterval = time.Duration(yc.WatchParty.TimeSyncIntervalMs) * time.Millisecond
-	}
-	if yc.WatchParty.BufferHysteresisMs > 0 {
-		cfg.WatchParty.BufferHysteresis = time.Duration(yc.WatchParty.BufferHysteresisMs) * time.Millisecond
-	}
-	if yc.WatchParty.PlayScheduleDelayMs > 0 {
-		cfg.WatchParty.PlayScheduleDelay = time.Duration(yc.WatchParty.PlayScheduleDelayMs) * time.Millisecond
-	}
-	if yc.WatchParty.DriftIgnoreMs > 0 {
-		cfg.WatchParty.DriftIgnoreMs = yc.WatchParty.DriftIgnoreMs
-	}
-	if yc.WatchParty.DriftRateAdjustMs > 0 {
-		cfg.WatchParty.DriftRateAdjustMs = yc.WatchParty.DriftRateAdjustMs
-	}
-	if yc.WatchParty.DriftHardSeekMs > 0 {
-		cfg.WatchParty.DriftHardSeekMs = yc.WatchParty.DriftHardSeekMs
-	}
-	if yc.WatchParty.DriftMaxAttempts > 0 {
-		cfg.WatchParty.DriftMaxAttempts = yc.WatchParty.DriftMaxAttempts
+	// 2026-06 V2 deletion — the watchparty sync tunables configured the
+	// removed V2 protocol. Warn loudly (once, at startup) when an
+	// aurora.yaml still sets them, rather than silently parsing and
+	// dropping the values: an operator "tuning" a dead knob should learn
+	// it's dead from the log, not from a fruitless debugging session.
+	if yc.WatchParty.HeartbeatIntervalMs > 0 || yc.WatchParty.TimeSyncIntervalMs > 0 ||
+		yc.WatchParty.BufferHysteresisMs > 0 || yc.WatchParty.PlayScheduleDelayMs > 0 ||
+		yc.WatchParty.DriftIgnoreMs > 0 || yc.WatchParty.DriftRateAdjustMs > 0 ||
+		yc.WatchParty.DriftHardSeekMs > 0 || yc.WatchParty.DriftMaxAttempts > 0 {
+		slog.Warn("aurora.yaml sets watchparty sync tunables (heartbeat_interval_ms / buffer_hysteresis_ms / drift_* / …) that configured the removed V2 sync protocol — they are ignored; V3 sync tuning is built in (see internal/watchparty DefaultSyncConfig)")
 	}
 
 	return nil

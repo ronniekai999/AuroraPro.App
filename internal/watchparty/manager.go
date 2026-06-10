@@ -418,6 +418,11 @@ type PartyState struct {
 	ScheduledStartAt *time.Time
 	StartedAt        *time.Time
 	scheduleCancel   context.CancelFunc
+	// scheduleFiring is true while a fireScheduledStart invocation is in
+	// flight (between its dedup check and its play attempt). Collapses
+	// concurrent fires — countdown timer racing a retry — to one, so
+	// clients can't receive duplicate "party-starting" broadcasts.
+	scheduleFiring bool
 }
 
 // Lock acquires the party-level mutex. Exported for cross-package use by handlers
@@ -706,6 +711,15 @@ const (
 	// late-delivery but tight enough that a malicious client can't
 	// fingerprint timestamps across the movie.
 	reactionAbsMsClampWindow = 5 * 60 * 1000
+
+	// maxPositionMs upper-bounds every client-supplied playback position
+	// (request-seek target, request-pause position) at 24h — anything
+	// beyond that is nonsense for media playback, and an unbounded value
+	// (e.g. math.MaxInt64) would overflow once CurrentAbsMs() adds elapsed
+	// wall-clock time, wrapping negative and propagating absurd tick
+	// positions to every peer. 2026-06 review: previously enforced only
+	// on seek; pause accepted unbounded positions through the same anchor.
+	maxPositionMs = 24 * 60 * 60 * 1000
 )
 
 // Allowed emoji reactions whitelist.
@@ -1361,11 +1375,17 @@ func (m *Manager) cancelScheduleTimerLocked(ps *PartyState) {
 
 // fireScheduledStart is the goroutine body. Re-resolves the party by code
 // (it may have ended since the timer was scheduled), checks that the party
-// is still in pre-start state, then broadcasts "party-starting" and routes
-// through HandlePlaybackControl(play) to engage the existing sync path.
+// is still in pre-start state, engages playback via HandleRequestPlay, and
+// broadcasts "party-starting" once playback actually started.
 //
-// Marks the in-memory and persisted StartedAt so reconnecting clients can
-// compute elapsed time from a stable timestamp.
+// 2026-06 review — two ordering fixes:
+//   - "party-starting" is broadcast AFTER a successful play, not before
+//     the gate check, so clients never see "Starting now!" while the
+//     spoiler gate is still blocking (and a blocked fire is silent).
+//   - the scheduleFiring flag makes concurrent fires (countdown timer
+//     racing a maybeRetryScheduledStartLocked goroutine) collapse to one;
+//     the dedup-on-StartedAt alone couldn't, because StartedAt is stamped
+//     later inside HandleRequestPlay's own lock acquisition.
 func (m *Manager) fireScheduledStart(code string) {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
@@ -1375,21 +1395,45 @@ func (m *Manager) fireScheduledStart(code string) {
 		return
 	}
 
-	now := time.Now()
-
 	ps.mu.Lock()
-	// Dedup guard: skip if the party already started — a prior timer fire or
-	// a manual host play stamped StartedAt / set HasEverPlayed (both happen
-	// in HandleRequestPlay). Checking both avoids a stray "party-starting"
-	// broadcast and a redundant play when the host beats the countdown.
-	if ps.StartedAt != nil || ps.HasEverPlayed {
+	// Dedup guard: skip if the party already started — a prior fire or a
+	// manual host play stamped StartedAt / set HasEverPlayed (both happen
+	// in HandleRequestPlay) — or another fire is in flight right now.
+	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring {
 		ps.mu.Unlock()
 		return
 	}
+	ps.scheduleFiring = true
+	ps.mu.Unlock()
 
+	// Engage playback via the V3 intent path (audit H6): HandleRequestPlay
+	// sets the anchor Running, starts the per-party tick loop, stamps
+	// StartedAt, persists MarkPartyStarted, and emits a synthetic tick that
+	// drives clients to actually play.
+	//
+	// HandleRequestPlay can return without engaging playback — the
+	// SpoilerFreeStart readiness gate returns a "waiting for: …" error, the
+	// host may not have joined their room socket yet ("not a participant"),
+	// or the party may have just ended. On failure StartedAt stays nil so a
+	// later manual host play still works and nothing persists a bogus start
+	// time; maybeRetryScheduledStartLocked re-fires when the gate's inputs
+	// change (ready toggle, blocker leaves, host (re)joins).
+	playErr := m.HandleRequestPlay(code, ps.HostUserID)
+
+	ps.mu.Lock()
+	ps.scheduleFiring = false
+	if playErr != nil {
+		ps.mu.Unlock()
+		slog.Warn("scheduled-start play did not engage; party left unstarted (retried when the gate unblocks)", "code", code, "error", playErr)
+		return
+	}
+	// Clear the cancel hook — the schedule is consumed (HandleRequestPlay
+	// already cancelled the timer; this is belt-and-suspenders).
+	ps.scheduleCancel = nil
 	// Broadcast "party-starting" so all clients show the "Starting now!"
-	// notification before playback engages. Includes server_now_ms so
-	// late-joiners' countdown widgets converge correctly.
+	// notification. Includes server_now_ms so late-joiners' countdown
+	// widgets converge correctly.
+	now := time.Now()
 	m.broadcastToPartyLocked(ps, map[string]interface{}{
 		"type": "party-starting",
 		"payload": map[string]interface{}{
@@ -1399,31 +1443,33 @@ func (m *Manager) fireScheduledStart(code string) {
 	})
 	ps.mu.Unlock()
 
-	// Engage playback via the V3 intent path (audit H6): HandleRequestPlay
-	// sets the anchor Running, starts the per-party tick loop, and emits a
-	// synthetic tick that drives clients to actually play. On success it
-	// also stamps StartedAt + persists MarkPartyStarted (2026-06 — the
-	// stamping moved into HandleRequestPlay when the V2 path that used to
-	// own it was deleted).
-	//
-	// HandleRequestPlay can return without engaging playback — the
-	// SpoilerFreeStart readiness gate returns a "waiting for: …" error, or
-	// the party may have just ended. On failure StartedAt stays nil so a
-	// later manual host play still works and nothing persists a bogus
-	// start time.
-	if err := m.HandleRequestPlay(code, ps.HostUserID); err != nil {
-		// Retried event-driven from MarkReady: the next Ready toggle that
-		// completes the gate re-fires this function (2026-06, bug 2).
-		slog.Warn("scheduled-start play did not engage; party left unstarted (retried on next ready-up)", "code", code, "error", err)
-		return
-	}
-
-	ps.mu.Lock()
-	// Clear the cancel hook — timer has fired, cancellation is moot.
-	ps.scheduleCancel = nil
-	ps.mu.Unlock()
-
 	slog.Info("scheduled watch party started", "code", code)
+}
+
+// maybeRetryScheduledStartLocked re-fires an overdue scheduled start when
+// the spoiler gate's inputs may have just changed. The 2026-06 review's
+// bug-2 fix originally hooked only the Ready toggle; the gate can also
+// unblock when the last not-ready guest LEAVES, or when the HOST (whom
+// HandleRequestPlay requires to be a current participant) (re)joins after
+// the countdown fired. All three events route through here.
+//
+// Cheap pre-checks only — fireScheduledStart re-validates everything and
+// dedups, so a spurious call is harmless. Caller MUST hold ps.mu; the
+// fire runs in a goroutine because it re-acquires the lock.
+func (m *Manager) maybeRetryScheduledStartLocked(ps *PartyState) {
+	if ps.ScheduledStartAt == nil || ps.ScheduledStartAt.After(time.Now()) {
+		return // no schedule, or not due yet (the timer goroutine owns it)
+	}
+	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring {
+		return // already started or a fire is in flight
+	}
+	if _, ok := ps.Participants[ps.HostUserID]; !ok {
+		return // host not connected — HandleRequestPlay would reject
+	}
+	if ps.Settings.SpoilerFreeStart && len(spoilerGateBlockersLocked(ps)) > 0 {
+		return // gate still blocked; a later event will retry
+	}
+	go m.fireScheduledStart(ps.Code)
 }
 
 // EndParty ends a party. Only the host can end it via the REST endpoint.
@@ -1503,48 +1549,23 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	// never started a tick loop (never-played party).
 	m.stopTickLoopLocked(ps)
 
-	// Broadcast party-ended on both sockets so every client surface sees
-	// the close (room handles UI teardown; sync stops the player mirror).
-	// 2026-05-25 — reset write deadline before each (see
-	// broadcastWriteTimeout). Critical here: if the host's conn has a
-	// stale expired deadline, the party-ended message never lands and
-	// the host's UI freezes on a dead party until they reload.
-	endDeadline := time.Now().Add(broadcastWriteTimeout)
-	for _, c := range ps.syncConns {
-		if c == nil {
-			continue
-		}
-		_ = c.SetWriteDeadline(endDeadline)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
-	}
-	for _, c := range ps.roomConns {
-		if c == nil {
-			continue
-		}
-		_ = c.SetWriteDeadline(endDeadline)
-		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
-	}
-
-	// Close all WebSocket connections (both pools).
+	// Snapshot + clear the conn pools under the lock; do the actual socket
+	// I/O (party-ended broadcast, close frames, Close) AFTER releasing it.
+	// 2026-06 review — the old in-lock direct writes contended on each
+	// conn's writeMu with a write pump potentially mid-write to a stalled
+	// peer (10s deadline), holding ps.mu — and, from cleanupOnce/Shutdown,
+	// the whole reaper — hostage for the duration. Clearing the maps first
+	// also makes the party invisible to broadcasts immediately.
+	closingConns := make([]*SafeConn, 0, len(ps.syncConns)+len(ps.roomConns))
 	for uid, conn := range ps.syncConns {
 		if conn != nil {
-			conn.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
-				time.Now().Add(5*time.Second),
-			)
-			_ = conn.Close()
+			closingConns = append(closingConns, conn)
 		}
 		delete(ps.syncConns, uid)
 	}
 	for uid, conn := range ps.roomConns {
 		if conn != nil {
-			conn.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
-				time.Now().Add(5*time.Second),
-			)
-			_ = conn.Close()
+			closingConns = append(closingConns, conn)
 		}
 		delete(ps.roomConns, uid)
 	}
@@ -1553,6 +1574,27 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	roomDBID := ps.roomDBID
 	isRoomPersistent := ps.IsRoomPersistent
 	ps.mu.Unlock()
+
+	// Broadcast party-ended on both sockets so every client surface sees
+	// the close (room handles UI teardown; sync stops the player mirror),
+	// then close. Direct writes (not Send) so the final message is flushed
+	// before Close rather than racing the pump's drain; blocking is
+	// acceptable here because no locks are held.
+	// 2026-05-25 — fresh write deadline before each (see
+	// broadcastWriteTimeout). Critical here: if the host's conn has a
+	// stale expired deadline, the party-ended message never lands and
+	// the host's UI freezes on a dead party until they reload.
+	endDeadline := time.Now().Add(broadcastWriteTimeout)
+	for _, c := range closingConns {
+		_ = c.SetWriteDeadline(endDeadline)
+		_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"party-ended","payload":{}}`))
+		_ = c.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "party ended"),
+			time.Now().Add(5*time.Second),
+		)
+		_ = c.Close()
+	}
 
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
@@ -2458,32 +2500,6 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 		})
 	}
 
-	// 2026-06 review (bug 2) — event-driven scheduled-start retry. If the
-	// countdown fired while the spoiler-free gate was blocking (a guest
-	// wasn't Ready), fireScheduledStart logged "retryable" but nothing
-	// ever retried, so the party silently never auto-started. A Ready
-	// toggle is exactly the event that can unblock the gate: when the
-	// schedule is overdue, playback never started, and every non-host is
-	// now Ready, re-fire. The gate is pre-checked here only to avoid
-	// spamming "party-starting" broadcasts on toggles that can't unblock;
-	// fireScheduledStart re-validates everything under the lock (and
-	// dedups via StartedAt/HasEverPlayed), so racing a manual host play
-	// is harmless.
-	retryScheduledStart := false
-	if ready && ps.ScheduledStartAt != nil && !ps.ScheduledStartAt.After(time.Now()) &&
-		ps.StartedAt == nil && !ps.HasEverPlayed {
-		retryScheduledStart = true
-		for _, pt := range ps.Participants {
-			if pt == nil || pt.IsHost {
-				continue
-			}
-			if !pt.Ready {
-				retryScheduledStart = false
-				break
-			}
-		}
-	}
-
 	// broadcastToPartyLocked requires ps.mu held — deferred Unlock above
 	// keeps the lock contract intact.
 	m.broadcastToPartyLocked(ps, map[string]interface{}{
@@ -2495,11 +2511,9 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 		},
 	})
 
-	if retryScheduledStart {
-		// Goroutine: fireScheduledStart takes ps.mu itself and MarkReady
-		// still holds it via the deferred Unlock.
-		go m.fireScheduledStart(code)
-	}
+	// 2026-06 review (bug 2) — a Ready toggle can unblock an overdue
+	// scheduled start whose first fire was held by the spoiler gate.
+	m.maybeRetryScheduledStartLocked(ps)
 
 	return nil
 }

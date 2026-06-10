@@ -641,11 +641,11 @@ export function useParty(currentUserId?: number): UseParty {
           rev: p.rev ?? 0,
         })
         // Treat hello as the initial tick for the player.
-        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: p.server_now_ms, running: p.running, rev: p.rev }
+        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: p.server_now_ms, running: p.running, rev: p.rev, receivedAtMs: Date.now() }
         break
       }
       case 'tick': {
-        tickRef.current = msg.payload
+        tickRef.current = { ...msg.payload, receivedAtMs: Date.now() }
         setStatePatch({
           isPlaying: msg.payload.running !== false,
           currentTimeMs: msg.payload.abs_ms,
@@ -660,7 +660,7 @@ export function useParty(currentUserId?: number): UseParty {
             ? {}
             : { isPlaying: false, currentTimeMs: p.abs_ms, rev: p.rev ?? prev.rev }
         )
-        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: Date.now(), running: false, rev: p.rev }
+        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: Date.now(), running: false, rev: p.rev, receivedAtMs: Date.now() }
         break
       }
       case 'seek': {
@@ -670,7 +670,7 @@ export function useParty(currentUserId?: number): UseParty {
             ? {}
             : { currentTimeMs: p.abs_ms, isPlaying: p.running ?? prev.isPlaying, rev: p.rev ?? prev.rev }
         )
-        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: Date.now(), running: p.running, rev: p.rev }
+        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: Date.now(), running: p.running, rev: p.rev, receivedAtMs: Date.now() }
         break
       }
       case 'party-ended':
@@ -905,7 +905,17 @@ export function useParty(currentUserId?: number): UseParty {
         try { ws.send(JSON.stringify(pending.seek)) } catch { /* defensive */ }
       }
       if (pending.playPause) {
-        try { ws.send(JSON.stringify(pending.playPause)) } catch { /* defensive */ }
+        // 2026-06 review — when BOTH a seek and a pause are buffered, the
+        // pause's captured abs_ms predates the seek (the slots don't
+        // record order), so sending it verbatim would yank the party back
+        // to the pre-seek position. abs_ms:-1 tells the server "pause at
+        // the current canonical position", which after the seek above is
+        // exactly the seek target.
+        let out = pending.playPause
+        if (pending.seek && out.type === 'request-pause') {
+          out = { type: 'request-pause', payload: { abs_ms: -1 } }
+        }
+        try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
       }
       // 2026-05-25 — start clock-offset estimation via repeated
       // time-syncs. We use a 5-shot burst at 250ms intervals to get a

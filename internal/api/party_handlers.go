@@ -281,7 +281,10 @@ func (h *PartyHandler) Create(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		slog.Warn("failed to create party", "error", err, "user_id", claims.UserID)
-		writeError(w, http.StatusConflict, err.Error())
+		// 2026-06 review — DB/internal errors (e.g. "insert party: …")
+		// must not reach the response body; user-facing manager errors
+		// ("you already have an active party") pass through.
+		writeError(w, http.StatusConflict, safeRESTError(err, "failed to create party"))
 		return
 	}
 
@@ -369,7 +372,7 @@ func (h *PartyHandler) Schedule(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.manager.SchedulePartyStart(r.Context(), code, req.ScheduledStartAt); err != nil {
 		slog.Warn("schedule party failed", "code", code, "error", err)
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, safeRESTError(err, "failed to schedule party"))
 		return
 	}
 
@@ -611,7 +614,7 @@ func (h *PartyHandler) End(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.manager.EndParty(code, claims.UserID); err != nil {
 		slog.Warn("failed to end party", "code", code, "user_id", claims.UserID, "error", err)
-		writeError(w, http.StatusForbidden, err.Error())
+		writeError(w, http.StatusForbidden, safeRESTError(err, "failed to end party"))
 		return
 	}
 

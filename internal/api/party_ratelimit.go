@@ -23,6 +23,21 @@ func safeWSError(err error) string {
 	return "internal error"
 }
 
+// safeRESTError is the HTTP twin of safeWSError: user-facing manager
+// errors pass through, anything else degrades to the caller's fallback
+// message. Without this, e.g. a DB outage during CreateParty returned the
+// raw wrapped driver error ("insert party: pq: …") in the HTTP response
+// body (2026-06 review).
+func safeRESTError(err error, fallback string) string {
+	if err == nil {
+		return ""
+	}
+	if watchparty.IsUserError(err) {
+		return err.Error()
+	}
+	return fallback
+}
+
 // ============================================================
 // Party WebSocket — shared constants, wire payloads, rate limiting
 // ============================================================

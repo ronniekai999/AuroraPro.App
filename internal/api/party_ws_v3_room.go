@@ -162,14 +162,21 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			codeMu.Unlock()
 
 			// Send an initial room snapshot (participant list, chat
-			// history, media descriptor).
+			// history, media descriptor). Built, marshalled, AND enqueued
+			// under ps.mu: the join already registered this conn for
+			// broadcasts, so enqueueing within the same lock the
+			// broadcasters hold guarantees the snapshot is ordered ahead
+			// of any broadcast that postdates it — and Send (vs a direct
+			// write) can't overtake older frames already in the outbox
+			// (2026-06 review: the direct write raced the pump on writeMu,
+			// letting a snapshot bypass queued chat frames it already
+			// contained, which the client then double-applied).
 			ps.Lock()
 			snap := h.manager.BuildPartyStateMessage(ps)
-			ps.Unlock()
 			if data, err := json.Marshal(snap); err == nil {
-				sc.SetWriteDeadline(time.Now().Add(partyWriteWait))
-				_ = sc.WriteMessage(websocket.TextMessage, data)
+				_ = sc.Send(data)
 			}
+			ps.Unlock()
 
 		case "leave-party":
 			codeMu.Lock()
@@ -380,14 +387,15 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 			// Reply to the JOINER with the list of existing peers so
 			// they can initiate outbound offers. The "newcomer initiates"
-			// pattern avoids offer-collision races.
+			// pattern avoids offer-collision races. Send (not a direct
+			// write) so the reply can't overtake frames already queued on
+			// this conn (2026-06 review — per-conn FIFO).
 			resp := map[string]interface{}{
 				"type":    "voice-peers",
 				"payload": map[string]interface{}{"peers": peers},
 			}
 			if data, err := json.Marshal(resp); err == nil {
-				sc.SetWriteDeadline(time.Now().Add(partyWriteWait))
-				_ = sc.WriteMessage(websocket.TextMessage, data)
+				_ = sc.Send(data)
 			}
 
 		case "voice-leave":
