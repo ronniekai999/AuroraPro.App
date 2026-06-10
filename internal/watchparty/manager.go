@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
@@ -362,14 +363,20 @@ type PartyState struct {
 	// ============================================================
 	// Canonical position is derived from an anchor:
 	//
-	//   CurrentAbsMs() = AnchorAbsMs + (now - AnchorServerMs)   (if Running)
+	//   CurrentAbsMs() = AnchorAbsMs + (now - AnchorServerAt)   (if Running)
 	//                  = AnchorAbsMs                            (if Paused)
 	//
 	// The anchor is updated on request-play, request-pause, request-seek,
 	// media-change, and party-create (seeded from the host's resume offset).
+	//
+	// AnchorServerAt is a time.Time (not a unix-ms int) so the elapsed
+	// computation uses Go's monotonic clock — an NTP step on the server
+	// can no longer jump every running party's position (2026-06 review).
+	// Wall-clock values still go on the wire (server_now_ms) for client
+	// offset estimation; only the server-side elapsed math is monotonic.
 	Running        bool
 	AnchorAbsMs    int64
-	AnchorServerMs int64
+	AnchorServerAt time.Time
 
 	// Separate WebSocket pools for V3's two-socket model. Sync traffic
 	// (tick/pause/seek/heartbeat/time-sync) rides syncConns. Room traffic
@@ -837,7 +844,7 @@ func (m *Manager) CreateParty(
 	for _, ps := range m.parties {
 		if ps.HostUserID == hostUserID {
 			m.mu.RUnlock()
-			return nil, fmt.Errorf("you already have an active party")
+			return nil, errUser("you already have an active party")
 		}
 	}
 	m.mu.RUnlock()
@@ -938,7 +945,7 @@ func (m *Manager) CreateParty(
 		// starts false; the tick loop won't spin up until request-play.
 		Running:        false,
 		AnchorAbsMs:    initialPositionMs,
-		AnchorServerMs: now.UnixMilli(),
+		AnchorServerAt: now,
 		syncConns:      make(map[int64]*SafeConn),
 		roomConns:      make(map[int64]*SafeConn),
 
@@ -955,11 +962,19 @@ func (m *Manager) CreateParty(
 	for _, existing := range m.parties {
 		if existing.HostUserID == hostUserID {
 			m.mu.Unlock()
-			// Best-effort cleanup: mark DB row inactive since we can't use it
+			// Best-effort cleanup: mark the party row inactive AND
+			// soft-delete the room we created for it. 2026-06 review
+			// (bug 1) — this path used to leak the room row, leaving its
+			// code reserved indefinitely (the non-race failure path above
+			// already rolled the room back; this one didn't).
 			if dbParty.ID > 0 {
 				_ = m.queries.EndWatchParty(ctx, dbParty.ID)
 			}
-			return nil, fmt.Errorf("you already have an active party")
+			if err := m.queries.SoftDeleteRoom(context.Background(), dbRoom.ID); err != nil {
+				slog.Error("party rollback: soft-delete of orphan room failed — code is now reserved indefinitely",
+					"room_id", dbRoom.ID, "code", dbRoom.Code, "delete_error", err)
+			}
+			return nil, errUser("you already have an active party")
 		}
 	}
 	m.parties[code] = ps
@@ -1141,7 +1156,7 @@ func (m *Manager) StartPartyInRoom(
 
 		Running:        false,
 		AnchorAbsMs:    initialPositionMs,
-		AnchorServerMs: now.UnixMilli(),
+		AnchorServerAt: now,
 		syncConns:      make(map[int64]*SafeConn),
 		roomConns:      make(map[int64]*SafeConn),
 
@@ -1245,7 +1260,7 @@ func (m *Manager) SchedulePartyStart(ctx context.Context, code string, scheduled
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	// Validate future-tense if non-nil. Past timestamps are rejected here
@@ -1397,7 +1412,9 @@ func (m *Manager) fireScheduledStart(code string) {
 	// later manual host play still works and nothing persists a bogus
 	// start time.
 	if err := m.HandleRequestPlay(code, ps.HostUserID); err != nil {
-		slog.Warn("scheduled-start play did not engage; party left unstarted (retryable)", "code", code, "error", err)
+		// Retried event-driven from MarkReady: the next Ready toggle that
+		// completes the gate re-fires this function (2026-06, bug 2).
+		slog.Warn("scheduled-start play did not engage; party left unstarted (retried on next ready-up)", "code", code, "error", err)
 		return
 	}
 
@@ -1416,13 +1433,13 @@ func (m *Manager) EndParty(code string, userID int64) error {
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	if ps.HostUserID != userID {
 		ps.mu.Unlock()
-		return fmt.Errorf("only the host can end the party")
+		return errUser("only the host can end the party")
 	}
 	ps.mu.Unlock()
 
@@ -1585,10 +1602,16 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 // HandleChat processes a chat message from a participant.
 func (m *Manager) HandleChat(code string, userID int64, username string, message string) error {
 	if len(message) == 0 {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
-	if len(message) > chatMaxLength {
-		return fmt.Errorf("message too long (max %d characters)", chatMaxLength)
+	// 2026-06 review (bug 6) — count RUNES, not bytes. `len(message)`
+	// gave CJK/emoji users only ~125-250 characters against an error
+	// message promising 500. The frontend input's maxLength=500 counts
+	// UTF-16 units, so the two now roughly agree for the BMP. A byte
+	// cap is unnecessary here: the WS read limit (partyMaxMessageSize)
+	// already bounds the frame size.
+	if utf8.RuneCountInString(message) > chatMaxLength {
+		return errUser("message too long (max %d characters)", chatMaxLength)
 	}
 
 	m.mu.RLock()
@@ -1596,7 +1619,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -1604,12 +1627,12 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 
 	// Check chat is enabled
 	if !ps.Settings.AllowChat {
-		return fmt.Errorf("chat is disabled for this party")
+		return errUser("chat is disabled for this party")
 	}
 
 	// Verify user is a participant
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 
 	// Trim leading/trailing whitespace; otherwise store the message as-is.
@@ -1632,7 +1655,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 	// the prior store-escape + render-escape was the bug.
 	stored := strings.TrimSpace(message)
 	if stored == "" {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
 	// 2026-05-27 (deep-debug Bug 9 fix) — TrimSpace uses unicode.IsSpace
 	// which catches NBSP/tab/newline but NOT zero-width chars (U+200B
@@ -1649,7 +1672,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 		}
 	}
 	if !hasPrintable {
-		return fmt.Errorf("empty message")
+		return errUser("empty message")
 	}
 
 	// Generate message ID
@@ -1706,7 +1729,7 @@ func (m *Manager) HandleChat(code string, userID int64, username string, message
 // movie-time".
 func (m *Manager) HandleReaction(code string, userID int64, username string, emoji string, clientAbsMs int64) error {
 	if !allowedReactions[emoji] {
-		return fmt.Errorf("emoji not in allowed reactions whitelist")
+		return errUser("emoji not in allowed reactions whitelist")
 	}
 
 	m.mu.RLock()
@@ -1714,7 +1737,7 @@ func (m *Manager) HandleReaction(code string, userID int64, username string, emo
 	m.mu.RUnlock()
 
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -1722,7 +1745,7 @@ func (m *Manager) HandleReaction(code string, userID int64, username string, emo
 
 	// Verify user is a participant
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 
 	// Resolve the timestamp the reaction is tagged against. Default to
@@ -2120,14 +2143,14 @@ func (m *Manager) JoinVoice(code string, userID int64, username string) ([]Voice
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return nil, fmt.Errorf("party not found")
+		return nil, errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if _, ok := ps.Participants[userID]; !ok {
-		return nil, fmt.Errorf("not a participant in this party")
+		return nil, errUser("not a participant in this party")
 	}
 
 	if ps.VoiceParticipants == nil {
@@ -2227,27 +2250,27 @@ func (m *Manager) leaveVoiceLocked(ps *PartyState, userID int64) error {
 // validation and the write — not worth surfacing).
 func (m *Manager) RelayVoiceSignal(code string, fromUserID, toUserID int64, signalType string, payload map[string]interface{}) error {
 	if signalType != "voice-offer" && signalType != "voice-answer" && signalType != "voice-ice" {
-		return fmt.Errorf("invalid voice signal type: %s", signalType)
+		return errUser("invalid voice signal type: %s", signalType)
 	}
 	if fromUserID == toUserID {
-		return fmt.Errorf("cannot signal to self")
+		return errUser("cannot signal to self")
 	}
 
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if ps.VoiceParticipants == nil || !ps.VoiceParticipants[fromUserID] {
-		return fmt.Errorf("sender not in voice")
+		return errUser("sender not in voice")
 	}
 	if !ps.VoiceParticipants[toUserID] {
-		return fmt.Errorf("recipient not in voice")
+		return errUser("recipient not in voice")
 	}
 	targetConn, ok := ps.roomConns[toUserID]
 	if !ok || targetConn == nil {
@@ -2326,7 +2349,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -2336,7 +2359,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	// episode. (Future: allow with democratic vote if AllowPause-style
 	// settings expand.)
 	if ps.HostUserID != hostUserID {
-		return fmt.Errorf("only the host can change media")
+		return errUser("only the host can change media")
 	}
 
 	// Reset playback to a fresh-party state. V3 model: Paused at anchor=0,
@@ -2408,7 +2431,7 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
@@ -2416,9 +2439,10 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 
 	p, ok := ps.Participants[userID]
 	if !ok {
-		return fmt.Errorf("not a participant in this party")
+		return errUser("not a participant in this party")
 	}
 	p.Ready = ready
+	p.LastSeen = time.Now()
 	// Snapshot the participant list under the lock so the broadcast
 	// payload doesn't iterate a map that might be mutated concurrently.
 	snapshot := make([]map[string]interface{}, 0, len(ps.Participants))
@@ -2434,10 +2458,34 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 		})
 	}
 
+	// 2026-06 review (bug 2) — event-driven scheduled-start retry. If the
+	// countdown fired while the spoiler-free gate was blocking (a guest
+	// wasn't Ready), fireScheduledStart logged "retryable" but nothing
+	// ever retried, so the party silently never auto-started. A Ready
+	// toggle is exactly the event that can unblock the gate: when the
+	// schedule is overdue, playback never started, and every non-host is
+	// now Ready, re-fire. The gate is pre-checked here only to avoid
+	// spamming "party-starting" broadcasts on toggles that can't unblock;
+	// fireScheduledStart re-validates everything under the lock (and
+	// dedups via StartedAt/HasEverPlayed), so racing a manual host play
+	// is harmless.
+	retryScheduledStart := false
+	if ready && ps.ScheduledStartAt != nil && !ps.ScheduledStartAt.After(time.Now()) &&
+		ps.StartedAt == nil && !ps.HasEverPlayed {
+		retryScheduledStart = true
+		for _, pt := range ps.Participants {
+			if pt == nil || pt.IsHost {
+				continue
+			}
+			if !pt.Ready {
+				retryScheduledStart = false
+				break
+			}
+		}
+	}
+
 	// broadcastToPartyLocked requires ps.mu held — deferred Unlock above
-	// keeps the lock contract intact. Iterates both V2 conns and V3
-	// roomConns pools so V3 clients (the only real ones in production
-	// today) actually receive the broadcast.
+	// keeps the lock contract intact.
 	m.broadcastToPartyLocked(ps, map[string]interface{}{
 		"type": "ready-changed",
 		"payload": map[string]interface{}{
@@ -2446,6 +2494,12 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 			"participants": snapshot,
 		},
 	})
+
+	if retryScheduledStart {
+		// Goroutine: fireScheduledStart takes ps.mu itself and MarkReady
+		// still holds it via the deferred Unlock.
+		go m.fireScheduledStart(code)
+	}
 
 	return nil
 }
@@ -2470,21 +2524,21 @@ func (m *Manager) MarkReady(code string, userID int64, ready bool) error {
 // the server doesn't know the available track count.
 func (m *Manager) BroadcastTrackChange(code string, hostUserID int64, kind string, index int) error {
 	if kind != "audio" && kind != "subtitle" {
-		return fmt.Errorf("invalid track kind: %q (want 'audio' or 'subtitle')", kind)
+		return errUser("invalid track kind: %q (want 'audio' or 'subtitle')", kind)
 	}
 
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	if ps.HostUserID != hostUserID {
-		return fmt.Errorf("only the host can change tracks for the party")
+		return errUser("only the host can change tracks for the party")
 	}
 
 	// Broadcast to all participants INCLUDING the host. The host's local

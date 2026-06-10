@@ -10,9 +10,9 @@ package api
 //   Client → server:  join-party, request-play, request-pause,
 //                     request-seek, heartbeat, time-sync
 //
-// Coexists with /ws/party (V2) during rollout. The client opens this
-// socket AFTER successfully opening /ws/party-room, because the room
-// socket is what establishes participant membership in the party.
+// The client opens this socket AFTER successfully opening /ws/party-room,
+// because the room socket is what establishes participant membership in
+// the party.
 
 import (
 	"encoding/json"
@@ -171,7 +171,7 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			codeMu.Unlock()
 
 			if err := h.manager.JoinPartyV3Sync(p.PartyCode, claims.UserID, sc); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 				continue
 			}
 			codeMu.Lock()
@@ -191,7 +191,7 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleRequestPlay(code, claims.UserID); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "request-pause":
@@ -208,7 +208,7 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			p.AtMs = -1 // signal "use current canonical position"
 			_ = json.Unmarshal(msg.Payload, &p)
 			if err := h.manager.HandleRequestPause(code, claims.UserID, p.AtMs); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "request-seek":
@@ -227,7 +227,7 @@ func (h *PartyWSHandlerV3Sync) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleRequestSeek(code, claims.UserID, p.ToMs); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "heartbeat":

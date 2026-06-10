@@ -4,11 +4,9 @@ package watchparty
 // Sync Protocol V3 — Running/Paused model
 // ============================================================
 //
-// This file implements the Phase 1 infrastructure for V3. It coexists with
-// V2 (sync.go) during the rollout: V3 fields and goroutines are maintained
-// alongside V2's tri-state machine, but no client currently reads V3's
-// wire format. Step 4 of the execution plan flips a frontend feature flag
-// to consume V3; step 5 deletes V2.
+// The only sync protocol since the 2026-06 V2 deletion ("step 5" of the
+// V3 execution plan; the V2 tri-state machine previously lived in
+// sync.go, which now retains only the shared time-sync pieces).
 //
 // The core insight: separate **intent** (Running vs Paused, global) from
 // **readiness** (buffer state, per-peer). V2 conflated them as the
@@ -21,7 +19,6 @@ package watchparty
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -30,13 +27,14 @@ import (
 )
 
 // CurrentAbsMs is the party's canonical position at the moment of the call.
-// In Running state, the anchor advances with wall-clock time. In Paused
-// state, the anchor is frozen. Callers MUST hold ps.mu.
+// In Running state, the anchor advances with elapsed time since the anchor
+// was set (monotonic — see PartyState.AnchorServerAt). In Paused state, the
+// anchor is frozen. Callers MUST hold ps.mu.
 func (ps *PartyState) CurrentAbsMs() int64 {
 	if !ps.Running {
 		return ps.AnchorAbsMs
 	}
-	return ps.AnchorAbsMs + (time.Now().UnixMilli() - ps.AnchorServerMs)
+	return ps.AnchorAbsMs + time.Since(ps.AnchorServerAt).Milliseconds()
 }
 
 // setAnchorLocked updates the party's position anchor and (optionally) its
@@ -45,7 +43,7 @@ func (ps *PartyState) CurrentAbsMs() int64 {
 // ordered against tick broadcasts. Callers MUST hold ps.mu.
 func (ps *PartyState) setAnchorLocked(absMs int64, running bool) {
 	ps.AnchorAbsMs = absMs
-	ps.AnchorServerMs = time.Now().UnixMilli()
+	ps.AnchorServerAt = time.Now()
 	ps.Running = running
 }
 
@@ -223,7 +221,7 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return nil, fmt.Errorf("party not found or has ended")
+		return nil, errUser("party not found or has ended")
 	}
 
 	ps.mu.Lock()
@@ -258,7 +256,7 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 
 	// New participant: enforce max, insert.
 	if len(ps.Participants) >= ps.MaxParticipants {
-		return nil, fmt.Errorf("party is full (%d/%d)", len(ps.Participants), ps.MaxParticipants)
+		return nil, errUser("party is full (%d/%d)", len(ps.Participants), ps.MaxParticipants)
 	}
 	ps.Participants[userID] = &Participant{
 		UserID:      userID,
@@ -315,13 +313,13 @@ func (m *Manager) JoinPartyV3Sync(code string, userID int64, sc *SafeConn) error
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found or has ended")
+		return errUser("party not found or has ended")
 	}
 
 	ps.mu.Lock()
 	if _, ok := ps.Participants[userID]; !ok {
 		ps.mu.Unlock()
-		return fmt.Errorf("not a participant — open /ws/party-room first")
+		return errUser("not a participant — open /ws/party-room first")
 	}
 	ps.syncConns[userID] = sc
 
@@ -699,7 +697,7 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -713,11 +711,11 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 	// always has a Participant record (created in JoinPartyV3Room), so this
 	// does not block the legitimate host path.
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant")
+		return errUser("not a participant")
 	}
 
 	if ps.HostUserID != userID {
-		return fmt.Errorf("only the host can start playback")
+		return errUser("only the host can start playback")
 	}
 	if ps.Running {
 		return nil // no-op, already running
@@ -744,7 +742,7 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 			}
 		}
 		if len(notReady) > 0 {
-			return fmt.Errorf("waiting for: %s", strings.Join(notReady, ", "))
+			return errUser("waiting for: %s", strings.Join(notReady, ", "))
 		}
 	}
 
@@ -792,7 +790,7 @@ func (m *Manager) HandleRequestPause(code string, userID int64, atAbsMs int64) e
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -802,11 +800,11 @@ func (m *Manager) HandleRequestPause(code string, userID int64, atAbsMs int64) e
 	// for ANY userID, so a former participant with a lingering sync socket
 	// could pause the party for everyone. Require current membership first.
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant")
+		return errUser("not a participant")
 	}
 
 	if ps.HostUserID != userID && !ps.Settings.AllowPause {
-		return fmt.Errorf("only the host can pause")
+		return errUser("only the host can pause")
 	}
 
 	pos := atAbsMs
@@ -840,10 +838,10 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
-		return fmt.Errorf("party not found")
+		return errUser("party not found")
 	}
 	if toAbsMs < 0 {
-		return fmt.Errorf("seek target must be non-negative")
+		return errUser("seek target must be non-negative")
 	}
 	// Upper-bound at 24h in ms — anything beyond that is nonsense for media
 	// playback and an unbounded toAbsMs (e.g. math.MaxInt64) would overflow
@@ -851,7 +849,7 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 	// and propagating absurd tick positions to every peer.
 	const maxSeekMs = 24 * 60 * 60 * 1000
 	if toAbsMs > maxSeekMs {
-		return fmt.Errorf("seek target out of range")
+		return errUser("seek target out of range")
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -861,11 +859,11 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 	// rationale — a stale HostUserID alone does not prove the sender is
 	// still in the party).
 	if _, ok := ps.Participants[userID]; !ok {
-		return fmt.Errorf("not a participant")
+		return errUser("not a participant")
 	}
 
 	if ps.HostUserID != userID {
-		return fmt.Errorf("only the host can seek")
+		return errUser("only the host can seek")
 	}
 
 	ps.setAnchorLocked(toAbsMs, ps.Running)
@@ -888,6 +886,31 @@ func (m *Manager) HandleRequestSeek(code string, userID int64, toAbsMs int64) er
 		m.emitTickLocked(ps)
 	}
 	return nil
+}
+
+// TouchParticipant refreshes a participant's LastSeen. Called by the room
+// socket's application-level heartbeat (every 25s from the SPA).
+//
+// 2026-06 review (latent bug) — before this, NOTHING in the live protocol
+// refreshed LastSeen after join: the room heartbeat was a pure no-op and
+// the SPA never sends sync-socket heartbeats. With CleanupStale running
+// (main.go), a party whose members quietly watched for 5+ minutes without
+// chatting, reacting, or reconnecting had every participant "stale" and
+// was reaped mid-movie — the likely cause of the unexplained
+// "why did my party end?" reports the endPartyInternal diagnostic
+// snapshot was added to investigate.
+func (m *Manager) TouchParticipant(code string, userID int64) {
+	m.mu.RLock()
+	ps, exists := m.parties[code]
+	m.mu.RUnlock()
+	if !exists {
+		return
+	}
+	ps.mu.Lock()
+	if p, ok := ps.Participants[userID]; ok {
+		p.LastSeen = time.Now()
+	}
+	ps.mu.Unlock()
 }
 
 // HandleV3Heartbeat is informational only. Updates LastSeen so presence

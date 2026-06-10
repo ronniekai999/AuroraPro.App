@@ -154,7 +154,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 			ps, err := h.manager.JoinPartyV3RoomCompanion(p.PartyCode, claims.UserID, claims.Username, companion, sc)
 			if err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 				continue
 			}
 			codeMu.Lock()
@@ -162,8 +162,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			codeMu.Unlock()
 
 			// Send an initial room snapshot (participant list, chat
-			// history, media descriptor). Reuses V2's party-state builder
-			// for payload parity during coexistence.
+			// history, media descriptor).
 			ps.Lock()
 			snap := h.manager.BuildPartyStateMessage(ps)
 			ps.Unlock()
@@ -192,8 +191,20 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// and the server's SetReadDeadline expired waiting for a pong
 			// that never made it through. Application-level data frames
 			// like this heartbeat DO reset every reasonable proxy's idle
-			// counter. No payload needed; the read itself is the value.
-			// Pure no-op on the server side.
+			// counter. No payload needed.
+			//
+			// 2026-06 review — also refresh the participant's LastSeen.
+			// This used to be a pure no-op, which meant NOTHING refreshed
+			// LastSeen for quietly-watching members and CleanupStale
+			// reaped their party at the 5-minute mark. The 25s heartbeat
+			// cadence keeps every connected member comfortably inside the
+			// staleParticipantTimeout window.
+			codeMu.Lock()
+			code := currentCode
+			codeMu.Unlock()
+			if code != "" {
+				h.manager.TouchParticipant(code, claims.UserID)
+			}
 
 		case "chat", "chat-message":
 			// 2026-05-25 — accept both "chat" and "chat-message" for the
@@ -224,7 +235,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleChat(code, claims.UserID, claims.Username, p.Message); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "reaction":
@@ -250,7 +261,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.HandleReaction(code, claims.UserID, claims.Username, p.Emoji, p.AbsMs); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "change-media":
@@ -275,7 +286,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.ChangeMedia(code, claims.UserID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "track-change":
@@ -296,7 +307,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.BroadcastTrackChange(code, claims.UserID, p.Kind, p.Index); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		case "ready", "mark-ready":
@@ -340,7 +351,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				continue
 			}
 			if err := h.manager.MarkReady(code, claims.UserID, p.Ready); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		// ============================================================
@@ -364,7 +375,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 			peers, err := h.manager.JoinVoice(code, claims.UserID, claims.Username)
 			if err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 				continue
 			}
 			// Reply to the JOINER with the list of existing peers so
@@ -461,7 +472,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if err := h.manager.RelayVoiceSignal(code, claims.UserID, p.ToUserID, msg.Type, forward); err != nil {
-				h.sendErr(sc, err.Error())
+				h.sendErr(sc, safeWSError(err))
 			}
 
 		default:

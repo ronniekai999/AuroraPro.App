@@ -3,7 +3,25 @@ package api
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/aurora-media/aurora/internal/watchparty"
 )
+
+// safeWSError maps a manager error to a message safe to send to the
+// client. Errors minted via the watchparty package's user-error helper
+// pass through verbatim ("only the host can pause", "party is full…");
+// anything else — which could wrap a DB or filesystem error — degrades to
+// a generic message so internal detail never crosses the WS boundary.
+// 2026-06 review (security finding 2).
+func safeWSError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if watchparty.IsUserError(err) {
+		return err.Error()
+	}
+	return "internal error"
+}
 
 // ============================================================
 // Party WebSocket — shared constants, wire payloads, rate limiting

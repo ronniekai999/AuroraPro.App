@@ -94,3 +94,56 @@ func TestV3_FireScheduledStart_SpoilerGateLeavesRetryable(t *testing.T) {
 		t.Error("Running=true despite the spoiler-free gate; want false")
 	}
 }
+
+// TestV3_MarkReady_RetriesOverdueScheduledStart is the 2026-06 review
+// (bug 2) regression test: when the countdown fired while the spoiler-free
+// gate was blocking, the LAST guest readying up must re-fire the scheduled
+// start — previously the "retryable" log line had no retry mechanism and
+// the party never auto-started.
+func TestV3_MarkReady_RetriesOverdueScheduledStart(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED4", 1)
+	overdue := time.Now().Add(-1 * time.Second)
+	ps.mu.Lock()
+	ps.Settings.SpoilerFreeStart = true
+	ps.ScheduledStartAt = &overdue
+	ps.Participants[2] = &Participant{
+		UserID: 2, Username: "guest", IsHost: false, Ready: false,
+		LastSeen: time.Now(),
+	}
+	ps.mu.Unlock()
+
+	// The countdown fires while the guest is not ready — blocked.
+	m.fireScheduledStart("SCHED4")
+	ps.mu.Lock()
+	if ps.Running || ps.StartedAt != nil {
+		ps.mu.Unlock()
+		t.Fatal("precondition failed: gate should have blocked the scheduled start")
+	}
+	ps.mu.Unlock()
+
+	// Guest readies up — the retry hook should engage playback.
+	if err := m.MarkReady("SCHED4", 2, true); err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+
+	// The retry runs in a goroutine; poll briefly for the transition.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ps.mu.Lock()
+		running := ps.Running
+		started := ps.StartedAt != nil
+		ps.mu.Unlock()
+		if running && started {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("party never started after the last guest readied up (scheduled-start retry missing)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	ps.mu.Lock()
+	m.stopTickLoopLocked(ps)
+	ps.mu.Unlock()
+}

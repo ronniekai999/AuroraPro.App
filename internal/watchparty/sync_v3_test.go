@@ -12,7 +12,7 @@ func TestV3_CurrentAbsMs_Paused(t *testing.T) {
 	ps := &PartyState{
 		Running:        false,
 		AnchorAbsMs:    120_000, // 2 minutes in
-		AnchorServerMs: time.Now().Add(-10 * time.Second).UnixMilli(),
+		AnchorServerAt: time.Now().Add(-10 * time.Second),
 	}
 	got := ps.CurrentAbsMs()
 	if got != 120_000 {
@@ -28,7 +28,7 @@ func TestV3_CurrentAbsMs_Running(t *testing.T) {
 	ps := &PartyState{
 		Running:        true,
 		AnchorAbsMs:    60_000, // 1 minute in
-		AnchorServerMs: time.Now().Add(-500 * time.Millisecond).UnixMilli(),
+		AnchorServerAt: time.Now().Add(-500 * time.Millisecond),
 	}
 	got := ps.CurrentAbsMs()
 	want := int64(60_500)
@@ -44,7 +44,7 @@ func TestV3_SetAnchorLocked_Pause(t *testing.T) {
 	ps := &PartyState{
 		Running:        true,
 		AnchorAbsMs:    0,
-		AnchorServerMs: time.Now().Add(-3 * time.Second).UnixMilli(),
+		AnchorServerAt: time.Now().Add(-3 * time.Second),
 	}
 	// Freeze at "~3s into the stream."
 	ps.setAnchorLocked(3_000, false)
@@ -62,7 +62,7 @@ func TestV3_SetAnchorLocked_Seek(t *testing.T) {
 	ps := &PartyState{
 		Running:        true,
 		AnchorAbsMs:    10_000,
-		AnchorServerMs: time.Now().UnixMilli(),
+		AnchorServerAt: time.Now(),
 	}
 	// Simulate wall clock advancing a bit before the seek.
 	time.Sleep(30 * time.Millisecond)
@@ -70,7 +70,7 @@ func TestV3_SetAnchorLocked_Seek(t *testing.T) {
 	ps.setAnchorLocked(300_000, true)
 	got := ps.CurrentAbsMs()
 	// Should be ~300_000 plus whatever tiny amount of time elapsed since
-	// setAnchorLocked set AnchorServerMs=now. Allow a 50ms window.
+	// setAnchorLocked set AnchorServerAt=now. Allow a 50ms window.
 	if got < 300_000 || got > 300_050 {
 		t.Errorf("after seek while Running: CurrentAbsMs=%d, want 300000–300050", got)
 	}
@@ -120,7 +120,7 @@ func TestV3_TickLoop_EmitsWhileRunning(t *testing.T) {
 		Code:           "TICK01",
 		Running:        true,
 		AnchorAbsMs:    0,
-		AnchorServerMs: time.Now().UnixMilli(),
+		AnchorServerAt: time.Now(),
 		syncConns:      make(map[int64]*SafeConn),
 	}
 	m.startTickLoopLocked(ps)
