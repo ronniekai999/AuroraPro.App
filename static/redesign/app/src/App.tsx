@@ -9020,6 +9020,12 @@ export default function App() {
       setHeroPersonalization(resp.personalization)
       setHeroIndex(0)
       if (resp.picks.length > 0) { setHomeHero(resp.picks[0].media); setHomeHeroIsFallback(false) }
+      // Empty pool: leave homeHero/flag as-is. On first load the hero
+      // hasn't been set yet, so the home-rails catalog fallback (which
+      // checks heroPoolRef.current.length === 0) will set it with
+      // isFallback=true. On a runtime refresh that returns empty, the
+      // displayed hero is still the previous pool pick — not catalog
+      // filler — so the existing label remains correct.
     } catch {
       // Non-fatal — keep whatever hero we had (listRecent fallback
       // from home-rails effect).
