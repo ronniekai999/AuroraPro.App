@@ -425,6 +425,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// for the profile UI. Both share the queries layer.
 	gamifyEngine := NewGamificationEngine(deps.Queries)
 	progressH.SetGamificationEngine(gamifyEngine)
+	// Finishing an episode warms the "Previously" recap for the next resume.
+	// Shares the GET handler's service instance so single-flight dedup spans
+	// both the prebuild and on-demand paths.
+	progressH.SetRecapService(recapH.Service())
 	gamifyH := NewGamificationHandler(deps.Queries)
 	profileH := NewProfileHandler(deps.Queries)
 	if deps.HeroProv != nil {

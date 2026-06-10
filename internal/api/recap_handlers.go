@@ -25,6 +25,11 @@ func NewRecapHandler(queries *db.Queries, llmClient *llm.Client) *RecapHandler {
 	return &RecapHandler{queries: queries, svc: recap.New(queries, llmClient)}
 }
 
+// Service exposes the underlying recap service so other handlers (e.g. the
+// progress handler's completion-hook prebuild) can share the SAME instance —
+// keeping single-flight dedup effective across the on-demand and prebuild paths.
+func (h *RecapHandler) Service() *recap.Service { return h.svc }
+
 // recapResponse is the GET /api/media/{id}/recap payload. Available is false
 // (with a Reason) whenever there's nothing to show — the frontend hides the
 // affordance instead of surfacing an error.

@@ -129,6 +129,8 @@ import {
   listNotifications,
   markAllNotificationsRead,
   type AppNotification,
+  getRecap,
+  type RecapResponse,
 } from '@/lib/api'
 import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer'
 import { PartyPanel } from '@/components/PartyPanel'
@@ -139,6 +141,7 @@ import { MediaListRow } from '@/components/MediaListRow'
 import { DetailHero } from '@/components/detail/DetailHero'
 import { DetailRail } from '@/components/detail/DetailRail'
 import { TrailerModal } from '@/components/detail/TrailerModal'
+import { RecapModal } from '@/components/detail/RecapModal'
 import { DetailTabs, type DetailTab } from '@/components/detail/DetailTabs'
 import { QualityChips } from '@/components/detail/QualityChips'
 import { EpisodeList } from '@/components/detail/EpisodeList'
@@ -2535,6 +2538,8 @@ interface DetailViewProps {
   onPlay: (m: Media) => void
   onToggleLib: (m: Media) => void
   inLibrary: boolean
+  // Active profile — scopes the per-profile "Previously" recap boundary.
+  profileId?: number | null
   // Phase 2 extras:
   detail?: MediaDetail
   apiEpisodes?: ApiEpisode[]
@@ -2585,7 +2590,7 @@ interface DetailViewProps {
   }
 }
 function DetailView({
-  media, onBack, onPlay, onToggleLib, inLibrary,
+  media, onBack, onPlay, onToggleLib, inLibrary, profileId,
   detail, apiEpisodes, onPlayEpisode, onEpisodeUnavailable, loading, error,
   onStartParty, inParty,
   seasons, selectedSeason, onSelectSeason,
@@ -2597,6 +2602,17 @@ function DetailView({
 }: DetailViewProps) {
   // Trailer modal (YouTube embed) — opened from the rail's "Watch Trailer".
   const [trailerOpen, setTrailerOpen] = useState(false)
+  // "Previously" recap modal. DetailView owns the fetch so the modal stays
+  // presentational; one fetch per open (the server caches across opens).
+  const [recapOpen, setRecapOpen] = useState(false)
+  const [recapState, setRecapState] = useState<{ loading: boolean; data?: RecapResponse; error?: string }>({ loading: false })
+  const openRecap = useCallback(() => {
+    setRecapOpen(true)
+    setRecapState({ loading: true })
+    getRecap(media.id, profileId ?? undefined)
+      .then((data) => setRecapState({ loading: false, data }))
+      .catch((e) => setRecapState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load recap' }))
+  }, [media.id, profileId])
   // Prefer real metadata when available — overview, runtime, rating
   // straight from the server. Falls back to whatever the lightweight
   // Media object had so the page still shows something pre-fetch.
@@ -2836,6 +2852,7 @@ function DetailView({
             secondaryLabel={resumeShown ? 'Play from start' : undefined}
             onSecondary={resumeShown ? () => onPlay(media) : undefined}
             onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
+            onPrevious={isShow && resumeShown ? openRecap : undefined}
             inLibrary={inLibrary}
             onToggleLibrary={() => onToggleLib(media)}
             onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
@@ -2850,6 +2867,18 @@ function DetailView({
               youtubeKey={detail.trailer_key}
               title={media.title}
               onClose={() => setTrailerOpen(false)}
+            />
+          )}
+          {recapOpen && (
+            <RecapModal
+              title={media.title}
+              loading={recapState.loading}
+              error={recapState.error}
+              recap={recapState.data?.available ? recapState.data.recap : undefined}
+              upTo={recapState.data?.up_to}
+              unavailableReason={recapState.data && !recapState.data.available ? recapState.data.reason : undefined}
+              onClose={() => setRecapOpen(false)}
+              onStart={resumeShown && ri ? () => { setRecapOpen(false); resume!.onPlay(ri) } : undefined}
             />
           )}
 
@@ -9762,6 +9791,7 @@ export default function App() {
               onPlay={handlePlay}
               onToggleLib={handleToggleLib}
               inLibrary={library.some(l => l.id === selectedMedia.id)}
+              profileId={activeProfileId}
               detail={detailItem ?? undefined}
               apiEpisodes={detailEpisodes}
               onPlayEpisode={handlePlayEpisode}
