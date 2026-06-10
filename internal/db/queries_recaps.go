@@ -105,27 +105,50 @@ func (q *Queries) RecapEpisodesUpToBoundary(ctx context.Context, mediaItemID int
 	return out, rows.Err()
 }
 
-// HasEpisodeAfterBoundary reports whether the show has any episode after the
-// (boundarySeason, boundaryEpisode) ordinal — i.e. whether the viewer has
-// episodes left to watch. False means they're caught up to the latest available
-// episode, which lets the recap safely give a complete, resolved summary.
-func (q *Queries) HasEpisodeAfterBoundary(ctx context.Context, mediaItemID int64, boundarySeason, boundaryEpisode int) (bool, error) {
-	var exists bool
+// RecapBoundaryFacts are the two library facts the recap's mode selection
+// needs about a boundary episode.
+type RecapBoundaryFacts struct {
+	// HasEpisodesAfter — any episode exists after the (season, episode)
+	// ordinal. False means the viewer is caught up to the latest available.
+	HasEpisodesAfter bool
+	// BoundaryIsSeasonLast — no higher-numbered episode of the SAME season
+	// exists, i.e. the boundary is a season finale as far as the library knows.
+	BoundaryIsSeasonLast bool
+}
+
+// GetRecapBoundaryFacts answers both mode-selection probes in ONE statement so
+// they read a single consistent snapshot — two separate queries could see a
+// concurrent library scan in between and return contradictory facts (review
+// finding on the season-closure PR). Same corruption-proof JOIN shape as the
+// other recap queries. Errors are returned verbatim: the caller hard-fails
+// rather than guessing a mode, so a transient DB error can't flip the mode,
+// mismatch the cache hash, and trigger a spurious LLM regeneration.
+func (q *Queries) GetRecapBoundaryFacts(ctx context.Context, mediaItemID int64, boundarySeason, boundaryEpisode int) (RecapBoundaryFacts, error) {
+	var f RecapBoundaryFacts
 	err := q.pool.QueryRow(ctx, `
-		SELECT EXISTS (
+		SELECT
+		  EXISTS (
 			SELECT 1
 			FROM tv_episodes e
 			JOIN tv_seasons s ON s.id = e.season_id AND s.media_item_id = e.media_item_id
 			WHERE e.media_item_id = $1
 			  AND ( s.season_number > $2
 			        OR (s.season_number = $2 AND e.episode_number > $3) )
-		)`,
+		  ) AS has_after,
+		  NOT EXISTS (
+			SELECT 1
+			FROM tv_episodes e
+			JOIN tv_seasons s ON s.id = e.season_id AND s.media_item_id = e.media_item_id
+			WHERE e.media_item_id = $1
+			  AND s.season_number = $2
+			  AND e.episode_number > $3
+		  ) AS season_last`,
 		mediaItemID, boundarySeason, boundaryEpisode,
-	).Scan(&exists)
+	).Scan(&f.HasEpisodesAfter, &f.BoundaryIsSeasonLast)
 	if err != nil {
-		return false, fmt.Errorf("has episode after boundary: %w", err)
+		return RecapBoundaryFacts{}, fmt.Errorf("recap boundary facts: %w", err)
 	}
-	return exists, nil
+	return f, nil
 }
 
 // GetCachedRecap returns the cached recap for a (show, boundary) pair, if one
