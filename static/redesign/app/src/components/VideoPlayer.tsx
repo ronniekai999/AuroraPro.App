@@ -670,9 +670,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // stranded inside the off-screen/aria-hidden subtree.
       ;(document.activeElement as HTMLElement | null)?.blur?.()
       // Drop browser-fullscreen so we don't strand a black fullscreen surface
-      // (the root goes opacity-0 while minimized).
+      // (the root goes opacity-0 while minimized). Issue #309 — handle the
+      // webkit-prefixed API for iOS Safari, which lacks the standard names.
       if (document.fullscreenElement) {
         void document.exitFullscreen().catch(() => { /* defensive */ })
+      } else if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+        document.webkitExitFullscreen()
       }
     }
   }, [remoteActive])
@@ -2049,7 +2052,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       setMuted(vid.muted)
     }
     const onFullscreenChange = () => {
-      setFullscreen(document.fullscreenElement === overlayRootRef.current)
+      // Issue #309 — iOS Safari reports the active fullscreen element via the
+      // webkit-prefixed property, so check both.
+      const fsEl = document.fullscreenElement ?? document.webkitFullscreenElement
+      setFullscreen(fsEl === overlayRootRef.current)
     }
     // Issue #177 — natural end of playback. Defer entirely to the
     // parent (auto-play-next decision lives there). 'ended' fires once
@@ -2072,6 +2078,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     vid.addEventListener('volumechange', onVolumeChange)
     vid.addEventListener('ended', onEndedDom)
     document.addEventListener('fullscreenchange', onFullscreenChange)
+    // iOS Safari fires the webkit-prefixed event instead (issue #309).
+    document.addEventListener('webkitfullscreenchange', onFullscreenChange)
     // Hydrate initial state from the element (it may already be
     // playing if we're re-mounting on a target change).
     setPlaying(!vid.paused)
@@ -2086,6 +2094,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.removeEventListener('volumechange', onVolumeChange)
       vid.removeEventListener('ended', onEndedDom)
       document.removeEventListener('fullscreenchange', onFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
     }
   }, [target])
 
@@ -2385,13 +2394,25 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // Fullscreen toggle. Some browsers reject requestFullscreen
   // without a user gesture; we treat rejection as "no fullscreen
   // for you" silently rather than surfacing an error.
+  //
+  // Issue #309 — iOS Safari does not implement the standard
+  // `requestFullscreen`/`exitFullscreen` on a <div>; it only exposes the
+  // `webkit`-prefixed names. Calling the standard method unconditionally
+  // throws "requestFullscreen is not a function", which crashed the player
+  // and could disrupt an in-flight AirPlay session. Feature-detect both.
   const handleFullscreenToggle = () => {
     const el = overlayRootRef.current
     if (!el) return
-    if (document.fullscreenElement) {
-      void document.exitFullscreen().catch(() => { /* defensive */ })
-    } else {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      if (document.exitFullscreen) {
+        void document.exitFullscreen().catch(() => { /* defensive */ })
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen()
+      }
+    } else if (el.requestFullscreen) {
       void el.requestFullscreen().catch(() => { /* defensive */ })
+    } else if (el.webkitRequestFullscreen) {
+      el.webkitRequestFullscreen()
     }
   }
 
