@@ -23,6 +23,72 @@ const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
 
+// describeCastError turns a Cast SDK rejection into a human-readable
+// message. The CAF Sender is maddeningly inconsistent about its reject
+// shape: requestSession()/loadMedia() may reject with a structured
+// `chrome.cast.Error` ({code, description, details}), OR — as seen in
+// the wild on Chrome 149 (issue #311) — with the BARE error-code STRING
+// from chrome.cast.ErrorCode, e.g. "session_error" or "cancel". The old
+// code only read `.code`/`.description`/`.message`; when the rejection
+// was a bare string all three were undefined, so it threw "unknown",
+// which surfaced to users as the useless "Cast failed: unknown".
+//
+// Here we (1) normalize the code out of either shape, and (2) map the
+// known chrome.cast.ErrorCode values to a sentence the user can act on.
+// Unknown codes fall back to the raw code/description so we never lose
+// information again.
+const CAST_ERROR_MESSAGES: Record<string, string> = {
+  // The receiver app (CC1AD845) failed to launch or the session
+  // dropped. Almost always a sender↔receiver reachability problem.
+  session_error:
+    'Could not connect to the Cast device. Make sure it is powered on and on the same Wi-Fi network, then try again.',
+  // The picker timed out waiting for the device to respond.
+  timeout: 'The Cast device did not respond in time. Please try again.',
+  // No receiver is reachable on the network.
+  receiver_unavailable:
+    'No Cast devices were found. Check that your Chromecast is on and on the same Wi-Fi network.',
+  // Sender↔receiver channel error (network blip, device went to sleep).
+  channel_error:
+    'Lost the connection to the Cast device. Please try again.',
+  // The selected receiver is busy with another app/sender.
+  extension_not_compatible:
+    'This browser cannot reach the Cast device. Try a recent version of Chrome.',
+  extension_missing:
+    'Casting requires the Google Cast support built into Chrome. Try a recent version of Chrome.',
+  // User dismissed the picker — callers treat this as a silent no-op.
+  cancel: 'cancel',
+  load_failed: 'The Cast device could not play this title. Please try again.',
+  invalid_parameter: 'Casting failed due to an internal error (invalid request).',
+}
+
+export function describeCastError(rawErr: unknown): string {
+  // Bare-string rejection (the issue-#311 case).
+  if (typeof rawErr === 'string') {
+    return CAST_ERROR_MESSAGES[rawErr] ?? rawErr
+  }
+  const e = (rawErr ?? {}) as {
+    code?: string
+    description?: string
+    message?: string
+  }
+  const code = e.code
+  const desc = e.description || e.message || ''
+  if (code && CAST_ERROR_MESSAGES[code]) {
+    return CAST_ERROR_MESSAGES[code]
+  }
+  // No mapping — preserve whatever the SDK gave us rather than collapsing
+  // to "unknown". Prefer a code:description combo when both exist.
+  if (code && desc) return `${code}: ${desc}`
+  if (code) return code
+  if (desc) return desc
+  // Last resort: stringify so even an opaque object surfaces *something*.
+  try {
+    const s = JSON.stringify(rawErr)
+    if (s && s !== '{}' && s !== 'null') return s
+  } catch { /* circular / non-serializable */ }
+  return 'Casting failed for an unknown reason. Please try again.'
+}
+
 // SDK load state — shared across every consumer in the app. The Cast
 // SDK enforces single initialization globally; tracking state here
 // prevents duplicate <script> injections during React strict-mode
@@ -475,9 +541,10 @@ export function useCast(
         message: e?.message,
         raw: rawErr,
       })
-      const code = e?.code ?? 'unknown'
-      const desc = e?.description ?? e?.message ?? ''
-      throw new Error(desc ? `${code}: ${desc}` : `loadMedia: ${code}`)
+      // Same robust mapping as requestSession — handles bare-string and
+      // structured rejections alike so a load failure never degrades to
+      // a bare "loadMedia: unknown".
+      throw new Error(describeCastError(rawErr))
     }
   }
 
@@ -518,9 +585,12 @@ export function useCast(
         message: e?.message,
         raw: rawErr,
       })
-      const code = e?.code ?? 'unknown'
-      const desc = e?.description ?? e?.message ?? ''
-      throw new Error(desc ? `${code}: ${desc}` : code)
+      // describeCastError handles BOTH the structured chrome.cast.Error
+      // shape AND the bare error-code string the CAF Sender rejects with
+      // on some Chrome builds (issue #311: rawErr === "session_error"),
+      // mapping known codes to actionable, human-readable messages
+      // instead of collapsing them to "unknown".
+      throw new Error(describeCastError(rawErr))
     }
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
