@@ -582,6 +582,26 @@ func CastNeedsVideoTranscode(videoCodecOut string) bool {
 	return true
 }
 
+// CastRemuxNeedsTranscode reports whether a REMUX session must be re-cloned as
+// a transcode before casting, independent of its video codec.
+//
+// Issue #324 (4K HEVC casts, 1080p H.264 does NOT): a remux session's master
+// playlist deliberately OMITS the CODECS attribute — the copied stream's exact
+// H.264 profile/level isn't known at session-create time, so the variant line
+// is emitted as `#EXT-X-STREAM-INF:BANDWIDTH=...,RESOLUTION=...` with no
+// CODECS="avc1...". hls.js and Safari tolerate that (they probe the segments),
+// but the Chromecast Default Media Receiver does NOT: with fMP4 (CMAF) segments
+// — Aurora's default container — its shaka-based pipeline needs a CODECS
+// attribute to pick a SourceBuffer, and without one it silently fails AFTER
+// loadMedia resolves (exactly the symptom in #324: loadMedia resolved, receiver
+// never plays). A forced H.264 transcode clone always populates CodecString
+// (hlsCodecString), so the cast manifest carries CODECS and the receiver can
+// decode it. This is the same "when receiver compatibility is uncertain,
+// transcode" trade-off #322 made for non-H.264 video.
+func CastRemuxNeedsTranscode(remux bool) bool {
+	return remux
+}
+
 // castCloneOpts builds the SessionOpts for a cast-safe clone of src.
 // Audio is always forced to stereo AAC. When needsVideoTranscode is true
 // (source video is non-H.264 remux), Remux is disabled so FFmpeg transcodes
@@ -615,14 +635,19 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 }
 
 // CloneForCast returns the session whose playlist should be handed to a Cast
-// receiver for sessionID. Returns the original session unchanged when it is
-// already cast-safe (H.264 video + AAC audio). Creates and returns a new
-// clone when either condition fails:
+// receiver for sessionID. Returns the original session unchanged ONLY when it
+// is already cast-safe (a TRANSCODE session emitting H.264 video + AAC audio,
+// whose master playlist carries a CODECS attribute). Creates and returns a new
+// clone when any condition fails:
 //   - Audio is Dolby (AC-3/E-AC-3): clone downmixes to stereo AAC — receiver
 //     Dolby support cannot be probed reliably.
 //   - Video is non-H.264 remux (HEVC, VP9, AV1, …): clone forces H.264
 //     transcode — the Default Media Receiver only decodes H.264 over HLS;
 //     other codecs produce an indefinite spinner with no sender-side error.
+//   - Session is a remux (even H.264 remux): clone forces an H.264 transcode
+//     so the cast master playlist carries the CODECS attribute the Default
+//     Media Receiver needs for fMP4 HLS — remux playlists omit it and the
+//     receiver silently fails to play after loadMedia resolves (issue #324).
 //
 // The clone is owned by userID so cast-token access checks pass; it inherits
 // StartSec so the receiver's playlist-time domain matches the local player's.
@@ -632,7 +657,13 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 		return nil, fmt.Errorf("session not found")
 	}
 	needsAudioClone := CastNeedsStereoClone(src.AudioCodecOut)
-	needsVideoTranscode := CastNeedsVideoTranscode(castVideoCodecOut(src))
+	// A remux session needs an H.264 transcode clone for cast whether its video
+	// is non-H.264 (CastNeedsVideoTranscode) OR H.264 (CastRemuxNeedsTranscode):
+	// either way its master playlist omits the CODECS attribute the Default
+	// Media Receiver requires for fMP4 HLS (issue #324). Transcode sessions are
+	// already cast-safe on the video side (they emit H.264 + a CODECS string).
+	needsVideoTranscode := CastNeedsVideoTranscode(castVideoCodecOut(src)) ||
+		CastRemuxNeedsTranscode(src.Remux)
 	if !needsAudioClone && !needsVideoTranscode {
 		return src, nil
 	}
