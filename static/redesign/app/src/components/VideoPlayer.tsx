@@ -1383,7 +1383,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // a URL it can authenticate without browser cookies (#317).
           let airplaySrc = masterUrl
           try {
-            const ct = await createCastToken(session.session_id)
+            // forAirplay=true skips CloneForCast on the server: Apple TV and
+            // the browser's native HLS player decode H.264 remux natively, so
+            // a full-transcode clone is unnecessary here. Without this flag a
+            // remux session spawns a fresh FFmpeg transcode whose first segment
+            // hasn't been written yet, making vid.src point at an empty
+            // playlist and breaking local playback entirely (#326).
+            const ct = await createCastToken(session.session_id, { forAirplay: true })
             airplaySrc = absoluteUrl(ct.playlist)
           } catch {
             // Token mint failed — local cookie auth still works for the

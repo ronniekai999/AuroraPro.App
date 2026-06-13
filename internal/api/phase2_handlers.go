@@ -1124,12 +1124,20 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// H.264+AAC clone when needed; returns the original session when it's already
 	// safe. If the clone can't be created (e.g. session limit) we fall back to
 	// the original session — no worse than the pre-guard behavior.
+	//
+	// Exception — for_airplay=true: Apple TV and the browser's native HLS
+	// player both decode H.264 remux natively. The CODECS-attribute guarantee
+	// enforced by CloneForCast is only required by the Chromecast Default Media
+	// Receiver. Skipping the clone avoids spinning up a full-transcode FFmpeg
+	// session just to pre-bake an auth token into vid.src for AirPlay (#326).
 	castSessionID := sessionID
-	if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
-		slog.Warn("cast: clone failed, casting original session",
-			"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
-	} else {
-		castSessionID = castSession.ID
+	if r.URL.Query().Get("for_airplay") != "true" {
+		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
+			slog.Warn("cast: clone failed, casting original session",
+				"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
+		} else {
+			castSessionID = castSession.ID
+		}
 	}
 
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
