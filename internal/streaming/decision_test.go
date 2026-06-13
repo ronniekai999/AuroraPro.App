@@ -876,13 +876,17 @@ func TestCastCloneOpts(t *testing.T) {
 		t.Error("AudioPassthrough must be false (force stereo re-encode)")
 	}
 
-	// Video / subtitle / resume handling must carry over unchanged.
+	// Video / resume handling must carry over unchanged.
 	if !opts.Remux || opts.AudioTrackIndex != 2 || opts.AudioChannels != 6 ||
 		!opts.HDRTonemap || opts.SourceVideoCodec != "hevc" || opts.StartSec != 120 {
 		t.Errorf("non-audio opts not preserved: %+v", opts)
 	}
-	if len(opts.SubtitleTracks) != 1 || opts.SubtitleTracks[0].AbsoluteIndex != 3 {
-		t.Errorf("subtitle tracks not preserved: %+v", opts.SubtitleTracks)
+	// SubtitleTracks must NOT be carried into the cast clone. When they are
+	// present, GenerateMasterPlaylist emits a SUBTITLES rendition group that
+	// causes the Chromecast Default Media Receiver (Shaka) to stall silently
+	// after loadMedia resolves (issue #328).
+	if len(opts.SubtitleTracks) != 0 {
+		t.Errorf("SubtitleTracks must be empty in cast clone opts (issue #328), got %+v", opts.SubtitleTracks)
 	}
 	if opts.BurnIn != nil {
 		t.Errorf("BurnIn should be nil when source had none, got %+v", opts.BurnIn)

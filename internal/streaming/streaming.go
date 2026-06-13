@@ -618,7 +618,12 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 		HDRTonemap:       src.HDRTonemap,
 		SourceVideoCodec: src.SourceVideoCodec,
 		StartSec:         src.StartSec,
-		SubtitleTracks:   src.SubtitleTracks,
+		// SubtitleTracks intentionally omitted: the Chromecast Default Media
+		// Receiver (Shaka) stalls after loadMedia resolves when the master
+		// playlist declares a SUBTITLES rendition group (issue #328). The
+		// receiver accepts the LoadRequest but never begins decoding. Omitting
+		// the tracks produces a subtitle-free master playlist that Shaka plays
+		// without issue. AirPlay is unaffected — it skips CloneForCast entirely.
 	}
 	if needsVideoTranscode {
 		opts.SourceVideoCodec = ""
@@ -637,8 +642,8 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 // CloneForCast returns the session whose playlist should be handed to a Cast
 // receiver for sessionID. Returns the original session unchanged ONLY when it
 // is already cast-safe (a TRANSCODE session emitting H.264 video + AAC audio,
-// whose master playlist carries a CODECS attribute). Creates and returns a new
-// clone when any condition fails:
+// no subtitle tracks, whose master playlist carries a CODECS attribute). Creates
+// and returns a new clone when any condition fails:
 //   - Audio is Dolby (AC-3/E-AC-3): clone downmixes to stereo AAC — receiver
 //     Dolby support cannot be probed reliably.
 //   - Video is non-H.264 remux (HEVC, VP9, AV1, …): clone forces H.264
@@ -648,6 +653,11 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 //     so the cast master playlist carries the CODECS attribute the Default
 //     Media Receiver needs for fMP4 HLS — remux playlists omit it and the
 //     receiver silently fails to play after loadMedia resolves (issue #324).
+//   - Session has subtitle tracks: the Chromecast Default Media Receiver (Shaka)
+//     stalls after loadMedia resolves when the master playlist declares a
+//     SUBTITLES rendition group — it accepts the LoadRequest but never begins
+//     decoding (issue #328). A subtitle-free clone avoids this; castCloneOpts
+//     intentionally omits SubtitleTracks.
 //
 // The clone is owned by userID so cast-token access checks pass; it inherits
 // StartSec so the receiver's playlist-time domain matches the local player's.
@@ -664,7 +674,10 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	// already cast-safe on the video side (they emit H.264 + a CODECS string).
 	needsVideoTranscode := CastNeedsVideoTranscode(castVideoCodecOut(src)) ||
 		CastRemuxNeedsTranscode(src.Remux)
-	if !needsAudioClone && !needsVideoTranscode {
+	// Any session with subtitle tracks needs a clone so the cast manifest is
+	// subtitle-free (issue #328). castCloneOpts intentionally omits SubtitleTracks.
+	needsSubsClone := len(src.SubtitleTracks) > 0
+	if !needsAudioClone && !needsVideoTranscode && !needsSubsClone {
 		return src, nil
 	}
 	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src, needsVideoTranscode))
@@ -674,7 +687,7 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	slog.Info("cast: created cast-safe clone of session for receiver compatibility",
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
 		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
-		"source_video_codec", src.SourceVideoCodec)
+		"source_video_codec", src.SourceVideoCodec, "subtitle_tracks_dropped", needsSubsClone)
 	return clone, nil
 }
 
