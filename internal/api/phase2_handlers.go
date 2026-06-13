@@ -1124,12 +1124,24 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// H.264+AAC clone when needed; returns the original session when it's already
 	// safe. If the clone can't be created (e.g. session limit) we fall back to
 	// the original session — no worse than the pre-guard behavior.
+	//
+	// Exception — for_airplay=true: this is an AirPlay / native-HLS token
+	// request (pre-baking a URL for vid.src so Apple TV can authenticate HLS
+	// sub-resources without browser cookies, per #317). The browser's own
+	// native HLS demuxer and Apple TV both tolerate master playlists that omit
+	// the CODECS attribute (they probe segments), unlike the Chromecast Default
+	// Media Receiver's shaka pipeline (which silently fails — hence #324).
+	// Skipping the clone avoids spawning an empty-segment FFmpeg transcode that
+	// makes vid.src point at an unready playlist (#326). This restores the
+	// pre-#324 native-HLS behaviour where the original session was used directly.
 	castSessionID := sessionID
-	if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
-		slog.Warn("cast: clone failed, casting original session",
-			"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
-	} else {
-		castSessionID = castSession.ID
+	if r.URL.Query().Get("for_airplay") != "true" {
+		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
+			slog.Warn("cast: clone failed, casting original session",
+				"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
+		} else {
+			castSessionID = castSession.ID
+		}
 	}
 
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(

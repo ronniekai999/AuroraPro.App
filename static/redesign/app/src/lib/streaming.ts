@@ -322,10 +322,11 @@ export interface CastTokenResponse {
 
 export async function createCastToken(
   sessionId: string,
-  signal?: AbortSignal,
+  opts: { signal?: AbortSignal; forAirplay?: boolean } = {},
 ): Promise<CastTokenResponse> {
+  const qs = opts.forAirplay ? '?for_airplay=true' : ''
   return apiFetch<CastTokenResponse>(
-    `/api/stream/sessions/${sessionId}/cast-token`,
-    { method: 'POST', signal },
+    `/api/stream/sessions/${sessionId}/cast-token${qs}`,
+    { method: 'POST', signal: opts.signal },
   )
 }
