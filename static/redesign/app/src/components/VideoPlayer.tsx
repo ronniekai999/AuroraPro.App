@@ -1365,12 +1365,43 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         const vid = videoRef.current
         if (!vid) return
 
-        if (!Hls.isSupported()) {
-          // Safari falls through to native HLS — hls.js doesn't run
-          // here but the <video> element loads the m3u8 directly.
-          // The ?token= query promotion handles auth.
+        // Prefer native HLS when the browser supports it natively (Safari on
+        // macOS/iOS; all iOS WebKit browsers). This fires even when
+        // Hls.isSupported() is true — modern Safari supports MSE but AirPlay
+        // cannot forward an MSE/blob source to an Apple TV. With a real m3u8
+        // URL set on vid.src, Safari hands the URL to the receiver directly,
+        // fixing the "device connects, no content plays" symptom (#314).
+        const usesNativeHls =
+          !Hls.isSupported() || vid.canPlayType('application/vnd.apple.mpegurl') !== ''
+        if (usesNativeHls) {
           vid.src = masterUrl
           vid.load()
+          // Resume fallback: server -ss'd in the normal case (start_sec > 0 means
+          // HLS-time-0 IS the resume point). When start_sec === 0 despite a
+          // resume position, seek client-side once metadata is ready — mirrors
+          // the MANIFEST_PARSED fallback in the hls.js path.
+          if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
+            const onCanPlaySeek = () => {
+              vid.currentTime = resumeSec
+              vid.removeEventListener('canplay', onCanPlaySeek)
+            }
+            vid.addEventListener('canplay', onCanPlaySeek)
+          }
+          // Disable DEFAULT=YES subtitle groups the native player auto-selects
+          // and reapply the user's prior sub choice. Mirrors the direct_play
+          // loadedmetadata/canplay pattern (lines ~1287-1299).
+          const newSubsNative = info.subtitles || []
+          const onNativeLoadedMetadata = () => { disableAllTextTracks(vid) }
+          const onNativeCanPlay = () => {
+            disableAllTextTracks(vid)
+            if (subToRestore >= 0 && newSubsNative.some(s => s.index === subToRestore)) {
+              applySubtitle(subToRestore)
+            }
+            vid.removeEventListener('canplay', onNativeCanPlay)
+            vid.removeEventListener('loadedmetadata', onNativeLoadedMetadata)
+          }
+          vid.addEventListener('loadedmetadata', onNativeLoadedMetadata)
+          vid.addEventListener('canplay', onNativeCanPlay)
           playerReadyRef.current = true
           try { await vid.play() } catch { /* autoplay-blocked */ }
           return
