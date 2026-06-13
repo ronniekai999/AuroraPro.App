@@ -624,6 +624,11 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 		// receiver accepts the LoadRequest but never begins decoding. Omitting
 		// the tracks produces a subtitle-free master playlist that Shaka plays
 		// without issue. AirPlay is unaffected — it skips CloneForCast entirely.
+		//
+		// ForceTS: the Default Media Receiver's fMP4/CMAF HLS path is fragile on
+		// many device/firmware combinations. MPEG-TS HLS is broadly supported, so
+		// cast clones always use TS segments even when the server default is fMP4.
+		ForceTS: true,
 	}
 	if needsVideoTranscode {
 		opts.SourceVideoCodec = ""
@@ -976,6 +981,12 @@ type TranscodeSession struct {
 	// hlsCodecString advertises the truth and CastNeedsStereoClone catches
 	// copied Dolby audio.
 	AudioCodecOut string `json:"-"`
+	// FMP4 selects fragmented-MP4 (CMAF) segments when true, MPEG-TS when
+	// false. Defaults to the TranscodeManager's global setting but can be
+	// overridden per session (e.g. cast clones force TS for Chromecast
+	// compatibility). startVariantImpl and the subtitle init-PTS probe read
+	// this instead of tm.fmp4.
+	FMP4 bool `json:"-"`
 	// Source video codec for BSF selection in remux mode (e.g., "hevc" needs hevc_mp4toannexb)
 	SourceVideoCodec string `json:"-"`
 	// StartSec is the resume seek offset passed to FFmpeg via -ss. When > 0,
@@ -1633,6 +1644,11 @@ type SessionOpts struct {
 	// appended to the FFmpeg command, piggybacking on the same file I/O as
 	// the video/audio transcode — zero extra disk reads.
 	SubtitleTracks []HLSSubtitleTrack
+	// ForceTS overrides the TranscodeManager's global segment format for this
+	// session, producing MPEG-TS segments even when the server default is fMP4.
+	// Used by cast clones: the Chromecast Default Media Receiver has much
+	// better compatibility with MPEG-TS HLS than with fMP4/CMAF HLS.
+	ForceTS bool
 }
 
 // CreateSession creates a new adaptive transcode session for a media file.
@@ -1693,11 +1709,15 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		BurnSubRelIndex: -1,
 		AudioTrackIndex: -1,
 		initPTS90kHz:    -1, // not yet probed
+		FMP4:            tm.fmp4,
 	}
 
 	// Apply session options if provided
 	if len(opts) > 0 {
 		o := opts[0]
+		if o.ForceTS {
+			session.FMP4 = false
+		}
 		if o.BurnIn != nil {
 			session.BurnSubIndex = o.BurnIn.SubIndex
 			session.BurnSubExternal = o.BurnIn.ExternalPath
@@ -2411,7 +2431,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	p := v.Profile
 	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
 	segExt := ".ts"
-	if tm.fmp4 {
+	if session.FMP4 {
 		segExt = ".m4s"
 	}
 	segmentPath := filepath.Join(v.OutputDir, "seg_%05d"+segExt)
@@ -2444,7 +2464,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// for fMP4 lands the first presentation time within one frame of 0 —
 	// the WebVTT X-TIMESTAMP-MAP uses 0 in fMP4 mode (see getSessionInitPTS).
 	avoidNegTS := "disabled"
-	if tm.fmp4 {
+	if session.FMP4 {
 		avoidNegTS = "make_zero"
 	}
 
@@ -2656,7 +2676,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	if resumeSegNum > 0 {
 		hlsFlags = "independent_segments+append_list"
 	}
-	if !tm.fmp4 {
+	if !session.FMP4 {
 		// -muxdelay 0 -muxpreload 0 are mpegts-muxer knobs (see the comment
 		// block above); meaningless for the mov-based fMP4 segments.
 		args = append(args, "-muxdelay", "0", "-muxpreload", "0")
@@ -2669,7 +2689,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		"-hls_flags", hlsFlags,
 		"-hls_segment_filename", segmentPath,
 	)
-	if tm.fmp4 {
+	if session.FMP4 {
 		// CMAF segments: seg_NNNNN.m4s + a single init.mp4 carrying the
 		// codec configuration. The variant playlist references it via
 		// #EXT-X-MAP:URI="init.mp4" (token-rewritten for cast receivers in
@@ -3441,7 +3461,7 @@ func (tm *TranscodeManager) getSessionInitPTS(s *TranscodeSession) int64 {
 	// at exactly 0, so the first presentation time is within one frame of 0
 	// and hls.js derives its initPTS from the same tfdt baseline —
 	// X-TIMESTAMP-MAP:MPEGTS:0 maps cue times directly onto the timeline.
-	if tm.fmp4 {
+	if s.FMP4 {
 		return 0
 	}
 
