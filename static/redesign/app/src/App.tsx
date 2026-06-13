@@ -6163,17 +6163,27 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [logsLoading, setLogsLoading] = useState(false)
   const [logsErr, setLogsErr] = useState<string | null>(null)
 
+  // Side-cards (Skip Markers, Embedded) load once on mount, on their
+  // own effect. They used to share the dashboard-stats effect below,
+  // but that effect's cleanup fires the moment stats first resolves
+  // (its [stats] dep flips null -> object), which aborted these
+  // still-in-flight requests whenever the heavier skip-marker COUNT
+  // query lost the race to the stats fetch. The card then stayed blank
+  // until a page refresh warmed the DB cache and let it win the race
+  // (issue #313 follow-up). A mount-only effect is cleaned up only on
+  // unmount, so these requests always run to completion.
+  useEffect(() => {
+    const cardsAc = new AbortController()
+    getEmbeddingStatus(cardsAc.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
+    getSkipMarkerStatus(cardsAc.signal).then(setSkipStatus).catch(() => { /* card hides if unavailable */ })
+    return () => cardsAc.abort()
+  }, [])
+
   // Dashboard is the landing tab — fetch on mount. The other tabs
   // fetch when the user navigates to them so we don't trigger four
   // API calls just because someone clicked "Admin".
   useEffect(() => {
     if (stats !== null) return
-    // Side-cards (Skip Markers, Embedded) get their own AbortController
-    // so they are not cancelled when a parent re-render during the
-    // auth-refresh wave fires the cleanup for this effect (issue #313).
-    const cardsAc = new AbortController()
-    getEmbeddingStatus(cardsAc.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
-    getSkipMarkerStatus(cardsAc.signal).then(setSkipStatus).catch(() => { /* card hides if unavailable */ })
     // Dashboard-stats fetch uses a cancelled flag rather than an
     // AbortController so an in-flight retry is not killed by cleanup —
     // only stale setState is suppressed.
@@ -6186,7 +6196,7 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
         setStatsErr(err instanceof Error ? err.message : 'Failed to load stats')
       })
       .finally(() => { if (!cancelled) setStatsLoading(false) })
-    return () => { cancelled = true; cardsAc.abort() }
+    return () => { cancelled = true }
   }, [stats])
 
   useEffect(() => {
