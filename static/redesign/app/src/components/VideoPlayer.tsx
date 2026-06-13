@@ -1374,7 +1374,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         const usesNativeHls =
           !Hls.isSupported() || vid.canPlayType('application/vnd.apple.mpegurl') !== ''
         if (usesNativeHls) {
-          vid.src = masterUrl
+          // withToken() is a no-op: tokens live in httpOnly cookies that the
+          // browser sends automatically, but which Apple TV cannot access.
+          // Without a ?token= in the URL, the Apple TV gets 401 on the master
+          // playlist and every subsequent HLS sub-resource — it shows
+          // "Connected" but nothing plays (#317, regression from #314 fix).
+          // Mint a cast token (same path as Chromecast) so the receiver gets
+          // a URL it can authenticate without browser cookies (#317).
+          let airplaySrc = masterUrl
+          try {
+            const ct = await createCastToken(session.session_id)
+            airplaySrc = absoluteUrl(ct.playlist)
+          } catch {
+            // Token mint failed — local cookie auth still works for the
+            // browser; AirPlay will fail auth but won't crash the player.
+          }
+          vid.src = airplaySrc
           vid.load()
           // Resume fallback: server -ss'd in the normal case (start_sec > 0 means
           // HLS-time-0 IS the resume point). When start_sec === 0 despite a
