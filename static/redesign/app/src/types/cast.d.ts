@@ -166,6 +166,13 @@ declare global {
     // source; pairs with the 'webkitcurrentplaybacktargetiswirelesschanged'
     // event to drive the minimized cast/AirPlay control widget.
     readonly webkitCurrentPlaybackTargetIsWireless?: boolean
+    // iPhone Safari uses WebKit-prefixed video-element fullscreen methods
+    // because the standard Fullscreen API doesn't work on arbitrary DOM
+    // elements (and, historically, not on <video> either).
+    webkitEnterFullscreen?: () => void
+    webkitExitFullscreen?: () => void
+    webkitEnterFullScreen?: () => void
+    webkitExitFullScreen?: () => void
     // Fires when an AirPlay-capable device becomes available or
     // disappears. Detail is a CustomEvent-like object with
     // `availability: 'available' | 'not-available'`.

@@ -297,6 +297,14 @@ function saveBandwidthEstimate(bps: number | undefined): void {
   } catch { /* best-effort */ }
 }
 
+// 2026-06-13 — iPhone Safari doesn't support the standard Fullscreen API on
+// arbitrary elements (or even on <video> in older releases). Detect it so
+// the player can fall back to the WebKit video-element fullscreen methods.
+function isIOSPhone(): boolean {
+  if (typeof navigator === 'undefined' || typeof window === 'undefined') return false
+  return /iPhone|iPod/.test(navigator.userAgent) && !window.MSStream
+}
+
 export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -383,6 +391,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const [controlsVisible, setControlsVisible] = useState(true)
   const hideTimerRef = useRef<number | null>(null)
   const overlayRootRef = useRef<HTMLDivElement | null>(null)
+  // 2026-06-13 — ref mirror of `fullscreen`. Used by the toggle handler
+  // so it always reads the CURRENT fullscreen state without needing to be
+  // recreated (the document keydown listener is bound once per target).
+  const fullscreenRef = useRef(false)
   // Audit H1 fix — playingRef lets the stable showControlsTemporarily
   // read CURRENT playing state regardless of which closure (effect,
   // handler) calls it. Without this, keyboard-only users were never
@@ -611,10 +623,17 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // Move focus off the (about-to-be-hidden) full player so it isn't
       // stranded inside the off-screen/aria-hidden subtree.
       ;(document.activeElement as HTMLElement | null)?.blur?.()
-      // Drop browser-fullscreen so we don't strand a black fullscreen surface
-      // (the root goes opacity-0 while minimized).
+      // Drop browser-fullscreen (and iPhone WebKit video fullscreen) so we
+      // don't strand a black fullscreen surface (the root goes opacity-0
+      // while minimized).
       if (document.fullscreenElement) {
         void document.exitFullscreen().catch(() => { /* defensive */ })
+      } else if (fullscreenRef.current) {
+        const vid = videoRef.current
+        const webkitExit = vid?.webkitExitFullscreen ?? vid?.webkitExitFullScreen
+        if (webkitExit) {
+          try { webkitExit.call(vid) } catch { /* defensive */ }
+        }
       }
     }
   }, [remoteActive])
@@ -1965,7 +1984,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       setMuted(vid.muted)
     }
     const onFullscreenChange = () => {
-      setFullscreen(document.fullscreenElement === overlayRootRef.current)
+      const fs = document.fullscreenElement === overlayRootRef.current
+      fullscreenRef.current = fs
+      setFullscreen(fs)
+    }
+    // 2026-06-13 — WebKit video-element fullscreen events. Fired on iPhone
+    // Safari when the video enters/exits the system fullscreen player.
+    // Keep the React state + ref in sync so the toggle handler and the
+    // fullscreen-styled shell stay correct after the user taps "Done".
+    const onWebkitBeginFullscreen = () => {
+      fullscreenRef.current = true
+      setFullscreen(true)
+    }
+    const onWebkitEndFullscreen = () => {
+      fullscreenRef.current = false
+      setFullscreen(false)
     }
     // Issue #177 — natural end of playback. Defer entirely to the
     // parent (auto-play-next decision lives there). 'ended' fires once
@@ -1980,6 +2013,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     vid.addEventListener('volumechange', onVolumeChange)
     vid.addEventListener('ended', onEndedDom)
     document.addEventListener('fullscreenchange', onFullscreenChange)
+    vid.addEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen)
+    vid.addEventListener('webkitendfullscreen', onWebkitEndFullscreen)
     // Hydrate initial state from the element (it may already be
     // playing if we're re-mounting on a target change).
     setPlaying(!vid.paused)
@@ -1994,6 +2029,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.removeEventListener('volumechange', onVolumeChange)
       vid.removeEventListener('ended', onEndedDom)
       document.removeEventListener('fullscreenchange', onFullscreenChange)
+      vid.removeEventListener('webkitbeginfullscreen', onWebkitBeginFullscreen)
+      vid.removeEventListener('webkitendfullscreen', onWebkitEndFullscreen)
     }
   }, [target])
 
@@ -2293,13 +2330,32 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // Fullscreen toggle. Some browsers reject requestFullscreen
   // without a user gesture; we treat rejection as "no fullscreen
   // for you" silently rather than surfacing an error.
+  //
+  // 2026-06-13 — iPhone Safari doesn't allow the standard Fullscreen API on
+  // the player wrapper <div>, so on iPhone we use the WebKit-prefixed
+  // video-element fullscreen methods instead. The user still exits via the
+  // system "Done" button; the webkitendfullscreen listener below resets state.
   const handleFullscreenToggle = () => {
-    const el = overlayRootRef.current
-    if (!el) return
+    const wrapper = overlayRootRef.current
+    const vid = videoRef.current
+    if (!wrapper || !vid) return
+
+    const ios = isIOSPhone()
+    const webkitEnter = vid.webkitEnterFullscreen ?? vid.webkitEnterFullScreen
+    const webkitExit = vid.webkitExitFullscreen ?? vid.webkitExitFullScreen
+    if (ios && webkitEnter) {
+      if (fullscreenRef.current && webkitExit) {
+        try { webkitExit.call(vid) } catch { /* defensive */ }
+      } else {
+        try { webkitEnter.call(vid) } catch { /* defensive */ }
+      }
+      return
+    }
+
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => { /* defensive */ })
     } else {
-      void el.requestFullscreen().catch(() => { /* defensive */ })
+      void wrapper.requestFullscreen().catch(() => { /* defensive */ })
     }
   }
 
