@@ -207,3 +207,46 @@ func TestCloneForCast_TranscodeReusedUnchanged(t *testing.T) {
 		t.Errorf("CloneForCast re-cloned an already-safe H.264 transcode session with no subs (got %q, want %q) — wasteful", clone.ID, src.ID)
 	}
 }
+
+// TestCloneForCast_ForcesTS is the regression test for Chromecast fMP4/CMAF
+// incompatibility: even when the server default is fMP4, a cast clone must be
+// created with ForceTS so the variant emits MPEG-TS segments, which the
+// Default Media Receiver decodes reliably.
+func TestCloneForCast_ForcesTS(t *testing.T) {
+	fakeFFmpegOnPath(t)
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "fmp4"})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// Any session that CloneForCast re-clones will do; use a remux so the clone
+	// path is definitely exercised.
+	src := &TranscodeSession{
+		ID:               "src-remux-for-ts",
+		UserID:           7,
+		FilePath:         "/library/movie.mkv",
+		SourceWidth:      1920,
+		SourceHeight:     1080,
+		Remux:            true,
+		SourceVideoCodec: "h264",
+		AudioCodecOut:    "aac",
+		AudioTrackIndex:  -1,
+		BurnSubIndex:     -1,
+		BurnSubRelIndex:  -1,
+	}
+	tm.mu.Lock()
+	tm.sessions[src.ID] = src
+	tm.mu.Unlock()
+
+	clone, err := tm.CloneForCast(7, "ronnie", src.ID)
+	if err != nil {
+		t.Fatalf("CloneForCast: %v", err)
+	}
+	if clone.ID == src.ID {
+		t.Fatal("CloneForCast reused the source session unchanged — expected a transcode clone")
+	}
+	if clone.FMP4 {
+		t.Error("cast clone has FMP4=true, want false — cast clones must force MPEG-TS segments for Chromecast compatibility")
+	}
+}
