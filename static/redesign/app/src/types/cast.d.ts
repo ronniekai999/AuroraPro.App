@@ -157,6 +157,19 @@ declare global {
     idleReason?: string | null
   }
 
+  // ---- WebKit-prefixed Fullscreen API ----
+  // iOS Safari (and older WebKit) expose the prefixed names instead of the
+  // standard Fullscreen API. Without these declarations, calling the
+  // standard `requestFullscreen()` on iOS throws "requestFullscreen is not
+  // a function" (issue #309), so we feature-detect and fall back to these.
+  interface Element {
+    webkitRequestFullscreen?: () => void
+  }
+  interface Document {
+    webkitExitFullscreen?: () => void
+    readonly webkitFullscreenElement?: Element | null
+  }
+
   // ---- WebKit AirPlay on HTMLVideoElement ----
   interface HTMLVideoElement {
     // Available on Safari/WebKit. Pops the system AirPlay picker.
