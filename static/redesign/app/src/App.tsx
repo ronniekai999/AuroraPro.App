@@ -6168,18 +6168,25 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
   // API calls just because someone clicked "Admin".
   useEffect(() => {
     if (stats !== null) return
-    const ac = new AbortController()
+    // Side-cards (Skip Markers, Embedded) get their own AbortController
+    // so they are not cancelled when a parent re-render during the
+    // auth-refresh wave fires the cleanup for this effect (issue #313).
+    const cardsAc = new AbortController()
+    getEmbeddingStatus(cardsAc.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
+    getSkipMarkerStatus(cardsAc.signal).then(setSkipStatus).catch(() => { /* card hides if unavailable */ })
+    // Dashboard-stats fetch uses a cancelled flag rather than an
+    // AbortController so an in-flight retry is not killed by cleanup —
+    // only stale setState is suppressed.
+    let cancelled = false
     setStatsLoading(true)
-    getEmbeddingStatus(ac.signal).then(setEmbStatus).catch(() => { /* card hides if unavailable */ })
-    getSkipMarkerStatus(ac.signal).then(setSkipStatus).catch(() => { /* card hides if unavailable */ })
-    getAdminDashboard(ac.signal)
-      .then(s => setStats(s))
+    getAdminDashboard()
+      .then(s => { if (!cancelled) setStats(s) })
       .catch(err => {
-        if (err && err.name === 'AbortError') return
+        if (cancelled || (err && err.name === 'AbortError')) return
         setStatsErr(err instanceof Error ? err.message : 'Failed to load stats')
       })
-      .finally(() => setStatsLoading(false))
-    return () => ac.abort()
+      .finally(() => { if (!cancelled) setStatsLoading(false) })
+    return () => { cancelled = true; cardsAc.abort() }
   }, [stats])
 
   useEffect(() => {
@@ -6298,9 +6305,36 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
           {statsLoading && !stats && (
             <div className="mb-6 text-white/40 text-sm">Loading stats…</div>
           )}
+          {(skipStatus?.enabled || embStatus?.enabled) && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
+              {[
+                ...(embStatus && embStatus.enabled
+                  ? [{ label: 'Embedded', value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`, icon: 'cpu', color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400' }]
+                  : []),
+                ...(skipStatus && skipStatus.enabled
+                  ? (() => {
+                      const analyzed = (skipStatus.episode_files_analyzed ?? 0) + (skipStatus.movie_files_analyzed ?? 0)
+                      const total = (skipStatus.episode_files_total ?? 0) + (skipStatus.movie_files_total ?? 0)
+                      const behind = analyzed < total || !!skipStatus.worker?.running
+                      return [{ label: 'Skip Markers', value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`, icon: 'film', color: behind ? 'text-amber-400' : 'text-emerald-400' }]
+                    })()
+                  : []),
+              ].map(s => (
+                <div key={s.label} className="glass-panel rounded-xl p-5">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={`${s.color}`}>
+                      <Icon name={s.icon} size={20} />
+                    </div>
+                    <span className="text-white/50 text-sm">{s.label}</span>
+                  </div>
+                  <p className="text-white text-2xl font-bold">{s.value}</p>
+                </div>
+              ))}
+            </div>
+          )}
           {stats && (
             <>
-              <div className={`grid grid-cols-1 sm:grid-cols-2 ${embStatus?.enabled ? 'lg:grid-cols-5' : 'lg:grid-cols-4'} gap-4 mb-8`}>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
                 {[
                   // QA BUG-002 — relabel "Total Media" → "Media File
                   // Entries" so it reads as raw row count, not the
@@ -6311,20 +6345,6 @@ function AdminView({ currentAdminId }: { currentAdminId: number }) {
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
-                  ...(embStatus && embStatus.enabled
-                    ? [{ label: 'Embedded', value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`, icon: 'cpu', color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400' }]
-                    : []),
-                  // Smart Skip coverage: files analyzed for intro/
-                  // credits markers vs total (episodes + movies).
-                  // Amber while a backlog remains or a sweep runs.
-                  ...(skipStatus && skipStatus.enabled
-                    ? (() => {
-                        const analyzed = (skipStatus.episode_files_analyzed ?? 0) + (skipStatus.movie_files_analyzed ?? 0)
-                        const total = (skipStatus.episode_files_total ?? 0) + (skipStatus.movie_files_total ?? 0)
-                        const behind = analyzed < total || !!skipStatus.worker?.running
-                        return [{ label: 'Skip Markers', value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`, icon: 'film', color: behind ? 'text-amber-400' : 'text-emerald-400' }]
-                      })()
-                    : []),
                 ].map(s => (
                   <div key={s.label} className="glass-panel rounded-xl p-5">
                     <div className="flex items-center gap-3 mb-3">
