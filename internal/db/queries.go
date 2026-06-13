@@ -642,6 +642,69 @@ func (q *Queries) DeleteLibrary(ctx context.Context, id int64) (bool, error) {
 // Media Items
 // ============================================================
 
+// DeleteMediaItem removes a single media item (movie or show) by id. Every
+// child record — files, seasons, episodes, episode files, artwork, cast,
+// genres, watch progress, collection memberships, etc. — is reaped via the
+// ON DELETE CASCADE foreign keys that all reference media_items(id). Returns
+// true when a row was actually deleted (false ⇒ no such id). Files on disk are
+// NOT touched; this only removes Aurora's catalog entry. Used by the admin
+// "remove from library" action.
+func (q *Queries) DeleteMediaItem(ctx context.Context, id int64) (bool, error) {
+	result, err := q.pool.Exec(ctx, `DELETE FROM media_items WHERE id = $1`, id)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+// DeletedMediaItem identifies a media item removed by DeleteEmptyMediaItems,
+// carried back so the scanner can log exactly what it swept.
+type DeletedMediaItem struct {
+	ID    int64
+	Title string
+}
+
+// DeleteEmptyMediaItems removes every media item in a library that has no
+// playable file left — a movie with zero media_files, or a show with zero
+// episode_files across all of its episodes. This is the catalog-side
+// complement to the scanner's file prune: once a title's last file is deleted
+// from disk (and pruned from episode_files/media_files), its orphaned metadata
+// shell — the "no files available" ghost the UI would otherwise show forever —
+// is swept away too, cascading its seasons/episodes/artwork/progress.
+//
+// SAFETY: scoped to a single library and only ever invoked by the scanner
+// AFTER a clean, non-empty directory walk (see ScanLibrary's walkFailed /
+// zero-discovered guards), so a transient mount failure that hides files can
+// never trip this into deleting live catalog rows. Media items are only ever
+// created by the scanner from real files, so an empty item always means its
+// files genuinely vanished. Returns the removed items for activity logging.
+func (q *Queries) DeleteEmptyMediaItems(ctx context.Context, libraryID int64) ([]DeletedMediaItem, error) {
+	rows, err := q.pool.Query(ctx, `
+		DELETE FROM media_items mi
+		WHERE mi.library_id = $1
+		  AND NOT EXISTS (
+		        SELECT 1 FROM media_files mf WHERE mf.media_item_id = mi.id)
+		  AND NOT EXISTS (
+		        SELECT 1 FROM tv_episodes te
+		        JOIN episode_files ef ON ef.episode_id = te.id
+		        WHERE te.media_item_id = mi.id)
+		RETURNING mi.id, mi.title`, libraryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var deleted []DeletedMediaItem
+	for rows.Next() {
+		var d DeletedMediaItem
+		if err := rows.Scan(&d.ID, &d.Title); err != nil {
+			return nil, err
+		}
+		deleted = append(deleted, d)
+	}
+	return deleted, rows.Err()
+}
+
 func (q *Queries) UpsertMediaItem(ctx context.Context, item *models.MediaItem) error {
 	// Uses the unique index uq_media_items_lib_type_title_year which handles NULL years via COALESCE
 	return q.pool.QueryRow(ctx,

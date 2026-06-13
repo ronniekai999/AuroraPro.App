@@ -392,7 +392,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	authH.SetSecureCookies(cfg.Server.SecureCookies)  // deep-debug H10
 	oauthH.SetSecureCookies(cfg.Server.SecureCookies) // deep-debug H10 — OAuth login also sets cookies
 	libH := NewLibraryHandler(deps.Queries, deps.Scanner, deps.Hub, deps.Watcher, deps.Activity)
-	mediaH := NewMediaHandler(deps.Queries)
+	mediaH := NewMediaHandler(deps.Queries, deps.Activity)
 	if deps.Semantic != nil {
 		mediaH.SetSemanticSearcher(deps.Semantic)
 	}
@@ -710,6 +710,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/{id}/cast", metaH.GetCast)
 				r.With(auth.RequireAdmin).Post("/{id}/refresh-metadata", metaH.RefreshMetadata)
 				r.With(auth.RequireAdmin).Post("/{id}/match", metaH.ManualMatch)
+				// Remove a show/movie from the catalog (admin only). Does not
+				// touch files on disk — only deletes Aurora's library entry and
+				// its child rows. Manual counterpart to the scanner's automatic
+				// empty-item cleanup.
+				r.With(auth.RequireAdmin).Delete("/{id}", mediaH.DeleteItem)
 			})
 
 			// TMDB Search (for manual matching) — admin-only since RefreshMetadata and ManualMatch are admin-only

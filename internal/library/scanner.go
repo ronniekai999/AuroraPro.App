@@ -198,6 +198,29 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		} else if pruned > 0 {
 			slog.Info("pruned deleted files", "library", lib.Name, "count", pruned)
 		}
+
+		// Phase 1c: Sweep away catalog entries whose last file just
+		// disappeared. After the file prune above, a movie/show with zero
+		// remaining files is the "no files available" ghost the UI would
+		// otherwise show indefinitely (the user deleted the title from disk,
+		// but its metadata shell lingers). Remove the shell too.
+		//
+		// Gated by the SAME safety conditions as the prune: we're already in
+		// the !walkFailed branch, and we additionally require a non-empty walk
+		// (len(allFiles) > 0) — mirroring pruneDeletedFiles' zero-discovered
+		// guard — so a transient empty mount can never trigger a catalog wipe.
+		if len(allFiles) > 0 {
+			removed, cleanErr := s.queries.DeleteEmptyMediaItems(ctx, lib.ID)
+			if cleanErr != nil {
+				slog.Error("prune empty media items failed", "library", lib.Name, "error", cleanErr)
+			} else if len(removed) > 0 {
+				for _, it := range removed {
+					slog.Info("removed media item with no remaining files",
+						"id", it.ID, "title", it.Title, "library", lib.Name)
+				}
+				slog.Info("pruned empty media items", "library", lib.Name, "count", len(removed))
+			}
+		}
 	}
 
 	// Phase 2: Process files concurrently with bounded goroutines.

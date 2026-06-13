@@ -154,6 +154,18 @@ func (a *ActivityLogger) LogLibraryDeleted(ctx context.Context, userID int64, li
 	})
 }
 
+// LogMediaDeleted records an admin removing a media item (show/movie) from the
+// catalog via the manual "remove from library" action. The media row is gone
+// after this fires, so the id/title live in Details rather than as an FK
+// (mirrors LogUserDeleted / LogLibraryDeleted).
+func (a *ActivityLogger) LogMediaDeleted(ctx context.Context, userID int64, mediaID int64, title string) {
+	a.log(ctx, &models.ActivityEntry{
+		UserID:    &userID,
+		EventType: "media_deleted",
+		Details:   map[string]interface{}{"media_id": mediaID, "title": title},
+	})
+}
+
 func (a *ActivityLogger) LogSettingsChanged(ctx context.Context, userID int64, keys []string) {
 	a.log(ctx, &models.ActivityEntry{
 		UserID:    &userID,

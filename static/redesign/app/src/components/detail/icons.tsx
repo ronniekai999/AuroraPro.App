@@ -121,6 +121,15 @@ export function InfoIcon({ size = 15, className }: IconProps) {
   )
 }
 
+// trash — admin "remove from library"
+export function TrashIcon({ size = 15, className }: IconProps) {
+  return (
+    <svg {...stroke(size, className)}>
+      <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6" />
+    </svg>
+  )
+}
+
 // corner-frame — resolution chip
 export function ResIcon({ size = 15, className }: IconProps) {
   return (

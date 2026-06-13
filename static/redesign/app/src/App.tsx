@@ -77,6 +77,7 @@ import {
   addToWatchlist,
   submitMediaFeedback,
   refreshMetadata,
+  deleteMedia,
   markWatched,
   clearProgress,
   deleteRequest,
@@ -2572,6 +2573,11 @@ interface DetailViewProps {
   // the wrong title. Distinct from Refresh (which re-runs the same
   // auto-match and may land on the same wrong answer).
   onIdentify?: (m: Media) => void
+  // Admin-only "remove from library" — deletes this title's catalog entry
+  // (and its episodes/files/history) from Aurora. Files on disk are untouched.
+  // Clears a "no files available" ghost left after the title was deleted on
+  // the server. Only passed for admins; the handler confirms first.
+  onDeleteMedia?: (m: Media) => void
   // Phase 5.2 — version selector for movies with multiple files.
   // App passes the files list; DetailView surfaces them as chips.
   // Clicking a chip plays that specific file (4K version, alt cut, etc.).
@@ -2599,6 +2605,7 @@ function DetailView({
   onAddToWatchlist,
   onRefreshMetadata,
   onIdentify,
+  onDeleteMedia,
   files, onPlayFile,
   resume,
 }: DetailViewProps) {
@@ -2864,6 +2871,7 @@ function DetailView({
             detailRows={railDetailRows}
             onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
             onIdentify={onIdentify ? () => onIdentify(media) : undefined}
+            onDelete={onDeleteMedia ? () => onDeleteMedia(media) : undefined}
           />
           {trailerOpen && detail?.trailer_key && (
             <TrailerModal
@@ -9056,6 +9064,44 @@ export default function App() {
     }])
   }, [identifyTarget, nextToastId])
 
+  // Drop a just-deleted media id from every in-memory browse cache so the
+  // ghost can't reappear (or be re-opened into a 404) after we navigate back.
+  // Home rails are filtered in place; the movies/shows grids reset to null so
+  // their effects refetch fresh; Continue Watching re-fetches via its nonce;
+  // the saved-library list is filtered directly.
+  const purgeMediaFromCaches = useCallback((id: number) => {
+    setHomeRails(prev => prev?.map(r => ({ ...r, items: r.items.filter(i => i.id !== id) })))
+    setMoviesList(null)
+    setShowsList(null)
+    setLibrary(prev => prev.filter(i => i.id !== id))
+    setCwReloadNonce(n => n + 1)
+  }, [])
+
+  // Admin "Remove from Library" — deletes the catalog entry (and its
+  // episodes/files/history) for a title. Files on the server's disk are NOT
+  // touched; this just clears Aurora's record, e.g. a "no files available"
+  // ghost left behind after the title was deleted on the server. Confirms
+  // first (destructive + irreversible), then navigates back off the now-gone
+  // detail page and purges the local caches.
+  const handleDeleteMedia = useCallback(async (m: Media) => {
+    const ok = window.confirm(
+      `Remove "${m.title}" from Aurora?\n\n` +
+      `This deletes the library entry and all of its episodes, watch history, ` +
+      `and metadata. Files on your server's disk are NOT deleted. ` +
+      `If the files are still there, the next scan will re-add the title.`,
+    )
+    if (!ok) return
+    try {
+      await deleteMedia(m.id)
+      purgeMediaFromCaches(m.id)
+      handleBack()
+      addToast(`Removed "${m.title}" from the library`, 'success')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to remove from library'
+      addToast(msg, 'error')
+    }
+  }, [purgeMediaFromCaches, handleBack, addToast])
+
   // Start a watch party with this media. Creates a quick-party
   // server-side, joins it, and opens the panel.
   //
@@ -9866,6 +9912,7 @@ export default function App() {
               onAddToWatchlist={profiles.length > 0 ? (m) => setAddToListMedia(m) : undefined}
               onRefreshMetadata={user.role === 'admin' ? handleRefreshMetadata : undefined}
               onIdentify={user.role === 'admin' ? handleIdentify : undefined}
+              onDeleteMedia={user.role === 'admin' ? handleDeleteMedia : undefined}
               files={detailFiles}
               onPlayFile={handlePlayFile}
               // 2026-05-27 — Continue Watching resume. If the user has
