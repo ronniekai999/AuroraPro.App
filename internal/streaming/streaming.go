@@ -558,13 +558,38 @@ func CastNeedsStereoClone(audioCodecOut string) bool {
 	return audioCodecOut == "ac3" || audioCodecOut == "eac3"
 }
 
-// castCloneOpts builds the SessionOpts for a stereo-AAC cast clone of src:
-// identical video / subtitle / resume handling, but audio forced to a stereo
-// AAC re-encode (never Dolby AC-3/E-AC-3, never passthrough/copy) so any Cast
-// receiver can play it.
-func castCloneOpts(src *TranscodeSession) SessionOpts {
+// castVideoCodecOut returns the video codec the session's output actually
+// carries: "h264" for transcode sessions (always encode to H.264), or the
+// source codec for remux sessions (video is copied unchanged).
+func castVideoCodecOut(src *TranscodeSession) string {
+	if src.Remux {
+		return src.SourceVideoCodec
+	}
+	return "h264"
+}
+
+// CastNeedsVideoTranscode reports whether casting a session with the given
+// video output codec requires a fresh H.264 transcode clone. The Chromecast
+// Default Media Receiver only reliably decodes H.264 over HLS; HEVC, VP9,
+// AV1, and other codecs cause an indefinite loading spinner with no error
+// because loadMedia resolves on the sender side while the receiver silently
+// fails to decode.
+func CastNeedsVideoTranscode(videoCodecOut string) bool {
+	switch videoCodecOut {
+	case "h264", "avc", "avc1", "":
+		return false
+	}
+	return true
+}
+
+// castCloneOpts builds the SessionOpts for a cast-safe clone of src.
+// Audio is always forced to stereo AAC. When needsVideoTranscode is true
+// (source video is non-H.264 remux), Remux is disabled so FFmpeg transcodes
+// the video to H.264 — the only codec the Default Media Receiver reliably
+// supports over HLS.
+func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts {
 	opts := SessionOpts{
-		Remux:            src.Remux,
+		Remux:            src.Remux && !needsVideoTranscode,
 		RemuxAudioCopy:   false, // force a re-encode, never copy Dolby audio
 		AudioPassthrough: false, // force a re-encode, never copy
 		AudioCodecOut:    "aac", // stereo AAC — universally decodable
@@ -574,6 +599,9 @@ func castCloneOpts(src *TranscodeSession) SessionOpts {
 		SourceVideoCodec: src.SourceVideoCodec,
 		StartSec:         src.StartSec,
 		SubtitleTracks:   src.SubtitleTracks,
+	}
+	if needsVideoTranscode {
+		opts.SourceVideoCodec = ""
 	}
 	if src.BurnSubIndex >= 0 || src.BurnSubExternal != "" {
 		opts.BurnIn = &BurnInOpts{
@@ -587,30 +615,35 @@ func castCloneOpts(src *TranscodeSession) SessionOpts {
 }
 
 // CloneForCast returns the session whose playlist should be handed to a Cast
-// receiver for sessionID. When the session's audio is already cast-safe it
-// returns that session unchanged. When the session emits Dolby audio — AC-3
-// or E-AC-3, whether re-encoded or COPIED from the source (chosen for the
-// local browser, but unsafe to assume on a receiver) — it creates and returns
-// a fresh stereo-AAC clone — same video / subtitles / resume position, audio
-// downmixed to AAC — so the cast never plays silent on a non-Dolby sink. The
-// clone is owned by userID so the cast-token access check passes; it inherits
-// the source's StartSec so the receiver's playlist-time domain matches the
-// local player's (the cast load request seeks by the local currentTime).
+// receiver for sessionID. Returns the original session unchanged when it is
+// already cast-safe (H.264 video + AAC audio). Creates and returns a new
+// clone when either condition fails:
+//   - Audio is Dolby (AC-3/E-AC-3): clone downmixes to stereo AAC — receiver
+//     Dolby support cannot be probed reliably.
+//   - Video is non-H.264 remux (HEVC, VP9, AV1, …): clone forces H.264
+//     transcode — the Default Media Receiver only decodes H.264 over HLS;
+//     other codecs produce an indefinite spinner with no sender-side error.
+//
+// The clone is owned by userID so cast-token access checks pass; it inherits
+// StartSec so the receiver's playlist-time domain matches the local player's.
 func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID string) (*TranscodeSession, error) {
 	src, ok := tm.GetSession(sessionID)
 	if !ok || src == nil {
 		return nil, fmt.Errorf("session not found")
 	}
-	if !CastNeedsStereoClone(src.AudioCodecOut) {
+	needsAudioClone := CastNeedsStereoClone(src.AudioCodecOut)
+	needsVideoTranscode := CastNeedsVideoTranscode(castVideoCodecOut(src))
+	if !needsAudioClone && !needsVideoTranscode {
 		return src, nil
 	}
-	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src))
+	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src, needsVideoTranscode))
 	if err != nil {
-		return nil, fmt.Errorf("create stereo cast session: %w", err)
+		return nil, fmt.Errorf("create cast-safe session: %w", err)
 	}
-	slog.Info("cast: created stereo-AAC clone of Dolby-audio session for receiver compatibility",
+	slog.Info("cast: created cast-safe clone of session for receiver compatibility",
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
-		"source_audio_codec", src.AudioCodecOut)
+		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
+		"source_video_codec", src.SourceVideoCodec)
 	return clone, nil
 }
 

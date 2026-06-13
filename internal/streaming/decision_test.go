@@ -863,7 +863,7 @@ func TestCastCloneOpts(t *testing.T) {
 		SubtitleTracks:   []HLSSubtitleTrack{{AbsoluteIndex: 3, Language: "eng"}},
 		BurnSubIndex:     -1,
 	}
-	opts := castCloneOpts(src)
+	opts := castCloneOpts(src, false)
 
 	// Audio is forced to a stereo AAC re-encode — never AC-3, never copy.
 	if opts.AudioCodecOut != "aac" {
@@ -892,7 +892,7 @@ func TestCastCloneOpts(t *testing.T) {
 	src.BurnSubIndex = 4
 	src.BurnSubRelIndex = 1
 	src.BurnSubBitmap = true
-	if bo := castCloneOpts(src).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
+	if bo := castCloneOpts(src, false).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
 		t.Errorf("BurnIn not preserved: %+v", bo)
 	}
 }

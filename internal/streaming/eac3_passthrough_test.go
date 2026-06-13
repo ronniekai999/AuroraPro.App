@@ -250,6 +250,65 @@ func TestCastNeedsStereoCloneDolby(t *testing.T) {
 	}
 }
 
+func TestCastNeedsVideoTranscode(t *testing.T) {
+	for codec, want := range map[string]bool{
+		"hevc": true, "h265": true, "vp9": true, "av1": true, // non-H.264 — receiver can't decode
+		"h264": false, "avc": false, "avc1": false, "": false, // cast-safe
+	} {
+		if got := CastNeedsVideoTranscode(codec); got != want {
+			t.Errorf("CastNeedsVideoTranscode(%q) = %v, want %v", codec, got, want)
+		}
+	}
+}
+
+func TestCastVideoCodecOut(t *testing.T) {
+	// Transcode session always outputs H.264 regardless of source.
+	transcode := &TranscodeSession{Remux: false, SourceVideoCodec: "hevc"}
+	if got := castVideoCodecOut(transcode); got != "h264" {
+		t.Errorf("castVideoCodecOut(transcode/hevc) = %q, want h264", got)
+	}
+	// Remux session passes through source codec unchanged.
+	remuxHEVC := &TranscodeSession{Remux: true, SourceVideoCodec: "hevc"}
+	if got := castVideoCodecOut(remuxHEVC); got != "hevc" {
+		t.Errorf("castVideoCodecOut(remux/hevc) = %q, want hevc", got)
+	}
+	remuxH264 := &TranscodeSession{Remux: true, SourceVideoCodec: "h264"}
+	if got := castVideoCodecOut(remuxH264); got != "h264" {
+		t.Errorf("castVideoCodecOut(remux/h264) = %q, want h264", got)
+	}
+}
+
+func TestCastCloneOptsVideoTranscode(t *testing.T) {
+	src := &TranscodeSession{
+		Remux:            true,
+		SourceVideoCodec: "hevc",
+		AudioCodecOut:    "aac",
+		AudioTrackIndex:  0,
+		StartSec:         42,
+		BurnSubIndex:     -1,
+		BurnSubRelIndex:  -1,
+	}
+	// When needsVideoTranscode=true, Remux must be disabled and SourceVideoCodec cleared.
+	opts := castCloneOpts(src, true)
+	if opts.Remux {
+		t.Error("castCloneOpts(needsVideoTranscode=true): Remux should be false")
+	}
+	if opts.SourceVideoCodec != "" {
+		t.Errorf("castCloneOpts(needsVideoTranscode=true): SourceVideoCodec = %q, want empty", opts.SourceVideoCodec)
+	}
+	if opts.AudioCodecOut != "aac" {
+		t.Errorf("castCloneOpts: AudioCodecOut = %q, want aac", opts.AudioCodecOut)
+	}
+	// When needsVideoTranscode=false (audio-only clone), Remux is preserved.
+	opts2 := castCloneOpts(src, false)
+	if !opts2.Remux {
+		t.Error("castCloneOpts(needsVideoTranscode=false): Remux should mirror source")
+	}
+	if opts2.SourceVideoCodec != "hevc" {
+		t.Errorf("castCloneOpts(needsVideoTranscode=false): SourceVideoCodec = %q, want hevc", opts2.SourceVideoCodec)
+	}
+}
+
 // TestDecideStatic_TranscodeBranchMP3Recode pins the follow-up to review
 // finding B3: the static TRANSCODE branches (plain + Hi10P) used to copy mp3
 // while the remux branch re-encoded it — now every static HLS branch shares
