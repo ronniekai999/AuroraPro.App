@@ -303,6 +303,7 @@ func allowedRatingsForMax(maxRating string) []string {
 
 type MediaHandler struct {
 	queries  *db.Queries
+	activity *ActivityLogger  // optional; nil in tests
 	semantic SemanticSearcher // optional; nil when LLM is disabled
 }
 
@@ -324,8 +325,51 @@ type SemanticHit struct {
 	Reason string
 }
 
-func NewMediaHandler(queries *db.Queries) *MediaHandler {
-	return &MediaHandler{queries: queries}
+func NewMediaHandler(queries *db.Queries, activity *ActivityLogger) *MediaHandler {
+	return &MediaHandler{queries: queries, activity: activity}
+}
+
+// DeleteItem removes a media item (show or movie) and everything hanging off
+// it — files, seasons, episodes, artwork, cast, watch progress — from the
+// catalog. Admin-only. This is the manual counterpart to the scanner's
+// automatic empty-item cleanup (DeleteEmptyMediaItems): it lets an admin
+// remove a "no files available" ghost immediately instead of waiting for the
+// next scan, and also works on an item whose files are still on disk. The
+// files themselves are left untouched; only Aurora's library entry is removed.
+func (h *MediaHandler) DeleteItem(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid media id")
+		return
+	}
+
+	// Look the item up first so we have its title for the activity log and can
+	// return a clean 404 (vs a generic 200) when the id doesn't exist.
+	item, err := h.queries.GetMediaItem(r.Context(), id)
+	if err != nil || item == nil {
+		writeError(w, http.StatusNotFound, "media not found")
+		return
+	}
+
+	deleted, err := h.queries.DeleteMediaItem(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete media item")
+		return
+	}
+	if !deleted {
+		// Raced with another delete (or the scanner's empty-item sweep) between
+		// the lookup and the delete — already gone is the desired end state.
+		writeError(w, http.StatusNotFound, "media not found")
+		return
+	}
+
+	if h.activity != nil {
+		if claims := auth.GetClaims(r.Context()); claims != nil {
+			h.activity.LogMediaDeleted(r.Context(), claims.UserID, id, item.Title)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "media deleted"})
 }
 
 // SetSemanticSearcher attaches the optional semantic-search backend. Pass nil

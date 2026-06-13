@@ -16,6 +16,7 @@ import {
   RefreshIcon,
   InfoIcon,
   SparkleIcon,
+  TrashIcon,
 } from './icons'
 
 export interface DetailRow {
@@ -53,6 +54,10 @@ interface DetailRailProps {
   // admin
   onRefresh?: () => void
   onIdentify?: () => void
+  // admin "remove from library" — deletes Aurora's catalog entry for this
+  // title (files on disk are untouched). Used to clear a "no files available"
+  // ghost. Only set for admins; the host confirms before calling.
+  onDelete?: () => void
   className?: string
 }
 
@@ -116,6 +121,7 @@ export function DetailRail({
   detailRows,
   onRefresh,
   onIdentify,
+  onDelete,
   className,
 }: DetailRailProps) {
   const hasProgress = resumeFraction !== undefined
@@ -235,28 +241,43 @@ export function DetailRail({
       )}
 
       {/* Admin utilities */}
-      {(onRefresh || onIdentify) && (
-        <div className="flex gap-2.5">
-          {onRefresh && (
-            <button
-              type="button"
-              onClick={onRefresh}
-              title="Re-fetch metadata from TMDB/TVDB"
-              className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
-            >
-              <RefreshIcon size={15} />
-              Refresh
-            </button>
+      {(onRefresh || onIdentify || onDelete) && (
+        <div className="space-y-2.5">
+          {(onRefresh || onIdentify) && (
+            <div className="flex gap-2.5">
+              {onRefresh && (
+                <button
+                  type="button"
+                  onClick={onRefresh}
+                  title="Re-fetch metadata from TMDB/TVDB"
+                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
+                >
+                  <RefreshIcon size={15} />
+                  Refresh
+                </button>
+              )}
+              {onIdentify && (
+                <button
+                  type="button"
+                  onClick={onIdentify}
+                  title="Manually search TMDB/TVDB and pick the correct match"
+                  className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
+                >
+                  <InfoIcon size={15} />
+                  Identify
+                </button>
+              )}
+            </div>
           )}
-          {onIdentify && (
+          {onDelete && (
             <button
               type="button"
-              onClick={onIdentify}
-              title="Manually search TMDB/TVDB and pick the correct match"
-              className="flex-1 h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.05] text-white/55 hover:text-white/85 transition-all"
+              onClick={onDelete}
+              title="Remove from Aurora — deletes the library entry (files on disk are kept)"
+              className="w-full h-10 inline-flex items-center justify-center gap-2 rounded-xl text-[13px] font-medium bg-red-500/[0.06] hover:bg-red-500/[0.14] border border-red-500/15 text-red-300/70 hover:text-red-200 transition-all"
             >
-              <InfoIcon size={15} />
-              Identify
+              <TrashIcon size={15} />
+              Remove from Library
             </button>
           )}
         </div>

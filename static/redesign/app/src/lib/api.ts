@@ -1686,6 +1686,14 @@ export async function refreshMetadata(mediaItemId: number): Promise<void> {
   await apiFetch(`/api/media/${mediaItemId}/refresh-metadata`, { method: 'POST' })
 }
 
+// Remove a show/movie from the catalog (admin only). Deletes Aurora's library
+// entry and all of its episodes/files/metadata/watch history — the files on the
+// server's disk are NOT touched. Used by the detail-page trash action to clear
+// a "no files available" ghost left behind after the title was deleted on disk.
+export async function deleteMedia(mediaItemId: number): Promise<void> {
+  await apiFetch(`/api/media/${mediaItemId}`, { method: 'DELETE' })
+}
+
 export async function addToWatchlist(
   profileId: number, listId: number, mediaItemId: number,
 ): Promise<void> {

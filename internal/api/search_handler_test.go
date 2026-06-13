@@ -83,7 +83,7 @@ func TestSearchHandler_Routing(t *testing.T) {
 
 	search := func(t *testing.T, fake *fakeSemantic, rawQuery string) (*httptest.ResponseRecorder, []*models.MediaItem) {
 		t.Helper()
-		h := NewMediaHandler(q)
+		h := NewMediaHandler(q, nil)
 		if fake != nil {
 			h.SetSemanticSearcher(fake)
 		}
