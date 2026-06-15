@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
+import { installSyncDebug } from './lib/syncDebug'
 
 // 2026-05-27 — Install the diagnostic buffer as early as possible so
 // the bug-report flow can attach "what was happening before the user
@@ -15,6 +16,12 @@ import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 // idempotent + try/catch-wrapped internally; nothing here can break
 // app startup even if the patches throw on an exotic browser.
 installDiagnosticBuffer()
+
+// Opt-in watch-party sync telemetry. Installs the window.auroraSyncDebug()
+// / window.auroraSyncDump() console helpers and hydrates the on/off flag
+// from localStorage. Off by default — the guest drift loop pays only a
+// boolean read per tick until a user enables it to chase a sync bug.
+installSyncDebug()
 
 // Audit M4 fix (Phase 8) — basename is derived from Vite's
 // `import.meta.env.BASE_URL` instead of hardcoded "/v2". This makes
