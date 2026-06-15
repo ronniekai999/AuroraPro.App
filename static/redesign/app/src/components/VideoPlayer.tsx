@@ -27,7 +27,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
-import { Airplay, Cast, Maximize2, Pause, Play, SkipForward, StopCircle, X } from 'lucide-react'
+import { Airplay, Cast, Maximize2, Pause, Play, SkipForward, StopCircle, VolumeX, X } from 'lucide-react'
 import {
   deleteSkipMarker,
   forceTokenRefresh,
@@ -333,6 +333,46 @@ function saveBandwidthEstimate(bps: number | undefined): void {
   } catch { /* best-effort */ }
 }
 
+// attemptPlay starts playback with a muted-autoplay fallback for the
+// watch-party case. Browsers block a *sounded* programmatic play() that
+// isn't tied to a fresh user gesture (autoplay policy) — which is exactly
+// how a party starts playback (driven by a WebSocket tick/hello, not a
+// click). The result is the video silently stays paused until the user
+// performs some gesture (issue #334: "didn't start until I went full
+// screen" — entering fullscreen runs play() inside a gesture). Muted
+// autoplay IS permitted without a gesture, so on a block we retry muted
+// and call onMutedAutostart() so the UI can offer a one-tap unmute.
+//
+// muteFallback is false for ordinary single-viewer playback: there we'd
+// rather leave the video paused for an explicit click (with sound) than
+// start it muted, since the user is right there and a gesture is one tap
+// away. In a party, a stuck/desynced player is the worse outcome, so the
+// caller passes true.
+async function attemptPlay(
+  vid: HTMLVideoElement,
+  muteFallback: boolean,
+  onMutedAutostart: () => void,
+): Promise<void> {
+  try {
+    await vid.play()
+    return
+  } catch {
+    // NotAllowedError (sounded autoplay refused) or a teardown race.
+    if (!muteFallback) return // leave it to the user's explicit play
+  }
+  const prevMuted = vid.muted
+  try {
+    vid.muted = true
+    await vid.play()
+    onMutedAutostart()
+  } catch {
+    // Still blocked (or play() raced a teardown). Restore the prior mute
+    // state so we don't leave a paused element silently muted with no
+    // "Tap for sound" pill (which only shows on a SUCCESSFUL muted start).
+    vid.muted = prevMuted
+  }
+}
+
 export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -412,6 +452,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   useEffect(() => { realDurationSecRef.current = realDurationSec }, [realDurationSec])
   const [volume, setVolume] = useState(1)
   const [muted, setMuted] = useState(false)
+  // #334 — true when we auto-started playback MUTED because the browser
+  // blocked a sounded autoplay (party start fires play() outside a user
+  // gesture). Drives the "Tap for sound" affordance. Distinct from the
+  // user's own mute choice (`muted`); only ever set by attemptPlay's
+  // muted fallback, and cleared when the user restores sound or the
+  // target changes.
+  const [autoStartedMuted, setAutoStartedMuted] = useState(false)
+  // Latest party-active flag for async play() sites whose effect closure
+  // would otherwise capture a stale `party`. Assigned during render so it
+  // always reflects the current prop by the time a deferred boot play
+  // resolves. Only the party path opts into attemptPlay's muted fallback.
+  const partyActiveRef = useRef(false)
+  partyActiveRef.current = Boolean(party)
   const [fullscreen, setFullscreen] = useState(false)
   // Controls visibility — true when paused, or recently
   // mouse-moved, or first 2s after mount. Auto-fades after 3s of
@@ -1309,7 +1362,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // Booted: re-enable host broadcasts. The deferred resume seek + play
           // below are the host's intended state, safe to propagate.
           playerReadyRef.current = true
-          try { await vid.play() } catch { /* autoplay-blocked, user clicks play */ }
+          await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
           // A direct-play target has no castable HLS session; bump anyway so a
           // pending cast auto-advance resolves (loadCurrent finds no media and
           // stops the cast — direct-play can't be cast).
@@ -1430,7 +1483,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           vid.addEventListener('loadedmetadata', onNativeLoadedMetadata)
           vid.addEventListener('canplay', onNativeCanPlay)
           playerReadyRef.current = true
-          try { await vid.play() } catch { /* autoplay-blocked */ }
+          await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
           return
         }
 
@@ -1546,7 +1599,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // superseded target (defensive — hls.destroy() also detaches this).
           if (cancelled) return
           playerReadyRef.current = true
-          vid.play().catch(() => { /* autoplay-blocked, user clicks play */ })
+          void attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
         })
 
         // Belt-and-suspenders: if hls.js fires SUBTITLE_TRACKS_UPDATED
@@ -1785,6 +1838,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const hostBroadcastRecoveryFiredRef = useRef<boolean>(false)
   useEffect(() => {
     hostBroadcastRecoveryFiredRef.current = false
+    // New media: clear any stale "auto-muted" affordance from the prior
+    // title. If this one also gets a blocked autoplay, attemptPlay re-sets it.
+    setAutoStartedMuted(false)
   }, [target?.fileId, target?.mediaItemId])
   useEffect(() => {
     if (!target || !party) return
@@ -1896,7 +1952,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // paused player.
       if (party.isPlaying && vid.paused) {
         extendSuppression(150)
-        vid.play().catch(() => { /* autoplay-blocked */ })
+        // #334 — muted fallback so a guest whose browser blocks sounded
+        // autoplay still joins the timeline (muted) instead of sitting
+        // paused and drifting; the "Tap for sound" pill restores audio.
+        void attemptPlay(vid, true, () => setAutoStartedMuted(true))
       } else if (!party.isPlaying && !vid.paused) {
         extendSuppression(150)
         vid.pause()
@@ -2152,6 +2211,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const onVolumeChange = () => {
       setVolume(vid.volume)
       setMuted(vid.muted)
+      // #334 — once sound is restored (via the pill or the normal mute
+      // control), the auto-muted affordance has served its purpose.
+      if (!vid.muted) setAutoStartedMuted(false)
     }
     const onFullscreenChange = () => {
       // Issue #309 — iOS Safari reports the active fullscreen element via the
@@ -3093,6 +3155,32 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   else vid.pause()
                 }}
               />
+              {/* #334 — "Tap for sound" affordance. Shown only when we
+                  auto-started playback muted because the browser blocked a
+                  sounded autoplay (almost always a party start, where play()
+                  fires from a WebSocket event rather than a click). NOT gated
+                  on controlsVisible — it's a call to action that must stay
+                  put until the user acts. One tap restores audio and clears
+                  the flag (also cleared via onVolumeChange if they use the
+                  normal mute control). */}
+              {autoStartedMuted && (
+                <button
+                  type="button"
+                  aria-label="Playback started muted — tap for sound"
+                  onClick={() => {
+                    const vid = videoRef.current
+                    if (vid) {
+                      vid.muted = false
+                      if (vid.volume === 0) vid.volume = 1
+                    }
+                    setAutoStartedMuted(false)
+                  }}
+                  className="absolute bottom-24 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-2 rounded-full bg-purple-600/90 hover:bg-purple-600 px-4 h-10 text-white text-sm font-semibold shadow-lg animate-fade-in"
+                >
+                  <VolumeX size={18} />
+                  Tap for sound
+                </button>
+              )}
               {/* Cast button. Visible whenever the Cast SDK loaded
                   successfully, NOT gated on a currently-reachable
                   receiver — mDNS discovery is slow and unreliable
