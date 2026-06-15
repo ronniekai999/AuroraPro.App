@@ -52,6 +52,7 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
+import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -96,6 +97,11 @@ export interface PartySync {
   // when undefined OR null on first render we just don't apply it
   // (the drift loop falls back to assuming offset = 0, same as before).
   clockOffsetRef?: React.MutableRefObject<number>
+  // 2026-06-15 — smoothed round-trip time from the same NTP-style
+  // time-sync that fills clockOffsetRef. Only read by the opt-in
+  // sync-debug instrumentation (syncDebug.ts); the drift loop itself
+  // doesn't use it. Optional so non-debug callers needn't thread it.
+  rttRef?: React.MutableRefObject<number>
 }
 
 export interface PlayTarget {
@@ -1842,14 +1848,49 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const DRIFT_HARD_MS = 1800
     const RATE_UP = 1.05
     const RATE_DN = 0.95
+    // 2026-06-15 — opt-in sync telemetry. `dbg` is a single boolean read
+    // (window.__auroraSyncDebug); when off, every recordSyncSample call
+    // below is skipped and the drift loop is byte-for-byte the old hot
+    // path. bufferedAheadSec is the smoking-gun signal: near-zero buffer
+    // right before a hard-seek ⇒ the guest's HLS pipeline can't keep up
+    // (network/transcode); healthy buffer + hard-seek ⇒ a target/clock
+    // miscalc. See lib/syncDebug.ts.
+    const bufferedAheadOf = (v: HTMLVideoElement): number => {
+      try {
+        const b = v.buffered
+        const cur = v.currentTime
+        for (let i = 0; i < b.length; i++) {
+          if (cur >= b.start(i) - 0.25 && cur <= b.end(i) + 0.25) return Math.max(0, b.end(i) - cur)
+        }
+      } catch { /* TimeRanges can throw if the element is torn down */ }
+      return 0
+    }
     const id = window.setInterval(() => {
+      const dbg = isSyncDebugEnabled()
       // Host doesn't pull from server tick (it IS the source of truth).
       if (party.isHost) return
       // Audit H3 — bail out if the local player isn't showing the
       // party's media. Avoids cross-content seeks.
       if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
       const t = party.tickRef.current
-      if (!t) return
+      if (!t) {
+        if (dbg) recordSyncSample({ ms: Date.now(), decision: 'no-tick', readyState: vid.readyState, bufferedAheadSec: bufferedAheadOf(vid) })
+        return
+      }
+      // Build a telemetry sample from the tick + local element state.
+      // Only invoked under `if (dbg)`, so it costs nothing in production.
+      const mkSample = (decision: SyncDecision, extra?: Partial<SyncSample>): SyncSample => ({
+        ms: Date.now(),
+        decision,
+        readyState: vid.readyState,
+        playbackRate: vid.playbackRate,
+        bufferedAheadSec: bufferedAheadOf(vid),
+        clockOffsetMs: party.clockOffsetRef?.current,
+        rttMs: party.rttRef?.current,
+        absMs: t.abs_ms,
+        rev: t.rev,
+        ...extra,
+      })
       // Play/pause mirror — use the server's isPlaying as authority.
       // Do this BEFORE drift checking so we don't try to seek a
       // paused player.
@@ -1873,7 +1914,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // re-evaluate once vid.paused has flipped to false. Running
       // drift while paused snaps to a position the video hasn't
       // yet started playing from — visually janky.
-      if (vid.paused) return
+      if (vid.paused) {
+        if (dbg) recordSyncSample(mkSample('buffering'))
+        return
+      }
 
       // Extrapolate the tick by elapsed wall-clock since the server
       // emitted it. If the tick is older than ~3s, fall back to its
@@ -1905,6 +1949,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       const tickAgeMs = Date.now() - (t.receivedAtMs ?? Date.now())
       if (tickAgeMs > 3000) {
         if (vid.playbackRate !== 1.0) vid.playbackRate = 1.0
+        if (dbg) recordSyncSample(mkSample('stale', { tickAgeMs }))
         return
       }
       const clockOffset = party.clockOffsetRef?.current ?? 0
@@ -1923,8 +1968,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       const driftMs = (localSec - targetSec) * 1000
       const absDrift = Math.abs(driftMs)
 
+      const sampleExtra: Partial<SyncSample> = { driftMs, localSec, targetSec, projectedAbsMs, tickAgeMs }
+
       if (absDrift < DRIFT_IGNORE_MS) {
         if (vid.playbackRate !== 1.0) vid.playbackRate = 1.0
+        if (dbg) recordSyncSample(mkSample('ignore', sampleExtra))
         return
       }
       if (absDrift >= DRIFT_HARD_MS) {
@@ -1934,10 +1982,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         extendSuppression(300)
         try { vid.currentTime = targetSec } catch { /* defensive */ }
         vid.playbackRate = 1.0
+        if (dbg) recordSyncSample(mkSample('hard-seek', sampleExtra))
         return
       }
       // Small drift: rate-adjust. Behind → speed up; ahead → slow down.
       vid.playbackRate = driftMs < 0 ? RATE_UP : RATE_DN
+      if (dbg) recordSyncSample(mkSample(driftMs < 0 ? 'rate-up' : 'rate-down', sampleExtra))
     }, 250)
 
     // Host broadcast — only fire on local-origin events. Audit H3

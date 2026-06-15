@@ -10156,6 +10156,9 @@ export default function App() {
           // 2026-05-25 — NTP-style clock offset for drift extrapolation.
           // Filled by repeated time-syncs on the sync socket.
           clockOffsetRef: party.clockOffsetRef,
+          // 2026-06-15 — smoothed RTT from the same time-sync, surfaced
+          // for the opt-in sync-debug telemetry only.
+          rttRef: party.rttRef,
         } : undefined}
       />
 
