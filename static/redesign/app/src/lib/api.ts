@@ -2426,6 +2426,10 @@ export function tmdbPosterURL(path?: string): string {
 
 export interface CreatePartyRequest {
   media_item_id: number
+  // For TV shows: the specific episode the host is starting with. When set,
+  // guests who join an already-playing party can auto-open the correct episode.
+  // Omit for movies.
+  episode_id?: number
   media_title: string
   media_poster?: string
   initial_position_ms?: number

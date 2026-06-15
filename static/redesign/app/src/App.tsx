@@ -2556,7 +2556,10 @@ interface DetailViewProps {
   loading?: boolean
   error?: string | null
   // Phase 4 — kick off a watch party with this media as the seed.
-  onStartParty?: (m: Media) => void
+  // episodeId is the currently-relevant episode for TV shows (resume ep or
+  // first available), so the party is created with a valid episode_id and
+  // guests who join an already-playing party can auto-open the right episode.
+  onStartParty?: (m: Media, episodeId?: number) => void
   inParty?: boolean
   // Phase 4.5 — multi-season picker.
   seasons?: { season_number: number; episode_count?: number }[]
@@ -2866,7 +2869,19 @@ function DetailView({
             inLibrary={inLibrary}
             onToggleLibrary={() => onToggleLib(media)}
             onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
-            onParty={onStartParty ? () => onStartParty(media) : undefined}
+            onParty={onStartParty ? () => {
+              // For shows, pass the resume episode (ri) if available, else the
+              // first episode that has files. Without this the party is created
+              // with episode_id=null and guests who join an already-playing
+              // party can't auto-open the correct episode (they hit an empty
+              // /api/media/{id}/files response and bail silently).
+              const episodeId = media.type === 'show'
+                ? (ri?.type === 'show' && ri.episode_id
+                    ? ri.episode_id
+                    : apiEpisodes?.find(e => e.files && e.files.length > 0)?.id)
+                : undefined
+              onStartParty(media, episodeId)
+            } : undefined}
             inParty={inParty}
             detailRows={railDetailRows}
             onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
@@ -7954,7 +7969,15 @@ export default function App() {
           const files = await getMediaFiles(mediaItemId)
           if (myGen !== guestAutoOpenGenRef.current) return // stale
           const file = pickFile(files)
-          if (!file) return
+          if (!file) {
+            // Empty file list for a show means episode_id was missing from
+            // the party state (party created before the fix). Log so this is
+            // diagnosable without a silent no-op.
+            // eslint-disable-next-line no-console
+            console.warn('[Aurora] guest auto-open: no files found for media', mediaItemId,
+              '— party episode_id is null; host may have created the party for a TV show without episode context')
+            return
+          }
           const titleDetail = await getMedia(mediaItemId).catch(() => null)
           if (myGen !== guestAutoOpenGenRef.current) return // stale
           setPlayerTarget({
@@ -9116,7 +9139,7 @@ export default function App() {
   //      we don't need to verify it exists via a separate GET.
   //   2. Log + toast on EVERY exit path (success, join-fail, throw)
   //      so the user always sees something — no more silent state.
-  const handleStartParty = useCallback(async (m: Media) => {
+  const handleStartParty = useCallback(async (m: Media, episodeId?: number) => {
     if (party.state.code) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Leave the current party first.', type: 'info' }])
@@ -9126,6 +9149,7 @@ export default function App() {
     try {
       const resp = await createQuickParty({
         media_item_id: m.id,
+        episode_id: episodeId,
         media_title: m.title,
         // Strip ANY image-proxy size variant prefix to avoid
         // double-proxying (e.g. `/api/images/w500//api/images/...`).
