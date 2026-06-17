@@ -401,7 +401,7 @@ func Load() (*Config, error) {
 		},
 		Cache: CacheConfig{
 			ImageDir:     "/var/cache/aurora/images",
-			TranscodeDir: "/var/cache/aurora/transcode",
+			TranscodeDir: "/tmp/aurora-transcode",
 			SubtitleDir:  "/var/cache/aurora/subtitles",
 		},
 		Transcode: TranscodeConfig{

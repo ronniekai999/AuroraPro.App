@@ -503,22 +503,35 @@ rm -rf "$FRONTEND_TMP"
 chown -R aurora:aurora "$INSTALL_DIR"
 
 # ── Restart + health check ────────────────────────────────────────
-write_status restarting "Restarting aurora.service" "$OLD_SHA" "$NEW_SHA"
-log "restarting service..."
 
-# Wait for active HLS stream sessions (FFmpeg child processes) to
-# drain before restarting so viewers aren't interrupted mid-playback.
-# Timeout after 300 s to avoid blocking indefinitely.
+# Drain active HLS stream sessions before restarting: systemctl restart
+# sends SIGTERM to the entire cgroup (KillMode=control-group default),
+# which kills FFmpeg children immediately and breaks playback for active
+# viewers. Wait up to 300 s for streams to finish organically; the
+# _DRAIN_LOG_EVERY throttle keeps log noise low.
 _DRAIN_MAX=300
 _DRAIN_WAITED=0
-while pgrep -u aurora -x ffmpeg >/dev/null 2>&1 && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
-    log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s)..."
-    sleep 10
-    _DRAIN_WAITED=$((_DRAIN_WAITED + 10))
-done
-if [ "$_DRAIN_WAITED" -ge "$_DRAIN_MAX" ] && pgrep -u aurora -x ffmpeg >/dev/null 2>&1; then
-    log "WARNING: stream sessions still active after ${_DRAIN_MAX}s, restarting anyway"
+_DRAIN_LOG_EVERY=30  # log at most once per 30 s
+_DRAIN_NEXT_LOG=0
+if pgrep -u aurora ffmpeg >/dev/null 2>&1; then
+    write_status restarting "Waiting for active stream sessions to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
+    while pgrep -u aurora ffmpeg >/dev/null 2>&1 && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
+        if [ "$_DRAIN_WAITED" -ge "$_DRAIN_NEXT_LOG" ]; then
+            log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s)..."
+            _DRAIN_NEXT_LOG=$((_DRAIN_NEXT_LOG + _DRAIN_LOG_EVERY))
+        fi
+        sleep 10
+        _DRAIN_WAITED=$((_DRAIN_WAITED + 10))
+    done
+    if pgrep -u aurora ffmpeg >/dev/null 2>&1; then
+        log "WARNING: stream sessions still active after ${_DRAIN_MAX}s, restarting anyway"
+    else
+        log "stream sessions drained after ${_DRAIN_WAITED}s"
+    fi
 fi
+
+write_status restarting "Restarting aurora.service" "$OLD_SHA" "$NEW_SHA"
+log "restarting service..."
 
 systemctl restart aurora
 
