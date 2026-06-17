@@ -1668,6 +1668,19 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}
 
+	// Remux with audio re-encode (RemuxAudioCopy=false) causes audio skipping
+	// on native HLS players (issue #344). Video-copy segment boundaries are
+	// dictated by the source GOP — ffmpeg can only cut at existing keyframes, so
+	// segment lengths vary with scene-cut cadence. Re-encoded AAC against those
+	// irregular cuts produces small PTS discontinuities at each segment boundary
+	// that AVPlayer and Chrome-native-HLS hear as audible audio skips. Fall back
+	// to full transcode: -force_key_frames enforces clean segDuration-aligned
+	// boundaries. The audio recode cost is identical either way; only video
+	// encode is added.
+	if len(opts) > 0 && opts[0].Remux && !opts[0].RemuxAudioCopy {
+		opts[0].Remux = false
+	}
+
 	profiles := ResolveProfiles(tm.enabledProfiles, sourceWidth, sourceHeight)
 
 	// In remux mode, we only need one "profile" at the source resolution

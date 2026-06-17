@@ -143,6 +143,69 @@ func TestCreateSession_PerUserQuota(t *testing.T) {
 	}
 }
 
+// TestCreateSession_RemuxAudioRecodeFallback verifies that a remux session with
+// audio re-encoding (RemuxAudioCopy=false) is silently promoted to full
+// transcode so -force_key_frames can enforce clean segment boundaries and
+// prevent native-HLS audio skipping (issue #344).
+func TestCreateSession_RemuxAudioRecodeFallback(t *testing.T) {
+	fakeFFmpegOnPath(t)
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	tests := []struct {
+		name           string
+		remux          bool
+		remuxAudioCopy bool
+		wantRemux      bool
+	}{
+		{
+			name:           "remux+audio_copy stays remux",
+			remux:          true,
+			remuxAudioCopy: true,
+			wantRemux:      true,
+		},
+		{
+			name:           "remux+audio_recode falls back to transcode",
+			remux:          true,
+			remuxAudioCopy: false,
+			wantRemux:      false,
+		},
+		{
+			name:           "pure transcode unchanged",
+			remux:          false,
+			remuxAudioCopy: false,
+			wantRemux:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, err := tm.CreateSession(1, "alice", "/tmp/a.mkv", 1920, 1080, SessionOpts{
+				Remux:          tt.remux,
+				RemuxAudioCopy: tt.remuxAudioCopy,
+			})
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if s.Remux != tt.wantRemux {
+				t.Errorf("session.Remux = %v, want %v", s.Remux, tt.wantRemux)
+			}
+			// When promoted to transcode, profiles must carry quality params
+			// (CRF, bitrate strings) rather than the bare source-resolution stub.
+			if !s.Remux && len(s.Profiles) > 0 {
+				for _, p := range s.Profiles {
+					if p.CRF == 0 && p.VideoBitrate == "" {
+						t.Errorf("profile %q has no quality params after transcode promotion", p.Name)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCreateSession_GlobalLimitSentinel(t *testing.T) {
 	fakeFFmpegOnPath(t)
 	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{
