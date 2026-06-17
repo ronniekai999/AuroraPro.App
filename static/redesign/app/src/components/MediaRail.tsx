@@ -8,6 +8,22 @@ import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
 
+// onPlay is still accepted for backward compatibility with callers
+// (HomeView etc.) but the new cinema card design no longer renders a
+// hover-only Play CTA — clicking the card opens detail where Play
+// is the primary CTA. Keeping the prop in the type avoids touching
+// every call site; ignoring it via destructure-rest avoids the
+// unused-var lint.
+// 2026-05-27 — Per-rail icon + chip tint mapping. Each rail's title
+// drives both the icon glyph and the chip color via railIconFor()
+// (defined just below MediaRail). When the caller doesn't supply an
+// `icon`/`tint` explicitly, MediaRail resolves them from the title;
+// when nothing matches, defaults to the generic compass + purple chip.
+// This keeps the dynamic Discover/anchor rails (AI-generated titles)
+// working without per-rail wiring at every call site — but note that
+// LLM-curated titles are exactly the ones MOST likely to drift from
+// the prefix patterns in railIconFor, so the fallback exists for that
+// case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
 export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
