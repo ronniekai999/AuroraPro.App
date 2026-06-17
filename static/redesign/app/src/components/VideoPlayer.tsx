@@ -383,6 +383,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const startSecRef = useRef<number>(0)
+  // Cleanup function for diagnostic event listeners added to <video> in the
+  // native-HLS path. Called from the play-effect teardown so listeners don't
+  // accumulate across target changes (each new play registers a fresh set).
+  const nativeHlsDiagCleanupRef = useRef<(() => void) | null>(null)
   // Watch-party sync — false while the player is (re)booting a
   // session. Gates host play/pause/seek broadcasts so the transient
   // currentTime=0 / startSec=0 boot window can't propagate abs_ms=0 to the
@@ -1482,6 +1486,45 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           }
           vid.addEventListener('loadedmetadata', onNativeLoadedMetadata)
           vid.addEventListener('canplay', onNativeCanPlay)
+
+          // Diagnostic listeners — capture seek/stall/error events on the
+          // native-HLS path so that playback-skip reports (e.g. #338) include
+          // the actual currentTime jumps. The hls.js path has equivalent
+          // visibility via its ERROR event; this branch previously had none.
+          const onNativeSeeking = () => {
+            if (cancelled) return
+            console.debug('[Aurora native-HLS] seeking → target', vid.currentTime.toFixed(3), 's')
+          }
+          const onNativeSeeked = () => {
+            if (cancelled) return
+            console.debug('[Aurora native-HLS] seeked  → landed', vid.currentTime.toFixed(3), 's')
+          }
+          const onNativeWaiting = () => {
+            if (cancelled) return
+            console.debug('[Aurora native-HLS] waiting at', vid.currentTime.toFixed(3), 's')
+          }
+          const onNativeStalled = () => {
+            if (cancelled) return
+            console.debug('[Aurora native-HLS] stalled at', vid.currentTime.toFixed(3), 's')
+          }
+          const onNativeError = () => {
+            if (cancelled) return
+            const e = vid.error
+            console.warn('[Aurora native-HLS] error code', e?.code, '—', e?.message, 'at', vid.currentTime.toFixed(3), 's')
+          }
+          vid.addEventListener('seeking', onNativeSeeking)
+          vid.addEventListener('seeked', onNativeSeeked)
+          vid.addEventListener('waiting', onNativeWaiting)
+          vid.addEventListener('stalled', onNativeStalled)
+          vid.addEventListener('error', onNativeError)
+          nativeHlsDiagCleanupRef.current = () => {
+            vid.removeEventListener('seeking', onNativeSeeking)
+            vid.removeEventListener('seeked', onNativeSeeked)
+            vid.removeEventListener('waiting', onNativeWaiting)
+            vid.removeEventListener('stalled', onNativeStalled)
+            vid.removeEventListener('error', onNativeError)
+          }
+
           playerReadyRef.current = true
           await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
           return
@@ -1771,6 +1814,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     return () => {
       cancelled = true
       ac.abort()
+      nativeHlsDiagCleanupRef.current?.()
+      nativeHlsDiagCleanupRef.current = null
       closeAndCleanup()
     }
     // currentSubIndex is read once to restore subtitles across target changes;
