@@ -1679,6 +1679,8 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// encode is added.
 	if len(opts) > 0 && opts[0].Remux && !opts[0].RemuxAudioCopy {
 		opts[0].Remux = false
+		slog.Info("remux promoted to transcode: audio re-encode incompatible with video-copy segment boundaries",
+			"file", filepath.Base(filePath))
 	}
 
 	profiles := ResolveProfiles(tm.enabledProfiles, sourceWidth, sourceHeight)
