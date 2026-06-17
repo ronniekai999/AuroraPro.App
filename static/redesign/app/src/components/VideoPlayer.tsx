@@ -1434,8 +1434,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // cannot forward an MSE/blob source to an Apple TV. With a real m3u8
         // URL set on vid.src, Safari hands the URL to the receiver directly,
         // fixing the "device connects, no content plays" symptom (#314).
+        // Chrome on macOS returns non-empty for canPlayType('application/vnd.apple.mpegurl')
+        // (macOS advertises HLS at the system level) but Chrome's native media pipeline
+        // cannot demux fMP4/CMAF HLS segments — it fails immediately with
+        // DEMUXER_ERROR_COULD_NOT_PARSE (MediaError code 4). Restrict the native-HLS
+        // branch to browsers where hls.js is unavailable (true iOS WebKit) or to Safari
+        // specifically, where a real m3u8 URL on vid.src is required for AirPlay (#314/#317).
+        const isSafari = !('chrome' in window) && /\bsafari\b/i.test(navigator.userAgent)
         const usesNativeHls =
-          !Hls.isSupported() || vid.canPlayType('application/vnd.apple.mpegurl') !== ''
+          !Hls.isSupported() || (isSafari && vid.canPlayType('application/vnd.apple.mpegurl') !== '')
         if (usesNativeHls) {
           // withToken() is a no-op: tokens live in httpOnly cookies that the
           // browser sends automatically, but which Apple TV cannot access.
@@ -1560,6 +1567,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             if (cancelled) return
             const e = vid.error
             console.warn('[Aurora native-HLS] error code', e?.code, '—', e?.message, 'at', vid.currentTime.toFixed(3), 's')
+            // MEDIA_ERR_SRC_NOT_SUPPORTED (code 4): the browser cannot demux this
+            // stream at all — retrying in-place won't help. Surface the error and
+            // release the server session so FFmpeg doesn't idle until tab close.
+            // Detach diag listeners before closeAndCleanup(): that function calls
+            // vid.load() which can re-queue an error event on an empty src,
+            // re-entering onNativeError while it's still attached.
+            if (e?.code === 4) {
+              nativeHlsDiagCleanupRef.current?.()
+              nativeHlsDiagCleanupRef.current = null
+              setErrorMsg('Playback failed — this stream format is not supported by your browser')
+              closeAndCleanup()
+            }
           }
           vid.addEventListener('seeking', onNativeSeeking)
           vid.addEventListener('seeked', onNativeSeeked)
