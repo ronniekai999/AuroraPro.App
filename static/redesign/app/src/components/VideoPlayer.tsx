@@ -1487,10 +1487,52 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           vid.addEventListener('loadedmetadata', onNativeLoadedMetadata)
           vid.addEventListener('canplay', onNativeCanPlay)
 
-          // Diagnostic listeners — capture seek/stall/error events on the
-          // native-HLS path so that playback-skip reports (e.g. #338) include
-          // the actual currentTime jumps. The hls.js path has equivalent
-          // visibility via its ERROR event; this branch previously had none.
+          // Diagnostic listeners + stall recovery for the native-HLS path.
+          // The hls.js path has MEDIA_ERROR recovery; native HLS had none (#340).
+          const NATIVE_RECOVERY_DELAY_MS = 3000
+          const MAX_NATIVE_RECOVERY = 5
+          let nativeRecoveryTimer: ReturnType<typeof setTimeout> | null = null
+          let nativeRecoveryAttempts = 0
+
+          const cancelNativeRecovery = () => {
+            if (nativeRecoveryTimer !== null) {
+              clearTimeout(nativeRecoveryTimer)
+              nativeRecoveryTimer = null
+            }
+          }
+
+          const scheduleNativeRecovery = () => {
+            if (nativeRecoveryTimer !== null || nativeRecoveryAttempts >= MAX_NATIVE_RECOVERY) return
+            nativeRecoveryTimer = setTimeout(() => {
+              nativeRecoveryTimer = null
+              if (cancelled || vid.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) return
+              // Find the furthest buffered position ahead of currentTime.
+              const buf = vid.buffered
+              let nudgeTo: number | null = null
+              for (let i = 0; i < buf.length; i++) {
+                if (buf.end(i) > vid.currentTime + 0.05) {
+                  nudgeTo = Math.max(vid.currentTime, buf.end(i) - 0.1)
+                  break
+                }
+              }
+              nativeRecoveryAttempts++
+              if (nudgeTo !== null && nudgeTo > vid.currentTime) {
+                console.debug(
+                  '[Aurora native-HLS] nudge', vid.currentTime.toFixed(3),
+                  '→', nudgeTo.toFixed(3), 's (attempt', nativeRecoveryAttempts, ')'
+                )
+                vid.currentTime = nudgeTo
+              } else {
+                // No buffered data ahead yet — transcoder still catching up.
+                console.debug(
+                  '[Aurora native-HLS] no buffered range ahead at',
+                  vid.currentTime.toFixed(3), 's — re-arming (attempt', nativeRecoveryAttempts, ')'
+                )
+                scheduleNativeRecovery()
+              }
+            }, NATIVE_RECOVERY_DELAY_MS)
+          }
+
           const onNativeSeeking = () => {
             if (cancelled) return
             console.debug('[Aurora native-HLS] seeking → target', vid.currentTime.toFixed(3), 's')
@@ -1499,13 +1541,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             if (cancelled) return
             console.debug('[Aurora native-HLS] seeked  → landed', vid.currentTime.toFixed(3), 's')
           }
+          const onNativePlaying = () => {
+            if (cancelled) return
+            cancelNativeRecovery()
+            nativeRecoveryAttempts = 0
+          }
           const onNativeWaiting = () => {
             if (cancelled) return
             console.debug('[Aurora native-HLS] waiting at', vid.currentTime.toFixed(3), 's')
+            scheduleNativeRecovery()
           }
           const onNativeStalled = () => {
             if (cancelled) return
             console.debug('[Aurora native-HLS] stalled at', vid.currentTime.toFixed(3), 's')
+            scheduleNativeRecovery()
           }
           const onNativeError = () => {
             if (cancelled) return
@@ -1514,12 +1563,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           }
           vid.addEventListener('seeking', onNativeSeeking)
           vid.addEventListener('seeked', onNativeSeeked)
+          vid.addEventListener('playing', onNativePlaying)
           vid.addEventListener('waiting', onNativeWaiting)
           vid.addEventListener('stalled', onNativeStalled)
           vid.addEventListener('error', onNativeError)
           nativeHlsDiagCleanupRef.current = () => {
+            cancelNativeRecovery()
             vid.removeEventListener('seeking', onNativeSeeking)
             vid.removeEventListener('seeked', onNativeSeeked)
+            vid.removeEventListener('playing', onNativePlaying)
             vid.removeEventListener('waiting', onNativeWaiting)
             vid.removeEventListener('stalled', onNativeStalled)
             vid.removeEventListener('error', onNativeError)
