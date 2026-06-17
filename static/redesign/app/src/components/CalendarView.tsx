@@ -74,7 +74,7 @@ function formatGroupDate(iso: string): string {
   return `${weekday} · ${monthDay}`
 }
 
-export function CalendarView({ onOpenMedia }: Props) {
+export default function CalendarView({ onOpenMedia }: Props) {
   // Preference-loaded view mode. Defaults to 'list' on first visit;
   // localStorage round-trip persists across sessions per browser.
   const [viewMode, setViewMode] = useState<ViewMode>(() => {

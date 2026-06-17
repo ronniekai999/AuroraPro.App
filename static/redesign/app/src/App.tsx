@@ -108,8 +108,6 @@ import { TasteOnboardingGate } from '@/components/TasteOnboarding'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
-import { CollectionsView } from '@/components/CollectionsView'
-import { CalendarView } from '@/components/CalendarView'
 import { GamificationCard } from '@/components/GamificationCard'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -131,6 +129,12 @@ import ManualMatchModal from '@/components/admin/ManualMatchModal'
 // placeholder. ErrorBoundary in main.tsx catches chunk-load failures
 // (offline / stale deploy); ViewSuspense complements it.
 const AdminView = lazy(() => import('@/components/admin/AdminView'))
+// 2.1 — Collections & Calendar are already standalone modules; the
+// only change is swapping their static import for a lazy import and
+// wrapping the render site in <ViewSuspense>. First slice to exercise
+// the lazy + ViewSuspense wiring end-to-end.
+const CollectionsView = lazy(() => import('@/components/CollectionsView'))
+const CalendarView = lazy(() => import('@/components/CalendarView'))
 
 /* ─────────────────────── TYPES ─────────────────────── */
 interface Media {
@@ -7497,64 +7501,68 @@ export default function App() {
             }}
           />}
           {view === 'collections' && (
-            <CollectionsView
-              isAdmin={user.role === 'admin'}
-              rewindNonce={navRewindNonce}
-              onOpenCreate={() => setCollectionsModalOpen(true)}
-              onOpenMedia={(id) => {
-                // Synthesize a minimal Media shape for handleSelect;
-                // the detail fetch hydrates full data.
-                handleSelect({
-                  id,
-                  title: '',
-                  year: 0,
-                  rating: 0,
+            <ViewSuspense fallback={<ViewFallback />}>
+              <CollectionsView
+                isAdmin={user.role === 'admin'}
+                rewindNonce={navRewindNonce}
+                onOpenCreate={() => setCollectionsModalOpen(true)}
+                onOpenMedia={(id) => {
+                  // Synthesize a minimal Media shape for handleSelect;
+                  // the detail fetch hydrates full data.
+                  handleSelect({
+                    id,
+                    title: '',
+                    year: 0,
+                    rating: 0,
+                    duration: '',
+                    genre: '',
+                    type: 'movie',
+                    poster: '',
+                    description: '',
+                  })
+                }}
+                // QA BUG-007 — pass the same library affordance other
+                // surfaces (Movies/Shows/Search) already have. Map the
+                // ServerMediaItem to UIMedia carrying real poster/year/
+                // rating/genre so toggling into My Library persists the
+                // full record to localStorage (otherwise the stored
+                // entry shows up as a posterless year-0 placeholder
+                // until the next /api/media refresh re-hydrates it).
+                libraryIds={libraryIds}
+                onToggleLib={(m) => handleToggleLib({
+                  id: m.id,
+                  title: m.title,
+                  year: m.year ?? 0,
+                  rating: m.rating ?? 0,
                   duration: '',
-                  genre: '',
-                  type: 'movie',
-                  poster: '',
-                  description: '',
-                })
-              }}
-              // QA BUG-007 — pass the same library affordance other
-              // surfaces (Movies/Shows/Search) already have. Map the
-              // ServerMediaItem to UIMedia carrying real poster/year/
-              // rating/genre so toggling into My Library persists the
-              // full record to localStorage (otherwise the stored
-              // entry shows up as a posterless year-0 placeholder
-              // until the next /api/media refresh re-hydrates it).
-              libraryIds={libraryIds}
-              onToggleLib={(m) => handleToggleLib({
-                id: m.id,
-                title: m.title,
-                year: m.year ?? 0,
-                rating: m.rating ?? 0,
-                duration: '',
-                genre: (m.genres && m.genres[0]) || '',
-                type: m.type,
-                poster: posterURL(m.poster_path),
-                backdrop: backdropURL(m.backdrop_path),
-                description: m.overview ?? '',
-              })}
-            />
+                  genre: (m.genres && m.genres[0]) || '',
+                  type: m.type,
+                  poster: posterURL(m.poster_path),
+                  backdrop: backdropURL(m.backdrop_path),
+                  description: m.overview ?? '',
+                })}
+              />
+            </ViewSuspense>
           )}
           {/* Phase 6 — Calendar view (upcoming TV episodes). */}
           {view === 'calendar' && (
-            <CalendarView
-              onOpenMedia={(id) => {
-                handleSelect({
-                  id,
-                  title: '',
-                  year: 0,
-                  rating: 0,
-                  duration: '',
-                  genre: '',
-                  type: 'show',
-                  poster: '',
-                  description: '',
-                })
-              }}
-            />
+            <ViewSuspense fallback={<ViewFallback />}>
+              <CalendarView
+                onOpenMedia={(id) => {
+                  handleSelect({
+                    id,
+                    title: '',
+                    year: 0,
+                    rating: 0,
+                    duration: '',
+                    genre: '',
+                    type: 'show',
+                    poster: '',
+                    description: '',
+                  })
+                }}
+              />
+            </ViewSuspense>
           )}
           {view === 'requests' && (
             <RequestsView
