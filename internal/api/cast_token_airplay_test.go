@@ -71,6 +71,7 @@ func TestCreateCastToken_ForAirplaySkipsClone(t *testing.T) {
 	src, err := tm.CreateSession(7, "testuser", "/library/scooby.mkv", 1920, 1080,
 		streaming.SessionOpts{
 			Remux:            true,
+			RemuxAudioCopy:   true, // H.264+AAC source — audio can be copied as-is
 			SourceVideoCodec: "h264",
 			AudioCodecOut:    "aac",
 			AudioTrackIndex:  -1,
@@ -119,6 +120,7 @@ func TestCreateCastToken_WithoutForAirplayClonesRemux(t *testing.T) {
 	src, err := tm.CreateSession(7, "testuser", "/library/scooby.mkv", 1920, 1080,
 		streaming.SessionOpts{
 			Remux:            true,
+			RemuxAudioCopy:   true, // H.264+AAC source — audio can be copied as-is
 			SourceVideoCodec: "h264",
 			AudioCodecOut:    "aac",
 			AudioTrackIndex:  -1,
