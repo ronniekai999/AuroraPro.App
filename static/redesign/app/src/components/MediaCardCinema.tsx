@@ -188,6 +188,26 @@ export function MediaCardCinema({
       className={`media-card-cinema group ${className}`}
       onClick={onSelect}
       onContextMenu={onCardContext}
+      // 2026-06-17 (a11y quick-win) — make the whole card keyboard-
+      // activatable so the default browse surface isn't mouse-only.
+      // role="button" + tabIndex put it in the tab order; onKeyDown
+      // activates on Enter/Space. The `e.target !== e.currentTarget`
+      // guard is critical: nested controls (lib badge, AI gem, resume
+      // pill) are real <button>s, and without it a keydown fired while
+      // one of them is focused would bubble up and ALSO open detail — a
+      // double-action bug (the card opens detail AND toggles the
+      // library). Mirrors the MediaListRow pattern, with the guard that
+      // MediaListRow was missing (added there too).
+      role="button"
+      tabIndex={0}
+      aria-label={`${item.title}${item.year ? ` (${item.year})` : ''}`}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSelect()
+        }
+      }}
       // 2026-06-04 — the AI reason is NO LONGER a native title= tooltip on
       // the card. Native tooltips clash with the dark theme, lag ~1s, fire
       // from anywhere on the card (fighting the inner .title tooltip) and

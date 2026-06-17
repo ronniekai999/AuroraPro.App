@@ -38,3 +38,6 @@ static/v2/
 
 # Go build cache (in case anyone runs builds in-tree)
 /tmp/
+
+# Claude Code local (machine-specific) settings — keep personal
+.claude/settings.local.json
