@@ -506,6 +506,20 @@ chown -R aurora:aurora "$INSTALL_DIR"
 write_status restarting "Restarting aurora.service" "$OLD_SHA" "$NEW_SHA"
 log "restarting service..."
 
+# Wait for active HLS stream sessions (FFmpeg child processes) to
+# drain before restarting so viewers aren't interrupted mid-playback.
+# Timeout after 300 s to avoid blocking indefinitely.
+_DRAIN_MAX=300
+_DRAIN_WAITED=0
+while pgrep -u aurora -x ffmpeg >/dev/null 2>&1 && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
+    log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s)..."
+    sleep 10
+    _DRAIN_WAITED=$((_DRAIN_WAITED + 10))
+done
+if [ "$_DRAIN_WAITED" -ge "$_DRAIN_MAX" ] && pgrep -u aurora -x ffmpeg >/dev/null 2>&1; then
+    log "WARNING: stream sessions still active after ${_DRAIN_MAX}s, restarting anyway"
+fi
+
 systemctl restart aurora
 
 # Health-check loop: wait up to 30s for /api/health to respond. If
