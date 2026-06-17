@@ -1096,7 +1096,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </svg>
           </div>
           <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
-          <p className="text-white/40 text-sm mt-1">Your personal media universe</p>
+          <p className="text-white/60 text-sm mt-1">Your personal media universe</p>
         </div>
 
         {/* Card */}
@@ -1104,7 +1104,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <h2 className="text-white text-xl font-semibold mb-1">
             {isRegister ? (setupStatus && !setupStatus.has_users ? 'Welcome to Aurora' : 'Create Account') : 'Welcome Back'}
           </h2>
-          <p className="text-white/40 text-sm mb-6">
+          <p className="text-white/60 text-sm mb-6">
             {isRegister
               ? (setupStatus && !setupStatus.has_users
                 ? "You're the first user on this server — your account becomes the admin."
@@ -1114,8 +1114,9 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
 
           <div className="space-y-4">
             <div>
-              <label className="block text-white/60 text-sm mb-2">Username</label>
+              <label htmlFor="login-username" className="block text-white/60 text-sm mb-2">Username</label>
               <input
+                id="login-username"
                 type="text"
                 placeholder="Enter username"
                 className="w-full"
@@ -1127,8 +1128,9 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </div>
             {isRegister && (
               <div>
-                <label className="block text-white/60 text-sm mb-2">Email</label>
+                <label htmlFor="login-email" className="block text-white/60 text-sm mb-2">Email</label>
                 <input
+                  id="login-email"
                   type="email"
                   placeholder="you@example.com"
                   className="w-full"
@@ -1140,8 +1142,9 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               </div>
             )}
             <div>
-              <label className="block text-white/60 text-sm mb-2">Password</label>
+              <label htmlFor="login-password" className="block text-white/60 text-sm mb-2">Password</label>
               <input
+                id="login-password"
                 type="password"
                 placeholder="Enter password"
                 value={password}
@@ -1153,8 +1156,9 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </div>
             {isRegister && inviteRequired && (
               <div>
-                <label className="block text-white/60 text-sm mb-2">Invite Code</label>
+                <label htmlFor="login-invite" className="block text-white/60 text-sm mb-2">Invite Code</label>
                 <input
+                  id="login-invite"
                   type="text"
                   placeholder="From your server admin"
                   className="w-full"
@@ -1167,7 +1171,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           </div>
 
           {error && (
-            <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
+            <div role="alert" className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
               {error}
             </div>
           )}
@@ -2165,6 +2169,11 @@ function BrowseView({
   // there's more than one to rotate through.
   useEffect(() => {
     if (heroPool.length < 2 || heroPaused) return
+    // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion: a
+    // 9s crossfade that swaps the hero background + text mid-read is
+    // problematic for low-vision users. Skip auto-rotation; the manual
+    // hover-pause / "Not tonight" affordances still work.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
     const id = window.setInterval(() => {
       setHeroIdx(i => (i + 1) % heroPool.length)
     }, 9000)
@@ -3866,10 +3875,14 @@ function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, on
               {section.items.map(item => (
                 <div key={item.key} className="flex items-center justify-between py-2">
                   <div>
-                    <p className="text-white/80 text-sm font-medium">{item.label}</p>
-                    <p className="text-white/40 text-xs">{item.desc}</p>
+                    <p id={`setting-label-${item.key}`} className="text-white/80 text-sm font-medium">{item.label}</p>
+                    <p className="text-white/60 text-xs">{item.desc}</p>
                   </div>
                   <button
+                    type="button"
+                    role="switch"
+                    aria-checked={!!settings[item.key]}
+                    aria-labelledby={`setting-label-${item.key}`}
                     className={`toggle ${settings[item.key] ? 'active' : ''}`}
                     onClick={() => toggle(item.key)}
                   >
@@ -6868,7 +6881,7 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
               <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
                 <h4 className="text-white/90 text-sm font-medium">{e.event_type.replace(/_/g, ' ')}</h4>
                 {e.username && <p className="text-white/50 text-xs mt-0.5">{e.username}</p>}
-                <p className="text-white/30 text-xs mt-1">{fmtRel(e.created_at)}</p>
+                <p className="text-white/60 text-xs mt-1">{fmtRel(e.created_at)}</p>
               </div>
             ))}
           </>
@@ -6880,12 +6893,6 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 
 /* ─────────────────────── TOAST CONTAINER ─────────────────────── */
 function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: string) => void }) {
-  useEffect(() => {
-    toasts.forEach(t => {
-      setTimeout(() => onRemove(t.id), 3000)
-    })
-  }, [toasts, onRemove])
-
   return (
     // 2026-05-27 (holistic deep-debug H1) — opt out of html2canvas
     // bug-report captures. Toasts are transient meta-UI, not the
@@ -6901,17 +6908,54 @@ function ToastContainer({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: 
     // owns the corner and toasts respect it.
     <div className="fixed bottom-[5.5rem] right-6 z-[200] flex flex-col gap-3" data-screenshot-exclude="true">
       {toasts.map(t => (
-        <div key={t.id} className="toast">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
-            t.type === 'success' ? 'bg-emerald-500/10 text-emerald-400' :
-            t.type === 'error' ? 'bg-red-500/10 text-red-400' :
-            'bg-purple-500/10 text-purple-400'
-          }`}>
-            <Icon name={t.type === 'success' ? 'check' : t.type === 'error' ? 'x' : 'info'} size={16} />
-          </div>
-          <p className="text-white/80 text-sm">{t.message}</p>
-        </div>
+        <ToastItem key={t.id} t={t} onRemove={onRemove} />
       ))}
+    </div>
+  )
+}
+
+// 2026-06-17 (a11y quick-win) — single toast with a live-region role
+// (role="alert" for errors = assertive, role="status" for success/info
+// = polite) so screen readers actually announce toasts, a hover/focus
+// pause, and a keyboard dismiss button. Owns its own 3s timer; the
+// previous shared effect re-set a fresh 3s timeout for ALL toasts on
+// every render (so a busy session could keep them alive indefinitely).
+// `onRemove` (App's removeToast) is a stable useCallback, so this timer
+// effect only re-runs on pause toggle, not every parent render.
+function ToastItem({ t, onRemove }: { t: Toast; onRemove: (id: string) => void }) {
+  const [paused, setPaused] = useState(false)
+  useEffect(() => {
+    if (paused) return
+    const id = window.setTimeout(() => onRemove(t.id), 3000)
+    return () => window.clearTimeout(id)
+  }, [paused, t.id, onRemove])
+  return (
+    <div
+      className="toast"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onFocus={() => setPaused(true)}
+      onBlur={() => setPaused(false)}
+    >
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
+        t.type === 'success' ? 'bg-emerald-500/10 text-emerald-400' :
+        t.type === 'error' ? 'bg-red-500/10 text-red-400' :
+        'bg-purple-500/10 text-purple-400'
+      }`}>
+        <Icon name={t.type === 'success' ? 'check' : t.type === 'error' ? 'x' : 'info'} size={16} />
+      </div>
+      {/* role on the message <p> (not the whole toast) so the live
+          region announces ONLY the message — not the "×" close glyph
+          or the decorative icon. */}
+      <p className="text-white/80 text-sm" role={t.type === 'error' ? 'alert' : 'status'}>{t.message}</p>
+      <button
+        type="button"
+        onClick={() => onRemove(t.id)}
+        aria-label="Dismiss notification"
+        className="ml-1 text-white/50 hover:text-white transition-colors flex-shrink-0"
+      >
+        ×
+      </button>
     </div>
   )
 }
@@ -6922,7 +6966,7 @@ function BrowseLoadingState({ title }: { title: string }) {
     <div className="animate-fade-in">
       <div className="mb-8">
         <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
-        <p className="text-white/40 text-sm mt-2">Loading your library…</p>
+        <p className="text-white/60 text-sm mt-2">Loading your library…</p>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
         {Array.from({ length: 12 }).map((_, i) => (
@@ -9398,6 +9442,11 @@ export default function App() {
   // steady-state cadence.
   useEffect(() => {
     if (heroPool.length < 2 || heroPaused) return
+    // 2026-06-17 (a11y quick-win) — respect prefers-reduced-motion (see
+    // the BrowseView hero for rationale): skip the 9s auto-rotation so
+    // the hero doesn't swap art + text out from under a low-vision
+    // reader. Manual advance / hover-pause still work.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
     const id = window.setInterval(() => {
       const next = (heroIndexRef.current + 1) % heroPool.length
       setHeroIndex(next)

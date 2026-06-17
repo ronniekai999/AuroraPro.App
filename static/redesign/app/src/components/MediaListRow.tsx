@@ -83,6 +83,11 @@ export function MediaListRow({
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
+        // Don't activate the row when a nested control (the lib-add
+        // button) has focus — that would double-fire (open detail AND
+        // toggle the library). Only activate when the row itself is
+        // the event target.
+        if (e.target !== e.currentTarget) return
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
           onSelect()

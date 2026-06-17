@@ -82,6 +82,14 @@
     --ring: 270 91% 65%;
     --radius: 0.625rem;
 
+    /* 2026-06-17 (a11y quick-win) — secondary text token for content
+       that must clear WCAG AA (>=4.5:1). Formalizes the
+       rgba(220, 220, 232, 0.65) color the media-card meta already uses
+       (.media-card-cinema .shelf .meta below) so table headers,
+       timestamps, and hints share one source of truth instead of
+       dropping to text-white/40 (~3.9:1, fails AA). */
+    --text-secondary: rgba(220, 220, 232, 0.65);
+
     /* Typeface system tokens — drive body + display type everywhere
        (body, .font-display, .holo-text all read these vars). Default
        (no data-font attribute) is "NOVA": Sora display + Inter Tight
@@ -930,7 +938,7 @@
      new color clears 5:1 while still reading as "secondary" against
      the title (which stays at near-white). Star and reason keep their
      accent colors; only the year/genre got dim. */
-  color: rgba(220, 220, 232, 0.65);
+  color: var(--text-secondary);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1055,6 +1063,38 @@ input:not([type="range"]):focus, select:focus, textarea:focus {
 
 input::placeholder, textarea::placeholder {
   color: rgba(255, 255, 255, 0.35);
+}
+
+/* 2026-06-17 (a11y quick-win) — visible keyboard focus indicator for
+   the interactive elements that had no focus style app-wide (only
+   .media-list-row / .ai-gem / .resume-pill / inputs had one). Targets
+   buttons, links, role=button/switch/menuitem/tab/option divs, and
+   anything with tabindex (the cards). :focus-visible = keyboard focus
+   only, so mouse clicks stay ring-free.
+
+   Deliberately UNLAYERED: unlayered CSS beats @layer rules in the
+   cascade, so this outline renders even where a Tailwind
+   `focus:outline-none` utility (in @layer utilities) would otherwise
+   suppress it. That makes it a true a11y floor — focus is ALWAYS
+   visibly indicated, including on controls that have no other focus
+   style (e.g. MiniDock's border-0 input). Tradeoff: elements that
+   already have a designed focus ring (`focus-visible:ring-*`) show
+   this outline AS WELL as their ring — a slightly bolder double
+   indicator, still accessible. Preferred over moving to @layer base,
+   which would let `focus:outline-none` utilities win and HIDE focus on
+   the ~13 controls that use outline-none with no ring. Inputs are
+   exempted below — their own higher-specificity `:focus` rule
+   (border + box-shadow) already provides the indicator. */
+:focus-visible {
+  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline-offset: 2px;
+}
+/* Inputs/selects/textareas keep their own border + box-shadow focus
+   treatment (above) — don't stack a ring on top of it. */
+input:not([type="range"]):focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
 }
 
 /* Toggle switch */
@@ -1195,7 +1235,7 @@ input::placeholder, textarea::placeholder {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: rgba(255, 255, 255, 0.4);
+  color: var(--text-secondary);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -1609,4 +1649,26 @@ input::placeholder, textarea::placeholder {
      under reduced-motion we must reveal them directly instead of disabling the
      animation (which would leave them invisible). */
   .onb-stagger > *, .onb-mtile.onb-in { opacity: 1 !important; transform: none !important; animation: none !important; }
+}
+
+/* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
+   blocks above already guard most decorative motion (convo-search,
+   media-card, onboarding, recap), but these infinite animations had no
+   guard: .animate-pulse-glow, .status-dot.processing, .animate-chromatic
+   + .holo-text::before, .animate-float, .animate-shimmer,
+   .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
+   (skeletons + spinners become static — still visible, just not
+   animating). */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse-glow,
+  .status-dot.processing,
+  .animate-chromatic,
+  .holo-text::before,
+  .animate-float,
+  .animate-shimmer,
+  .aurora-pulse-blob,
+  .animate-pulse,
+  .animate-spin {
+    animation: none !important;
+  }
 }

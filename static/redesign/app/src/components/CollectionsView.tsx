@@ -15,6 +15,16 @@ import {
   type ServerMediaItem,
 } from '@/lib/api'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from '@/components/ui/alert-dialog'
 
 interface Props {
   isAdmin: boolean
@@ -44,6 +54,18 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
   const [items, setItems] = useState<ServerMediaItem[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loadingItems, setLoadingItems] = useState(false)
+  // 2026-06-17 (a11y quick-win) — replaces window.confirm / window.alert
+  // on remove-from-collection + delete-collection. The native dialogs
+  // clash with the dark glass UI and aren't part of the app's design
+  // language. `confirm` holds the pending destructive op; `dialogError`
+  // surfaces a failure inside the same dialog so the user can retry /
+  // cancel without a jarring native popup.
+  const [confirm, setConfirm] = useState<
+    | { kind: 'remove'; collectionId: number; mediaId: number; title: string }
+    | { kind: 'delete'; collectionId: number; title: string }
+    | null
+  >(null)
+  const [dialogError, setDialogError] = useState<string | null>(null)
 
   // Re-click on the Collections nav resets to the index. Skip the
   // initial render (nonce === 0 OR undefined) so first-paint doesn't
@@ -83,12 +105,77 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
     return () => { cancelled = true; ac.abort() }
   }, [selected])
 
+  // 2026-06-17 (a11y quick-win) — controlled confirm dialog for the
+  // remove-from-collection + delete-collection destructive actions
+  // (replaces window.confirm / window.alert). Rendered once and
+  // appended to both the detail and list return paths below.
+  const confirmDialog = confirm && (
+    <AlertDialog
+      open
+      onOpenChange={(o) => { if (!o) { setConfirm(null); setDialogError(null) } }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {confirm.kind === 'remove' ? `Remove "${confirm.title}"?` : `Delete "${confirm.title}"?`}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {confirm.kind === 'remove'
+              ? 'Remove this title from the collection?'
+              : 'Delete this collection? This cannot be undone.'}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {dialogError && <p role="alert" className="text-sm text-red-400">{dialogError}</p>}
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-red-600 hover:bg-red-500 text-white"
+            onClick={async (e) => {
+              // Keep the dialog open while the op runs / on error so
+              // dialogError shows in place. Radix closes AlertDialog
+              // Action on click by default; preventDefault stops that.
+              e.preventDefault()
+              try {
+                if (confirm.kind === 'remove') {
+                  await removeFromCollection(confirm.collectionId, confirm.mediaId)
+                  setItems((prev) => prev.filter((x) => x.id !== confirm.mediaId))
+                  setCollections((prev) =>
+                    prev?.map((c) =>
+                      c.id === confirm.collectionId
+                        ? { ...c, item_count: Math.max(0, (c.item_count ?? 1) - 1) }
+                        : c,
+                    ) ?? null,
+                  )
+                } else {
+                  await deleteCollection(confirm.collectionId)
+                  setCollections((prev) => prev?.filter((x) => x.id !== confirm.collectionId) || [])
+                  // If viewing the deleted collection's detail, pop back to the list.
+                  if (selected === confirm.collectionId) setSelected(null)
+                }
+                setConfirm(null)
+                setDialogError(null)
+              } catch (err) {
+                setDialogError(
+                  (confirm.kind === 'remove' ? 'Remove failed: ' : 'Delete failed: ') +
+                  (err instanceof Error ? err.message : 'unknown'),
+                )
+              }
+            }}
+          >
+            {confirm.kind === 'remove' ? 'Remove' : 'Delete'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
+
   if (error) return <p className="text-red-300 p-8">{error}</p>
-  if (collections === null) return <p className="text-white/40 p-8">Loading collections…</p>
+  if (collections === null) return <p className="text-white/60 p-8">Loading collections…</p>
 
   if (selected != null) {
     const c = collections.find((x) => x.id === selected)
     return (
+      <>
       <div className="animate-fade-in">
         <button
           onClick={() => setSelected(null)}
@@ -107,16 +194,16 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
             ✨ AI-curated from: "{c.prompt}"
           </p>
         )}
-        <p className="text-white/40 text-sm mb-8">
+        <p className="text-white/60 text-sm mb-8">
           {items.length} title{items.length === 1 ? '' : 's'}
         </p>
 
         {loadingItems ? (
-          <p className="text-white/40 text-sm">Loading…</p>
+          <p className="text-white/60 text-sm">Loading…</p>
         ) : items.length === 0 ? (
           <div className="text-center py-20">
             <p className="text-white/60 text-lg">This collection is empty.</p>
-            <p className="text-white/40 text-sm mt-2">
+            <p className="text-white/60 text-sm mt-2">
               Add titles via the right-click context menu on any media card.
             </p>
           </div>
@@ -145,26 +232,9 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
                 onToggleLib={onToggleLib ? () => onToggleLib(m) : undefined}
                 topRightOverlay={isAdmin && (
                   <button
-                    onClick={async (e) => {
+                    onClick={(e) => {
                       e.stopPropagation()
-                      if (!window.confirm(`Remove "${m.title}" from this collection?`)) return
-                      try {
-                        await removeFromCollection(selected, m.id)
-                        setItems((prev) => prev.filter((x) => x.id !== m.id))
-                        // Audit L4 fix — decrement the cached
-                        // item_count on the parent list so the
-                        // detail-view → back-to-list path doesn't
-                        // show a stale count.
-                        setCollections((prev) =>
-                          prev?.map((c) =>
-                            c.id === selected
-                              ? { ...c, item_count: Math.max(0, (c.item_count ?? 1) - 1) }
-                              : c,
-                          ) ?? null,
-                        )
-                      } catch (err) {
-                        window.alert('Remove failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                      }
+                      setConfirm({ kind: 'remove', collectionId: selected, mediaId: m.id, title: m.title })
                     }}
                     title="Remove from collection"
                     aria-label={`Remove ${m.title} from collection`}
@@ -178,10 +248,13 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
           </div>
         )}
       </div>
+      {confirmDialog}
+      </>
     )
   }
 
   return (
+    <>
     <div className="animate-fade-in">
       <div className="flex items-center justify-between mb-8">
         <div>
@@ -207,7 +280,7 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
       {collections.length === 0 ? (
         <div className="text-center py-20">
           <p className="text-white/60 text-lg">No collections yet.</p>
-          <p className="text-white/40 text-sm mt-2 max-w-md mx-auto">
+          <p className="text-white/60 text-sm mt-2 max-w-md mx-auto">
             Create one manually or describe a vibe and let Aurora's AI build it
             from your library.
           </p>
@@ -269,19 +342,14 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
               </div>
               {isAdmin && (
                 <button
-                  onClick={async (e) => {
+                  onClick={(e) => {
                     e.stopPropagation()
-                    if (!window.confirm(`Delete "${c.name}"? This can't be undone.`)) return
-                    try {
-                      await deleteCollection(c.id)
-                      setCollections((prev) => prev?.filter((x) => x.id !== c.id) || [])
-                    } catch (err) {
-                      window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                    }
+                    setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })
                   }}
                   onKeyDown={(e) => e.stopPropagation()}
                   className="absolute top-3 right-3 w-7 h-7 rounded-full bg-black/40 hover:bg-red-500/80 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs z-10"
                   title="Delete collection"
+                  aria-label={`Delete collection ${c.name}`}
                 >
                   ×
                 </button>
@@ -291,5 +359,7 @@ export function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, libraryIds
         </div>
       )}
     </div>
+    {confirmDialog}
+    </>
   )
 }
