@@ -2055,11 +2055,13 @@ func renderCodeSpan(s string) string {
 //   - exhaust memory (entry-count and per-field char caps)
 
 // consoleEntry mirrors the frontend ConsoleEntry shape. All fields
-// are normalized + truncated at parse time.
+// are normalized + truncated at parse time. Decoding goes through the
+// custom UnmarshalJSON below (the unexported fields carry no struct
+// tags because encoding/json never touches them directly).
 type consoleEntry struct {
-	ts      string `json:"ts"`
-	level   string `json:"level"`
-	message string `json:"message"`
+	ts      string
+	level   string
+	message string
 }
 
 // UnmarshalJSON handles the field-rename gymnastics — frontend ships
@@ -2098,13 +2100,16 @@ func normalizeConsoleLevel(raw string) string {
 	}
 }
 
+// networkEntry mirrors the frontend NetworkEntry shape. Like
+// consoleEntry, decoding is handled by the custom UnmarshalJSON below,
+// so the unexported fields carry no struct tags.
 type networkEntry struct {
-	ts           string `json:"ts"`
-	method       string `json:"method"`
-	url          string `json:"url"`
-	status       int    `json:"status"`
-	durationMs   int    `json:"durationMs"`
-	responseSize int64  `json:"responseSize"`
+	ts           string
+	method       string
+	url          string
+	status       int
+	durationMs   int
+	responseSize int64
 }
 
 func (n *networkEntry) UnmarshalJSON(data []byte) error {

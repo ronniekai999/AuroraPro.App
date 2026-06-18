@@ -82,8 +82,8 @@ func TestCreateCastToken_ForAirplaySkipsClone(t *testing.T) {
 	}
 
 	authSvc := auth.NewService(config.AuthConfig{
-		JWTSecret:        "test-secret-that-is-at-least-32-chars-long-yes",
-		CastTokenExpiry:  4 * 3600 * 1e9, // 4h in nanoseconds
+		JWTSecret:       "test-secret-that-is-at-least-32-chars-long-yes",
+		CastTokenExpiry: 4 * 3600 * 1e9, // 4h in nanoseconds
 	})
 	h := &StreamHandler{transcode: tm, authSvc: authSvc}
 

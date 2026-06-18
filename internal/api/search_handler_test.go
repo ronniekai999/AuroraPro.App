@@ -77,8 +77,8 @@ func TestSearchHandler_Routing(t *testing.T) {
 	// DeleteLibrary CASCADEs the seeded media_items.
 	t.Cleanup(func() { _, _ = q.DeleteLibrary(context.Background(), lib.ID) })
 
-	titleItem := seedSearchMovie(t, q, lib.ID, "A Time to Kill "+suffix) // #207: long exact title, no marker
-	likeItem := seedSearchMovie(t, q, lib.ID, "As You Like It "+suffix)  // title that trips the "like" marker
+	titleItem := seedSearchMovie(t, q, lib.ID, "A Time to Kill "+suffix)  // #207: long exact title, no marker
+	likeItem := seedSearchMovie(t, q, lib.ID, "As You Like It "+suffix)   // title that trips the "like" marker
 	semItem := seedSearchMovie(t, q, lib.ID, "Semantic Sentinel "+suffix) // what the fake LLM returns
 
 	search := func(t *testing.T, fake *fakeSemantic, rawQuery string) (*httptest.ResponseRecorder, []*models.MediaItem) {

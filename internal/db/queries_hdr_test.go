@@ -65,10 +65,10 @@ func TestGetMediaItemsWithHDR(t *testing.T) {
 	ownerID := seedTestUser(t, q)
 	libraryID := seedTestLibrary(t, q, ownerID)
 
-	pq := seedTestMediaItem(t, q, libraryID)   // HDR10 (PQ)
-	hlg := seedTestMediaItem(t, q, libraryID)  // HLG
-	sdr := seedTestMediaItem(t, q, libraryID)  // bt709
-	none := seedTestMediaItem(t, q, libraryID) // empty transfer (unscanned)
+	pq := seedTestMediaItem(t, q, libraryID)    // HDR10 (PQ)
+	hlg := seedTestMediaItem(t, q, libraryID)   // HLG
+	sdr := seedTestMediaItem(t, q, libraryID)   // bt709
+	none := seedTestMediaItem(t, q, libraryID)  // empty transfer (unscanned)
 	mixed := seedTestMediaItem(t, q, libraryID) // one SDR + one HDR file → HDR
 
 	seedMediaFile(t, q, pq, "smpte2084")
