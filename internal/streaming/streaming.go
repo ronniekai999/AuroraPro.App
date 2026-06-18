@@ -2428,6 +2428,72 @@ func audioBitrate(channels int) string {
 	return fmt.Sprintf("%dk", bps)
 }
 
+// timestampPrefixArgs returns the FFmpeg input-side timestamp options that
+// precede -i for a variant, chosen by delivery path (remux vs full transcode).
+// It is extracted from startVariantImpl so the A/V-anchoring contract is
+// unit-testable without spawning FFmpeg.
+//
+// avoid_negative_ts: the MPEG-TS muxer tolerates "disabled" (and needs it —
+// otherwise it adds its own ~1.4 s PTS offset that desyncs subtitle cue times),
+// but the mov/fMP4 muxer requires non-negative dts: with "disabled", a
+// B-frame-reordered stream whose first dts < 0 makes the muxer error out.
+// "make_zero" shifts mux-side so the first dts is exactly 0, which for fMP4
+// lands the first presentation time within one frame of 0 (the WebVTT
+// X-TIMESTAMP-MAP uses 0 in fMP4 mode — see getSessionInitPTS).
+//
+// Both paths converge on -copyts -start_at_zero, which preserves the source's
+// A/V relative timing (through a re-encode, or across a -ss seek) and shifts
+// both streams' first PTS to 0 together. The fresh-start transcode branch used
+// to use +genpts instead, on the assumption that fresh encoder timestamps
+// would self-align; that assumption is wrong when audio is re-encoded
+// (EAC-3/DTS → AAC, the path #345 promotes remux to), because the AAC
+// encoder's priming/delay samples get fresh PTS unanchored to the
+// force-keyframed video. hls.js then carried that startup A/V offset into the
+// first fragments and corrected it at the first 1-2 segment boundaries —
+// audible as the "drops at 6 s and 12 s then fine" reported in #348. Anchoring
+// with -copyts -start_at_zero eliminates the offset. +discardcorrupt is kept
+// on the transcode path for damaged-source protection (the mid-stream
+// auto-restart path flows through here too — dropping it would make
+// restart-from-crash re-crash immediately on a damaged MKV, #131). The
+// returned slice does NOT include the -ss seek arg; the caller appends it
+// when startSec > 0.
+//
+// Escalation note: if a residual startup A/V offset ever appears on a source
+// whose AAC priming -copyts does not fully zero, the next lever is an audio
+// filter -af aresample=async=1:first_pts=0 in audioEncodeArgs (forces the
+// first audio PTS to exactly 0). Not needed today; documented so the fix
+// has a known next step if #348-style drift resurfaces on an odd source.
+func timestampPrefixArgs(session *TranscodeSession) []string {
+	avoidNegTS := "disabled"
+	if session.FMP4 {
+		avoidNegTS = "make_zero"
+	}
+
+	if session.Remux {
+		// Emby-style: -copyts preserves original A/V timing, -start_at_zero
+		// shifts so PTS starts at 0, -avoid_negative_ts disabled prevents
+		// FFmpeg from adding any PTS offset to "fix" negative timestamps.
+		// Without -avoid_negative_ts disabled, the mpegts muxer (used by
+		// both -f hls and -f segment) adds ~1.4s initial PTS offset, which
+		// desynchronizes subtitle cue times from the video PTS timeline.
+		return []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", avoidNegTS}
+	}
+
+	// Full transcode (remux promoted to transcode, or an explicit transcode).
+	// Resume and fresh-start share this prefix. Fresh-start previously
+	// hard-coded avoid_negative_ts=make_zero on TS while resume used
+	// "disabled"; the two are equivalent here because -start_at_zero already
+	// anchors the first PTS to 0 and the HLS output's -muxdelay 0 -muxpreload 0
+	// removes the mpegts muxer's ~1.4 s offset regardless (see the HLS output
+	// args below), so make_zero was a no-op on fresh-start. Collapsing to
+	// avoidNegTS just makes fresh-start match the proven resume/remux branches.
+	return []string{
+		"-fflags", "+discardcorrupt",
+		"-copyts", "-start_at_zero",
+		"-avoid_negative_ts", avoidNegTS,
+	}
+}
+
 // startVariant launches FFmpeg for a single profile. resumeSegNum=0 is the
 // normal fresh-start case. resumeSegNum>0 is the P3 auto-restart path:
 // FFmpeg is started with -start_number set so output segment numbering
@@ -2460,76 +2526,10 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		segDuration = 6
 	}
 
-	// Timestamp handling differs between remux and full transcode:
-	//
-	// Remux (video copy): the copied video retains its original MKV timestamps.
-	// Using -fflags +genpts would generate FRESH PTS for the transcoded audio
-	// that clash with the video's original timestamps in the TS muxer, causing
-	// HLS.js to stretch audio playback (deep/slow sound). Instead, -copyts
-	// preserves the original A/V timing relationship, and -start_at_zero
-	// shifts everything so the first PTS is 0.
-	//
-	// Full transcode: both video and audio get fresh timestamps from their
-	// encoders, so genpts is safe and helps normalise any gaps.
-	// -avoid_negative_ts: the MPEG-TS muxer tolerates "disabled" (and needs
-	// it — otherwise it adds its own PTS offset that desyncs subtitles), but
-	// the mov/fMP4 muxer requires non-negative dts: with "disabled", a
-	// B-frame-reordered stream whose first dts < 0 makes the muxer error
-	// out. "make_zero" shifts mux-side so the first dts is exactly 0, which
-	// for fMP4 lands the first presentation time within one frame of 0 —
-	// the WebVTT X-TIMESTAMP-MAP uses 0 in fMP4 mode (see getSessionInitPTS).
-	avoidNegTS := "disabled"
-	if session.FMP4 {
-		avoidNegTS = "make_zero"
-	}
-
-	var args []string
-	if session.Remux {
-		// Emby-style: -copyts preserves original A/V timing, -start_at_zero
-		// shifts so PTS starts at 0, -avoid_negative_ts disabled prevents
-		// FFmpeg from adding any PTS offset to "fix" negative timestamps.
-		// Without -avoid_negative_ts disabled, the mpegts muxer (used by
-		// both -f hls and -f segment) adds ~1.4s initial PTS offset, which
-		// desynchronizes subtitle cue times from the video PTS timeline.
-		args = []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", avoidNegTS}
-	} else if startSec > 0 {
-		// 2026-05-28 — Resume + full-transcode: use the same -copyts /
-		// -start_at_zero pattern as the remux path. With +genpts and
-		// make_zero, the input -ss seek lands video at the preceding
-		// keyframe (file-PTS ~startSec-N) and audio at the next packet
-		// (file-PTS ~startSec). make_zero then shifts both so the
-		// MINIMUM PTS is 0 — video starts at 0, audio starts at N
-		// (the keyframe gap). HLS playback shows N seconds of silent
-		// video before audio catches up. -copyts + -start_at_zero
-		// preserves the A/V relative timing across the seek and aligns
-		// both streams to PTS=0 together (same fix the remux path
-		// already proved out). Reported as Issue #131 on Finding Nemo.
-		//
-		// Deep-debug H3 fix — keep +discardcorrupt. The original
-		// non-resume path included it for a reason: protects FFmpeg
-		// from crashing on damaged source pixel-rows (rare but real
-		// on imperfectly-ripped MKVs). The mid-stream auto-restart
-		// path (EnsureVariant → resumeFromSec = startSec + segs*dur)
-		// flows through this branch too, and that path was DESIGNED
-		// for the case where the source has corruption — losing the
-		// flag here would make restart-from-crash re-crash immediately.
-		// Adding -vsync vfr (== -fps_mode vfr on FFmpeg 5+) keeps the
-		// hardware-encoder path tolerant of frame-drop after the seek.
-		args = []string{
-			"-fflags", "+discardcorrupt",
-			"-copyts", "-start_at_zero",
-			"-avoid_negative_ts", avoidNegTS,
-		}
-	} else {
-		// Fresh start (startSec=0): both streams already begin at file
-		// PTS=0, so +genpts is safe and helps normalise any source-side
-		// gaps. The make_zero is a no-op here but kept for symmetry
-		// with the previous behavior.
-		args = []string{
-			"-fflags", "+genpts+discardcorrupt",
-			"-avoid_negative_ts", "make_zero",
-		}
-	}
+	// Timestamp/PTS prefix args differ between remux and full transcode. See
+	// timestampPrefixArgs for the rationale (especially why fresh-start no
+	// longer uses +genpts — #348).
+	args := timestampPrefixArgs(session)
 	if startSec > 0 {
 		args = append(args, "-ss", strconv.Itoa(startSec))
 	}
