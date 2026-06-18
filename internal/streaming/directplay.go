@@ -26,14 +26,14 @@ import (
 // Fields are intentionally JSON-tagged so the admin endpoint can
 // marshal them straight onto the wire.
 type DirectPlaySession struct {
-	ID       string    `json:"id"`
-	UserID   int64     `json:"user_id"`
-	Username string    `json:"username,omitempty"`
+	ID       string `json:"id"`
+	UserID   int64  `json:"user_id"`
+	Username string `json:"username,omitempty"`
 	// FileType is the resource kind the user is streaming: "media"
 	// (a movie file) or "episode" (a TV episode file).
-	FileType  string `json:"file_type"`
-	FileID    int64  `json:"file_id"`
-	FileName  string `json:"file_name,omitempty"`
+	FileType string `json:"file_type"`
+	FileID   int64  `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
 	// Decision is "direct_play" (no remux, no transcode) or
 	// "direct_stream" (codec-copy remux — still no transcode, but
 	// container repackaged). Both share this registry because

@@ -18,7 +18,7 @@ func TestPickBackdropPath(t *testing.T) {
 	t.Run("prefers first textless over default backdrop_path", func(t *testing.T) {
 		imgs := &TMDBImages{Backdrops: []TMDBImage{
 			{FilePath: "/logo-en.jpg", Lang: lang("en"), VoteAverage: 9}, // tagged, highest vote
-			{FilePath: "/scene-textless.jpg", Lang: nil, VoteAverage: 5},  // textless
+			{FilePath: "/scene-textless.jpg", Lang: nil, VoteAverage: 5}, // textless
 		}}
 		if got := pickBackdropPath(imgs, lang("/tmdb-default-N.jpg")); bpDeref(got) != "/scene-textless.jpg" {
 			t.Fatalf("want /scene-textless.jpg, got %q", bpDeref(got))

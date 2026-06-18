@@ -82,7 +82,7 @@ func TestRetryAutoPromote_BelowThreshold(t *testing.T) {
 		name       string
 		confidence *int
 	}{
-		{"nil_confidence", nil},            // → 0 effective, below 90
+		{"nil_confidence", nil}, // → 0 effective, below 90
 		{"zero_confidence", ptrInt(0)},
 		{"below_threshold", ptrInt(89)},
 		{"just_below_threshold", ptrInt(80)},

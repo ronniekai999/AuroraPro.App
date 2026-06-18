@@ -27,9 +27,9 @@ func TestParseConsoleEntriesInvalidJSON(t *testing.T) {
 	cases := []string{
 		"not json",
 		"{",
-		`{"ts":"x"}`,            // object, not array
-		`["string entry"]`,      // not the expected shape
-		`[{"ts": 123}]`,         // ts wrong type → decode error
+		`{"ts":"x"}`,       // object, not array
+		`["string entry"]`, // not the expected shape
+		`[{"ts": 123}]`,    // ts wrong type → decode error
 	}
 	for _, raw := range cases {
 		if got := parseConsoleEntries(raw); got != nil {
