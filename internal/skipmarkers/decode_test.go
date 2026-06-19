@@ -41,6 +41,34 @@ func TestSilenceDetectArgsAreAudioOnly(t *testing.T) {
 	assertSeekAndInput(t, args, "1234.56", "/media/show.mkv")
 }
 
+// A video-only file (no audio) makes the silence pass exit non-zero with
+// "does not contain any stream"; an audio-only file does the same to the
+// black pass. That must be treated as an empty result (file still gets
+// ledgered), not a hard error that re-attempts the file every sweep. Real
+// decode/IO failures must stay fatal so the file is retried.
+func TestStreamAbsentClassification(t *testing.T) {
+	absent := []string{
+		"Output file #0 does not contain any stream",
+		"Output file does not contain any stream",
+		"Stream map '0:a:0' matches no streams.",
+	}
+	for _, s := range absent {
+		if !streamAbsent(s) {
+			t.Errorf("streamAbsent(%q) = false, want true (missing stream is a benign empty result)", s)
+		}
+	}
+	fatal := []string{
+		"Error opening input: Input/output error",
+		"Invalid data found when processing input",
+		"",
+	}
+	for _, s := range fatal {
+		if streamAbsent(s) {
+			t.Errorf("streamAbsent(%q) = true, want false (real errors must stay fatal and retry)", s)
+		}
+	}
+}
+
 func hasFilter(args []string, flag, name string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == flag && strings.Contains(args[i+1], name) {

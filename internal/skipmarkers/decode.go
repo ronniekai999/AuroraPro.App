@@ -181,10 +181,31 @@ func runDetectPass(ctx context.Context, args []string) (string, error) {
 		return "", fmt.Errorf("start ffmpeg detect: %w", err)
 	}
 	reniceProcess(cmd.Process.Pid)
-	if err := cmd.Wait(); err != nil {
-		return "", fmt.Errorf("ffmpeg detect: %w (%s)", err, truncateErr(stderr.String()))
+	err := cmd.Wait()
+	out := stderr.String()
+	if err != nil {
+		// A file that lacks the stream this pass targets (e.g. a video-
+		// only file in the silence pass, where -vn leaves no output
+		// stream) makes FFmpeg exit non-zero with "does not contain any
+		// stream". That isn't a failure to analyze — the detector simply
+		// has nothing to look at, an empty result, not a reason to
+		// withhold the ledger and re-attempt the file every sweep
+		// forever. The pre-split combined command tolerated this (the
+		// unused filter was ignored); preserve that.
+		if streamAbsent(out) {
+			return "", nil
+		}
+		return "", fmt.Errorf("ffmpeg detect: %w (%s)", err, truncateErr(out))
 	}
-	return stderr.String(), nil
+	return out, nil
+}
+
+// streamAbsent reports whether FFmpeg failed only because the pass had no
+// stream of its target type, leaving an output with zero streams — as
+// opposed to a genuine decode/IO error that must be retried.
+func streamAbsent(stderr string) bool {
+	return strings.Contains(stderr, "does not contain any stream") ||
+		strings.Contains(stderr, "matches no streams")
 }
 
 // truncateErr keeps FFmpeg stderr noise out of the logs while
