@@ -79,6 +79,7 @@ func decodeIntroPCM(ctx context.Context, path string) ([]int16, error) {
 	stdout.Grow(maxDecodeBytes)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	hardenCmd(cmd) // die with the parent — never orphan on OOM/crash
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ffmpeg decode: %w", err)
 	}
@@ -98,35 +99,36 @@ func decodeIntroPCM(ctx context.Context, path string) ([]int16, error) {
 	return samples, nil
 }
 
-// runCreditsDetect runs blackdetect+silencedetect over the file's tail
-// and returns the detected intervals in ABSOLUTE source seconds.
+// runCreditsDetect runs blackdetect and silencedetect over the file's
+// tail and returns the detected intervals in ABSOLUTE source seconds.
 // tailStartSec uses input seeking (-ss before -i) so FFmpeg jumps
 // straight to the tail instead of decoding the whole file; detect
 // timestamps then restart near zero and get the offset added back.
+//
+// The two detectors run as SEPARATE single-stream passes (video-only
+// blackdetect, audio-only silencedetect) rather than one combined
+// invocation. Muxing a video filter and an audio filter into a single
+// `-f null` output forces FFmpeg to buffer raw decoded frames to
+// interleave the two streams; with input seeking desyncing their start
+// times, that buffer grows across the whole (up to creditsTailMaxSec)
+// tail and balloons RSS into the tens of GB — enough to OOM the host.
+// One stream per pass has nothing to interleave, so memory stays bounded
+// to a few in-flight frames. Detection itself is unchanged: the same two
+// filters, just no longer sharing an output.
 func runCreditsDetect(ctx context.Context, path string, tailStartSec float64) (black, silence []timeRange, err error) {
-	ctx, cancel := context.WithTimeout(ctx, detectTimeout)
-	defer cancel()
-
-	args := []string{
-		"-hide_banner", "-nostats", "-nostdin",
-		"-ss", strconv.FormatFloat(tailStartSec, 'f', 2, 64),
-		"-i", path,
-		"-vf", "blackdetect=d=0.5:pix_th=0.10",
-		"-af", "silencedetect=n=-40dB:d=1.5",
-		"-f", "null", "-",
+	blackStderr, err := runDetectPass(ctx, blackDetectArgs(path, tailStartSec))
+	if err != nil {
+		return nil, nil, err
 	}
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("start ffmpeg detect: %w", err)
-	}
-	reniceProcess(cmd.Process.Pid)
-	if err := cmd.Wait(); err != nil {
-		return nil, nil, fmt.Errorf("ffmpeg detect: %w (%s)", err, truncateErr(stderr.String()))
+	silenceStderr, err := runDetectPass(ctx, silenceDetectArgs(path, tailStartSec))
+	if err != nil {
+		return nil, nil, err
 	}
 
-	black, silence = parseDetectOutput(stderr.String())
+	// Each pass carries only its own filter's stream, so each stderr
+	// holds only its own detector's lines.
+	black, _ = parseDetectOutput(blackStderr)
+	_, silence = parseDetectOutput(silenceStderr)
 	for i := range black {
 		black[i].start += tailStartSec
 		black[i].end += tailStartSec
@@ -136,6 +138,74 @@ func runCreditsDetect(ctx context.Context, path string, tailStartSec float64) (b
 		silence[i].end += tailStartSec // +Inf stays +Inf; coverage clamps it
 	}
 	return black, silence, nil
+}
+
+// blackDetectArgs builds the video-only black-frame pass. -an drops
+// audio so the output carries a single stream (no A/V interleave buffer).
+func blackDetectArgs(path string, tailStartSec float64) []string {
+	return []string{
+		"-hide_banner", "-nostats", "-nostdin",
+		"-ss", strconv.FormatFloat(tailStartSec, 'f', 2, 64),
+		"-i", path,
+		"-an",
+		"-vf", "blackdetect=d=0.5:pix_th=0.10",
+		"-f", "null", "-",
+	}
+}
+
+// silenceDetectArgs builds the audio-only silence pass. -vn drops video
+// so the output carries a single stream (no A/V interleave buffer).
+func silenceDetectArgs(path string, tailStartSec float64) []string {
+	return []string{
+		"-hide_banner", "-nostats", "-nostdin",
+		"-ss", strconv.FormatFloat(tailStartSec, 'f', 2, 64),
+		"-i", path,
+		"-vn",
+		"-af", "silencedetect=n=-40dB:d=1.5",
+		"-f", "null", "-",
+	}
+}
+
+// runDetectPass runs one niced, timeout- and parent-death-bounded FFmpeg
+// detect invocation and returns its stderr, where blackdetect /
+// silencedetect emit their findings.
+func runDetectPass(ctx context.Context, args []string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, detectTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	hardenCmd(cmd) // die with the parent — never orphan on OOM/crash
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start ffmpeg detect: %w", err)
+	}
+	reniceProcess(cmd.Process.Pid)
+	err := cmd.Wait()
+	out := stderr.String()
+	if err != nil {
+		// A file that lacks the stream this pass targets (e.g. a video-
+		// only file in the silence pass, where -vn leaves no output
+		// stream) makes FFmpeg exit non-zero with "does not contain any
+		// stream". That isn't a failure to analyze — the detector simply
+		// has nothing to look at, an empty result, not a reason to
+		// withhold the ledger and re-attempt the file every sweep
+		// forever. The pre-split combined command tolerated this (the
+		// unused filter was ignored); preserve that.
+		if streamAbsent(out) {
+			return "", nil
+		}
+		return "", fmt.Errorf("ffmpeg detect: %w (%s)", err, truncateErr(out))
+	}
+	return out, nil
+}
+
+// streamAbsent reports whether FFmpeg failed only because the pass had no
+// stream of its target type, leaving an output with zero streams — as
+// opposed to a genuine decode/IO error that must be retried.
+func streamAbsent(stderr string) bool {
+	return strings.Contains(stderr, "does not contain any stream") ||
+		strings.Contains(stderr, "matches no streams")
 }
 
 // truncateErr keeps FFmpeg stderr noise out of the logs while
