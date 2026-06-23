@@ -25,6 +25,12 @@ interface DetailViewProps {
   media: Media
   onBack: () => void
   onPlay: (m: Media) => void
+  // Fired on hover/focus of the primary Play/Resume button — App resolves the
+  // would-be file and pre-warms playback (pre-creates the transcode session /
+  // warms the file cache) so the click→play latency is hidden. `resumeItem`
+  // mirrors the primary button's resume-vs-fresh choice so the pre-warm seeks
+  // to the same position. Best-effort; optional.
+  onPlayIntent?: (m: Media, resumeItem?: ContinueWatchingItem) => void
   onToggleLib: (m: Media) => void
   inLibrary: boolean
   // Active profile — scopes the per-profile "Previously" recap boundary.
@@ -87,7 +93,7 @@ interface DetailViewProps {
   }
 }
 export default function DetailView({
-  media, onBack, onPlay, onToggleLib, inLibrary, profileId,
+  media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId,
   detail, apiEpisodes, onPlayEpisode, onEpisodeUnavailable, loading, error,
   onStartParty, inParty,
   seasons, selectedSeason, onSelectSeason,
@@ -346,6 +352,7 @@ export default function DetailView({
             resumeRightLabel={railResumeRight}
             primaryLabel={resumeShown && ri ? formatResumeLabel(ri) : 'Play'}
             onPrimary={resumeShown && ri ? () => resume!.onPlay(ri) : () => onPlay(media)}
+            onPrimaryIntent={onPlayIntent ? () => onPlayIntent(media, resumeShown && ri ? ri : undefined) : undefined}
             primaryAriaLabel={resumeShown && ri ? formatResumeAriaLabel(ri) : undefined}
             primaryTitle={resumeShown && ri ? `Resume from your last position (${formatResumeTime(ri.position_ms)})` : undefined}
             secondaryLabel={resumeShown ? 'Play from start' : undefined}

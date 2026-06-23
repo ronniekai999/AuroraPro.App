@@ -34,6 +34,10 @@ interface DetailRailProps {
   // primary action
   primaryLabel: string
   onPrimary: () => void
+  // Fired on hover/focus of the primary button — lets the page pre-warm
+  // playback (pre-create the transcode session / warm the file cache) before
+  // the click so playback starts faster. Best-effort; optional.
+  onPrimaryIntent?: () => void
   primaryAriaLabel?: string
   primaryTitle?: string
   // secondary "from start" (only when resuming)
@@ -107,6 +111,7 @@ export function DetailRail({
   resumeRightLabel,
   primaryLabel,
   onPrimary,
+  onPrimaryIntent,
   primaryAriaLabel,
   primaryTitle,
   secondaryLabel,
@@ -164,6 +169,8 @@ export function DetailRail({
         <button
           type="button"
           onClick={onPrimary}
+          onMouseEnter={onPrimaryIntent}
+          onFocus={onPrimaryIntent}
           aria-label={primaryAriaLabel}
           title={primaryTitle}
           className="w-full h-12 inline-flex items-center justify-center gap-2.5 rounded-full font-semibold bg-purple-600 hover:bg-purple-500 transition-all shadow-[0_0_24px_rgba(168,85,247,0.45)]"

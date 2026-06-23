@@ -128,6 +128,54 @@ export interface SessionResponse {
   start_sec?: number
 }
 
+// buildSessionRequest maps a stream-info decision + play target into the
+// EXACT body POSTed to /api/stream/sessions. Factored out of VideoPlayer so
+// the details-page pre-warm (lib/prewarm.ts) builds a byte-identical request
+// — the player only adopts a pre-warmed session when the request keys match
+// (see sessionRequestKey), so a single source of truth keeps that match
+// reliable. Pure (no I/O), safe to call anywhere.
+export function buildSessionRequest(
+  stream: StreamDecision,
+  opts: {
+    fileId: number
+    fileType: 'media' | 'episode'
+    // resume position in WHOLE seconds (0 = from the start)
+    startSec: number
+    // in-player audio-track override; falls back to the server's choice
+    audioTrackIndex?: number
+    // Phase 5 auto-fallback: force a full transcode (disables remux)
+    forceTranscode?: boolean
+  },
+): CreateSessionRequest {
+  return {
+    file_id: opts.fileId,
+    file_type: opts.fileType,
+    remux: opts.forceTranscode ? false : !!stream.remux,
+    audio_passthrough: stream.audio_passthrough,
+    audio_track_index: opts.audioTrackIndex ?? stream.audio_track_index,
+    audio_channels: stream.audio_channels,
+    audio_codec_out: stream.audio_codec_out,
+    hdr_tonemap: stream.hdr_tonemap,
+    video_codec: stream.video_codec,
+    start_sec: opts.startSec > 0 ? opts.startSec : undefined,
+  }
+}
+
+// sessionRequestKey is a stable, order-independent serialization of a
+// CreateSessionRequest. undefined-valued fields are dropped so a field that
+// is "absent" and one that is "present but undefined" hash identically. Used
+// to decide whether a pre-warmed session matches what the player is about to
+// request — an exact match is required, any difference falls back to a fresh
+// createSession (a missed optimization, never a wrong stream).
+export function sessionRequestKey(req: CreateSessionRequest): string {
+  const r = req as unknown as Record<string, unknown>
+  return Object.keys(r)
+    .filter((k) => r[k] !== undefined)
+    .sort()
+    .map((k) => `${k}=${JSON.stringify(r[k])}`)
+    .join('&')
+}
+
 // Client capability probe. The backend's playback-decision engine
 // (DecidePlayback) chooses direct play vs remux vs transcode based on what the
 // client can actually decode — but ONLY when we tell it. ParseClientCaps on
