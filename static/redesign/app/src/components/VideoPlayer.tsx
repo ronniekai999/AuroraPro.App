@@ -42,15 +42,18 @@ import {
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import {
+  buildSessionRequest,
   createCastToken,
   createSession,
   deleteSession,
   getStreamInfo,
   keepalive,
   type AudioTrack,
+  type SessionResponse,
   type StreamInfo,
   type SubtitleTrack,
 } from '@/lib/streaming'
+import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 
@@ -1376,34 +1379,39 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
 
         // 2. HLS path (transcode or direct_stream remux). Create the
         //    session first, then load the master playlist via hls.js.
-        const sessionReq = {
-          file_id: target.fileId,
-          file_type: target.fileType,
-          // Phase 5 — forceTranscode disables the server's remux
-          // path (used by the MEDIA_ERROR auto-fallback to skip
-          // straight to a full transcode on retry).
-          remux: target.forceTranscode ? false : !!stream.remux,
-          audio_passthrough: stream.audio_passthrough,
-          // M10 Phase 4.5 — user-selected audio track override.
-          // Passing a different index forces FFmpeg to map that
-          // stream as audio_0; the session re-creates from scratch.
-          audio_track_index: target.audioTrackIndex ?? stream.audio_track_index,
-          audio_channels: stream.audio_channels,
-          // Audio output codec from the stream-info decision: the re-encode
-          // target ('aac' stereo / 'ac3' 5.1) or, when audio is copied, the
-          // SOURCE codec ('aac'/'ac3'/'eac3'). Echoed back verbatim; the
-          // server re-validates against its own track data
-          // (NormalizeSessionAudio), so a stale echo can never produce a
-          // manifest/segment codec mismatch.
-          audio_codec_out: stream.audio_codec_out,
-          hdr_tonemap: stream.hdr_tonemap,
-          video_codec: stream.video_codec,
-          start_sec: resumeSec > 0 ? resumeSec : undefined,
+        // Build the EXACT session request via the shared helper so the
+        // details-page pre-warm (lib/prewarm.ts) can produce a byte-identical
+        // one — forceTranscode disables remux (Phase 5 MEDIA_ERROR
+        // auto-fallback), audioTrackIndex is the in-player override, and the
+        // audio_* / hdr / codec fields echo the stream-info decision (the
+        // server re-validates via NormalizeSessionAudio, so a stale echo can
+        // never cause a manifest/segment codec mismatch).
+        const sessionReq = buildSessionRequest(stream, {
+          fileId: target.fileId,
+          fileType: target.fileType,
+          startSec: resumeSec,
+          audioTrackIndex: target.audioTrackIndex,
+          forceTranscode: target.forceTranscode,
+        })
+        // Pre-warm fast path: if the details page already created a session
+        // for this EXACT request, adopt it and skip CreateSession's ffprobe +
+        // ladder-build latency. takeWarmedSession matches on the request key
+        // only and consumes the entry (we now own its teardown); any mismatch
+        // returns null and we create a fresh session exactly as before.
+        let session: SessionResponse
+        const warmed = prewarmEnabled() ? takeWarmedSession(sessionReq) : null
+        if (warmed) {
+          session = {
+            session_id: warmed.sessionId,
+            master_playlist: warmed.masterPlaylist,
+            start_sec: warmed.startSec,
+          }
+        } else {
+          session = await createSession(sessionReq, ac.signal)
         }
-        const session = await createSession(sessionReq, ac.signal)
         if (cancelled) {
           // Race: cancelled between info and session — clean up the
-          // just-created session before unwinding.
+          // just-created (or adopted) session before unwinding.
           void deleteSession(session.session_id)
           return
         }
@@ -1412,8 +1420,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
         // already folds in forceTranscode). The subtitle endpoint uses
         // this to pick the cue-shift offset: keyframe for remux, raw
-        // startSec for transcode.
-        sessionRemuxRef.current = sessionReq.remux
+        // startSec for transcode. (remux is optional on the request type;
+        // buildSessionRequest always sets a concrete boolean.)
+        sessionRemuxRef.current = !!sessionReq.remux
         // Cast follows the local session: now that the new session exists,
         // signal the reload effect so a pending cast auto-advance re-points the
         // receiver at this episode (no-op when not casting / nothing pending).

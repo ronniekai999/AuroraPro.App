@@ -94,6 +94,8 @@ import { ToastContainer, type Toast } from '@/components/Toast'
 import { oauthProviderLabel } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
+import { currentPreferredQuality } from '@/lib/appearance'
+import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -2326,6 +2328,77 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // Pre-warm playback on Play/Resume hover/focus from the detail page. Mirrors
+  // handlePlay's file resolution (READ-ONLY — touches no playback state) and
+  // hands the resolved file to the pre-warm module, which pre-creates the
+  // transcode session (or warms the direct-play file cache) so the click→play
+  // latency is hidden. Deliberately PARALLEL to handlePlay rather than sharing
+  // its code, so the battle-tested play path stays untouched; any divergence
+  // only costs a missed pre-warm — the player adopts a warmed session solely on
+  // an exact request-key match, never the wrong stream.
+  // Dedup repeated Play-button intents (onMouseEnter + onFocus fire as a pair,
+  // and a button can be re-hovered): collapses to one resolution+warm per
+  // distinct target. Reset when the detail page is left (see cleanup effect).
+  const lastIntentKeyRef = useRef<string | null>(null)
+  const handlePrimaryIntent = useCallback(async (m: Media, resumeItem?: ContinueWatchingItem) => {
+    if (!prewarmEnabled()) return
+    // Don't pre-warm while casting — handlePlay refuses to start new local
+    // playback in that state, so a warm would never be consumed.
+    if (playerMinimizedRef.current) return
+
+    const startSec = resumeItem && resumeItem.position_ms > 0
+      ? Math.floor(resumeItem.position_ms / 1000)
+      : 0
+    // Skip the resolution fetches (getMediaFiles / getEpisodes / getSeasons)
+    // when the intent is unchanged — the warm for this target is already in
+    // flight or done; re-resolving would just burn redundant API round-trips.
+    const intentKey = `${m.type}:${m.id}:${resumeItem?.episode_id ?? ''}:${startSec}`
+    if (lastIntentKeyRef.current === intentKey) return
+    lastIntentKeyRef.current = intentKey
+
+    try {
+      const preferQuality = currentPreferredQuality()
+
+      if (m.type === 'show') {
+        if (resumeItem?.episode_id && resumeItem.season_number !== undefined) {
+          // Resume → the CW record names the exact episode + position.
+          const eps = await getEpisodes(m.id, resumeItem.season_number)
+          const ep = eps.find(e => e.id === resumeItem.episode_id)
+          const file = pickFile(ep?.files, preferQuality)
+          if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec })
+        } else {
+          // Fresh → first episode of the first season (mirrors handlePlay's
+          // explicit season/episode sort).
+          const seasonsRaw = await getSeasons(m.id)
+          if (seasonsRaw.length === 0) return
+          const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
+          const episodesRaw = await getEpisodes(m.id, seasons[0].season_number)
+          if (episodesRaw.length === 0) return
+          const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
+          const file = pickFile(episodes[0].files, preferQuality)
+          if (file) void prewarm({ fileId: file.id, fileType: 'episode', startSec: 0 })
+        }
+      } else {
+        const files = await getMediaFiles(m.id)
+        const file = pickFile(files, preferQuality)
+        if (file) void prewarm({ fileId: file.id, fileType: 'media', startSec })
+      }
+    } catch {
+      // Best-effort — a failed resolution / pre-warm must never disrupt the page.
+    }
+  }, [])
+
+  // Discard a hover-warmed session when the user leaves the detail page without
+  // playing. On play the player consumes the warm (takeWarmedSession), so this
+  // cleanup is a no-op then; otherwise it deletes the stranded ffmpeg session.
+  // Also reset the intent dedup so re-opening the page can warm afresh.
+  useEffect(() => {
+    return () => {
+      cancelPrewarm()
+      lastIntentKeyRef.current = null
+    }
+  }, [view, selectedMedia?.id])
+
   const handleToggleLib = useCallback((m: Media) => {
     setLibrary(prev => {
       const exists = prev.find(i => i.id === m.id)
@@ -4526,6 +4599,7 @@ export default function App() {
                 media={selectedMedia}
                 onBack={handleBack}
                 onPlay={handlePlay}
+                onPlayIntent={handlePrimaryIntent}
                 onToggleLib={handleToggleLib}
                 inLibrary={library.some(l => l.id === selectedMedia.id)}
                 profileId={activeProfileId}

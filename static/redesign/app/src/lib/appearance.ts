@@ -82,6 +82,19 @@ export function currentGlow(): GlowChoice {
   return v === 'subtle' || v === 'heavy' ? v : 'aurora'
 }
 
+export type QualityChoice = 'auto' | '1080p' | '4k'
+
+/**
+ * The stored playback-quality preference, defaulting to 'auto' (1080p-preferred)
+ * when unset/invalid. Reads the same `aurora_prefs` bucket Settings writes to —
+ * the single source of truth for the `preferQuality` used by the play handlers
+ * and the details-page pre-warm.
+ */
+export function currentPreferredQuality(): QualityChoice {
+  const v = readPrefs().preferred_quality
+  return v === '4k' || v === '1080p' ? v : 'auto'
+}
+
 /** Persist + live-apply a typeface choice ('nova' is the attribute-less default). */
 export function applyFont(id: FontChoice): void {
   writePref('font_choice', id)
