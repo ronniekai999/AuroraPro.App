@@ -1142,6 +1142,22 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		} else {
 			castSessionID = castSession.ID
 		}
+		// Pre-warm every quality variant so the Chromecast Default Media
+		// Receiver's ABR bandwidth probe hits a ready FFmpeg process rather
+		// than a cold start. Without this, the receiver probes 480p first,
+		// the FFmpeg for that tier hasn't started yet (browser was watching
+		// a different quality), and the ~2s readiness wait puts Shaka into
+		// an error-recovery polling loop that prevents playback (#355).
+		if cs, ok := h.transcode.GetSession(castSessionID); ok {
+			for _, p := range cs.Profiles {
+				p, cs := p, cs
+				go func() {
+					if _, err := h.transcode.EnsureVariant(cs, p.Name, cs.StartSec); err != nil {
+						slog.Debug("cast: pre-warm variant", "session_id", castSessionID, "profile", p.Name, "error", err)
+					}
+				}()
+			}
+		}
 	}
 
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
