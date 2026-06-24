@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // withToken → identity so the direct-play warm URL is easy to assert.
-vi.mock('./api', () => ({ withToken: (u: string) => u }))
+// apiFetchResponse → route through the global fetch stub so the pre-encode GET's
+// URL + abort signal are assertable exactly like the direct-play fetch.
+vi.mock('./api', () => ({
+  withToken: (u: string) => u,
+  apiFetchResponse: (path: string, opts: { signal?: AbortSignal } = {}) =>
+    fetch(path, { signal: opts.signal, credentials: 'same-origin' }),
+}))
 
 // Keep the PURE helpers (buildSessionRequest / sessionRequestKey) real — the
 // reuse-key match they produce is exactly what we're testing — but stub the
@@ -36,6 +42,15 @@ const TRANSCODE = { decision: 'transcode' } as StreamDecision
 const reqFor = (fileId: number, startSec: number) =>
   buildSessionRequest(TRANSCODE, { fileId, fileType: 'media', startSec })
 
+// A full 4K ABR ladder (highest-first), as CreateSession returns it.
+const PROFILES = [
+  { name: '2160p', width: 3840, height: 2160, bandwidth: 18_000_000 },
+  { name: '1080p', width: 1920, height: 1080, bandwidth: 7_500_000 },
+  { name: '720p', width: 1280, height: 720, bandwidth: 4_500_000 },
+  { name: '480p', width: 854, height: 480, bandwidth: 2_200_000 },
+]
+const fetchCalls = () => (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
+
 beforeEach(() => {
   // resetAllMocks (not clearAllMocks) so per-test mockResolvedValueOnce queues
   // never bleed across tests.
@@ -46,7 +61,7 @@ beforeEach(() => {
     setItem: (k: string, v: string) => void store.set(k, v),
     removeItem: (k: string) => void store.delete(k),
   })
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve('#EXTM3U') }))
 })
 
 afterEach(() => {
@@ -195,5 +210,101 @@ describe('prewarm / takeWarmedSession', () => {
 
     await prewarm({ fileId: 7, fileType: 'media', startSec: 0 })
     expect(mockGetStreamInfo).not.toHaveBeenCalled()
+  })
+})
+
+describe('Phase 2: first-segment pre-encode', () => {
+  const warmTranscode = (sessionId: string, profiles?: typeof PROFILES) => {
+    mockGetStreamInfo.mockResolvedValue({ stream: TRANSCODE } as never)
+    mockCreateSession.mockResolvedValue({
+      session_id: sessionId,
+      master_playlist: `/api/stream/hls/${sessionId}/master.m3u8`,
+      start_sec: 0,
+      profiles,
+    } as never)
+  }
+
+  it('full mode pre-encodes the predicted tier (default 8 Mbps seed → 1080p)', async () => {
+    warmTranscode('sx', PROFILES)
+    await prewarm({ fileId: 3, fileType: 'media', startSec: 0 })
+    // Exactly one variant-playlist fetch, targeting 1080p (7.5M ≤ 8M < 18M).
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetchCalls()[0][0]).toBe('/api/stream/hls/sx/1080p/stream.m3u8')
+  })
+
+  it('pre-encodes 2160p when the saved bandwidth seed is high', async () => {
+    localStorage.setItem('aurora_bw_estimate', String(25_000_000))
+    warmTranscode('sy', PROFILES)
+    await prewarm({ fileId: 4, fileType: 'media', startSec: 0 })
+    expect(fetchCalls()[0][0]).toBe('/api/stream/hls/sy/2160p/stream.m3u8')
+  })
+
+  it('light mode pre-creates the session but does NOT pre-encode', async () => {
+    localStorage.setItem('aurora.prewarm', 'light')
+    warmTranscode('sz', PROFILES)
+    await prewarm({ fileId: 5, fileType: 'media', startSec: 0 })
+    expect(mockCreateSession).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('skips pre-encode when the response carries no profiles', async () => {
+    warmTranscode('sw', undefined)
+    await prewarm({ fileId: 6, fileType: 'media', startSec: 0 })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('aborts the in-flight pre-encode when the warm is discarded', async () => {
+    warmTranscode('sa', PROFILES)
+    await prewarm({ fileId: 8, fileType: 'media', startSec: 0 })
+    const signal = fetchCalls()[0][1].signal as AbortSignal
+    expect(signal.aborted).toBe(false)
+    cancelPrewarm()
+    expect(signal.aborted).toBe(true)
+    expect(mockDeleteSession).toHaveBeenCalledWith('sa')
+  })
+
+  it('adopts the pre-encoded session and aborts the now-redundant encode GET', async () => {
+    warmTranscode('sb', PROFILES)
+    await prewarm({ fileId: 9, fileType: 'media', startSec: 0 })
+    const signal = fetchCalls()[0][1].signal as AbortSignal
+    expect(signal.aborted).toBe(false)
+    expect(takeWarmedSession(reqFor(9, 0))?.sessionId).toBe('sb')
+    // The player will open its own variant fetch; our speculative GET is released.
+    expect(signal.aborted).toBe(true)
+  })
+
+  it('caps the predicted tier to the player size (small window → 720p despite high bandwidth)', async () => {
+    localStorage.setItem('aurora_bw_estimate', String(25_000_000))
+    vi.stubGlobal('innerWidth', 1280)
+    vi.stubGlobal('innerHeight', 720)
+    vi.stubGlobal('devicePixelRatio', 1)
+    warmTranscode('sc', PROFILES)
+    await prewarm({ fileId: 10, fileType: 'media', startSec: 0 })
+    expect(fetchCalls()[0][0]).toBe('/api/stream/hls/sc/720p/stream.m3u8')
+  })
+
+  it('predicts 2160p on a large HiDPI viewport even though screen/window height < 2160', async () => {
+    // Regression for the height-only-cap bug: Retina laptop, big window, fast link.
+    // hls.js caps by max(w,h)*dpr vs level WIDTH-or-height, so 2160p is allowed.
+    localStorage.setItem('aurora_bw_estimate', String(30_000_000))
+    vi.stubGlobal('innerWidth', 1440)
+    vi.stubGlobal('innerHeight', 900)
+    vi.stubGlobal('devicePixelRatio', 2)
+    warmTranscode('sd', PROFILES)
+    await prewarm({ fileId: 13, fileType: 'media', startSec: 0 })
+    expect(fetchCalls()[0][0]).toBe('/api/stream/hls/sd/2160p/stream.m3u8')
+  })
+
+  it('returns no pre-encode for an empty profile ladder', async () => {
+    warmTranscode('se', [])
+    await prewarm({ fileId: 11, fileType: 'media', startSec: 0 })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the lowest tier when bandwidth fits nothing', async () => {
+    localStorage.setItem('aurora_bw_estimate', String(1_000_000)) // clamps to 1M, below 480p=2.2M
+    warmTranscode('sf', PROFILES)
+    await prewarm({ fileId: 12, fileType: 'media', startSec: 0 })
+    expect(fetchCalls()[0][0]).toBe('/api/stream/hls/sf/480p/stream.m3u8')
   })
 })

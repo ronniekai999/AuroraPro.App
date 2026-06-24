@@ -48,6 +48,8 @@ import {
   deleteSession,
   getStreamInfo,
   keepalive,
+  loadBandwidthEstimate,
+  saveBandwidthEstimate,
   type AudioTrack,
   type SessionResponse,
   type StreamInfo,
@@ -309,32 +311,9 @@ function liftCuesAboveControls(tt: TextTrack | null | undefined): void {
 // ever play uses a LAN-appropriate 8 Mbps prior. Clamped so one weird sample
 // (dev-tools throttling, a flaky hotel wifi session) can't poison the seed
 // outside sane bounds.
-const BW_ESTIMATE_KEY = 'aurora_bw_estimate'
-const BW_ESTIMATE_DEFAULT = 8_000_000
-const BW_ESTIMATE_MIN = 1_000_000
-const BW_ESTIMATE_MAX = 200_000_000
-
-// Single clamp shared by load and save so the persisted and applied bounds
-// can never diverge.
-function clampBandwidth(bps: number): number {
-  return Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, bps))
-}
-
-function loadBandwidthEstimate(): number {
-  try {
-    const raw = localStorage.getItem(BW_ESTIMATE_KEY)
-    const n = raw ? Number(raw) : NaN
-    if (Number.isFinite(n)) return clampBandwidth(n)
-  } catch { /* private browsing / quota — fall through to default */ }
-  return BW_ESTIMATE_DEFAULT
-}
-
-function saveBandwidthEstimate(bps: number | undefined): void {
-  if (!bps || !Number.isFinite(bps) || bps <= 0) return
-  try {
-    localStorage.setItem(BW_ESTIMATE_KEY, String(Math.round(clampBandwidth(bps))))
-  } catch { /* best-effort */ }
-}
+// loadBandwidthEstimate / saveBandwidthEstimate (the persisted ABR seed used by
+// the Hls config's abrEwmaDefaultEstimate) now live in lib/streaming.ts so the
+// details-page pre-warm can read the SAME estimate to predict the start tier.
 
 // attemptPlay starts playback with a muted-autoplay fallback for the
 // watch-party case. Browsers block a *sounded* programmatic play() that

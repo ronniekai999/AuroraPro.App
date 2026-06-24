@@ -122,10 +122,57 @@ export interface CreateSessionRequest {
   start_sec?: number
 }
 
+export interface SessionProfile {
+  name: string // tier name, e.g. "1080p"
+  width: number // nominal tier width
+  height: number // aspect-corrected output height
+  bandwidth: number // declared HLS BANDWIDTH (bits/sec) — the ABR threshold hls.js compares against
+}
+
 export interface SessionResponse {
   session_id: string
   master_playlist: string
   start_sec?: number
+  // The ABR ladder the session was created with, HIGHEST tier first (matches the
+  // master-playlist order). Surfaced so the pre-warm can predict which tier
+  // hls.js will start at and pre-encode that tier's first segment.
+  profiles?: SessionProfile[]
+}
+
+// ============================================================
+// ABR bandwidth-estimate persistence (shared by the player + pre-warm)
+// ============================================================
+// hls.js seeds its ABR start level from a remembered bandwidth estimate so the
+// 2nd+ plays start at the right tier immediately instead of ramping up from
+// 480p (each up-switch cold-starting a new server-side FFmpeg variant). The
+// first-ever play uses a LAN-appropriate 8 Mbps prior. Clamped so one weird
+// sample (devtools throttling, flaky hotel wifi) can't poison the seed. The
+// pre-warm reads the SAME value to predict which tier hls.js will start at.
+const BW_ESTIMATE_KEY = 'aurora_bw_estimate'
+const BW_ESTIMATE_DEFAULT = 8_000_000
+const BW_ESTIMATE_MIN = 1_000_000
+const BW_ESTIMATE_MAX = 200_000_000
+
+// Single clamp shared by load and save so the persisted and applied bounds can
+// never diverge. Only load/saveBandwidthEstimate are consumed outside this file.
+function clampBandwidth(bps: number): number {
+  return Math.min(BW_ESTIMATE_MAX, Math.max(BW_ESTIMATE_MIN, bps))
+}
+
+export function loadBandwidthEstimate(): number {
+  try {
+    const raw = localStorage.getItem(BW_ESTIMATE_KEY)
+    const n = raw ? Number(raw) : NaN
+    if (Number.isFinite(n)) return clampBandwidth(n)
+  } catch { /* private browsing / quota — fall through to default */ }
+  return BW_ESTIMATE_DEFAULT
+}
+
+export function saveBandwidthEstimate(bps: number | undefined): void {
+  if (!bps || !Number.isFinite(bps) || bps <= 0) return
+  try {
+    localStorage.setItem(BW_ESTIMATE_KEY, String(Math.round(clampBandwidth(bps))))
+  } catch { /* best-effort */ }
 }
 
 // buildSessionRequest maps a stream-info decision + play target into the
