@@ -10,6 +10,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Icon } from '@/components/Icon'
 import { type Toast } from '@/components/Toast'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { GamificationCard } from '@/components/GamificationCard'
@@ -377,24 +384,37 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 <p className="text-white/80 text-sm font-medium">Audio Language</p>
                 <p className="text-white/40 text-xs">Preferred audio track</p>
               </div>
-              <select value={settings.audioLang} onChange={(e) => setSettings(p => ({ ...p, audioLang: e.target.value }))} className="text-sm py-2 px-3">
-                <option value="en">English</option>
-                <option value="ja">Japanese</option>
-                <option value="es">Spanish</option>
-                <option value="fr">French</option>
-              </select>
+              <Select value={settings.audioLang} onValueChange={(value) => setSettings(p => ({ ...p, audioLang: value }))}>
+                <SelectTrigger size="sm" className="text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="en">English</SelectItem>
+                  <SelectItem value="ja">Japanese</SelectItem>
+                  <SelectItem value="es">Spanish</SelectItem>
+                  <SelectItem value="fr">French</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-white/80 text-sm font-medium">Subtitle Language</p>
                 <p className="text-white/40 text-xs">Preferred subtitle track</p>
               </div>
-              <select value={settings.subtitleLang} onChange={(e) => setSettings(p => ({ ...p, subtitleLang: e.target.value }))} className="text-sm py-2 px-3">
-                <option value="en">English</option>
-                <option value="ja">Japanese</option>
-                <option value="es">Spanish</option>
-                <option value="">None</option>
-              </select>
+              <Select
+                value={settings.subtitleLang === '' ? 'none' : settings.subtitleLang}
+                onValueChange={(value) => setSettings(p => ({ ...p, subtitleLang: value === 'none' ? '' : value }))}
+              >
+                <SelectTrigger size="sm" className="text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="en">English</SelectItem>
+                  <SelectItem value="ja">Japanese</SelectItem>
+                  <SelectItem value="es">Spanish</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
           </div>
         </div>
