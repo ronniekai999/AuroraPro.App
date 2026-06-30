@@ -91,6 +91,7 @@ import { useRealtime } from '@/hooks/useRealtime'
 // date formatter (no @/lib/api dep → no cycle).
 import { Icon } from '@/components/Icon'
 import { ToastContainer, type Toast } from '@/components/Toast'
+import { Spinner } from '@/components/ui/spinner'
 import { oauthProviderLabel } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
@@ -431,9 +432,14 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-all duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
+            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-all duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
-            {submitting ? 'Signing in…' : isRegister ? 'Create Account' : 'Sign In'}
+            {submitting ? (
+              <>
+                <Spinner className="size-4" />
+                {isRegister ? 'Creating account…' : 'Signing in…'}
+              </>
+            ) : isRegister ? 'Create Account' : 'Sign In'}
           </button>
 
           {/* OAuth sign-in row. The ?invite= query forwards an entered
