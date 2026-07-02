@@ -2234,6 +2234,10 @@ func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *
 	v.exited = false
 	v.Err = nil
 	v.Cmd = nil
+	// Also clear the previous generation's stderr snapshot — diagnostics
+	// would otherwise attribute the OLD FFmpeg's crash output to the
+	// relaunched process until its own exit overwrites it.
+	v.StderrTail = ""
 	return tm.startVariantAt(session, v, resumeFromSec, resumeSegNum)
 }
 

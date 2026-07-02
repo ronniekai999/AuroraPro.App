@@ -305,6 +305,13 @@ type ScanProgress struct {
 	CurrentFile  string     `json:"current_file,omitempty"`
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	Error        string     `json:"error,omitempty"`
+	// WalkErrors counts directory entries the walk could not read.
+	// When non-zero the discovered file list was incomplete, so the
+	// deleted-file prune was skipped (PruneSkipped) — surfaced here so
+	// the status API shows WHY stale rows linger instead of reporting a
+	// clean "complete" while cleanup is silently disabled.
+	WalkErrors   int  `json:"walk_errors,omitempty"`
+	PruneSkipped bool `json:"prune_skipped,omitempty"`
 }
 
 // --- API Request/Response ---

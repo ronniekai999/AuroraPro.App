@@ -1911,12 +1911,6 @@ export async function deleteRoom(id: number): Promise<void> {
   await apiFetch(`/api/rooms/${id}`, { method: 'DELETE' })
 }
 
-// Phase 4.6/4.7 — highlight reel. Auto-generated server-side at party-end
-// (M9); the host is told via a 'party_reel_ready' notification whose `link`
-// carries the reel URL, rendered as a plain same-origin <a href> that sends
-// the httpOnly auth cookie automatically (no ?token= — a JWT in the URL
-// leaks into browser history and proxy access logs).
-
 // ──────────────────────────────────────────────────────────────────
 // Watch Party — Mobile Companion (additive helpers)
 //

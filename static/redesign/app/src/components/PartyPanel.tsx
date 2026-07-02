@@ -532,14 +532,9 @@ export function PartyPanel({
             </div>
           </div>
         )}
-        {/* Phase 4.7 — the highlight reel is announced via a bell
-            notification to the host once it's rendered. The reel only
-            exists AFTER the party ends (generation starts at
-            endPartyInternal), so an in-panel link could never serve
-            the current session's reel — it 404'd for its whole
-            lifetime (or, for reused persistent-room codes, served the
-            PREVIOUS session's file). The notification carries the
-            authenticated same-origin link instead. */}
+        {/* Phase 4.7 — the highlight reel only exists AFTER the party
+            ends, so there is no in-panel link; the host gets a bell
+            notification with the reel URL once it's rendered. */}
       </div>
     </aside>
   )

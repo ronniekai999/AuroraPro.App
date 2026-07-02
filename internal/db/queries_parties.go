@@ -156,50 +156,11 @@ func (q *Queries) GetWatchPartyByCode(ctx context.Context, code string) (*models
 }
 
 // GetWatchPartyByCodeAny retrieves a watch party by code regardless of active
-// status. Used for viewing ended party info.
+// status. Used for viewing ended party info. Persistent rooms reuse their
+// join code across sessions, so several rows can match — the ORDER BY pins
+// the result to the newest session (previously QueryRow picked an arbitrary
+// row from the multi-row result).
 func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*models.WatchParty, error) {
-	party := &models.WatchParty{}
-	err := q.pool.QueryRow(ctx,
-		`SELECT id, party_code, host_user_id, media_item_id, episode_id,
-			party_name, media_title, media_poster,
-			max_participants, is_active, COALESCE(settings_json, '{}'),
-			created_at, ended_at, scheduled_start_at, started_at
-		FROM watch_parties
-		WHERE party_code = $1`,
-		code,
-	).Scan(
-		&party.ID,
-		&party.PartyCode,
-		&party.HostUserID,
-		&party.MediaItemID,
-		&party.EpisodeID,
-		&party.PartyName,
-		&party.MediaTitle,
-		&party.MediaPoster,
-		&party.MaxParticipants,
-		&party.IsActive,
-		&party.SettingsJSON,
-		&party.CreatedAt,
-		&party.EndedAt,
-		&party.ScheduledStartAt,
-		&party.StartedAt,
-	)
-	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get watch party by code (any): %w", err)
-	}
-	return party, nil
-}
-
-// GetLatestWatchPartyByCode returns the MOST RECENT party session for a code,
-// active or ended. Persistent rooms reuse their join code across sessions, so
-// a bare party_code lookup can match several rows; anything keyed to the
-// newest session (e.g. the on-disk highlight reel, which each party end
-// overwrites) must resolve through this ordered variant. Returns (nil, nil)
-// when the code has never been used.
-func (q *Queries) GetLatestWatchPartyByCode(ctx context.Context, code string) (*models.WatchParty, error) {
 	party := &models.WatchParty{}
 	err := q.pool.QueryRow(ctx,
 		`SELECT id, party_code, host_user_id, media_item_id, episode_id,
@@ -232,9 +193,33 @@ func (q *Queries) GetLatestWatchPartyByCode(ctx context.Context, code string) (*
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get latest watch party by code: %w", err)
+		return nil, fmt.Errorf("get watch party by code (any): %w", err)
 	}
 	return party, nil
+}
+
+// IsPartyMemberForCode reports whether userID hosted or participated in party
+// partyDBID, additionally requiring that row to carry code — so a URL can't
+// mix one session's code with another session's id. found=false when no such
+// (id, code) row exists. Single round trip on purpose: the highlight-reel
+// handler runs this per HTTP Range request during MP4 playback.
+func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, err error) {
+	err = q.pool.QueryRow(ctx, `
+		SELECT host_user_id = $3 OR EXISTS (
+			SELECT 1 FROM watch_party_participants
+			WHERE party_id = $1 AND user_id = $3
+		)
+		FROM watch_parties
+		WHERE id = $1 AND party_code = $2`,
+		partyDBID, code, userID,
+	).Scan(&member)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("is party member: %w", err)
+	}
+	return true, member, nil
 }
 
 // EndWatchParty marks a watch party as inactive and records the end time.

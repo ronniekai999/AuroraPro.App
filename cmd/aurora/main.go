@@ -541,12 +541,12 @@ func main() {
 	// Unmatched shows are intentionally left alone — they are already in the
 	// flagged/needs_review pipeline, and re-searching TMDB on every
 	// incremental scan would churn their match state.
-	scanner.OnEpisodeBackfill = func(ctx context.Context, item *models.MediaItem) {
-		matched, err := enricher.BackfillEpisodeMetadata(ctx, item.ID)
+	scanner.OnEpisodeBackfill = func(ctx context.Context, item *models.MediaItem, seasons []int) {
+		matched, err := enricher.BackfillEpisodeMetadata(ctx, item.ID, seasons)
 		if err != nil {
 			slog.Warn("episode metadata backfill failed", "item", item.Title, "error", err)
 		} else if matched {
-			slog.Info("backfilled episode metadata", "item", item.Title)
+			slog.Info("backfilled episode metadata", "item", item.Title, "seasons", seasons)
 		}
 	}
 

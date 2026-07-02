@@ -358,10 +358,16 @@ func (e *Enricher) applyTMDBShowMatch(ctx context.Context, item *models.MediaIte
 // path (their canonical row exists), so without this pass the new episode
 // rows would keep bare titles/overviews/stills forever.
 //
+// seasons targets the pass: a weekly episode of a 30-season show costs one
+// GetTVSeason call, not GetTV + thirty. Empty seasons refreshes all of them.
+//
 // Returns matched=false when the item has no tmdb_id (e.g. TVDB-only or
 // unmatched shows) — those are left to the flagged/needs_review pipeline;
 // re-searching on every incremental scan would churn their match state.
-func (e *Enricher) BackfillEpisodeMetadata(ctx context.Context, mediaItemID int64) (matched bool, err error) {
+// Known limitation: the scanner only signals a backfill in the scan that
+// first sees a file, so a failure here (TMDB outage) is not retried by later
+// scans — the admin metadata-refresh path covers stragglers.
+func (e *Enricher) BackfillEpisodeMetadata(ctx context.Context, mediaItemID int64, seasons []int) (matched bool, err error) {
 	tmdbID, err := e.queries.GetTMDBIDForItem(ctx, mediaItemID)
 	if err != nil {
 		return false, fmt.Errorf("get tmdb id: %w", err)
@@ -369,46 +375,58 @@ func (e *Enricher) BackfillEpisodeMetadata(ctx context.Context, mediaItemID int6
 	if tmdbID == 0 {
 		return false, nil
 	}
-	detail, err := e.tmdb.GetTV(ctx, tmdbID)
-	if err != nil {
-		return true, fmt.Errorf("get tv detail: %w", err)
+	if len(seasons) == 0 {
+		detail, err := e.tmdb.GetTV(ctx, tmdbID)
+		if err != nil {
+			return true, fmt.Errorf("get tv detail: %w", err)
+		}
+		e.enrichSeasons(ctx, mediaItemID, tmdbID, detail.Seasons)
+		return true, nil
 	}
-	e.enrichSeasons(ctx, mediaItemID, tmdbID, detail.Seasons)
+	for _, sn := range seasons {
+		e.enrichSeasonEpisodes(ctx, mediaItemID, tmdbID, sn)
+	}
 	return true, nil
 }
 
 func (e *Enricher) enrichSeasons(ctx context.Context, mediaItemID int64, tvTMDBID int, seasons []TMDBSeason) {
 	for _, s := range seasons {
-		// Skip specials (season 0) for now
-		if s.SeasonNumber == 0 {
-			continue
-		}
+		e.enrichSeasonEpisodes(ctx, mediaItemID, tvTMDBID, s.SeasonNumber)
+	}
+}
 
-		seasonDetail, err := e.tmdb.GetTVSeason(ctx, tvTMDBID, s.SeasonNumber)
-		if err != nil {
-			slog.Warn("failed to get season detail", "season", s.SeasonNumber, "error", err)
-			continue
-		}
+// enrichSeasonEpisodes fetches one season's TMDB detail and patches every
+// locally-present episode of that season.
+func (e *Enricher) enrichSeasonEpisodes(ctx context.Context, mediaItemID int64, tvTMDBID, seasonNumber int) {
+	// Skip specials (season 0) for now
+	if seasonNumber == 0 {
+		return
+	}
 
-		// Update each episode that exists in our DB
-		for _, ep := range seasonDetail.Episodes {
-			tmdbEp := &models.EpisodeMetadataUpdate{
-				MediaItemID:   mediaItemID,
-				SeasonNumber:  ep.SeasonNumber,
-				EpisodeNumber: ep.EpisodeNumber,
-				TMDBID:        &ep.ID,
-				Title:         nilIfEmpty(ep.Name),
-				Overview:      nilIfEmpty(ep.Overview),
-				StillPath:     ptrStr(ep.StillPath),
-				VoteAverage:   &ep.VoteAverage,
-				VoteCount:     &ep.VoteCount,
-				RuntimeMin:    nilIfZero(ep.Runtime),
-				AirDate:       nilIfEmpty(ep.AirDate),
-			}
-			if err := e.queries.UpdateEpisodeMetadata(ctx, tmdbEp); err != nil {
-				// Not an error — episode may not exist locally yet
-				continue
-			}
+	seasonDetail, err := e.tmdb.GetTVSeason(ctx, tvTMDBID, seasonNumber)
+	if err != nil {
+		slog.Warn("failed to get season detail", "season", seasonNumber, "error", err)
+		return
+	}
+
+	// Update each episode that exists in our DB
+	for _, ep := range seasonDetail.Episodes {
+		tmdbEp := &models.EpisodeMetadataUpdate{
+			MediaItemID:   mediaItemID,
+			SeasonNumber:  ep.SeasonNumber,
+			EpisodeNumber: ep.EpisodeNumber,
+			TMDBID:        &ep.ID,
+			Title:         nilIfEmpty(ep.Name),
+			Overview:      nilIfEmpty(ep.Overview),
+			StillPath:     ptrStr(ep.StillPath),
+			VoteAverage:   &ep.VoteAverage,
+			VoteCount:     &ep.VoteCount,
+			RuntimeMin:    nilIfZero(ep.Runtime),
+			AirDate:       nilIfEmpty(ep.AirDate),
+		}
+		if err := e.queries.UpdateEpisodeMetadata(ctx, tmdbEp); err != nil {
+			// Not an error — episode may not exist locally yet
+			continue
 		}
 	}
 }

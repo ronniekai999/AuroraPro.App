@@ -1,9 +1,9 @@
 package api
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -147,51 +147,40 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	// Membership gate, two tiers. The in-memory check covers live parties;
-	// but the reel is generated minutes AFTER endPartyInternal deletes the
-	// party from memory — exactly when the host follows the "reel ready"
-	// notification link — so fall back to the DB audit rows (host +
-	// watch_party_participants) for the most recent session with this code.
-	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) &&
-		!h.wasPartyMember(r.Context(), code, claims.UserID) {
+	// Reels are session-scoped: the link (from the host's "reel ready"
+	// notification) carries ?session=<watch_parties.id>, and both the
+	// file on disk and the membership check resolve through that id.
+	// Codes alone are ambiguous — persistent rooms and freed quick-party
+	// codes are reused, so a code-keyed reel could be served under a
+	// different session's notification or 404 its rightful members once
+	// a newer session row exists.
+	sessionID, err := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
+	if err != nil || sessionID <= 0 {
 		writeError(w, http.StatusNotFound, "highlight reel not available")
 		return
 	}
+	// Membership gate against the DB audit rows of THAT session (the party
+	// is long gone from the manager's memory by the time the reel exists).
+	// Single round trip — this runs per HTTP Range request during playback.
+	if claims.Role != "admin" {
+		found, member, err := h.queries.IsPartyMemberForCode(r.Context(), sessionID, code, claims.UserID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to authorize")
+			return
+		}
+		if !found || !member {
+			writeError(w, http.StatusNotFound, "highlight reel not available")
+			return
+		}
+	}
 	// File path is resolved on-disk; PartyHandler doesn't know the
-	// cache dir directly. We'll set this up via a small accessor on the
-	// PartyShareHandler pattern OR have manager expose the path.
-	// For now, defer to manager which carries the cacheDir config.
-	path, ok := h.manager.HighlightReelPath(code)
+	// cache dir directly — the manager carries the cacheDir config.
+	path, ok := h.manager.HighlightReelPath(code, sessionID)
 	if !ok || path == "" {
 		writeError(w, http.StatusNotFound, "highlight reel not available")
 		return
 	}
 	http.ServeFile(w, r, path)
-}
-
-// wasPartyMember reports whether userID hosted or participated in the MOST
-// RECENT party session for code, per the DB audit rows. Scoped to the latest
-// session on purpose: persistent rooms reuse codes, and the on-disk reel is
-// overwritten at each session end, so only the newest session's members
-// should see the current file.
-func (h *PartyHandler) wasPartyMember(ctx context.Context, code string, userID int64) bool {
-	party, err := h.queries.GetLatestWatchPartyByCode(ctx, code)
-	if err != nil || party == nil {
-		return false
-	}
-	if party.HostUserID == userID {
-		return true
-	}
-	participants, err := h.queries.GetPartyParticipants(ctx, party.ID)
-	if err != nil {
-		return false
-	}
-	for _, p := range participants {
-		if p.UserID == userID {
-			return true
-		}
-	}
-	return false
 }
 
 // createPartyRequest is the expected JSON body for creating a party.
