@@ -491,6 +491,86 @@ func (h *ProfileHandler) AddToWatchlist(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, map[string]string{"message": "added to watchlist"})
 }
 
+// GetLibrary returns the profile's "My Library" saved items — the set behind
+// the + save button. Backed by a reserved default watchlist so saves persist
+// server-side and sync across devices (previously they lived only in one
+// browser's localStorage).
+func (h *ProfileHandler) GetLibrary(w http.ResponseWriter, r *http.Request) {
+	profileID, ok := h.requireProfileOwnership(w, r)
+	if !ok {
+		return
+	}
+	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profileID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve library")
+		return
+	}
+	items, err := h.queries.GetAllWatchlistItems(r.Context(), wl.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get library items")
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// AddToLibrary saves a media item to the profile's library. Idempotent —
+// re-saving an already-saved item is a no-op, not an error.
+func (h *ProfileHandler) AddToLibrary(w http.ResponseWriter, r *http.Request) {
+	profileID, ok := h.requireProfileOwnership(w, r)
+	if !ok {
+		return
+	}
+	var req models.AddToWatchlistRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.MediaItemID <= 0 {
+		writeError(w, http.StatusBadRequest, "media_item_id required")
+		return
+	}
+	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profileID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve library")
+		return
+	}
+	if err := h.queries.AddToWatchlist(r.Context(), wl.ID, req.MediaItemID); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			writeError(w, http.StatusNotFound, "media item not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to add to library")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"message": "added to library"})
+}
+
+// RemoveFromLibrary removes a media item from the profile's library by its
+// media_item_id. Idempotent — removing an item that isn't saved returns 200 so
+// an optimistic UI double-remove doesn't surface a spurious error.
+func (h *ProfileHandler) RemoveFromLibrary(w http.ResponseWriter, r *http.Request) {
+	profileID, ok := h.requireProfileOwnership(w, r)
+	if !ok {
+		return
+	}
+	mediaItemID, err := strconv.ParseInt(chi.URLParam(r, "mediaItemId"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid media item id")
+		return
+	}
+	wl, err := h.queries.GetOrCreateLibraryWatchlist(r.Context(), profileID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve library")
+		return
+	}
+	if _, err := h.queries.RemoveFromWatchlistByMedia(r.Context(), wl.ID, mediaItemID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove from library")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "removed from library"})
+}
+
 // RemoveFromWatchlist removes an item from a watchlist.
 func (h *ProfileHandler) RemoveFromWatchlist(w http.ResponseWriter, r *http.Request) {
 	profileID, ok := h.requireProfileOwnership(w, r)

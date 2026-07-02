@@ -830,6 +830,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/{profileId}/watchlists/{listId}/items", profileH.GetWatchlistItems)
 				r.Post("/{profileId}/watchlists/{listId}/items", profileH.AddToWatchlist)
 				r.Delete("/{profileId}/watchlists/{listId}/items/{itemId}", profileH.RemoveFromWatchlist)
+
+				// My Library — the profile's default saved-titles list (the +
+				// save button). Media-keyed so the client toggles by media id.
+				r.Get("/{profileId}/library", profileH.GetLibrary)
+				r.Post("/{profileId}/library", profileH.AddToLibrary)
+				r.Delete("/{profileId}/library/{mediaItemId}", profileH.RemoveFromLibrary)
 			})
 
 			// Taste onboarding ("Pick What You Love") — seeds the recommender

@@ -1,5 +1,6 @@
 // Aurora V2 — Episodes section: season-picker chip row + episode rows.
 
+import { useEffect, useRef } from 'react'
 import { cn } from '../../lib/utils'
 import { EpisodeRow, type EpisodeRowVM } from './EpisodeRow'
 
@@ -34,6 +35,21 @@ export function EpisodeList({
   className,
 }: EpisodeListProps) {
   const showPicker = !!seasons && seasons.length > 1
+
+  // Bring the in-progress episode into view when a season's rows land —
+  // a long season otherwise opens at E1 with the current episode below
+  // the fold. Keyed by the row id: the primitive dep already skips
+  // unrelated re-renders (progress updates, version-chip hovers), and
+  // re-runs on every actual change — including switching seasons away and
+  // back, which a "scrolled once" guard would wrongly suppress. 'nearest'
+  // is a no-op when the row is already visible.
+  const inProgressId = rows.find((r) => r.state === 'in-progress')?.id
+  const inProgressRowRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (inProgressId == null) return
+    inProgressRowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+  }, [inProgressId])
+
   return (
     <section className={className}>
       <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
@@ -70,7 +86,9 @@ export function EpisodeList({
       {rows.length > 0 ? (
         <div className="space-y-2.5">
           {rows.map((ep) => (
-            <EpisodeRow key={ep.id} ep={ep} onPlay={onPlay} onUnavailable={onUnavailable} />
+            <div key={ep.id} ref={ep.id === inProgressId ? inProgressRowRef : undefined}>
+              <EpisodeRow ep={ep} onPlay={onPlay} onUnavailable={onUnavailable} />
+            </div>
           ))}
         </div>
       ) : (

@@ -1703,6 +1703,49 @@ export async function addToWatchlist(
   })
 }
 
+// My Library — the profile's default saved-titles list, backing the + save
+// button. Server-side (and thus cross-device) rather than the old
+// localStorage-only store. Media-keyed: the client toggles by media id and
+// never handles watchlist-row ids.
+export interface LibraryItem {
+  media_item_id: number
+  title: string
+  poster_path?: string
+  year?: number
+  type: 'movie' | 'show'
+}
+// Build a lightweight UIMedia from a server library item, for ids the local
+// snapshot cache has never seen (fresh device). Rating/genre/badges are absent
+// until the card's detail is opened — cached rich snapshots are preferred by
+// the caller when available. Mirrors mapMedia's default shape.
+export function libraryItemToMedia(it: LibraryItem): UIMedia {
+  return {
+    id: it.media_item_id,
+    title: it.title,
+    year: it.year ?? 0,
+    rating: 0,
+    duration: '',
+    genre: '',
+    type: it.type === 'show' ? 'show' : 'movie',
+    poster: posterURL(it.poster_path),
+    description: '',
+    tags: [],
+  }
+}
+export async function getLibrary(profileId: number, signal?: AbortSignal): Promise<LibraryItem[]> {
+  const res = await apiFetch<LibraryItem[]>(`/api/profiles/${profileId}/library`, { signal })
+  return res || []
+}
+export async function addToLibrary(profileId: number, mediaItemId: number): Promise<void> {
+  await apiFetch(`/api/profiles/${profileId}/library`, {
+    method: 'POST',
+    body: { media_item_id: mediaItemId },
+  })
+}
+export async function removeFromLibrary(profileId: number, mediaItemId: number): Promise<void> {
+  await apiFetch(`/api/profiles/${profileId}/library/${mediaItemId}`, { method: 'DELETE' })
+}
+
 // Phase D — steerable thumbs. 👍 'up' feeds the taste vector ("more like this"),
 // 👎 'down' excludes the title from every recommendation surface ("not
 // interested"), 'clear' removes the thumb. The server records it + invalidates

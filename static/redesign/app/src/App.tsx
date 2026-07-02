@@ -7,7 +7,12 @@ import {
   getMediaFiles,
   getSeasons,
   getEpisodes,
+  getLibrary,
+  addToLibrary,
+  removeFromLibrary,
+  libraryItemToMedia,
   listMedia,
+  mapMedia,
   listRecent,
   listMediaWithTotal,
   listGenres,
@@ -1574,11 +1579,10 @@ function BrowseLoadingState({ title }: { title: string }) {
 // (set in main.tsx), so useLocation().pathname returns the path
 // WITHOUT that prefix — "/movies" rather than "/v2/movies".
 //
-// 'detail' is intentionally absent: it's a selectedMedia-scoped
-// transient view with no URL representation. Clicking a card sets
-// view='detail' but leaves the URL on the prior top-level path,
-// so a refresh re-renders that top-level view (movies/shows/etc.)
-// rather than a dangling detail page with no selectedMedia.
+// 'detail' resolves from /title/:id (see titleIdFromPath below) rather
+// than this static map: opening a card pushes /title/<id>, so refresh,
+// browser Back, bookmarks, and shared links all land on the same title.
+// A cold load hydrates selectedMedia from GET /api/media/:id.
 const VIEW_BY_PATH: Record<string, string> = {
   '': 'home',
   '/': 'home',
@@ -1594,9 +1598,20 @@ const VIEW_BY_PATH: Record<string, string> = {
   '/search': 'search',
 }
 
+// titleIdFromPath extracts the media id from a /title/:id pathname, or
+// null when the path is anything else. Kept strict (digits only) so a
+// malformed deep link falls through to the home view instead of a
+// dangling detail page.
+const TITLE_PATH_RE = /^\/title\/(\d+)$/
+function titleIdFromPath(pathname: string): number | null {
+  const m = TITLE_PATH_RE.exec(pathname)
+  return m ? Number(m[1]) : null
+}
+
 function pathToView(pathname: string): string {
   // Exact match first.
   if (VIEW_BY_PATH[pathname] !== undefined) return VIEW_BY_PATH[pathname]
+  if (titleIdFromPath(pathname) !== null) return 'detail'
   // First-segment fallback so future subroutes (e.g. /movies/genre/action)
   // still resolve to the top-level view that contains them.
   const first = pathname.split('/').filter(Boolean)[0]
@@ -1721,7 +1736,6 @@ function UserMenu({
 
 export default function App() {
   const [view, setView] = useState('home')
-  const [prevView, setPrevView] = useState('home')
   // Bumped every time the user clicks the current view's nav item.
   // Views with internal drill-down state (CollectionsView's selected
   // collection, future views) can subscribe via useEffect deps and
@@ -1898,12 +1912,14 @@ export default function App() {
   // QA BUG-012 — mobile sidebar drawer state. Below md (768px) the
   // sidebar is hidden by default and toggles in over content.
   const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false)
-  // My Library — user-saved titles. Persisted to localStorage so the
-  // collection survives refreshes. Items are snapshots (full Media
-  // objects) so the card poster / title / year stays accessible even
-  // when the network is down. Stale entries (e.g. media deleted on
-  // the server) gracefully degrade: the card still renders, opening
-  // the detail will fetch fresh data and may 404 — handled there.
+  // My Library — user-saved titles. The authoritative set lives server-side
+  // (a per-profile default watchlist) so saves sync across every device;
+  // localStorage is only an instant-paint + offline SNAPSHOT cache (full
+  // Media objects keep posters/titles renderable before the server responds
+  // or when it's unreachable). The reconcile effect below replaces this seed
+  // with the server's set once the active profile is known. Stale entries
+  // (media deleted on the server) degrade gracefully: the card still renders;
+  // opening detail fetches fresh data and may 404 — handled there.
   const [library, setLibrary] = useState<Media[]>(() => {
     try {
       const raw = localStorage.getItem('aurora_my_library')
@@ -1916,6 +1932,43 @@ export default function App() {
     try { localStorage.setItem('aurora_my_library', JSON.stringify(library)) }
     catch { /* quota / private mode — non-fatal */ }
   }, [library])
+  // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
+  // The reconcile below re-applies these on top of the server snapshot so a
+  // save/unsave that completes DURING the fetch isn't clobbered by the
+  // (older) snapshot. Cleared when each toggle's request settles.
+  const pendingLibOpsRef = useRef<Map<number, 'add' | 'remove'>>(new Map())
+  // Reconcile the local cache against the server's authoritative library for
+  // the active profile (login, profile switch, refresh). Rich cached
+  // snapshots win per id so posters/ratings survive; ids the server has that
+  // the cache doesn't get a basic card from the server's lightweight item.
+  useEffect(() => {
+    if (!user || !activeProfileId) return
+    let cancelled = false
+    const ac = new AbortController()
+    getLibrary(activeProfileId, ac.signal)
+      .then(items => {
+        if (cancelled) return
+        setLibrary(prev => {
+          const cachedById = new Map(prev.map(m => [m.id, m]))
+          const pending = pendingLibOpsRef.current
+          // Server set, minus any item an in-flight unsave is removing.
+          const merged = items
+            .filter(it => pending.get(it.media_item_id) !== 'remove')
+            .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
+          // Re-add any in-flight save the snapshot predates.
+          const have = new Set(merged.map(m => m.id))
+          for (const [id, op] of pending) {
+            if (op === 'add' && !have.has(id)) {
+              const cached = cachedById.get(id)
+              if (cached) merged.push(cached)
+            }
+          }
+          return merged
+        })
+      })
+      .catch(() => { /* offline / transient — keep the localStorage cache */ })
+    return () => { cancelled = true; ac.abort() }
+  }, [user, activeProfileId])
   // Memoized ID set so MediaRail / BrowseView / LibraryView can do
   // O(1) membership checks without re-creating the Set on every
   // render. Rebuilt only when the library array reference changes.
@@ -1994,6 +2047,10 @@ export default function App() {
   // mapped to UIMedia) because handlePlay needs position_ms to
   // seed resume.
   const [continueItems, setContinueItems] = useState<ContinueWatchingItem[]>([])
+  // Ref mirror for effects that need the CURRENT list without re-running
+  // when the CW poll refreshes it (e.g. the detail fetch's season seed).
+  const continueItemsRef = useRef(continueItems)
+  useEffect(() => { continueItemsRef.current = continueItems }, [continueItems])
   // 2026-05-27 — Bug-report config. Holds the full server response so
   // the BugReportButton + modal can both gate on `enabled` AND surface
   // admin-only token-health diagnostics (added 2026-05-27 PAT health
@@ -2108,6 +2165,14 @@ export default function App() {
     if (target !== view) {
       setView(target)
     }
+    // Leaving a /title/:id URL (browser Back, sidebar nav, history
+    // traversal) is the moment the detail selection stops being current.
+    // Clearing here — after the URL actually changed — instead of inside
+    // handleBack avoids a blank-detail flash between the click and the
+    // popstate landing. Idempotent for every non-detail navigation.
+    if (target !== 'detail') {
+      setSelectedMedia(null)
+    }
     // Intentionally NOT including `view` in deps — we only want
     // this to fire on URL changes. Including view would cause it
     // to reconcile back to the URL after any setView('detail')
@@ -2115,6 +2180,7 @@ export default function App() {
     // navigation back from detail via handleBack).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname])
+
 
   // security — bounce a non-admin who lands on /admin (typed URL,
   // bookmark, stale link) back home. Pairs with the role gate on the
@@ -2136,6 +2202,29 @@ export default function App() {
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id))
   }, [])
+
+  // Hydrate a /title/:id deep link (cold load, refresh, forward-button,
+  // shared link). In-app opens set selectedMedia synchronously in
+  // handleSelect before pushing the URL, so this no-ops for them — the
+  // ids already match. Waits for `user` so the fetch runs authenticated.
+  // Placed after addToast so its declaration precedes this reference.
+  useEffect(() => {
+    const id = titleIdFromPath(location.pathname)
+    if (id === null || !user) return
+    if (selectedMedia && selectedMedia.id === id) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const detail = await getMedia(id)
+        if (!cancelled) setSelectedMedia(mapMedia(detail))
+      } catch {
+        if (cancelled) return
+        addToast('Title not found', 'error')
+        navigate('/', { replace: true })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [location.pathname, user, selectedMedia, addToast, navigate])
 
   // App-wide realtime hub: live request-status patches + push notifications.
   // One socket for the whole session, enabled only while logged in.
@@ -2241,7 +2330,6 @@ export default function App() {
       window.scrollTo({ top: 0, behavior: 'smooth' })
       return
     }
-    setPrevView(view)
     setView(v)
     setSelectedMedia(null)
     setSearchOpen(false)
@@ -2262,17 +2350,19 @@ export default function App() {
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
-    setPrevView(view)
     setView('detail')
+    // Real URL per title: refresh keeps the page, browser Back returns to
+    // the grid this was opened from, and the address bar is shareable.
+    // selectedMedia is already set above so the deep-link hydration
+    // effect no-ops for in-app opens.
+    navigate(`/title/${m.id}`)
     // Issue #261 — clicking into a movie/show must open the detail page
-    // at the top. The detail view swaps in via `view` state (it's not a
-    // pathname change, so the URL-keyed scroll effects don't fire), which
-    // means the window keeps whatever scroll offset the user had on the
-    // previous page (e.g. scrolled-down home). Reset to the top here.
+    // at the top; the window otherwise keeps whatever scroll offset the
+    // user had on the previous page (e.g. scrolled-down home).
     // Instant (not smooth) because the page content is being replaced —
     // a smooth scroll would animate over swapped-in content and look off.
     window.scrollTo({ top: 0, behavior: 'auto' })
-  }, [view])
+  }, [navigate])
 
   // Play resolution. The UI Media type doesn't carry server file
   // IDs, so we resolve them here:
@@ -2430,22 +2520,51 @@ export default function App() {
   }, [view, selectedMedia?.id])
 
   const handleToggleLib = useCallback((m: Media) => {
-    setLibrary(prev => {
-      const exists = prev.find(i => i.id === m.id)
-      if (exists) {
-        addToast(`Removed "${m.title}" from library`, 'info')
-        return prev.filter(i => i.id !== m.id)
-      } else {
-        addToast(`Added "${m.title}" to library`, 'success')
-        return [...prev, m]
-      }
+    // Optimistic: flip local state now, persist to the server, roll back on
+    // failure. Needs a signed-in profile — the library is per-profile.
+    if (!activeProfileId) {
+      addToast('Pick a profile to save titles', 'info')
+      return
+    }
+    const wasSaved = library.some(i => i.id === m.id)
+    // All membership mutations dedupe inside the functional updater so a
+    // rapid double-click can't insert the same id twice (duplicate React
+    // keys) or drop it — the render-closure read above only decides intent.
+    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
+    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
+    setLibrary(wasSaved ? removeLocal : addLocal)
+    addToast(
+      wasSaved ? `Removed "${m.title}" from library` : `Added "${m.title}" to library`,
+      wasSaved ? 'info' : 'success',
+    )
+    // Record the in-flight op so a concurrent reconcile preserves it.
+    pendingLibOpsRef.current.set(m.id, wasSaved ? 'remove' : 'add')
+    const settle = () => pendingLibOpsRef.current.delete(m.id)
+    const req = wasSaved
+      ? removeFromLibrary(activeProfileId, m.id)
+      : addToLibrary(activeProfileId, m.id)
+    req.then(settle).catch(() => {
+      settle()
+      // Roll back the optimistic change and tell the user it didn't stick.
+      setLibrary(wasSaved ? addLocal : removeLocal)
+      addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
     })
-  }, [addToast])
+  }, [library, activeProfileId, addToast])
 
   const handleBack = useCallback(() => {
-    setView(prevView)
-    setSelectedMedia(null)
-  }, [prevView])
+    // In-app opens pushed /title/:id onto the history stack, so real
+    // history-back returns to the exact view (and scroll restoration)
+    // the user came from — and the browser's own Back button now does
+    // the same thing as this in-app arrow. A cold load (refresh or a
+    // shared link) has no in-app entry behind it; going back(-1) would
+    // leave the SPA, so route home instead. selectedMedia is cleared by
+    // the URL-sync effect once the path stops being /title/:id.
+    if (location.key !== 'default') {
+      navigate(-1)
+    } else {
+      navigate('/', { replace: true })
+    }
+  }, [location.key, navigate])
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -3413,16 +3532,29 @@ export default function App() {
           const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
           setDetailSeasons(seasons)
           if (seasons.length > 0) {
-            // Auto-select the first season so the user lands on
-            // something; they can switch via the picker.
-            setDetailSelectedSeason(seasons[0].season_number)
-            const epsRaw = await getEpisodes(selectedMedia.id, seasons[0].season_number, ac.signal)
+            // Land on the season the viewer is actually watching (their
+            // Continue Watching record), not blindly Season 1 — "open
+            // show → find current episode" is the most common TV
+            // navigation, and mid-series viewers previously always paid
+            // a picker-click + refetch detour. Falls back to the first
+            // season for unwatched shows or a CW season missing from the
+            // list. Read via the ref so CW poll refreshes don't re-run
+            // this whole fetch.
+            const cw = continueItemsRef.current.find(
+              c => c.media_item_id === selectedMedia.id && c.season_number != null,
+            )
+            const initialSeason =
+              cw?.season_number != null && seasons.some(s => s.season_number === cw.season_number)
+                ? cw.season_number
+                : seasons[0].season_number
+            setDetailSelectedSeason(initialSeason)
+            const epsRaw = await getEpisodes(selectedMedia.id, initialSeason, ac.signal)
             if (cancelled) return
             const eps = [...epsRaw].sort((a, b) => a.episode_number - b.episode_number)
             setDetailEpisodes(eps)
             // Stamp the ref so the season-switch effect knows
             // what's currently loaded.
-            currentEpisodesSeasonRef.current = { mediaId: selectedMedia.id, season: seasons[0].season_number }
+            currentEpisodesSeasonRef.current = { mediaId: selectedMedia.id, season: initialSeason }
           }
         } else {
           // Capture the files list so DetailView can render the
@@ -4309,8 +4441,8 @@ export default function App() {
         onClose={() => setPaletteOpen(false)}
         onSelect={(m) => {
           setPaletteOpen(false)
-          // Reuse handleSelect to route to detail view + remember
-          // prevView for the back button to land correctly.
+          // Reuse handleSelect so the palette pushes the same
+          // /title/:id history entry as a card click.
           handleSelect(m as Media)
         }}
       />
@@ -4619,6 +4751,10 @@ export default function App() {
               />
             </ViewSuspense>
           )}
+          {/* /title/:id deep link, selection still hydrating from the
+              API — hold the layout with a skeleton instead of a blank
+              page (or worse, a flash of the home view). */}
+          {view === 'detail' && !selectedMedia && <ViewFallback />}
           {view === 'detail' && selectedMedia && (
             <ViewSuspense fallback={<ViewFallback />}>
               <DetailView
