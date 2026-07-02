@@ -1524,6 +1524,8 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
 	mediaItemIDForReel := ps.MediaItemID
+	hostForReel := ps.HostUserID
+	mediaTitleForReel := ps.MediaTitle
 
 	slog.Info("watch party ending — diagnostic snapshot",
 		"code", code,
@@ -1599,8 +1601,10 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
 	// minutes later (best-effort). Empty reactions → no reel, returns
-	// immediately.
-	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel)
+	// immediately. On success the HOST gets a bell notification with the
+	// reel link — by then every party conn is closed and the party UI is
+	// gone, so the notification is the only surface that can announce it.
+	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel)
 
 	// Mark inactive in DB
 	if dbID > 0 {
@@ -1907,7 +1911,7 @@ type highlightMoment struct {
 //
 // Called from endPartyInternal AFTER the ps.mu lock is released so the
 // long-running ffmpeg job doesn't block other parties.
-func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID int64) {
+func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID, hostUserID int64, mediaTitle string) {
 	m.mu.RLock()
 	dir := m.highlightCacheDir
 	queries := m.queries
@@ -1980,7 +1984,48 @@ func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRe
 			return
 		}
 		slog.Info("highlight reel: generated", "code", code, "moments", len(moments), "out", outPath)
+		m.notifyReelReady(ctx, code, hostUserID, mediaTitle)
 	}()
+}
+
+// notifyReelReady persists a bell notification for the party host and pushes
+// it live over the 'notification' WebSocket event. The reel finishes minutes
+// after endPartyInternal closed every party conn, so the notification is the
+// only surface that can announce it. Host-only by design — the host can share
+// the link; ServeHighlightReel authorizes past participants against the DB
+// audit rows. Best-effort like the reel itself: failures log and move on.
+func (m *Manager) notifyReelReady(ctx context.Context, code string, hostUserID int64, mediaTitle string) {
+	m.mu.RLock()
+	queries := m.queries
+	hub := m.hub
+	m.mu.RUnlock()
+	if queries == nil || hostUserID == 0 {
+		return
+	}
+	title := mediaTitle
+	if title == "" {
+		title = "Watch party"
+	}
+	n := &models.Notification{
+		UserID: hostUserID,
+		Type:   models.NotificationPartyReelReady,
+		Title:  title,
+		Link:   "/api/parties/" + code + "/highlight.mp4",
+	}
+	created, err := queries.CreateNotification(ctx, n)
+	if err != nil {
+		slog.Warn("highlight reel: failed to persist ready notification", "code", code, "err", err)
+		return
+	}
+	if created && hub != nil {
+		hub.BroadcastToUser(hostUserID, ws.EventNotification, map[string]interface{}{
+			"id":         n.ID,
+			"type":       n.Type,
+			"title":      n.Title,
+			"link":       n.Link,
+			"created_at": n.CreatedAt,
+		})
+	}
 }
 
 // pickHighlightMoments buckets reactions into sliding windows and returns

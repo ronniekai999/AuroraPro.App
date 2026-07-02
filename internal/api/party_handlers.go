@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -146,7 +147,13 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) {
+	// Membership gate, two tiers. The in-memory check covers live parties;
+	// but the reel is generated minutes AFTER endPartyInternal deletes the
+	// party from memory — exactly when the host follows the "reel ready"
+	// notification link — so fall back to the DB audit rows (host +
+	// watch_party_participants) for the most recent session with this code.
+	if claims.Role != "admin" && !h.manager.IsParticipantOrHost(code, claims.UserID) &&
+		!h.wasPartyMember(r.Context(), code, claims.UserID) {
 		writeError(w, http.StatusNotFound, "highlight reel not available")
 		return
 	}
@@ -160,6 +167,31 @@ func (h *PartyHandler) ServeHighlightReel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	http.ServeFile(w, r, path)
+}
+
+// wasPartyMember reports whether userID hosted or participated in the MOST
+// RECENT party session for code, per the DB audit rows. Scoped to the latest
+// session on purpose: persistent rooms reuse codes, and the on-disk reel is
+// overwritten at each session end, so only the newest session's members
+// should see the current file.
+func (h *PartyHandler) wasPartyMember(ctx context.Context, code string, userID int64) bool {
+	party, err := h.queries.GetLatestWatchPartyByCode(ctx, code)
+	if err != nil || party == nil {
+		return false
+	}
+	if party.HostUserID == userID {
+		return true
+	}
+	participants, err := h.queries.GetPartyParticipants(ctx, party.ID)
+	if err != nil {
+		return false
+	}
+	for _, p := range participants {
+		if p.UserID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // createPartyRequest is the expected JSON body for creating a party.

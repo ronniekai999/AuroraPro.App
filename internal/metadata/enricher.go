@@ -351,6 +351,32 @@ func (e *Enricher) applyTMDBShowMatch(ctx context.Context, item *models.MediaIte
 	return confidence, nil
 }
 
+// BackfillEpisodeMetadata re-runs the season/episode metadata pass for a show
+// that is ALREADY matched (has a tmdb_id), without re-searching TMDB or
+// touching show-level fields. The scanner calls this when a scan adds new
+// episode files to an existing show: such shows skip the full EnrichMediaItem
+// path (their canonical row exists), so without this pass the new episode
+// rows would keep bare titles/overviews/stills forever.
+//
+// Returns matched=false when the item has no tmdb_id (e.g. TVDB-only or
+// unmatched shows) — those are left to the flagged/needs_review pipeline;
+// re-searching on every incremental scan would churn their match state.
+func (e *Enricher) BackfillEpisodeMetadata(ctx context.Context, mediaItemID int64) (matched bool, err error) {
+	tmdbID, err := e.queries.GetTMDBIDForItem(ctx, mediaItemID)
+	if err != nil {
+		return false, fmt.Errorf("get tmdb id: %w", err)
+	}
+	if tmdbID == 0 {
+		return false, nil
+	}
+	detail, err := e.tmdb.GetTV(ctx, tmdbID)
+	if err != nil {
+		return true, fmt.Errorf("get tv detail: %w", err)
+	}
+	e.enrichSeasons(ctx, mediaItemID, tmdbID, detail.Seasons)
+	return true, nil
+}
+
 func (e *Enricher) enrichSeasons(ctx context.Context, mediaItemID int64, tvTMDBID int, seasons []TMDBSeason) {
 	for _, s := range seasons {
 		// Skip specials (season 0) for now

@@ -534,6 +534,22 @@ func main() {
 		embedItem(ctx, item)
 	}
 
+	// New episode files added to an already-matched show skip the full
+	// enrichment path (the canonical row exists), so their episode rows would
+	// never receive TMDB titles/overviews/stills. The backfill reuses the
+	// show's existing tmdb match and re-runs only the season/episode pass.
+	// Unmatched shows are intentionally left alone — they are already in the
+	// flagged/needs_review pipeline, and re-searching TMDB on every
+	// incremental scan would churn their match state.
+	scanner.OnEpisodeBackfill = func(ctx context.Context, item *models.MediaItem) {
+		matched, err := enricher.BackfillEpisodeMetadata(ctx, item.ID)
+		if err != nil {
+			slog.Warn("episode metadata backfill failed", "item", item.Title, "error", err)
+		} else if matched {
+			slog.Info("backfilled episode metadata", "item", item.Title)
+		}
+	}
+
 	// Background cleanup of expired/revoked refresh tokens (hourly)
 	go func() {
 		ticker := time.NewTicker(time.Hour)

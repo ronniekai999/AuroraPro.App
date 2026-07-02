@@ -193,6 +193,50 @@ func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*mod
 	return party, nil
 }
 
+// GetLatestWatchPartyByCode returns the MOST RECENT party session for a code,
+// active or ended. Persistent rooms reuse their join code across sessions, so
+// a bare party_code lookup can match several rows; anything keyed to the
+// newest session (e.g. the on-disk highlight reel, which each party end
+// overwrites) must resolve through this ordered variant. Returns (nil, nil)
+// when the code has never been used.
+func (q *Queries) GetLatestWatchPartyByCode(ctx context.Context, code string) (*models.WatchParty, error) {
+	party := &models.WatchParty{}
+	err := q.pool.QueryRow(ctx,
+		`SELECT id, party_code, host_user_id, media_item_id, episode_id,
+			party_name, media_title, media_poster,
+			max_participants, is_active, COALESCE(settings_json, '{}'),
+			created_at, ended_at, scheduled_start_at, started_at
+		FROM watch_parties
+		WHERE party_code = $1
+		ORDER BY created_at DESC
+		LIMIT 1`,
+		code,
+	).Scan(
+		&party.ID,
+		&party.PartyCode,
+		&party.HostUserID,
+		&party.MediaItemID,
+		&party.EpisodeID,
+		&party.PartyName,
+		&party.MediaTitle,
+		&party.MediaPoster,
+		&party.MaxParticipants,
+		&party.IsActive,
+		&party.SettingsJSON,
+		&party.CreatedAt,
+		&party.EndedAt,
+		&party.ScheduledStartAt,
+		&party.StartedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get latest watch party by code: %w", err)
+	}
+	return party, nil
+}
+
 // EndWatchParty marks a watch party as inactive and records the end time.
 func (q *Queries) EndWatchParty(ctx context.Context, id int64) error {
 	_, err := q.pool.Exec(ctx,

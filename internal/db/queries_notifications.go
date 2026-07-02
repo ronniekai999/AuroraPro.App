@@ -16,19 +16,22 @@ import (
 func (q *Queries) CreateNotification(ctx context.Context, n *models.Notification) (created bool, err error) {
 	// Map empty/zero optional fields to SQL NULL so the schema's nullable columns
 	// stay NULL rather than storing "" / 0.
-	var mediaType, requestID interface{}
+	var mediaType, requestID, link interface{}
 	if n.MediaType != "" {
 		mediaType = n.MediaType
 	}
 	if n.RequestID != nil {
 		requestID = *n.RequestID
 	}
+	if n.Link != "" {
+		link = n.Link
+	}
 	err = q.pool.QueryRow(ctx, `
-		INSERT INTO notifications (user_id, type, title, media_type, request_id)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO notifications (user_id, type, title, media_type, request_id, link)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id, request_id, type) DO NOTHING
 		RETURNING id, created_at`,
-		n.UserID, n.Type, n.Title, mediaType, requestID,
+		n.UserID, n.Type, n.Title, mediaType, requestID, link,
 	).Scan(&n.ID, &n.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// ON CONFLICT DO NOTHING fired — a notification for this (user, request,
@@ -48,7 +51,7 @@ func (q *Queries) ListNotificationsForUser(ctx context.Context, userID int64, li
 		limit = 50
 	}
 	rows, err := q.pool.Query(ctx, `
-		SELECT id, user_id, type, title, COALESCE(media_type, ''), request_id, read_at, created_at
+		SELECT id, user_id, type, title, COALESCE(media_type, ''), request_id, COALESCE(link, ''), read_at, created_at
 		FROM notifications
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -61,7 +64,7 @@ func (q *Queries) ListNotificationsForUser(ctx context.Context, userID int64, li
 	var out []*models.Notification
 	for rows.Next() {
 		n := &models.Notification{}
-		if err := rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.MediaType, &n.RequestID, &n.ReadAt, &n.CreatedAt); err != nil {
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.MediaType, &n.RequestID, &n.Link, &n.ReadAt, &n.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, n)

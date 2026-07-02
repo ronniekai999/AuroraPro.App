@@ -37,7 +37,6 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { PartyState } from '@/hooks/useParty'
-import { highlightReelURL } from '@/lib/api'
 import type { VoiceState } from '@/lib/voice'
 import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
@@ -533,26 +532,14 @@ export function PartyPanel({
             </div>
           </div>
         )}
-        {/* Phase 4.6 — highlight reel link. Always visible while in
-            a party; the server auto-generates the reel from the
-            ongoing party's reactions. If the party is too young /
-            has no reactions yet, the server returns 404 and the
-            browser shows a "couldn't load" page. Phase 4.7 may
-            gate visibility behind a "reel ready" event.
-            Security review 2026-06 — the link authenticates via the
-            httpOnly auth cookie (same-origin GET); no ?token= so the
-            JWT never lands in history or proxy logs. */}
-        {state.code && (
-          <a
-            href={highlightReelURL(state.code)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="block text-center mt-3 py-2 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] rounded-lg text-white/70 hover:text-white text-xs transition-colors"
-            title="Download a highlight reel of this party (server-generated from reactions)"
-          >
-            Highlight Reel
-          </a>
-        )}
+        {/* Phase 4.7 — the highlight reel is announced via a bell
+            notification to the host once it's rendered. The reel only
+            exists AFTER the party ends (generation starts at
+            endPartyInternal), so an in-panel link could never serve
+            the current session's reel — it 404'd for its whole
+            lifetime (or, for reused persistent-room codes, served the
+            PREVIOUS session's file). The notification carries the
+            authenticated same-origin link instead. */}
       </div>
     </aside>
   )

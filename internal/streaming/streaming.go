@@ -2810,17 +2810,32 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	v.Cmd = cmd
 	v.started = true
 
+	// Relaunch race guard (2026-07) — relaunchVariantLocked replaces v.Ready
+	// with a fresh channel while THIS launch's goroutines may still be alive:
+	// the serve path can observe the exit via ffmpegDone (Cmd.ProcessState is
+	// set the moment cmd.Wait returns) and relaunch before the post-Wait
+	// bookkeeping below runs. So this generation's goroutines must (a) close
+	// only their own captured channel — a stale close of the replacement
+	// channel is a premature "ready" for the relaunched FFmpeg and a
+	// double-close panic when the new generation closes it again — and
+	// (b) drop their lifecycle writes (Err/StderrTail/exited) once the
+	// variant has moved on. sameGeneration must be called under variantMu.
+	readyCh := v.Ready
+	sameGeneration := func() bool { return v.Ready == readyCh }
+
 	go func() {
 		if err := cmd.Start(); err != nil {
 			// Take the session lock for the write: serve-path readers
 			// snapshot v.Err under variantMu (review 2026-06 finding B4),
 			// and this goroutine is the one v.Err writer that ran outside
-			// it. close(v.Ready) still publishes the value to pre-Ready
+			// it. close(readyCh) still publishes the value to pre-Ready
 			// waiters; the lock covers later readers.
 			session.variantMu.Lock()
-			v.Err = fmt.Errorf("start ffmpeg: %w", err)
+			if sameGeneration() {
+				v.Err = fmt.Errorf("start ffmpeg: %w", err)
+			}
 			session.variantMu.Unlock()
-			close(v.Ready)
+			close(readyCh)
 			return
 		}
 
@@ -2838,14 +2853,14 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		go func() {
 			for i := 0; i < readyPolls; i++ {
 				if _, err := os.Stat(playlistPath); err == nil {
-					close(v.Ready)
+					close(readyCh)
 					return
 				}
 				select {
 				case <-cmdDone:
 					// FFmpeg exited — check one last time for the playlist.
 					if _, err := os.Stat(playlistPath); err == nil {
-						close(v.Ready)
+						close(readyCh)
 						return
 					}
 					// cmdDone closes AFTER the cmd.Wait goroutine has
@@ -2856,7 +2871,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 					// didn't observe a non-nil error, which is rare but
 					// possible when ctx was canceled).
 					session.variantMu.Lock()
-					if v.Err == nil {
+					if sameGeneration() && v.Err == nil {
 						if v.StderrTail != "" {
 							v.Err = fmt.Errorf("FFmpeg exited before producing playlist for %s (stderr tail: %s)", p.Name, v.StderrTail)
 						} else {
@@ -2864,17 +2879,17 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 						}
 					}
 					session.variantMu.Unlock()
-					close(v.Ready)
+					close(readyCh)
 					return
 				case <-time.After(500 * time.Millisecond):
 				}
 			}
 			session.variantMu.Lock()
-			if v.Err == nil {
+			if sameGeneration() && v.Err == nil {
 				v.Err = fmt.Errorf("transcode timeout: no segments for %s", p.Name)
 			}
 			session.variantMu.Unlock()
-			close(v.Ready)
+			close(readyCh)
 		}()
 
 		waitErr := cmd.Wait()
@@ -2908,14 +2923,21 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// preserve the error so EnsureVariant callers can see it. Set
 		// StderrTail unconditionally — the polling goroutine may consult
 		// it even on the "exited cleanly but no playlist" path.
+		//
+		// Generation-guarded: ffmpegDone can observe Cmd.ProcessState the
+		// instant cmd.Wait returned (above), so a relaunch may already have
+		// reset this variant for a NEW FFmpeg — writing exited/Err here then
+		// would mark the healthy replacement as dead.
 		session.variantMu.Lock()
-		v.exited = true
-		v.StderrTail = stderrTail
-		if waitErr != nil && ctx.Err() == nil && v.Err == nil {
-			if stderrTail != "" {
-				v.Err = fmt.Errorf("%w (ffmpeg stderr tail: %s)", waitErr, stderrTail)
-			} else {
-				v.Err = waitErr
+		if sameGeneration() {
+			v.exited = true
+			v.StderrTail = stderrTail
+			if waitErr != nil && ctx.Err() == nil && v.Err == nil {
+				if stderrTail != "" {
+					v.Err = fmt.Errorf("%w (ffmpeg stderr tail: %s)", waitErr, stderrTail)
+				} else {
+					v.Err = waitErr
+				}
 			}
 		}
 		session.variantMu.Unlock()
