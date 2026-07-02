@@ -3,10 +3,13 @@ package library
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +26,47 @@ const batchFlushSize = 100
 type pendingEnrichItem struct {
 	item     *models.MediaItem
 	filePath string
+	// episodeBackfillOnly marks a show whose canonical row already existed
+	// (so full enrichment is skipped) but which gained new episode files this
+	// scan. Only the episode-level metadata pass runs for these — otherwise
+	// episodes added to an already-enriched show stay bare forever.
+	episodeBackfillOnly bool
+	// season is the season number of the new episode file (backfill entries
+	// only). Collected per show so the backfill fetches just the touched
+	// seasons instead of every season of the show.
+	season int
+}
+
+// episodeBackfillEntry aggregates a scan's new episode files per show: one
+// entry per media item, with the union of touched season numbers. Built via
+// addPendingBackfill so a 400-file season-pack import queues one entry, not
+// 400.
+type episodeBackfillEntry struct {
+	item    *models.MediaItem
+	seasons map[int]struct{}
+}
+
+// addPendingBackfill merges a backfill signal into the per-show map. Caller
+// holds the map's lock.
+func addPendingBackfill(m map[int64]*episodeBackfillEntry, item *models.MediaItem, season int) {
+	e := m[item.ID]
+	if e == nil {
+		e = &episodeBackfillEntry{item: item, seasons: make(map[int]struct{})}
+		m[item.ID] = e
+	}
+	if season > 0 {
+		e.seasons[season] = struct{}{}
+	}
+}
+
+// sortedSeasons returns the entry's touched seasons in ascending order.
+func (e *episodeBackfillEntry) sortedSeasons() []int {
+	out := make([]int, 0, len(e.seasons))
+	for sn := range e.seasons {
+		out = append(out, sn)
+	}
+	sort.Ints(out)
+	return out
 }
 
 type Scanner struct {
@@ -64,6 +108,13 @@ type Scanner struct {
 
 	// OnNewItemByTVDBID is called when an .nfo file provides a TVDB ID (but no TMDB ID).
 	OnNewItemByTVDBID func(ctx context.Context, item *models.MediaItem, tvdbID int)
+
+	// OnEpisodeBackfill is called for shows whose canonical row already
+	// existed when a scan added new episode files. The enricher hooks into
+	// this to populate episode-level TMDB metadata for the new rows without
+	// re-running the full show match. seasons lists the season numbers the
+	// scan touched (empty ⇒ refresh all seasons).
+	OnEpisodeBackfill func(ctx context.Context, item *models.MediaItem, seasons []int)
 
 	// OnScanComplete fires once per ScanLibrary call after the scan
 	// finished SUCCESSFULLY (not on failure), regardless of which
@@ -162,18 +213,36 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Phase 1: Walk all paths and collect video files
 	var allFiles []string
 	walkFailed := false
+	totalWalkErrs := 0
 	for _, rootPath := range lib.Paths {
-		files, err := collectVideoFiles(rootPath)
+		files, walkErrs, err := collectVideoFiles(rootPath)
 		if err != nil {
 			slog.Error("walk path failed", "path", rootPath, "error", err)
 			walkFailed = true
+			totalWalkErrs++
 			continue
+		}
+		// deep-debug H9 addendum — a walk that "succeeded" but skipped
+		// unreadable entries is just as dangerous as a failed one: the file
+		// list is missing everything under the unreadable subtree, so a
+		// prune would delete those rows. Scan what we found, skip the prune.
+		if walkErrs > 0 {
+			slog.Warn("walk incomplete: unreadable entries — prune will be skipped",
+				"path", rootPath, "unreadable", walkErrs)
+			walkFailed = true
+			totalWalkErrs += walkErrs
 		}
 		allFiles = append(allFiles, files...)
 	}
 
 	s.mu.Lock()
 	progress.TotalFiles = len(allFiles)
+	// Surface incomplete walks on the status API: a persistently
+	// unreadable entry (root-owned lost+found, NAS .snapshots) disables
+	// the prune on EVERY scan, and a log line is the wrong place for the
+	// only evidence of that.
+	progress.WalkErrors = totalWalkErrs
+	progress.PruneSkipped = walkFailed
 	s.mu.Unlock()
 	notify()
 
@@ -241,11 +310,15 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	var newCount atomic.Int64
 	var wg sync.WaitGroup
 
-	// Local per-scan collection for deferred TV enrichment.
+	// Local per-scan collections for deferred TV enrichment.
 	// TV show enrichment is deferred until all files are processed so that
-	// all season/episode rows exist when enrichSeasons() runs.
+	// all season/episode rows exist when enrichSeasons() runs. Full
+	// enrichments (new shows) and episode backfills (existing shows that
+	// gained files) are kept apart: backfills dedup per show at enqueue,
+	// and running the fulls first is structural, not an ordering pass.
 	var pendingMu sync.Mutex
 	var pendingTVEnrich []*pendingEnrichItem
+	pendingBackfill := make(map[int64]*episodeBackfillEntry)
 
 	for _, fp := range allFiles {
 		if ctx.Err() != nil {
@@ -268,7 +341,11 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 			}
 			if pending != nil {
 				pendingMu.Lock()
-				pendingTVEnrich = append(pendingTVEnrich, pending)
+				if pending.episodeBackfillOnly {
+					addPendingBackfill(pendingBackfill, pending.item, pending.season)
+				} else {
+					pendingTVEnrich = append(pendingTVEnrich, pending)
+				}
 				pendingMu.Unlock()
 			}
 
@@ -306,14 +383,35 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// Enrich TV shows after all files are processed.
 	// All season/episode rows now exist in the DB, so enrichSeasons() can
 	// populate every episode with TMDB metadata (titles, overviews, stills).
-	if len(pendingTVEnrich) > 0 {
-		slog.Info("enriching TV shows", "count", len(pendingTVEnrich))
+	if len(pendingTVEnrich) > 0 || len(pendingBackfill) > 0 {
+		slog.Info("enriching TV shows",
+			"full", len(pendingTVEnrich), "episode_backfills", len(pendingBackfill))
+		// Fulls run before backfills: a full enrichment covers the
+		// backfill's work and marks the show in the shared per-scan dedup
+		// map, so backfillEpisodeMetadata skips shows enriched this scan
+		// (a show gets BOTH kinds of entry when its first file created the
+		// row and later files found it existing).
+		interrupted := false
 		for i, p := range pendingTVEnrich {
 			if ctx.Err() != nil {
-				slog.Warn("TV enrichment interrupted by context cancellation", "completed", i, "remaining", len(pendingTVEnrich)-i)
+				slog.Warn("TV enrichment interrupted by context cancellation",
+					"completed", i, "remaining", len(pendingTVEnrich)-i+len(pendingBackfill))
+				interrupted = true
 				break
 			}
 			s.enrichNewItem(ctx, p.item, p.filePath)
+		}
+		if !interrupted {
+			done := 0
+			for _, b := range pendingBackfill {
+				if ctx.Err() != nil {
+					slog.Warn("episode backfill interrupted by context cancellation",
+						"completed", done, "remaining", len(pendingBackfill)-done)
+					break
+				}
+				s.backfillEpisodeMetadata(ctx, b.item, b.sortedSeasons())
+				done++
+			}
 		}
 	}
 
@@ -520,6 +618,13 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 		if needsEnrichment {
 			return isNew, &pendingEnrichItem{item: item, filePath: filePath}, nil
 		}
+		// Canonical show already existed (needsEnrichment=false), but this
+		// scan added a NEW episode file. The full-enrichment path won't run
+		// for this show, so queue an episode-level backfill or the new
+		// episode rows never receive TMDB titles/overviews/stills.
+		if isNew {
+			return isNew, &pendingEnrichItem{item: item, filePath: filePath, episodeBackfillOnly: true, season: seasonNum}, nil
+		}
 	} else {
 		// Movie: create media_file
 		mf := &models.MediaFile{
@@ -598,6 +703,20 @@ func (s *Scanner) enrichNewItem(ctx context.Context, item *models.MediaItem, fil
 	}
 }
 
+// backfillEpisodeMetadata triggers the episode-level metadata pass for a show
+// that already had a canonical row when this scan added new episode files.
+// Shares the per-scan dedup map with enrichNewItem so a show fully enriched
+// this scan (which already covered its episodes) is skipped.
+func (s *Scanner) backfillEpisodeMetadata(ctx context.Context, item *models.MediaItem, seasons []int) {
+	if _, alreadyEnriched := s.enrichedItems.Load().LoadOrStore(item.ID, true); alreadyEnriched {
+		slog.Debug("skipping duplicate episode backfill", "item_id", item.ID, "title", item.Title)
+		return
+	}
+	if s.OnEpisodeBackfill != nil {
+		s.OnEpisodeBackfill(ctx, item, seasons)
+	}
+}
+
 // pruneDeletedFiles removes DB rows for files that no longer exist on disk.
 // It compares the set of files discovered by the walk against all file paths
 // stored in the DB for this library. Any DB path not in the discovered set
@@ -667,7 +786,11 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 	return pruned, nil
 }
 
-func collectVideoFiles(root string) ([]string, error) {
+// collectVideoFiles walks root and returns the video files found, plus the
+// number of entries the walk could not read (permission errors, I/O
+// failures, a subtree whose mount dropped mid-walk). A non-zero count means
+// the returned list is INCOMPLETE — callers must not prune against it.
+func collectVideoFiles(root string) ([]string, int, error) {
 	// 2026-05-19 audit (BE-H3) — defend against symlinked files that
 	// escape the library root. filepath.WalkDir (Go 1.21+) does NOT
 	// follow directory symlinks, but it DOES traverse FILE-level
@@ -683,12 +806,19 @@ func collectVideoFiles(root string) ([]string, error) {
 	// is self-contained).
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return nil, fmt.Errorf("resolve root: %w", err)
+		return nil, 0, fmt.Errorf("resolve root: %w", err)
 	}
 	resolvedRoot = filepath.Clean(resolvedRoot)
 	var files []string
+	walkErrs := 0
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			// deep-debug H9 addendum — count the failure instead of silently
+			// absorbing it. Returning nil keeps the walk going (we still want
+			// to scan every readable file), but the caller must know the file
+			// list is incomplete: pruning against a partial list would delete
+			// the DB rows for everything under an unreadable subtree.
+			walkErrs++
 			slog.Warn("walk error", "path", path, "error", err)
 			return nil
 		}
@@ -703,6 +833,15 @@ func collectVideoFiles(root string) ([]string, error) {
 		// must not be processed.
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
+			// Distinguish "genuinely gone" from "can't verify". A dangling
+			// symlink (or a file deleted mid-walk) is safe for the prune to
+			// treat as absent. Any other failure (EACCES, EIO) means the
+			// file may well still exist — count it so the prune is skipped,
+			// otherwise this skip silently shrinks the discovered list and
+			// the prune deletes the row of a file that is still on disk.
+			if !errors.Is(err, fs.ErrNotExist) {
+				walkErrs++
+			}
 			slog.Warn("skip: resolve symlink failed", "path", path, "error", err)
 			return nil
 		}
@@ -714,7 +853,7 @@ func collectVideoFiles(root string) ([]string, error) {
 		files = append(files, path)
 		return nil
 	})
-	return files, walkErr
+	return files, walkErrs, walkErr
 }
 
 func generateFileHash(path string) (string, int64, error) {

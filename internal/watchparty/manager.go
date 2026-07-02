@@ -599,17 +599,37 @@ func (m *Manager) reapHighlights(dir string) {
 		// M9/M5 — only reap our own files. Defends against an operator
 		// (or a future feature) dropping unrelated files in this dir,
 		// and explicitly skips `.tmp` files left behind by H1's atomic
-		// rename if a render is in-flight. Expected pattern: <6-char
-		// code>.mp4.
+		// rename if a render is in-flight. Expected pattern:
+		// <6-char code>-<partyDBID>.mp4 (session-scoped reels), plus the
+		// legacy <6-char code>.mp4 shape so files from earlier builds
+		// still age out.
 		if !strings.HasSuffix(name, ".mp4") {
 			continue
 		}
 		base := strings.TrimSuffix(name, ".mp4")
-		if len(base) != codeLength {
+		codePart := base
+		if i := strings.IndexByte(base, '-'); i >= 0 {
+			codePart = base[:i]
+			idPart := base[i+1:]
+			if idPart == "" {
+				continue
+			}
+			validID := true
+			for _, c := range idPart {
+				if c < '0' || c > '9' {
+					validID = false
+					break
+				}
+			}
+			if !validID {
+				continue
+			}
+		}
+		if len(codePart) != codeLength {
 			continue
 		}
 		valid := true
-		for _, c := range base {
+		for _, c := range codePart {
 			if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
 				valid = false
 				break
@@ -637,15 +657,16 @@ func (m *Manager) reapHighlights(dir string) {
 // whether the file exists. Used by the HTTP handler to serve the MP4 or
 // 404. Returns (empty, false) when reel generation is disabled, the
 // file is missing, or the code is empty / suspicious.
-func (m *Manager) HighlightReelPath(code string) (string, bool) {
+func (m *Manager) HighlightReelPath(code string, partyDBID int64) (string, bool) {
 	m.mu.RLock()
 	dir := m.highlightCacheDir
 	m.mu.RUnlock()
-	if dir == "" || code == "" {
+	if dir == "" || code == "" || partyDBID <= 0 {
 		return "", false
 	}
 	// Defensive: party codes are uppercase alphanumeric (codeLength=6).
-	// Reject anything else to prevent path-traversal via the URL.
+	// Reject anything else to prevent path-traversal via the URL. The
+	// partyDBID component is an int64 — no traversal surface.
 	for _, c := range code {
 		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
 			return "", false
@@ -654,7 +675,7 @@ func (m *Manager) HighlightReelPath(code string) (string, bool) {
 	if len(code) != codeLength {
 		return "", false
 	}
-	path := filepath.Join(dir, code+".mp4")
+	path := filepath.Join(dir, highlightReelFilename(code, partyDBID))
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
 		return "", false
 	}
@@ -1524,6 +1545,8 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
 	mediaItemIDForReel := ps.MediaItemID
+	hostForReel := ps.HostUserID
+	mediaTitleForReel := ps.MediaTitle
 
 	slog.Info("watch party ending — diagnostic snapshot",
 		"code", code,
@@ -1599,8 +1622,14 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	// M9 — kick off highlight-reel generation. Goroutine + ffmpeg detach
 	// from this function; the reel file appears at HighlightReelPath
 	// minutes later (best-effort). Empty reactions → no reel, returns
-	// immediately.
-	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel)
+	// immediately. On success the HOST gets a bell notification with the
+	// reel link — by then every party conn is closed and the party UI is
+	// gone, so the notification is the only surface that can announce it.
+	// The reel is keyed by (code, dbID): persistent rooms and freed quick-
+	// party codes REUSE codes across sessions, so a code-only file would
+	// let a later session's reel be served under an earlier session's
+	// notification (and vice versa for authorization).
+	m.generateHighlightReelAsync(code, reactionsForReel, mediaItemIDForReel, hostForReel, mediaTitleForReel, dbID)
 
 	// Mark inactive in DB
 	if dbID > 0 {
@@ -1907,7 +1936,7 @@ type highlightMoment struct {
 //
 // Called from endPartyInternal AFTER the ps.mu lock is released so the
 // long-running ffmpeg job doesn't block other parties.
-func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID int64) {
+func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRecord, mediaItemID, hostUserID int64, mediaTitle string, partyDBID int64) {
 	m.mu.RLock()
 	dir := m.highlightCacheDir
 	queries := m.queries
@@ -1927,6 +1956,12 @@ func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRe
 	}
 	if queries == nil {
 		slog.Debug("highlight reel: skipping (no DB)", "code", code)
+		return
+	}
+	if partyDBID == 0 {
+		// No DB row for the session (insert failed at create time) means
+		// ServeHighlightReel could never authorize anyone for it post-end.
+		slog.Debug("highlight reel: skipping (no DB row for session)", "code", code)
 		return
 	}
 	if parentCtx == nil {
@@ -1965,7 +2000,7 @@ func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRe
 		// hitting /highlight.mp4 while ffmpeg is still writing. ffmpeg's
 		// +faststart pass writes the moov atom AFTER the mdat box, so a
 		// partial file is unplayable until the rename lands.
-		outPath := filepath.Join(dir, code+".mp4")
+		outPath := filepath.Join(dir, highlightReelFilename(code, partyDBID))
 		tmpPath := outPath + ".tmp"
 		if err := renderHighlightReel(ctx, srcPath, tmpPath, moments); err != nil {
 			slog.Warn("highlight reel: render failed", "code", code, "err", err)
@@ -1980,7 +2015,64 @@ func (m *Manager) generateHighlightReelAsync(code string, reactions []ReactionRe
 			return
 		}
 		slog.Info("highlight reel: generated", "code", code, "moments", len(moments), "out", outPath)
+		m.notifyReelReady(ctx, code, partyDBID, hostUserID, mediaTitle)
 	}()
+}
+
+// highlightReelFilename is the on-disk name for a session's reel:
+// <CODE>-<partyDBID>.mp4. Session-scoped (not just code-scoped) because
+// persistent rooms and freed quick-party codes reuse codes; the reaper's
+// filename filter and HighlightReelPath must agree with this shape.
+func highlightReelFilename(code string, partyDBID int64) string {
+	return fmt.Sprintf("%s-%d.mp4", code, partyDBID)
+}
+
+// notifyReelReady persists a bell notification for the party host and pushes
+// it live over the 'notification' WebSocket event. The reel finishes minutes
+// after endPartyInternal closed every party conn, so the notification is the
+// only surface that can announce it. Host-only by design — the host can share
+// the link; ServeHighlightReel authorizes past participants against the DB
+// audit rows. Best-effort like the reel itself: failures log and move on.
+func (m *Manager) notifyReelReady(ctx context.Context, code string, partyDBID, hostUserID int64, mediaTitle string) {
+	m.mu.RLock()
+	queries := m.queries
+	hub := m.hub
+	m.mu.RUnlock()
+	if queries == nil || hostUserID == 0 {
+		return
+	}
+	// Detach the durable write from the render ctx (mirrors notifyRequest,
+	// request_handlers.go): the reel just landed on disk, and this is its
+	// only announcement — a render that consumed most of the shared 5-minute
+	// budget, or a SIGTERM between the rename and here, must not silently
+	// drop the write. WithoutCancel keeps values, drops cancellation; the
+	// fresh timeout still bounds it.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	title := mediaTitle
+	if title == "" {
+		title = "Watch party"
+	}
+	n := &models.Notification{
+		UserID: hostUserID,
+		Type:   models.NotificationPartyReelReady,
+		Title:  title,
+		Link:   fmt.Sprintf("/api/parties/%s/highlight.mp4?session=%d", code, partyDBID),
+	}
+	created, err := queries.CreateNotification(writeCtx, n)
+	if err != nil {
+		slog.Warn("highlight reel: failed to persist ready notification", "code", code, "err", err)
+		return
+	}
+	if created && hub != nil {
+		hub.BroadcastToUser(hostUserID, ws.EventNotification, map[string]interface{}{
+			"id":         n.ID,
+			"type":       n.Type,
+			"title":      n.Title,
+			"link":       n.Link,
+			"created_at": n.CreatedAt,
+		})
+	}
 }
 
 // pickHighlightMoments buckets reactions into sliding windows and returns

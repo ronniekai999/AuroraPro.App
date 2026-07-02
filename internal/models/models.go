@@ -305,6 +305,13 @@ type ScanProgress struct {
 	CurrentFile  string     `json:"current_file,omitempty"`
 	StartedAt    *time.Time `json:"started_at,omitempty"`
 	Error        string     `json:"error,omitempty"`
+	// WalkErrors counts directory entries the walk could not read.
+	// When non-zero the discovered file list was incomplete, so the
+	// deleted-file prune was skipped (PruneSkipped) — surfaced here so
+	// the status API shows WHY stale rows linger instead of reporting a
+	// clean "complete" while cleanup is silently disabled.
+	WalkErrors   int  `json:"walk_errors,omitempty"`
+	PruneSkipped bool `json:"prune_skipped,omitempty"`
 }
 
 // --- API Request/Response ---
@@ -897,6 +904,10 @@ type Request struct {
 const (
 	NotificationRequestAvailable = "request_available"
 	NotificationRequestFailed    = "request_failed"
+	// NotificationPartyReelReady tells the party host their highlight reel
+	// finished rendering (minutes after the party — and its UI — ended).
+	// Carries the reel URL in Link.
+	NotificationPartyReelReady = "party_reel_ready"
 )
 
 // Notification is a durable, per-user in-app notification backing the bell +
@@ -906,10 +917,11 @@ const (
 type Notification struct {
 	ID        int64      `json:"id"`
 	UserID    int64      `json:"user_id"`
-	Type      string     `json:"type"`                 // request_available | request_failed
+	Type      string     `json:"type"`                 // request_available | request_failed | party_reel_ready
 	Title     string     `json:"title"`                // media title, e.g. "Hook"
 	MediaType string     `json:"media_type,omitempty"` // movie | tv
 	RequestID *int64     `json:"request_id,omitempty"` // source request, when applicable
+	Link      string     `json:"link,omitempty"`       // optional deep link (e.g. highlight-reel MP4)
 	ReadAt    *time.Time `json:"read_at,omitempty"`    // nil ⇒ unread
 	CreatedAt time.Time  `json:"created_at"`
 }

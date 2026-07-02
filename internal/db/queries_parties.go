@@ -156,7 +156,10 @@ func (q *Queries) GetWatchPartyByCode(ctx context.Context, code string) (*models
 }
 
 // GetWatchPartyByCodeAny retrieves a watch party by code regardless of active
-// status. Used for viewing ended party info.
+// status. Used for viewing ended party info. Persistent rooms reuse their
+// join code across sessions, so several rows can match — the ORDER BY pins
+// the result to the newest session (previously QueryRow picked an arbitrary
+// row from the multi-row result).
 func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*models.WatchParty, error) {
 	party := &models.WatchParty{}
 	err := q.pool.QueryRow(ctx,
@@ -165,7 +168,9 @@ func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*mod
 			max_participants, is_active, COALESCE(settings_json, '{}'),
 			created_at, ended_at, scheduled_start_at, started_at
 		FROM watch_parties
-		WHERE party_code = $1`,
+		WHERE party_code = $1
+		ORDER BY created_at DESC
+		LIMIT 1`,
 		code,
 	).Scan(
 		&party.ID,
@@ -191,6 +196,30 @@ func (q *Queries) GetWatchPartyByCodeAny(ctx context.Context, code string) (*mod
 		return nil, fmt.Errorf("get watch party by code (any): %w", err)
 	}
 	return party, nil
+}
+
+// IsPartyMemberForCode reports whether userID hosted or participated in party
+// partyDBID, additionally requiring that row to carry code — so a URL can't
+// mix one session's code with another session's id. found=false when no such
+// (id, code) row exists. Single round trip on purpose: the highlight-reel
+// handler runs this per HTTP Range request during MP4 playback.
+func (q *Queries) IsPartyMemberForCode(ctx context.Context, partyDBID int64, code string, userID int64) (found, member bool, err error) {
+	err = q.pool.QueryRow(ctx, `
+		SELECT host_user_id = $3 OR EXISTS (
+			SELECT 1 FROM watch_party_participants
+			WHERE party_id = $1 AND user_id = $3
+		)
+		FROM watch_parties
+		WHERE id = $1 AND party_code = $2`,
+		partyDBID, code, userID,
+	).Scan(&member)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("is party member: %w", err)
+	}
+	return true, member, nil
 }
 
 // EndWatchParty marks a watch party as inactive and records the end time.

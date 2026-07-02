@@ -1911,17 +1911,6 @@ export async function deleteRoom(id: number): Promise<void> {
   await apiFetch(`/api/rooms/${id}`, { method: 'DELETE' })
 }
 
-// Phase 4.6 — highlight reel. Auto-generated server-side at party-
-// end (M9). The server streams the MP4.
-// Security review 2026-06 — no withToken(): the <a href> is a same-origin
-// top-level GET that carries the httpOnly auth cookie automatically
-// (post-H10, same pattern as companionQrURL). Embedding the login JWT in
-// the URL leaked it into browser history and upstream proxy access logs;
-// the router-side ?token= promotion for this path has been removed.
-export function highlightReelURL(code: string): string {
-  return `/api/parties/${encodeURIComponent(code)}/highlight.mp4`
-}
-
 // ──────────────────────────────────────────────────────────────────
 // Watch Party — Mobile Companion (additive helpers)
 //
@@ -2299,10 +2288,11 @@ export async function getRequestsConfig(signal?: AbortSignal): Promise<RequestsC
 export interface AppNotification {
   id: number
   user_id: number
-  type: string // 'request_available' | 'request_failed'
+  type: string // 'request_available' | 'request_failed' | 'party_reel_ready'
   title: string
   media_type?: string
   request_id?: number
+  link?: string // optional deep link (e.g. the highlight-reel MP4)
   read_at?: string | null // null/absent ⇒ unread
   created_at: string
 }

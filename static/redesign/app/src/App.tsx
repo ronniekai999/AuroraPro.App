@@ -1415,6 +1415,20 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
 }
 
 /* ─────────────────────── NOTIFICATION PANEL ─────────────────────── */
+// Shared by the NotificationPanel rows and the live WS toast so the
+// notification type→copy mapping can't drift between the two surfaces.
+const notifLine = (n: AppNotification): string =>
+  n.type === 'request_failed' ? `Request failed: ${n.title}`
+  : n.type === 'party_reel_ready' ? `Highlight reel ready: ${n.title}`
+  : `${n.title} is now available`
+
+// Render a notification's link only when it is a same-origin path. The
+// server column is free text, so refuse absolute and protocol-relative
+// URLs (off-origin redirect) and anything non-path (javascript: would be
+// stored XSS) in case a future producer writes less-controlled values.
+const safeNotifLink = (link?: string): string | undefined =>
+  link && link.startsWith('/') && !link.startsWith('//') ? link : undefined
+
 // NotificationPanel surfaces recent admin activity log entries.
 // Real-time WS-driven notifications are TODO; non-admins see an
 // empty state.
@@ -1469,9 +1483,6 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
   // (content scrolls inside).
   //
   // z-[45] — same layering rationale as ServerPanel above.
-  const notifLine = (n: AppNotification): string =>
-    n.type === 'request_failed' ? `Request failed: ${n.title}` : `${n.title} is now available`
-
   return (
     <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
@@ -1494,7 +1505,20 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
               aria-hidden="true"
             />
             <div className="min-w-0">
-              <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
+              {/* Same-origin <a href> so the httpOnly auth cookie rides along
+                  (the highlight-reel MP4 is an authenticated endpoint). */}
+              {safeNotifLink(n.link) ? (
+                <a
+                  href={safeNotifLink(n.link)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-white/90 hover:text-white text-sm font-medium truncate block underline decoration-white/20 underline-offset-2"
+                >
+                  {notifLine(n)}
+                </a>
+              ) : (
+                <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
+              )}
               <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
             </div>
           </div>
@@ -2138,7 +2162,7 @@ export default function App() {
       setNotifications(prev => (prev.some(x => x.id === n.id) ? prev : [n, ...prev]))
       setUnreadCount(c => c + 1)
       addToast(
-        n.type === 'request_failed' ? `Request failed: ${n.title}` : `${n.title} is now available`,
+        notifLine(n) + (n.type === 'party_reel_ready' ? ' — see Notifications' : ''),
         n.type === 'request_failed' ? 'error' : 'success',
       )
     },
