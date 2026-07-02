@@ -261,6 +261,36 @@ function readAutoplayPref(): boolean {
   return true
 }
 
+// Persisted player volume, same aurora_prefs bucket as the autoplay pref
+// above. The <video> element fully unmounts between playback sessions, so
+// without this every player open boots at useState(1) — 100% volume — and
+// the night-time viewer lunges for the slider on every title. Volume only:
+// mute is deliberately session-scoped, because the watch-party muted-
+// autoplay fallback (#334) mutes the element programmatically, and a
+// persisted flag would replay a mute the user never chose onto the next,
+// unrelated playback.
+function readVolumePref(): number | null {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+    if (raw && typeof raw === 'object') {
+      const v = (raw as Record<string, unknown>).player_volume
+      if (typeof v === 'number' && Number.isFinite(v)) {
+        return Math.min(1, Math.max(0, v))
+      }
+    }
+  } catch { /* malformed prefs — no restore */ }
+  return null
+}
+
+function writeVolumePref(volume: number): void {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+    const prefs = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+    prefs.player_volume = Math.min(1, Math.max(0, volume))
+    localStorage.setItem('aurora_prefs', JSON.stringify(prefs))
+  } catch { /* storage unavailable — the volume just won't stick */ }
+}
+
 // 2026-05-28 — Lift subtitle cues clear of the bottom control bar.
 //
 // With native <track> rendering AND our custom controls (the native
@@ -438,6 +468,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   useEffect(() => { realDurationSecRef.current = realDurationSec }, [realDurationSec])
   const [volume, setVolume] = useState(1)
   const [muted, setMuted] = useState(false)
+  // Debounce bookkeeping for persisting the volume pref (see
+  // readVolumePref/writeVolumePref above the component).
+  const volumeSaveTimerRef = useRef<number | null>(null)
+  const pendingVolumeRef = useRef<number | null>(null)
   // #334 — true when we auto-started playback MUTED because the browser
   // blocked a sounded autoplay (party start fires play() outside a user
   // gesture). Drives the "Tap for sound" affordance. Distinct from the
@@ -2318,6 +2352,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // #334 — once sound is restored (via the pill or the normal mute
       // control), the auto-muted affordance has served its purpose.
       if (!vid.muted) setAutoStartedMuted(false)
+      // Debounced persist — dragging the slider fires a burst of
+      // volumechange events; write once the level settles.
+      pendingVolumeRef.current = vid.volume
+      if (volumeSaveTimerRef.current != null) window.clearTimeout(volumeSaveTimerRef.current)
+      volumeSaveTimerRef.current = window.setTimeout(() => {
+        volumeSaveTimerRef.current = null
+        if (pendingVolumeRef.current !== null) writeVolumePref(pendingVolumeRef.current)
+        pendingVolumeRef.current = null
+      }, 400)
     }
     const onFullscreenChange = () => {
       // Issue #309 — iOS Safari reports the active fullscreen element via the
@@ -2348,6 +2391,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     document.addEventListener('fullscreenchange', onFullscreenChange)
     // iOS Safari fires the webkit-prefixed event instead (issue #309).
     document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+    // Apply the persisted volume BEFORE hydrating state from the element,
+    // so a fresh player doesn't open at the useState(1) default. Re-runs
+    // on target change are no-ops: the element keeps its volume and the
+    // persisted value already matches (cleanup below flushes any pending
+    // write before this effect re-runs).
+    const savedVolume = readVolumePref()
+    if (savedVolume !== null) vid.volume = savedVolume
     // Hydrate initial state from the element (it may already be
     // playing if we're re-mounting on a target change).
     setPlaying(!vid.paused)
@@ -2363,6 +2413,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.removeEventListener('ended', onEndedDom)
       document.removeEventListener('fullscreenchange', onFullscreenChange)
       document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+      // Flush a pending debounced volume write so the last adjustment
+      // before a close or episode-advance isn't lost.
+      if (volumeSaveTimerRef.current != null) {
+        window.clearTimeout(volumeSaveTimerRef.current)
+        volumeSaveTimerRef.current = null
+      }
+      if (pendingVolumeRef.current !== null) {
+        writeVolumePref(pendingVolumeRef.current)
+        pendingVolumeRef.current = null
+      }
     }
   }, [target])
 

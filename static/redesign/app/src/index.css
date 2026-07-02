@@ -598,6 +598,55 @@
   -webkit-overflow-scrolling: touch;
 }
 
+/* Rail paddles — hover/focus-revealed chevrons that page the rail for
+   mouse users (the scrollbar is hidden and a vertical wheel scrolls the
+   page, so without these anything past the first viewport-width of
+   cards is unreachable without a trackpad/touch). Hidden by default;
+   revealed while the rail is hovered or a paddle has keyboard focus.
+   Touch devices never hover — swiping already works there. */
+.rail-scroll-wrap {
+  position: relative;
+}
+.rail-paddle {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 36px;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(10, 8, 18, 0.78);
+  border: 1px solid var(--glow-border);
+  color: rgba(255, 255, 255, 0.85);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.rail-scroll-wrap:hover .rail-paddle,
+.rail-paddle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.rail-paddle:hover {
+  background: rgba(30, 24, 48, 0.92);
+  color: #fff;
+}
+.rail-paddle:focus-visible {
+  outline: 2px solid rgba(168, 85, 247, 0.8);
+  outline-offset: 2px;
+}
+.rail-paddle-left {
+  left: -8px;
+}
+.rail-paddle-right {
+  right: -8px;
+}
+
 .rail-scroll > * {
   scroll-snap-align: start;
   flex-shrink: 0;

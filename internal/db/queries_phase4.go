@@ -279,6 +279,75 @@ func (q *Queries) RemoveFromWatchlist(ctx context.Context, watchlistID, itemID i
 	return tag.RowsAffected() > 0, nil
 }
 
+// RemoveFromWatchlistByMedia deletes an item by its media_item_id (rather than
+// the watchlist_item row id). This is what a save/unsave TOGGLE needs — the UI
+// knows the media it's un-saving, not the join-row id — and it means an add
+// followed by a remove in the same session doesn't require refetching the row
+// id first.
+func (q *Queries) RemoveFromWatchlistByMedia(ctx context.Context, watchlistID, mediaItemID int64) (bool, error) {
+	tag, err := q.pool.Exec(ctx,
+		"DELETE FROM watchlist_items WHERE watchlist_id = $1 AND media_item_id = $2", watchlistID, mediaItemID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// libraryWatchlistName is the reserved name of the per-profile "My Library"
+// list that backs the + save button. Using a reserved name (not a schema
+// flag) reuses the existing UNIQUE(profile_id, name) constraint for
+// race-safe get-or-create, so no migration is needed.
+const libraryWatchlistName = "My Library"
+
+// GetOrCreateLibraryWatchlist returns the profile's reserved "My Library"
+// watchlist, creating it on first use. Race-safe via ON CONFLICT on
+// (profile_id, name): two concurrent first-saves resolve to the same row
+// instead of erroring. If the profile already has a same-named list from the
+// right-click "Add to Watchlist…" flow, that list is adopted as the library.
+func (q *Queries) GetOrCreateLibraryWatchlist(ctx context.Context, profileID int64) (*models.Watchlist, error) {
+	wl := &models.Watchlist{}
+	err := q.pool.QueryRow(ctx, `
+		INSERT INTO watchlists (profile_id, name, list_type)
+		VALUES ($1, $2, 'favorites')
+		ON CONFLICT (profile_id, name) DO UPDATE SET updated_at = NOW()
+		RETURNING id, profile_id, name, list_type, created_at, updated_at`,
+		profileID, libraryWatchlistName,
+	).Scan(&wl.ID, &wl.ProfileID, &wl.Name, &wl.ListType, &wl.CreatedAt, &wl.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return wl, nil
+}
+
+// GetAllWatchlistItems returns every item in a watchlist (no pagination),
+// newest-saved first. Used by the library sync, where the client needs the
+// full authoritative set to reconcile against its local cache. Bounded by the
+// user's own save count.
+func (q *Queries) GetAllWatchlistItems(ctx context.Context, watchlistID int64) ([]*models.WatchlistItem, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT wi.id, wi.watchlist_id, wi.media_item_id, wi.added_at, wi.sort_order,
+		       mi.title, COALESCE(mi.poster_path, ''), mi.year, mi.type
+		FROM watchlist_items wi
+		JOIN media_items mi ON mi.id = wi.media_item_id
+		WHERE wi.watchlist_id = $1
+		ORDER BY wi.added_at DESC`, watchlistID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := []*models.WatchlistItem{}
+	for rows.Next() {
+		item := &models.WatchlistItem{}
+		if err := rows.Scan(&item.ID, &item.WatchlistID, &item.MediaItemID, &item.AddedAt,
+			&item.SortOrder, &item.Title, &item.PosterPath, &item.Year, &item.Type); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (q *Queries) GetWatchlistItems(ctx context.Context, watchlistID int64, params models.PaginationParams) ([]*models.WatchlistItem, int64, error) {
 	var total int64
 	err := q.pool.QueryRow(ctx,

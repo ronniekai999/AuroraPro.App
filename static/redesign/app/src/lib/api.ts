@@ -1703,6 +1703,31 @@ export async function addToWatchlist(
   })
 }
 
+// My Library — the profile's default saved-titles list, backing the + save
+// button. Server-side (and thus cross-device) rather than the old
+// localStorage-only store. Media-keyed: the client toggles by media id and
+// never handles watchlist-row ids.
+export interface LibraryItem {
+  media_item_id: number
+  title: string
+  poster_path?: string
+  year?: number
+  type: 'movie' | 'show'
+}
+export async function getLibrary(profileId: number, signal?: AbortSignal): Promise<LibraryItem[]> {
+  const res = await apiFetch<LibraryItem[]>(`/api/profiles/${profileId}/library`, { signal })
+  return res || []
+}
+export async function addToLibrary(profileId: number, mediaItemId: number): Promise<void> {
+  await apiFetch(`/api/profiles/${profileId}/library`, {
+    method: 'POST',
+    body: { media_item_id: mediaItemId },
+  })
+}
+export async function removeFromLibrary(profileId: number, mediaItemId: number): Promise<void> {
+  await apiFetch(`/api/profiles/${profileId}/library/${mediaItemId}`, { method: 'DELETE' })
+}
+
 // Phase D — steerable thumbs. 👍 'up' feeds the taste vector ("more like this"),
 // 👎 'down' excludes the title from every recommendation surface ("not
 // interested"), 'clear' removes the thumb. The server records it + invalidates

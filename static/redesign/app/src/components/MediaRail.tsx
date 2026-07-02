@@ -3,7 +3,7 @@
 // (2026-06-17 app split, Phase 2.4) so the lazy BrowseView chunk can reuse it
 // without reaching back into App. RailTint + railIconFor (title → {icon,tint}
 // resolver) are module-private — only MediaRail uses them.
-import { useRef, type MouseEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { type Media } from '@/lib/types'
@@ -82,6 +82,30 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
   tint?: RailTint
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Chevron paddles — the rail hides its scrollbar (.scrollbar-hide), so
+  // without these a plain-mouse user can only ever see the first
+  // viewport-width of cards: the vertical wheel scrolls the page and
+  // there is no other affordance. Hover/focus reveals a paddle per
+  // scrollable direction; each pages by ~90% of the visible width.
+  const [canScroll, setCanScroll] = useState({ left: false, right: false })
+  const updatePaddles = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const max = el.scrollWidth - el.clientWidth
+    // 2px slop — fractional scroll positions on zoomed/hidpi layouts
+    // never quite reach the exact max.
+    const next = { left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 }
+    setCanScroll(prev => (prev.left === next.left && prev.right === next.right ? prev : next))
+  }, [])
+  useEffect(() => {
+    updatePaddles()
+    window.addEventListener('resize', updatePaddles)
+    return () => window.removeEventListener('resize', updatePaddles)
+  }, [items, updatePaddles])
+  const page = (dir: -1 | 1) => {
+    const el = scrollRef.current
+    if (el) el.scrollBy({ left: dir * el.clientWidth * 0.9, behavior: 'smooth' })
+  }
   // Resolve icon + tint. Caller-supplied value wins; otherwise look
   // up by title; otherwise the generic compass / purple chip.
   const resolved = railIconFor(title)
@@ -113,22 +137,44 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           </button>
         )}
       </div>
-      <div ref={scrollRef} className="rail-scroll scrollbar-hide">
-        {items.map((item) => (
-          <MediaCardCinema
-            key={item.id}
-            item={item}
-            onSelect={() => onSelect(item)}
-            onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
-            libraryIds={libraryIds}
-            onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
-            className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
-            aspect={aspect}
-            onResume={resolveResume?.(item)}
-            showBadges={showBadges}
-            subtitle={cardSubtitleFor?.(item)}
-          />
-        ))}
+      <div className="rail-scroll-wrap">
+        {canScroll.left && (
+          <button
+            type="button"
+            className="rail-paddle rail-paddle-left"
+            aria-label={`Scroll ${title} rail left`}
+            onClick={() => page(-1)}
+          >
+            <Icon name="chevronLeft" size={18} />
+          </button>
+        )}
+        <div ref={scrollRef} className="rail-scroll scrollbar-hide" onScroll={updatePaddles}>
+          {items.map((item) => (
+            <MediaCardCinema
+              key={item.id}
+              item={item}
+              onSelect={() => onSelect(item)}
+              onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
+              libraryIds={libraryIds}
+              onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
+              className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
+              aspect={aspect}
+              onResume={resolveResume?.(item)}
+              showBadges={showBadges}
+              subtitle={cardSubtitleFor?.(item)}
+            />
+          ))}
+        </div>
+        {canScroll.right && (
+          <button
+            type="button"
+            className="rail-paddle rail-paddle-right"
+            aria-label={`Scroll ${title} rail right`}
+            onClick={() => page(1)}
+          >
+            <Icon name="chevronRight" size={18} />
+          </button>
+        )}
       </div>
     </section>
   )
