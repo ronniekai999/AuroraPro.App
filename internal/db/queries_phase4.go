@@ -300,21 +300,52 @@ func (q *Queries) RemoveFromWatchlistByMedia(ctx context.Context, watchlistID, m
 const libraryWatchlistName = "My Library"
 
 // GetOrCreateLibraryWatchlist returns the profile's reserved "My Library"
-// watchlist, creating it on first use. Race-safe via ON CONFLICT on
-// (profile_id, name): two concurrent first-saves resolve to the same row
-// instead of erroring. If the profile already has a same-named list from the
-// right-click "Add to Watchlist…" flow, that list is adopted as the library.
+// watchlist, creating it on first use.
+//
+// list_type is 'custom', NOT 'favorites': the 'favorites' type is owned by the
+// taste-onboarding list (GetOrCreateFavoritesWatchlist selects
+// `list_type='favorites' ORDER BY id LIMIT 1`), so a favorites-typed library
+// created before onboarding would be picked up as the onboarding list and get
+// the recommender seeds mixed into it.
+//
+// Read-first so the steady-state path (every GetLibrary) performs no write.
+// Matched by the reserved NAME; the UNIQUE(profile_id, name) constraint makes
+// the create race-safe (concurrent first-saves converge on one row). If the
+// profile already has a same-named list from the right-click "Add to
+// Watchlist…" flow, that list is adopted.
 func (q *Queries) GetOrCreateLibraryWatchlist(ctx context.Context, profileID int64) (*models.Watchlist, error) {
+	const sel = `SELECT id, profile_id, name, list_type, created_at, updated_at
+		FROM watchlists WHERE profile_id = $1 AND name = $2`
+
 	wl := &models.Watchlist{}
-	err := q.pool.QueryRow(ctx, `
+	err := q.pool.QueryRow(ctx, sel, profileID, libraryWatchlistName).
+		Scan(&wl.ID, &wl.ProfileID, &wl.Name, &wl.ListType, &wl.CreatedAt, &wl.UpdatedAt)
+	if err == nil {
+		return wl, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, fmt.Errorf("find library watchlist: %w", err)
+	}
+
+	err = q.pool.QueryRow(ctx, `
 		INSERT INTO watchlists (profile_id, name, list_type)
-		VALUES ($1, $2, 'favorites')
-		ON CONFLICT (profile_id, name) DO UPDATE SET updated_at = NOW()
+		VALUES ($1, $2, 'custom')
+		ON CONFLICT (profile_id, name) DO NOTHING
 		RETURNING id, profile_id, name, list_type, created_at, updated_at`,
 		profileID, libraryWatchlistName,
 	).Scan(&wl.ID, &wl.ProfileID, &wl.Name, &wl.ListType, &wl.CreatedAt, &wl.UpdatedAt)
+	if err == nil {
+		return wl, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, fmt.Errorf("create library watchlist: %w", err)
+	}
+
+	// Lost the insert race — a concurrent call created it. Re-read.
+	err = q.pool.QueryRow(ctx, sel, profileID, libraryWatchlistName).
+		Scan(&wl.ID, &wl.ProfileID, &wl.Name, &wl.ListType, &wl.CreatedAt, &wl.UpdatedAt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reread library watchlist: %w", err)
 	}
 	return wl, nil
 }

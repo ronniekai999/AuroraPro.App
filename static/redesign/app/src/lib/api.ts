@@ -1714,6 +1714,24 @@ export interface LibraryItem {
   year?: number
   type: 'movie' | 'show'
 }
+// Build a lightweight UIMedia from a server library item, for ids the local
+// snapshot cache has never seen (fresh device). Rating/genre/badges are absent
+// until the card's detail is opened — cached rich snapshots are preferred by
+// the caller when available. Mirrors mapMedia's default shape.
+export function libraryItemToMedia(it: LibraryItem): UIMedia {
+  return {
+    id: it.media_item_id,
+    title: it.title,
+    year: it.year ?? 0,
+    rating: 0,
+    duration: '',
+    genre: '',
+    type: it.type === 'show' ? 'show' : 'movie',
+    poster: posterURL(it.poster_path),
+    description: '',
+    tags: [],
+  }
+}
 export async function getLibrary(profileId: number, signal?: AbortSignal): Promise<LibraryItem[]> {
   const res = await apiFetch<LibraryItem[]>(`/api/profiles/${profileId}/library`, { signal })
   return res || []

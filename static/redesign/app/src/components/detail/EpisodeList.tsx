@@ -38,15 +38,15 @@ export function EpisodeList({
 
   // Bring the in-progress episode into view when a season's rows land —
   // a long season otherwise opens at E1 with the current episode below
-  // the fold. Keyed by the row id so re-renders (progress updates,
-  // version-chip hovers) don't re-yank the viewport; 'nearest' makes it
-  // a no-op when the row is already visible.
+  // the fold. Keyed by the row id: the primitive dep already skips
+  // unrelated re-renders (progress updates, version-chip hovers), and
+  // re-runs on every actual change — including switching seasons away and
+  // back, which a "scrolled once" guard would wrongly suppress. 'nearest'
+  // is a no-op when the row is already visible.
   const inProgressId = rows.find((r) => r.state === 'in-progress')?.id
   const inProgressRowRef = useRef<HTMLDivElement | null>(null)
-  const scrolledForRef = useRef<number | null>(null)
   useEffect(() => {
-    if (inProgressId == null || scrolledForRef.current === inProgressId) return
-    scrolledForRef.current = inProgressId
+    if (inProgressId == null) return
     inProgressRowRef.current?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
   }, [inProgressId])
 

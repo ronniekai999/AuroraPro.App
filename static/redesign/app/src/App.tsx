@@ -10,6 +10,7 @@ import {
   getLibrary,
   addToLibrary,
   removeFromLibrary,
+  libraryItemToMedia,
   listMedia,
   mapMedia,
   listRecent,
@@ -1931,6 +1932,11 @@ export default function App() {
     try { localStorage.setItem('aurora_my_library', JSON.stringify(library)) }
     catch { /* quota / private mode — non-fatal */ }
   }, [library])
+  // In-flight optimistic library toggles, by media id → 'add' | 'remove'.
+  // The reconcile below re-applies these on top of the server snapshot so a
+  // save/unsave that completes DURING the fetch isn't clobbered by the
+  // (older) snapshot. Cleared when each toggle's request settles.
+  const pendingLibOpsRef = useRef<Map<number, 'add' | 'remove'>>(new Map())
   // Reconcile the local cache against the server's authoritative library for
   // the active profile (login, profile switch, refresh). Rich cached
   // snapshots win per id so posters/ratings survive; ids the server has that
@@ -1944,20 +1950,20 @@ export default function App() {
         if (cancelled) return
         setLibrary(prev => {
           const cachedById = new Map(prev.map(m => [m.id, m]))
-          return items.map(it =>
-            cachedById.get(it.media_item_id) ?? {
-              id: it.media_item_id,
-              title: it.title,
-              year: it.year ?? 0,
-              rating: 0,
-              duration: '',
-              genre: '',
-              type: it.type === 'show' ? 'show' : 'movie',
-              poster: posterURL(it.poster_path),
-              description: '',
-              tags: [],
-            },
-          )
+          const pending = pendingLibOpsRef.current
+          // Server set, minus any item an in-flight unsave is removing.
+          const merged = items
+            .filter(it => pending.get(it.media_item_id) !== 'remove')
+            .map(it => cachedById.get(it.media_item_id) ?? libraryItemToMedia(it))
+          // Re-add any in-flight save the snapshot predates.
+          const have = new Set(merged.map(m => m.id))
+          for (const [id, op] of pending) {
+            if (op === 'add' && !have.has(id)) {
+              const cached = cachedById.get(id)
+              if (cached) merged.push(cached)
+            }
+          }
+          return merged
         })
       })
       .catch(() => { /* offline / transient — keep the localStorage cache */ })
@@ -2516,29 +2522,31 @@ export default function App() {
   const handleToggleLib = useCallback((m: Media) => {
     // Optimistic: flip local state now, persist to the server, roll back on
     // failure. Needs a signed-in profile — the library is per-profile.
-    const wasSaved = library.some(i => i.id === m.id)
     if (!activeProfileId) {
       addToast('Pick a profile to save titles', 'info')
       return
     }
-    setLibrary(prev =>
-      wasSaved ? prev.filter(i => i.id !== m.id) : [...prev, m],
-    )
+    const wasSaved = library.some(i => i.id === m.id)
+    // All membership mutations dedupe inside the functional updater so a
+    // rapid double-click can't insert the same id twice (duplicate React
+    // keys) or drop it — the render-closure read above only decides intent.
+    const addLocal = (prev: Media[]) => (prev.some(i => i.id === m.id) ? prev : [...prev, m])
+    const removeLocal = (prev: Media[]) => prev.filter(i => i.id !== m.id)
+    setLibrary(wasSaved ? removeLocal : addLocal)
     addToast(
       wasSaved ? `Removed "${m.title}" from library` : `Added "${m.title}" to library`,
       wasSaved ? 'info' : 'success',
     )
+    // Record the in-flight op so a concurrent reconcile preserves it.
+    pendingLibOpsRef.current.set(m.id, wasSaved ? 'remove' : 'add')
+    const settle = () => pendingLibOpsRef.current.delete(m.id)
     const req = wasSaved
       ? removeFromLibrary(activeProfileId, m.id)
       : addToLibrary(activeProfileId, m.id)
-    req.catch(() => {
+    req.then(settle).catch(() => {
+      settle()
       // Roll back the optimistic change and tell the user it didn't stick.
-      setLibrary(prev => {
-        const nowSaved = prev.some(i => i.id === m.id)
-        if (wasSaved && !nowSaved) return [...prev, m]
-        if (!wasSaved && nowSaved) return prev.filter(i => i.id !== m.id)
-        return prev
-      })
+      setLibrary(wasSaved ? addLocal : removeLocal)
       addToast(`Couldn't ${wasSaved ? 'remove' : 'save'} "${m.title}" — try again`, 'error')
     })
   }, [library, activeProfileId, addToast])

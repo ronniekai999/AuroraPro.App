@@ -87,15 +87,19 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
   // viewport-width of cards: the vertical wheel scrolls the page and
   // there is no other affordance. Hover/focus reveals a paddle per
   // scrollable direction; each pages by ~90% of the visible width.
-  const [canScroll, setCanScroll] = useState({ left: false, right: false })
+  // Two primitive booleans (not one object) so React's built-in Object.is
+  // bail-out skips the re-render when neither edge changed — no hand-rolled
+  // equality check to keep in sync as the handler fires every scroll frame.
+  const [canLeft, setCanLeft] = useState(false)
+  const [canRight, setCanRight] = useState(false)
   const updatePaddles = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     const max = el.scrollWidth - el.clientWidth
     // 2px slop — fractional scroll positions on zoomed/hidpi layouts
     // never quite reach the exact max.
-    const next = { left: el.scrollLeft > 2, right: el.scrollLeft < max - 2 }
-    setCanScroll(prev => (prev.left === next.left && prev.right === next.right ? prev : next))
+    setCanLeft(el.scrollLeft > 2)
+    setCanRight(el.scrollLeft < max - 2)
   }, [])
   useEffect(() => {
     updatePaddles()
@@ -138,7 +142,7 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
         )}
       </div>
       <div className="rail-scroll-wrap">
-        {canScroll.left && (
+        {canLeft && (
           <button
             type="button"
             className="rail-paddle rail-paddle-left"
@@ -165,7 +169,7 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
             />
           ))}
         </div>
-        {canScroll.right && (
+        {canRight && (
           <button
             type="button"
             className="rail-paddle rail-paddle-right"
