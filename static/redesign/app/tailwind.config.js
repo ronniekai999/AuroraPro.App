@@ -3,16 +3,34 @@ module.exports = {
   darkMode: ["class"],
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
+    // Hard rule 01: zero the ENTIRE radius scale (top-level override,
+    // not extend) so every rounded-* utility — including
+    // variant-prefixed emissions like sm:rounded-2xl, which land after
+    // index.css's runtime kill rule and would otherwise win — is 0 at
+    // build time. index.css's [class*="rounded"] rule mops up
+    // arbitrary values (rounded-[10px]) and non-Tailwind classes.
+    borderRadius: {
+      none: "0",
+      sm: "0",
+      DEFAULT: "0",
+      md: "0",
+      lg: "0",
+      xl: "0",
+      "2xl": "0",
+      "3xl": "0",
+      full: "0",
+    },
     extend: {
       fontFamily: {
         // Map the `font-sans` utility (and Tailwind's preflight base
-        // font) to the active typeface system so EVERY element — not
-        // just `body` / `.font-display` — follows Settings → Appearance
-        // → Typeface. `--font-sans` is defined on :root in index.css and
-        // swapped via the data-font attribute. (.font-display stays a
-        // bespoke utility on `--font-display`; intentionally not mapped
-        // here so it doesn't collide with that class.)
+        // font) to the catalogue grotesk, and `font-mono` to the ledger
+        // hand — every number, timecode, stamp, and catalogue mark sets
+        // in mono (redesign hard rule 04). Both vars are defined on
+        // :root in index.css. (.font-display stays a bespoke utility on
+        // `--font-display`; intentionally not mapped here so it doesn't
+        // collide with that class.)
         sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
         border: "hsl(var(--border))",
@@ -60,14 +78,16 @@ module.exports = {
         },
       },
       borderRadius: {
-        xl: "calc(var(--radius) + 4px)",
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
-        xs: "calc(var(--radius) - 6px)",
+        // xs isn't in the top-level zeroed scale (it's a shadcn
+        // addition) — pin it to 0 with the rest.
+        xs: "0",
       },
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+        // The system's one shadow: hard offset on floating paper
+        // (menus, dialogs, toasts) — redesign hard rule 05. Reads the
+        // :root token so CSS and utilities share one source of truth.
+        hard: "var(--shadow-hard)",
       },
       keyframes: {
         "accordion-down": {

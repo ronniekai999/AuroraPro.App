@@ -147,8 +147,10 @@ function StarSvg() {
   )
 }
 function MovieSvg() {
+  // Ink-tint glyph — was text-white/20, invisible on the stock card
+  // (phase-1 review finding).
   return (
-    <svg width={32} height={32} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-white/20">
+    <svg width={32} height={32} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="text-[rgba(22,21,17,0.3)]">
       <rect x="2" y="2" width="20" height="20" rx="2.18" />
       <path d="M7 2v20M17 2v20M2 12h20" />
     </svg>
