@@ -869,19 +869,18 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
       <div className="flex items-end justify-between gap-5 mt-2 mb-5">
         <div className="min-w-0">
-          <h1 className="font-display text-3xl font-bold tracking-tight leading-tight">
-            Good {greetWord},{' '}
-            <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
+          <h1 className="font-display text-3xl md:text-4xl font-extrabold uppercase tracking-tight leading-none text-[var(--ink)]">
+            Good {greetWord}, <span className="text-[var(--signal)]">{firstName}</span>.
           </h1>
-          <div className="text-white/60 text-sm mt-1.5 flex items-center gap-2 flex-wrap">
+          <div className="text-[var(--ink-2)] font-mono text-[11px] tracking-[0.08em] uppercase mt-2.5 flex items-center gap-2 flex-wrap">
             <span>{weekday} {dayPart}</span>
             {nPicks > 0 && (
               <>
-                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
+                <span className="w-[3px] h-[3px] bg-[var(--ink-3)]" aria-hidden="true" />
                 <span>
-                  <b className="text-white font-semibold">{nPicks}</b> titles worth your time
+                  <b className="text-[var(--ink)]">{nPicks}</b> {nPicks === 1 ? 'title' : 'titles'} worth your time
                   {libraryTotal != null && libraryTotal > 0 && (
-                    <> out of the <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</>
+                    <> · from <b className="text-[var(--ink)]">{libraryTotal.toLocaleString()}</b> on shelf</>
                   )}
                 </span>
               </>
@@ -889,8 +888,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             {/* TODO(redesign-net-new): wire a real library-count if a lightweight endpoint exists. */}
             {nPicks === 0 && libraryTotal != null && libraryTotal > 0 && (
               <>
-                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
-                <span>picked from <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</span>
+                <span className="w-[3px] h-[3px] bg-[var(--ink-3)]" aria-hidden="true" />
+                <span>picked from <b className="text-[var(--ink)]">{libraryTotal.toLocaleString()}</b> titles on shelf</span>
               </>
             )}
           </div>
@@ -900,22 +899,22 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             <button
               onClick={onRefreshRecs}
               disabled={recsRefreshing}
-              title="Refresh picks — rebuild your AI-curated Discover rails"
-              aria-label="Refresh picks — rebuild your AI-curated Discover rails"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Reshuffle — rebuild your curated shelves"
+              aria-label="Reshuffle — rebuild your curated shelves"
+              className="inline-flex items-center gap-2 px-4 py-2.5 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
-              {recsRefreshing ? 'Refreshing…' : 'Refresh picks'}
+              <Icon name="refresh" size={13} className={recsRefreshing ? 'animate-spin' : undefined} />
+              {recsRefreshing ? 'Reshuffling…' : 'Reshuffle'}
             </button>
           )}
           {onSurprise && (
             <button
               onClick={onSurprise}
-              title="Surprise me — play a random recommended title"
-              aria-label="Surprise me — play a random recommended title"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
+              title="Dealer's choice — play a random recommended title"
+              aria-label="Dealer's choice — play a random recommended title"
+              className="inline-flex items-center gap-2 px-4 py-2.5 border border-[var(--signal)] text-[var(--signal)] hover:bg-[var(--signal)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase whitespace-nowrap transition-colors"
             >
-              <Icon name="sparkle" size={15} /> Surprise me
+              Dealer's choice
             </button>
           )}
         </div>
@@ -940,33 +939,32 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           pick and the browsable rails. Fires the semantic search on Enter (not
           per-keystroke) to bound LLM cost. */}
       {onConversationalSearch && (
-        <div className="mt-7 mb-8 max-w-2xl mx-auto">
+        <div className="relative mt-8 mb-8 max-w-2xl mx-auto">
+          <span className="absolute -top-2 left-3 bg-[var(--paper)] px-2 cat-label !text-[var(--signal)] z-10 pointer-events-none">Ask the archivist</span>
           <div className="convo-search flex items-center">
-            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
               value={convoText}
               onChange={e => setConvoText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
-              aria-label="Describe what you're in the mood for"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
+              placeholder="Describe the evening — “something cold and quiet, under two hours”"
+              aria-label="Describe the evening you're after"
+              className="flex-1 min-w-0 text-[var(--ink)] text-sm outline-none"
             />
             {convoText && (
               <button
                 onClick={() => { setConvoText(''); onConversationalSearch('') }}
                 aria-label="Clear search"
-                className="shrink-0 px-2.5 py-1 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+                className="shrink-0 px-2.5 py-1 font-mono text-[10px] font-semibold tracking-[0.1em] uppercase text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors"
               >Clear</button>
             )}
-            {/* Solid Search chip pinned to the right edge — a filled element
-                reads as anchored-right even through the bar's glow halo, where
-                faint floating text did not. Clickable (Enter still works too). */}
+            {/* Solid Search chip pinned to the right edge. Clickable
+                (Enter still works too). */}
             <button
               onClick={() => onConversationalSearch(convoText)}
               aria-label="Search"
-              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/30 border border-purple-400/25 hover:border-purple-400/45 px-2.5 py-1.5 text-[11px] font-semibold text-purple-100/90 hover:text-white transition-colors"
+              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 bg-[var(--ink)] hover:bg-[var(--signal)] px-2.5 py-1.5 font-mono text-[10px] font-semibold tracking-[0.1em] uppercase text-[var(--paper)] transition-colors"
             >
-              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
+              <kbd className="grid place-items-center h-4 min-w-[1rem] border border-[rgba(240,237,228,0.4)] text-[10px] leading-none">↵</kbd>
               <span className="hidden sm:inline">Search</span>
             </button>
           </div>
@@ -974,25 +972,24 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
       )}
       {convoLoading && (
         <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
-          <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
-          <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
-          <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
-          <div className="relative z-10 flex items-center gap-2 text-purple-200 text-sm font-medium animate-pulse">
-            <Icon name="sparkle" size={14} />
-            Sensing the vibe...
+          <div className="aurora-pulse-blob w-24 h-24 bg-[#C8331F]/20 -left-10 -top-2" style={{ animationDelay: '0s' }} />
+          <div className="aurora-pulse-blob w-32 h-32 bg-[#161511]/10 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
+          <div className="aurora-pulse-blob w-28 h-28 bg-[#C8331F]/10 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
+          <div className="relative z-10 flex items-center gap-2 text-[var(--ink-2)] font-mono text-[11px] font-semibold tracking-[0.12em] uppercase animate-pulse">
+            The archivist is thinking…
           </div>
         </div>
       )}
       {error && (
-        <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
+        <div className="mb-6 px-5 py-4 border border-[var(--signal)] text-sm flex items-center justify-between gap-4">
           <div>
-            <p className="font-medium">Couldn't load your library</p>
-            <p className="text-red-300/70 text-xs mt-1">{error}</p>
+            <p className="font-semibold text-[var(--signal)]">Couldn't load your library</p>
+            <p className="text-[var(--ink-2)] text-xs mt-1">{error}</p>
           </div>
           {onRetry && (
             <button
               onClick={onRetry}
-              className="px-4 py-2 bg-white/10 hover:bg-white/15 rounded-lg text-white/90 text-sm transition-colors"
+              className="px-4 py-2 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.12em] uppercase transition-colors"
             >
               Retry
             </button>
@@ -1000,7 +997,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         </div>
       )}
       {loading && !rails && (
-        <div className="mb-6 px-5 py-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-200 text-sm">
+        <div className="mb-6 px-5 py-3 border border-[var(--rule-faint)] bg-[var(--stock)] text-[var(--ink-2)] text-sm">
           Loading your library…
         </div>
       )}
@@ -1051,6 +1048,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         return (
           <MediaRail
             key={`${rail.title}-${i}`}
+            index={i}
             title={rail.title}
             items={rail.items}
             onSelect={onSelect}
@@ -1117,45 +1115,42 @@ function YourWeekBand() {
 
   return (
     <>
-      <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="barChart" size={17} className="text-purple-300" />
-        <h3 className="text-[16.5px] font-semibold">Your week</h3>
-        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
+      <div className="flex items-baseline gap-3 mt-10 mb-3 pb-2 border-b border-[var(--rule)]">
+        <span className="cat-label !text-[var(--signal)]">Ledger</span>
+        <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">The week in review</h3>
+        <span className="ml-auto cat-label hidden sm:inline">Mon–Sun</span>
       </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-purple-500/[0.08] to-white/[0.02] flex flex-col lg:flex-row items-stretch">
-        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-purple-500/[0.14] blur-[60px] pointer-events-none" aria-hidden="true" />
-        {/* Lead: level + XP bar (real) */}
-        <div className="relative px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[210px] border-b lg:border-b-0 lg:border-r border-white/[0.08]">
-          <span className="inline-flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold">
-            <Icon name="zap" size={13} /> Level {xp ? xp.level : '—'}
+      <div className="border border-[var(--ink)] bg-[var(--stock)] flex flex-col lg:flex-row items-stretch">
+        {/* Lead: standing + XP rule (real) */}
+        <div className="px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[220px] border-b lg:border-b-0 lg:border-r border-[var(--rule-faint)]">
+          <span className="cat-label">Standing</span>
+          <span className="font-display text-[26px] font-extrabold leading-tight text-[var(--ink)] tabular-nums">Level {xp ? xp.level : '—'}</span>
+          <span className="h-1.5 bg-[rgba(22,21,17,0.14)] overflow-hidden mt-1">
+            <span className="block h-full bg-[var(--ink)] transition-all duration-700" style={{ width: `${pct}%` }} />
           </span>
-          <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
-          <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
-            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${pct}%` }} />
-          </span>
-          <span className="text-[11px] text-white/40 mt-1">
+          <span className="text-[11px] text-[var(--ink-2)] font-mono tabular-nums mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
           </span>
         </div>
         {/* Stats grid */}
-        <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
+        <div className="flex-1 grid grid-cols-2 lg:grid-cols-4">
           {/* Hrs + titles finished this week — real, from watch_progress.completed_at. */}
           <div className="px-5 py-5 flex flex-col gap-1.5">
-            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
+            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-[var(--ink-2)] font-medium">hrs</small></span>
+            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Watched this week</span>
           </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[28px] font-bold leading-none">{wkTitles != null ? wkTitles : '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
+            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums">{wkTitles != null ? wkTitles : '—'}</span>
+            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Titles finished</span>
           </div>
           {/* Day streak — REAL from xp.current_streak / longest_streak */}
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-white/60 font-medium font-sans">days</small></span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
+            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-[var(--ink-2)] font-medium">days</small></span>
+            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
           </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
-            <span className="font-display text-[21px] font-bold leading-none">{stats?.top_genre || '—'}</span>
-            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
+            <span className="font-display text-[21px] font-extrabold leading-none text-[var(--ink)]">{stats?.top_genre || '—'}</span>
+            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Your top genre</span>
           </div>
         </div>
       </div>
@@ -1214,25 +1209,20 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
 
   return (
     <>
-      <div className="flex items-center gap-3 mt-9 mb-3.5">
-        <Icon name="users" size={17} className="text-purple-300" />
-        <h3 className="text-[16.5px] font-semibold">Watch together</h3>
+      <div className="flex items-baseline gap-3 mt-9 mb-3 pb-2 border-b border-[var(--rule)]">
+        <span className="cat-label !text-[var(--signal)]">Together</span>
+        <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">The screening room</h3>
         {joinable.length > 0 && (
-          <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
-            {joinable.length} live now
-          </span>
+          <span className="stamp stamp--red-solid">{joinable.length} live</span>
         )}
-        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
       </div>
-      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] px-6 py-5">
-        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
-
+      <div className="border border-[var(--ink)] bg-[var(--stock)] px-6 py-5">
         {joinable.length > 0 ? (
-          <div className="relative flex flex-col gap-2.5">
+          <div className="flex flex-col gap-2.5">
             {joinable.slice(0, 3).map((p) => (
               <div key={p.code} className="flex items-center gap-3.5 flex-wrap">
-                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex-none overflow-hidden">
-                  <Icon name="users" size={20} className="text-indigo-300" />
+                <div className="relative flex items-center justify-center w-[46px] h-[46px] border border-[var(--ink)] bg-[var(--paper)] flex-none overflow-hidden">
+                  <Icon name="users" size={18} className="text-[var(--ink-2)]" />
                   {p.media_poster ? (
                     <img
                       src={posterURL(p.media_poster, 'w154')}
@@ -1244,49 +1234,47 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                   ) : null}
                 </div>
                 <div className="flex-1 min-w-[180px]">
-                  <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
-                  <div className="text-[12.5px] text-white/55 truncate">
+                  <div className="text-[14.5px] font-bold text-[var(--ink)] truncate uppercase tracking-wide">{p.party_name?.trim() || 'Screening room'}</div>
+                  <div className="text-[12px] text-[var(--ink-2)] font-mono truncate">
                     {p.media_title
-                      ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
-                      : 'In the lobby'}
-                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                      ? <>{p.is_playing ? 'WATCHING' : 'PAUSED ON'} <span className="text-[var(--ink)]">{p.media_title}</span></>
+                      : 'IN THE LOBBY'}
+                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} VIEWERS
                   </div>
                 </div>
                 <button
                   onClick={() => handleJoin(p.code)}
                   disabled={!onJoinParty || joining !== null}
-                  className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
+                  className="px-4 py-2.5 bg-[var(--ink)] hover:bg-[var(--signal)] disabled:opacity-50 disabled:cursor-default text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase transition-colors flex-none"
                 >
-                  {joining === p.code ? 'Joining…' : 'Join'}
+                  {joining === p.code ? 'Joining…' : 'Join room'}
                 </button>
               </div>
             ))}
-            {joinError && <div className="text-[12px] text-rose-300/90 mt-0.5">{joinError}</div>}
+            {joinError && <div className="text-[12px] text-[var(--signal)] mt-0.5">{joinError}</div>}
             {onStartParty && (
-              <button onClick={onStartParty} className="self-start text-[12.5px] text-indigo-200/80 hover:text-white mt-1 transition-colors">
-                or start your own watch party →
+              <button onClick={onStartParty} className="self-start font-mono text-[10.5px] font-semibold tracking-[0.12em] uppercase text-[var(--ink-2)] hover:text-[var(--signal)] mt-1 transition-colors">
+                or open a new room →
               </button>
             )}
           </div>
         ) : (
-          <div className="relative flex items-center gap-5 flex-wrap">
-            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
-              <Icon name="users" size={26} className="text-indigo-300" />
+          <div className="flex items-center gap-5 flex-wrap">
+            <div className="flex items-center justify-center w-[54px] h-[54px] border border-[var(--ink)] bg-[var(--paper)] flex-none">
+              <Icon name="users" size={22} className="text-[var(--ink)]" />
             </div>
-            <div className="relative flex-1 min-w-[200px]">
-              <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
-                <Icon name="users" size={13} /> Watch parties
-              </div>
-              <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
-              <div className="text-[12.5px] text-white/50 mt-0.5">No one's hosting right now — start one and everyone stays in sync, same scene, same time.</div>
+            <div className="flex-1 min-w-[200px]">
+              <div className="cat-label">Synced sessions</div>
+              <div className="text-[16px] font-bold text-[var(--ink)] mt-1 uppercase tracking-wide">The room is dark tonight</div>
+              <div className="text-[12.5px] text-[var(--ink-2)] mt-0.5">No one's hosting — open a room and everyone stays in sync, same scene, same time.</div>
             </div>
-            <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
+            <div className="flex items-center gap-3.5 flex-none flex-wrap">
               {onStartParty && (
                 <button
                   onClick={onStartParty}
-                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
+                  className="flex items-center gap-2 px-5 py-3 bg-[var(--ink)] hover:bg-[var(--signal)] text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors"
                 >
-                  <Icon name="users" size={16} /> Start a watch party
+                  Open a room
                 </button>
               )}
             </div>
@@ -4347,8 +4335,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#050505] aurora-bg">
-      {/* Sidebar */}
+    <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)]">
       {/* The masthead (ex-sidebar) renders inside the sticky stack in
           <main> below, so the scan bar + masthead pin together. The
           old mobile drawer/hamburger died with the sidebar: the tab

@@ -26,12 +26,17 @@ import { type Media } from '@/lib/types'
 // case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
+export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, index }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
+  // Catalogue Edition — zero-based shelf position. When provided, the
+  // header leads with a red "SHELF NN" catalogue number instead of the
+  // icon chip (the numbering mirrors on-page order, like the proposal's
+  // shelf marks). Rails without it keep the icon.
+  index?: number
   // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
   // subtitle under the rail title, and an "✨ AI PICK" chip beside the
   // title for recommender-driven rails (discover / anchor). Both are
@@ -122,7 +127,11 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           title + subtitle and an inline "AI PICK" chip. When no subtitle
           is passed the title row layout is unchanged. */}
       <div className="rail-header">
-        <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
+        {index != null ? (
+          <span className="cat-label !text-[var(--signal)] shrink-0">Shelf {String(index + 1).padStart(2, '0')}</span>
+        ) : (
+          <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
+        )}
         <div className="flex flex-col gap-0.5 min-w-0">
           <div className="flex items-center gap-2.5">
             <h2 className="rail-title">{title}</h2>

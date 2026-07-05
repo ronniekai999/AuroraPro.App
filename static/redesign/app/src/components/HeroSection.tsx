@@ -1,33 +1,41 @@
-// HeroSection — the personalized hero banner, shared by HomeView (eager, in
-// App) + BrowseView (lazy). Extracted from App.tsx (2026-06-17 app split,
-// Phase 2.4) so the lazy BrowseView chunk can reuse it alongside HomeView.
-// heroMatchScore (the cold-start "match %" fallback) is module-private here
-// — only HeroSection uses it.
-import { useState } from 'react'
+// HeroSection — "Tonight's Pick", shared by HomeView (eager, in App) +
+// BrowseView (lazy). Catalogue Edition: the full-bleed cinematic banner
+// became an index card — artwork plate left, record details right, a
+// stamped match verdict instead of the percent ring. All behavioral
+// contracts are unchanged: resume-aware primary CTA with the stale-
+// closure guard, the My List toggle pair, pause-on-hover rotation,
+// "Not tonight" pool advance, cold-start hint copy.
 import { Icon } from '@/components/Icon'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
 import { type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
 
-// Stable, deterministic "match %" for the hero ring — the COLD-START
-// FALLBACK only. The recommender now returns a real Aurora Score
-// (HeroPick.score, threaded as `match`) for EVERY pick, so this fires only
-// if that's somehow absent. Deliberately NOT clamped to the old flattering
-// 82–98 band — that band is exactly what made every hero read the same. It
-// maps the TMDB rating onto an honest spread (a 6 reads ~58, a 9 reads ~88),
-// CONSISTENT-per-title (same title → same %), hashing the id when rating is
-// missing so every hero still gets a number.
+// Stable, deterministic match score — the COLD-START FALLBACK only.
+// The recommender returns a real Aurora Score (HeroPick.score, threaded
+// as `match`) for every pick; this fires only if that's absent. Maps the
+// TMDB rating onto an honest spread (a 6 reads ~58, a 9 reads ~88),
+// consistent per title, hashing the id when the rating is missing.
 function heroMatchScore(media: { id: number; rating?: number }): number {
   const r = media.rating ?? 0
   if (r > 0) {
-    // TMDB 0–10 → ~10..97, linear with real spread and capped just under 100
-    // so we never show a fake perfect match.
     return Math.round(Math.max(5, Math.min(97, r * 9.5 + 2)))
   }
-  // No rating — deterministic mid-spread from the id so it's stable across
-  // renders but not clustered at the top of the scale.
   return 35 + (media.id % 31)
 }
+
+// The percent ring became a stamped verdict. The exact number stays
+// available (tooltip + aria-label); the band label is the visible mark.
+function matchStampLabel(score: number, personal: boolean): string {
+  if (!personal) return `Aurora score ${score}`
+  if (score >= 80) return 'Strong match'
+  if (score >= 60) return 'Good match'
+  return 'Fair match'
+}
+
+// Solid / outline catalogue buttons, local to the hero.
+const BTN_SOLID = 'flex items-center gap-2 px-5 py-3 bg-[var(--ink)] hover:bg-[var(--signal)] text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors'
+const BTN_OUTLINE = 'flex items-center gap-2 px-5 py-3 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors'
+
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
@@ -36,373 +44,220 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
   // Personal "% for you" (0-100) for the current hero. Undefined / 0
-  // (cold-start popular pool, no centroid) → fall back to the global Aurora
-  // `score`, then to a derived estimate.
+  // (cold-start popular pool, no centroid) → fall back to the global
+  // Aurora `score`, then to a derived estimate.
   match?: number
-  // Global Aurora Score (0-100) — shown on the ring when there's no personal
-  // match. Same for every viewer (title quality, not personal fit).
+  // Global Aurora Score (0-100) — used when there's no personal match.
+  // Same for every viewer (title quality, not personal fit).
   score?: number
-  // 2026-06-05 (Home redesign B) — My Library state for the hero's
-  // "＋ My List / ✓ In My List" toggle. Both must be present for the
-  // button to render (same contract as MediaCardCinema's lib badge).
+  // My Library state for the "+ Shelf / On Shelf ✓" toggle. Both must
+  // be present for the button to render (same contract as
+  // MediaCardCinema's lib badge).
   libraryIds?: Set<number>
   onToggleLib?: (m: Media) => void
-  // Phase 5.3 — personalization reason ("Because you finished
-  // Severance"). Rendered above the title. Empty/undefined hides.
+  // Personalization reason ("Because you finished Severance").
+  // Rendered as the curator's note. Empty/undefined hides.
   reason?: string
-  // True when the hero is the catalog fallback (recent/top-rated) rather
-  // than a pick from the personalized pool. Renders "Recently Added"
-  // instead of "Featured" so the label is accurate.
+  // True when the hero is the catalog fallback (recent/top-rated)
+  // rather than a pick from the personalized pool — the stamp reads
+  // "Recently added" instead of "Tonight's pick" so the label is
+  // accurate.
   isCatalogFallback?: boolean
   // "Not tonight" — advance to the next pick in the loaded hero pool
   // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
-  // the button doesn't render.
+  // the affordance doesn't render.
   onNextPick?: () => void
-  // Pause auto-rotation while user hovers.
+  // Pause auto-rotation while the user hovers.
   onPauseChange?: (paused: boolean) => void
   // Personalization status — drives the cold-start hint that replaces
-  // the empty reason line when we're below the watch-history threshold.
-  // null = unknown / not yet loaded.
+  // the empty reason line when below the watch-history threshold.
   personalization?: HeroPersonalization | null
-  // 2026-05-27 — Continue Watching resume bundle for the current hero.
-  // When set, the primary CTA reads "Resume at MM:SS" (or "Resume S2E5
-  // · MM:SS" for shows) and calls `resume.onPlay(resume.item)` instead
-  // of the fresh `onPlay(hero)`. Mirrors the DetailView pattern. The
-  // discriminated `{ item, onPlay }` bundle makes partial wiring a
-  // type error (same rationale as DetailViewProps.resume).
+  // Continue Watching resume bundle for the current hero. When set,
+  // the primary CTA resumes at the saved position via resume.onPlay.
+  // Discriminated bundle so partial wiring is a type error.
   resume?: {
     item: ContinueWatchingItem
     onPlay: (c: ContinueWatchingItem) => void
   }
 }) {
-  // useState MUST be called before any conditional return so hook
-  // ordering stays stable across renders (Rules of Hooks).
-  const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   if (!heroProp) {
     return (
-      <section className="relative w-full h-[55vh] min-h-[420px] max-h-[600px] rounded-2xl overflow-hidden mb-8 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] border border-white/[0.04] flex items-center justify-center">
-        <div className="text-center px-8">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
-            <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
-              <defs>
-                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stopColor="#A855F7" />
-                  <stop offset="0.5" stopColor="#7C3AED" />
-                  <stop offset="1" stopColor="#22D3EE" />
-                </linearGradient>
-              </defs>
-              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
-              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-            </svg>
+      <section className="relative w-full min-h-[300px] mt-1 mb-10 bg-[var(--stock)] border border-[var(--ink)] flex items-center justify-center">
+        <div className="text-center px-8 py-14">
+          <div className="inline-flex items-center justify-center w-12 h-12 bg-[var(--ink)] mb-4 animate-pulse" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 12 12"><path d="M3 1.5L10.5 6L3 10.5Z" fill="#F0EDE4" /></svg>
           </div>
-          <h2 className="text-white/70 text-2xl font-bold font-display tracking-wide">Welcome to Aurora</h2>
-          <p className="text-white/40 text-sm mt-2">Loading your featured content…</p>
+          <h2 className="text-[var(--ink)] text-xl font-bold uppercase tracking-tight">Tonight's pick</h2>
+          <p className="text-[var(--ink-2)] text-sm mt-2">The archivist is choosing…</p>
         </div>
       </section>
     )
   }
   const hero = heroProp
-  // Backdrop → poster → gradient fallback chain (some TMDB rows have
+  // Backdrop → poster → flat-plate fallback chain (some TMDB rows have
   // no backdrop image).
   const bgImage = hero.backdrop || hero.poster || ''
-  // Ring value: the personal Match when we have one (personalized pool), else
-  // the global Aurora Score (cold-start), else a derived estimate as a last
-  // resort. `showingPersonal` drives the ring's label so "92% Match" only
-  // appears when it's genuinely personal — otherwise it reads "92 Score".
+  // Verdict value: the personal Match when we have one, else the global
+  // Aurora Score, else a derived estimate. `showingPersonal` keeps the
+  // stamp honest — "match" language only when it's genuinely personal.
   const showingPersonal = !!(match && match > 0)
   const matchScore = (match && match > 0) ? match : (score && score > 0) ? score : heroMatchScore(hero)
-  const matchCircumference = 2 * Math.PI * 36
-  // Subtle parallax: backdrop drifts ~2% with the mouse so the hero
-  // doesn't feel like a static still. The transition smooths cursor
-  // jitter into a slow drift instead of jumpy 1:1 tracking.
-  const parallaxX = (mousePos.x - 0.5) * 2
-  const parallaxY = (mousePos.y - 0.5) * 2
+  const stampLabel = matchStampLabel(matchScore, showingPersonal)
 
   return (
     <section
-      // 2026-06-05 (Home redesign A/B) — the redesign frames the hero as
-      // a rounded, INSET card (matching the mockup + the new greeting
-      // band, which is also inset). Dropped the former full-bleed
-      // `-mx-8 -mt-8` so the hero aligns with the greeting band and the
-      // rails below it inside the page's p-8 padding. rounded-2xl + a
-      // soft border give it the "glass card" treatment from the mockup.
-      className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden mt-1 mb-10 bg-[#050505] rounded-2xl border border-purple-300/15"
-      onMouseMove={(e) => {
-        const rect = e.currentTarget.getBoundingClientRect()
-        setMousePos({
-          x: (e.clientX - rect.left) / rect.width,
-          y: (e.clientY - rect.top) / rect.height
-        })
-      }}
-      // Pause rotation over the entire hero. Do NOT put key={hero.id}
-      // on this <section>: a remount-based crossfade breaks pause-on-
-      // hover because browsers don't reliably synthesize mouseenter
-      // on element replacement. Key the <img> instead.
+      className="relative w-full mt-1 mb-10 bg-[var(--stock)] border border-[var(--ink)] grid md:grid-cols-[minmax(280px,2fr)_3fr]"
+      // Pause rotation over the entire card. Key the <img>, not the
+      // section — a remount-based crossfade breaks pause-on-hover
+      // because browsers don't reliably synthesize mouseenter on
+      // element replacement.
       onMouseEnter={() => onPauseChange?.(true)}
       onMouseLeave={() => onPauseChange?.(false)}
     >
-      {/* Brand-gradient fallback base layer. The positioned gradient
-          stack above only covers part of the hero; this paints the
-          violet→ink gradient under everything so a missing/errored
-          backdrop still feels on-brand. */}
-      <div
-        aria-hidden="true"
-        className="absolute inset-0 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505]"
-      />
-      {/* Backdrop image. Key on the IMG (not the section) so the
-          image element remounts on rotation — drives the fade-in
-          animation per-tick — without unmounting the parent that
-          owns the hover handlers and mousePos state. */}
-      {bgImage ? (
-        <img
-          key={bgImage}
-          src={bgImage}
-          alt=""
-          aria-hidden="true"
-          className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out animate-fade-in"
-          style={{
-            transform: `scale(1.05) translate(${parallaxX}%, ${parallaxY}%)`,
-          }}
-          loading="eager"
-          decoding="async"
-          onError={(e) => {
-            // 404 happens when the server hasn't mirrored the TMDB
-            // image yet. Hide the broken-image icon; the gradient
-            // layer below takes over.
-            const img = e.currentTarget
-            img.style.display = 'none'
-          }}
-        />
-      ) : null}
-
-      {/* Phase 5.3 final QA — gradient stack rebuilt for a seamless
-          "futuristic" feel. Three layers, each with a job:
-          1. Bottom fade — covers the lower two-thirds of the hero,
-             ramping from solid #050505 at the bottom to transparent
-             at the top of the fade. The bottom matches the page
-             background EXACTLY (#050505) so there's no visible seam
-             where the hero ends and the rails begin.
-          2. Left fade — a softer, more gradual sweep so the
-             subtitle text reads cleanly without a hard "the
-             gradient starts here" line. Doesn't go fully solid at
-             the left edge — keeps a hint of the image visible.
-          3. Aurora-violet glow — subtle radial wash at the focal
-             point, mix-blend-screen so it tints the image rather
-             than overlaying it. Adds the brand's purple mood
-             without dominating the artwork. */}
-      <div className="absolute bottom-0 left-0 right-0 h-2/3 bg-gradient-to-t from-[#050505] via-[#050505]/95 to-transparent pointer-events-none" />
-      <div className="absolute top-0 bottom-0 left-0 w-2/3 bg-gradient-to-r from-[#050505]/95 via-[#050505]/45 to-transparent pointer-events-none" />
-      <div
-        className="absolute inset-0 pointer-events-none mix-blend-screen opacity-30"
-        style={{
-          background: 'radial-gradient(ellipse 60% 70% at 20% 60%, rgba(168, 85, 247, 0.35), transparent 65%)',
-        }}
-      />
-      {/* Top-right corner scrim — the Match ring lives here, but the scrims
-          above only cover bottom + left, so on a backdrop that's bright in
-          this corner (blown-out art, e.g. Person of Interest) the white score
-          number + ring vanished. A soft radial vignette anchored top-right
-          guarantees contrast regardless of the image, fading to transparent
-          toward the focal point so it doesn't darken the artwork. */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: 'radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)',
-        }}
-      />
-
-      {/* 2026-06-05 (Home redesign B) — Match ring, top-right of the
-          hero. A circular purple→cyan arc showing a stable, derived
-          "{n}% match" (see heroMatchScore). The inner number + label are
-          aria-hidden (decorative), so role="img" + aria-label on the wrap
-          is what exposes the score to assistive tech. The cold-start path
-          keeps it (an honest derived signal); sits above scrims (z-20). */}
-      <div
-        className="absolute top-6 right-6 md:top-8 md:right-8 z-20 flex flex-col items-center gap-1.5"
-        role="img"
-        aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
-      >
-        <div className="relative w-[84px] h-[84px]">
-          <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
-            <defs>
-              <linearGradient id="heroMatchGradient" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#a855f7" />
-                <stop offset="1" stopColor="#22d3ee" />
-              </linearGradient>
-            </defs>
-            <circle cx="42" cy="42" r="36" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="6" />
-            <circle
-              cx="42" cy="42" r="36" fill="none" stroke="url(#heroMatchGradient)"
-              strokeWidth="6" strokeLinecap="round"
-              strokeDasharray={`${(matchScore / 100) * matchCircumference} ${matchCircumference}`}
-            />
-          </svg>
-          <span className="absolute inset-0 flex items-center justify-center font-display font-bold text-xl text-white [text-shadow:0_1px_4px_rgba(0,0,0,0.55)]" aria-hidden="true">
-            {matchScore}%
-          </span>
-        </div>
-        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
+      {/* Artwork plate. Real TMDB art in a ruled frame; a flat ink
+          plate with the title initial when the image is missing or 404s
+          (the server may not have mirrored it yet). */}
+      <div className="relative min-h-[240px] md:min-h-[380px] bg-[var(--ink)] md:border-r border-b md:border-b-0 border-[var(--rule)] overflow-hidden">
+        <span className="absolute inset-0 flex items-center justify-center text-[96px] font-extrabold text-[rgba(240,237,228,0.18)] select-none" aria-hidden="true">
+          {hero.title?.[0]?.toUpperCase() || 'A'}
+        </span>
+        {bgImage ? (
+          <img
+            key={bgImage}
+            src={bgImage}
+            alt=""
+            aria-hidden="true"
+            className="absolute inset-0 w-full h-full object-cover animate-fade-in"
+            loading="eager"
+            decoding="async"
+            onError={(e) => {
+              // Hide the broken-image icon; the ink plate below takes
+              // over.
+              e.currentTarget.style.display = 'none'
+            }}
+          />
+        ) : null}
       </div>
 
-      {/* Subtitle */}
-      <div className="absolute bottom-8 left-8 right-8 z-20 flex items-end justify-between gap-4">
-        <div className="max-w-2xl">
-          <div className="flex items-center gap-3 mb-3">
-            {/* 2026-06-05 (Home redesign B) — when a personalization
-                reason exists, lead with an "✨ Aurora picked this for
-                you" pill (replaces the plain "Recommended" copy). No
-                reason → keep "Featured". The cold-start hint copy below
-                is untouched. */}
-            {reason ? (
-              <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/30">
-                <Icon name="sparkle" size={12} /> Aurora picked this for you
-              </span>
-            ) : isCatalogFallback ? (
-              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
-                <Icon name="clock" size={12} /> Recently Added
-              </span>
-            ) : (
-              <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
-                <Icon name="star" size={12} /> Featured
-              </span>
-            )}
-            <span className="text-white/60 text-sm">
-              {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
-            </span>
-          </div>
-          {/* Phase 5.3 — personalization reason ("Because you watched X").
-              When the reason is empty AND we're in cold-start mode, show
-              a hint about the watch-history threshold instead — same
-              visual slot, but explanatory copy that tells the user why
-              the picks aren't personalized yet. */}
-          {reason ? (
-            <p className="text-purple-200/80 text-xs italic mb-2 max-w-md">{reason}</p>
-          ) : personalization?.coldStart ? (
-            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
-              Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
-            </p>
-          ) : null}
-          <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl">{hero.title}</h2>
-          {hero.description && (
-            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
-          )}
-          <div className="flex items-center gap-3">
-            {/* 2026-05-27 — Resume-aware primary CTA. When the hero
-                has a CW match, click resumes at the saved position via
-                resume.onPlay (which threads through to App's
-                handlePlayContinue). Otherwise the classic Play button
-                starts fresh via onPlay(hero). The DetailView's "From
-                start" affordance still works because handlePlay itself
-                stays unmodified — only the Hero's call site decides
-                between fresh and resume. Same discriminated-bundle
-                pattern as DetailViewProps.resume.
-
-                Deep-debug H1 — stale-closure guard: the click handler
-                checks `resume.item.media_item_id === hero.id` before
-                dispatching so a mid-flight hero rotation between the
-                user's hover and click doesn't end up resuming the
-                NEW hero with the OLD CW record. If the identities
-                no longer match, fall through to the fresh-play path
-                for whatever's currently visible.
-
-                Deep-debug M5 — sub-second guard: a 5s threshold on
-                position_ms hides "Resume at 0:00" labels for users
-                who opened-then-immediately-closed a title. The
-                server's `position_ms > 0` filter alone wasn't enough
-                because brief opens save ~100-2000ms of progress
-                that's effectively "fresh." */}
-            {resume && isResumable(resume.item) ? (
-              <button
-                onClick={() => {
-                  if (resume.item.media_item_id !== hero.id) {
-                    onPlay(hero) // hero rotated mid-click; play fresh instead
-                    return
-                  }
-                  resume.onPlay(resume.item)
-                }}
-                // Deep-debug M4 — visual differentiator: indigo tint
-                // (vs purple Play) + a clock icon prefix so users
-                // scanning the Hero can tell at a glance that this
-                // button resumes rather than restarts. Same shape
-                // and glow weight to keep it readable as the primary
-                // CTA.
-                // 2026-06-05 (Home redesign B) — relative + overflow so
-                // the thin embedded progress fill (below) clips to the
-                // pill. extra bottom padding leaves room for the 3px bar.
-                className="relative overflow-hidden flex items-center gap-2 px-6 py-3 pb-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
-                title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
-                aria-label={formatResumeAriaLabel(resume.item)}
-              >
-                <Icon name="clock" size={16} /> {formatResumeLabel(resume.item)}
-                {/* Embedded progress bar — fraction from the CW record's
-                    position/duration. Only when duration is known and the
-                    fraction is in (0,1); otherwise we omit the fill rather
-                    than guess (e.g. a live item with duration_ms=0). */}
-                {(() => {
-                  const d = resume.item.duration_ms
-                  if (!d || d <= 0) return null
-                  const frac = Math.max(0, Math.min(1, resume.item.position_ms / d))
-                  if (frac <= 0) return null
-                  return (
-                    <span className="absolute left-0 right-0 bottom-0 h-[3px] bg-white/25" aria-hidden="true">
-                      <span className="block h-full bg-white" style={{ width: `${frac * 100}%`, boxShadow: '0 0 8px rgba(255,255,255,0.6)' }} />
-                    </span>
-                  )
-                })()}
-              </button>
-            ) : (
-              <button
-                onClick={() => onPlay(hero)}
-                className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
-              >
-                <Icon name="play" size={18} /> Play
-              </button>
-            )}
-            {/* 2026-06-05 (Home redesign B) — "My List" toggle. Adds /
-                removes the hero title from My Library. Only when the
-                caller wired both libraryIds + onToggleLib (matches the
-                MediaCardCinema lib-badge contract). */}
-            {libraryIds && onToggleLib && (() => {
-              const inLib = libraryIds.has(hero.id)
-              return (
-                <button
-                  onClick={() => onToggleLib(hero)}
-                  aria-label={inLib ? `Remove ${hero.title} from My List` : `Add ${hero.title} to My List`}
-                  title={inLib ? 'In My List — click to remove' : 'Add to My List'}
-                  className={`flex items-center gap-2 px-6 py-3 backdrop-blur-md rounded-full font-medium transition-all duration-200 border ${
-                    inLib
-                      ? 'bg-purple-500/20 text-purple-100 border-purple-400/40 hover:bg-purple-500/30'
-                      : 'bg-white/10 text-white border-white/10 hover:bg-white/15 hover:border-white/20'
-                  }`}
-                >
-                  <Icon name={inLib ? 'check' : 'plus'} size={18} /> {inLib ? 'In My List' : 'My List'}
-                </button>
-              )
-            })()}
-            <button
-              onClick={() => onInfo(hero)}
-              className="flex items-center gap-2 px-6 py-3 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20"
-            >
-              <Icon name="info" size={18} /> More Info
-            </button>
-          </div>
+      {/* Record details. */}
+      <div className="relative flex flex-col gap-4 p-6 md:p-8 min-w-0">
+        {/* Stamped verdict — replaces the percent ring; the number
+            stays in the tooltip and accessible name. */}
+        <div
+          className="absolute top-5 right-5 rotate-6 border-2 border-[var(--signal)] text-[var(--signal)] font-mono text-[10px] font-semibold tracking-[0.18em] uppercase px-2.5 py-1.5 pointer-events-none select-none hidden sm:block"
+          role="img"
+          title={`${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
+          aria-label={`${stampLabel} — ${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
+        >
+          {stampLabel}
         </div>
-        {/* "Not tonight" — advance to the NEXT pick in the loaded hero
-            pool (instant, no refetch). Distinct from the greeting's
-            "Surprise me", which pulls a whole fresh pool. The pool has
-            multiple picks even in cold-start (deterministic popular-
-            unwatched), so this always moves to a different title.
-            2026-06-05 (Home redesign B). */}
-        {onNextPick && (
-          <button
-            onClick={onNextPick}
-            title="Not tonight — show the next pick"
-            aria-label="Not tonight — show the next pick"
-            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/60 hover:text-white text-sm transition-colors whitespace-nowrap"
-          >
-            Not tonight <Icon name="refresh" size={15} />
-          </button>
+
+        <div className="flex items-center gap-3 flex-wrap pr-28">
+          <span className={`stamp ${isCatalogFallback ? '' : 'stamp--red'}`}>
+            {reason ? "Tonight's pick" : isCatalogFallback ? 'Recently added' : 'Featured'}
+          </span>
+          <span className="text-[var(--ink-2)] font-mono text-[11px] tracking-[0.08em] uppercase">
+            {hero.genre}{hero.genre && hero.year ? ' · ' : ''}{hero.year || ''}
+          </span>
+        </div>
+
+        <h2 className="text-[var(--ink)] text-3xl md:text-5xl font-extrabold uppercase tracking-tight leading-[0.95] text-balance">
+          {hero.title}
+        </h2>
+
+        {/* Curator's note ("Because you watched X"). When the reason is
+            empty AND we're in cold-start mode, the same slot explains
+            the watch-history threshold instead. */}
+        {reason ? (
+          <div className="border border-[var(--rule-faint)] bg-[var(--paper)] px-4 py-3 max-w-xl">
+            <span className="cat-label !text-[var(--signal)] block mb-1">Curator's note</span>
+            <p className="text-[var(--ink)] text-[13px] leading-relaxed">{reason}</p>
+          </div>
+        ) : personalization?.coldStart ? (
+          <div className="border border-[var(--rule-faint)] bg-[var(--paper)] px-4 py-3 max-w-xl">
+            <span className="cat-label block mb-1">From the archivist</span>
+            <p className="text-[var(--ink-2)] text-[13px] leading-relaxed">
+              Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; curated shelves ({personalization.historyCount}/{personalization.threshold} so far).
+            </p>
+          </div>
+        ) : null}
+
+        {hero.description && (
+          <p className="text-[var(--ink-2)] text-sm md:text-[15px] max-w-xl line-clamp-3">{hero.description}</p>
         )}
+
+        <div className="flex items-center gap-2.5 flex-wrap mt-auto pt-2">
+          {/* Resume-aware primary CTA. Stale-closure guard: verify the
+              CW record still belongs to the visible hero before
+              dispatching — a mid-hover rotation must not resume the NEW
+              hero with the OLD record (falls through to fresh play).
+              isResumable also hides "Resume at 0:00" for sub-5s opens. */}
+          {resume && isResumable(resume.item) ? (
+            <button
+              onClick={() => {
+                if (resume.item.media_item_id !== hero.id) {
+                  onPlay(hero) // hero rotated mid-click; play fresh instead
+                  return
+                }
+                resume.onPlay(resume.item)
+              }}
+              className={`relative overflow-hidden ${BTN_SOLID} pb-4`}
+              title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
+              aria-label={formatResumeAriaLabel(resume.item)}
+            >
+              <Icon name="clock" size={14} /> {formatResumeLabel(resume.item)}
+              {/* Embedded progress rule — fraction from the CW record.
+                  Only when duration is known and the fraction is in
+                  (0,1); otherwise omit rather than guess. */}
+              {(() => {
+                const d = resume.item.duration_ms
+                if (!d || d <= 0) return null
+                const frac = Math.max(0, Math.min(1, resume.item.position_ms / d))
+                if (frac <= 0) return null
+                return (
+                  <span className="absolute left-0 right-0 bottom-0 h-[3px] bg-[rgba(240,237,228,0.25)]" aria-hidden="true">
+                    <span className="block h-full bg-[var(--signal)]" style={{ width: `${frac * 100}%` }} />
+                  </span>
+                )
+              })()}
+            </button>
+          ) : (
+            <button onClick={() => onPlay(hero)} className={BTN_SOLID}>
+              <Icon name="play" size={14} /> Play
+            </button>
+          )}
+          {/* Shelf toggle. Renders only when the caller wired both
+              libraryIds + onToggleLib (MediaCardCinema contract). */}
+          {libraryIds && onToggleLib && (() => {
+            const inLib = libraryIds.has(hero.id)
+            return (
+              <button
+                onClick={() => onToggleLib(hero)}
+                aria-label={inLib ? `Remove ${hero.title} from your shelf` : `Add ${hero.title} to your shelf`}
+                title={inLib ? 'On your shelf — click to remove' : 'Add to your shelf'}
+                className={inLib ? BTN_SOLID : BTN_OUTLINE}
+              >
+                <Icon name={inLib ? 'check' : 'plus'} size={14} /> {inLib ? 'On shelf' : 'Shelf'}
+              </button>
+            )
+          })()}
+          <button onClick={() => onInfo(hero)} className={BTN_OUTLINE}>
+            <Icon name="info" size={14} /> Details
+          </button>
+          {/* "Not tonight" — advance to the NEXT pick in the loaded
+              pool (instant, no refetch). Distinct from the greeting's
+              Dealer's Choice, which plays a random pick. */}
+          {onNextPick && (
+            <button
+              onClick={onNextPick}
+              title="Not tonight — show the next pick"
+              aria-label="Not tonight — show the next pick"
+              className="ml-auto font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase text-[var(--ink-2)] hover:text-[var(--signal)] transition-colors whitespace-nowrap px-2 py-2"
+            >
+              Not tonight →
+            </button>
+          )}
+        </div>
       </div>
     </section>
   )
