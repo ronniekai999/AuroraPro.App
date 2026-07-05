@@ -127,12 +127,14 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
           <div className="flex items-center gap-2.5">
             <h2 className="rail-title">{title}</h2>
             {aiPick && (
-              <span className="inline-flex items-center gap-1 px-2 py-[2px] rounded-full bg-yellow-400/10 border border-yellow-400/30 text-yellow-300 text-[9.5px] font-bold tracking-[0.08em] uppercase">
-                <Icon name="sparkle" size={10} className="text-yellow-300" /> AI Pick
+              // Catalogue stamp — the old yellow-on-glass chip was
+              // illegible on the paper ground (phase-1 review finding).
+              <span className="stamp stamp--red inline-flex items-center gap-1">
+                <Icon name="sparkle" size={10} /> AI Pick
               </span>
             )}
           </div>
-          {subtitle && <span className="text-white/55 text-xs">{subtitle}</span>}
+          {subtitle && <span className="text-[var(--ink-2)] text-xs">{subtitle}</span>}
         </div>
         <span className="rail-spacer" aria-hidden="true" />
         {onSeeAll && (

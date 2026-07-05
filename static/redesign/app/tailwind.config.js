@@ -3,6 +3,23 @@ module.exports = {
   darkMode: ["class"],
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
   theme: {
+    // Hard rule 01: zero the ENTIRE radius scale (top-level override,
+    // not extend) so every rounded-* utility — including
+    // variant-prefixed emissions like sm:rounded-2xl, which land after
+    // index.css's runtime kill rule and would otherwise win — is 0 at
+    // build time. index.css's [class*="rounded"] rule mops up
+    // arbitrary values (rounded-[10px]) and non-Tailwind classes.
+    borderRadius: {
+      none: "0",
+      sm: "0",
+      DEFAULT: "0",
+      md: "0",
+      lg: "0",
+      xl: "0",
+      "2xl": "0",
+      "3xl": "0",
+      full: "0",
+    },
     extend: {
       fontFamily: {
         // Map the `font-sans` utility (and Tailwind's preflight base
@@ -61,20 +78,16 @@ module.exports = {
         },
       },
       borderRadius: {
-        // --radius is 0rem in the catalogue system (hard rule 01:
-        // nothing is rounded). Every step maps to the raw var — the old
-        // calc(±Npx) offsets would produce invalid negative radii at 0.
-        xl: "var(--radius)",
-        lg: "var(--radius)",
-        md: "var(--radius)",
-        sm: "var(--radius)",
-        xs: "var(--radius)",
+        // xs isn't in the top-level zeroed scale (it's a shadcn
+        // addition) — pin it to 0 with the rest.
+        xs: "0",
       },
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
         // The system's one shadow: hard offset on floating paper
-        // (menus, dialogs, toasts) — redesign hard rule 05.
-        hard: "4px 4px 0 rgba(22, 21, 17, 0.9)",
+        // (menus, dialogs, toasts) — redesign hard rule 05. Reads the
+        // :root token so CSS and utilities share one source of truth.
+        hard: "var(--shadow-hard)",
       },
       keyframes: {
         "accordion-down": {

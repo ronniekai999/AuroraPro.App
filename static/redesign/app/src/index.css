@@ -14,7 +14,11 @@
    carry the old inline dark-theme utility classes render as a known
    hybrid on this branch. The player/party/companion surfaces stay
    dark by design ("the one dark room") and keep the --glow-border
-   compat token until phase 7 restyles them.
+   compat token until phase 7 restyles them. KNOWN-INERT until the
+   phase-5 settings rework: Settings → Appearance's Typeface and Glow
+   pickers still write data-font/data-glow, but no CSS reads them
+   anymore (the old font faces and glow variants are gone) — the
+   pickers are replaced, and the orphaned prefs migrated, in phase 5.
    ==================================================================== */
 
 /* Self-hosted fonts (latin subsets). Archivo is a single variable file
@@ -66,12 +70,21 @@
     --secondary-foreground: 48 13% 8%;
     --muted: 45 25% 87%;
     --muted-foreground: 46 9% 39%;     /* ink-2 #6B675A */
-    --accent: 7 73% 45%;               /* signal red #C8331F */
-    --accent-foreground: 45 29% 92%;
+    /* accent is shadcn's NEUTRAL hover/highlight surface (dropdown
+       focus rows, select options, ghost-button hovers) — deep bone,
+       NOT the signal red: red here paints every ordinary menu
+       highlight as destructive. Red lives in --destructive/--ring
+       and the raw --signal token. */
+    --accent: 45 25% 87%;
+    --accent-foreground: 48 13% 8%;
     --destructive: 7 73% 45%;
     --destructive-foreground: 45 29% 92%;
     --border: 46 18% 76%;              /* faint rule #CCC7B6 */
-    --input: 48 13% 8%;                /* inputs draw the hard ink rule */
+    /* shadcn's field/track surface token — ui/switch paints the
+       UNCHECKED track with bg-input, so this must stay distinct from
+       --primary or on/off states collapse into the same ink. Real
+       <input> borders come from the plain-CSS rule below, not this. */
+    --input: 46 18% 76%;
     --ring: 7 73% 45%;
     --radius: 0rem;
 
@@ -97,8 +110,9 @@
     --darkroom: #12100D;     /* the player, and nothing else */
 
     /* Secondary-text token — pre-dates the redesign (a11y quick-win);
-       consumers keep working. ≥4.5:1 on bone and stock. */
-    --text-secondary: #6B675A;
+       consumers keep working. Aliased to --ink-2 (single source of
+       truth); ≥4.5:1 on bone and stock. */
+    --text-secondary: var(--ink-2);
 
     /* Type systems. Display and body are the same grotesk — Swiss —
        with weight/width doing the differentiation (font-stretch on the
@@ -113,9 +127,12 @@
        bone hairline and the halos to a valid no-op shadow (keeps
        comma-separated shadow lists parseable). Remove with phase 7. */
     --glow-border: rgba(237, 234, 224, 0.28);
-    --glow-border-strong: rgba(237, 234, 224, 0.45);
     --glow-halo: 0 0 0 0 rgba(0, 0, 0, 0);
-    --glow-halo-strong: 0 0 0 0 rgba(0, 0, 0, 0);
+
+    /* The system's one shadow (hard rule 05) — single source of truth.
+       tailwind.config's boxShadow.hard reads this var; use the
+       `shadow-hard` utility in markup, var(--shadow-hard) in CSS. */
+    --shadow-hard: 4px 4px 0 rgba(22, 21, 17, 0.9);
   }
 
   ::selection {
@@ -134,14 +151,17 @@
   }
 }
 
-/* Hard rule 01 — the radius kill. Unlayered so it outranks the
-   Tailwind utility layer: every inline rounded-* class (rounded-xl,
-   rounded-2xl, rounded-full avatars, …) flattens to square without
-   editing each call site. Classes defined later in this file (plain
-   CSS, same 0,1,0 specificity, later source order) can still opt a
-   shape back in deliberately. Range-slider thumbs are pseudo-elements
-   and never match, so native sliders keep their round thumbs until
-   the player restyle. */
+/* Hard rule 01 — the radius kill, runtime half. The build-time half is
+   tailwind.config.js zeroing the ENTIRE borderRadius scale — that also
+   covers variant-prefixed utilities (sm:rounded-2xl, data-[…]:rounded-*)
+   which are emitted AFTER this rule and would out-order it here. This
+   unlayered rule mops up what the config can't reach: arbitrary values
+   (rounded-[10px]) and non-Tailwind rounded-* classes. It wins ties
+   against the utility layer by being unlayered; plain CSS classes later
+   in this file (same 0,1,0 specificity, later source order) can still
+   opt a shape back in deliberately (.neb orbs, .aurora-pulse-blob).
+   Range-slider thumbs are pseudo-elements and never match, so native
+   sliders keep round thumbs until the player restyle. */
 [class*="rounded"] {
   border-radius: 0;
 }
@@ -151,23 +171,28 @@
     font-family: var(--font-display);
   }
 
-  /* Legacy glass surfaces → card stock with a hard rule. Kept under
-     their old names so the ~10 existing call sites shift material
-     without markup edits; phases 2–7 replace the class names. */
+  /* DARK-ROOM COMPAT — .glass-panel/.glass-card keep a dark plate
+     (flat fill, bone hairline, no blur, no glow) because every live
+     call site sets white inline text on them, and most sit on
+     dark-by-design surfaces (auth ground, party invite over video,
+     companion, onboarding pickers). Review finding: flipping these to
+     light stock made that text unreadable. Views that go light swap
+     these classes for catalogue primitives in their own phase;
+     phase 7 retires the names. */
   .glass-panel {
-    background: var(--stock);
-    border: 1px solid var(--rule);
+    background: rgba(24, 22, 18, 0.88);
+    border: 1px solid var(--glow-border);
   }
 
   .glass-card {
-    background: var(--stock);
-    border: 1px solid var(--rule);
-    transition: box-shadow 0.15s ease, transform 0.15s ease;
+    background: rgba(24, 22, 18, 0.88);
+    border: 1px solid var(--glow-border);
+    transition: border-color 0.15s ease, background 0.15s ease;
   }
 
   .glass-card:hover {
-    box-shadow: 3px 3px 0 rgba(22, 21, 17, 0.9);
-    transform: translate(-1px, -1px);
+    background: rgba(32, 29, 24, 0.92);
+    border-color: rgba(237, 234, 224, 0.45);
   }
 
   /* Glow is gone from the system; the class remains a no-op until its
@@ -196,9 +221,12 @@
     display: none;
   }
 
-  /* Former aurora gradient wash → flat paper. */
+  /* DARK-ROOM COMPAT — full-screen ground behind auth and onboarding,
+     both of which still set white inline text (review finding: paper
+     here turned the taste-onboarding headline paper-on-paper). Flat
+     near-black, no radial washes; goes light per-view in phases 2/7. */
   .aurora-bg {
-    background: var(--paper);
+    background: #0F0E0B;
   }
 
   /* Former detail-hero purple glow floor — retired. The rule stays so
@@ -208,21 +236,14 @@
   }
 }
 
-/* Motion — hard rule 07: fades only, ≤150ms. The two finite entrance
-   animations keep their names + fill-mode (see the pre-redesign note
-   about re-render snap-back) but lose the slide distance. */
-@keyframes slideIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
+/* Motion — hard rule 07: fades only, ≤150ms. fill-mode stays (see the
+   pre-redesign note about re-render snap-back: without `forwards`, a
+   re-render that re-applies the class snaps back to opacity 0).
+   slideIn collapsed into fadeIn once it lost its slide distance, and
+   .animate-slide-in had zero call sites — both removed. */
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
-}
-
-.animate-slide-in {
-  animation: slideIn 0.15s ease-out forwards;
 }
 
 .animate-fade-in {
@@ -240,6 +261,11 @@
 
 .aurora-pulse-blob {
   position: absolute;
+  /* Decorative light orb, not a UI corner — one of the two deliberate
+     radius exemptions (with .neb). Its App.tsx divs carry no rounded-*
+     class, so the shape must come from here or the blobs render as
+     drifting blurred squares (review finding). */
+  border-radius: 50%;
   filter: blur(24px);
   mix-blend-mode: multiply;
   animation: aurora-drift 8s ease-in-out infinite;
@@ -269,45 +295,15 @@
 }
 
 /* ====================================================================
-   Media cards
-   --------------------------------------------------------------------
-   .media-card         — legacy card (non-rail call sites)
-   .media-card-cinema  — the rail/grid card. Same DOM contract as
-                         before (poster img, optional progress, badges,
-                         lib/resume/gem controls) reskinned as an
-                         index card: stock ground, hard rule, ruled
-                         caption shelf, mono metadata.
-   Hover = the card lifts 2px with a hard offset shadow — paper picked
-   up off the desk, no blur, no glow.
+   Media card — .media-card-cinema, the index card. (The old
+   .media-card block and its .card-actions/.action-btn dependents were
+   deleted in the phase-1 review: zero call sites repo-wide — the only
+   card the app renders is MediaCardCinema.)
+   Same DOM contract as before (poster img, optional progress, badges,
+   lib/resume/gem controls) reskinned: stock ground, hard rule, ruled
+   caption shelf, mono metadata. Hover = the card lifts 2px with the
+   hard offset shadow — paper picked up off the desk, no blur, no glow.
    ==================================================================== */
-
-.media-card {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid var(--rule);
-  background: var(--stock);
-  transition: box-shadow 0.15s ease, transform 0.15s ease;
-  cursor: pointer;
-}
-
-.media-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(22, 21, 17, 0.82) 0%, transparent 55%);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 1;
-}
-
-.media-card:hover {
-  transform: translate(-2px, -2px);
-  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
-}
-
-.media-card:hover::before {
-  opacity: 1;
-}
 
 /* Sidebar nav link (retires with the phase-2 masthead). */
 .nav-link-item {
@@ -467,11 +463,8 @@
   align-items: center;
   gap: 4px;
   color: var(--ink-2);
-  font-family: var(--font-mono);
   font-size: 0.66rem;
-  font-weight: 600;
   letter-spacing: 0.12em;
-  text-transform: uppercase;
   transition: color 0.15s;
   flex-shrink: 0;
 }
@@ -490,7 +483,7 @@
 }
 .media-card-cinema:hover {
   transform: translate(-2px, -2px);
-  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
+  box-shadow: var(--shadow-hard);
 }
 .media-card-cinema .poster-wrap {
   position: relative;
@@ -588,7 +581,7 @@
   font-size: 0.72rem;
   font-style: italic;
   line-height: 1.34;
-  color: #F0EDE4;
+  color: var(--paper);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -655,11 +648,8 @@
   background: var(--ink);
   border: 1px solid var(--ink);
   color: var(--paper);
-  font-family: var(--font-mono);
   font-size: 0.62rem;
-  font-weight: 600;
   letter-spacing: 0.1em;
-  text-transform: uppercase;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
@@ -680,20 +670,18 @@
   outline-offset: 2px;
 }
 
-/* Badge → stamp. Mono, bordered, square (formerly "glass"). */
+/* Badge chip (formerly "glass") — mono voice only. Deliberately sets
+   NO color/background/border: call sites paint their own tints via
+   utilities (RecapModal's emerald/purple chips sit on the dark detail
+   hero), and ink/stock fills here — unlayered, so beating the utility
+   layer — made those chips invisible (review finding). */
 .badge-glass {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 3px 8px;
-  font-family: var(--font-mono);
   font-size: 0.62rem;
-  font-weight: 600;
   letter-spacing: 0.1em;
-  text-transform: uppercase;
-  background: var(--stock);
-  border: 1px solid var(--rule);
-  color: var(--ink);
 }
 
 /* Inputs — bone field, hard ink rule, red focus outline (hard rule 07).
@@ -705,7 +693,10 @@ input:not([type="range"]), select, textarea {
   color: var(--ink);
   padding: 10px 14px;
   font-size: 0.9rem;
-  font-family: var(--font-sans);
+  /* No font-family here: this selector (0,1,1) would beat the
+     `font-mono` utility (0,1,0) and lock fields out of the ledger
+     hand — party-code inputs etc. set mono via utilities (review
+     finding). Fields inherit the body grotesk by default anyway. */
   transition: outline-color 0.15s ease;
 }
 
@@ -716,6 +707,23 @@ input:not([type="range"]):focus, select:focus, textarea:focus {
 
 input::placeholder, textarea::placeholder {
   color: var(--ink-3);
+}
+
+/* The archivist search (.convo-search) is the field — its inner input
+   must not paint its own box. Higher specificity (0,2,1) than both the
+   base input rule (0,1,1) and the call site's border-0/bg-transparent
+   utilities; padding mirrors the call site's py-3 pl-1 pr-2 intent.
+   Focus indication is the wrapper's :focus-within outline alone —
+   without these resets the field showed a boxed input inside the pill
+   and two concentric focus outlines (review finding). */
+.convo-search input:not([type="range"]) {
+  background: transparent;
+  border: none;
+  padding: 12px 8px 12px 4px;
+}
+.convo-search input:not([type="range"]):focus,
+.convo-search input:not([type="range"]):focus-visible {
+  outline: none;
 }
 
 /* A11y floor — keyboard focus is ALWAYS visible. Unlayered on purpose
@@ -765,88 +773,61 @@ textarea:focus-visible {
   background: var(--paper);
 }
 
-/* Card overlay actions — corner plates. The pointer-events dance is
-   load-bearing for touch devices (see the pre-redesign notes). */
-.card-actions {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  z-index: 2;
-  pointer-events: none;
-}
-
-.media-card:hover .card-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.action-btn {
-  width: 34px;
-  height: 34px;
-  background: var(--stock);
-  border: 1px solid var(--ink);
-  color: var(--ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.action-btn:hover {
-  background: var(--signal);
-  border-color: var(--signal);
-  color: var(--paper);
-}
-
-/* Table styling — the ledger. Mono letterspaced headers over a hard
-   rule; hairline row rules. */
-.data-table {
+/* Table styling — THE ledger. One spec shared by .data-table (admin's
+   pre-redesign markup) and table.ledger (the catalogue-phase name) so
+   the two "standard tables" cannot drift apart: mono letterspaced
+   headers over a hard rule, hairline row rules, tabular numerals. */
+.data-table,
+table.ledger {
   width: 100%;
   border-collapse: collapse;
 }
 
-.data-table th {
+.data-table th,
+table.ledger th {
   text-align: left;
-  padding: 10px 14px 8px;
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  font-weight: 600;
-  text-transform: uppercase;
+  padding: 9px 12px 7px;
+  font-size: 0.6rem;
   letter-spacing: 0.14em;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   border-bottom: 1px solid var(--ink);
 }
 
-.data-table td {
-  padding: 11px 14px;
+.data-table td,
+table.ledger td {
+  padding: 10px 12px;
   border-bottom: 1px solid var(--rule-faint);
-  font-size: 0.875rem;
+  font-size: 0.82rem;
   color: var(--ink);
+  vertical-align: middle;
   font-variant-numeric: tabular-nums;
 }
 
-.data-table tr:hover td {
+.data-table tr:last-child td,
+table.ledger tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tr:hover td,
+table.ledger tr:hover td {
   background: rgba(22, 21, 17, 0.03);
 }
 
-/* Toast — floating paper. The one shadow in the system: a hard offset
-   (hard rule 05). */
+/* Toast — DARK-ROOM COMPAT: Toast.tsx renders its message and dismiss
+   control in white/* utilities, so a stock plate made every toast
+   unreadable (review finding). The plate stays solid ink (bone text
+   reads on it) until the toast component's own restyle; the hard
+   offset shadow is the floating-paper cue either way. */
 .toast {
-  background: var(--stock);
+  background: var(--ink);
   border: 1px solid var(--ink);
-  color: var(--ink);
+  color: var(--paper);
   padding: 13px 18px;
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
-  animation: slideIn 0.15s ease;
+  box-shadow: var(--shadow-hard);
+  animation: fadeIn 0.15s ease;
 }
 
 /* ====================================================================
@@ -860,11 +841,8 @@ textarea:focus-visible {
 .genre-chip {
   padding: 6px 12px;
   white-space: nowrap;
-  font-family: var(--font-mono);
   font-size: 0.66rem;
-  font-weight: 600;
   letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--ink-2);
   background: transparent;
   border: 1px solid var(--rule-faint);
@@ -921,11 +899,8 @@ textarea:focus-visible {
   padding: 11px 16px;
 }
 .media-list-head {
-  font-family: var(--font-mono);
   font-size: 0.6rem;
-  font-weight: 600;
   letter-spacing: 0.14em;
-  text-transform: uppercase;
   color: var(--text-secondary);
   border-bottom: 1px solid var(--ink);
   background: var(--stock);
@@ -973,9 +948,7 @@ textarea:focus-visible {
   margin-top: 4px;
 }
 .media-list-row .mlr-tag {
-  font-family: var(--font-mono);
   font-size: 0.56rem;
-  font-weight: 600;
   letter-spacing: 0.08em;
   padding: 1px 6px;
   color: var(--ink-2);
@@ -1088,9 +1061,7 @@ textarea:focus-visible {
 }
 .media-card-cinema .card-badge {
   padding: 3px 6px;
-  font-family: var(--font-mono);
   font-size: 0.56rem;
-  font-weight: 600;
   letter-spacing: 0.08em;
   line-height: 1;
   color: var(--ink);
@@ -1112,24 +1083,40 @@ textarea:focus-visible {
    these instead of re-inventing per view.
    ==================================================================== */
 
+/* One voice for every mono mark. The shared trio (ledger hand, 600,
+   uppercase) is grouped here so the label surfaces can't drift on the
+   basics; size/tracking/color stay per-role deltas on each rule.
+   (Review finding: the trio was copy-declared 12 times and had
+   already forked into six size×tracking micro-variants.) */
+.cat-label,
+.stamp,
+.badge-glass,
+.formbox > .formbox-label,
+.genre-chip,
+.media-list-head,
+.rail-header .rail-see-all,
+.media-card-cinema .card-badge,
+.media-card-cinema .resume-pill,
+.media-list-row .mlr-tag,
+.data-table th,
+table.ledger th {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
 /* Mono small-caps label — section eyebrows, table headers, metadata. */
 .cat-label {
-  font-family: var(--font-mono);
   font-size: 0.62rem;
-  font-weight: 600;
   letter-spacing: 0.14em;
-  text-transform: uppercase;
   color: var(--ink-2);
 }
 
 /* Stamps — bordered mono state marks. */
 .stamp {
   display: inline-block;
-  font-family: var(--font-mono);
   font-size: 0.6rem;
-  font-weight: 600;
   letter-spacing: 0.12em;
-  text-transform: uppercase;
   border: 1px solid var(--ink);
   color: var(--ink);
   background: transparent;
@@ -1154,43 +1141,16 @@ textarea:focus-visible {
   left: 12px;
   background: var(--paper);
   padding: 0 8px;
-  font-family: var(--font-mono);
   font-size: 0.6rem;
-  font-weight: 600;
   letter-spacing: 0.14em;
-  text-transform: uppercase;
   color: var(--signal);
 }
 
-/* Ledger table — the standard data table of the system. */
-table.ledger {
-  width: 100%;
-  border-collapse: collapse;
-}
-table.ledger th {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--ink-2);
-  text-align: left;
-  padding: 8px 10px 6px;
-  border-bottom: 1px solid var(--ink);
-}
-table.ledger td {
-  font-size: 0.8rem;
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--rule-faint);
-  vertical-align: middle;
-  font-variant-numeric: tabular-nums;
-}
-table.ledger tr:last-child td { border-bottom: none; }
-
-/* Hard-offset shadow for floating paper (menus, dialogs, toasts). */
-.shadow-hard {
-  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
-}
+/* table.ledger — alias of .data-table; both are styled by the single
+   grouped ledger spec above (see "Table styling — THE ledger").
+   The `shadow-hard` utility comes from tailwind.config's boxShadow
+   token (reading --shadow-hard) — no plain class here, so ring/variant
+   composition (`shadow-hard ring-1`, `md:shadow-none`) keeps working. */
 
 /* ============================================================
    Onboarding flow + Nebula avatars — dark full-screen flow; gets its
@@ -1238,10 +1198,10 @@ table.ledger tr:last-child td { border-bottom: none; }
 @keyframes onbFloaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-12px); } }
 /* Shimmer text retired with the gradient ban — plain paper-white type. */
 .onb-shimmer-text {
-  color: #F0EDE4;
+  color: var(--paper);
 }
 
-.onb-ring { position: absolute; inset: -12px; border-radius: 50%; border: 2px solid transparent; border-top-color: #F0EDE4; border-right-color: rgba(240,237,228,0.4); animation: onbSpin 1.4s linear infinite; opacity: 0.85; }
+.onb-ring { position: absolute; inset: -12px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--paper); border-right-color: rgba(240,237,228,0.4); animation: onbSpin 1.4s linear infinite; opacity: 0.85; }
 .onb-ring2 { position: absolute; inset: -22px; border-radius: 50%; border: 1px solid rgba(240,237,228,0.18); border-bottom-color: rgba(200,51,31,0.7); animation: onbSpin 2.6s linear infinite reverse; }
 @keyframes onbSpin { to { transform: rotate(360deg); } }
 .onb-pulse-mark { animation: onbPulseMark 2.2s ease-in-out infinite; }
@@ -1254,9 +1214,9 @@ table.ledger tr:last-child td { border-bottom: none; }
 .onb-mosaic-shimmer .onb-shine { animation: onbShine 1.1s ease forwards; }
 @keyframes onbShine { to { transform: translateX(120%); } }
 
-.onb-range { -webkit-appearance: none; appearance: none; height: 6px; cursor: pointer; background: linear-gradient(90deg, #C8331F 0%, #C8331F var(--p, 30%), rgba(255,255,255,0.14) var(--p, 30%)); }
-.onb-range::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; background: #F0EDE4; border: 3px solid #C8331F; cursor: pointer; }
-.onb-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 0; background: #F0EDE4; border: 3px solid #C8331F; cursor: pointer; }
+.onb-range { -webkit-appearance: none; appearance: none; height: 6px; cursor: pointer; background: linear-gradient(90deg, var(--signal) 0%, var(--signal) var(--p, 30%), rgba(255,255,255,0.14) var(--p, 30%)); }
+.onb-range::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; background: var(--paper); border: 3px solid var(--signal); cursor: pointer; }
+.onb-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 0; background: var(--paper); border: 3px solid var(--signal); cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
   .neb-l, .onb-blob, .onb-floaty, .onb-ring, .onb-ring2, .onb-pulse-mark, .onb-shine { animation: none !important; }
