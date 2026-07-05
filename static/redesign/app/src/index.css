@@ -1,58 +1,48 @@
-/* Self-hosted variable fonts (latin). Replaces the Google Fonts CDN
-   @import so type renders even when the deploy environment can't reach
-   fonts.googleapis.com (the silent CDN-fallback-to-system-sans failure
-   mode). One variable .woff2 per family covers every weight we use
-   (300–800); the browser only fetches the families referenced by the
-   active data-font system. The seven families back the four typeface
-   systems users pick in Settings → Appearance → Typeface. */
+/* ====================================================================
+   AURORA — CATALOGUE EDITION foundation (ui-overhaul phase 1)
+   --------------------------------------------------------------------
+   Bone paper · ink rules · one signal red · Archivo + IBM Plex Mono.
+   Hard rules of the system (see docs/redesign proposal, FIG. 11):
+     01  border-radius: 0 everywhere, including avatars
+     02  no gradients, no glassmorphism, no blur, no glow
+     03  one accent (signal red); semantic states use marks + words
+     04  every number is monospace, tabular, letterspaced
+     05  shadows only as hard offsets on floating paper
+     06  no emoji in UI copy; stamps and marks instead
+     07  hover = invert; focus = 2px red outline; motion ≤ 150ms fades
+   Phases 2–7 migrate view markup; until they land, views that still
+   carry the old inline dark-theme utility classes render as a known
+   hybrid on this branch. The player/party/companion surfaces stay
+   dark by design ("the one dark room") and keep the --glow-border
+   compat token until phase 7 restyles them.
+   ==================================================================== */
+
+/* Self-hosted fonts (latin subsets). Archivo is a single variable file
+   covering weight 100–900 AND width 62%–125% — the condensed/expanded
+   display cuts come from font-stretch, no extra files. IBM Plex Mono
+   carries every number, timecode, stamp, and catalogue mark; 400 for
+   data, 600 for emphasis/labels. */
 @font-face {
-  font-family: 'Inter';
+  font-family: 'Archivo';
   font-style: normal;
   font-weight: 100 900;
+  font-stretch: 62% 125%;
   font-display: swap;
-  src: url('./fonts/inter.woff2') format('woff2');
+  src: url('./fonts/archivo-var.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Inter Tight';
+  font-family: 'IBM Plex Mono';
   font-style: normal;
-  font-weight: 100 900;
+  font-weight: 400;
   font-display: swap;
-  src: url('./fonts/inter-tight.woff2') format('woff2');
+  src: url('./fonts/ibm-plex-mono-400.woff2') format('woff2');
 }
 @font-face {
-  font-family: 'Space Grotesk';
+  font-family: 'IBM Plex Mono';
   font-style: normal;
-  font-weight: 300 700;
+  font-weight: 600;
   font-display: swap;
-  src: url('./fonts/space-grotesk.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Sora';
-  font-style: normal;
-  font-weight: 100 800;
-  font-display: swap;
-  src: url('./fonts/sora.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Bricolage Grotesque';
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url('./fonts/bricolage-grotesque.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Outfit';
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
-  src: url('./fonts/outfit.woff2') format('woff2');
-}
-@font-face {
-  font-family: 'Plus Jakarta Sans';
-  font-style: normal;
-  font-weight: 200 800;
-  font-display: swap;
-  src: url('./fonts/plus-jakarta-sans.woff2') format('woff2');
+  src: url('./fonts/ibm-plex-mono-600.woff2') format('woff2');
 }
 
 @tailwind base;
@@ -61,116 +51,76 @@
 
 @layer base {
   :root {
-    --background: 0 0% 2%;
-    --foreground: 0 0% 100%;
-    --card: 0 0% 6.7%;
-    --card-foreground: 0 0% 100%;
-    --popover: 0 0% 6.7%;
-    --popover-foreground: 0 0% 100%;
-    --primary: 270 91% 65%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 8%;
-    --secondary-foreground: 0 0% 100%;
-    --muted: 0 0% 12%;
-    --muted-foreground: 0 0% 60%;
-    --accent: 270 91% 65%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 14%;
-    --input: 0 0% 14%;
-    --ring: 270 91% 65%;
-    --radius: 0.625rem;
+    /* shadcn token set — light, committed. Derived from the catalogue
+       palette below so ui/* primitives (dialogs, dropdowns, popovers)
+       flip to bone/ink without per-component edits. */
+    --background: 45 29% 92%;          /* bone  #F0EDE4 */
+    --foreground: 48 13% 8%;           /* ink   #161511 */
+    --card: 47 36% 95%;                /* stock #F7F5EE */
+    --card-foreground: 48 13% 8%;
+    --popover: 47 36% 95%;
+    --popover-foreground: 48 13% 8%;
+    --primary: 48 13% 8%;              /* solid ink buttons */
+    --primary-foreground: 45 29% 92%;
+    --secondary: 45 25% 87%;           /* deep bone */
+    --secondary-foreground: 48 13% 8%;
+    --muted: 45 25% 87%;
+    --muted-foreground: 46 9% 39%;     /* ink-2 #6B675A */
+    --accent: 7 73% 45%;               /* signal red #C8331F */
+    --accent-foreground: 45 29% 92%;
+    --destructive: 7 73% 45%;
+    --destructive-foreground: 45 29% 92%;
+    --border: 46 18% 76%;              /* faint rule #CCC7B6 */
+    --input: 48 13% 8%;                /* inputs draw the hard ink rule */
+    --ring: 7 73% 45%;
+    --radius: 0rem;
 
-    /* 2026-06-17 (a11y quick-win) — secondary text token for content
-       that must clear WCAG AA (>=4.5:1). Formalizes the
-       rgba(220, 220, 232, 0.65) color the media-card meta already uses
-       (.media-card-cinema .shelf .meta below) so table headers,
-       timestamps, and hints share one source of truth instead of
-       dropping to text-white/40 (~3.9:1, fails AA). */
-    --text-secondary: rgba(220, 220, 232, 0.65);
+    /* sidebar tokens — ui/sidebar.tsx reads these if it ever mounts */
+    --sidebar-background: 47 36% 95%;
+    --sidebar-foreground: 48 13% 8%;
+    --sidebar-primary: 48 13% 8%;
+    --sidebar-primary-foreground: 45 29% 92%;
+    --sidebar-accent: 45 25% 87%;
+    --sidebar-accent-foreground: 48 13% 8%;
+    --sidebar-border: 46 18% 76%;
+    --sidebar-ring: 7 73% 45%;
 
-    /* Typeface system tokens — drive body + display type everywhere
-       (body, .font-display, .holo-text all read these vars). Default
-       (no data-font attribute) is "NOVA": Sora display + Inter Tight
-       body. Users override via Settings → Appearance → Typeface, which
-       writes data-font="current" | "eclipse" | "halo" on <html>. */
-    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Sora', 'Inter Tight', sans-serif;
+    /* Catalogue palette — raw values for plain CSS below. */
+    --paper: #F0EDE4;        /* app ground */
+    --stock: #F7F5EE;        /* raised card stock */
+    --ink: #161511;          /* text, rules, solid fills */
+    --ink-2: #6B675A;        /* secondary text — AA on bone/stock */
+    --ink-3: #98937F;        /* muted: placeholders, disabled */
+    --rule: #161511;         /* hard 1px rule */
+    --rule-faint: #CCC7B6;   /* hairline row rules */
+    --signal: #C8331F;       /* the only color */
+    --darkroom: #12100D;     /* the player, and nothing else */
 
-    /* Glow theme tokens — drive the white/purple edge + halo on
-       .glass-panel, .glass-card, and .media-card. Default is
-       "Aurora" (white border, purple-tinted halo). Users override
-       via Settings → Appearance → Glow Style, which writes
-       data-glow="subtle" | "heavy" on <html>. */
-    --glow-border: rgba(220, 200, 255, 0.22);
-    --glow-border-strong: rgba(220, 200, 255, 0.45);
-    --glow-halo:
-      0 0 0 1px rgba(220, 200, 255, 0.14),
-      0 0 28px rgba(168, 85, 247, 0.12),
-      0 0 56px rgba(255, 255, 255, 0.05);
-    --glow-halo-strong:
-      0 0 0 1px rgba(220, 200, 255, 0.25),
-      0 0 34px rgba(168, 85, 247, 0.20),
-      0 0 72px rgba(255, 255, 255, 0.08);
+    /* Secondary-text token — pre-dates the redesign (a11y quick-win);
+       consumers keep working. ≥4.5:1 on bone and stock. */
+    --text-secondary: #6B675A;
+
+    /* Type systems. Display and body are the same grotesk — Swiss —
+       with weight/width doing the differentiation (font-stretch on the
+       variable file gives the condensed display cuts). */
+    --font-sans: 'Archivo', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --font-display: 'Archivo', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    /* COMPAT (until phase 7): party/companion/player overlays reference
+       var(--glow-border) / var(--glow-halo) inline. Those surfaces sit
+       over video and stay dark by design, so the "border" resolves to a
+       bone hairline and the halos to a valid no-op shadow (keeps
+       comma-separated shadow lists parseable). Remove with phase 7. */
+    --glow-border: rgba(237, 234, 224, 0.28);
+    --glow-border-strong: rgba(237, 234, 224, 0.45);
+    --glow-halo: 0 0 0 0 rgba(0, 0, 0, 0);
+    --glow-halo-strong: 0 0 0 0 rgba(0, 0, 0, 0);
   }
 
-  html[data-glow="subtle"] {
-    --glow-border: rgba(255, 255, 255, 0.10);
-    --glow-border-strong: rgba(255, 255, 255, 0.18);
-    --glow-halo:
-      0 0 0 1px rgba(255, 255, 255, 0.06),
-      0 0 14px rgba(255, 255, 255, 0.04);
-    --glow-halo-strong:
-      0 0 0 1px rgba(255, 255, 255, 0.12),
-      0 0 18px rgba(255, 255, 255, 0.08);
-  }
-
-  html[data-glow="heavy"] {
-    --glow-border: rgba(220, 200, 255, 0.40);
-    --glow-border-strong: rgba(220, 200, 255, 0.65);
-    --glow-halo:
-      0 0 0 1px rgba(220, 200, 255, 0.28),
-      0 0 32px rgba(168, 85, 247, 0.30),
-      0 0 64px rgba(255, 255, 255, 0.12);
-    --glow-halo-strong:
-      0 0 0 1px rgba(220, 200, 255, 0.50),
-      0 0 48px rgba(168, 85, 247, 0.40),
-      0 0 96px rgba(255, 255, 255, 0.18);
-  }
-
-  /* Typeface systems — see Settings → Appearance → Typeface. The
-     default (NOVA: Sora + Inter Tight) lives in the :root tokens above;
-     these blocks override per the user's choice. "current" is the
-     original Space Grotesk + Inter pairing (labelled "Classic" in UI). */
-  html[data-font="current"] {
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Space Grotesk', 'Inter', sans-serif;
-  }
-
-  html[data-font="eclipse"] {
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
-  }
-
-  html[data-font="halo"] {
-    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
-  }
-
-  /* Cinematic watch-party overlay — reduce-transparency / blur budget.
-     The minimal-mode overlay surfaces (VoicePill, MiniDock, the floating
-     rail card) layer backdrop-blur over PLAYING video, which repaints
-     continuously — the exact per-frame re-composite cost flagged for the
-     media-card badge (deep-debug Bug 25). Users on weak / integrated GPUs
-     already have a lever: Settings → Appearance → Glow = Subtle
-     (data-glow="subtle"). For any .aurora-glass-overlay surface that ALSO
-     drops the backdrop blur for a flat fill — same readable look, zero
-     per-frame blur. Default ("aurora") and "heavy" keep the glass. */
-  html[data-glow="subtle"] .aurora-glass-overlay {
-    backdrop-filter: none !important;
-    -webkit-backdrop-filter: none !important;
-    background: rgba(10, 8, 16, 0.92) !important;
+  ::selection {
+    background: var(--signal);
+    color: var(--paper);
   }
 
   body {
@@ -184,105 +134,58 @@
   }
 }
 
+/* Hard rule 01 — the radius kill. Unlayered so it outranks the
+   Tailwind utility layer: every inline rounded-* class (rounded-xl,
+   rounded-2xl, rounded-full avatars, …) flattens to square without
+   editing each call site. Classes defined later in this file (plain
+   CSS, same 0,1,0 specificity, later source order) can still opt a
+   shape back in deliberately. Range-slider thumbs are pseudo-elements
+   and never match, so native sliders keep their round thumbs until
+   the player restyle. */
+[class*="rounded"] {
+  border-radius: 0;
+}
+
 @layer utilities {
   .font-display {
     font-family: var(--font-display);
   }
 
-  .text-gradient {
-    background: linear-gradient(135deg, #A855F7 0%, #D8B4FE 50%, #A855F7 100%);
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
+  /* Legacy glass surfaces → card stock with a hard rule. Kept under
+     their old names so the ~10 existing call sites shift material
+     without markup edits; phases 2–7 replace the class names. */
   .glass-panel {
-    background: rgba(255, 255, 255, 0.03);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--glow-border);
-    box-shadow: var(--glow-halo);
+    background: var(--stock);
+    border: 1px solid var(--rule);
   }
 
   .glass-card {
-    background: rgba(255, 255, 255, 0.04);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glow-border);
-    box-shadow: var(--glow-halo);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    background: var(--stock);
+    border: 1px solid var(--rule);
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
   }
 
   .glass-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: var(--glow-border-strong);
-    box-shadow: var(--glow-halo-strong);
+    box-shadow: 3px 3px 0 rgba(22, 21, 17, 0.9);
+    transform: translate(-1px, -1px);
   }
 
+  /* Glow is gone from the system; the class remains a no-op until its
+     call sites migrate. */
   .glow-purple {
-    box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
+    box-shadow: none;
   }
 
-  .glow-text {
-    text-shadow: 0 0 20px rgba(168, 85, 247, 0.5), 0 0 40px rgba(168, 85, 247, 0.3);
-  }
-
-  /* Phase D — conversational "mood box": a focal, on-brand search pill that
-     invites natural-language discovery. A violet→cyan gradient ring + soft halo
-     (the same palette as the rest of the UI) that intensifies on hover/focus
-     and breathes gently to draw the eye. Honors prefers-reduced-motion and
-     calms down under data-glow="subtle". */
+  /* Conversational search — "Ask the Archivist". Stamped-form field:
+     stock ground, hard rule, red focus outline. No halo, no breathing. */
   .convo-search {
     position: relative;
-    /* Rounded-rect, not a full pill: a full pill's semicircular end caps swept
-       empty space above/below the trailing "↵ to search" hint, so it read as
-       floating mid-bar even when flush. A defined vertical right edge lets the
-       hint actually hug it. */
-    border-radius: 1rem;
-    background:
-      linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
-      linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
-    border: 1.5px solid transparent;
-    box-shadow:
-      0 8px 28px -10px rgba(124, 58, 237, 0.4),
-      0 0 20px -6px rgba(34, 211, 238, 0.25);
-    transition: box-shadow 0.35s ease;
-  }
-  .convo-search::before {
-    content: '';
-    position: absolute;
-    inset: -3px;
-    border-radius: 1.2rem;
-    background: linear-gradient(100deg, rgba(168, 85, 247, 0.45), rgba(34, 211, 238, 0.4));
-    filter: blur(16px);
-    opacity: 0.28;
-    z-index: -1;
-    animation: convo-breathe 5s ease-in-out infinite;
-  }
-  .convo-search:hover {
-    box-shadow:
-      0 10px 32px -10px rgba(124, 58, 237, 0.55),
-      0 0 26px -4px rgba(34, 211, 238, 0.4);
+    background: var(--stock);
+    border: 1px solid var(--rule);
   }
   .convo-search:focus-within {
-    box-shadow:
-      0 0 0 1px rgba(168, 85, 247, 0.3),
-      0 12px 38px -10px rgba(124, 58, 237, 0.65),
-      0 0 32px -2px rgba(34, 211, 238, 0.5);
-  }
-  .convo-search:focus-within::before {
-    opacity: 0.55;
-    animation-play-state: paused;
-  }
-  @keyframes convo-breathe {
-    0%, 100% { opacity: 0.2; }
-    50% { opacity: 0.42; }
-  }
-  html[data-glow="subtle"] .convo-search::before {
-    opacity: 0.14;
-    animation: none;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .convo-search::before { animation: none; opacity: 0.3; }
+    outline: 2px solid var(--signal);
+    outline-offset: 1px;
   }
 
   .scrollbar-hide {
@@ -293,181 +196,97 @@
     display: none;
   }
 
+  /* Former aurora gradient wash → flat paper. */
   .aurora-bg {
-    background:
-      radial-gradient(ellipse 80% 60% at 20% 40%, rgba(168, 85, 247, 0.08) 0%, transparent 60%),
-      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(216, 180, 254, 0.05) 0%, transparent 50%),
-      radial-gradient(ellipse 50% 40% at 50% 80%, rgba(107, 33, 168, 0.06) 0%, transparent 50%),
-      #050505;
+    background: var(--paper);
   }
 
-  /* DetailView hero glow floor — a soft purple radial at the bottom-left of
-     the backdrop, giving the editorial hero its "shine". Single static
-     element on a non-scrolling hero, so the blur cost is paid once. */
+  /* Former detail-hero purple glow floor — retired. The rule stays so
+     the DetailView call site renders nothing rather than erroring. */
   .aurora-floor {
-    position: absolute;
-    left: -10%;
-    right: -10%;
-    bottom: -25%;
-    height: 60%;
-    background: radial-gradient(55% 100% at 28% 100%, rgba(168, 85, 247, 0.28), transparent 70%);
-    filter: blur(46px);
-    pointer-events: none;
+    display: none;
   }
 }
 
-@keyframes chromaticShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0px); }
-  50% { transform: translateY(-10px); }
-
-}
-
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 20px rgba(168, 85, 247, 0.3); }
-  50% { box-shadow: 0 0 40px rgba(168, 85, 247, 0.5); }
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
-
+/* Motion — hard rule 07: fades only, ≤150ms. The two finite entrance
+   animations keep their names + fill-mode (see the pre-redesign note
+   about re-render snap-back) but lose the slide distance. */
 @keyframes slideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-@keyframes aurora-drift {
-  0%, 100% { transform: translate(0, 0) scale(1); opacity: 0.6; }
-  33% { transform: translate(30px, -20px) scale(1.1); opacity: 0.8; }
-  66% { transform: translate(-20px, 20px) scale(0.9); opacity: 0.6; }
-}
-
-
-.animate-chromatic {
-  animation: chromaticShift 4s ease infinite;
-}
-
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
-
-.animate-pulse-glow {
-  animation: pulse-glow 3s ease-in-out infinite;
-}
-
-.animate-shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
-  background-size: 200% 100%;
-  animation: shimmer 2s infinite;
-}
-
-/* 2026-05-26 — fill-mode: forwards added to both finite animations
-   below. Without it, animation-fill-mode defaults to "none" and the
-   element snaps BACK to its un-animated state after completion. For
-   .animate-fade-in on the hero <img>, the un-animated state is the
-   keyframes' "from" (opacity: 0, translateY(10px)) — so any React
-   re-render that re-applied the class would leave the backdrop
-   invisible. Observed in production QA: hero backdrop stuck at
-   opacity:0 on multiple page loads, only visible after manually
-   forcing opacity:1 via DevTools. "forwards" holds the "to" state
-   (opacity:1) after the animation completes, so the backdrop stays
-   visible even if re-rendered. Same reasoning applies to slideIn —
-   defense in depth before its first user complaint. */
 .animate-slide-in {
-  animation: slideIn 0.3s ease-out forwards;
+  animation: slideIn 0.15s ease-out forwards;
 }
 
 .animate-fade-in {
-  animation: fadeIn 0.4s ease-out forwards;
+  animation: fadeIn 0.15s ease-out forwards;
+}
+
+/* "The archivist is thinking…" loading blobs (home vibe search).
+   Blend flips to multiply so the shapes read on paper instead of
+   vanishing (screen-blend was tuned for the old black ground). The
+   drift stays gentle; phase 3 replaces the whole treatment. */
+@keyframes aurora-drift {
+  0%, 100% { transform: translate(0, 0); opacity: 0.5; }
+  50% { transform: translate(12px, -8px); opacity: 0.7; }
 }
 
 .aurora-pulse-blob {
   position: absolute;
-  border-radius: 50%;
-  filter: blur(40px);
-  mix-blend-mode: screen;
+  filter: blur(24px);
+  mix-blend-mode: multiply;
   animation: aurora-drift 8s ease-in-out infinite;
 }
 
-
-/* Phase 6 — Custom scrollbar (Aurora-themed).
-   Replaces the previous bare 6px-track-no-corner scrollbar with a
-   futuristic style: wider on hover (8px → 12px), purple gradient
-   thumb on hover, transparent track that lets the page background
-   show through. Firefox uses `scrollbar-color` which only supports
-   solid colors — we approximate with the same purple. */
+/* Scrollbar — a square ink bar on a paper track. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.015);
-  border-radius: 10px;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: linear-gradient(135deg,
-    rgba(168, 85, 247, 0.35),
-    rgba(217, 70, 239, 0.25));
-  border-radius: 10px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
-  transition: background 200ms ease;
+  background: var(--rule-faint);
+  border: 2px solid var(--paper);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(135deg,
-    rgba(168, 85, 247, 0.75),
-    rgba(217, 70, 239, 0.55));
-  background-clip: padding-box;
-  border: 2px solid transparent;
+  background: var(--ink);
 }
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
-/* Firefox (limited support for full theming) */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(168, 85, 247, 0.45) transparent;
+  scrollbar-color: var(--rule-faint) transparent;
 }
 
 /* ====================================================================
    Media cards
    --------------------------------------------------------------------
-   .media-card             — original card (legacy callers, in-place
-                              usages outside the main home rails)
-   .media-card-cinema      — 2026-05-27 redesign: poster + designed
-                              "shelf" below for title/meta/reason, with
-                              stronger always-on purple halo + bigger
-                              jewel-tone corner badges. Used by the home
-                              MediaRail. Same external API as the legacy
-                              card (renders an <img>, optional progress,
-                              optional reason caption) so the rest of
-                              the home-rail flow doesn't change.
-   .rail-container         — glassy frame wrapping a whole rail (title +
-                              cards), with a decorative header row that
-                              uses horizontal divider lines on either
-                              side of the rail's title.
+   .media-card         — legacy card (non-rail call sites)
+   .media-card-cinema  — the rail/grid card. Same DOM contract as
+                         before (poster img, optional progress, badges,
+                         lib/resume/gem controls) reskinned as an
+                         index card: stock ground, hard rule, ruled
+                         caption shelf, mono metadata.
+   Hover = the card lifts 2px with a hard offset shadow — paper picked
+   up off the desk, no blur, no glow.
    ==================================================================== */
 
-/* Media card hover effect */
 .media-card {
   position: relative;
   overflow: hidden;
-  border-radius: 12px;
-  border: 1px solid var(--glow-border);
-  box-shadow: var(--glow-halo);
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid var(--rule);
+  background: var(--stock);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
   cursor: pointer;
 }
 
@@ -475,72 +294,29 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(to top, rgba(5,5,5,0.9) 0%, transparent 60%);
+  background: linear-gradient(to top, rgba(22, 21, 17, 0.82) 0%, transparent 55%);
   opacity: 0;
-  transition: opacity 0.3s ease;
+  transition: opacity 0.15s ease;
   z-index: 1;
-  border-radius: 12px;
 }
 
 .media-card:hover {
-  transform: translateY(-8px) scale(1.02);
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong), 0 20px 40px rgba(0, 0, 0, 0.6);
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
 }
 
 .media-card:hover::before {
   opacity: 1;
 }
 
-.media-card img {
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.media-card:hover img {
-  transform: scale(1.08);
-}
-
-/* Holographic text effect */
-.holo-text {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: 10px;
-  text-transform: uppercase;
-  background: linear-gradient(90deg, #A855F7 0%, #FFFFFF 50%, #A855F7 100%);
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: screen;
-  position: relative;
-}
-
-.holo-text::before {
-  content: attr(data-text);
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(45deg, #ff00cc, #3333ff, #00ffcc);
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: color-dodge;
-  animation: chromaticShift 4s ease infinite;
-  opacity: 0.6;
-}
-
-/* Sidebar nav link */
+/* Sidebar nav link (retires with the phase-2 masthead). */
 .nav-link-item {
   position: relative;
   padding: 10px 14px;
-  border-radius: 10px;
-  color: rgba(255, 255, 255, 0.5);
+  color: var(--ink-2);
   font-size: 0.875rem;
   font-weight: 500;
-  transition: all 0.2s ease;
+  transition: color 0.15s ease, background 0.15s ease;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -548,13 +324,13 @@
 }
 
 .nav-link-item:hover {
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.03);
+  color: var(--ink);
+  background: rgba(22, 21, 17, 0.04);
 }
 
 .nav-link-item.active {
-  color: #fff;
-  background: rgba(168, 85, 247, 0.15);
+  color: var(--ink);
+  font-weight: 700;
 }
 
 .nav-link-item.active::before {
@@ -565,45 +341,39 @@
   transform: translateY(-50%);
   width: 3px;
   height: 20px;
-  background: #A855F7;
-  border-radius: 0 3px 3px 0;
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+  background: var(--signal);
 }
 
-/* Progress bar */
+/* Progress — a 3px rule with a signal-red fill. */
 .progress-bar {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
   height: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(22, 21, 17, 0.16);
   z-index: 2;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #A855F7, #D8B4FE);
-  box-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
+  background: var(--signal);
   transition: width 0.3s ease;
 }
 
 /* Rail scroll container */
 .rail-scroll {
   display: flex;
-  gap: 16px;
+  gap: 14px;
   overflow-x: auto;
   scroll-snap-type: x mandatory;
   padding: 8px 4px;
   -webkit-overflow-scrolling: touch;
 }
 
-/* Rail paddles — hover/focus-revealed chevrons that page the rail for
-   mouse users (the scrollbar is hidden and a vertical wheel scrolls the
-   page, so without these anything past the first viewport-width of
-   cards is unreachable without a trackpad/touch). Hidden by default;
-   revealed while the rail is hovered or a paddle has keyboard focus.
-   Touch devices never hover — swiping already works there. */
+/* Rail paddles — hover/focus-revealed pagers. Bone plates with an ink
+   rule; invert on hover. Reveal/pointer-events mechanics unchanged
+   (touch devices never hover; swiping already works). */
 .rail-scroll-wrap {
   position: relative;
 }
@@ -612,20 +382,17 @@
   top: 50%;
   transform: translateY(-50%);
   z-index: 5;
-  width: 36px;
-  height: 68px;
+  width: 34px;
+  height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 12px;
-  background: rgba(10, 8, 18, 0.78);
-  border: 1px solid var(--glow-border);
-  color: rgba(255, 255, 255, 0.85);
+  background: var(--stock);
+  border: 1px solid var(--rule);
+  color: var(--ink);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
 }
 .rail-scroll-wrap:hover .rail-paddle,
 .rail-paddle:focus-visible {
@@ -633,11 +400,11 @@
   pointer-events: auto;
 }
 .rail-paddle:hover {
-  background: rgba(30, 24, 48, 0.92);
-  color: #fff;
+  background: var(--ink);
+  color: var(--paper);
 }
 .rail-paddle:focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.8);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
 .rail-paddle-left {
@@ -653,141 +420,80 @@
 }
 
 /* ====================================================================
-   .rail-container — wraps a whole home rail (header + cards).
-   Glassy bg + outer halo so the rail reads as a contained shelf rather
-   than free-floating cards on the page background. Padding leaves room
-   for the cards' own hover lift without clipping. The decorative
-   horizontal divider lines on either side of the rail title are pure
-   ::before / ::after on .rail-header — no extra DOM nodes needed.
+   .rail-container — a shelf is an open section under a ruled header,
+   not a glass box. The header rule is the shelf's identity.
    ==================================================================== */
 .rail-container {
-  background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
-  border: 1px solid var(--glow-border);
-  border-radius: 18px;
-  box-shadow: var(--glow-halo);
-  padding: 18px 20px 22px;
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  margin-bottom: 28px;
+  background: none;
+  border: none;
+  padding: 0 0 6px;
+  margin-bottom: 26px;
 }
 .rail-header {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 10px;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--rule);
 }
-/* 2026-05-27 — Per-rail icon chip with tint variants. The base rule
-   handles ONLY layout (size, shape, alignment); each [data-tint=...]
-   block owns its own colors. railIconFor() always resolves to a tint
-   so the data-tint attribute is present on every render — there's no
-   "naked" fallback to worry about.
-   Adding a new tint = one block here + one entry in railIconFor(). */
+/* Per-rail icon chip — one ink treatment for every former tint. The
+   data-tint attribute still arrives from railIconFor(); it no longer
+   selects a color. */
 .rail-header .rail-icon {
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* Border thickness comes from the base rule; tint blocks override
-     background + border-color + color. */
-  border: 1px solid transparent;
-}
-.rail-header .rail-icon[data-tint="purple"] {
-  background: rgba(168, 85, 247, 0.18);
-  border-color: rgba(168, 85, 247, 0.4);
-  color: #d8b4fe;
-}
-.rail-header .rail-icon[data-tint="teal"] {
-  background: rgba(45, 212, 191, 0.16);
-  border-color: rgba(45, 212, 191, 0.4);
-  color: #5eead4;
-}
-.rail-header .rail-icon[data-tint="amber"] {
-  background: rgba(245, 158, 11, 0.16);
-  border-color: rgba(245, 158, 11, 0.4);
-  color: #fcd34d;
-}
-.rail-header .rail-icon[data-tint="pink"] {
-  background: rgba(236, 72, 153, 0.16);
-  border-color: rgba(236, 72, 153, 0.4);
-  color: #f9a8d4;
-}
-.rail-header .rail-icon[data-tint="rose"] {
-  background: rgba(244, 63, 94, 0.16);
-  border-color: rgba(244, 63, 94, 0.4);
-  color: #fda4af;
-}
-.rail-header .rail-icon[data-tint="indigo"] {
-  background: rgba(99, 102, 241, 0.16);
-  border-color: rgba(99, 102, 241, 0.4);
-  color: #a5b4fc;
+  border: 1px solid var(--rule);
+  background: var(--stock);
+  color: var(--ink);
 }
 .rail-header .rail-title {
-  font-size: 1.05rem;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.95);
+  font-size: 1rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--ink);
   white-space: nowrap;
 }
-/* Divider line that fills the space between title and the See-All chevron. */
 .rail-header .rail-spacer {
   flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%);
 }
 .rail-header .rail-see-all {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 0.8rem;
-  transition: color 0.2s;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transition: color 0.15s;
   flex-shrink: 0;
 }
-.rail-header .rail-see-all:hover { color: #d8b4fe; }
+.rail-header .rail-see-all:hover { color: var(--signal); }
 
 /* ====================================================================
-   .media-card-cinema — the new card design used inside .rail-container.
-   Same outer shape semantics as .media-card (rounded box, poster fills
-   most of it, hover lift) but with:
-     - Always-on purple halo so cards read as "luminous" against the
-       rail's dark glass — the legacy .media-card only glows on hover.
-     - Designed shelf below the poster instead of bare text — title,
-       star+year+genre meta, and (when present) the LLM "reason"
-       caption.
-     - Larger top-corner badges so they read on a glance without a
-       hover, and with a jewel-toned diamond for the AI-matched signal.
+   .media-card-cinema — the index card.
    ==================================================================== */
 .media-card-cinema {
   position: relative;
-  border-radius: 14px;
   overflow: hidden;
-  background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
-  border: 1px solid var(--glow-border);
-  box-shadow: var(--glow-halo);
-  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  background: var(--stock);
+  border: 1px solid var(--rule);
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
   cursor: pointer;
 }
 .media-card-cinema:hover {
-  transform: translateY(-6px);
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong);
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
 }
 .media-card-cinema .poster-wrap {
   position: relative;
-  padding: 8px 8px 0;
-  /* 2026-05-27 (deep-debug Bug 22) — round all four corners of the
-     poster-wrap. Previously only the top corners were rounded; for
-     landscape (16:9) cards the image's bottom rounded edges (9px)
-     visibly clipped against the wrap's flat bottom corners producing
-     a stair-step look. Rounding the bottom too means the image's
-     rounding is always inside the wrap's rounding, no clash. The shelf
-     below has square top corners by default; the rail-container's
-     outer 18px radius hides the shelf-to-wrap seam. */
-  border-radius: 14px;
   overflow: hidden;
 }
 .media-card-cinema .poster-img {
@@ -795,147 +501,83 @@
   width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  border-radius: 9px;
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* 2026-05-27 (deep-debug Bug 21) — reduced hover scale from 1.04 to
-   1.02. At 1.04, the scaled image's rounded corners (border-radius 9px,
-   now larger after scale) hit the wrap's edge before its own corners
-   reach there, producing a flat-edge clip at the top corners during
-   hover. At 1.02 the scaling stays within the wrap's safe area and
-   the rounding is preserved. The subtle scale still reads as a hover
-   affordance — it's the lift (translateY) on the parent that does most
-   of the work anyway. */
-.media-card-cinema:hover .poster-img { transform: scale(1.02); }
 
-/* Larger "+" / library badge — sits in poster top-left. Filled
-   purple when item is in the user's library, dark glass otherwise.
-   2026-05-27 (deep-debug Bug 25) — dropped backdrop-filter:blur. The
-   home view typically renders 5+ rails × 15+ visible cards = 80+
-   backdrop-filter layers, each forcing a re-composite on every scroll
-   /hover/resize frame. Profiling showed observable FPS drops on weak
-   integrated graphics. The badge is 30px on top of a poster — the
-   "frosted glass" effect was invisible at that size. A flat dark fill
-   (rgba 0.7) reads identically while costing nothing to render. The
-   rail-container's outer blur is preserved since it's once per rail
-   (5-10 layers total). */
+/* Library toggle — a square plate, top-left. Ink-on-stock; filled ink
+   when saved; red on the destructive (remove) hover. Flat fills only. */
 .media-card-cinema .lib-badge {
   position: absolute;
-  top: 14px;
-  left: 14px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(10, 8, 18, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  transition: background 0.2s, border-color 0.2s, transform 0.2s;
+  color: var(--ink);
+  background: var(--stock);
+  border: 1px solid var(--rule);
+  transition: background 0.15s, color 0.15s;
   z-index: 3;
   cursor: pointer;
 }
-.media-card-cinema .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
+.media-card-cinema .lib-badge:hover { background: var(--ink); color: var(--paper); }
 .media-card-cinema .lib-badge.in-lib {
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  border-color: rgba(220, 200, 255, 0.6);
-  box-shadow: 0 0 12px rgba(168, 85, 247, 0.45);
+  background: var(--ink);
+  color: var(--paper);
 }
-/* 2028-05-28 (deep-debug Bug D) — destructive hover cue when the badge is
-   already in the in-lib state. Without this, the generic .lib-badge:hover
-   rule (purple translucent fill) overrides the in-lib gradient on hover
-   and gives a misleading "add" signal even though the click will remove
-   the title from the library. The .in-lib qualifier raises specificity
-   above the generic rule and recolors to red so the destructive action
-   reads clearly. */
 .media-card-cinema .lib-badge.in-lib:hover {
-  background: linear-gradient(135deg, #f87171, #b91c1c);
-  border-color: rgba(255, 200, 200, 0.6);
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.5);
-  transform: scale(1.06);
+  background: var(--signal);
+  border-color: var(--signal);
+  color: var(--paper);
 }
 
-/* AI-matched diamond — jewel-style top-right badge + reveal control.
-   Only renders when the recommender attached an LLM reason (item.reason).
-   2026-06-04 — promoted from a decorative div to a real <button>: it is
-   the always-on "AI-picked" signal AND the affordance that surfaces the
-   reason — hover the card (desktop), tab to it (keyboard) or tap it
-   (touch), all of which reveal the .reason-scrim below via the card's
-   :hover / :focus-within. */
+/* Curated marker — the recommender's stamp (formerly the "AI gem").
+   A red-ruled plate; still the button that reveals the reason plate
+   on hover/focus/tap. */
 .media-card-cinema .ai-gem {
   position: absolute;
-  top: 14px;
-  right: 14px;
-  /* 2026-05-27 (deep-debug Bug 20) — sized to match the lib-badge
-     diameter (30px) so the top corners read symmetric. Previously 26x26
-     looked visibly smaller than the 30x30 lib-badge for no design
-     reason. */
-  width: 30px;
-  height: 30px;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, rgba(216, 180, 254, 0.85), rgba(168, 85, 247, 0.85));
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  color: #fffbe6;
-  box-shadow: 0 0 14px rgba(216, 180, 254, 0.5);
+  background: var(--stock);
+  border: 1px solid var(--signal);
+  color: var(--signal);
   z-index: 3;
-  /* Interactive now (was pointer-events:none) so a touch/click focuses it
-     and reveals the reason; cursor hints it's actionable. */
   cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.media-card-cinema .ai-gem:hover { transform: scale(1.06); box-shadow: 0 0 18px rgba(216, 180, 254, 0.7); }
-.media-card-cinema .ai-gem:focus-visible { outline: 2px solid rgba(216, 180, 254, 0.95); outline-offset: 2px; }
-/* svg ignores pointer events so the click always lands on the button. */
-.media-card-cinema .ai-gem svg { filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.55)); pointer-events: none; }
+.media-card-cinema .ai-gem:hover { background: var(--signal); color: var(--paper); }
+.media-card-cinema .ai-gem:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+.media-card-cinema .ai-gem svg { pointer-events: none; }
 
-/* Reveal-on-intent reason scrim — the full LLM reason faded up over the
-   poster bottom on card :hover / :focus-within. Replaces the old always-on
-   truncated shelf caption (.reason) and the native title= tooltip: the
-   reason is now fully readable (≤80-char sentence, ~3 lines) on intent,
-   themed to match the cinematic UI, and works on touch via the gem. */
+/* Reveal-on-intent reason plate — the curator's note, faded up over
+   the poster bottom on card hover/focus. The ramp stays dark (it sits
+   over arbitrary poster art; bone text needs it), which reads as the
+   printed caption plate on an archival photo. Mechanics unchanged. */
 .media-card-cinema .reason-scrim {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  /* z:2 — below the z:3 corner controls (lib badge / gem) so they stay
-     visible and clickable while the scrim is up; same layer as the
-     hover-preview play scrim. */
   z-index: 2;
   padding: 26px 12px 12px;
-  /* Dense ramp so near-white .reason-text clears WCAG AA even over bright
-     poster art (snowy backdrops, white logos). The knee at 60% keeps the
-     bottom 1–2 lines on ~0.9+ alpha; the top line of a 3-line reason sits
-     ~0.69 alpha, which still composites dark enough vs near-white to clear
-     4.5:1 (~6:1 worst case over pure white). The previous thinner ramp
-     failed AA for 2–3 line reasons over bright art. */
-  background: linear-gradient(to top, rgba(8, 6, 16, 0.96) 0%, rgba(8, 6, 16, 0.9) 60%, rgba(8, 6, 16, 0) 100%);
+  background: linear-gradient(to top, rgba(22, 21, 17, 0.95) 0%, rgba(22, 21, 17, 0.88) 60%, rgba(22, 21, 17, 0) 100%);
   opacity: 0;
-  transform: translateY(6px);
-  transition: opacity 0.22s ease, transform 0.22s ease;
-  /* never intercept the card's click-to-detail: the reveal is driven by
-     the CARD's :hover / :focus-within, not by hovering the scrim itself. */
+  transition: opacity 0.15s ease;
   pointer-events: none;
 }
 .media-card-cinema:hover .reason-scrim,
 .media-card-cinema:focus-within .reason-scrim {
   opacity: 1;
-  transform: translateY(0);
 }
-/* 2026-06-05 (Home redesign) — AI cards now carry BOTH a reveal-on-hover
-   .reason-scrim AND the quality/maturity .card-badges, which share the
-   poster-bottom-left corner and overlap when the reason reveals. Fade the
-   badges out while the reason is up so the rating chip doesn't sit on top
-   of the reason text. The `.reason-scrim ~` combinator scopes this to
-   cards that actually have a reason — badge-only cards (no scrim) keep
-   their badges on hover. */
 .media-card-cinema .reason-scrim ~ .card-badges {
-  transition: opacity 0.22s ease;
+  transition: opacity 0.15s ease;
 }
 .media-card-cinema:hover .reason-scrim ~ .card-badges,
 .media-card-cinema:focus-within .reason-scrim ~ .card-badges {
@@ -946,275 +588,185 @@
   font-size: 0.72rem;
   font-style: italic;
   line-height: 1.34;
-  color: rgba(238, 232, 252, 0.97);
-  /* the full ≤80-char reason fits ~3 lines at the 180px rail width; the
-     clamp guards the rare longer string without spilling over the art. */
+  color: #F0EDE4;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
-}
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .ai-gem { transition: none; }
-  .media-card-cinema .ai-gem:hover { transform: none; }
-  .media-card-cinema .reason-scrim { transform: none; transition: opacity 0.22s ease; }
 }
 
-/* Shelf: title + meta. The shelf is INSIDE the card chrome (not a
-   separate column under the poster) so the whole card reads as one
-   designed object. The reason moved out to the reveal-on-intent
-   .reason-scrim over the poster (above). */
+/* Shelf: the ruled caption block under the artwork. Title in the
+   grotesk; metadata in the ledger hand (hard rule 04). */
 .media-card-cinema .shelf {
-  padding: 12px 14px 14px;
+  padding: 9px 10px 10px;
+  border-top: 1px solid var(--rule);
 }
 .media-card-cinema .shelf .title {
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  color: var(--ink);
   line-height: 1.2;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .media-card-cinema .shelf .meta {
-  font-size: 0.72rem;
-  /* 2026-05-27 (deep-debug Bug 17) — bumped from rgba(255,255,255,0.45)
-     to rgba(220,220,232,0.65). The previous color composited over the
-     card's bottom gradient gave an effective contrast ratio of ~4.47:1,
-     just below the WCAG AA threshold (4.5:1) for normal-size text. The
-     new color clears 5:1 while still reading as "secondary" against
-     the title (which stays at near-white). Star and reason keep their
-     accent colors; only the year/genre got dim. */
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   gap: 6px;
   font-weight: 400;
 }
-.media-card-cinema .shelf .meta .star { color: #facc15; font-weight: 600; display: inline-flex; align-items: center; gap: 2px; }
-.media-card-cinema .shelf .meta .sep  { color: rgba(255, 255, 255, 0.2); }
+.media-card-cinema .shelf .meta .star { color: var(--ink); font-weight: 600; display: inline-flex; align-items: center; gap: 2px; }
+.media-card-cinema .shelf .meta .sep  { color: var(--rule-faint); }
 
-/* Progress bar — shared shape with the legacy card so existing CSS
-   logic keeps working. Positioned in the poster wrap (above the
-   shelf) the same way the legacy card uses it. */
 .media-card-cinema .progress-bar {
   position: absolute;
   bottom: 0;
-  left: 8px;
-  right: 8px;
+  left: 0;
+  right: 0;
   height: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 0 0 9px 9px;
+  background: rgba(22, 21, 17, 0.16);
   overflow: hidden;
 }
 .media-card-cinema .progress-bar .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #a855f7, #d8b4fe);
+  background: var(--signal);
 }
 
-/* 2026-05-27 — Resume pill (one-click resume from Continue Watching
-   cards). Bottom-right of the poster, above the 3px progress bar
-   (positioned at bottom: 14px). Hidden until card hover/focus so it
-   doesn't compete with the poster art on first paint. Click on pill
-   resumes; click on card opens detail (event.stopPropagation in JSX
-   prevents both from firing).
-
-   Deep-debug C1 — `pointer-events: none` on the base + `auto` on the
-   visible states is critical for touch devices: without it, the
-   invisible pill intercepts taps on the bottom-right of the card
-   and silently fires Resume instead of opening detail (no :hover on
-   touch). Mirrors the established .card-actions pattern in this
-   file. Adds outline on :focus-visible (deep-debug H1) so keyboard
-   users get a distinct ring on top of the dark indigo gradient. */
+/* Resume pill → resume plate. Solid ink, mono label, square. All the
+   touch-safety mechanics (opacity + pointer-events pairing) are
+   load-bearing and unchanged. */
 .media-card-cinema .resume-pill {
   position: absolute;
-  bottom: 14px;
-  right: 10px;
+  bottom: 12px;
+  right: 8px;
   z-index: 3;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 9px;
-  border-radius: 9999px;
-  background: linear-gradient(135deg, #6366f1, #4338ca);
-  border: 1px solid rgba(165, 180, 252, 0.5);
-  box-shadow: 0 4px 12px rgba(67, 56, 202, 0.5);
-  color: rgba(255, 255, 255, 0.96);
-  font-size: 0.7rem;
+  gap: 5px;
+  padding: 5px 9px;
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transform: translateY(2px);
-  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  transition: opacity 0.15s ease, background 0.15s ease;
 }
 .media-card-cinema:hover .resume-pill,
 .media-card-cinema:focus-within .resume-pill,
 .media-card-cinema .resume-pill:focus-visible {
   opacity: 1;
   pointer-events: auto;
-  transform: translateY(0);
 }
 .media-card-cinema .resume-pill:hover {
-  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.65);
-  transform: translateY(0) scale(1.04);
+  background: var(--signal);
+  border-color: var(--signal);
 }
 .media-card-cinema .resume-pill:focus-visible {
-  outline: 2px solid #ffffff;
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
-/* Reduced motion — drop the slide-in but keep the fade. */
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .resume-pill {
-    transform: none;
-    transition: opacity 0.18s ease;
-  }
-}
 
-/* Badge */
+/* Badge → stamp. Mono, bordered, square (formerly "glass"). */
 .badge-glass {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
-  border-radius: 9999px;
-  font-size: 0.7rem;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
   font-weight: 600;
-  backdrop-filter: blur(10px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: var(--stock);
+  border: 1px solid var(--rule);
+  color: var(--ink);
 }
 
-/* Input styling.
-   Exclude range sliders: this box treatment (padding/border/background)
-   applies inside the slider's content box, shrinking the track so the
-   thumb can't reach the ends — e.g. the player's volume slider couldn't
-   reach max ("doesn't go all the way to the right"). Range inputs keep
-   their native rendering + Tailwind `accent-*`. Text inputs, selects,
-   textareas, and checkboxes are unaffected. */
+/* Inputs — bone field, hard ink rule, red focus outline (hard rule 07).
+   The :not([type="range"]) exclusion is load-bearing: the box treatment
+   inside a range slider's content box shrinks the track. */
 input:not([type="range"]), select, textarea {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  color: #fff;
-  padding: 12px 16px;
+  background: var(--stock);
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  padding: 10px 14px;
   font-size: 0.9rem;
-  transition: all 0.2s ease;
+  font-family: var(--font-sans);
+  transition: outline-color 0.15s ease;
 }
 
 input:not([type="range"]):focus, select:focus, textarea:focus {
-  outline: none;
-  border-color: rgba(168, 85, 247, 0.5);
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.1);
+  outline: 2px solid var(--signal);
+  outline-offset: 1px;
 }
 
 input::placeholder, textarea::placeholder {
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--ink-3);
 }
 
-/* 2026-06-17 (a11y quick-win) — visible keyboard focus indicator for
-   the interactive elements that had no focus style app-wide (only
-   .media-list-row / .ai-gem / .resume-pill / inputs had one). Targets
-   buttons, links, role=button/switch/menuitem/tab/option divs, and
-   anything with tabindex (the cards). :focus-visible = keyboard focus
-   only, so mouse clicks stay ring-free.
-
-   Deliberately UNLAYERED: unlayered CSS beats @layer rules in the
-   cascade, so this outline renders even where a Tailwind
-   `focus:outline-none` utility (in @layer utilities) would otherwise
-   suppress it. That makes it a true a11y floor — focus is ALWAYS
-   visibly indicated, including on controls that have no other focus
-   style (e.g. MiniDock's border-0 input). Tradeoff: elements that
-   already have a designed focus ring (`focus-visible:ring-*`) show
-   this outline AS WELL as their ring — a slightly bolder double
-   indicator, still accessible. Preferred over moving to @layer base,
-   which would let `focus:outline-none` utilities win and HIDE focus on
-   the ~13 controls that use outline-none with no ring. Inputs are
-   exempted below — their own higher-specificity `:focus` rule
-   (border + box-shadow) already provides the indicator. */
+/* A11y floor — keyboard focus is ALWAYS visible. Unlayered on purpose
+   so Tailwind `focus:outline-none` utilities can't suppress it
+   (unlayered beats @layer in the cascade). Signal red, per the system. */
 :focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
-/* Inputs/selects/textareas keep their own border + box-shadow focus
-   treatment (above) — don't stack a ring on top of it. */
+/* Inputs already carry the red outline via :focus above — don't stack
+   a second ring. */
 input:not([type="range"]):focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: none;
+  outline: 2px solid var(--signal);
+  outline-offset: 1px;
 }
 
-/* Toggle switch */
+/* Toggle switch — a mechanical slide: ink handle in a ruled track;
+   the track fills ink when on. */
 .toggle {
-  width: 48px;
-  height: 26px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 13px;
+  width: 44px;
+  height: 24px;
+  background: var(--stock);
+  border: 1px solid var(--ink);
   position: relative;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background 0.15s ease;
 }
 
 .toggle.active {
-  background: #A855F7;
+  background: var(--ink);
 }
 
 .toggle-handle {
-  width: 22px;
-  height: 22px;
-  background: white;
-  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  background: var(--ink);
   position: absolute;
-  top: 2px;
-  left: 2px;
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  top: 3px;
+  left: 3px;
+  transition: transform 0.15s ease, background 0.15s ease;
 }
 
 .toggle.active .toggle-handle {
-  transform: translateX(22px);
+  transform: translateX(20px);
+  background: var(--paper);
 }
 
-/* Status dot */
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.status-dot.online {
-  background: #10b981;
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
-}
-
-.status-dot.offline {
-  background: #ef4444;
-}
-
-.status-dot.processing {
-  background: #f59e0b;
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
-/* Card overlay actions
- *
- * QA BUG-001 — the previous layout centered the action buttons via
- * `inset: 0; flex center`, putting the 44px Play button at the
- * geometric center of every card. Users instinctively click center —
- * they thought "click the poster" auto-played the title. The card's
- * onClick already navigates to detail; only the Play button starts
- * playback. Anchoring the buttons to the bottom-right corner with
- * a small bias gives the Play button its own affordance while
- * leaving the rest of the card's surface area to the detail-nav
- * click target.
- *
- * BUG-009 — making the Play button visible-on-hover is the requested
- * "on-card Play affordance"; the existing `.media-card::before`
- * gradient + scale-lift transform handle the broader "this is
- * interactive" hover cue.
- */
+/* Card overlay actions — corner plates. The pointer-events dance is
+   load-bearing for touch devices (see the pre-redesign notes). */
 .card-actions {
   position: absolute;
   bottom: 8px;
@@ -1223,56 +775,37 @@ textarea:focus-visible {
   align-items: center;
   gap: 8px;
   opacity: 0;
-  /* translateY animates the button "in" from below on hover; subtle
-   * but signals direction so users notice the new affordance. */
-  transform: translateY(4px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
+  transition: opacity 0.15s ease;
   z-index: 2;
-  /* pointer-events: none on the container is critical for touch
-   * devices that have no hover: the button DOM node would otherwise
-   * stay hit-testable while opacity:0, intercepting taps in the
-   * bottom-right corner and firing Play instead of bubbling to the
-   * card's onSelect (detail-nav). The hover rule below re-enables
-   * pointer-events only when the button is actually visible. */
   pointer-events: none;
 }
 
 .media-card:hover .card-actions {
   opacity: 1;
-  transform: translateY(0);
   pointer-events: auto;
 }
 
 .action-btn {
-  /* Slightly smaller than the previous 44px center button — corner
-   * anchored buttons read as accessories rather than the primary CTA,
-   * which matches the actual UX intent (Play is one option; the card
-   * click going to Detail is the default).
-   *
-   * No box-shadow — the parent `.relative.overflow-hidden.rounded-xl`
-   * (~5 call sites) clips it to a sliver that contributes no lift.
-   * The :hover ::before gradient on .media-card provides enough
-   * background contrast for the white button to read clearly. */
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.95);
-  border: none;
-  color: #050505;
+  width: 34px;
+  height: 34px;
+  background: var(--stock);
+  border: 1px solid var(--ink);
+  color: var(--ink);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .action-btn:hover {
-  transform: scale(1.1);
-  background: #A855F7;
-  color: #fff;
+  background: var(--signal);
+  border-color: var(--signal);
+  color: var(--paper);
 }
 
-/* Table styling */
+/* Table styling — the ledger. Mono letterspaced headers over a hard
+   rule; hairline row rules. */
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -1280,165 +813,79 @@ textarea:focus-visible {
 
 .data-table th {
   text-align: left;
-  padding: 12px 16px;
-  font-size: 0.75rem;
+  padding: 10px 14px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.14em;
   color: var(--text-secondary);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--ink);
 }
 
 .data-table td {
-  padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--rule-faint);
   font-size: 0.875rem;
-  color: rgba(255, 255, 255, 0.7);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
 }
 
 .data-table tr:hover td {
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(22, 21, 17, 0.03);
 }
 
-/* Toast */
+/* Toast — floating paper. The one shadow in the system: a hard offset
+   (hard rule 05). */
 .toast {
-  background: rgba(17, 17, 17, 0.95);
-  backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 14px 20px;
-  border-radius: 12px;
+  background: var(--stock);
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  padding: 13px 18px;
   display: flex;
   align-items: center;
   gap: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  animation: slideIn 0.3s ease;
+  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
+  animation: slideIn 0.15s ease;
 }
 
 /* ====================================================================
-   LIBRARY HYBRID REDESIGN (2026-05-31) — Movies / TV Shows browse page.
-   All rules below are scoped to opt-in classes/props so the 5 OTHER
-   surfaces that render <MediaCardCinema> (home rails, library, search,
-   collections, Continue Watching) are visually unchanged. Tokens mirror
-   the existing card (--glow-border, purple #a855f7, gold #facc15).
+   Browse page (Movies / TV Shows) — toolbar, chips, list view.
    ==================================================================== */
 
-/* ── Card: cinematic hover preview (browse grid only) ──────────────
-   Decorative scrim + center play glyph that fades in on card hover or
-   keyboard focus. pointer-events:none so it never intercepts clicks on
-   the lib/resume buttons stacked above it — the card's own onClick
-   (open detail) is what fires. Lives inside .poster-wrap, which is
-   already position:relative + overflow:hidden. */
-.media-card-cinema .card-hover-preview {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(0deg, rgba(5, 5, 5, 0.55), rgba(5, 5, 5, 0.05) 55%, transparent);
-  opacity: 0;
-  transition: opacity 0.25s ease;
-  pointer-events: none;
-}
-.media-card-cinema:hover .card-hover-preview,
-.media-card-cinema:focus-within .card-hover-preview {
-  opacity: 1;
-}
-.media-card-cinema .card-hover-preview .chp-play {
-  width: 48px;
-  height: 48px;
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.95);
-  color: #0a0a0a;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transform: translateY(4px) scale(0.86);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
-}
-.media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
-.media-card-cinema:hover .card-hover-preview .chp-play,
-.media-card-cinema:focus-within .card-hover-preview .chp-play {
-  transform: translateY(0) scale(1);
-}
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .card-hover-preview { transition: opacity 0.25s ease; }
-  .media-card-cinema .card-hover-preview .chp-play { transform: none; transition: none; }
-}
-
-/* ── Card: quality / maturity badges (browse grid only) ────────────
-   Bottom-left of the poster (top corners belong to the lib badge + AI
-   gem). First chip (quality, e.g. 4K) gets the purple accent; the rest
-   (maturity) stay neutral glass. z-index 3 = same layer as lib badge,
-   above the hover scrim (z-2). */
-.media-card-cinema .card-badges {
-  position: absolute;
-  left: 14px;
-  bottom: 14px;
-  z-index: 3;
-  display: flex;
-  gap: 6px;
-  pointer-events: none;
-}
-.media-card-cinema .card-badge {
-  padding: 3px 7px;
-  border-radius: 6px;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.9);
-  background: rgba(10, 8, 18, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  backdrop-filter: blur(4px);
-}
-.media-card-cinema .card-badge.is-quality {
-  color: #f5edff;
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.85), rgba(126, 34, 206, 0.85));
-  border-color: rgba(220, 200, 255, 0.5);
-}
-/* HDR badge — amber accent, distinct from 4K's purple and the neutral
-   maturity rating. The JSX makes is-hdr and is-quality mutually exclusive
-   (an HDR chip never also carries is-quality, even at index 0), so this
-   stands alone. */
-.media-card-cinema .card-badge.is-hdr {
-  color: #fff7e6;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.85), rgba(180, 83, 9, 0.85));
-  border-color: rgba(253, 224, 138, 0.5);
-}
-
-/* ── Browse toolbar: genre chips + density toggle ──────────────────── */
 .browse-toolbar .genre-chips {
   scrollbar-width: none;
 }
 .browse-toolbar .genre-chips::-webkit-scrollbar { display: none; }
 .genre-chip {
-  padding: 7px 15px;
-  border-radius: 9999px;
+  padding: 6px 12px;
   white-space: nowrap;
-  font-size: 0.8rem;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  background: transparent;
+  border: 1px solid var(--rule-faint);
   transition: color 0.15s, background 0.15s, border-color 0.15s;
   cursor: pointer;
   flex: none;
 }
 .genre-chip:hover {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.14);
+  color: var(--ink);
+  border-color: var(--ink);
 }
 .genre-chip.is-active {
-  color: #fff;
-  background: rgba(168, 85, 247, 0.18);
-  border-color: rgba(168, 85, 247, 0.45);
+  color: var(--paper);
+  background: var(--ink);
+  border-color: var(--ink);
 }
 .density-toggle {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 11px;
-  padding: 3px;
+  background: var(--stock);
+  border: 1px solid var(--ink);
+  padding: 0;
+  display: inline-flex;
 }
 .density-btn {
   display: inline-flex;
@@ -1446,29 +893,24 @@ textarea:focus-visible {
   justify-content: center;
   width: 34px;
   height: 32px;
-  border-radius: 8px;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--ink-2);
   transition: color 0.15s, background 0.15s;
   cursor: pointer;
 }
-.density-btn:hover { color: #fff; }
+.density-btn:hover { color: var(--ink); }
 .density-btn.is-active {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.4);
+  color: var(--paper);
+  background: var(--ink);
 }
 
-/* ── List view (density = list) ────────────────────────────────────
-   A dense, scannable table. The grid-template-columns drives both the
-   header row and each MediaListRow so columns line up. The trailing
-   44px column is the quick-add button. */
+/* List view — the ledger proper. Grid templates and the responsive
+   column drop are unchanged. */
 .media-list {
   display: flex;
   flex-direction: column;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
+  border: 1px solid var(--ink);
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--stock);
 }
 .media-list-head,
 .media-list-row {
@@ -1476,44 +918,37 @@ textarea:focus-visible {
   grid-template-columns: 52px 1fr 150px 96px 70px 84px 44px;
   align-items: center;
   gap: 16px;
-  padding: 12px 18px;
+  padding: 11px 16px;
 }
 .media-list-head {
-  font-size: 0.66rem;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.4);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--ink);
+  background: var(--stock);
 }
-/* The head has no thumb column label; its first cell aligns over the
-   row's thumb+title pair. Shift the head's first (Title) label to sit
-   over the title, not the thumb, by spanning the thumb gutter. */
 .media-list-head > span:first-child { grid-column: 1 / 3; }
 .media-list-row {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--rule-faint);
   cursor: pointer;
   transition: background 0.15s;
 }
 .media-list-row:last-child { border-bottom: none; }
-.media-list-row:hover { background: rgba(168, 85, 247, 0.07); }
+.media-list-row:hover { background: rgba(22, 21, 17, 0.04); }
 .media-list-row:focus-visible {
-  outline: 2px solid rgba(168, 85, 247, 0.6);
+  outline: 2px solid var(--signal);
   outline-offset: -2px;
 }
 .media-list-row .mlr-thumb {
-  /* The thumb sits in the row grid's fixed 52px first column, so its 40px
-     width is stable regardless of title length. position:relative +
-     overflow:hidden clip the img to the rounded box; the gradient stays as
-     the box background so it shows through while the lazy img loads and
-     when an item has no poster. */
   position: relative;
   overflow: hidden;
   width: 40px;
   height: 58px;
-  border-radius: 7px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(160deg, rgba(168, 85, 247, 0.22), rgba(14, 12, 22, 0.9));
+  border: 1px solid var(--rule-faint);
+  background: var(--rule-faint);
 }
 .media-list-row .mlr-thumb-img {
   position: absolute;
@@ -1525,9 +960,9 @@ textarea:focus-visible {
 }
 .media-list-row .mlr-main { min-width: 0; }
 .media-list-row .mlr-title {
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1538,69 +973,65 @@ textarea:focus-visible {
   margin-top: 4px;
 }
 .media-list-row .mlr-tag {
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   padding: 1px 6px;
-  border-radius: 5px;
-  color: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--ink-2);
+  border: 1px solid var(--rule-faint);
 }
 .media-list-row .mlr-tag.is-quality {
-  color: #e9d5ff;
-  border-color: rgba(168, 85, 247, 0.45);
-  background: rgba(168, 85, 247, 0.12);
+  color: var(--paper);
+  background: var(--ink);
+  border-color: var(--ink);
 }
 .media-list-row .mlr-tag.is-hdr {
-  color: #fde68a;
-  border-color: rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.12);
+  color: var(--signal);
+  border-color: var(--signal);
 }
 .media-list-row .mlr-cell {
-  font-size: 0.82rem;
-  color: rgba(220, 220, 232, 0.65);
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.media-list-row .mlr-genre { color: rgba(216, 180, 254, 0.75); }
+.media-list-row .mlr-genre { color: var(--ink-2); }
 .media-list-row .mlr-star {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: #facc15;
+  color: var(--ink);
   font-weight: 700;
 }
 .media-list-row .mlr-add {
   width: 30px;
   height: 30px;
-  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.6);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--ink);
+  background: var(--stock);
+  border: 1px solid var(--ink);
   transition: color 0.15s, background 0.15s, border-color 0.15s;
   cursor: pointer;
 }
 .media-list-row .mlr-add:hover {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  border-color: transparent;
+  color: var(--paper);
+  background: var(--ink);
 }
 .media-list-row .mlr-add.in-lib {
-  color: #fff;
-  background: linear-gradient(135deg, #a855f7, #7e22ce);
-  border-color: rgba(220, 200, 255, 0.6);
+  color: var(--paper);
+  background: var(--ink);
 }
 .media-list-row .mlr-add.in-lib:hover {
-  background: linear-gradient(135deg, #f87171, #b91c1c);
-  border-color: rgba(255, 200, 200, 0.6);
+  background: var(--signal);
+  border-color: var(--signal);
 }
 
-/* Narrow viewports: drop the genre + length columns so the list stays
-   readable on tablet/phone (title + year + rating + add remain). */
 @media (max-width: 768px) {
   .media-list-head,
   .media-list-row {
@@ -1614,13 +1045,159 @@ textarea:focus-visible {
   }
 }
 
+/* Card hover preview — scrim + play plate (browse grid). */
+.media-card-cinema .card-hover-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(0deg, rgba(22, 21, 17, 0.5), rgba(22, 21, 17, 0.04) 55%, transparent);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+.media-card-cinema:hover .card-hover-preview,
+.media-card-cinema:focus-within .card-hover-preview {
+  opacity: 1;
+}
+.media-card-cinema .card-hover-preview .chp-play {
+  width: 44px;
+  height: 44px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.media-card-cinema .card-hover-preview .chp-play svg { margin-left: 2px; }
+
+/* Quality / maturity stamps on the poster (browse grid). First chip
+   (quality) prints solid ink; HDR takes the red rule; the rest stay
+   outline stamps. State always carries a word — never color alone. */
+.media-card-cinema .card-badges {
+  position: absolute;
+  left: 8px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 5px;
+  pointer-events: none;
+}
+.media-card-cinema .card-badge {
+  padding: 3px 6px;
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  color: var(--ink);
+  background: var(--stock);
+  border: 1px solid var(--ink);
+}
+.media-card-cinema .card-badge.is-quality {
+  color: var(--paper);
+  background: var(--ink);
+}
+.media-card-cinema .card-badge.is-hdr {
+  color: var(--signal);
+  background: var(--stock);
+  border-color: var(--signal);
+}
+
+/* ====================================================================
+   Catalogue primitives — new in the redesign; phases 2–7 consume
+   these instead of re-inventing per view.
+   ==================================================================== */
+
+/* Mono small-caps label — section eyebrows, table headers, metadata. */
+.cat-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+/* Stamps — bordered mono state marks. */
+.stamp {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid var(--ink);
+  color: var(--ink);
+  background: transparent;
+  padding: 3px 7px 2px;
+  white-space: nowrap;
+}
+.stamp--solid { background: var(--ink); color: var(--paper); }
+.stamp--red   { border-color: var(--signal); color: var(--signal); }
+.stamp--red-solid { background: var(--signal); border-color: var(--signal); color: var(--paper); }
+.stamp--ghost { border-color: var(--ink-3); color: var(--ink-2); }
+
+/* Stamped fieldset — the archive form box with its label breaking the
+   top rule ("ASK THE ARCHIVIST", "THE SCREENING ROOM", …). */
+.formbox {
+  position: relative;
+  border: 1px solid var(--ink);
+  padding: 18px 16px 16px;
+}
+.formbox > .formbox-label {
+  position: absolute;
+  top: -8px;
+  left: 12px;
+  background: var(--paper);
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+/* Ledger table — the standard data table of the system. */
+table.ledger {
+  width: 100%;
+  border-collapse: collapse;
+}
+table.ledger th {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: left;
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--ink);
+}
+table.ledger td {
+  font-size: 0.8rem;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--rule-faint);
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+table.ledger tr:last-child td { border-bottom: none; }
+
+/* Hard-offset shadow for floating paper (menus, dialogs, toasts). */
+.shadow-hard {
+  box-shadow: 4px 4px 0 rgba(22, 21, 17, 0.9);
+}
+
 /* ============================================================
-   Onboarding flow + Nebula avatars (feat/onboarding-flow)
-   Namespaced .neb-* / .onb-* selectors and onb* keyframes so they
-   can't collide with existing app styles/animations.
+   Onboarding flow + Nebula avatars — dark full-screen flow; gets its
+   catalogue restyle in phase 7. Purple accents are swapped for
+   ink/signal so the interim state stays on-palette.
    ============================================================ */
 
-/* --- Nebula avatar: a living aurora orb (3 drifting screen-blended blobs) --- */
 .neb {
   position: relative;
   display: inline-block;
@@ -1640,8 +1217,6 @@ textarea:focus-visible {
 @keyframes onbDrift2 { 0%,100% { transform: translate(0,0) scale(1); } 33% { transform: translate(-16%,-10%) scale(1.12); } 66% { transform: translate(-22%,6%) scale(1.2); } }
 @keyframes onbDrift3 { 0%,100% { transform: translate(0,0) scale(1.05); } 50% { transform: translate(-14%,16%) scale(0.9); } }
 
-/* Staggered entrance for the direct children of the step wrapper. The flow
-   remounts that wrapper per step (key={step}), so this replays on every step. */
 .onb-stagger > * { opacity: 0; transform: translateY(14px); animation: onbRise 0.6s cubic-bezier(0.2,0.7,0.3,1) forwards; }
 .onb-stagger > *:nth-child(1) { animation-delay: 0.05s; }
 .onb-stagger > *:nth-child(2) { animation-delay: 0.13s; }
@@ -1650,71 +1225,62 @@ textarea:focus-visible {
 .onb-stagger > *:nth-child(5) { animation-delay: 0.37s; }
 @keyframes onbRise { to { opacity: 1; transform: none; } }
 
-/* --- Floating aurora background blobs behind the flow --- */
 .onb-bg { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-.onb-blob { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.5; mix-blend-mode: screen; }
-.onb-blob1 { width: 46vw; height: 46vw; left: -8vw; top: -6vw; background: radial-gradient(circle, rgba(168,85,247,0.5), transparent 70%); animation: onbFloat1 18s ease-in-out infinite; }
-.onb-blob2 { width: 40vw; height: 40vw; right: -6vw; top: 8vh; background: radial-gradient(circle, rgba(45,212,191,0.28), transparent 70%); animation: onbFloat2 22s ease-in-out infinite; }
-.onb-blob3 { width: 42vw; height: 42vw; left: 30vw; bottom: -14vw; background: radial-gradient(circle, rgba(236,72,153,0.26), transparent 70%); animation: onbFloat3 26s ease-in-out infinite; }
+.onb-blob { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.35; mix-blend-mode: screen; }
+.onb-blob1 { width: 46vw; height: 46vw; left: -8vw; top: -6vw; background: radial-gradient(circle, rgba(200, 51, 31, 0.30), transparent 70%); animation: onbFloat1 18s ease-in-out infinite; }
+.onb-blob2 { width: 40vw; height: 40vw; right: -6vw; top: 8vh; background: radial-gradient(circle, rgba(240, 237, 228, 0.12), transparent 70%); animation: onbFloat2 22s ease-in-out infinite; }
+.onb-blob3 { width: 42vw; height: 42vw; left: 30vw; bottom: -14vw; background: radial-gradient(circle, rgba(200, 51, 31, 0.18), transparent 70%); animation: onbFloat3 26s ease-in-out infinite; }
 @keyframes onbFloat1 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(6vw,4vh) scale(1.12); } }
 @keyframes onbFloat2 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-5vw,6vh) scale(1.08); } }
-@keyframes onbFloat3 { 0%,100% { transform: translate(0,0) scale(1); } 50% { transform: translate(-4vw,-6vh) scale(1.15); } }
+@keyframes onbFloat3 { 0%,100% { transform: translate(0,0) scale(1.15); } 50% { transform: translate(-4vw,-6vh) scale(1); } }
 
-/* --- Welcome screen --- */
 .onb-floaty { animation: onbFloaty 5s ease-in-out infinite; }
 @keyframes onbFloaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-12px); } }
+/* Shimmer text retired with the gradient ban — plain paper-white type. */
 .onb-shimmer-text {
-  background: linear-gradient(110deg, #fff 10%, #d8b4fe 50%, #fff 90%);
-  background-size: 200% auto;
-  -webkit-background-clip: text; background-clip: text;
-  -webkit-text-fill-color: transparent; color: transparent;
-  animation: onbShimmer 4s linear infinite;
+  color: #F0EDE4;
 }
-@keyframes onbShimmer { to { background-position: 200% center; } }
 
-/* --- Loading screen: spinning rings + pulsing mark --- */
-.onb-ring { position: absolute; inset: -12px; border-radius: 50%; border: 2px solid transparent; border-top-color: #a855f7; border-right-color: #d8b4fe; animation: onbSpin 1.4s linear infinite; opacity: 0.85; }
-.onb-ring2 { position: absolute; inset: -22px; border-radius: 50%; border: 1px solid rgba(168,85,247,0.25); border-bottom-color: rgba(216,180,254,0.6); animation: onbSpin 2.6s linear infinite reverse; }
+.onb-ring { position: absolute; inset: -12px; border-radius: 50%; border: 2px solid transparent; border-top-color: #F0EDE4; border-right-color: rgba(240,237,228,0.4); animation: onbSpin 1.4s linear infinite; opacity: 0.85; }
+.onb-ring2 { position: absolute; inset: -22px; border-radius: 50%; border: 1px solid rgba(240,237,228,0.18); border-bottom-color: rgba(200,51,31,0.7); animation: onbSpin 2.6s linear infinite reverse; }
 @keyframes onbSpin { to { transform: rotate(360deg); } }
-.onb-pulse-mark { animation: onbPulseMark 2.2s ease-in-out infinite; filter: drop-shadow(0 0 24px rgba(168,85,247,0.8)); }
+.onb-pulse-mark { animation: onbPulseMark 2.2s ease-in-out infinite; }
 @keyframes onbPulseMark { 0%,100% { transform: scale(1); } 50% { transform: scale(1.07); } }
 
-/* --- Loading screen: poster mosaic of the user's picks --- */
-.onb-mtile { position: relative; overflow: hidden; border-radius: 8px; opacity: 0; transform: translateY(40px) scale(0.7) rotate(var(--rot, 0deg)); box-shadow: 0 8px 24px rgba(0,0,0,0.4); border: 1px solid var(--glow-border); }
+.onb-mtile { position: relative; overflow: hidden; opacity: 0; transform: translateY(40px) scale(0.7) rotate(var(--rot, 0deg)); box-shadow: 0 8px 24px rgba(0,0,0,0.4); border: 1px solid var(--glow-border); }
 .onb-mtile.onb-in { animation: onbTileIn 0.6s cubic-bezier(0.2,0.8,0.3,1.1) forwards; }
 @keyframes onbTileIn { to { opacity: 1; transform: translateY(0) scale(1) rotate(var(--rot, 0deg)); } }
 .onb-shine { position: absolute; inset: 0; background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,0.5) 50%, transparent 70%); transform: translateX(-120%); }
 .onb-mosaic-shimmer .onb-shine { animation: onbShine 1.1s ease forwards; }
 @keyframes onbShine { to { transform: translateX(120%); } }
 
-/* --- Age step slider (purple fill via --p, white thumb) --- */
-.onb-range { -webkit-appearance: none; appearance: none; height: 6px; border-radius: 5px; cursor: pointer; background: linear-gradient(90deg, #a855f7 0%, #a855f7 var(--p, 30%), rgba(255,255,255,0.12) var(--p, 30%)); }
-.onb-range::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 3px solid #a855f7; box-shadow: 0 0 0 5px rgba(168,85,247,0.18), 0 4px 14px rgba(0,0,0,0.5); cursor: pointer; }
-.onb-range::-moz-range-thumb { width: 26px; height: 26px; border-radius: 50%; background: #fff; border: 3px solid #a855f7; cursor: pointer; }
+.onb-range { -webkit-appearance: none; appearance: none; height: 6px; cursor: pointer; background: linear-gradient(90deg, #C8331F 0%, #C8331F var(--p, 30%), rgba(255,255,255,0.14) var(--p, 30%)); }
+.onb-range::-webkit-slider-thumb { -webkit-appearance: none; width: 24px; height: 24px; background: #F0EDE4; border: 3px solid #C8331F; cursor: pointer; }
+.onb-range::-moz-range-thumb { width: 24px; height: 24px; border-radius: 0; background: #F0EDE4; border: 3px solid #C8331F; cursor: pointer; }
 
 @media (prefers-reduced-motion: reduce) {
-  .neb-l, .onb-blob, .onb-floaty, .onb-ring, .onb-ring2, .onb-pulse-mark, .onb-shimmer-text, .onb-shine { animation: none !important; }
+  .neb-l, .onb-blob, .onb-floaty, .onb-ring, .onb-ring2, .onb-pulse-mark, .onb-shine { animation: none !important; }
   /* These start at opacity:0 and rely on a "forwards" animation to appear, so
      under reduced-motion we must reveal them directly instead of disabling the
      animation (which would leave them invisible). */
   .onb-stagger > *, .onb-mtile.onb-in { opacity: 1 !important; transform: none !important; animation: none !important; }
 }
 
-/* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
-   blocks above already guard most decorative motion (convo-search,
-   media-card, onboarding, recap), but these infinite animations had no
-   guard: .animate-pulse-glow, .status-dot.processing, .animate-chromatic
-   + .holo-text::before, .animate-float, .animate-shimmer,
-   .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
-   (skeletons + spinners become static — still visible, just not
-   animating). */
+/* Cinematic watch-party overlay — reduce-transparency / blur budget.
+   Overlay surfaces (VoicePill, MiniDock, the floating rail card) layer
+   backdrop-blur over PLAYING video; data-glow="subtle" remains the
+   user's lever to swap the blur for a flat fill until phase 7 replaces
+   these surfaces with darkroom plates. */
+html[data-glow="subtle"] .aurora-glass-overlay {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgba(18, 16, 13, 0.92) !important;
+}
+
+/* Global reduced-motion catch-all for the remaining infinite
+   animations (loading blobs, Tailwind's animate-pulse / animate-spin —
+   skeletons and spinners become static, still visible). */
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-glow,
-  .status-dot.processing,
-  .animate-chromatic,
-  .holo-text::before,
-  .animate-float,
-  .animate-shimmer,
   .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin {

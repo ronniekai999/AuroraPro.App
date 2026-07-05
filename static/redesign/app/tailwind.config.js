@@ -6,13 +6,14 @@ module.exports = {
     extend: {
       fontFamily: {
         // Map the `font-sans` utility (and Tailwind's preflight base
-        // font) to the active typeface system so EVERY element — not
-        // just `body` / `.font-display` — follows Settings → Appearance
-        // → Typeface. `--font-sans` is defined on :root in index.css and
-        // swapped via the data-font attribute. (.font-display stays a
-        // bespoke utility on `--font-display`; intentionally not mapped
-        // here so it doesn't collide with that class.)
+        // font) to the catalogue grotesk, and `font-mono` to the ledger
+        // hand — every number, timecode, stamp, and catalogue mark sets
+        // in mono (redesign hard rule 04). Both vars are defined on
+        // :root in index.css. (.font-display stays a bespoke utility on
+        // `--font-display`; intentionally not mapped here so it doesn't
+        // collide with that class.)
         sans: ['var(--font-sans)', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+        mono: ['var(--font-mono)', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
         border: "hsl(var(--border))",
@@ -60,14 +61,20 @@ module.exports = {
         },
       },
       borderRadius: {
-        xl: "calc(var(--radius) + 4px)",
+        // --radius is 0rem in the catalogue system (hard rule 01:
+        // nothing is rounded). Every step maps to the raw var — the old
+        // calc(±Npx) offsets would produce invalid negative radii at 0.
+        xl: "var(--radius)",
         lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
-        xs: "calc(var(--radius) - 6px)",
+        md: "var(--radius)",
+        sm: "var(--radius)",
+        xs: "var(--radius)",
       },
       boxShadow: {
         xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+        // The system's one shadow: hard offset on floating paper
+        // (menus, dialogs, toasts) — redesign hard rule 05.
+        hard: "4px 4px 0 rgba(22, 21, 17, 0.9)",
       },
       keyframes: {
         "accordion-down": {
