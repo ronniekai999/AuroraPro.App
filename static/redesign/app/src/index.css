@@ -305,39 +305,75 @@
    hard offset shadow — paper picked up off the desk, no blur, no glow.
    ==================================================================== */
 
-/* Sidebar nav link (retires with the phase-2 masthead). */
-.nav-link-item {
+/* ====================================================================
+   Masthead — the phase-2 shell. Brand + utilities over a numbered
+   index of tabs. (.nav-link-item retired with the sidebar.)
+   ==================================================================== */
+.mast-tab {
   position: relative;
-  padding: 10px 14px;
-  color: var(--ink-2);
-  font-size: 0.875rem;
-  font-weight: 500;
-  transition: color 0.15s ease, background 0.15s ease;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 7px;
+  padding: 10px 14px 9px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  border-right: 1px solid var(--rule-faint);
+  white-space: nowrap;
+  transition: color 0.15s ease, background 0.15s ease;
   cursor: pointer;
 }
-
-.nav-link-item:hover {
+.mast-tab:hover {
   color: var(--ink);
   background: rgba(22, 21, 17, 0.04);
 }
-
-.nav-link-item.active {
-  color: var(--ink);
-  font-weight: 700;
+.mast-tab .no {
+  color: var(--ink-3);
 }
-
-.nav-link-item.active::before {
+.mast-tab.on {
+  color: var(--ink);
+}
+/* Active marker: a signal-red bar riding the rule above the tab row. */
+.mast-tab.on::after {
   content: '';
   position: absolute;
   left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
+  right: 0;
+  top: -1px;
+  height: 3px;
   background: var(--signal);
+}
+
+.mast-util {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--rule);
+  background: var(--stock);
+  padding: 8px 11px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+  transition: background 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mast-util:hover,
+.mast-util.on {
+  background: var(--ink);
+  color: var(--paper);
+}
+/* The unread count inside an inverted (hovered/active) util must stay
+   legible — bone, not red-on-ink. */
+.mast-util:hover b,
+.mast-util.on b {
+  color: var(--paper);
 }
 
 /* Progress — a 3px rule with a signal-red fill. */
