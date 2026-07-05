@@ -346,12 +346,12 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </svg>
           </div>
           <h1 className="text-[var(--ink)] text-2xl font-extrabold tracking-[0.3em]">AURORA</h1>
-          <p className="cat-label !text-[var(--signal)] mt-2">Catalogue Edition · Personal Media Archive</p>
+          <p className="cat-label cat-label--red mt-2">Catalogue Edition · Personal Media Archive</p>
         </div>
 
         {/* Card — stamped archive form. */}
         <form onSubmit={handleSubmit} className="relative bg-[var(--stock)] border border-[var(--ink)] p-8">
-          <span className="absolute -top-2 left-4 bg-[var(--paper)] px-2 cat-label !text-[var(--signal)]">
+          <span className="formbox-label !left-4">
             {isRegister ? 'Registration' : 'Sign In'}
           </span>
           <h2 className="text-[var(--ink)] text-xl font-bold mb-1 uppercase tracking-tight">
@@ -432,7 +432,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="w-full mt-6 py-3.5 bg-[var(--ink)] hover:bg-[var(--signal)] text-[var(--paper)] font-mono text-xs font-semibold tracking-[0.14em] uppercase transition-colors disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            className="btn-cat w-full mt-6 !py-3.5 justify-center"
           >
             {submitting ? (
               <>
@@ -622,6 +622,9 @@ function Masthead({ user: mastUser, currentView, onNavigate, serverOpen, setServ
   // Numbered index. `id` stays the stable route/view discriminator;
   // the label is the Catalogue voice for the same tab (Home→Tonight,
   // Movies→Films, TV Shows→Series, My Library→Shelf, Admin→Console).
+  // KEEP IN SYNC with VIEW_BY_PATH (further down this file): a tab id
+  // missing there still *clicks* fine (handleNavigate routes by id)
+  // but refresh/bookmark on its path silently falls back to home.
   const navItems = [
     { id: 'home', no: '01', label: 'Tonight' },
     { id: 'movies', no: '02', label: 'Films' },
@@ -647,14 +650,19 @@ function Masthead({ user: mastUser, currentView, onNavigate, serverOpen, setServ
             <svg width="11" height="11" viewBox="0 0 12 12"><path d="M3 1.5L10.5 6L3 10.5Z" fill="#F0EDE4" /></svg>
           </span>
           <span className="text-[var(--ink)] font-extrabold text-base tracking-[0.28em]">AURORA</span>
-          <span className="cat-label !text-[var(--signal)] hidden lg:inline">Catalogue Edition</span>
+          <span className="cat-label cat-label--red hidden lg:inline">Catalogue Edition</span>
         </button>
         {searchArea}
         <div className="flex items-center gap-2 shrink-0">
+          {/* Visible at every breakpoint (icon-only below xl): this is
+              the ONLY entry point to the server-status panel, and
+              hiding it below sm made Machine Room unreachable on
+              phones (review finding). */}
           <button
-            className={`mast-util hidden sm:inline-flex ${serverOpen ? 'on' : ''}`}
+            className={`mast-util ${serverOpen ? 'on' : ''}`}
             onClick={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
             aria-pressed={serverOpen}
+            aria-label="Machine room — server status"
             title="Machine room — server status"
           >
             <Icon name="server" size={13} />
@@ -901,7 +909,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               disabled={recsRefreshing}
               title="Reshuffle — rebuild your curated shelves"
               aria-label="Reshuffle — rebuild your curated shelves"
-              className="inline-flex items-center gap-2 px-4 py-2.5 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="btn-cat btn-cat--outline !px-4 !py-2.5 !text-[10.5px]"
             >
               <Icon name="refresh" size={13} className={recsRefreshing ? 'animate-spin' : undefined} />
               {recsRefreshing ? 'Reshuffling…' : 'Reshuffle'}
@@ -912,7 +920,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               onClick={onSurprise}
               title="Dealer's choice — play a random recommended title"
               aria-label="Dealer's choice — play a random recommended title"
-              className="inline-flex items-center gap-2 px-4 py-2.5 border border-[var(--signal)] text-[var(--signal)] hover:bg-[var(--signal)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase whitespace-nowrap transition-colors"
+              className="btn-cat btn-cat--red !px-4 !py-2.5 !text-[10.5px]"
             >
               Dealer's choice
             </button>
@@ -940,7 +948,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           per-keystroke) to bound LLM cost. */}
       {onConversationalSearch && (
         <div className="relative mt-8 mb-8 max-w-2xl mx-auto">
-          <span className="absolute -top-2 left-3 bg-[var(--paper)] px-2 cat-label !text-[var(--signal)] z-10 pointer-events-none">Ask the archivist</span>
+          <span className="formbox-label z-10">Ask the archivist</span>
           <div className="convo-search flex items-center">
             <input
               value={convoText}
@@ -962,7 +970,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             <button
               onClick={() => onConversationalSearch(convoText)}
               aria-label="Search"
-              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 bg-[var(--ink)] hover:bg-[var(--signal)] px-2.5 py-1.5 font-mono text-[10px] font-semibold tracking-[0.1em] uppercase text-[var(--paper)] transition-colors"
+              className="btn-cat shrink-0 ml-1 mr-2 !gap-1.5 !px-2.5 !py-1.5 !text-[10px] !tracking-[0.1em]"
             >
               <kbd className="grid place-items-center h-4 min-w-[1rem] border border-[rgba(240,237,228,0.4)] text-[10px] leading-none">↵</kbd>
               <span className="hidden sm:inline">Search</span>
@@ -989,7 +997,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           {onRetry && (
             <button
               onClick={onRetry}
-              className="px-4 py-2 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.12em] uppercase transition-colors"
+              className="btn-cat btn-cat--outline !px-4 !py-2 !text-[10.5px]"
             >
               Retry
             </button>
@@ -1001,8 +1009,11 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           Loading your library…
         </div>
       )}
-      {effectiveRails.map((rail, i) => {
-        if (rail.items.length === 0) return null
+      {/* Filter empties BEFORE mapping so the stamped SHELF numbers
+          stay contiguous — a rail that drains at runtime ("Not
+          interested" on its last title) must not leave a gap in the
+          catalogue numbering (review finding). */}
+      {effectiveRails.filter(r => r.items.length > 0).map((rail, i) => {
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
           : undefined
@@ -1079,6 +1090,22 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
   )
 }
 
+/* ─────────────────── SHARED SHELF HEADER ───────────────────
+ * One grammar for the home's ledger/screening-room section heads:
+ * red eyebrow + title over a hard rule, optional trailing aside.
+ * (The rails' own headers are .rail-header in CSS — this is the
+ * inline-band variant; extracted in the phases 2+3 review so the two
+ * bands can't drift.) */
+function ShelfHead({ eyebrow, title, aside }: { eyebrow: string; title: string; aside?: React.ReactNode }) {
+  return (
+    <div className="flex items-baseline gap-3 mt-10 mb-3 pb-2 border-b border-[var(--rule)]">
+      <span className="cat-label cat-label--red">{eyebrow}</span>
+      <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">{title}</h3>
+      {aside}
+    </div>
+  )
+}
+
 /* ─────────────────── YOUR WEEK STAT BAND (Home redesign E) ───────────────────
  * 2026-06-05 — A slim glass band below the last rail. Real data from
  * getGamificationStats: Level, per-level XP bar (SAME math as
@@ -1115,11 +1142,11 @@ function YourWeekBand() {
 
   return (
     <>
-      <div className="flex items-baseline gap-3 mt-10 mb-3 pb-2 border-b border-[var(--rule)]">
-        <span className="cat-label !text-[var(--signal)]">Ledger</span>
-        <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">The week in review</h3>
-        <span className="ml-auto cat-label hidden sm:inline">Mon–Sun</span>
-      </div>
+      <ShelfHead
+        eyebrow="Ledger"
+        title="The week in review"
+        aside={<span className="ml-auto cat-label hidden sm:inline">Mon–Sun</span>}
+      />
       <div className="border border-[var(--ink)] bg-[var(--stock)] flex flex-col lg:flex-row items-stretch">
         {/* Lead: standing + XP rule (real) */}
         <div className="px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[220px] border-b lg:border-b-0 lg:border-r border-[var(--rule-faint)]">
@@ -1209,13 +1236,11 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
 
   return (
     <>
-      <div className="flex items-baseline gap-3 mt-9 mb-3 pb-2 border-b border-[var(--rule)]">
-        <span className="cat-label !text-[var(--signal)]">Together</span>
-        <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">The screening room</h3>
-        {joinable.length > 0 && (
-          <span className="stamp stamp--red-solid">{joinable.length} live</span>
-        )}
-      </div>
+      <ShelfHead
+        eyebrow="Together"
+        title="The screening room"
+        aside={joinable.length > 0 ? <span className="stamp stamp--red-solid">{joinable.length} live</span> : undefined}
+      />
       <div className="border border-[var(--ink)] bg-[var(--stock)] px-6 py-5">
         {joinable.length > 0 ? (
           <div className="flex flex-col gap-2.5">
@@ -1245,7 +1270,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                 <button
                   onClick={() => handleJoin(p.code)}
                   disabled={!onJoinParty || joining !== null}
-                  className="px-4 py-2.5 bg-[var(--ink)] hover:bg-[var(--signal)] disabled:opacity-50 disabled:cursor-default text-[var(--paper)] font-mono text-[10.5px] font-semibold tracking-[0.13em] uppercase transition-colors flex-none"
+                  className="btn-cat !px-4 !py-2.5 !text-[10.5px] flex-none"
                 >
                   {joining === p.code ? 'Joining…' : 'Join room'}
                 </button>
@@ -1272,7 +1297,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
               {onStartParty && (
                 <button
                   onClick={onStartParty}
-                  className="flex items-center gap-2 px-5 py-3 bg-[var(--ink)] hover:bg-[var(--signal)] text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors"
+                  className="btn-cat"
                 >
                   Open a room
                 </button>
@@ -1337,14 +1362,15 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
     ]
     : []
-  // Anchored top-right, directly under the masthead's Status control
-  // (the trigger moved from the sidebar footer to the masthead in the
-  // Catalogue shell). z-[45] sits above the sticky masthead stack (40)
-  // and below ContextMenu (100) / modals (60s).
+  // Mounted inside the sticky masthead stack and anchored
+  // `absolute top-full`, so it hangs off the stack's real bottom edge
+  // — a fixed pixel offset overlapped the tab row whenever the admin
+  // scan bar added height (review finding). z-[45] sits above the
+  // stack's own chrome and below ContextMenu (100) / modals (60s).
   return (
-    <div className="fixed top-[104px] left-2 right-2 md:left-auto md:right-4 md:w-[480px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard p-5 z-[45] animate-fade-in overflow-y-auto">
+    <div className="absolute top-full mt-2 left-2 right-2 md:left-auto md:right-4 md:w-[480px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard p-5 z-[45] animate-fade-in overflow-y-auto">
       <div className="flex items-center justify-between mb-4">
-        <span className="cat-label !text-[var(--signal)]">Machine Room</span>
+        <span className="cat-label cat-label--red">Machine Room</span>
         <button
           onClick={onClose}
           className="text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors"
@@ -1446,16 +1472,16 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
   if (!open) return null
-  // Anchored top-right under the masthead's Bulletin control (the
-  // trigger moved from the sidebar footer to the masthead in the
-  // Catalogue shell). Bounded max-height keeps the panel reachable on
-  // short viewports (content scrolls inside).
+  // Mounted inside the sticky masthead stack, anchored `absolute
+  // top-full` (same rationale as ServerPanel — tracks the stack's
+  // real bottom edge). Bounded max-height keeps the panel reachable
+  // on short viewports (content scrolls inside).
   //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="fixed top-[104px] left-2 right-2 md:left-auto md:right-4 md:w-[380px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard z-[45] animate-fade-in overflow-y-auto">
+    <div className="absolute top-full mt-2 left-2 right-2 md:left-auto md:right-4 md:w-[380px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard z-[45] animate-fade-in overflow-y-auto">
       <div className="p-4 border-b border-[var(--rule)] flex items-center justify-between">
-        <span className="cat-label !text-[var(--signal)]">The Bulletin</span>
+        <span className="cat-label cat-label--red">The Bulletin</span>
         <button onClick={onClose} className="text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors" aria-label="Close notifications">
           <Icon name="x" size={16} />
         </button>
@@ -1551,6 +1577,8 @@ function BrowseLoadingState({ title }: { title: string }) {
 // than this static map: opening a card pushes /title/<id>, so refresh,
 // browser Back, bookmarks, and shared links all land on the same title.
 // A cold load hydrates selectedMedia from GET /api/media/:id.
+// KEEP IN SYNC with Masthead's navItems (top of file): every tab id
+// needs an entry here or deep links to it fall back to home.
 const VIEW_BY_PATH: Record<string, string> = {
   '': 'home',
   '/': 'home',
@@ -1862,7 +1890,9 @@ export default function App() {
     return () => { cancelled = true }
   }, [addToListMedia, activeProfileId])
   const [searchQuery, setSearchQuery] = useState('')
-  const [searchOpen, setSearchOpen] = useState(false)
+  // (searchOpen state removed in the phases 2+3 review: it was
+  // write-only — nothing rendered from it — and its stale-true flag
+  // silently ate the first Escape keypress after using the search.)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
@@ -2299,7 +2329,6 @@ export default function App() {
     }
     setView(v)
     setSelectedMedia(null)
-    setSearchOpen(false)
     // Clear the search input on navigate. It's a controlled input on
     // `searchQuery`, so this prevents the text from sticking after
     // leaving the search view.
@@ -2545,7 +2574,6 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if (playerTarget && !playerMinimizedRef.current) setPlayerTarget(null)
-        else if (searchOpen) setSearchOpen(false)
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -2573,7 +2601,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
+  }, [playerTarget, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
 
   // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
   // so a cached user is our auth signal: optimistically render with it while
@@ -4339,28 +4367,11 @@ export default function App() {
       {/* The masthead (ex-sidebar) renders inside the sticky stack in
           <main> below, so the scan bar + masthead pin together. The
           old mobile drawer/hamburger died with the sidebar: the tab
-          row scrolls horizontally on narrow viewports instead. */}
-      <ServerPanel
-        open={serverOpen}
-        isAdmin={user.role === 'admin'}
-        onClose={() => setServerOpen(false)}
-      />
-
-      <NotificationPanel
-        open={notifOpen}
-        isAdmin={user.role === 'admin'}
-        onClose={() => setNotifOpen(false)}
-        notifications={notifications}
-        onMarkAllRead={() => {
-          if (unreadCount === 0) return
-          setUnreadCount(0)
-          const now = new Date().toISOString()
-          setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
-          markAllNotificationsRead().catch(() => {
-            /* non-fatal — local state is already cleared */
-          })
-        }}
-      />
+          row scrolls horizontally on narrow viewports instead.
+          The Status/Bulletin panels mount INSIDE that sticky stack
+          (anchored absolute top-full) so they track the stack's real
+          bottom edge — a fixed offset overlapped the tab row whenever
+          the admin scan bar added height (review finding). */}
 
       {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}
       <SearchPalette
@@ -4378,8 +4389,9 @@ export default function App() {
       <main className="min-h-screen">
         {/* Sticky stack: scan bar + masthead in one sticky container
             so the scan bar contributes its height to flow and both
-            pin together on scroll. */}
-        <div className="sticky top-0 z-40">
+            pin together on scroll. `relative` makes it the containing
+            block for the Status/Bulletin panels below. */}
+        <div className="relative sticky top-0 z-40">
           {/* Global scan progress bar (admin-only). Returns null when
               no scan is active. */}
           <ScanProgressBar isAdmin={user.role === 'admin'} />
@@ -4414,7 +4426,6 @@ export default function App() {
                       setView('home')
                     }
                   }}
-                  onFocus={() => setSearchOpen(true)}
                 />
                 <span className="absolute right-2.5 top-1/2 -translate-y-1/2 cat-label !text-[9.5px] border border-[var(--rule-faint)] bg-[var(--paper)] px-1.5 py-0.5 pointer-events-none" aria-hidden="true">⌘K</span>
               </div>
@@ -4458,6 +4469,29 @@ export default function App() {
                 />
               </>
             }
+          />
+          {/* Status/Bulletin panels — anchored `absolute top-full` so
+              they hang off the stack's REAL bottom edge (masthead +
+              any active scan bars), never overlapping the tab row. */}
+          <ServerPanel
+            open={serverOpen}
+            isAdmin={user.role === 'admin'}
+            onClose={() => setServerOpen(false)}
+          />
+          <NotificationPanel
+            open={notifOpen}
+            isAdmin={user.role === 'admin'}
+            onClose={() => setNotifOpen(false)}
+            notifications={notifications}
+            onMarkAllRead={() => {
+              if (unreadCount === 0) return
+              setUnreadCount(0)
+              const now = new Date().toISOString()
+              setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
+              markAllNotificationsRead().catch(() => {
+                /* non-fatal — local state is already cleared */
+              })
+            }}
           />
         </div>{/* /sticky stack */}
 

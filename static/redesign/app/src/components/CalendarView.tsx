@@ -155,7 +155,7 @@ export default function CalendarView({ onOpenMedia }: Props) {
               {viewMode === 'list' ? 'Upcoming' : 'Month View'}
             </span>
           </div>
-          <h1 className="text-white text-4xl font-bold font-display">Calendar</h1>
+          <h1 className="text-[var(--ink)] uppercase tracking-tight text-4xl font-extrabold font-display">Calendar</h1>
           {episodes && (() => {
             // QA BUG-004 — make the window explicit + leading in both
             // views, in matching shape, so the count delta between

@@ -221,6 +221,11 @@ export function MediaCardCinema({
       <div className="poster-wrap">
         {artSrc ? (
           <img
+            // Keyed by src (like the hero plate): onError below sets an
+            // imperative inline style, and without the key React reuses
+            // the DOM node when artSrc changes — a later VALID poster
+            // would load into a still-hidden element (review finding).
+            key={artSrc}
             src={artSrc}
             alt={item.title}
             className="poster-img"

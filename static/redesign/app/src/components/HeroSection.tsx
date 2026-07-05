@@ -32,9 +32,9 @@ function matchStampLabel(score: number, personal: boolean): string {
   return 'Fair match'
 }
 
-// Solid / outline catalogue buttons, local to the hero.
-const BTN_SOLID = 'flex items-center gap-2 px-5 py-3 bg-[var(--ink)] hover:bg-[var(--signal)] text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors'
-const BTN_OUTLINE = 'flex items-center gap-2 px-5 py-3 border border-[var(--ink)] text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] font-mono text-[11px] font-semibold tracking-[0.13em] uppercase transition-colors'
+// Catalogue button classes (defined in index.css — the shared recipe).
+const BTN_SOLID = 'btn-cat'
+const BTN_OUTLINE = 'btn-cat btn-cat--outline'
 
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
@@ -141,10 +141,15 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
 
       {/* Record details. */}
       <div className="relative flex flex-col gap-4 p-6 md:p-8 min-w-0">
-        {/* Stamped verdict — replaces the percent ring; the number
-            stays in the tooltip and accessible name. */}
+        {/* Stamped verdict — replaces the percent ring. The rotated
+            plate renders at sm+ (hoverable: the title tooltip carries
+            the exact number — no pointer-events-none, which killed it);
+            below sm an unrotated inline stamp joins the chip row so
+            the verdict never vanishes from the visual or a11y tree.
+            display:none removes the hidden twin from the a11y tree, so
+            exactly one is ever announced. */}
         <div
-          className="absolute top-5 right-5 rotate-6 border-2 border-[var(--signal)] text-[var(--signal)] font-mono text-[10px] font-semibold tracking-[0.18em] uppercase px-2.5 py-1.5 pointer-events-none select-none hidden sm:block"
+          className="absolute top-5 right-5 rotate-6 border-2 border-[var(--signal)] text-[var(--signal)] font-mono text-[10px] font-semibold tracking-[0.18em] uppercase px-2.5 py-1.5 select-none hidden sm:block cursor-help"
           role="img"
           title={`${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
           aria-label={`${stampLabel} — ${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
@@ -152,9 +157,20 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           {stampLabel}
         </div>
 
-        <div className="flex items-center gap-3 flex-wrap pr-28">
-          <span className={`stamp ${isCatalogFallback ? '' : 'stamp--red'}`}>
+        <div className="flex items-center gap-3 flex-wrap sm:pr-28">
+          {/* Red emphasis is reserved for the personalized pick (a
+              reason exists) — Featured/Recently added stay muted so
+              the one accent color keeps meaning (review finding). */}
+          <span className={`stamp ${reason ? 'stamp--red' : ''}`}>
             {reason ? "Tonight's pick" : isCatalogFallback ? 'Recently added' : 'Featured'}
+          </span>
+          <span
+            className="stamp stamp--red sm:hidden"
+            role="img"
+            title={`${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
+            aria-label={`${stampLabel} — ${matchScore} ${showingPersonal ? 'percent match' : 'Aurora score'}`}
+          >
+            {stampLabel}
           </span>
           <span className="text-[var(--ink-2)] font-mono text-[11px] tracking-[0.08em] uppercase">
             {hero.genre}{hero.genre && hero.year ? ' · ' : ''}{hero.year || ''}
@@ -170,7 +186,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             the watch-history threshold instead. */}
         {reason ? (
           <div className="border border-[var(--rule-faint)] bg-[var(--paper)] px-4 py-3 max-w-xl">
-            <span className="cat-label !text-[var(--signal)] block mb-1">Curator's note</span>
+            <span className="cat-label cat-label--red block mb-1">Curator's note</span>
             <p className="text-[var(--ink)] text-[13px] leading-relaxed">{reason}</p>
           </div>
         ) : personalization?.coldStart ? (
@@ -201,7 +217,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 }
                 resume.onPlay(resume.item)
               }}
-              className={`relative overflow-hidden ${BTN_SOLID} pb-4`}
+              className={`relative overflow-hidden ${BTN_SOLID} !pb-4`}
               title={`Resume from your last position (${formatResumeTime(resume.item.position_ms)})`}
               aria-label={formatResumeAriaLabel(resume.item)}
             >

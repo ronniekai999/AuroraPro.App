@@ -47,7 +47,7 @@ export function MiniDock({ onSendChat, onSendReaction, voice, onToggleVoiceMute 
     <div
       className="aurora-glass-overlay fixed left-1/2 -translate-x-1/2 bottom-4 z-[67]
                  inline-flex items-center gap-2 pl-2.5 pr-2.5 py-1.5 rounded-full
-                 bg-[rgba(8,6,14,0.5)] backdrop-blur-lg border border-[rgba(220,200,255,0.18)]
+                 bg-[rgba(8,6,14,0.9)] backdrop-blur-lg border border-[rgba(220,200,255,0.18)]
                  shadow-[0_8px_30px_rgba(0,0,0,0.45)]"
     >
       {/* Emoji — reuse the shared 9-emoji picker. Opens upward so the

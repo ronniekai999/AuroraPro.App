@@ -173,14 +173,13 @@ export function PartyPanel({
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // Rail (default) face — the full panel, restyled as floating glass.
-  // 2026-05-30 — was a near-opaque slab bolted to the right edge
-  // (`bg-[#0a0a0f]/95` + `border-l`, flush to top/right/bottom). Now a
-  // translucent glass card lifted off the edges (inset margins +
-  // rounded) so the movie glows through and around it. On phones it
-  // still spans (nearly) full width but keeps the float inset + radius.
+  // Rail (default) face — the full panel, a floating dark plate.
+  // Plate opacity 0.4→0.92 (phases 2+3 review finding): over the paper
+  // app ground the old 40%-alpha blur composited to a light gray that
+  // washed the white text out to ~2.5:1. Near-opaque still reads as an
+  // overlay above playing video; phase 7 restyles this surface fully.
   return (
-    <aside className="aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
+    <aside className="aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(14,12,10,0.92)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
       {/* Header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
         <div className="min-w-0">
