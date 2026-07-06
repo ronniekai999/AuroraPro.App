@@ -57,7 +57,7 @@ export function VoicePill({
           type="button"
           onClick={onJoinVoice}
           className="aurora-glass-overlay inline-flex items-center gap-2 pl-2.5 pr-3.5 py-2 rounded-full
-                     bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.18)]
+                     bg-[rgba(8,6,14,0.9)] backdrop-blur-md border border-[rgba(220,200,255,0.18)]
                      text-white/80 hover:text-white hover:border-[rgba(220,200,255,0.32)]
                      transition-colors"
           title="Join voice chat"
@@ -93,7 +93,7 @@ export function VoicePill({
       data-screenshot-exclude="true"
       className={[
         'aurora-glass-overlay fixed top-4 right-4 z-[67] inline-flex items-center gap-2 pl-2.5 pr-3 py-2 rounded-full',
-        'bg-[rgba(8,6,14,0.5)] backdrop-blur-md border transition-shadow',
+        'bg-[rgba(8,6,14,0.9)] backdrop-blur-md border transition-shadow',
         live
           ? 'border-emerald-400/40 shadow-[0_0_16px_rgba(52,211,153,0.25)]'
           : 'border-[rgba(220,200,255,0.18)]',

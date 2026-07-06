@@ -305,39 +305,69 @@
    hard offset shadow — paper picked up off the desk, no blur, no glow.
    ==================================================================== */
 
-/* Sidebar nav link (retires with the phase-2 masthead). */
-.nav-link-item {
+/* ====================================================================
+   Masthead — the phase-2 shell. Brand + utilities over a numbered
+   index of tabs. (.nav-link-item retired with the sidebar.)
+   ==================================================================== */
+.mast-tab {
   position: relative;
-  padding: 10px 14px;
-  color: var(--ink-2);
-  font-size: 0.875rem;
-  font-weight: 500;
-  transition: color 0.15s ease, background 0.15s ease;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 7px;
+  padding: 10px 14px 9px;
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  color: var(--ink-2);
+  border-right: 1px solid var(--rule-faint);
+  white-space: nowrap;
+  transition: color 0.15s ease, background 0.15s ease;
   cursor: pointer;
 }
-
-.nav-link-item:hover {
+.mast-tab:hover {
   color: var(--ink);
   background: rgba(22, 21, 17, 0.04);
 }
-
-.nav-link-item.active {
-  color: var(--ink);
-  font-weight: 700;
+.mast-tab .no {
+  color: var(--ink-3);
 }
-
-.nav-link-item.active::before {
+.mast-tab.on {
+  color: var(--ink);
+}
+/* Active marker: a signal-red bar riding the rule above the tab row. */
+.mast-tab.on::after {
   content: '';
   position: absolute;
   left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
+  right: 0;
+  top: -1px;
+  height: 3px;
   background: var(--signal);
+}
+
+.mast-util {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--rule);
+  background: var(--stock);
+  padding: 8px 11px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink);
+  transition: background 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mast-util:hover,
+.mast-util.on {
+  background: var(--ink);
+  color: var(--paper);
+}
+/* The unread count inside an inverted (hovered/active) util must stay
+   legible — bone, not red-on-ink. */
+.mast-util:hover b,
+.mast-util.on b {
+  color: var(--paper);
 }
 
 /* Progress — a 3px rule with a signal-red fill. */
@@ -433,20 +463,8 @@
   padding-bottom: 7px;
   border-bottom: 1px solid var(--rule);
 }
-/* Per-rail icon chip — one ink treatment for every former tint. The
-   data-tint attribute still arrives from railIconFor(); it no longer
-   selects a color. */
-.rail-header .rail-icon {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--rule);
-  background: var(--stock);
-  color: var(--ink);
-}
+/* (The per-rail icon chip retired with MediaRail's railIconFor
+   resolver — shelves lead with a red "SHELF NN" catalogue number.) */
 .rail-header .rail-title {
   font-size: 1rem;
   font-weight: 700;
@@ -1091,8 +1109,9 @@ table.ledger tr:hover td {
 .cat-label,
 .stamp,
 .badge-glass,
-.formbox > .formbox-label,
 .genre-chip,
+.mast-tab,
+.mast-util,
 .media-list-head,
 .rail-header .rail-see-all,
 .media-card-cinema .card-badge,
@@ -1111,6 +1130,48 @@ table.ledger th {
   letter-spacing: 0.14em;
   color: var(--ink-2);
 }
+/* Red eyebrow variant (mirrors .stamp--red) — replaces the
+   `!text-[var(--signal)]` arbitrary-value utility that was repeated
+   per call site. */
+.cat-label--red {
+  color: var(--signal);
+}
+
+/* Catalogue buttons — THE button recipe (mono voice, hover-invert).
+   One source for the solid/outline/red forms that HeroSection and the
+   home/auth views were each re-typing inline (phases 2+3 review). Keep
+   sizing overrides as per-site utilities with `!` (these classes are
+   unlayered and beat plain utilities). */
+.btn-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.btn-cat:hover { background: var(--signal); border-color: var(--signal); }
+.btn-cat:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-cat--outline {
+  background: transparent;
+  color: var(--ink);
+}
+.btn-cat--outline:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.btn-cat--red {
+  background: transparent;
+  border-color: var(--signal);
+  color: var(--signal);
+}
+.btn-cat--red:hover { background: var(--signal); border-color: var(--signal); color: var(--paper); }
 
 /* Stamps — bordered mono state marks. */
 .stamp {
@@ -1129,21 +1190,29 @@ table.ledger th {
 .stamp--ghost { border-color: var(--ink-3); color: var(--ink-2); }
 
 /* Stamped fieldset — the archive form box with its label breaking the
-   top rule ("ASK THE ARCHIVIST", "THE SCREENING ROOM", …). */
+   top rule. .formbox-label is deliberately standalone (not
+   child-scoped) so any relative bordered box can wear the stamped
+   label — the auth card and the archivist search both do. */
 .formbox {
   position: relative;
   border: 1px solid var(--ink);
   padding: 18px 16px 16px;
 }
-.formbox > .formbox-label {
+.formbox-label {
   position: absolute;
   top: -8px;
   left: 12px;
+  z-index: 1;
   background: var(--paper);
   padding: 0 8px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
   font-size: 0.6rem;
   letter-spacing: 0.14em;
   color: var(--signal);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 /* table.ledger — alias of .data-table; both are styled by the single

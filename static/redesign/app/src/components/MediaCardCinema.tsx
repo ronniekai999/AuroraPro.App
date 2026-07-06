@@ -221,18 +221,28 @@ export function MediaCardCinema({
       <div className="poster-wrap">
         {artSrc ? (
           <img
+            // Keyed by src (like the hero plate): onError below sets an
+            // imperative inline style, and without the key React reuses
+            // the DOM node when artSrc changes — a later VALID poster
+            // would load into a still-hidden element (review finding).
+            key={artSrc}
             src={artSrc}
             alt={item.title}
             className="poster-img"
             loading="lazy"
             style={landscapeStyle}
+            // A not-yet-mirrored TMDB path 404s: hide the broken-image
+            // glyph and let the card's stock ground show through (the
+            // ruled caption still identifies the title) — same pattern
+            // as the hero artwork plate.
+            onError={(e) => { e.currentTarget.style.visibility = 'hidden' }}
           />
         ) : (
           // Placeholder for items with no poster (search hits mid-
           // enrichment, library entries pre-metadata-sync). Same
           // aspect so grid alignment doesn't shift when a real poster
-          // lands.
-          <div className="poster-img bg-white/[0.03] flex items-center justify-center" style={landscapeStyle}>
+          // lands. Ink-tint ground (was white/3%, invisible on stock).
+          <div className="poster-img bg-[rgba(22,21,17,0.06)] flex items-center justify-center" style={landscapeStyle}>
             <MovieSvg />
           </div>
         )}
