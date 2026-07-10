@@ -151,7 +151,7 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     return (
       <div className="animate-fade-in">
         <div className="mb-6">
-          <h1 className="text-[var(--ink)] uppercase tracking-tight text-3xl font-extrabold font-display">Requests</h1>
+          <h1 className="text-white text-3xl font-bold font-display">Requests</h1>
           <p className="text-white/40 text-sm mt-2">Loading requests…</p>
         </div>
       </div>

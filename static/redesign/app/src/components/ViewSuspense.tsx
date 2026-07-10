@@ -15,17 +15,17 @@ import { Suspense, type ReactNode } from 'react'
 export function ViewFallback() {
   return (
     <div className="animate-fade-in flex min-h-[60vh] flex-col items-center justify-center gap-4">
-      {/* Aurora mark — ink plate + the same pulse cadence as
+      {/* Aurora mark — purple accent + the same pulse cadence as
           BrowseLoadingState's skeleton cards. aria-hidden because the
           "Loading…" label below is the accessible name; the mark is
           decorative, same rationale as <Icon>. */}
       <div
-        className="flex h-12 w-12 items-center justify-center border border-[var(--ink)] bg-[var(--stock)] animate-pulse"
+        className="flex h-12 w-12 items-center justify-center rounded-2xl border border-purple-500/20 bg-purple-500/10 animate-pulse"
         aria-hidden="true"
       >
-        <span className="font-display text-xl font-bold text-[var(--ink)]">A</span>
+        <span className="font-display text-xl font-bold text-purple-200">A</span>
       </div>
-      <p className="text-sm text-[var(--ink-2)]">Loading…</p>
+      <p className="text-sm text-white/60">Loading…</p>
     </div>
   )
 }

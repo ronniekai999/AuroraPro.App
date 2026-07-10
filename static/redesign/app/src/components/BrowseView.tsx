@@ -208,12 +208,12 @@ export default function BrowseView({
   const countLabel = total != null && total > items.length ? (
     <>
       Showing {items.length.toLocaleString()} of{' '}
-      <span className="text-[var(--ink)] font-semibold">{total.toLocaleString()}</span>
+      <span className="text-white/90 font-medium">{total.toLocaleString()}</span>
       {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{total === 1 ? '' : 's'}
     </>
   ) : (
     <>
-      <span className="text-[var(--ink)] font-semibold">{(total ?? items.length).toLocaleString()}</span>
+      <span className="text-white/90 font-medium">{(total ?? items.length).toLocaleString()}</span>
       {genreFilter && genreFilter !== 'All Genres' ? ` ${genreFilter}` : ''} title{(total ?? items.length) === 1 ? '' : 's'}
     </>
   )
@@ -252,14 +252,14 @@ export default function BrowseView({
 
       {/* Page title + count */}
       <div className="relative mb-5">
-        <div className="inline-flex items-center gap-2 mb-3 stamp stamp--red">
-          <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={11} />
-          <span>{pillLabel}</span>
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
+          <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-purple-300" />
+          <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
         </div>
-        <h1 className="text-[var(--ink)] uppercase tracking-tight text-4xl font-extrabold font-display">{title}</h1>
-        <p className="text-[var(--ink-2)] text-sm mt-2">
+        <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
+        <p className="text-white/60 text-sm mt-2">
           {subtitle}
-          <span className="text-[var(--ink-3)] mx-1.5">•</span>
+          <span className="text-white/30 mx-1.5">•</span>
           {countLabel}
         </p>
       </div>

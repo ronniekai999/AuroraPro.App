@@ -336,28 +336,33 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   }, [isRegister, username, email, password, inviteCode, inviteRequired, onLogin])
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--paper)] p-4">
+    <div className="min-h-screen flex items-center justify-center aurora-bg p-4">
       <div className="w-full max-w-[420px]">
-        {/* Wordmark — ink plate + play triangle, the Catalogue mark. */}
+        {/* Logo */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-[var(--ink)] mb-4">
-            <svg width="18" height="18" viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M3 1.5L10.5 6L3 10.5Z" fill="#F0EDE4" />
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
+            <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
+              <defs>
+                <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stopColor="#A855F7" />
+                  <stop offset="0.5" stopColor="#7C3AED" />
+                  <stop offset="1" stopColor="#22D3EE" />
+                </linearGradient>
+              </defs>
+              <circle cx="18" cy="18" r="16" fill="url(#auroraMarkA)" />
+              <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
-          <h1 className="text-[var(--ink)] text-2xl font-extrabold tracking-[0.3em]">AURORA</h1>
-          <p className="cat-label cat-label--red mt-2">Catalogue Edition · Personal Media Archive</p>
+          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
+          <p className="text-white/60 text-sm mt-1">Your personal media universe</p>
         </div>
 
-        {/* Card — stamped archive form. */}
-        <form onSubmit={handleSubmit} className="relative bg-[var(--stock)] border border-[var(--ink)] p-8">
-          <span className="formbox-label !left-4">
-            {isRegister ? 'Registration' : 'Sign In'}
-          </span>
-          <h2 className="text-[var(--ink)] text-xl font-bold mb-1 uppercase tracking-tight">
+        {/* Card */}
+        <form onSubmit={handleSubmit} className="glass-panel rounded-2xl p-8">
+          <h2 className="text-white text-xl font-semibold mb-1">
             {isRegister ? (setupStatus && !setupStatus.has_users ? 'Welcome to Aurora' : 'Create Account') : 'Welcome Back'}
           </h2>
-          <p className="text-[var(--ink-2)] text-sm mb-6">
+          <p className="text-white/60 text-sm mb-6">
             {isRegister
               ? (setupStatus && !setupStatus.has_users
                 ? "You're the first user on this server — your account becomes the admin."
@@ -367,7 +372,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
 
           <div className="space-y-4">
             <div>
-              <label htmlFor="login-username" className="cat-label block mb-2">Username</label>
+              <label htmlFor="login-username" className="block text-white/60 text-sm mb-2">Username</label>
               <input
                 id="login-username"
                 type="text"
@@ -381,7 +386,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </div>
             {isRegister && (
               <div>
-                <label htmlFor="login-email" className="cat-label block mb-2">Email</label>
+                <label htmlFor="login-email" className="block text-white/60 text-sm mb-2">Email</label>
                 <input
                   id="login-email"
                   type="email"
@@ -395,7 +400,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               </div>
             )}
             <div>
-              <label htmlFor="login-password" className="cat-label block mb-2">Password</label>
+              <label htmlFor="login-password" className="block text-white/60 text-sm mb-2">Password</label>
               <input
                 id="login-password"
                 type="password"
@@ -409,7 +414,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             </div>
             {isRegister && inviteRequired && (
               <div>
-                <label htmlFor="login-invite" className="cat-label block mb-2">Invite Code</label>
+                <label htmlFor="login-invite" className="block text-white/60 text-sm mb-2">Invite Code</label>
                 <input
                   id="login-invite"
                   type="text"
@@ -424,7 +429,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           </div>
 
           {error && (
-            <div role="alert" className="mt-4 px-4 py-3 border border-[var(--signal)] text-[var(--signal)] text-sm">
+            <div role="alert" className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">
               {error}
             </div>
           )}
@@ -432,7 +437,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           <button
             type="submit"
             disabled={submitting}
-            className="btn-cat w-full mt-6 !py-3.5 justify-center"
+            className="w-full mt-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-medium transition-all duration-200 hover:scale-[1.02] glow-purple disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center justify-center gap-2"
           >
             {submitting ? (
               <>
@@ -449,9 +454,9 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           {(setupStatus?.oauth_google_enabled || setupStatus?.oauth_discord_enabled || setupStatus?.oauth_twitch_enabled || setupStatus?.oauth_facebook_enabled || setupStatus?.oauth_twitter_enabled) && (
             <>
               <div className="flex items-center gap-3 my-6">
-                <div className="flex-1 h-px bg-[var(--rule-faint)]" />
-                <span className="cat-label">or</span>
-                <div className="flex-1 h-px bg-[var(--rule-faint)]" />
+                <div className="flex-1 h-px bg-white/[0.06]" />
+                <span className="text-white/30 text-xs uppercase tracking-wider">or</span>
+                <div className="flex-1 h-px bg-white/[0.06]" />
               </div>
               <div className="space-y-2">
                 {setupStatus?.oauth_google_enabled && (
@@ -502,7 +507,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
             <button
               type="button"
               onClick={() => { setIsRegister(!isRegister); setError(null) }}
-              className="font-mono text-xs tracking-[0.1em] uppercase text-[var(--signal)] hover:text-[var(--ink)] transition-colors"
+              className="text-purple-400 hover:text-purple-300 text-sm transition-colors"
             >
               {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Register"}
             </button>
@@ -537,7 +542,7 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
   // dimensions so the row reads as a uniform stack.
   const config = {
     google: {
-      bg: 'bg-white hover:bg-white/95 text-gray-800 border border-[#CCC7B6]',
+      bg: 'bg-white hover:bg-white/95 text-gray-800',
       icon: (
         <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
           <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" />
@@ -596,17 +601,11 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
   )
 }
 
-/* ─────────────────────── MASTHEAD ─────────────────────── */
-// Catalogue Edition shell — the left sidebar became a top masthead:
-// brand + utilities over a numbered index of tabs under a hard rule.
-// Admin still gets the Console tab (the server-side /api/admin/* gate
-// is the real enforcement; this is UX). Settings moved to the avatar
-// menu (UserMenu), where it already lived as well. On narrow
-// viewports the tab row scrolls horizontally — no drawer, no
-// hamburger. `searchArea`/`actionsArea` are render slots so the
-// search field and the party/profile controls keep their state
-// wiring inside App.
-function Masthead({ user: mastUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount, searchArea, actionsArea }: {
+/* ─────────────────────── SIDEBAR ─────────────────────── */
+// Sidebar conditionally renders the Admin link for admins. The
+// server-side /api/admin/* endpoints enforce the gate too — the
+// frontend check is for UX, not security.
+function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount, mobileOpen, onMobileClose }: {
   user?: ApiUser
   currentView: string
   onNavigate: (v: string) => void
@@ -615,101 +614,109 @@ function Masthead({ user: mastUser, currentView, onNavigate, serverOpen, setServ
   notifOpen: boolean
   setNotifOpen: (v: boolean) => void
   notifCount: number
-  searchArea?: React.ReactNode
-  actionsArea?: React.ReactNode
+  // QA BUG-012 — mobile drawer support. Below md (768px) the sidebar
+  // is hidden by default and slides in over content when mobileOpen
+  // is true. md+ ignores both props; the sidebar is always visible.
+  mobileOpen: boolean
+  onMobileClose: () => void
 }) {
-  const isAdmin = mastUser?.role === 'admin'
-  // Numbered index. `id` stays the stable route/view discriminator;
-  // the label is the Catalogue voice for the same tab (Home→Tonight,
-  // Movies→Films, TV Shows→Series, My Library→Shelf, Admin→Console).
-  // KEEP IN SYNC with VIEW_BY_PATH (further down this file): a tab id
-  // missing there still *clicks* fine (handleNavigate routes by id)
-  // but refresh/bookmark on its path silently falls back to home.
+  const isAdmin = sidebarUser?.role === 'admin'
   const navItems = [
-    { id: 'home', no: '01', label: 'Tonight' },
-    { id: 'movies', no: '02', label: 'Films' },
-    { id: 'shows', no: '03', label: 'Series' },
-    { id: 'collections', no: '04', label: 'Collections' },
-    { id: 'calendar', no: '05', label: 'Calendar' },
-    { id: 'library', no: '06', label: 'Shelf' },
-    { id: 'requests', no: '07', label: 'Requests' },
+    { id: 'home', label: 'Home', icon: 'home' },
+    { id: 'movies', label: 'Movies', icon: 'movie' },
+    { id: 'shows', label: 'TV Shows', icon: 'tv' },
+    { id: 'collections', label: 'Collections', icon: 'star' },
+    { id: 'calendar', label: 'Calendar', icon: 'clock' },
+    { id: 'library', label: 'My Library', icon: 'library' },
+    { id: 'requests', label: 'Requests', icon: 'download' },
+    ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'settings' }] : []),
   ]
 
   return (
-    <header className="bg-[var(--paper)] border-b border-[var(--rule)]">
-      <div className="flex items-center justify-between gap-3 md:gap-5 px-3 md:px-6 py-2.5">
-        {/* Brand — clicking the wordmark always returns home (kept
-            from the sidebar era; same convention everywhere). */}
-        <button
-          type="button"
-          onClick={() => onNavigate('home')}
-          className="flex items-center gap-2.5 shrink-0"
-          aria-label="Go to home"
-        >
-          <span className="w-7 h-7 bg-[var(--ink)] flex items-center justify-center" aria-hidden="true">
-            <svg width="11" height="11" viewBox="0 0 12 12"><path d="M3 1.5L10.5 6L3 10.5Z" fill="#F0EDE4" /></svg>
-          </span>
-          <span className="text-[var(--ink)] font-extrabold text-base tracking-[0.28em]">AURORA</span>
-          <span className="cat-label cat-label--red hidden lg:inline">Catalogue Edition</span>
-        </button>
-        {searchArea}
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Visible at every breakpoint (icon-only below xl): this is
-              the ONLY entry point to the server-status panel, and
-              hiding it below sm made Machine Room unreachable on
-              phones (review finding). */}
-          <button
-            className={`mast-util ${serverOpen ? 'on' : ''}`}
-            onClick={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
-            aria-pressed={serverOpen}
-            aria-label="Machine room — server status"
-            title="Machine room — server status"
-          >
-            <Icon name="server" size={13} />
-            <span className="hidden xl:inline">Status</span>
-          </button>
-          <button
-            className={`mast-util ${notifOpen ? 'on' : ''}`}
-            onClick={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
-            aria-pressed={notifOpen}
-            aria-label={notifCount > 0 ? `Bulletin — ${notifCount} unread` : 'Bulletin'}
-            title="The bulletin — notifications"
-          >
-            <Icon name="bell" size={13} />
-            <span className="hidden xl:inline">Bulletin</span>
-            {notifCount > 0 && <b className="text-[var(--signal)]">{notifCount}</b>}
-          </button>
-          {actionsArea}
-        </div>
-      </div>
-      <nav
-        className="flex items-stretch overflow-x-auto scrollbar-hide border-t border-[var(--rule)] px-3 md:px-6"
-        aria-label="Primary"
+    <aside className={`fixed left-0 top-0 bottom-0 w-[240px] bg-[#050505] border-r border-white/[0.06] z-50 flex flex-col transition-transform duration-200 md:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+      {/* Brand — Phase 8 fix: clicking the logo always returns to
+          home, matching every other media-app convention (Netflix,
+          Spotify, YouTube etc). `type="button"` prevents form
+          submission if the sidebar ever ends up inside a form. */}
+      <button
+        type="button"
+        onClick={() => { onNavigate('home'); onMobileClose() }}
+        className="p-5 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
+        aria-label="Go to home"
       >
+        <div className="w-9 h-9 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
+          <svg width="20" height="20" viewBox="0 0 36 36" fill="none">
+            <defs>
+              <linearGradient id="auroraMarkB" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#A855F7" />
+                <stop offset="0.5" stopColor="#7C3AED" />
+                <stop offset="1" stopColor="#22D3EE" />
+              </linearGradient>
+            </defs>
+            <circle cx="18" cy="18" r="16" fill="url(#auroraMarkB)" />
+            <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
+          </svg>
+        </div>
+        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA PRO</span>
+      </button>
+
+      {/* Nav */}
+      <nav className="flex-1 px-3 py-2 space-y-1">
         {navItems.map((item) => (
           <button
             key={item.id}
-            className={`mast-tab ${currentView === item.id ? 'on' : ''}`}
-            aria-current={currentView === item.id ? 'page' : undefined}
-            onClick={() => onNavigate(item.id)}
+            className={`nav-link-item w-full ${currentView === item.id ? 'active' : ''}`}
+            onClick={() => { onNavigate(item.id); onMobileClose() }}
           >
-            <span className="no">{item.no}</span>
+            <Icon name={item.icon} size={18} />
             {item.label}
           </button>
         ))}
-        <span className="flex-1" aria-hidden="true" />
-        {isAdmin && (
-          <button
-            className={`mast-tab border-l border-[var(--rule-faint)] ${currentView === 'admin' ? 'on' : ''}`}
-            aria-current={currentView === 'admin' ? 'page' : undefined}
-            onClick={() => onNavigate('admin')}
-          >
-            <span className="no">08</span>
-            Console
-          </button>
-        )}
       </nav>
-    </header>
+
+      {/* Bottom Actions */}
+      <div className="p-3 border-t border-white/[0.06]">
+        <button
+          className={`nav-link-item w-full ${serverOpen ? 'active' : ''}`}
+          onClick={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
+        >
+          <Icon name="server" size={18} />
+          Server Status
+        </button>
+        <button
+          className={`nav-link-item w-full ${notifOpen ? 'active' : ''}`}
+          onClick={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
+        >
+          <div className="relative">
+            <Icon name="bell" size={18} />
+            {notifCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-purple-600 rounded-full text-[10px] font-bold flex items-center justify-center">
+                {notifCount}
+              </span>
+            )}
+          </div>
+          Notifications
+        </button>
+        <button
+          className={`nav-link-item w-full ${currentView === 'settings' ? 'active' : ''}`}
+          onClick={() => { onNavigate('settings'); onMobileClose() }}
+        >
+          <Icon name="settings" size={18} />
+          Settings
+        </button>
+        <div className="mt-2 pt-2 border-t border-white/[0.04]">
+          <div className="flex items-center gap-3 px-3 py-2">
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold">
+              {sidebarUser?.username[0]?.toUpperCase() || 'U'}
+            </div>
+            <div className="min-w-0">
+              <p className="text-white/80 text-sm font-medium truncate">{sidebarUser?.username || 'User'}</p>
+              <p className="text-white/40 text-xs capitalize">{sidebarUser?.role || 'online'}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
   )
 }
 
@@ -877,18 +884,19 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
       <div className="flex items-end justify-between gap-5 mt-2 mb-5">
         <div className="min-w-0">
-          <h1 className="font-display text-3xl md:text-4xl font-extrabold uppercase tracking-tight leading-none text-[var(--ink)]">
-            Good {greetWord}, <span className="text-[var(--signal)]">{firstName}</span>.
+          <h1 className="font-display text-3xl font-bold tracking-tight leading-tight">
+            Good {greetWord},{' '}
+            <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
           </h1>
-          <div className="text-[var(--ink-2)] font-mono text-[11px] tracking-[0.08em] uppercase mt-2.5 flex items-center gap-2 flex-wrap">
+          <div className="text-white/60 text-sm mt-1.5 flex items-center gap-2 flex-wrap">
             <span>{weekday} {dayPart}</span>
             {nPicks > 0 && (
               <>
-                <span className="w-[3px] h-[3px] bg-[var(--ink-3)]" aria-hidden="true" />
+                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
                 <span>
-                  <b className="text-[var(--ink)]">{nPicks}</b> {nPicks === 1 ? 'title' : 'titles'} worth your time
+                  <b className="text-white font-semibold">{nPicks}</b> titles worth your time
                   {libraryTotal != null && libraryTotal > 0 && (
-                    <> · from <b className="text-[var(--ink)]">{libraryTotal.toLocaleString()}</b> on shelf</>
+                    <> out of the <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</>
                   )}
                 </span>
               </>
@@ -896,8 +904,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             {/* TODO(redesign-net-new): wire a real library-count if a lightweight endpoint exists. */}
             {nPicks === 0 && libraryTotal != null && libraryTotal > 0 && (
               <>
-                <span className="w-[3px] h-[3px] bg-[var(--ink-3)]" aria-hidden="true" />
-                <span>picked from <b className="text-[var(--ink)]">{libraryTotal.toLocaleString()}</b> titles on shelf</span>
+                <span className="w-[3px] h-[3px] rounded-full bg-white/40" />
+                <span>picked from <b className="text-white font-semibold">{libraryTotal.toLocaleString()}</b> titles in your library</span>
               </>
             )}
           </div>
@@ -907,22 +915,22 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             <button
               onClick={onRefreshRecs}
               disabled={recsRefreshing}
-              title="Reshuffle — rebuild your curated shelves"
-              aria-label="Reshuffle — rebuild your curated shelves"
-              className="btn-cat btn-cat--outline !px-4 !py-2.5 !text-[10.5px]"
+              title="Refresh picks — rebuild your AI-curated Discover rails"
+              aria-label="Refresh picks — rebuild your AI-curated Discover rails"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/5 hover:bg-white/10 border border-white/15 text-white/70 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Icon name="refresh" size={13} className={recsRefreshing ? 'animate-spin' : undefined} />
-              {recsRefreshing ? 'Reshuffling…' : 'Reshuffle'}
+              <Icon name="refresh" size={15} className={recsRefreshing ? 'animate-spin' : undefined} />
+              {recsRefreshing ? 'Refreshing…' : 'Refresh picks'}
             </button>
           )}
           {onSurprise && (
             <button
               onClick={onSurprise}
-              title="Dealer's choice — play a random recommended title"
-              aria-label="Dealer's choice — play a random recommended title"
-              className="btn-cat btn-cat--red !px-4 !py-2.5 !text-[10.5px]"
+              title="Surprise me — play a random recommended title"
+              aria-label="Surprise me — play a random recommended title"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full bg-purple-500/12 hover:bg-purple-500/20 border border-purple-500/30 text-purple-200 hover:text-white text-sm font-semibold whitespace-nowrap transition-colors"
             >
-              Dealer's choice
+              <Icon name="sparkle" size={15} /> Surprise me
             </button>
           )}
         </div>
@@ -947,32 +955,33 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           pick and the browsable rails. Fires the semantic search on Enter (not
           per-keystroke) to bound LLM cost. */}
       {onConversationalSearch && (
-        <div className="relative mt-8 mb-8 max-w-2xl mx-auto">
-          <span className="formbox-label z-10">Ask the archivist</span>
+        <div className="mt-7 mb-8 max-w-2xl mx-auto">
           <div className="convo-search flex items-center">
+            <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
               value={convoText}
               onChange={e => setConvoText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              placeholder="Describe the evening — “something cold and quiet, under two hours”"
-              aria-label="Describe the evening you're after"
-              className="flex-1 min-w-0 text-[var(--ink)] text-sm outline-none"
+              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
+              aria-label="Describe what you're in the mood for"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
             />
             {convoText && (
               <button
                 onClick={() => { setConvoText(''); onConversationalSearch('') }}
                 aria-label="Clear search"
-                className="shrink-0 px-2.5 py-1 font-mono text-[10px] font-semibold tracking-[0.1em] uppercase text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors"
+                className="shrink-0 px-2.5 py-1 rounded-full text-xs font-semibold text-white/55 hover:text-white hover:bg-white/10 transition-colors"
               >Clear</button>
             )}
-            {/* Solid Search chip pinned to the right edge. Clickable
-                (Enter still works too). */}
+            {/* Solid Search chip pinned to the right edge — a filled element
+                reads as anchored-right even through the bar's glow halo, where
+                faint floating text did not. Clickable (Enter still works too). */}
             <button
               onClick={() => onConversationalSearch(convoText)}
               aria-label="Search"
-              className="btn-cat shrink-0 ml-1 mr-2 !gap-1.5 !px-2.5 !py-1.5 !text-[10px] !tracking-[0.1em]"
+              className="shrink-0 ml-1 mr-2 flex items-center gap-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/30 border border-purple-400/25 hover:border-purple-400/45 px-2.5 py-1.5 text-[11px] font-semibold text-purple-100/90 hover:text-white transition-colors"
             >
-              <kbd className="grid place-items-center h-4 min-w-[1rem] border border-[rgba(240,237,228,0.4)] text-[10px] leading-none">↵</kbd>
+              <kbd className="grid place-items-center h-4 min-w-[1rem] rounded border border-white/15 bg-white/10 text-[10px] leading-none">↵</kbd>
               <span className="hidden sm:inline">Search</span>
             </button>
           </div>
@@ -980,24 +989,25 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
       )}
       {convoLoading && (
         <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
-          <div className="aurora-pulse-blob w-24 h-24 bg-[#C8331F]/20 -left-10 -top-2" style={{ animationDelay: '0s' }} />
-          <div className="aurora-pulse-blob w-32 h-32 bg-[#161511]/10 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
-          <div className="aurora-pulse-blob w-28 h-28 bg-[#C8331F]/10 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
-          <div className="relative z-10 flex items-center gap-2 text-[var(--ink-2)] font-mono text-[11px] font-semibold tracking-[0.12em] uppercase animate-pulse">
-            The archivist is thinking…
+          <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
+          <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
+          <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
+          <div className="relative z-10 flex items-center gap-2 text-purple-200 text-sm font-medium animate-pulse">
+            <Icon name="sparkle" size={14} />
+            Sensing the vibe...
           </div>
         </div>
       )}
       {error && (
-        <div className="mb-6 px-5 py-4 border border-[var(--signal)] text-sm flex items-center justify-between gap-4">
+        <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
           <div>
-            <p className="font-semibold text-[var(--signal)]">Couldn't load your library</p>
-            <p className="text-[var(--ink-2)] text-xs mt-1">{error}</p>
+            <p className="font-medium">Couldn't load your library</p>
+            <p className="text-red-300/70 text-xs mt-1">{error}</p>
           </div>
           {onRetry && (
             <button
               onClick={onRetry}
-              className="btn-cat btn-cat--outline !px-4 !py-2 !text-[10.5px]"
+              className="px-4 py-2 bg-white/10 hover:bg-white/15 rounded-lg text-white/90 text-sm transition-colors"
             >
               Retry
             </button>
@@ -1005,15 +1015,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         </div>
       )}
       {loading && !rails && (
-        <div className="mb-6 px-5 py-3 border border-[var(--rule-faint)] bg-[var(--stock)] text-[var(--ink-2)] text-sm">
+        <div className="mb-6 px-5 py-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-200 text-sm">
           Loading your library…
         </div>
       )}
-      {/* Filter empties BEFORE mapping so the stamped SHELF numbers
-          stay contiguous — a rail that drains at runtime ("Not
-          interested" on its last title) must not leave a gap in the
-          catalogue numbering (review finding). */}
-      {effectiveRails.filter(r => r.items.length > 0).map((rail, i) => {
+      {effectiveRails.map((rail, i) => {
+        if (rail.items.length === 0) return null
         const seeAllHandler = rail.seeAllTarget && onNavigate
           ? () => onNavigate(rail.seeAllTarget!.view, { sortBy: rail.seeAllTarget!.sortBy })
           : undefined
@@ -1059,7 +1066,6 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         return (
           <MediaRail
             key={`${rail.title}-${i}`}
-            index={i}
             title={rail.title}
             items={rail.items}
             onSelect={onSelect}
@@ -1086,22 +1092,6 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           <WatchTogetherCard onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
         </>
       )}
-    </div>
-  )
-}
-
-/* ─────────────────── SHARED SHELF HEADER ───────────────────
- * One grammar for the home's ledger/screening-room section heads:
- * red eyebrow + title over a hard rule, optional trailing aside.
- * (The rails' own headers are .rail-header in CSS — this is the
- * inline-band variant; extracted in the phases 2+3 review so the two
- * bands can't drift.) */
-function ShelfHead({ eyebrow, title, aside }: { eyebrow: string; title: string; aside?: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline gap-3 mt-10 mb-3 pb-2 border-b border-[var(--rule)]">
-      <span className="cat-label cat-label--red">{eyebrow}</span>
-      <h3 className="text-[15px] font-bold uppercase tracking-wide text-[var(--ink)]">{title}</h3>
-      {aside}
     </div>
   )
 }
@@ -1142,42 +1132,45 @@ function YourWeekBand() {
 
   return (
     <>
-      <ShelfHead
-        eyebrow="Ledger"
-        title="The week in review"
-        aside={<span className="ml-auto cat-label hidden sm:inline">Mon–Sun</span>}
-      />
-      <div className="border border-[var(--ink)] bg-[var(--stock)] flex flex-col lg:flex-row items-stretch">
-        {/* Lead: standing + XP rule (real) */}
-        <div className="px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[220px] border-b lg:border-b-0 lg:border-r border-[var(--rule-faint)]">
-          <span className="cat-label">Standing</span>
-          <span className="font-display text-[26px] font-extrabold leading-tight text-[var(--ink)] tabular-nums">Level {xp ? xp.level : '—'}</span>
-          <span className="h-1.5 bg-[rgba(22,21,17,0.14)] overflow-hidden mt-1">
-            <span className="block h-full bg-[var(--ink)] transition-all duration-700" style={{ width: `${pct}%` }} />
+      <div className="flex items-center gap-3 mt-9 mb-3.5">
+        <Icon name="barChart" size={17} className="text-purple-300" />
+        <h3 className="text-[16.5px] font-semibold">Your week</h3>
+        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
+      </div>
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-purple-500/[0.08] to-white/[0.02] flex flex-col lg:flex-row items-stretch">
+        <div className="absolute -top-16 -right-10 w-[280px] h-[280px] rounded-full bg-purple-500/[0.14] blur-[60px] pointer-events-none" aria-hidden="true" />
+        {/* Lead: level + XP bar (real) */}
+        <div className="relative px-6 py-5 flex flex-col justify-center gap-1.5 lg:min-w-[210px] border-b lg:border-b-0 lg:border-r border-white/[0.08]">
+          <span className="inline-flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold">
+            <Icon name="zap" size={13} /> Level {xp ? xp.level : '—'}
           </span>
-          <span className="text-[11px] text-[var(--ink-2)] font-mono tabular-nums mt-1">
+          <span className="font-display text-[26px] font-bold leading-tight">{xp ? `${xp.xp.toLocaleString()} XP` : '— XP'}</span>
+          <span className="h-1.5 rounded-md bg-white/[0.08] overflow-hidden mt-1">
+            <span className="block h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+          </span>
+          <span className="text-[11px] text-white/40 mt-1">
             {xp && xp.next_level_total ? `${(xp.xp_to_next_level || 0).toLocaleString()} XP to Level ${xp.level + 1}` : 'Keep watching to level up'}
           </span>
         </div>
         {/* Stats grid */}
-        <div className="flex-1 grid grid-cols-2 lg:grid-cols-4">
+        <div className="relative flex-1 grid grid-cols-2 lg:grid-cols-4">
           {/* Hrs + titles finished this week — real, from watch_progress.completed_at. */}
           <div className="px-5 py-5 flex flex-col gap-1.5">
-            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-[var(--ink-2)] font-medium">hrs</small></span>
-            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Watched this week</span>
+            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{wkHrs ?? '—'}<small className="text-sm text-white/60 font-medium font-sans">hrs</small></span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="clock" size={13} className="text-purple-300" /> Watched this week</span>
           </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
-            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums">{wkTitles != null ? wkTitles : '—'}</span>
-            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Titles finished</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[28px] font-bold leading-none">{wkTitles != null ? wkTitles : '—'}</span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="check" size={13} className="text-purple-300" /> Titles finished</span>
           </div>
           {/* Day streak — REAL from xp.current_streak / longest_streak */}
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
-            <span className="font-display text-[28px] font-extrabold leading-none text-[var(--ink)] tabular-nums flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-[var(--ink-2)] font-medium">days</small></span>
-            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[28px] font-bold leading-none flex items-baseline gap-1">{xp ? xp.current_streak : '—'}<small className="text-sm text-white/60 font-medium font-sans">days</small></span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="zap" size={13} className="text-orange-400" /> Day streak{xp ? ` · best ${xp.longest_streak}` : ''}</span>
           </div>
-          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-[var(--rule-faint)]">
-            <span className="font-display text-[21px] font-extrabold leading-none text-[var(--ink)]">{stats?.top_genre || '—'}</span>
-            <span className="cat-label !normal-case !tracking-normal !text-[11.5px]">Your top genre</span>
+          <div className="px-5 py-5 flex flex-col gap-1.5 border-l border-white/[0.08]">
+            <span className="font-display text-[21px] font-bold leading-none">{stats?.top_genre || '—'}</span>
+            <span className="text-[11.5px] text-white/60 flex items-center gap-1.5"><Icon name="heart" size={13} className="text-purple-300" /> Your top genre</span>
           </div>
         </div>
       </div>
@@ -1236,18 +1229,25 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
 
   return (
     <>
-      <ShelfHead
-        eyebrow="Together"
-        title="The screening room"
-        aside={joinable.length > 0 ? <span className="stamp stamp--red-solid">{joinable.length} live</span> : undefined}
-      />
-      <div className="border border-[var(--ink)] bg-[var(--stock)] px-6 py-5">
+      <div className="flex items-center gap-3 mt-9 mb-3.5">
+        <Icon name="users" size={17} className="text-purple-300" />
+        <h3 className="text-[16.5px] font-semibold">Watch together</h3>
+        {joinable.length > 0 && (
+          <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
+            {joinable.length} live now
+          </span>
+        )}
+        <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
+      </div>
+      <div className="relative overflow-hidden rounded-[18px] border border-white/[0.07] bg-gradient-to-br from-indigo-500/10 to-white/[0.02] px-6 py-5">
+        <div className="absolute -bottom-16 left-1/3 w-[300px] h-[240px] rounded-full bg-indigo-500/[0.16] blur-[64px] pointer-events-none" aria-hidden="true" />
+
         {joinable.length > 0 ? (
-          <div className="flex flex-col gap-2.5">
+          <div className="relative flex flex-col gap-2.5">
             {joinable.slice(0, 3).map((p) => (
               <div key={p.code} className="flex items-center gap-3.5 flex-wrap">
-                <div className="relative flex items-center justify-center w-[46px] h-[46px] border border-[var(--ink)] bg-[var(--paper)] flex-none overflow-hidden">
-                  <Icon name="users" size={18} className="text-[var(--ink-2)]" />
+                <div className="relative flex items-center justify-center w-[46px] h-[46px] rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex-none overflow-hidden">
+                  <Icon name="users" size={20} className="text-indigo-300" />
                   {p.media_poster ? (
                     <img
                       src={posterURL(p.media_poster, 'w154')}
@@ -1259,47 +1259,49 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                   ) : null}
                 </div>
                 <div className="flex-1 min-w-[180px]">
-                  <div className="text-[14.5px] font-bold text-[var(--ink)] truncate uppercase tracking-wide">{p.party_name?.trim() || 'Screening room'}</div>
-                  <div className="text-[12px] text-[var(--ink-2)] font-mono truncate">
+                  <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
+                  <div className="text-[12.5px] text-white/55 truncate">
                     {p.media_title
-                      ? <>{p.is_playing ? 'WATCHING' : 'PAUSED ON'} <span className="text-[var(--ink)]">{p.media_title}</span></>
-                      : 'IN THE LOBBY'}
-                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} VIEWERS
+                      ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
+                      : 'In the lobby'}
+                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
                   </div>
                 </div>
                 <button
                   onClick={() => handleJoin(p.code)}
                   disabled={!onJoinParty || joining !== null}
-                  className="btn-cat !px-4 !py-2.5 !text-[10.5px] flex-none"
+                  className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
                 >
-                  {joining === p.code ? 'Joining…' : 'Join room'}
+                  {joining === p.code ? 'Joining…' : 'Join'}
                 </button>
               </div>
             ))}
-            {joinError && <div className="text-[12px] text-[var(--signal)] mt-0.5">{joinError}</div>}
+            {joinError && <div className="text-[12px] text-rose-300/90 mt-0.5">{joinError}</div>}
             {onStartParty && (
-              <button onClick={onStartParty} className="self-start font-mono text-[10.5px] font-semibold tracking-[0.12em] uppercase text-[var(--ink-2)] hover:text-[var(--signal)] mt-1 transition-colors">
-                or open a new room →
+              <button onClick={onStartParty} className="self-start text-[12.5px] text-indigo-200/80 hover:text-white mt-1 transition-colors">
+                or start your own watch party →
               </button>
             )}
           </div>
         ) : (
-          <div className="flex items-center gap-5 flex-wrap">
-            <div className="flex items-center justify-center w-[54px] h-[54px] border border-[var(--ink)] bg-[var(--paper)] flex-none">
-              <Icon name="users" size={22} className="text-[var(--ink)]" />
+          <div className="relative flex items-center gap-5 flex-wrap">
+            <div className="relative flex items-center justify-center w-[60px] h-[60px] rounded-2xl bg-indigo-500/15 border border-indigo-400/30 flex-none">
+              <Icon name="users" size={26} className="text-indigo-300" />
             </div>
-            <div className="flex-1 min-w-[200px]">
-              <div className="cat-label">Synced sessions</div>
-              <div className="text-[16px] font-bold text-[var(--ink)] mt-1 uppercase tracking-wide">The room is dark tonight</div>
-              <div className="text-[12.5px] text-[var(--ink-2)] mt-0.5">No one's hosting — open a room and everyone stays in sync, same scene, same time.</div>
+            <div className="relative flex-1 min-w-[200px]">
+              <div className="text-[10px] tracking-[0.14em] uppercase text-indigo-300 font-semibold flex items-center gap-2">
+                <Icon name="users" size={13} /> Watch parties
+              </div>
+              <div className="text-[17px] font-semibold mt-1">Start a synced session with friends</div>
+              <div className="text-[12.5px] text-white/50 mt-0.5">No one's hosting right now — start one and everyone stays in sync, same scene, same time.</div>
             </div>
-            <div className="flex items-center gap-3.5 flex-none flex-wrap">
+            <div className="relative flex items-center gap-3.5 flex-none flex-wrap">
               {onStartParty && (
                 <button
                   onClick={onStartParty}
-                  className="btn-cat"
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-100 border border-indigo-400/40 font-semibold transition-colors"
                 >
-                  Open a room
+                  <Icon name="users" size={16} /> Start a watch party
                 </button>
               )}
             </div>
@@ -1362,46 +1364,52 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
     ]
     : []
-  // Mounted inside the sticky masthead stack and anchored
-  // `absolute top-full`, so it hangs off the stack's real bottom edge
-  // — a fixed pixel offset overlapped the tab row whenever the admin
-  // scan bar added height (review finding). z-[45] sits above the
-  // stack's own chrome and below ContextMenu (100) / modals (60s).
+  // QA BUG-005 — anchor near the Server Status trigger in the sidebar
+  // footer (bottom-left) instead of spanning the entire top of the
+  // content area. The previous `top-0 left-[240px] right-0` covered
+  // the global header (search, watch-party button, account avatar),
+  // making them unreachable while the panel was open. Mirroring the
+  // NotificationPanel layout (also a sidebar-footer trigger) but at
+  // ~480px wide to fit a 2-column tile grid.
+  //
+  // z-[45] sits above the sticky top-bar stack (40) and below
+  // ContextMenu (100) / modals (60s).
   return (
-    <div className="absolute top-full mt-2 left-2 right-2 md:left-auto md:right-4 md:w-[480px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard p-5 z-[45] animate-fade-in overflow-y-auto">
-      <div className="flex items-center justify-between mb-4">
-        <span className="cat-label cat-label--red">Machine Room</span>
-        <button
-          onClick={onClose}
-          className="text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors"
-          aria-label="Close server status"
-        >
-          <Icon name="x" size={16} />
-        </button>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {!isAdmin && <p className="text-[var(--ink-2)] text-sm col-span-full">Server status is admin-only.</p>}
-        {isAdmin && !stats && <p className="text-[var(--ink-2)] text-sm col-span-full">Loading stats…</p>}
+    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto">
+      {/* No "Server Status" heading — the trigger button in the
+          sidebar (line ~960) already shows that label, and the panel
+          opens directly under it. Matching the NotificationPanel
+          pattern, we DO offer a close affordance for symmetry. */}
+      <button
+        onClick={onClose}
+        className="absolute top-3 right-3 text-white/40 hover:text-white transition-colors"
+        aria-label="Close server status"
+      >
+        <Icon name="x" size={16} />
+      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pr-6">
+        {!isAdmin && <p className="text-white/40 text-sm col-span-full">Server status is admin-only.</p>}
+        {isAdmin && !stats && <p className="text-white/40 text-sm col-span-full">Loading stats…</p>}
         {tiles.map(stat => (
           <div
             key={stat.label}
             title={stat.hint}
-            className={`border border-[var(--rule-faint)] bg-[var(--paper)] p-3 ${stat.hint ? 'cursor-help' : ''}`}
+            className={`glass-panel rounded-xl p-3 ${stat.hint ? 'cursor-help' : ''}`}
           >
             <div className="flex items-center gap-3">
-              <div className={`w-9 h-9 flex items-center justify-center flex-shrink-0 border ${
-                stat.tone === 'warn'
-                  ? 'border-[var(--signal)] text-[var(--signal)]'
-                  : 'border-[var(--rule)] text-[var(--ink)]'
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
+                stat.tone === 'warn' ? 'bg-amber-500/10 text-amber-400' :
+                stat.tone === 'idle' ? 'bg-white/[0.04] text-white/40' :
+                'bg-emerald-500/10 text-emerald-400'
               }`}>
                 <Icon name={stat.icon} size={16} />
               </div>
               <div className="min-w-0">
-                <p className="text-[var(--ink-2)] text-xs flex items-center gap-1">
+                <p className="text-white/50 text-xs flex items-center gap-1">
                   {stat.label}
-                  {stat.hint && <span className="text-[var(--ink-3)] text-[10px]">ⓘ</span>}
+                  {stat.hint && <span className="text-white/30 text-[10px]">ⓘ</span>}
                 </p>
-                <p className="text-[var(--ink)] font-mono text-[15px] font-semibold truncate">{stat.value}</p>
+                <p className="text-white text-base font-bold truncate">{stat.value}</p>
               </div>
             </div>
           </div>
@@ -1472,37 +1480,35 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
   if (!open) return null
-  // Mounted inside the sticky masthead stack, anchored `absolute
-  // top-full` (same rationale as ServerPanel — tracks the stack's
-  // real bottom edge). Bounded max-height keeps the panel reachable
-  // on short viewports (content scrolls inside).
+  // QA BUG-006 — anchor near the Notifications trigger in the sidebar
+  // footer (bottom-left) instead of the top-left of the content area.
+  // The previous `top-0 left-[240px]` covered the page heading and
+  // looked unrelated to the button that opened it. `bottom-4` plus a
+  // bounded max-height keeps the panel reachable on short viewports
+  // (content scrolls inside).
   //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="absolute top-full mt-2 left-2 right-2 md:left-auto md:right-4 md:w-[380px] max-h-[70vh] bg-[var(--stock)] border border-[var(--ink)] shadow-hard z-[45] animate-fade-in overflow-y-auto">
-      <div className="p-4 border-b border-[var(--rule)] flex items-center justify-between">
-        <span className="cat-label cat-label--red">The Bulletin</span>
-        <button onClick={onClose} className="text-[var(--ink-2)] hover:text-[var(--ink)] transition-colors" aria-label="Close notifications">
+    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
+      <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
+        <h3 className="text-white font-semibold">Notifications</h3>
+        <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
           <Icon name="x" size={16} />
         </button>
       </div>
       <div>
         {notifications.length === 0 && (
           <div className="p-8 text-center">
-            <p className="text-[var(--ink-2)] text-sm">Nothing posted yet</p>
-            <p className="text-[var(--ink-3)] text-xs mt-2">You'll be notified when a request is ready to watch.</p>
+            <p className="text-white/40 text-sm">No notifications yet</p>
+            <p className="text-white/30 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
           </div>
         )}
         {notifications.map(n => (
-          <div key={n.id} className="p-4 border-b border-[var(--rule-faint)] hover:bg-[rgba(22,21,17,0.03)] transition-colors flex items-start gap-3">
-            {/* State mark: ✕ failed (red), ● posted — mark + words, never
-                color alone. */}
+          <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
             <span
-              className={`mt-0.5 font-mono text-[11px] flex-shrink-0 ${n.type === 'request_failed' ? 'text-[var(--signal)]' : 'text-[var(--ink)]'}`}
+              className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${n.type === 'request_failed' ? 'bg-red-400' : 'bg-emerald-400'}`}
               aria-hidden="true"
-            >
-              {n.type === 'request_failed' ? '✕' : '●'}
-            </span>
+            />
             <div className="min-w-0">
               {/* Same-origin <a href> so the httpOnly auth cookie rides along
                   (the highlight-reel MP4 is an authenticated endpoint). */}
@@ -1511,14 +1517,14 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                   href={safeNotifLink(n.link)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-[var(--ink)] hover:text-[var(--signal)] text-sm font-medium truncate block underline decoration-[var(--rule-faint)] underline-offset-2"
+                  className="text-white/90 hover:text-white text-sm font-medium truncate block underline decoration-white/20 underline-offset-2"
                 >
                   {notifLine(n)}
                 </a>
               ) : (
-                <h4 className="text-[var(--ink)] text-sm font-medium truncate">{notifLine(n)}</h4>
+                <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
               )}
-              <p className="text-[var(--ink-3)] font-mono text-[10px] mt-1 uppercase tracking-wider">{fmtRel(n.created_at)}</p>
+              <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
             </div>
           </div>
         ))}
@@ -1526,20 +1532,20 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
         {/* Admin activity log, kept below the user's own notifications. */}
         {isAdmin && (
           <>
-            <div className="px-4 pt-3 pb-2 border-t border-[var(--rule)]">
-              <h4 className="cat-label">Recent Activity</h4>
+            <div className="px-4 pt-3 pb-2 border-t border-white/[0.06]">
+              <h4 className="text-white/40 text-xs font-semibold uppercase tracking-wide">Recent Activity</h4>
             </div>
             {loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-[var(--ink-2)] text-sm">Loading…</p>
+              <p className="px-4 pb-4 text-white/40 text-sm">Loading…</p>
             )}
             {!loading && entries.length === 0 && (
-              <p className="px-4 pb-4 text-[var(--ink-2)] text-sm">No recent activity.</p>
+              <p className="px-4 pb-4 text-white/40 text-sm">No recent activity.</p>
             )}
             {entries.map(e => (
-              <div key={e.id} className="p-4 border-b border-[var(--rule-faint)] hover:bg-[rgba(22,21,17,0.03)] transition-colors">
-                <h4 className="text-[var(--ink)] text-sm font-medium capitalize">{e.event_type.replace(/_/g, ' ')}</h4>
-                {e.username && <p className="text-[var(--ink-2)] text-xs mt-0.5">{e.username}</p>}
-                <p className="text-[var(--ink-3)] font-mono text-[10px] mt-1 uppercase tracking-wider">{fmtRel(e.created_at)}</p>
+              <div key={e.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                <h4 className="text-white/90 text-sm font-medium">{e.event_type.replace(/_/g, ' ')}</h4>
+                {e.username && <p className="text-white/50 text-xs mt-0.5">{e.username}</p>}
+                <p className="text-white/60 text-xs mt-1">{fmtRel(e.created_at)}</p>
               </div>
             ))}
           </>
@@ -1554,12 +1560,12 @@ function BrowseLoadingState({ title }: { title: string }) {
   return (
     <div className="animate-fade-in">
       <div className="mb-8">
-        <h1 className="text-[var(--ink)] text-4xl font-extrabold uppercase tracking-tight font-display">{title}</h1>
-        <p className="text-[var(--ink-2)] text-sm mt-2">Loading your library…</p>
+        <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
+        <p className="text-white/60 text-sm mt-2">Loading your library…</p>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
         {Array.from({ length: 12 }).map((_, i) => (
-          <div key={i} className="aspect-[2/3] bg-[rgba(22,21,17,0.05)] border border-[var(--rule-faint)] animate-pulse" />
+          <div key={i} className="aspect-[2/3] rounded-xl bg-white/[0.02] border border-white/[0.04] animate-pulse" />
         ))}
       </div>
     </div>
@@ -1577,8 +1583,6 @@ function BrowseLoadingState({ title }: { title: string }) {
 // than this static map: opening a card pushes /title/<id>, so refresh,
 // browser Back, bookmarks, and shared links all land on the same title.
 // A cold load hydrates selectedMedia from GET /api/media/:id.
-// KEEP IN SYNC with Masthead's navItems (top of file): every tab id
-// needs an entry here or deep links to it fall back to home.
 const VIEW_BY_PATH: Record<string, string> = {
   '': 'home',
   '/': 'home',
@@ -1674,24 +1678,24 @@ function UserMenu({
         title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="shrink-0"
+        className="rounded-full focus:outline-none focus:ring-2 focus:ring-purple-400/60"
       >
-        <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={36} />
+        <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={40} />
       </button>
       {open && (
         <div
           role="menu"
-          className="absolute right-0 mt-2 w-56 bg-[var(--stock)] border border-[var(--ink)] shadow-hard z-[50] overflow-hidden animate-fade-in"
+          className="absolute right-0 mt-2 w-56 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[50] overflow-hidden animate-fade-in"
         >
           {/* Header — show identity so users with multiple accounts
-              know which one is signed in. role=admin gets a stamp;
-              non-admin users get a clean header. */}
-          <div className="px-4 py-3 border-b border-[var(--rule)]">
-            <p className="text-[var(--ink)] text-sm font-bold truncate">{user.username}</p>
-            <p className="text-[var(--ink-2)] text-xs mt-1 flex items-center gap-1.5">
+              know which one is signed in. role=admin gets a small
+              chip; non-admin users get a clean header. */}
+          <div className="px-4 py-3 border-b border-white/[0.06]">
+            <p className="text-white text-sm font-medium truncate">{user.username}</p>
+            <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
               {user.role === 'admin' ? (
                 <>
-                  <span className="stamp stamp--red">Admin</span>
+                  <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
                   Account
                 </>
               ) : 'Account'}
@@ -1700,28 +1704,28 @@ function UserMenu({
           <button
             role="menuitem"
             onClick={() => go('settings')}
-            className="w-full text-left px-4 py-2.5 text-sm text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] flex items-center gap-2 transition-colors"
+            className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
           >
-            <Icon name="settings" size={14} className="opacity-60" />
+            <Icon name="settings" size={14} className="text-white/50" />
             Settings
           </button>
           {user.role === 'admin' && (
             <button
               role="menuitem"
               onClick={() => go('admin')}
-              className="w-full text-left px-4 py-2.5 text-sm text-[var(--ink)] hover:bg-[var(--ink)] hover:text-[var(--paper)] flex items-center gap-2 transition-colors"
+              className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
             >
-              <Icon name="shield" size={14} className="opacity-60" />
-              Console
+              <Icon name="shield" size={14} className="text-white/50" />
+              Admin
             </button>
           )}
-          <div className="border-t border-[var(--rule-faint)] mt-1" />
+          <div className="border-t border-white/[0.06] mt-1" />
           <button
             role="menuitem"
             onClick={() => { setOpen(false); onSignOut() }}
-            className="w-full text-left px-4 py-2.5 text-sm text-[var(--signal)] hover:bg-[var(--signal)] hover:text-[var(--paper)] flex items-center gap-2 transition-colors"
+            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2"
           >
-            <Icon name="log-out" size={14} className="opacity-70" />
+            <Icon name="log-out" size={14} className="text-red-400/60" />
             Sign out
           </button>
         </div>
@@ -1890,9 +1894,7 @@ export default function App() {
     return () => { cancelled = true }
   }, [addToListMedia, activeProfileId])
   const [searchQuery, setSearchQuery] = useState('')
-  // (searchOpen state removed in the phases 2+3 review: it was
-  // write-only — nothing rendered from it — and its stale-true flag
-  // silently ate the first Escape keypress after using the search.)
+  const [searchOpen, setSearchOpen] = useState(false)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
@@ -1907,8 +1909,9 @@ export default function App() {
   // over the new page until the user manually closed it. Auto-close
   // both when `view` changes. Same effect mounts once and runs on
   // every view transition — cheap, no extra deps needed.
-  // (The QA BUG-012 mobile sidebar-drawer state retired with the
-  // sidebar — the masthead's tab row scrolls horizontally instead.)
+  // QA BUG-012 — mobile sidebar drawer state. Below md (768px) the
+  // sidebar is hidden by default and toggles in over content.
+  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false)
   // My Library — user-saved titles. The authoritative set lives server-side
   // (a per-profile default watchlist) so saves sync across every device;
   // localStorage is only an instant-paint + offline SNAPSHOT cache (full
@@ -2329,6 +2332,7 @@ export default function App() {
     }
     setView(v)
     setSelectedMedia(null)
+    setSearchOpen(false)
     // Clear the search input on navigate. It's a controlled input on
     // `searchQuery`, so this prevents the text from sticking after
     // leaving the search view.
@@ -2574,6 +2578,7 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if (playerTarget && !playerMinimizedRef.current) setPlayerTarget(null)
+        else if (searchOpen) setSearchOpen(false)
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -2601,7 +2606,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
+  }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
 
   // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
   // so a cached user is our auth signal: optimistically render with it while
@@ -4363,15 +4368,72 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[var(--paper)] text-[var(--ink)]">
-      {/* The masthead (ex-sidebar) renders inside the sticky stack in
-          <main> below, so the scan bar + masthead pin together. The
-          old mobile drawer/hamburger died with the sidebar: the tab
-          row scrolls horizontally on narrow viewports instead.
-          The Status/Bulletin panels mount INSIDE that sticky stack
-          (anchored absolute top-full) so they track the stack's real
-          bottom edge — a fixed offset overlapped the tab row whenever
-          the admin scan bar added height (review finding). */}
+    <div className="min-h-screen bg-[#050505] aurora-bg">
+      {/* Sidebar */}
+      <Sidebar
+        user={user}
+        currentView={view}
+        onNavigate={handleNavigate}
+        serverOpen={serverOpen}
+        setServerOpen={setServerOpen}
+        notifOpen={notifOpen}
+        setNotifOpen={setNotifOpen}
+        notifCount={unreadCount}
+        mobileOpen={sidebarMobileOpen}
+        onMobileClose={() => setSidebarMobileOpen(false)}
+      />
+
+      {/* QA BUG-012 — mobile sidebar backdrop + hamburger trigger.
+          Both are md:hidden so the desktop layout (sidebar always
+          present at 240px) is unchanged. The backdrop dismisses
+          on tap. The hamburger sits at the top-left in the space
+          the sidebar would normally occupy. z-40 for backdrop puts
+          it above content (10-30) but below sidebar (50). */}
+      {sidebarMobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
+          onClick={() => setSidebarMobileOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+      <button
+        type="button"
+        className={`fixed top-3 z-[55] md:hidden w-10 h-10 rounded-lg bg-[#0a0a0f]/80 backdrop-blur-sm border border-white/[0.08] flex items-center justify-center text-white/80 hover:text-white hover:bg-[#0a0a0f] ${
+          // QA BUG-012 follow-up — when the sidebar drawer is open
+          // the hamburger sits ABOVE the AURORA brand button (also
+          // top-left of the sidebar). Tapping the upper-left would
+          // close the drawer instead of triggering the documented
+          // brand-as-home affordance. Swap to top-right while open.
+          sidebarMobileOpen ? 'right-3' : 'left-3'
+        }`}
+        onClick={() => setSidebarMobileOpen(o => !o)}
+        aria-label={sidebarMobileOpen ? 'Close menu' : 'Open menu'}
+        aria-expanded={sidebarMobileOpen}
+      >
+        <Icon name={sidebarMobileOpen ? 'x' : 'menu'} size={18} />
+      </button>
+
+      <ServerPanel
+        open={serverOpen}
+        isAdmin={user.role === 'admin'}
+        onClose={() => setServerOpen(false)}
+      />
+
+      <NotificationPanel
+        open={notifOpen}
+        isAdmin={user.role === 'admin'}
+        onClose={() => setNotifOpen(false)}
+        notifications={notifications}
+        onMarkAllRead={() => {
+          if (unreadCount === 0) return
+          setUnreadCount(0)
+          const now = new Date().toISOString()
+          setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
+          markAllNotificationsRead().catch(() => {
+            /* non-fatal — local state is already cleared */
+          })
+        }}
+      />
 
       {/* Cmd+K Spotlight palette. Overlays everything at z-200. */}
       <SearchPalette
@@ -4386,113 +4448,87 @@ export default function App() {
       />
 
       {/* Main Content */}
-      <main className="min-h-screen">
-        {/* Sticky stack: scan bar + masthead in one sticky container
+      <main className="md:ml-[240px] min-h-screen">
+        {/* Sticky stack: scan bar + header in one sticky container
             so the scan bar contributes its height to flow and both
-            pin together on scroll. `relative` makes it the containing
-            block for the Status/Bulletin panels below. */}
-        <div className="relative sticky top-0 z-40">
+            pin together on scroll. */}
+        <div className="sticky top-0 z-40">
           {/* Global scan progress bar (admin-only). Returns null when
               no scan is active. */}
           <ScanProgressBar isAdmin={user.role === 'admin'} />
-          <Masthead
-            user={user}
-            currentView={view}
-            onNavigate={handleNavigate}
-            serverOpen={serverOpen}
-            setServerOpen={setServerOpen}
-            notifOpen={notifOpen}
-            setNotifOpen={setNotifOpen}
-            notifCount={unreadCount}
-            searchArea={
-              <div className="relative flex-1 max-w-md min-w-0">
-                <Icon name="search" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--ink-3)] pointer-events-none" />
-                {/* !pl-9/!py-2 (important): the global `input` rule in
-                    index.css (specificity 0,1,1) sets padding that
-                    outranks plain utilities (0,1,0) — the important
-                    modifiers win so the icon clears the text and the
-                    field stays masthead-compact. */}
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  placeholder="Search the catalogue…"
-                  className="w-full !pl-9 !pr-12 !py-2 text-sm"
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value)
-                    if (e.target.value) {
-                      setView('search')
-                    } else if (view === 'search') {
-                      setView('home')
-                    }
-                  }}
-                />
-                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 cat-label !text-[9.5px] border border-[var(--rule-faint)] bg-[var(--paper)] px-1.5 py-0.5 pointer-events-none" aria-hidden="true">⌘K</span>
-              </div>
-            }
-            actionsArea={
-              <>
-                {/* Screening room — M10 Phase 4. Click opens the panel
-                    if already in a party, otherwise prompts to join.
-                    The dot is red while a room is live. */}
-                <button
-                  onClick={() => {
-                    if (party.state.code) {
-                      setPartyPanelOpen(o => !o)
-                    } else {
-                      setPartyJoinPrompt(true)
-                    }
-                  }}
-                  title={party.state.code ? `In room ${party.state.code}` : 'Join a screening room'}
-                  className="mast-util"
-                >
-                  <span className={`w-2 h-2 ${party.state.code ? 'bg-[var(--signal)]' : 'bg-[var(--rule-faint)]'}`} aria-hidden="true" />
-                  <span className="hidden xl:inline">Room</span>
-                </button>
-                {/* Phase 5 — profile picker. Shows the active profile's nebula +
-                    name; a static chip with one profile, a switch menu with several. */}
-                {profiles.length > 0 && (
-                  <ProfileSwitcher
-                    profiles={profiles}
-                    activeProfileId={activeProfileId}
-                    onSelect={setActiveProfileId}
-                  />
-                )}
-                {/* User — QA 2026-05-25: avatar opens a dropdown menu
-                    (Profile / Settings / Sign Out), the standard
-                    media-app expectation. */}
-                <UserMenu
-                  user={user}
-                  avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
-                  onNavigate={(v) => handleNavigate(v)}
-                  onSignOut={() => { void handleLogout() }}
-                />
-              </>
-            }
-          />
-          {/* Status/Bulletin panels — anchored `absolute top-full` so
-              they hang off the stack's REAL bottom edge (masthead +
-              any active scan bars), never overlapping the tab row. */}
-          <ServerPanel
-            open={serverOpen}
-            isAdmin={user.role === 'admin'}
-            onClose={() => setServerOpen(false)}
-          />
-          <NotificationPanel
-            open={notifOpen}
-            isAdmin={user.role === 'admin'}
-            onClose={() => setNotifOpen(false)}
-            notifications={notifications}
-            onMarkAllRead={() => {
-              if (unreadCount === 0) return
-              setUnreadCount(0)
-              const now = new Date().toISOString()
-              setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
-              markAllNotificationsRead().catch(() => {
-                /* non-fatal — local state is already cleared */
-              })
-            }}
-          />
+          {/* Top Bar */}
+          <header className="bg-[#050505]/80 backdrop-blur-xl border-b border-white/[0.04] px-8 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-4 flex-1">
+            {/* Search */}
+            <div className="relative max-w-md w-full">
+              <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
+              {/* !pl-10 (important): the global `input` rule in index.css
+                  (`input:not([type="range"])`, specificity 0,1,1) sets
+                  `padding: 12px 16px`, which outranks the plain `pl-10` utility
+                  (0,1,0) and collapses the left padding to 16px — overlapping the
+                  magnifying-glass icon (absolute left-3) with the placeholder
+                  text (#209). The important modifier wins the cascade so the icon
+                  clears the text. */}
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search titles... (⌘K)"
+                className="w-full !pl-10 pr-4 py-2.5 text-sm bg-white/[0.03] border-white/[0.06] focus:bg-white/[0.05]"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value)
+                  if (e.target.value) {
+                    setView('search')
+                  } else if (view === 'search') {
+                    setView('home')
+                  }
+                }}
+                onFocus={() => setSearchOpen(true)}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Party — M10 Phase 4. Click opens the panel if already
+                in a party, otherwise prompts for a code to join. */}
+            <button
+              onClick={() => {
+                if (party.state.code) {
+                  setPartyPanelOpen(o => !o)
+                } else {
+                  setPartyJoinPrompt(true)
+                }
+              }}
+              title={party.state.code ? `In party ${party.state.code}` : 'Join a watch party'}
+              className="relative w-10 h-10 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] flex items-center justify-center text-white/60 hover:text-white transition-all"
+            >
+              <Icon name="users" size={18} />
+              {party.state.code && (
+                <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#050505]" />
+              )}
+            </button>
+            {/* Phase 5 — profile picker. Shows the active profile's nebula +
+                name; a static chip with one profile, a switch menu with several. */}
+            {profiles.length > 0 && (
+              <ProfileSwitcher
+                profiles={profiles}
+                activeProfileId={activeProfileId}
+                onSelect={setActiveProfileId}
+              />
+            )}
+            {/* User — QA 2026-05-25: avatar now opens a dropdown menu
+                instead of deep-scrolling to the Account section of
+                Settings. The previous behavior surprised users who
+                expected a Plex/Netflix-style profile menu (Profile /
+                Settings / Sign Out). */}
+            <UserMenu
+              user={user}
+              avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
+              onNavigate={(v) => handleNavigate(v)}
+              onSignOut={() => { void handleLogout() }}
+            />
+          </div>
+        </header>
         </div>{/* /sticky stack */}
 
         {/* Page Content */}

@@ -80,7 +80,7 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
     <div className="animate-fade-in">
       <div className="mb-6">
         <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-[var(--ink)] uppercase tracking-tight text-3xl font-extrabold font-display">Search Results</h1>
+          <h1 className="text-white text-3xl font-bold font-display">Search Results</h1>
           {/* Smart badge renders only when the server actually used
               the semantic path. */}
           {!loading && results.length > 0 && searchMode === 'semantic' && (

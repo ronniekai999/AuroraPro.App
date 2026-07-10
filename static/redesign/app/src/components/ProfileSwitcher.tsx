@@ -48,17 +48,14 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect }: Profile
         title={canSwitch ? 'Switch profile — filters Continue Watching + recommendations' : active.name}
         aria-haspopup={canSwitch ? 'menu' : undefined}
         aria-expanded={canSwitch ? open : undefined}
-        // Catalogue plate — the old white-alpha chip was tuned for the
-        // dark header and vanished on the paper masthead (review
-        // finding).
-        className={`flex items-center gap-2 border border-[var(--rule)] bg-[var(--stock)] py-1 pl-1 pr-2.5 text-xs text-[var(--ink)] transition-colors ${
-          canSwitch ? 'cursor-pointer hover:bg-[rgba(22,21,17,0.06)]' : 'cursor-default'
+        className={`flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.05] py-1.5 pl-1.5 pr-2.5 text-xs text-white/80 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+          canSwitch ? 'cursor-pointer hover:bg-white/[0.08]' : 'cursor-default'
         }`}
       >
         <ProfileAvatar avatarUrl={active.avatar_url} name={active.name} size={24} />
         <span className="max-w-[120px] truncate font-medium">{active.name}</span>
         {canSwitch && (
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-[var(--ink-3)]" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="text-white/40" aria-hidden="true">
             <path d="M6 9l6 6 6-6" />
           </svg>
         )}
@@ -66,9 +63,9 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect }: Profile
       {open && canSwitch && (
         <div
           role="menu"
-          className="animate-fade-in absolute right-0 z-[50] mt-2 w-56 overflow-hidden border border-[var(--ink)] bg-[var(--stock)] shadow-hard"
+          className="animate-fade-in absolute right-0 z-[50] mt-2 w-56 overflow-hidden rounded-xl border border-white/[0.06] bg-[#0a0a0f]/95 shadow-2xl backdrop-blur-xl"
         >
-          <div className="px-3 py-2 cat-label">Switch profile</div>
+          <div className="px-3 py-2 text-[11px] uppercase tracking-wide text-white/35">Switch profile</div>
           {profiles.map((p) => {
             const sel = p.id === active.id
             return (
@@ -80,8 +77,8 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect }: Profile
                   onSelect(p.id)
                   setOpen(false)
                 }}
-                className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition-colors hover:bg-[rgba(22,21,17,0.06)] ${
-                  sel ? 'text-[var(--ink)] font-semibold' : 'text-[var(--ink-2)]'
+                className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-sm transition-colors hover:bg-white/[0.06] ${
+                  sel ? 'text-white' : 'text-white/75'
                 }`}
               >
                 <ProfileAvatar avatarUrl={p.avatar_url} name={p.name} size={32} />
@@ -90,7 +87,7 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect }: Profile
                   {p.is_default ? ' ★' : ''}
                 </span>
                 {sel && (
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--signal)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M5 12.5l4.2 4.2L19 7" />
                   </svg>
                 )}
