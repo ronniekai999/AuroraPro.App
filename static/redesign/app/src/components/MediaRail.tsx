@@ -1,7 +1,8 @@
-// MediaRail — a catalogue shelf of <MediaCardCinema> cards, shared by
+// MediaRail — glassy horizontal rail of <MediaCardCinema> cards, shared by
 // HomeView (eager, in App) + BrowseView (lazy). Extracted from App.tsx
 // (2026-06-17 app split, Phase 2.4) so the lazy BrowseView chunk can reuse it
-// without reaching back into App.
+// without reaching back into App. RailTint + railIconFor (title → {icon,tint}
+// resolver) are module-private — only MediaRail uses them.
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
@@ -13,23 +14,24 @@ import { type Media } from '@/lib/types'
 // is the primary CTA. Keeping the prop in the type avoids touching
 // every call site; ignoring it via destructure-rest avoids the
 // unused-var lint.
-// (The 2026-05-27 per-rail icon/tint resolver — railIconFor + RailTint —
-// was retired in the Catalogue redesign, phases 2+3 review: the tint CSS
-// became a no-op in phase 1, home rails lead with a SHELF number instead
-// of an icon chip, and no caller passed icon/tint. Title prefixes no
-// longer drive any visual.)
+// 2026-05-27 — Per-rail icon + chip tint mapping. Each rail's title
+// drives both the icon glyph and the chip color via railIconFor()
+// (defined just below MediaRail). When the caller doesn't supply an
+// `icon`/`tint` explicitly, MediaRail resolves them from the title;
+// when nothing matches, defaults to the generic compass + purple chip.
+// This keeps the dynamic Discover/anchor rails (AI-generated titles)
+// working without per-rail wiring at every call site — but note that
+// LLM-curated titles are exactly the ones MOST likely to drift from
+// the prefix patterns in railIconFor, so the fallback exists for that
+// case, not as a "rare exception."
+type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, index }: {
+export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
   onPlay?: (m: Media) => void
   aspect?: 'poster' | 'landscape'
-  // Catalogue Edition — zero-based shelf position. When provided, the
-  // header leads with a red "SHELF NN" catalogue number instead of the
-  // icon chip (the numbering mirrors on-page order, like the proposal's
-  // shelf marks). Rails without it keep the icon.
-  index?: number
   // 2026-06-05 (Home redesign D) — optional one-line "why it's here"
   // subtitle under the rail title, and an "✨ AI PICK" chip beside the
   // title for recommender-driven rails (discover / anchor). Both are
@@ -69,6 +71,15 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
   // for them) skip it; "Top Rated Movies" etc. wire it to navigate
   // to the right browse view with the matching sort.
   onSeeAll?: () => void
+  // Optional Icon name for the decorative glyph next to the rail
+  // title. When omitted, MediaRail resolves it from the title via
+  // railIconFor() — covers all known rail titles + falls back to
+  // 'compass' for unknown (dynamic AI-curated) ones. Explicit value
+  // wins; this keeps test setups + future one-off rails easy to wire.
+  icon?: string
+  // Chip tint that overrides whatever railIconFor would pick from the
+  // title. Same resolution rules as `icon`.
+  tint?: RailTint
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   // Chevron paddles — the rail hides its scrollbar (.scrollbar-hide), so
@@ -99,15 +110,19 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
     const el = scrollRef.current
     if (el) el.scrollBy({ left: dir * el.clientWidth * 0.9, behavior: 'smooth' })
   }
+  // Resolve icon + tint. Caller-supplied value wins; otherwise look
+  // up by title; otherwise the generic compass / purple chip.
+  const resolved = railIconFor(title)
+  const resolvedIcon = icon ?? resolved.icon
+  const resolvedTint = tint ?? resolved.tint
+
   return (
     <section className="rail-container">
       {/* 2026-06-05 (Home redesign D) — header now supports a stacked
           title + subtitle and an inline "AI PICK" chip. When no subtitle
           is passed the title row layout is unchanged. */}
       <div className="rail-header">
-        {index != null && (
-          <span className="cat-label cat-label--red shrink-0">Shelf {String(index + 1).padStart(2, '0')}</span>
-        )}
+        <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
         <div className="flex flex-col gap-0.5 min-w-0">
           <div className="flex items-center gap-2.5">
             <h2 className="rail-title">{title}</h2>
@@ -171,4 +186,70 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
   )
 }
 
+/* 2026-05-27 — Resolve a rail's icon + chip tint from its title. Title
+ * is the ONLY consistent identity for a rail (some are constructed
+ * inline at the call site; some come back from the API; some are
+ * AI-generated). Matching on title prefix means a single map covers
+ * static rails ("Continue Watching", "Top Rated Movies") AND dynamic
+ * variants ("Top Rated Sci-Fi", "Because you watched Severance").
+ *
+ * Match order matters — more specific patterns first. Unknown titles
+ * fall through to the generic compass + purple chip, which keeps the
+ * current default behavior intact.
+ *
+ * Tints come from index.css :root tokens; adding a new tint = one CSS
+ * block + one entry here. Keep the palette tight (current: 6 colors)
+ * so the homepage doesn't turn into a Skittles ad. */
+function railIconFor(title: string): { icon: string; tint: RailTint } {
+  const t = title.trim().toLowerCase()
 
+  // Continue Watching — purple clock. Only one rail uses this exact
+  // title, but the prefix match defends against any future variant
+  // (e.g. "Continue Watching (S2)").
+  if (t.startsWith('continue watching')) return { icon: 'clock', tint: 'purple' }
+
+  // Recently Added — teal sparkle. Fresh / new content cue.
+  if (t.startsWith('recently added')) return { icon: 'sparkle', tint: 'teal' }
+
+  // Top Rated — amber. Different glyph for movies vs shows so the
+  // icon also signals the content type at a glance.
+  if (t.startsWith('top rated movie')) return { icon: 'star', tint: 'amber' }
+  if (t.startsWith('top rated show') || t.startsWith('top rated tv')) {
+    return { icon: 'tv', tint: 'amber' }
+  }
+  // Catch-all for other "Top Rated ..." rails (e.g. "Top Rated Sci-Fi").
+  if (t.startsWith('top rated')) return { icon: 'star', tint: 'amber' }
+
+  // "Because you watched X" — anchor rails, pink heart for the
+  // recommendation-by-affinity cue.
+  if (t.startsWith('because you')) return { icon: 'heart', tint: 'pink' }
+
+  // "Trending" — rose flame. Reserved for future "Trending Now" rail.
+  if (t.startsWith('trending')) return { icon: 'zap', tint: 'rose' }
+
+  // Discover / AI-curated rails. Catches "Discover" + "For You" +
+  // server-stamped "Aurora …" rails (e.g. "Aurora Picks", "Aurora
+  // Recommends").
+  //
+  // Deep-debug fix: narrowed from `t.includes('aurora')` to a prefix
+  // match. A bare contains-check would mis-tint a future rail like
+  // "Northern Aurora Nature Docs" (movie title surfaced via search /
+  // genre rail) as Discover/indigo. Prefix is tight enough to catch
+  // the intended product-named rails without grabbing movie titles.
+  if (
+    t.startsWith('discover') ||
+    t.startsWith('for you') ||
+    t.startsWith('aurora ')
+  ) {
+    return { icon: 'sparkle', tint: 'indigo' }
+  }
+
+  // Library / Saved — placeholder for future Library page rails.
+  if (t.startsWith('saved') || t.startsWith('library') || t.startsWith('your library')) {
+    return { icon: 'heart', tint: 'pink' }
+  }
+
+  // Unknown / dynamic genre rail → default compass + purple. Same
+  // behavior as before the per-rail icon refactor.
+  return { icon: 'compass', tint: 'purple' }
+}

@@ -135,7 +135,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   return (
     <div className="animate-fade-in max-w-3xl">
       <div className="mb-8">
-        <h1 className="text-[var(--ink)] uppercase tracking-tight text-3xl font-extrabold font-display">Settings</h1>
+        <h1 className="text-white text-3xl font-bold font-display">Settings</h1>
         <p className="text-white/50 text-sm mt-1">Configure your preferences</p>
       </div>
 

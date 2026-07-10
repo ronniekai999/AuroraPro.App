@@ -13,9 +13,8 @@ interface ProfileAvatarProps {
 /**
  * ProfileAvatar renders the correct visual for a profile's avatar in one place:
  * the animated nebula orb for a "nebula:<id>" value, an <img> for an http(s)
- * URL (e.g. an OAuth photo), or the name's initial on an ink plate (Catalogue
- * Edition — was a purple gradient). Used by the top-bar account menu and the
- * profile switcher so they stay consistent.
+ * URL (e.g. an OAuth photo), or the name's initial on a purple gradient. Used by
+ * the top-bar account menu and the profile switcher so they stay consistent.
  */
 export function ProfileAvatar({ avatarUrl, name, size = 40, className = '' }: ProfileAvatarProps) {
   const nb = parseNebula(avatarUrl)
@@ -25,7 +24,7 @@ export function ProfileAvatar({ avatarUrl, name, size = 40, className = '' }: Pr
   const initial = (name?.trim()?.[0] ?? 'U').toUpperCase()
   return (
     <span
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden bg-[var(--ink)] font-bold text-[var(--paper)] ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-purple-500 to-purple-700 font-bold text-white ${className}`}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}
     >
       {isUrl ? <img src={avatarUrl!} alt="" className="h-full w-full object-cover" /> : initial}

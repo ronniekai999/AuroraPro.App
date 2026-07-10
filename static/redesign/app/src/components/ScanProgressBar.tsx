@@ -78,7 +78,7 @@ export function ScanProgressBar({ isAdmin }: { isAdmin: boolean }) {
   // stay pinned together AND the bar's height pushes the page
   // content down naturally.
   return (
-    <div className="bg-[var(--stock)] border-b border-[var(--rule)]">
+    <div className="bg-[#0a0a0f]/90 backdrop-blur-md border-b border-purple-500/30">
       {active.map(({ library: lib, status: s }) => {
         const pct = s.total_files > 0
           ? Math.min(100, Math.max(0, (s.scanned_files / s.total_files) * 100))
@@ -86,26 +86,26 @@ export function ScanProgressBar({ isAdmin }: { isAdmin: boolean }) {
         return (
           <div key={lib.id} className="px-4 py-1.5">
             <div className="flex items-center justify-between gap-3 mb-1">
-              <span className="text-[var(--ink)] text-xs font-medium">
-                Scanning <strong>{lib.name}</strong>
+              <span className="text-white/80 text-xs font-medium">
+                Scanning <strong className="text-purple-200">{lib.name}</strong>
                 {s.total_files > 0 && (
-                  <span className="text-[var(--ink-2)] font-mono text-[11px] ml-2">
+                  <span className="text-white/40 ml-2">
                     {s.scanned_files.toLocaleString()} / {s.total_files.toLocaleString()}
-                    {s.new_files > 0 && <> · <span className="text-[var(--signal)]">{s.new_files} new</span></>}
+                    {s.new_files > 0 && <> · <span className="text-emerald-300">{s.new_files} new</span></>}
                   </span>
                 )}
               </span>
               {s.current_file && (
-                <span className="text-[var(--ink-3)] font-mono text-[10px] truncate max-w-[40%]" title={s.current_file}>
+                <span className="text-white/40 text-[10px] truncate max-w-[40%]" title={s.current_file}>
                   {/* Audit L4 — server already passes the basename;
                       the extra split is harmless but unnecessary. */}
                   {s.current_file}
                 </span>
               )}
             </div>
-            <div className="h-[3px] bg-[rgba(22,21,17,0.14)] overflow-hidden">
+            <div className="h-1 bg-white/[0.06] rounded-full overflow-hidden">
               <div
-                className="h-full bg-[var(--signal)] transition-all duration-500"
+                className="h-full bg-purple-500 transition-all duration-500"
                 style={{ width: `${pct}%` }}
               />
             </div>

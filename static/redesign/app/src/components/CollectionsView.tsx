@@ -183,11 +183,11 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
         >
           ← Back to collections
         </button>
-        <h1 className="text-[var(--ink)] uppercase tracking-tight text-4xl font-extrabold font-display mb-1">
+        <h1 className="text-white text-4xl font-bold font-display mb-1">
           {c?.name || 'Collection'}
         </h1>
         {c?.description && (
-          <p className="text-[var(--ink-2)] text-sm mb-2">{c.description}</p>
+          <p className="text-white/60 text-sm mb-2">{c.description}</p>
         )}
         {c?.kind === 'ai' && c.prompt && (
           <p className="text-purple-300/80 text-xs italic mb-6">

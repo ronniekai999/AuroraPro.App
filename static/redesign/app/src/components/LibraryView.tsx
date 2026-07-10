@@ -48,8 +48,8 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
           <Icon name="library" size={12} className="text-purple-300" />
           <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">Saved by You</span>
         </div>
-        <h1 className="text-[var(--ink)] uppercase tracking-tight text-4xl font-extrabold font-display">My Library</h1>
-        <p className="text-[var(--ink-2)] text-sm mt-2">
+        <h1 className="text-white text-4xl font-bold font-display">My Library</h1>
+        <p className="text-white/60 text-sm mt-2">
           {library.length === 0
             ? 'Hover any card and click + to save titles here.'
             : library.length === 1
