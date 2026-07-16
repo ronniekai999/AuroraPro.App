@@ -211,15 +211,45 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* NEW (Aurea №12) — "Premiere" spotlight card, floats gently. */
+  /* NEW (Aurea №12) — "Premiere" spotlight card, floats gently.
+     Aurea used this slot to advertise its own originals; Aurora's
+     version is a functional surface with three data states, cycled
+     from the mockup controls:
+       added   — newest completed library addition (default)
+       request — a REQUESTED title just landed (Requests tie-in);
+                 teal accent = the existing "fresh content" tint
+       hidden  — nothing new in the last few days → the card earns
+                 its slot by not existing (also reached via dismiss ×) */
   .premiere-card {
-    margin: 10px 14px 0; padding: 14px 15px; border-radius: 16px;
+    position: relative; margin: 10px 14px 0; padding: 14px 15px; border-radius: 16px;
     border: 1px solid rgba(168, 85, 247, 0.28);
     background: linear-gradient(135deg, rgba(168, 85, 247, 0.14) 0%, rgba(5, 5, 5, 0) 55%, rgba(34, 211, 238, 0.08) 100%);
+    cursor: pointer;
   }
   .premiere-card .eyebrow { font-size: 8.5px; letter-spacing: 0.26em; }
   .premiere-title { font-family: var(--font-editorial); font-style: italic; font-weight: 600; font-size: 15px; margin: 7px 0 4px; color: #f3ecff; }
   .premiere-copy { font-size: 11px; line-height: 1.5; color: var(--text-2); margin: 0; }
+  .premiere-card .state-request { display: none; }
+  .premiere-card[data-mode="request"] .state-added { display: none; }
+  .premiere-card[data-mode="request"] .state-request { display: block; }
+  .premiere-card[data-mode="request"] {
+    border-color: rgba(45, 212, 191, 0.38);
+    background: linear-gradient(135deg, rgba(45, 212, 191, 0.13) 0%, rgba(5, 5, 5, 0) 55%, rgba(168, 85, 247, 0.07) 100%);
+  }
+  .premiere-card[data-mode="request"] .eyebrow { color: #6ee7d8; }
+  .premiere-card[data-mode="hidden"] { display: none; }
+  /* Per-item dismiss — reveal on hover/focus; in-app this stashes the
+     media id in localStorage so the card only returns for a NEW item. */
+  .premiere-dismiss {
+    position: absolute; top: 7px; right: 7px; z-index: 2;
+    width: 22px; height: 22px; border-radius: 999px;
+    display: grid; place-items: center;
+    color: rgba(255, 255, 255, 0.45); background: rgba(255, 255, 255, 0.06);
+    opacity: 0; transition: opacity 0.2s, color 0.2s, background 0.2s;
+  }
+  .premiere-card:hover .premiere-dismiss, .premiere-dismiss:focus-visible { opacity: 1; }
+  .premiere-dismiss:hover { color: #fff; background: rgba(255, 255, 255, 0.14); }
+  .premiere-dismiss .icon { width: 11px; height: 11px; }
 
   .side-foot { padding: 10px 12px 12px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
   .side-foot .nav-item { margin-bottom: 1px; }
@@ -844,6 +874,7 @@
     <symbol id="i-gem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M7 4h10l4 5.2L12 20.5 3 9.2z"/><path d="M3 9.2h18M12 20.5L9.3 9.2M12 20.5l2.7-11.3"/></symbol>
     <symbol id="i-trophy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 4h9v4.6a4.5 4.5 0 0 1-9 0z"/><path d="M7.5 5.2H4.4A3.1 3.1 0 0 0 7.6 9M16.5 5.2h3.1A3.1 3.1 0 0 1 16.4 9M12 13v3.6M8.5 20.5h7M10 16.6h4"/></symbol>
     <symbol id="i-compass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2.2 5-5 2.2 2.2-5z"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></symbol>
   </svg>
 
   <div class="grain" aria-hidden="true"></div>
@@ -872,10 +903,18 @@
       <p class="nav-label">Manage</p>
       <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-gear"/></svg>Admin</button>
 
-      <div class="premiere-card float-slow">
-        <span class="eyebrow"><svg class="icon"><use href="#i-sparkle"/></svg>Premiere · added today</span>
-        <p class="premiere-title">Neon Meridian</p>
-        <p class="premiere-copy">A rain-slick chase through a city that never resolves. Now in your library — 4K · HDR.</p>
+      <div class="premiere-card float-slow" id="premiereCard" data-mode="added" role="button" tabindex="0" aria-label="Spotlight — open title">
+        <button class="premiere-dismiss" aria-label="Dismiss spotlight" title="Dismiss — the card returns when something new lands"><svg class="icon"><use href="#i-x"/></svg></button>
+        <div class="state-added">
+          <span class="eyebrow"><svg class="icon"><use href="#i-sparkle"/></svg>Premiere · added today</span>
+          <p class="premiere-title">Neon Meridian</p>
+          <p class="premiere-copy">A rain-slick chase through a city that never resolves. Now in your library — 4K · HDR.</p>
+        </div>
+        <div class="state-request">
+          <span class="eyebrow"><svg class="icon"><use href="#i-check"/></svg>Your request arrived</span>
+          <p class="premiere-title">The Cartographer's Daughter</p>
+          <p class="premiere-copy">Maya asked for this 3 days ago — it just landed in 4K. Ready for tonight.</p>
+        </div>
       </div>
     </nav>
 
@@ -1495,11 +1534,12 @@
         <li><span class="n">9</span><span><b>Hover quick actions</b> on cards — Play / add-to-library + “% for you”, sharing the scrim with the existing AI reason.</span></li>
         <li><span class="n">10</span><span><b>Edge-fade mask</b> on rail overflow — cards dissolve at the edges instead of clipping.</span></li>
         <li><span class="n">11</span><span><b>Continue Watching upgrades</b> — episode chip, centered play-on-hover, luminous gradient progress with % + time left.</span></li>
-        <li><span class="n">12</span><span><b>Sidebar touches</b> — section labels, glowing active notch, My Library count, floating “Premiere” spotlight card.</span></li>
+        <li><span class="n">12</span><span><b>Sidebar touches</b> — section labels, glowing active notch, My Library count, floating “Premiere” spotlight card. The card has three data states — newest addition, <i>fulfilled request</i> (“Maya asked for this”), and hidden when nothing’s new — cycle them with the control below; hover the card for its per-item dismiss ×.</span></li>
       </ol>
       <p class="global">Also global: <b>film grain</b> (toggle below · would respect Glow = Subtle &amp; reduced-motion), violet-tinted <b>scrollbar</b> + <b>selection</b> color.</p>
     </div>
     <button class="mock-toggle" id="annotateBtn" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Show adopted elements</button>
+    <button class="mock-toggle secondary" id="premiereBtn">Premiere card: added today</button>
     <button class="mock-toggle secondary" id="grainBtn" aria-pressed="true">Film grain: on</button>
   </div>
 
@@ -1510,6 +1550,30 @@
     var on = document.body.classList.toggle('annotate');
     annotateBtn.setAttribute('aria-pressed', String(on));
     annotateBtn.lastChild.textContent = on ? 'Hide adopted elements' : 'Show adopted elements';
+  });
+
+  // Premiere spotlight card — cycle its three data states. In the app
+  // the state comes from data (fulfilled request → recent addition →
+  // hidden); the button exists only so the mockup can show all three.
+  var premiereCard = document.getElementById('premiereCard');
+  var premiereBtn = document.getElementById('premiereBtn');
+  var premiereModes = ['added', 'request', 'hidden'];
+  var premiereLabels = {
+    added: 'Premiere card: added today',
+    request: 'Premiere card: request arrived',
+    hidden: 'Premiere card: hidden (nothing new)'
+  };
+  function setPremiere(mode) {
+    premiereCard.setAttribute('data-mode', mode);
+    premiereBtn.textContent = premiereLabels[mode];
+  }
+  premiereBtn.addEventListener('click', function () {
+    var i = premiereModes.indexOf(premiereCard.getAttribute('data-mode') || 'added');
+    setPremiere(premiereModes[(i + 1) % premiereModes.length]);
+  });
+  document.querySelector('.premiere-dismiss').addEventListener('click', function (e) {
+    e.stopPropagation();
+    setPremiere('hidden');
   });
 
   // Grain toggle

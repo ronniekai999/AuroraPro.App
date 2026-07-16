@@ -39,12 +39,38 @@ take is **editorial voice and finishing moves**, not a reskin.
 | 9 | **Hover quick actions on cards** | poster hover overlay w/ play + add + match% | Adds a Play / add-to-library row + "% for you" to `MediaCardCinema`'s existing hover scrim — shares the scrim with the current AI-reason reveal; title is NOT duplicated (the shelf keeps it). Play keeps the click→detail language elsewhere on the card. |
 | 10 | **Edge-fade mask on rails** | `mask-x` | Cards dissolve at the rail edges instead of clipping. One utility class on `.rail-scroll`; chevron paddles unchanged. |
 | 11 | **Continue Watching upgrades** | episode chip, center play-on-hover, luminous progress + % | Episode chip top-left ("S2E4 · 'The Anchorage'"), centered play chip on hover, and the progress bar moves into the shelf as a violet→cyan gradient with % + time-left readout (`formatRemaining` already computes it). |
-| 12 | **Sidebar touches** | section labels, active notch, count badge, promo card | Groups the flat nav (Browse / Library / Manage), glowing left-notch active indicator, My Library count badge, and a floating "Premiere" spotlight card fed by the newest library addition. |
+| 12 | **Sidebar touches** | section labels, active notch, count badge, promo card | Groups the flat nav (Browse / Library / Manage), glowing left-notch active indicator, My Library count badge, and a floating "Premiere" spotlight card (see below). |
 
 **Global touches:** subtle animated **film grain** (Appearance toggle;
 disabled under `data-glow="subtle"` and reduced-motion — same budget rules as
 the existing overlay blur), violet-tinted **scrollbar** and **selection**
 color.
+
+### The Premiere spotlight card (element 12, in depth)
+
+Aurea uses this sidebar slot as a marketing card for its own originals
+("Aurea Premiere — Hollow Kings Season 2. Now streaming."). Aurora's version
+keeps the slot but makes it a functional surface with **three data states**
+(cycle them with the "Premiere card" control in the mockup):
+
+1. **Request arrived** (highest priority, teal accent — the existing
+   "fresh content" tint from the Recently Added rail): a title someone
+   requested has landed and finished scanning. This is the moment a
+   household member most wants to be told about, and today it's only
+   discoverable via the Requests page or by noticing the rail.
+   Copy names the requester ("Maya asked for this 3 days ago").
+2. **Added today** (violet): the newest completed library addition —
+   effectively card #1 of Recently Added, promoted to a slot visible on
+   *every* view. Blurb truncated from the synopsis + quality chips.
+3. **Hidden**: nothing new in the last few days → the card doesn't
+   render. This rule is what lets it earn permanent sidebar space —
+   a card that always shows something stops meaning anything.
+
+Click → DetailView for the title. Hover reveals a per-item **dismiss ×**
+(stash the media id in localStorage; the card only returns for a *new*
+item). Implementation shape: a self-fetching `PremiereCard.tsx` (same
+pattern as `GamificationCard`) reading the recently-added source +
+requests state, refreshed off the realtime scan-complete event.
 
 ## Deliberately not adopted
 
