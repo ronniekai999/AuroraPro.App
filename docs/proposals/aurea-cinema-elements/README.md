@@ -29,13 +29,13 @@ take is **editorial voice and finishing moves**, not a reskin.
 | # | Element | From Aurea | How it lands in Aurora |
 |---|---------|------------|------------------------|
 | 1 | **Editorial serif display** | Fraunces italic headlines everywhere | Hero title, rail headings, procedural-poster captions only — body/UI stays Sora/Inter Tight. Ships as a *fifth Typeface system* in Settings → Appearance (we already have the `data-font` token plumbing in `index.css`); self-host `fraunces.woff2` like the other seven faces. |
-| 2 | **Eyebrow kickers** | "AUREA ORIGINAL SERIES", "THE LEDGER" | Micro uppercase tracked labels: "TONIGHT'S PICK" above the hero, "HOUSE CHARTS" above the Top 10 rail. Pure CSS class. |
+| 2 | **Eyebrow kickers** | "AUREA ORIGINAL SERIES", "THE LEDGER" | Micro uppercase tracked labels: "TONIGHT'S PICK" above the hero, "THE CHARTS" above the Top 10 rail. Pure CSS class. |
 | 3 | **Hero meta chips** | match/year/duration + rating chip + "4K · DOLBY VISION" | We already have `has_4k` + `content_rating` in the list payload (`mapMedia` builds `tags`) — surface them in `HeroSection` alongside the existing match %. |
 | 4 | **Serif tagline quote** | italic quote leading the synopsis | One styled span in the hero copy (tagline comes from metadata when present). |
-| 5 | **Rank tag** | "№1 in Series Today" glass chip | "№1 · Most watched in your house" — real household watch stats, seated under the existing match ring. |
+| 5 | **Rank tag** | "№1 in Series Today" glass chip | "№1 · Most watched this week" — real watch stats from this server, seated under the existing match ring. |
 | 6 | **Ken Burns + staggered entrance** | 26s hero zoom, `rise` cascade | Idle drift layered under the existing mouse parallax (`HeroSection` already owns the transform wrapper); entrance stagger on hero copy. Both off under `prefers-reduced-motion`. |
 | 7 | **Genre pill row** | pill filters under the hero | One-tap genre filters between the mood box and the rails; active pill gets the violet glow treatment. |
-| 8 | **Top 10 rail** | giant outlined numerals behind posters | New rail type in `MediaRail`'s family: `-webkit-text-stroke` violet numerals (brighten + lift on hover), fed by household play counts. Lives inside the standard glass shelf so it reads native. |
+| 8 | **Top 10 rail** | giant outlined numerals behind posters | New rail type in `MediaRail`'s family: `-webkit-text-stroke` violet numerals (brighten + lift on hover), fed by the server's play counts. Lives inside the standard glass shelf so it reads native. |
 | 9 | **Hover quick actions on cards** | poster hover overlay w/ play + add + match% | Adds a Play / add-to-library row + "% for you" to `MediaCardCinema`'s existing hover scrim — shares the scrim with the current AI-reason reveal; title is NOT duplicated (the shelf keeps it). Play keeps the click→detail language elsewhere on the card. |
 | 10 | **Edge-fade mask on rails** | `mask-x` | Cards dissolve at the rail edges instead of clipping. One utility class on `.rail-scroll`; chevron paddles unchanged. |
 | 11 | **Continue Watching upgrades** | episode chip, center play-on-hover, luminous progress + % | Episode chip top-left ("S2E4 · 'The Anchorage'"), centered play chip on hover, and the progress bar moves into the shelf as a violet→cyan gradient with % + time-left readout (`formatRemaining` already computes it). |
@@ -56,9 +56,10 @@ keeps the slot but makes it a functional surface with **three data states**
 1. **Request arrived** (highest priority, teal accent — the existing
    "fresh content" tint from the Recently Added rail): a title someone
    requested has landed and finished scanning. This is the moment a
-   household member most wants to be told about, and today it's only
-   discoverable via the Requests page or by noticing the rail.
-   Copy names the requester ("Maya asked for this 3 days ago").
+   user most wants to be told about, and today it's only discoverable
+   via the Requests page or by noticing the rail. Copy stays
+   deployment-neutral ("Requested 3 days ago"); multi-user servers
+   could optionally attribute the requester.
 2. **Added today** (violet): the newest completed library addition —
    effectively card #1 of Recently Added, promoted to a slot visible on
    *every* view. Blurb truncated from the synopsis + quality chips.
