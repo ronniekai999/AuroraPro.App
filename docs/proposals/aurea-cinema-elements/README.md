@@ -1,5 +1,9 @@
 # Aurea cinema elements — what to borrow, and how it lands in Aurora
 
+**Implementation plan:** [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) —
+three phased PRs (presentation → interaction → backend-backed), grounded in
+the existing code.
+
 **Mockup:** [`mockup-home-aurea-elements.html`](./mockup-home-aurea-elements.html) —
 static, self-contained, open in any browser. Use the **"Show adopted
 elements"** toggle (bottom-right) to outline every borrowed element with a
