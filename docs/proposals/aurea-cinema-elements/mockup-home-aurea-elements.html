@@ -12,9 +12,12 @@
      "Aurora today + Aurea elements" — the current Aurora home
      (sidebar · glass topbar · greeting band · inset hero with
      match ring · mood box · glass shelf rails · cinema cards ·
-     Your Week band) with 12 elements adopted from the "Aurea"
+     Your Week band) with 11 elements adopted from the "Aurea"
      Netflix-style concept (Kimi mockup, 2026-07), each translated
      into Aurora's violet/cyan identity — no gold chrome.
+     2026-07-16 review pass: copy made deployment-neutral (no
+     household assumptions); dropped the hero "№1" rank tag and the
+     hover add-button that duplicated the persistent lib-badge.
 
      Use the "Adopted elements" toggle (bottom-right) to outline
      every borrowed element with a numbered chip; the legend maps
@@ -73,7 +76,7 @@
   img { max-width: 100%; }
   :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; border-radius: 4px; }
 
-  /* NEW (Aurea №13, global) — selection tint + luminous scrollbar,
+  /* NEW (Aurea global) — selection tint + luminous scrollbar,
      violet instead of Aurea's gold. */
   ::selection { background: rgba(168, 85, 247, 0.4); color: #f6f0ff; }
   ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -87,7 +90,7 @@
   .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
   .scrollbar-hide::-webkit-scrollbar { display: none; }
 
-  /* NEW (Aurea №13) — animated film grain, sits over everything.
+  /* NEW (Aurea, global) — animated film grain, sits over everything.
      4% opacity: texture, not noise. Toggle in the mockup controls;
      in-app this would hang off Settings → Appearance (and turn off
      under data-glow="subtle"). */
@@ -107,7 +110,7 @@
     80% { transform: translate(3%, 3%); }
   }
 
-  /* NEW (Aurea №6) — staggered entrance + hero ken burns. */
+  /* NEW (Aurea №5) — staggered entrance + hero ken burns. */
   @keyframes rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
   .rise { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
   .rise-1 { animation-delay: 0.06s; } .rise-2 { animation-delay: 0.14s; }
@@ -151,13 +154,13 @@
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
 
-  /* NEW (Aurea №10) — horizontal edge-fade mask for rails. */
+  /* NEW (Aurea №9) — horizontal edge-fade mask for rails. */
   .mask-x {
     -webkit-mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
     mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
   }
 
-  /* ── Sidebar (Aurora today + Aurea №12 touches) ──────────── */
+  /* ── Sidebar (Aurora today + Aurea №11 touches) ──────────── */
   .sidebar {
     position: fixed; left: 0; top: 0; bottom: 0; width: 240px; z-index: 50;
     display: flex; flex-direction: column;
@@ -176,7 +179,7 @@
   .brand-sub { display: block; font-size: 8.5px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--text-3); margin-top: 3px; }
 
   .side-nav { flex: 1; padding: 4px 12px; overflow-y: auto; }
-  /* NEW (Aurea №12) — section labels group the flat nav list. */
+  /* NEW (Aurea №11) — section labels group the flat nav list. */
   .nav-label {
     padding: 14px 12px 6px; margin: 0;
     font-size: 9.5px; font-weight: 700; letter-spacing: 0.28em;
@@ -193,7 +196,7 @@
   .nav-item:hover .icon { color: var(--violet-soft); }
   .nav-item.active { background: rgba(168, 85, 247, 0.13); color: #efe3ff; }
   .nav-item.active .icon { color: var(--violet); }
-  /* NEW (Aurea №12) — active left-notch indicator (gold → violet). */
+  /* NEW (Aurea №11) — active left-notch indicator (gold → violet). */
   .nav-notch {
     position: absolute; left: 0; top: 50%; transform: translateY(-50%);
     width: 3px; height: 20px; border-radius: 999px; background: var(--violet);
@@ -202,7 +205,7 @@
   }
   .nav-item.active .nav-notch { opacity: 1; }
   .nav-item:hover .nav-notch { opacity: 0.4; }
-  /* NEW (Aurea №12) — count badge (My Library). */
+  /* NEW (Aurea №11) — count badge (My Library). */
   .nav-count {
     margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px;
     display: grid; place-items: center; border-radius: 999px;
@@ -211,7 +214,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* NEW (Aurea №12) — "Premiere" spotlight card, floats gently.
+  /* NEW (Aurea №11) — "Premiere" spotlight card, floats gently.
      Aurea used this slot to advertise its own originals; Aurora's
      version is a functional surface with three data states, cycled
      from the mockup controls:
@@ -343,7 +346,7 @@
   .pill-btn.violet:hover { background: rgba(168, 85, 247, 0.2); color: #fff; }
   .pill-btn .icon { width: 15px; height: 15px; }
 
-  /* ── HERO (Aurora today + Aurea №1-6) ────────────────────── */
+  /* ── HERO (Aurora today + Aurea №1-5) ────────────────────── */
   .hero {
     position: relative; width: 100%; height: 60vh; min-height: 500px; max-height: 680px;
     border-radius: 20px; overflow: hidden; margin-bottom: 40px;
@@ -462,20 +465,10 @@
   }
   .match-ring .lbl { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #d8b4fe; font-weight: 600; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); }
 
-  /* NEW (Aurea №5) — rank tag, glass chip under the ring. */
-  .rank-tag {
-    position: absolute; top: 132px; right: 26px; z-index: 20;
-    display: flex; align-items: center; gap: 10px;
-    padding: 9px 14px; border-radius: 14px;
-    background: rgba(10, 8, 18, 0.55); border: 1px solid rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(14px);
-  }
-  .rank-tag .no {
-    font-family: var(--font-editorial); font-style: italic; font-weight: 700; font-size: 26px;
-    background: linear-gradient(115deg, #e6d3ff, #a855f7 60%, #22d3ee 130%);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
-  .rank-tag .txt { font-size: 9px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); line-height: 1.6; }
+  /* (Removed 2026-07-16 — Aurea's "№1 in Series Today" rank tag. For a
+     single-user deployment "most watched this week" is self-referential,
+     and the Top 10 rail already owns rank. If it ever returns it should
+     render only when ≥2 viewers contributed to the week's chart.) */
 
   /* ── Mood box (Aurora today, untouched) ──────────────────── */
   .convo-wrap { max-width: 640px; margin: 0 auto 34px; }
@@ -498,7 +491,7 @@
   }
   .convo-kbd kbd { display: grid; place-items: center; height: 16px; min-width: 16px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.1); font-size: 10px; font-family: inherit; }
 
-  /* ── NEW (Aurea №7) — genre pills row ────────────────────── */
+  /* ── NEW (Aurea №6) — genre pills row ────────────────────── */
   .genre-pills { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; margin-bottom: 34px; }
   .gpill {
     flex-shrink: 0; padding: 7px 16px; border-radius: 999px;
@@ -572,7 +565,7 @@
   .rail-paddle:hover { border-color: rgba(168, 85, 247, 0.6); color: #d8b4fe; }
   .rail-paddle.left { left: -6px; } .rail-paddle.right { right: -6px; }
 
-  /* ── Cards (Aurora's media-card-cinema + Aurea №9 hover) ──── */
+  /* ── Cards (Aurora's media-card-cinema + Aurea №8 hover) ──── */
   .card {
     position: relative; width: 180px; border-radius: 14px; overflow: hidden;
     background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
@@ -648,7 +641,7 @@
   .card:focus-within .poster .p-title, .card:focus-within .poster .p-meta { opacity: 0; transition: opacity 0.2s; }
   .poster .p-title, .poster .p-meta { transition: opacity 0.2s; }
 
-  /* NEW (Aurea №9) — hover overlay: quick Play / +List + match %.
+  /* NEW (Aurea №8) — hover overlay: quick Play / +List + match %.
      Title stays in the shelf (no duplication) — the overlay only adds
      ACTIONS. Reason text (AI cards) rides in the same scrim. */
   .card-hover {
@@ -669,8 +662,9 @@
   }
   .qa-btn:hover { transform: scale(1.1); }
   .qa-play { background: linear-gradient(135deg, #a855f7, #7c3aed); color: #fff; box-shadow: 0 0 14px rgba(168, 85, 247, 0.55); }
-  .qa-add { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.25); color: #fff; backdrop-filter: blur(6px); }
-  .qa-add:hover { border-color: rgba(168, 85, 247, 0.7); }
+  /* (No add-to-library button here — the card's persistent top-left
+     .lib-badge is the single add control; duplicating it in the scrim
+     read as two competing "+" affordances.) */
   .qa-btn .icon { width: 13px; height: 13px; }
   .qa-match { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--violet-soft); font-variant-numeric: tabular-nums; }
 
@@ -680,13 +674,13 @@
   .shelf .meta .star { color: #facc15; display: inline-flex; }
   .shelf .meta .star .icon { width: 10px; height: 10px; }
 
-  /* ── Continue Watching (Aurora today + Aurea №11) ────────── */
+  /* ── Continue Watching (Aurora today + Aurea №10) ────────── */
   .cw-card { width: 320px; }
   .cw-art { aspect-ratio: 16 / 9; }
   /* CW art is "bare" — the shelf below carries the title, so the art
      caption would just duplicate it. */
   .cw-art .p-title, .cw-art .p-meta { display: none; }
-  /* NEW (Aurea №11a) — episode chip, top-left over the art. */
+  /* NEW (Aurea №10a) — episode chip, top-left over the art. */
   .ep-chip {
     position: absolute; top: 14px; left: 14px; z-index: 3;
     display: inline-flex; align-items: center; gap: 6px;
@@ -696,7 +690,7 @@
     backdrop-filter: blur(6px);
   }
   .ep-chip .icon { width: 11px; height: 11px; color: var(--violet-soft); }
-  /* NEW (Aurea №11b) — center play chip fades in on hover. */
+  /* NEW (Aurea №10b) — center play chip fades in on hover. */
   .cw-playchip {
     position: absolute; inset: 8px 8px 0; z-index: 2; display: grid; place-items: center;
     pointer-events: none;
@@ -711,7 +705,7 @@
   }
   .card:hover .cw-playchip span { transform: scale(1); opacity: 1; }
   .cw-playchip .icon { width: 16px; height: 16px; margin-left: 2px; }
-  /* NEW (Aurea №11c) — luminous gradient progress + % readout.
+  /* NEW (Aurea №10c) — luminous gradient progress + % readout.
      (Today: a 2px white-ish bar on the poster, no readout.) */
   .cw-progress { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
   .cw-track { position: relative; flex: 1; height: 3px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
@@ -719,7 +713,7 @@
   .cw-pct { font-size: 11px; font-weight: 700; color: var(--violet-soft); font-variant-numeric: tabular-nums; }
   .cw-left { font-size: 11px; color: var(--text-3); white-space: nowrap; }
 
-  /* ── NEW (Aurea №8) — Top 10 rail with outlined numerals ─── */
+  /* ── NEW (Aurea №7) — Top 10 rail with outlined numerals ─── */
   .tt-scroll { align-items: flex-end; padding-top: 18px; }
   .tt-item { display: flex; align-items: flex-end; padding-left: 6px; background: none; border: none; }
   .tt-num {
@@ -816,14 +810,12 @@
     line-height: 20px; text-align: center;
     box-shadow: 0 0 10px rgba(34, 211, 238, 0.8);
   }
-  /* The chip anchor needs a positioning context — but .rank-tag and
-     .hero-media are ALREADY absolutely positioned; a blanket
-     position:relative would yank them back into flow (the hero media
-     collapses to zero height). Exclude them. */
-  [data-new]:not(.rank-tag):not(.hero-media) { position: relative; }
-  /* keep chips visible where the tagged element hugs an edge or clips
-     its overflow (cards + hero media are overflow:hidden) */
-  body.annotate .match-ring[data-new]::after, body.annotate .rank-tag[data-new]::after { left: auto; right: -10px; }
+  /* The chip anchor needs a positioning context — but .hero-media is
+     ALREADY absolutely positioned; a blanket position:relative would
+     yank it back into flow (it collapses to zero height). Exclude it. */
+  [data-new]:not(.hero-media) { position: relative; }
+  /* keep chips visible where the tagged element clips its overflow
+     (cards + hero media are overflow:hidden) */
   body.annotate .card[data-new]::after { top: 2px; left: 2px; }
   body.annotate .hero-media[data-new]::after { top: 14px; left: 14px; }
   body.annotate .side-nav[data-new]::after { top: 8px; left: auto; right: 10px; }
@@ -879,7 +871,7 @@
 
   <div class="grain" aria-hidden="true"></div>
 
-  <!-- ═══════════ SIDEBAR — Aurora today + №12 ═══════════ -->
+  <!-- ═══════════ SIDEBAR — Aurora today + №11 ═══════════ -->
   <aside class="sidebar">
     <button class="brand" type="button" aria-label="Go to home">
       <span class="brand-mark" aria-hidden="true">
@@ -888,7 +880,7 @@
       <span><span class="brand-name">AURORA PRO</span><span class="brand-sub">Your stories, your server</span></span>
     </button>
 
-    <nav class="side-nav" data-new="12" aria-label="Primary">
+    <nav class="side-nav" data-new="11" aria-label="Primary">
       <p class="nav-label">Browse</p>
       <button class="nav-item active"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-home"/></svg>Home</button>
       <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-film"/></svg>Movies</button>
@@ -959,9 +951,9 @@
         </div>
       </div>
 
-      <!-- ═══════════ HERO — Aurora today + №1-6 ═══════════ -->
+      <!-- ═══════════ HERO — Aurora today + №1-5 ═══════════ -->
       <section class="hero rise rise-2" aria-label="Featured: Signal to Noise">
-        <div class="hero-media" id="heroMedia" data-new="6">
+        <div class="hero-media" id="heroMedia" data-new="5">
           <div class="hero-art kenburns"></div>
         </div>
         <div class="hero-scrim-b"></div>
@@ -976,11 +968,6 @@
           </svg>
           <span class="num" aria-hidden="true">94%</span>
           <span class="lbl" aria-hidden="true">Match</span>
-        </div>
-
-        <div class="rank-tag" data-new="5">
-          <span class="no">№1</span>
-          <span class="txt">Most watched<br>this week</span>
         </div>
 
         <div class="hero-content">
@@ -1023,8 +1010,8 @@
         </div>
       </div>
 
-      <!-- ═══════════ NEW №7 — GENRE PILLS ═══════════ -->
-      <nav class="genre-pills scrollbar-hide rise rise-5" data-new="7" aria-label="Quick genre filters">
+      <!-- ═══════════ NEW №6 — GENRE PILLS ═══════════ -->
+      <nav class="genre-pills scrollbar-hide rise rise-5" data-new="6" aria-label="Quick genre filters">
         <button class="gpill active">All</button>
         <button class="gpill">Sci-Fi</button>
         <button class="gpill">Mystery</button>
@@ -1037,7 +1024,7 @@
         <button class="gpill">Fantasy</button>
       </nav>
 
-      <!-- ═══════════ CONTINUE WATCHING — today + №11 ═══════════ -->
+      <!-- ═══════════ CONTINUE WATCHING — today + №10 ═══════════ -->
       <section class="rail-container">
         <div class="rail-header">
           <span class="rail-icon" data-tint="purple"><svg class="icon"><use href="#i-clock"/></svg></span>
@@ -1051,7 +1038,7 @@
           <button class="rail-paddle left" aria-label="Scroll Continue Watching left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
           <div class="rail-scroll scrollbar-hide mask-x">
 
-            <button class="card cw-card" data-new="11">
+            <button class="card cw-card" data-new="10">
               <div class="poster-wrap">
                 <span class="poster cw-art" data-motif="waves" style="--p1:#0b1d26;--p2:#14424d;--p3:#4dd7c0">
                   <span class="glowfield"></span><span class="motif"></span><span class="shade"></span>
@@ -1132,8 +1119,8 @@
         </div>
       </section>
 
-      <!-- ═══════════ NEW №8 — TOP 10 RAIL ═══════════ -->
-      <section class="rail-container" data-new="8">
+      <!-- ═══════════ NEW №7 — TOP 10 RAIL ═══════════ -->
+      <section class="rail-container" data-new="7">
         <div class="rail-header">
           <span class="rail-icon" data-tint="indigo"><svg class="icon"><use href="#i-flame"/></svg></span>
           <div class="rail-titles">
@@ -1162,7 +1149,7 @@
         </div>
       </section>
 
-      <!-- ═══════════ BECAUSE-YOU-FINISHED RAIL — today + №9/№10 ═══════════ -->
+      <!-- ═══════════ BECAUSE-YOU-FINISHED RAIL — today + №8/№9 ═══════════ -->
       <section class="rail-container">
         <div class="rail-header">
           <span class="rail-icon" data-tint="pink"><svg class="icon"><use href="#i-heart"/></svg></span>
@@ -1175,11 +1162,11 @@
           </div>
           <span class="rail-spacer" aria-hidden="true"></span>
         </div>
-        <div class="rail-wrap" data-new="10">
+        <div class="rail-wrap" data-new="9">
           <button class="rail-paddle left" aria-label="Scroll rail left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
           <div class="rail-scroll scrollbar-hide mask-x">
 
-            <button class="card" data-new="9">
+            <button class="card" data-new="8">
               <div class="poster-wrap">
                 <span class="poster" data-motif="waves" style="--p1:#0a1410;--p2:#1e4034;--p3:#6ee7b7">
                   <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
@@ -1191,7 +1178,6 @@
                   <span class="reason">“Coastal dread and a keeper who logs a light that shouldn't be there — the same fog Dark Harbor lives in.”</span>
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Last Lighthouse"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">91% for you</span>
                   </span>
                 </span>
@@ -1214,7 +1200,6 @@
                   <span class="reason">“A village that votes on what the forest is owed. Slow ritual dread, no jump scares.”</span>
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Palegrove"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Remove from My Library"><svg class="icon"><use href="#i-check"/></svg></span>
                     <span class="qa-match">88% for you</span>
                   </span>
                 </span>
@@ -1235,7 +1220,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Glass Aviary"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">84% for you</span>
                   </span>
                 </span>
@@ -1256,7 +1240,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Iron Tide"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">80% for you</span>
                   </span>
                 </span>
@@ -1277,7 +1260,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Orbital Decay"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">78% for you</span>
                   </span>
                 </span>
@@ -1298,7 +1280,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Verdigris"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">74% for you</span>
                   </span>
                 </span>
@@ -1319,7 +1300,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Cartographer's Daughter"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">71% for you</span>
                   </span>
                 </span>
@@ -1361,7 +1341,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Neon Meridian"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">86% for you</span>
                   </span>
                 </span>
@@ -1383,7 +1362,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Afterlight Express"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">82% for you</span>
                   </span>
                 </span>
@@ -1404,7 +1382,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Static Fields"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Remove from My Library"><svg class="icon"><use href="#i-check"/></svg></span>
                     <span class="qa-match">79% for you</span>
                   </span>
                 </span>
@@ -1426,7 +1403,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Comet Season"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">76% for you</span>
                   </span>
                 </span>
@@ -1447,7 +1423,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Paper Suns"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">73% for you</span>
                   </span>
                 </span>
@@ -1468,7 +1443,6 @@
                 <span class="card-hover">
                   <span class="qa-row">
                     <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Salt and Cinder"><svg class="icon"><use href="#i-play"/></svg></span>
-                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
                     <span class="qa-match">70% for you</span>
                   </span>
                 </span>
@@ -1512,7 +1486,7 @@
       <!-- ═══════════ FOOTER — Aurea sign-off, Aurora-ized ═══════════ -->
       <footer class="footer">
         <p class="wordmark text-gradient">AURORA PRO — YOUR STORIES, YOUR SERVER</p>
-        <p>Design mockup: Aurora's current home with twelve elements adopted from the “Aurea” cinema concept, translated into Aurora's violet/cyan identity. Every title is fictional; all artwork is procedural.</p>
+        <p>Design mockup: Aurora's current home with eleven elements adopted from the “Aurea” cinema concept, translated into Aurora's violet/cyan identity. Every title is fictional; all artwork is procedural.</p>
       </footer>
     </div>
   </div>
@@ -1527,16 +1501,15 @@
         <li><span class="n">2</span><span><b>Eyebrow kickers</b> — micro uppercase tracked labels above the hero and chart rail.</span></li>
         <li><span class="n">3</span><span><b>Hero meta chips</b> — certification + “4K · Dolby Vision” format chip (we already have has_4k / content_rating).</span></li>
         <li><span class="n">4</span><span><b>Serif tagline quote</b> leading the hero synopsis.</span></li>
-        <li><span class="n">5</span><span><b>Rank tag</b> — “№1 most watched this week”, real watch stats from this server.</span></li>
-        <li><span class="n">6</span><span><b>Ken Burns drift</b> on the hero backdrop (idle) + staggered “rise” entrance; existing mouse parallax kept.</span></li>
-        <li><span class="n">7</span><span><b>Genre pill row</b> — one-tap filters between the mood box and the rails.</span></li>
-        <li><span class="n">8</span><span><b>Top 10 rail</b> — giant outlined numerals behind posters, violet stroke that brightens on hover.</span></li>
-        <li><span class="n">9</span><span><b>Hover quick actions</b> on cards — Play / add-to-library + “% for you”, sharing the scrim with the existing AI reason.</span></li>
-        <li><span class="n">10</span><span><b>Edge-fade mask</b> on rail overflow — cards dissolve at the edges instead of clipping.</span></li>
-        <li><span class="n">11</span><span><b>Continue Watching upgrades</b> — episode chip, centered play-on-hover, luminous gradient progress with % + time left.</span></li>
-        <li><span class="n">12</span><span><b>Sidebar touches</b> — section labels, glowing active notch, My Library count, floating “Premiere” spotlight card. The card has three data states — newest addition, <i>fulfilled request</i> (“Requested 3 days ago”), and hidden when nothing’s new — cycle them with the control below; hover the card for its per-item dismiss ×.</span></li>
+        <li><span class="n">5</span><span><b>Ken Burns drift</b> on the hero backdrop (idle) + staggered “rise” entrance; existing mouse parallax kept.</span></li>
+        <li><span class="n">6</span><span><b>Genre pill row</b> — one-tap filters between the mood box and the rails.</span></li>
+        <li><span class="n">7</span><span><b>Top 10 rail</b> — giant outlined numerals behind posters, violet stroke that brightens on hover.</span></li>
+        <li><span class="n">8</span><span><b>Hover quick actions</b> on cards — one-tap Play + “% for you”, sharing the scrim with the existing AI reason. (Library add stays on the card’s persistent top-left badge — no duplicate “+”.)</span></li>
+        <li><span class="n">9</span><span><b>Edge-fade mask</b> on rail overflow — cards dissolve at the edges instead of clipping.</span></li>
+        <li><span class="n">10</span><span><b>Continue Watching upgrades</b> — episode chip, centered play-on-hover, luminous gradient progress with % + time left.</span></li>
+        <li><span class="n">11</span><span><b>Sidebar touches</b> — section labels, glowing active notch, My Library count, floating “Premiere” spotlight card. The card has three data states — newest addition, <i>fulfilled request</i> (“Requested 3 days ago”), and hidden when nothing’s new — cycle them with the control below; hover the card for its per-item dismiss ×.</span></li>
       </ol>
-      <p class="global">Also global: <b>film grain</b> (toggle below · would respect Glow = Subtle &amp; reduced-motion), violet-tinted <b>scrollbar</b> + <b>selection</b> color.</p>
+      <p class="global">Also global: <b>film grain</b> (toggle below · would respect Glow = Subtle &amp; reduced-motion), violet-tinted <b>scrollbar</b> + <b>selection</b> color. Dropped after review: Aurea’s “№1” hero rank tag — self-referential on single-user servers; the Top 10 rail owns rank.</p>
     </div>
     <button class="mock-toggle" id="annotateBtn" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Show adopted elements</button>
     <button class="mock-toggle secondary" id="premiereBtn">Premiere card: added today</button>

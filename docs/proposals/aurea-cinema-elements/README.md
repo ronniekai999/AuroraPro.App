@@ -32,21 +32,20 @@ take is **editorial voice and finishing moves**, not a reskin.
 | 2 | **Eyebrow kickers** | "AUREA ORIGINAL SERIES", "THE LEDGER" | Micro uppercase tracked labels: "TONIGHT'S PICK" above the hero, "THE CHARTS" above the Top 10 rail. Pure CSS class. |
 | 3 | **Hero meta chips** | match/year/duration + rating chip + "4K · DOLBY VISION" | We already have `has_4k` + `content_rating` in the list payload (`mapMedia` builds `tags`) — surface them in `HeroSection` alongside the existing match %. |
 | 4 | **Serif tagline quote** | italic quote leading the synopsis | One styled span in the hero copy (tagline comes from metadata when present). |
-| 5 | **Rank tag** | "№1 in Series Today" glass chip | "№1 · Most watched this week" — real watch stats from this server, seated under the existing match ring. |
-| 6 | **Ken Burns + staggered entrance** | 26s hero zoom, `rise` cascade | Idle drift layered under the existing mouse parallax (`HeroSection` already owns the transform wrapper); entrance stagger on hero copy. Both off under `prefers-reduced-motion`. |
-| 7 | **Genre pill row** | pill filters under the hero | One-tap genre filters between the mood box and the rails; active pill gets the violet glow treatment. |
-| 8 | **Top 10 rail** | giant outlined numerals behind posters | New rail type in `MediaRail`'s family: `-webkit-text-stroke` violet numerals (brighten + lift on hover), fed by the server's play counts. Lives inside the standard glass shelf so it reads native. |
-| 9 | **Hover quick actions on cards** | poster hover overlay w/ play + add + match% | Adds a Play / add-to-library row + "% for you" to `MediaCardCinema`'s existing hover scrim — shares the scrim with the current AI-reason reveal; title is NOT duplicated (the shelf keeps it). Play keeps the click→detail language elsewhere on the card. |
-| 10 | **Edge-fade mask on rails** | `mask-x` | Cards dissolve at the rail edges instead of clipping. One utility class on `.rail-scroll`; chevron paddles unchanged. |
-| 11 | **Continue Watching upgrades** | episode chip, center play-on-hover, luminous progress + % | Episode chip top-left ("S2E4 · 'The Anchorage'"), centered play chip on hover, and the progress bar moves into the shelf as a violet→cyan gradient with % + time-left readout (`formatRemaining` already computes it). |
-| 12 | **Sidebar touches** | section labels, active notch, count badge, promo card | Groups the flat nav (Browse / Library / Manage), glowing left-notch active indicator, My Library count badge, and a floating "Premiere" spotlight card (see below). |
+| 5 | **Ken Burns + staggered entrance** | 26s hero zoom, `rise` cascade | Idle drift layered under the existing mouse parallax (`HeroSection` already owns the transform wrapper); entrance stagger on hero copy. Both off under `prefers-reduced-motion`. |
+| 6 | **Genre pill row** | pill filters under the hero | One-tap genre filters between the mood box and the rails; active pill gets the violet glow treatment. |
+| 7 | **Top 10 rail** | giant outlined numerals behind posters | New rail type in `MediaRail`'s family: `-webkit-text-stroke` violet numerals (brighten + lift on hover), fed by the server's play counts. Lives inside the standard glass shelf so it reads native. |
+| 8 | **Hover quick actions on cards** | poster hover overlay w/ play + add + match% | Adds a one-tap Play + "% for you" to `MediaCardCinema`'s existing hover scrim — shares the scrim with the current AI-reason reveal; title is NOT duplicated (the shelf keeps it). Aurea's overlay also had an add button; we deliberately dropped it — the persistent top-left lib-badge is the single add-to-library control (always visible, touch-friendly, and it's where the in-library ✓ state lives). |
+| 9 | **Edge-fade mask on rails** | `mask-x` | Cards dissolve at the rail edges instead of clipping. One utility class on `.rail-scroll`; chevron paddles unchanged. |
+| 10 | **Continue Watching upgrades** | episode chip, center play-on-hover, luminous progress + % | Episode chip top-left ("S2E4 · 'The Anchorage'"), centered play chip on hover, and the progress bar moves into the shelf as a violet→cyan gradient with % + time-left readout (`formatRemaining` already computes it). |
+| 11 | **Sidebar touches** | section labels, active notch, count badge, promo card | Groups the flat nav (Browse / Library / Manage), glowing left-notch active indicator, My Library count badge, and a floating "Premiere" spotlight card (see below). |
 
 **Global touches:** subtle animated **film grain** (Appearance toggle;
 disabled under `data-glow="subtle"` and reduced-motion — same budget rules as
 the existing overlay blur), violet-tinted **scrollbar** and **selection**
 color.
 
-### The Premiere spotlight card (element 12, in depth)
+### The Premiere spotlight card (element 11, in depth)
 
 Aurea uses this sidebar slot as a marketing card for its own originals
 ("Aurea Premiere — Hollow Kings Season 2. Now streaming."). Aurora's version
@@ -72,6 +71,26 @@ Click → DetailView for the title. Hover reveals a per-item **dismiss ×**
 item). Implementation shape: a self-fetching `PremiereCard.tsx` (same
 pattern as `GamificationCard`) reading the recently-added source +
 requests state, refreshed off the realtime scan-complete event.
+
+## Removed after review (2026-07-16)
+
+Two elements were in the first cut and dropped once the copy went
+deployment-neutral:
+
+- **The hero "№1" rank tag** ("№1 in Series Today" in Aurea). On a
+  single-user server "most watched this week" is self-referential — it
+  tells you what you yourself watched — and the hero is already dense
+  (ring, eyebrow, reason pill, meta chips, tagline, three CTAs). Rank
+  lives in the Top 10 rail, which still works solo (a Wrapped-style
+  chart of your own habits) and becomes real social proof on multi-user
+  servers. If the tag ever returns, it should render only when ≥2
+  viewers contributed to the week's chart — the same earn-your-slot
+  gating as the premiere card and cold-start personalization.
+- **The hover overlay's add-to-library button.** It duplicated the
+  card's persistent top-left lib-badge — two "+" affordances for one
+  action, visible at the same time on hover. The badge wins: always
+  visible, touch-friendly, and it carries the in-library ✓ state. The
+  hover scrim keeps what it uniquely adds: one-tap Play + "% for you".
 
 ## Deliberately not adopted
 
