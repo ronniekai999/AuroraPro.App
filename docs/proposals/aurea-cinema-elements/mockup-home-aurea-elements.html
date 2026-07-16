@@ -1,0 +1,1573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="dark" />
+<title>Aurora — Home with Aurea cinema elements (mockup)</title>
+<style>
+  /* ───────────────────────────────────────────────────────────
+     Static mockup. No build, no network. Open in any browser.
+
+     "Aurora today + Aurea elements" — the current Aurora home
+     (sidebar · glass topbar · greeting band · inset hero with
+     match ring · mood box · glass shelf rails · cinema cards ·
+     Your Week band) with 12 elements adopted from the "Aurea"
+     Netflix-style concept (Kimi mockup, 2026-07), each translated
+     into Aurora's violet/cyan identity — no gold chrome.
+
+     Use the "Adopted elements" toggle (bottom-right) to outline
+     every borrowed element with a numbered chip; the legend maps
+     each number to its Aurea source. Film grain is toggleable and
+     honors prefers-reduced-motion.
+
+     Deliberately single-theme (dark): Aurora is a cinema UI.
+     All titles are fictional; poster art is procedural CSS.
+     ─────────────────────────────────────────────────────────── */
+
+  :root {
+    /* Aurora's existing tokens (index.css), honored exactly */
+    --bg: #050505;
+    --violet: #a855f7;
+    --violet-deep: #7c3aed;
+    --violet-soft: #d8b4fe;
+    --cyan: #22d3ee;
+    --indigo: #818cf8;
+    --text: #ffffff;
+    --text-2: rgba(220, 220, 232, 0.65);
+    --text-3: rgba(255, 255, 255, 0.4);
+    --glass: rgba(255, 255, 255, 0.04);
+    --glow-border: rgba(220, 200, 255, 0.22);
+    --glow-border-strong: rgba(220, 200, 255, 0.45);
+    --glow-halo:
+      0 0 0 1px rgba(220, 200, 255, 0.14),
+      0 0 28px rgba(168, 85, 247, 0.12),
+      0 0 56px rgba(255, 255, 255, 0.05);
+    --glow-halo-strong:
+      0 0 0 1px rgba(220, 200, 255, 0.25),
+      0 0 34px rgba(168, 85, 247, 0.20),
+      0 0 72px rgba(255, 255, 255, 0.08);
+    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-display: 'Sora', 'Inter Tight', -apple-system, BlinkMacSystemFont, sans-serif;
+    /* NEW (Aurea №1) — editorial serif for headlines only. Would ship as a
+       fifth Typeface system in Settings → Appearance ("VELVET"). */
+    --font-editorial: 'Fraunces', 'Iowan Old Style', 'Palatino', Georgia, 'Times New Roman', serif;
+    --annotate: #22d3ee;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    font-family: var(--font-sans);
+    color: var(--text);
+    background:
+      radial-gradient(ellipse 80% 60% at 20% 40%, rgba(168, 85, 247, 0.08) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 50% at 80% 20%, rgba(216, 180, 254, 0.05) 0%, transparent 50%),
+      radial-gradient(ellipse 50% 40% at 50% 80%, rgba(107, 33, 168, 0.06) 0%, transparent 50%),
+      var(--bg);
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+  button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; padding: 0; }
+  input { font: inherit; }
+  img { max-width: 100%; }
+  :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; border-radius: 4px; }
+
+  /* NEW (Aurea №13, global) — selection tint + luminous scrollbar,
+     violet instead of Aurea's gold. */
+  ::selection { background: rgba(168, 85, 247, 0.4); color: #f6f0ff; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(168, 85, 247, 0.22);
+    border-radius: 8px; border: 2px solid transparent; background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(168, 85, 247, 0.45); border: 2px solid transparent; background-clip: content-box; }
+
+  .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+
+  /* NEW (Aurea №13) — animated film grain, sits over everything.
+     4% opacity: texture, not noise. Toggle in the mockup controls;
+     in-app this would hang off Settings → Appearance (and turn off
+     under data-glow="subtle"). */
+  .grain {
+    content: '';
+    position: fixed; inset: -60%; z-index: 90; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    opacity: 0.04;
+    animation: grain-shift 9s steps(6) infinite;
+  }
+  body.no-grain .grain { display: none; }
+  @keyframes grain-shift {
+    0%, 100% { transform: translate(0, 0); }
+    20% { transform: translate(-3%, 2%); }
+    40% { transform: translate(2%, -3%); }
+    60% { transform: translate(-2%, -2%); }
+    80% { transform: translate(3%, 3%); }
+  }
+
+  /* NEW (Aurea №6) — staggered entrance + hero ken burns. */
+  @keyframes rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+  .rise { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .rise-1 { animation-delay: 0.06s; } .rise-2 { animation-delay: 0.14s; }
+  .rise-3 { animation-delay: 0.24s; } .rise-4 { animation-delay: 0.36s; }
+  .rise-5 { animation-delay: 0.48s; }
+  @keyframes kenburns { from { transform: scale(1.02); } to { transform: scale(1.1); } }
+  .kenburns { animation: kenburns 26s ease-in-out infinite alternate; }
+  @keyframes float-slow { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+  .float-slow { animation: float-slow 7s ease-in-out infinite; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .grain, .kenburns, .float-slow { animation: none !important; }
+    .rise { animation-duration: 0.01s; animation-delay: 0s; }
+    * { scroll-behavior: auto !important; }
+  }
+
+  /* ── Shared bits ─────────────────────────────────────────── */
+  .icon { width: 18px; height: 18px; flex-shrink: 0; }
+  .font-editorial { font-family: var(--font-editorial); }
+
+  /* NEW (Aurea №2) — eyebrow kicker: micro uppercase, wide tracking. */
+  .eyebrow {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.32em;
+    text-transform: uppercase; color: var(--violet-soft);
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .eyebrow .icon { width: 12px; height: 12px; }
+
+  .badge-glass {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 12px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600;
+    background: rgba(168, 85, 247, 0.14); color: #e3d1fa;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    backdrop-filter: blur(6px);
+  }
+  .badge-glass .icon { width: 12px; height: 12px; }
+
+  .text-gradient {
+    background: linear-gradient(120deg, #e6d3ff 0%, var(--violet) 55%, var(--cyan) 115%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+
+  /* NEW (Aurea №10) — horizontal edge-fade mask for rails. */
+  .mask-x {
+    -webkit-mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
+    mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
+  }
+
+  /* ── Sidebar (Aurora today + Aurea №12 touches) ──────────── */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; width: 240px; z-index: 50;
+    display: flex; flex-direction: column;
+    background: rgba(5, 5, 5, 0.82);
+    backdrop-filter: blur(18px);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; padding: 20px; text-align: left; }
+  .brand:hover { background: rgba(255, 255, 255, 0.02); }
+  .brand-mark {
+    width: 36px; height: 36px; border-radius: 12px; flex-shrink: 0;
+    background: rgba(147, 51, 234, 0.2); border: 1px solid rgba(168, 85, 247, 0.3);
+    display: grid; place-items: center;
+  }
+  .brand-name { font-family: var(--font-display); font-weight: 700; font-size: 17px; letter-spacing: 0.08em; }
+  .brand-sub { display: block; font-size: 8.5px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--text-3); margin-top: 3px; }
+
+  .side-nav { flex: 1; padding: 4px 12px; overflow-y: auto; }
+  /* NEW (Aurea №12) — section labels group the flat nav list. */
+  .nav-label {
+    padding: 14px 12px 6px; margin: 0;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.28em;
+    text-transform: uppercase; color: rgba(255, 255, 255, 0.28);
+  }
+  .nav-item {
+    position: relative; display: flex; align-items: center; gap: 12px;
+    width: 100%; padding: 9px 12px; margin-bottom: 2px; border-radius: 12px;
+    color: rgba(255, 255, 255, 0.6); font-size: 13.5px; font-weight: 500;
+    transition: background 0.2s, color 0.2s; text-align: left;
+  }
+  .nav-item .icon { width: 17px; height: 17px; color: rgba(255, 255, 255, 0.38); transition: color 0.2s; }
+  .nav-item:hover { background: rgba(255, 255, 255, 0.05); color: #fff; }
+  .nav-item:hover .icon { color: var(--violet-soft); }
+  .nav-item.active { background: rgba(168, 85, 247, 0.13); color: #efe3ff; }
+  .nav-item.active .icon { color: var(--violet); }
+  /* NEW (Aurea №12) — active left-notch indicator (gold → violet). */
+  .nav-notch {
+    position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+    width: 3px; height: 20px; border-radius: 999px; background: var(--violet);
+    box-shadow: 0 0 10px rgba(168, 85, 247, 0.8);
+    opacity: 0; transition: opacity 0.2s;
+  }
+  .nav-item.active .nav-notch { opacity: 1; }
+  .nav-item:hover .nav-notch { opacity: 0.4; }
+  /* NEW (Aurea №12) — count badge (My Library). */
+  .nav-count {
+    margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px;
+    display: grid; place-items: center; border-radius: 999px;
+    background: linear-gradient(135deg, var(--violet), var(--violet-deep));
+    color: #fff; font-size: 10px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* NEW (Aurea №12) — "Premiere" spotlight card, floats gently. */
+  .premiere-card {
+    margin: 10px 14px 0; padding: 14px 15px; border-radius: 16px;
+    border: 1px solid rgba(168, 85, 247, 0.28);
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.14) 0%, rgba(5, 5, 5, 0) 55%, rgba(34, 211, 238, 0.08) 100%);
+  }
+  .premiere-card .eyebrow { font-size: 8.5px; letter-spacing: 0.26em; }
+  .premiere-title { font-family: var(--font-editorial); font-style: italic; font-weight: 600; font-size: 15px; margin: 7px 0 4px; color: #f3ecff; }
+  .premiere-copy { font-size: 11px; line-height: 1.5; color: var(--text-2); margin: 0; }
+
+  .side-foot { padding: 10px 12px 12px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+  .side-foot .nav-item { margin-bottom: 1px; }
+  .notif-dot-wrap { position: relative; display: inline-flex; }
+  .notif-count {
+    position: absolute; top: -6px; right: -7px; min-width: 15px; height: 15px;
+    border-radius: 999px; background: #9333ea; color: #fff;
+    font-size: 9px; font-weight: 700; display: grid; place-items: center; padding: 0 4px;
+  }
+  .user-card { display: flex; align-items: center; gap: 11px; padding: 10px 12px 4px; margin-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.04); }
+  .user-avatar {
+    width: 32px; height: 32px; border-radius: 999px; flex-shrink: 0;
+    background: linear-gradient(135deg, #a855f7, #6b21a8);
+    display: grid; place-items: center; font-size: 12px; font-weight: 700;
+  }
+  .user-name { font-size: 13px; font-weight: 500; color: rgba(255, 255, 255, 0.8); margin: 0; }
+  .user-role { font-size: 11px; color: var(--text-3); margin: 1px 0 0; text-transform: capitalize; }
+
+  /* ── Main column + topbar (Aurora today) ─────────────────── */
+  .main { margin-left: 240px; min-height: 100vh; }
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 12px 32px;
+    background: rgba(5, 5, 5, 0.8);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  }
+  .top-search { position: relative; width: 100%; max-width: 430px; }
+  .top-search .icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; color: rgba(255, 255, 255, 0.3); }
+  .top-search input {
+    width: 100%; padding: 10px 16px 10px 38px; font-size: 13.5px;
+    color: #fff; background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 12px;
+    outline: none; transition: background 0.2s, border-color 0.2s, box-shadow 0.3s;
+  }
+  .top-search input::placeholder { color: rgba(255, 255, 255, 0.32); }
+  .top-search input:focus {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(168, 85, 247, 0.45);
+    box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.09);
+  }
+  .top-actions { display: flex; align-items: center; gap: 12px; }
+  .top-icon-btn {
+    position: relative; width: 40px; height: 40px; border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06);
+    display: grid; place-items: center; color: rgba(255, 255, 255, 0.6);
+    transition: background 0.2s, color 0.2s;
+  }
+  .top-icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+  .profile-chip {
+    display: flex; align-items: center; gap: 9px; padding: 5px 14px 5px 5px;
+    border-radius: 999px; background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06); font-size: 13px; color: rgba(255, 255, 255, 0.75);
+  }
+  .nebula {
+    width: 30px; height: 30px; border-radius: 999px;
+    background:
+      radial-gradient(circle at 30% 30%, rgba(216, 180, 254, 0.9), transparent 45%),
+      radial-gradient(circle at 70% 65%, rgba(34, 211, 238, 0.75), transparent 50%),
+      radial-gradient(circle at 50% 50%, #7c3aed, #2e1065);
+  }
+
+  .page { padding: 32px; max-width: 1440px; margin: 0 auto; }
+
+  /* ── Greeting band (Aurora today) ────────────────────────── */
+  .greeting { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin: 4px 0 20px; }
+  .greeting h1 {
+    font-family: var(--font-display); font-size: 30px; font-weight: 700;
+    letter-spacing: -0.01em; line-height: 1.15; margin: 0;
+  }
+  .greeting h1 .name {
+    background: linear-gradient(90deg, #d8b4fe, #a855f7);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .greeting-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; color: rgba(255, 255, 255, 0.6); font-size: 13.5px; }
+  .greeting-sub .dot { width: 3px; height: 3px; border-radius: 999px; background: rgba(255, 255, 255, 0.4); }
+  .greeting-sub b { color: #fff; font-weight: 600; }
+  .greeting-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .pill-btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.7); transition: background 0.2s, color 0.2s, border-color 0.2s;
+    white-space: nowrap;
+  }
+  .pill-btn:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+  .pill-btn.violet {
+    background: rgba(168, 85, 247, 0.12); border-color: rgba(168, 85, 247, 0.3); color: #e3d1fa;
+  }
+  .pill-btn.violet:hover { background: rgba(168, 85, 247, 0.2); color: #fff; }
+  .pill-btn .icon { width: 15px; height: 15px; }
+
+  /* ── HERO (Aurora today + Aurea №1-6) ────────────────────── */
+  .hero {
+    position: relative; width: 100%; height: 60vh; min-height: 500px; max-height: 680px;
+    border-radius: 20px; overflow: hidden; margin-bottom: 40px;
+    background: linear-gradient(135deg, rgba(59, 7, 100, 0.4), #0a0a0f 55%, #050505);
+    border: 1px solid rgba(216, 180, 254, 0.15);
+  }
+  .hero-media { position: absolute; inset: 0; transition: transform 0.7s ease-out; }
+  .hero-art {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(75% 90% at 78% 18%, rgba(34, 211, 238, 0.44), transparent 58%),
+      radial-gradient(60% 75% at 15% 85%, rgba(168, 85, 247, 0.55), transparent 60%),
+      radial-gradient(45% 55% at 55% 55%, rgba(129, 140, 248, 0.32), transparent 65%),
+      linear-gradient(160deg, #1d1038 0%, #0d1430 48%, #05070e 100%);
+  }
+  /* procedural "key art": signal rings + a listening dish horizon */
+  .hero-art::before {
+    content: ''; position: absolute; inset: 0;
+    background:
+      repeating-radial-gradient(circle at 76% 30%, transparent 0 34px, rgba(148, 233, 255, 0.16) 34px 36px),
+      repeating-radial-gradient(circle at 76% 30%, transparent 0 89px, rgba(216, 180, 254, 0.12) 89px 91px);
+  }
+  .hero-art::after {
+    content: ''; position: absolute; inset: 0;
+    background:
+      radial-gradient(2px 2px at 20% 22%, rgba(255,255,255,0.8), transparent 100%),
+      radial-gradient(1.6px 1.6px at 34% 12%, rgba(255,255,255,0.6), transparent 100%),
+      radial-gradient(1.4px 1.4px at 48% 30%, rgba(255,255,255,0.5), transparent 100%),
+      radial-gradient(2px 2px at 63% 8%, rgba(255,255,255,0.7), transparent 100%),
+      radial-gradient(1.5px 1.5px at 87% 45%, rgba(255,255,255,0.55), transparent 100%),
+      radial-gradient(1.3px 1.3px at 92% 15%, rgba(255,255,255,0.5), transparent 100%),
+      radial-gradient(1.8px 1.8px at 71% 60%, rgba(255,255,255,0.4), transparent 100%),
+      linear-gradient(to top, rgba(2, 4, 10, 0.85) 0%, transparent 34%);
+  }
+  /* Aurora's existing scrim stack — bottom fade to #050505, left sweep, violet wash */
+  .hero-scrim-b { position: absolute; left: 0; right: 0; bottom: 0; height: 66%; background: linear-gradient(to top, #050505 4%, rgba(5, 5, 5, 0.95) 22%, transparent 100%); pointer-events: none; }
+  .hero-scrim-l { position: absolute; top: 0; bottom: 0; left: 0; width: 66%; background: linear-gradient(to right, rgba(5, 5, 5, 0.95), rgba(5, 5, 5, 0.45) 55%, transparent); pointer-events: none; }
+  .hero-glow { position: absolute; inset: 0; mix-blend-mode: screen; opacity: 0.3; background: radial-gradient(ellipse 60% 70% at 20% 60%, rgba(168, 85, 247, 0.35), transparent 65%); pointer-events: none; }
+  .hero-scrim-tr { position: absolute; inset: 0; background: radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5, 5, 5, 0.72), transparent 70%); pointer-events: none; }
+
+  .hero-content { position: absolute; left: 32px; right: 32px; bottom: 30px; z-index: 20; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+  .hero-copy { max-width: 640px; }
+  .hero-pills { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .hero-pills .meta-inline { color: rgba(255, 255, 255, 0.6); font-size: 13.5px; }
+  .hero-reason { font-size: 12.5px; font-style: italic; color: rgba(216, 180, 254, 0.85); margin: 0 0 10px; }
+
+  /* NEW (Aurea №1) — editorial serif headline, gradient on the last word. */
+  .hero-title {
+    font-family: var(--font-editorial); font-style: italic; font-weight: 600;
+    font-size: clamp(44px, 5.4vw, 74px); line-height: 0.98; letter-spacing: -0.01em;
+    margin: 0 0 14px; color: #f7f3ff; text-wrap: balance;
+    text-shadow: 0 2px 24px rgba(0, 0, 0, 0.55);
+  }
+  .hero-title .grad {
+    background: linear-gradient(115deg, #e6d3ff 0%, #a855f7 52%, #22d3ee 110%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+
+  /* NEW (Aurea №3) — meta row with certification + format chips. */
+  .hero-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 13px; margin-bottom: 12px; }
+  .hero-meta .match { color: var(--violet-soft); font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hero-meta .plain { color: rgba(255, 255, 255, 0.62); }
+  .chip-cert {
+    padding: 2px 7px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    border: 1px solid rgba(255, 255, 255, 0.35); color: rgba(255, 255, 255, 0.75);
+  }
+  .chip-format {
+    padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+    background: rgba(255, 255, 255, 0.1); color: #dff6ff; backdrop-filter: blur(4px);
+    border: 1px solid rgba(34, 211, 238, 0.25);
+  }
+
+  /* NEW (Aurea №4) — serif tagline quote leading the synopsis. */
+  .hero-desc { font-size: 14.5px; line-height: 1.55; color: rgba(255, 255, 255, 0.7); margin: 0 0 20px; max-width: 560px; }
+  .hero-desc .tagline { font-family: var(--font-editorial); font-style: italic; color: #cfeaff; margin-right: 8px; font-size: 15.5px; }
+
+  .hero-ctas { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+  .btn-primary {
+    position: relative; overflow: hidden;
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 13px 26px 15px; border-radius: 999px;
+    background: #4f46e5; color: #fff; font-size: 14px; font-weight: 600;
+    box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
+    transition: transform 0.2s, background 0.2s;
+  }
+  .btn-primary:hover { background: #6366f1; transform: scale(1.04); }
+  .btn-primary .icon { width: 16px; height: 16px; }
+  .btn-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, 0.25); }
+  .btn-progress > span { display: block; height: 100%; width: 52%; background: #fff; box-shadow: 0 0 8px rgba(255, 255, 255, 0.6); }
+  .btn-glass {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 13px 22px; border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #fff; font-size: 14px; font-weight: 500; backdrop-filter: blur(10px);
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .btn-glass:hover { background: rgba(255, 255, 255, 0.16); border-color: rgba(255, 255, 255, 0.24); }
+  .btn-glass .icon { width: 16px; height: 16px; }
+
+  .hero-side { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; flex-shrink: 0; }
+  .not-tonight {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 9px 15px; border-radius: 999px; font-size: 13px;
+    background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.6); white-space: nowrap; transition: all 0.2s;
+  }
+  .not-tonight:hover { background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.4); color: #fff; }
+  .not-tonight .icon { width: 14px; height: 14px; }
+
+  /* Aurora's existing match ring (top-right), untouched. */
+  .match-ring { position: absolute; top: 26px; right: 26px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .match-ring .num {
+    position: absolute; inset: 0 0 22px; display: grid; place-items: center;
+    font-family: var(--font-display); font-weight: 700; font-size: 20px;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.55); font-variant-numeric: tabular-nums;
+  }
+  .match-ring .lbl { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #d8b4fe; font-weight: 600; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55); }
+
+  /* NEW (Aurea №5) — rank tag, glass chip under the ring. */
+  .rank-tag {
+    position: absolute; top: 132px; right: 26px; z-index: 20;
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px; border-radius: 14px;
+    background: rgba(10, 8, 18, 0.55); border: 1px solid rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(14px);
+  }
+  .rank-tag .no {
+    font-family: var(--font-editorial); font-style: italic; font-weight: 700; font-size: 26px;
+    background: linear-gradient(115deg, #e6d3ff, #a855f7 60%, #22d3ee 130%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .rank-tag .txt { font-size: 9px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase; color: rgba(255, 255, 255, 0.55); line-height: 1.6; }
+
+  /* ── Mood box (Aurora today, untouched) ──────────────────── */
+  .convo-wrap { max-width: 640px; margin: 0 auto 34px; }
+  .convo-search {
+    position: relative; border-radius: 16px;
+    display: flex; align-items: center;
+    background:
+      linear-gradient(rgba(14, 12, 26, 0.66), rgba(14, 12, 26, 0.66)) padding-box,
+      linear-gradient(100deg, rgba(168, 85, 247, 0.7), rgba(129, 140, 248, 0.4) 48%, rgba(34, 211, 238, 0.6)) border-box;
+    border: 1.5px solid transparent;
+    box-shadow: 0 8px 28px -10px rgba(124, 58, 237, 0.4), 0 0 20px -6px rgba(34, 211, 238, 0.25);
+  }
+  .convo-search .icon { width: 17px; height: 17px; margin: 0 8px 0 16px; color: #d8b4fe; }
+  .convo-search input { flex: 1; min-width: 0; background: transparent; border: 0; padding: 13px 8px 13px 0; color: #fff; font-size: 13.5px; outline: none; }
+  .convo-search input::placeholder { color: rgba(255, 255, 255, 0.4); }
+  .convo-kbd {
+    display: flex; align-items: center; gap: 6px; margin-right: 8px;
+    padding: 6px 10px; border-radius: 8px; font-size: 11px; font-weight: 600;
+    background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(196, 145, 255, 0.25); color: rgba(233, 213, 255, 0.9);
+  }
+  .convo-kbd kbd { display: grid; place-items: center; height: 16px; min-width: 16px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.1); font-size: 10px; font-family: inherit; }
+
+  /* ── NEW (Aurea №7) — genre pills row ────────────────────── */
+  .genre-pills { display: flex; gap: 8px; overflow-x: auto; padding: 2px 2px 6px; margin-bottom: 34px; }
+  .gpill {
+    flex-shrink: 0; padding: 7px 16px; border-radius: 999px;
+    font-size: 12.5px; font-weight: 500; letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.6);
+    background: rgba(255, 255, 255, 0.04); border: 1px solid var(--glow-border);
+    transition: all 0.25s;
+  }
+  .gpill:hover { border-color: rgba(168, 85, 247, 0.4); color: #fff; }
+  .gpill.active {
+    color: #efe3ff; background: rgba(168, 85, 247, 0.15);
+    border-color: rgba(168, 85, 247, 0.7);
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.18);
+  }
+
+  /* ── Rails (Aurora today: glass shelf + icon chip + See All) ─ */
+  .rail-container {
+    background: linear-gradient(180deg, rgba(20, 18, 30, 0.45) 0%, rgba(8, 6, 14, 0.55) 100%);
+    border: 1px solid var(--glow-border);
+    border-radius: 18px;
+    box-shadow: var(--glow-halo);
+    padding: 18px 20px 22px;
+    backdrop-filter: blur(14px);
+    margin-bottom: 28px;
+  }
+  .rail-header { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+  .rail-icon {
+    flex-shrink: 0; width: 28px; height: 28px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid transparent;
+  }
+  .rail-icon .icon { width: 16px; height: 16px; }
+  .rail-icon[data-tint="purple"] { background: rgba(168, 85, 247, 0.18); border-color: rgba(168, 85, 247, 0.4); color: #d8b4fe; }
+  .rail-icon[data-tint="teal"]   { background: rgba(45, 212, 191, 0.16); border-color: rgba(45, 212, 191, 0.4); color: #5eead4; }
+  .rail-icon[data-tint="amber"]  { background: rgba(245, 158, 11, 0.16); border-color: rgba(245, 158, 11, 0.4); color: #fcd34d; }
+  .rail-icon[data-tint="pink"]   { background: rgba(236, 72, 153, 0.16); border-color: rgba(236, 72, 153, 0.4); color: #f9a8d4; }
+  .rail-icon[data-tint="indigo"] { background: rgba(99, 102, 241, 0.16); border-color: rgba(99, 102, 241, 0.4); color: #a5b4fc; }
+  .rail-titles { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .rail-title-row { display: flex; align-items: center; gap: 10px; }
+  /* NEW (Aurea №1) — rail headings move to the editorial serif italic. */
+  .rail-title { font-family: var(--font-editorial); font-style: italic; font-weight: 600; font-size: 21px; color: rgba(255, 255, 255, 0.95); margin: 0; white-space: nowrap; }
+  .rail-eyebrow { font-size: 9px; font-weight: 700; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(216, 180, 254, 0.75); }
+  .rail-sub { font-size: 12px; color: rgba(255, 255, 255, 0.55); }
+  .ai-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 8px; border-radius: 999px;
+    background: rgba(250, 204, 21, 0.1); border: 1px solid rgba(250, 204, 21, 0.3);
+    color: #fde047; font-size: 9.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .ai-chip .icon { width: 10px; height: 10px; }
+  .rail-spacer { flex: 1; height: 1px; background: linear-gradient(90deg, rgba(220, 200, 255, 0.18) 0%, rgba(220, 200, 255, 0.04) 100%); }
+  .rail-see-all { display: inline-flex; align-items: center; gap: 4px; color: rgba(255, 255, 255, 0.4); font-size: 12.5px; flex-shrink: 0; transition: color 0.2s; }
+  .rail-see-all:hover { color: #d8b4fe; }
+  .rail-see-all .icon { width: 14px; height: 14px; }
+
+  .rail-wrap { position: relative; }
+  .rail-scroll {
+    display: flex; gap: 14px; overflow-x: auto; scroll-behavior: smooth;
+    scroll-snap-type: x proximity; padding: 6px 2px 8px;
+  }
+  .rail-scroll > * { scroll-snap-align: start; flex-shrink: 0; }
+  .rail-paddle {
+    position: absolute; top: 50%; transform: translateY(-50%); z-index: 10;
+    width: 38px; height: 38px; border-radius: 999px;
+    display: grid; place-items: center;
+    background: rgba(10, 8, 18, 0.8); border: 1px solid var(--glow-border);
+    color: rgba(255, 255, 255, 0.75); backdrop-filter: blur(8px);
+    opacity: 0; transition: opacity 0.25s, border-color 0.2s, color 0.2s;
+  }
+  .rail-wrap:hover .rail-paddle.can, .rail-paddle.can:focus-visible { opacity: 1; }
+  .rail-paddle:hover { border-color: rgba(168, 85, 247, 0.6); color: #d8b4fe; }
+  .rail-paddle.left { left: -6px; } .rail-paddle.right { right: -6px; }
+
+  /* ── Cards (Aurora's media-card-cinema + Aurea №9 hover) ──── */
+  .card {
+    position: relative; width: 180px; border-radius: 14px; overflow: hidden;
+    background: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
+    border: 1px solid var(--glow-border);
+    box-shadow: var(--glow-halo);
+    cursor: pointer; text-align: left;
+    transition: transform 0.35s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.35s, border-color 0.35s;
+  }
+  /* card-lift: Aurora lifts −6px today; Aurea adds the slight scale + ring */
+  .card:hover { transform: translateY(-7px) scale(1.015); border-color: var(--glow-border-strong); box-shadow: var(--glow-halo-strong); z-index: 5; }
+  .poster-wrap { position: relative; padding: 8px 8px 0; border-radius: 14px; overflow: hidden; }
+  .poster {
+    position: relative; display: block; width: 100%; aspect-ratio: 2 / 3;
+    border-radius: 9px; overflow: hidden;
+    background: linear-gradient(165deg, var(--p2) 0%, var(--p1) 82%);
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .card:hover .poster { transform: scale(1.02); }
+  .poster .glowfield { position: absolute; inset: 0; background: radial-gradient(90% 62% at 50% 28%, var(--p3), transparent 72%); opacity: 0.22; }
+  .poster .motif { position: absolute; inset: 0; opacity: 0.5; }
+  .poster[data-motif="rings"] .motif { background: repeating-radial-gradient(circle at 50% 34%, transparent 0 16px, color-mix(in srgb, var(--p3) 55%, transparent) 16px 17.5px); }
+  .poster[data-motif="beams"] .motif { background: repeating-linear-gradient(118deg, transparent 0 13px, color-mix(in srgb, var(--p3) 45%, transparent) 13px 14.5px); }
+  .poster[data-motif="lines"] .motif { background: repeating-linear-gradient(64deg, transparent 0 19px, color-mix(in srgb, var(--p3) 42%, transparent) 19px 20.5px); }
+  .poster[data-motif="grid"] .motif { background:
+      repeating-linear-gradient(0deg, transparent 0 22px, color-mix(in srgb, var(--p3) 38%, transparent) 22px 23px),
+      repeating-linear-gradient(90deg, transparent 0 22px, color-mix(in srgb, var(--p3) 38%, transparent) 22px 23px);
+  }
+  .poster[data-motif="waves"] .motif { background: repeating-radial-gradient(140% 60% at 50% 118%, transparent 0 17px, color-mix(in srgb, var(--p3) 50%, transparent) 17px 18.5px); }
+  .poster[data-motif="orb"] .motif { background:
+      radial-gradient(circle at 50% 32%, color-mix(in srgb, var(--p3) 88%, transparent) 0 15%, transparent 16%),
+      radial-gradient(circle at 50% 32%, transparent 0 21%, color-mix(in srgb, var(--p3) 35%, transparent) 21.5% 22.5%, transparent 23%),
+      linear-gradient(to top, color-mix(in srgb, var(--p3) 30%, transparent) 0 2px, transparent 2px);
+    background-position: 0 0, 0 0, 0 68%;
+  }
+  .poster .frame { position: absolute; inset: 9px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--p3) 26%, transparent); }
+  .poster .shade { position: absolute; inset: 0; box-shadow: inset 0 -64px 54px -30px rgba(0, 0, 0, 0.62); }
+  /* NEW (Aurea №1, small dose) — serif italic caption on procedural art */
+  .poster .p-title { position: absolute; left: 12px; right: 12px; bottom: 24px; font-family: var(--font-editorial); font-style: italic; font-weight: 600; font-size: 17px; line-height: 1.08; color: #f5efff; text-shadow: 0 1px 8px rgba(0,0,0,0.6); }
+  .poster .p-meta { position: absolute; left: 12px; right: 12px; bottom: 11px; font-size: 7.5px; font-weight: 600; letter-spacing: 0.24em; text-transform: uppercase; color: color-mix(in srgb, var(--p3) 80%, white 10%); }
+
+  /* Aurora today — lib badge (top-left) + AI gem (top-right) */
+  .lib-badge {
+    position: absolute; top: 14px; left: 14px; z-index: 3;
+    width: 30px; height: 30px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: rgba(255, 255, 255, 0.95); background: rgba(10, 8, 18, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    transition: background 0.2s, transform 0.2s;
+  }
+  .lib-badge:hover { background: rgba(168, 85, 247, 0.75); transform: scale(1.06); }
+  .lib-badge.in-lib { background: linear-gradient(135deg, #a855f7, #7e22ce); border-color: rgba(220, 200, 255, 0.6); box-shadow: 0 0 12px rgba(168, 85, 247, 0.45); }
+  .lib-badge .icon { width: 15px; height: 15px; }
+  .lib-badge .i-check { display: none; }
+  .lib-badge.in-lib .i-plus { display: none; }
+  .lib-badge.in-lib .i-check { display: block; }
+  .ai-gem {
+    position: absolute; top: 14px; right: 14px; z-index: 3;
+    width: 30px; height: 30px; border-radius: 8px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, rgba(216, 180, 254, 0.85), rgba(168, 85, 247, 0.85));
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    color: #fffbe6; box-shadow: 0 0 14px rgba(216, 180, 254, 0.5);
+  }
+  .ai-gem .icon { width: 14px; height: 14px; }
+  .card-badges { position: absolute; left: 14px; bottom: 10px; z-index: 3; display: flex; gap: 5px; }
+  .qbadge { padding: 3px 6px; border-radius: 5px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; background: rgba(8, 6, 16, 0.78); border: 1px solid rgba(255, 255, 255, 0.2); color: rgba(255, 255, 255, 0.85); }
+  /* Quality badges share the poster's bottom-left corner with the
+     procedural art's genre·year caption — drop the caption there. */
+  .poster-wrap:has(.card-badges) .p-meta { display: none; }
+  /* While the hover scrim is up, fade the art's own caption so the
+     reason / quick actions don't stack on top of it. */
+  .card:hover .poster .p-title, .card:hover .poster .p-meta,
+  .card:focus-within .poster .p-title, .card:focus-within .poster .p-meta { opacity: 0; transition: opacity 0.2s; }
+  .poster .p-title, .poster .p-meta { transition: opacity 0.2s; }
+
+  /* NEW (Aurea №9) — hover overlay: quick Play / +List + match %.
+     Title stays in the shelf (no duplication) — the overlay only adds
+     ACTIONS. Reason text (AI cards) rides in the same scrim. */
+  .card-hover {
+    position: absolute; left: 8px; right: 8px; bottom: 0; z-index: 2;
+    padding: 44px 12px 12px; border-radius: 0 0 9px 9px;
+    background: linear-gradient(to top, rgba(8, 6, 16, 0.94) 12%, rgba(8, 6, 16, 0.6) 62%, transparent 100%);
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+    pointer-events: none;
+  }
+  .card:hover .card-hover, .card:focus-within .card-hover { opacity: 1; transform: translateY(0); pointer-events: auto; }
+  .card-hover .reason { margin: 0 0 9px; font-size: 11px; font-style: italic; line-height: 1.35; color: rgba(238, 232, 252, 0.97); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .qa-row { display: flex; align-items: center; gap: 7px; }
+  .qa-btn {
+    width: 31px; height: 31px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: transform 0.2s, background 0.2s, border-color 0.2s;
+  }
+  .qa-btn:hover { transform: scale(1.1); }
+  .qa-play { background: linear-gradient(135deg, #a855f7, #7c3aed); color: #fff; box-shadow: 0 0 14px rgba(168, 85, 247, 0.55); }
+  .qa-add { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.25); color: #fff; backdrop-filter: blur(6px); }
+  .qa-add:hover { border-color: rgba(168, 85, 247, 0.7); }
+  .qa-btn .icon { width: 13px; height: 13px; }
+  .qa-match { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--violet-soft); font-variant-numeric: tabular-nums; }
+
+  .shelf { padding: 11px 14px 13px; }
+  .shelf .title { font-size: 14px; font-weight: 600; color: rgba(255, 255, 255, 0.96); margin: 0 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shelf .meta { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); }
+  .shelf .meta .star { color: #facc15; display: inline-flex; }
+  .shelf .meta .star .icon { width: 10px; height: 10px; }
+
+  /* ── Continue Watching (Aurora today + Aurea №11) ────────── */
+  .cw-card { width: 320px; }
+  .cw-art { aspect-ratio: 16 / 9; }
+  /* CW art is "bare" — the shelf below carries the title, so the art
+     caption would just duplicate it. */
+  .cw-art .p-title, .cw-art .p-meta { display: none; }
+  /* NEW (Aurea №11a) — episode chip, top-left over the art. */
+  .ep-chip {
+    position: absolute; top: 14px; left: 14px; z-index: 3;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    background: rgba(10, 8, 18, 0.68); border: 1px solid rgba(255, 255, 255, 0.14);
+    font-size: 10px; font-weight: 600; letter-spacing: 0.04em; color: rgba(230, 222, 255, 0.92);
+    backdrop-filter: blur(6px);
+  }
+  .ep-chip .icon { width: 11px; height: 11px; color: var(--violet-soft); }
+  /* NEW (Aurea №11b) — center play chip fades in on hover. */
+  .cw-playchip {
+    position: absolute; inset: 8px 8px 0; z-index: 2; display: grid; place-items: center;
+    pointer-events: none;
+  }
+  .cw-playchip span {
+    width: 46px; height: 46px; border-radius: 999px;
+    display: grid; place-items: center;
+    background: rgba(12, 8, 22, 0.62); border: 1px solid rgba(216, 180, 254, 0.4);
+    color: #e9d5ff; backdrop-filter: blur(8px);
+    transform: scale(0.75); opacity: 0; transition: all 0.3s;
+    box-shadow: 0 0 24px rgba(168, 85, 247, 0.35);
+  }
+  .card:hover .cw-playchip span { transform: scale(1); opacity: 1; }
+  .cw-playchip .icon { width: 16px; height: 16px; margin-left: 2px; }
+  /* NEW (Aurea №11c) — luminous gradient progress + % readout.
+     (Today: a 2px white-ish bar on the poster, no readout.) */
+  .cw-progress { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .cw-track { position: relative; flex: 1; height: 3px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
+  .cw-fill { position: absolute; inset: 0 auto 0 0; border-radius: 999px; background: linear-gradient(90deg, #d8b4fe, #a855f7 55%, #22d3ee); box-shadow: 0 0 8px rgba(168, 85, 247, 0.6); }
+  .cw-pct { font-size: 11px; font-weight: 700; color: var(--violet-soft); font-variant-numeric: tabular-nums; }
+  .cw-left { font-size: 11px; color: var(--text-3); white-space: nowrap; }
+
+  /* ── NEW (Aurea №8) — Top 10 rail with outlined numerals ─── */
+  .tt-scroll { align-items: flex-end; padding-top: 18px; }
+  .tt-item { display: flex; align-items: flex-end; padding-left: 6px; background: none; border: none; }
+  .tt-num {
+    font-family: var(--font-editorial); font-style: italic; font-weight: 700;
+    font-size: 138px; line-height: 0.72; letter-spacing: -0.04em;
+    color: transparent;
+    -webkit-text-stroke: 2.5px rgba(168, 85, 247, 0.6);
+    margin-right: -12px; margin-bottom: 4px; position: relative; z-index: 1;
+    transition: all 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+    user-select: none;
+  }
+  .tt-item:hover .tt-num { -webkit-text-stroke-color: rgba(216, 180, 254, 0.95); transform: translateY(-5px); }
+  .tt-poster {
+    position: relative; z-index: 2; width: 128px; border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--glow-border); box-shadow: var(--glow-halo);
+    transition: transform 0.45s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.45s, border-color 0.45s;
+  }
+  .tt-item:hover .tt-poster { transform: translateY(-7px) scale(1.03); border-color: var(--glow-border-strong); box-shadow: var(--glow-halo-strong); }
+  .tt-poster .poster { border-radius: 0; padding: 0; }
+  .tt-poster .p-title { font-size: 13.5px; bottom: 10px; }
+  .tt-poster .p-meta { display: none; }
+
+  /* ── Your Week + Watch Together (Aurora today, compact) ──── */
+  .bands { display: grid; grid-template-columns: 1.6fr 1fr; gap: 20px; margin: 34px 0 10px; }
+  .band {
+    border-radius: 18px; border: 1px solid var(--glow-border);
+    background: rgba(255, 255, 255, 0.03); box-shadow: var(--glow-halo);
+    backdrop-filter: blur(14px); padding: 20px 22px;
+  }
+  .band h3 { font-family: var(--font-display); font-size: 15px; font-weight: 700; margin: 0 0 14px; display: flex; align-items: center; gap: 9px; }
+  .band h3 .icon { width: 16px; height: 16px; color: var(--violet-soft); }
+  .week-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+  .stat .k { font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); margin: 0 0 5px; }
+  .stat .v { font-family: var(--font-display); font-size: 19px; font-weight: 700; margin: 0; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 11px; font-weight: 500; color: var(--text-2); }
+  .xp-track { position: relative; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); margin-top: 8px; overflow: hidden; }
+  .xp-fill { position: absolute; inset: 0 auto 0 0; width: 62%; border-radius: 999px; background: linear-gradient(90deg, #a855f7, #22d3ee); }
+  .wt-row { display: flex; gap: 10px; align-items: center; }
+  .wt-input { flex: 1; padding: 10px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); color: #fff; font-size: 13px; outline: none; }
+  .wt-input::placeholder { color: rgba(255, 255, 255, 0.35); letter-spacing: 0.18em; }
+  .wt-input:focus { border-color: rgba(168, 85, 247, 0.5); }
+  .band .hint { font-size: 12px; color: var(--text-2); margin: 10px 0 0; line-height: 1.5; }
+
+  /* ── Footer (Aurea's sign-off, Aurora-ized) ──────────────── */
+  .footer { margin-top: 44px; padding: 30px 0 14px; border-top: 1px solid rgba(220, 200, 255, 0.12); text-align: center; }
+  .footer .wordmark { font-family: var(--font-editorial); font-style: italic; font-size: 15px; letter-spacing: 0.2em; }
+  .footer p { max-width: 520px; margin: 10px auto 0; font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+
+  /* ── Mockup controls + annotation layer ──────────────────── */
+  .mock-controls {
+    position: fixed; right: 18px; bottom: 18px; z-index: 100;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+  }
+  .mock-toggle {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 10px 16px; border-radius: 999px;
+    background: rgba(8, 6, 16, 0.9); border: 1px solid rgba(34, 211, 238, 0.4);
+    color: #a5f3fc; font-size: 12.5px; font-weight: 600;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5), 0 0 18px rgba(34, 211, 238, 0.15);
+    backdrop-filter: blur(12px);
+  }
+  .mock-toggle:hover { border-color: rgba(34, 211, 238, 0.7); color: #cffafe; }
+  .mock-toggle .swatch { width: 14px; height: 14px; border-radius: 4px; border: 1.5px dashed var(--annotate); }
+  .mock-toggle.secondary { border-color: rgba(255, 255, 255, 0.18); color: rgba(255, 255, 255, 0.6); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5); }
+  .mock-toggle.secondary:hover { color: #fff; }
+
+  .legend {
+    display: none; width: 348px; max-height: min(520px, 62vh); overflow-y: auto;
+    border-radius: 16px; padding: 16px 18px;
+    background: rgba(8, 6, 16, 0.94); border: 1px solid rgba(34, 211, 238, 0.35);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(16px);
+  }
+  body.annotate .legend { display: block; }
+  .legend h4 { margin: 0 0 3px; font-size: 13px; font-weight: 700; color: #cffafe; }
+  .legend .src { margin: 0 0 12px; font-size: 11px; color: var(--text-3); line-height: 1.5; }
+  .legend ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  .legend li { display: flex; gap: 10px; font-size: 11.5px; line-height: 1.45; color: rgba(255, 255, 255, 0.78); }
+  .legend li .n {
+    flex-shrink: 0; width: 18px; height: 18px; margin-top: 1px; border-radius: 999px;
+    background: var(--annotate); color: #04222b; font-size: 10.5px; font-weight: 800;
+    display: grid; place-items: center;
+  }
+  .legend li b { color: #fff; font-weight: 600; }
+  .legend .global { margin: 12px 0 0; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.1); font-size: 11px; color: var(--text-2); line-height: 1.55; }
+
+  body.annotate [data-new] { outline: 1.5px dashed rgba(34, 211, 238, 0.75); outline-offset: 3px; }
+  body.annotate [data-new]::after {
+    content: attr(data-new);
+    position: absolute; top: -10px; left: -10px; z-index: 60;
+    width: 20px; height: 20px; border-radius: 999px;
+    background: var(--annotate); color: #04222b;
+    font-family: var(--font-sans); font-size: 11px; font-weight: 800;
+    line-height: 20px; text-align: center;
+    box-shadow: 0 0 10px rgba(34, 211, 238, 0.8);
+  }
+  /* The chip anchor needs a positioning context — but .rank-tag and
+     .hero-media are ALREADY absolutely positioned; a blanket
+     position:relative would yank them back into flow (the hero media
+     collapses to zero height). Exclude them. */
+  [data-new]:not(.rank-tag):not(.hero-media) { position: relative; }
+  /* keep chips visible where the tagged element hugs an edge or clips
+     its overflow (cards + hero media are overflow:hidden) */
+  body.annotate .match-ring[data-new]::after, body.annotate .rank-tag[data-new]::after { left: auto; right: -10px; }
+  body.annotate .card[data-new]::after { top: 2px; left: 2px; }
+  body.annotate .hero-media[data-new]::after { top: 14px; left: 14px; }
+  body.annotate .side-nav[data-new]::after { top: 8px; left: auto; right: 10px; }
+
+  @media (max-width: 1080px) {
+    .sidebar { display: none; }
+    .main { margin-left: 0; }
+    .bands { grid-template-columns: 1fr; }
+    .week-grid { grid-template-columns: repeat(2, 1fr); }
+    .hero-side { display: none; }
+  }
+</style>
+</head>
+<body>
+  <!-- svg sprite -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#22d3ee"/>
+      </linearGradient>
+      <linearGradient id="markGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#A855F7"/><stop offset="0.5" stop-color="#7C3AED"/><stop offset="1" stop-color="#22D3EE"/>
+      </linearGradient>
+    </defs>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z" fill="currentColor"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-chev-l" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-chev-r" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></symbol>
+    <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 2l1.7 6.3L20 10l-6.3 1.7L12 18l-1.7-6.3L4 10l6.3-1.7z" fill="currentColor"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" fill="currentColor"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 2.5l4 4 4-4"/></symbol>
+    <symbol id="i-film" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 4.5v15M16.5 4.5v15M3 9.5h4.5M3 14.5h4.5M16.5 9.5H21M16.5 14.5H21"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9V21h13V9"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></symbol>
+    <symbol id="i-bookmark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6.5 3.5h11V21L12 16.5 6.5 21z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5v11M6.5 10l5.5 5.5L17.5 10M5 20.5h14"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.8M12 18.7v2.8M2.5 12h2.8M18.7 12h2.8M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5a6 6 0 0 1 12 0c0 5 2 6.5 2 6.5H4s2-1.5 2-6.5"/><path d="M10 19.5a2.2 2.2 0 0 0 4 0"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17.5" cy="9" r="2.6"/><path d="M15.8 14.7a5.4 5.4 0 0 1 5.7 5.3"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.5-4.5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 8a8.1 8.1 0 0 0-14.4-1.6M4 4v4h4M4 16a8.1 8.1 0 0 0 14.4 1.6M20 20v-4h-4"/></symbol>
+    <symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 20s-7.4-4.7-9.2-9A5.2 5.2 0 0 1 12 6.7 5.2 5.2 0 0 1 21.2 11c-1.8 4.3-9.2 9-9.2 9z"/></symbol>
+    <symbol id="i-flame" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3s5 4.6 5 9.2a5 5 0 0 1-10 0c0-1.9.9-3.5 1.9-4.9.5 1.4 1.5 2.1 2.6 2.1C11.3 7.6 11.2 5 12 3z"/></symbol>
+    <symbol id="i-gem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M7 4h10l4 5.2L12 20.5 3 9.2z"/><path d="M3 9.2h18M12 20.5L9.3 9.2M12 20.5l2.7-11.3"/></symbol>
+    <symbol id="i-trophy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 4h9v4.6a4.5 4.5 0 0 1-9 0z"/><path d="M7.5 5.2H4.4A3.1 3.1 0 0 0 7.6 9M16.5 5.2h3.1A3.1 3.1 0 0 1 16.4 9M12 13v3.6M8.5 20.5h7M10 16.6h4"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2.2 5-5 2.2 2.2-5z"/></symbol>
+  </svg>
+
+  <div class="grain" aria-hidden="true"></div>
+
+  <!-- ═══════════ SIDEBAR — Aurora today + №12 ═══════════ -->
+  <aside class="sidebar">
+    <button class="brand" type="button" aria-label="Go to home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 36 36" fill="none"><circle cx="18" cy="18" r="16" fill="url(#markGrad)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg>
+      </span>
+      <span><span class="brand-name">AURORA PRO</span><span class="brand-sub">Your stories, your server</span></span>
+    </button>
+
+    <nav class="side-nav" data-new="12" aria-label="Primary">
+      <p class="nav-label">Browse</p>
+      <button class="nav-item active"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-home"/></svg>Home</button>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-film"/></svg>Movies</button>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-tv"/></svg>TV Shows</button>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-star"/></svg>Collections</button>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-cal"/></svg>Calendar</button>
+
+      <p class="nav-label">Library</p>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-bookmark"/></svg>My Library<span class="nav-count">37</span></button>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-download"/></svg>Requests</button>
+
+      <p class="nav-label">Manage</p>
+      <button class="nav-item"><span class="nav-notch" aria-hidden="true"></span><svg class="icon"><use href="#i-gear"/></svg>Admin</button>
+
+      <div class="premiere-card float-slow">
+        <span class="eyebrow"><svg class="icon"><use href="#i-sparkle"/></svg>Premiere · added today</span>
+        <p class="premiere-title">Neon Meridian</p>
+        <p class="premiere-copy">A rain-slick chase through a city that never resolves. Now in your library — 4K · HDR.</p>
+      </div>
+    </nav>
+
+    <div class="side-foot">
+      <button class="nav-item"><svg class="icon"><use href="#i-server"/></svg>Server Status</button>
+      <button class="nav-item"><span class="notif-dot-wrap"><svg class="icon"><use href="#i-bell"/></svg><span class="notif-count">3</span></span>Notifications</button>
+      <button class="nav-item"><svg class="icon"><use href="#i-gear"/></svg>Settings</button>
+      <div class="user-card">
+        <div class="user-avatar" aria-hidden="true">R</div>
+        <div><p class="user-name">ronnie</p><p class="user-role">admin</p></div>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <!-- ═══════════ TOPBAR — Aurora today ═══════════ -->
+    <header class="topbar">
+      <div class="top-search">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <input type="text" placeholder="Search titles... (⌘K)" aria-label="Search titles" />
+      </div>
+      <div class="top-actions">
+        <button class="top-icon-btn" title="Join a watch party" aria-label="Join a watch party"><svg class="icon"><use href="#i-users"/></svg></button>
+        <span class="profile-chip"><span class="nebula" aria-hidden="true"></span>Ronnie</span>
+      </div>
+    </header>
+
+    <div class="page">
+      <!-- ═══════════ GREETING BAND — Aurora today ═══════════ -->
+      <div class="greeting rise rise-1">
+        <div>
+          <h1>Good evening, <span class="name">Ronnie</span></h1>
+          <div class="greeting-sub">
+            <span>Thursday evening</span>
+            <span class="dot" aria-hidden="true"></span>
+            <span><b>12</b> titles worth your time out of the <b>1,842</b> in your library</span>
+          </div>
+        </div>
+        <div class="greeting-actions">
+          <button class="pill-btn"><svg class="icon"><use href="#i-refresh"/></svg>Refresh picks</button>
+          <button class="pill-btn violet"><svg class="icon"><use href="#i-sparkle"/></svg>Surprise me</button>
+        </div>
+      </div>
+
+      <!-- ═══════════ HERO — Aurora today + №1-6 ═══════════ -->
+      <section class="hero rise rise-2" aria-label="Featured: Signal to Noise">
+        <div class="hero-media" id="heroMedia" data-new="6">
+          <div class="hero-art kenburns"></div>
+        </div>
+        <div class="hero-scrim-b"></div>
+        <div class="hero-scrim-l"></div>
+        <div class="hero-glow"></div>
+        <div class="hero-scrim-tr"></div>
+
+        <div class="match-ring" role="img" aria-label="94 percent match">
+          <svg width="84" height="84" viewBox="0 0 84 84" style="transform:rotate(-90deg)" aria-hidden="true">
+            <circle cx="42" cy="42" r="36" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="6"/>
+            <circle cx="42" cy="42" r="36" fill="none" stroke="url(#ringGrad)" stroke-width="6" stroke-linecap="round" stroke-dasharray="212.6 226.2"/>
+          </svg>
+          <span class="num" aria-hidden="true">94%</span>
+          <span class="lbl" aria-hidden="true">Match</span>
+        </div>
+
+        <div class="rank-tag" data-new="5">
+          <span class="no">№1</span>
+          <span class="txt">Most watched<br>in your house</span>
+        </div>
+
+        <div class="hero-content">
+          <div class="hero-copy">
+            <div class="rise rise-2" style="margin-bottom:10px">
+              <span class="eyebrow" data-new="2"><svg class="icon"><use href="#i-sparkle"/></svg>Tonight's pick</span>
+            </div>
+            <div class="hero-pills rise rise-2">
+              <span class="badge-glass"><svg class="icon"><use href="#i-sparkle"/></svg>Aurora picked this for you</span>
+              <span class="meta-inline">Sci-Fi Thriller • 2024</span>
+            </div>
+            <p class="hero-reason rise rise-3">Because you finished Dark Harbor — this one hums on the same frequency.</p>
+            <h2 class="hero-title rise rise-3" data-new="1">Signal <span class="grad">to Noise</span></h2>
+            <div class="hero-meta rise rise-4" data-new="3">
+              <span class="match">94% Match</span>
+              <span class="plain">2024</span>
+              <span class="plain">2 Seasons</span>
+              <span class="chip-cert">TV-MA</span>
+              <span class="chip-format">4K · DOLBY VISION</span>
+            </div>
+            <p class="hero-desc rise rise-4"><span class="tagline" data-new="4">“The static was never empty.”</span>A radio astronomer intercepts a signal that answers back — and every listener starts hearing something different.</p>
+            <div class="hero-ctas rise rise-5">
+              <button class="btn-primary"><svg class="icon"><use href="#i-clock"/></svg>Resume S1E3 · 31:07<span class="btn-progress" aria-hidden="true"><span></span></span></button>
+              <button class="btn-glass"><svg class="icon"><use href="#i-plus"/></svg>My List</button>
+              <button class="btn-glass"><svg class="icon"><use href="#i-info"/></svg>More Info</button>
+            </div>
+          </div>
+          <div class="hero-side">
+            <button class="not-tonight">Not tonight <svg class="icon"><use href="#i-refresh"/></svg></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ MOOD BOX — Aurora today ═══════════ -->
+      <div class="convo-wrap rise rise-4">
+        <div class="convo-search">
+          <svg class="icon"><use href="#i-sparkle"/></svg>
+          <input type="text" placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark" aria-label="Describe what you're in the mood for" />
+          <span class="convo-kbd"><kbd>↵</kbd>Search</span>
+        </div>
+      </div>
+
+      <!-- ═══════════ NEW №7 — GENRE PILLS ═══════════ -->
+      <nav class="genre-pills scrollbar-hide rise rise-5" data-new="7" aria-label="Quick genre filters">
+        <button class="gpill active">All</button>
+        <button class="gpill">Sci-Fi</button>
+        <button class="gpill">Mystery</button>
+        <button class="gpill">Drama</button>
+        <button class="gpill">Documentary</button>
+        <button class="gpill">Animation</button>
+        <button class="gpill">Comedy</button>
+        <button class="gpill">Thriller</button>
+        <button class="gpill">Horror</button>
+        <button class="gpill">Fantasy</button>
+      </nav>
+
+      <!-- ═══════════ CONTINUE WATCHING — today + №11 ═══════════ -->
+      <section class="rail-container">
+        <div class="rail-header">
+          <span class="rail-icon" data-tint="purple"><svg class="icon"><use href="#i-clock"/></svg></span>
+          <div class="rail-titles">
+            <div class="rail-title-row"><h2 class="rail-title">Continue Watching</h2></div>
+            <span class="rail-sub">Pick up exactly where the reel stopped</span>
+          </div>
+          <span class="rail-spacer" aria-hidden="true"></span>
+        </div>
+        <div class="rail-wrap">
+          <button class="rail-paddle left" aria-label="Scroll Continue Watching left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
+          <div class="rail-scroll scrollbar-hide mask-x">
+
+            <button class="card cw-card" data-new="11">
+              <div class="poster-wrap">
+                <span class="poster cw-art" data-motif="waves" style="--p1:#0b1d26;--p2:#14424d;--p3:#4dd7c0">
+                  <span class="glowfield"></span><span class="motif"></span><span class="shade"></span>
+                  <span class="p-title">Dark Harbor</span>
+                </span>
+                <span class="ep-chip"><svg class="icon"><use href="#i-clock"/></svg>S2E4 · “The Anchorage”</span>
+                <span class="cw-playchip" aria-hidden="true"><span><svg class="icon"><use href="#i-play"/></svg></span></span>
+              </div>
+              <div class="shelf">
+                <p class="title">Dark Harbor</p>
+                <div class="cw-progress">
+                  <span class="cw-track"><span class="cw-fill" style="width:63%"></span></span>
+                  <span class="cw-pct">63%</span>
+                  <span class="cw-left">23m left</span>
+                </div>
+              </div>
+            </button>
+
+            <button class="card cw-card">
+              <div class="poster-wrap">
+                <span class="poster cw-art" data-motif="rings" style="--p1:#070d1c;--p2:#10264d;--p3:#59c2f0">
+                  <span class="glowfield"></span><span class="motif"></span><span class="shade"></span>
+                  <span class="p-title">Orbital Decay</span>
+                </span>
+                <span class="ep-chip"><svg class="icon"><use href="#i-clock"/></svg>Film · 2020</span>
+                <span class="cw-playchip" aria-hidden="true"><span><svg class="icon"><use href="#i-play"/></svg></span></span>
+              </div>
+              <div class="shelf">
+                <p class="title">Orbital Decay</p>
+                <div class="cw-progress">
+                  <span class="cw-track"><span class="cw-fill" style="width:41%"></span></span>
+                  <span class="cw-pct">41%</span>
+                  <span class="cw-left">1h 12m left</span>
+                </div>
+              </div>
+            </button>
+
+            <button class="card cw-card">
+              <div class="poster-wrap">
+                <span class="poster cw-art" data-motif="beams" style="--p1:#0e131f;--p2:#2c3a55;--p3:#93b4f0">
+                  <span class="glowfield"></span><span class="motif"></span><span class="shade"></span>
+                  <span class="p-title">The Quiet Divide</span>
+                </span>
+                <span class="ep-chip"><svg class="icon"><use href="#i-clock"/></svg>S1E7 · “Hairline”</span>
+                <span class="cw-playchip" aria-hidden="true"><span><svg class="icon"><use href="#i-play"/></svg></span></span>
+              </div>
+              <div class="shelf">
+                <p class="title">The Quiet Divide</p>
+                <div class="cw-progress">
+                  <span class="cw-track"><span class="cw-fill" style="width:88%"></span></span>
+                  <span class="cw-pct">88%</span>
+                  <span class="cw-left">6m left</span>
+                </div>
+              </div>
+            </button>
+
+            <button class="card cw-card">
+              <div class="poster-wrap">
+                <span class="poster cw-art" data-motif="waves" style="--p1:#130f1d;--p2:#3b2a63;--p3:#b79cff">
+                  <span class="glowfield"></span><span class="motif"></span><span class="shade"></span>
+                  <span class="p-title">Static Fields</span>
+                </span>
+                <span class="ep-chip"><svg class="icon"><use href="#i-clock"/></svg>E3 · “Tape Hiss”</span>
+                <span class="cw-playchip" aria-hidden="true"><span><svg class="icon"><use href="#i-play"/></svg></span></span>
+              </div>
+              <div class="shelf">
+                <p class="title">Static Fields</p>
+                <div class="cw-progress">
+                  <span class="cw-track"><span class="cw-fill" style="width:12%"></span></span>
+                  <span class="cw-pct">12%</span>
+                  <span class="cw-left">41m left</span>
+                </div>
+              </div>
+            </button>
+
+          </div>
+          <button class="rail-paddle right" aria-label="Scroll Continue Watching right"><svg class="icon"><use href="#i-chev-r"/></svg></button>
+        </div>
+      </section>
+
+      <!-- ═══════════ NEW №8 — TOP 10 RAIL ═══════════ -->
+      <section class="rail-container" data-new="8">
+        <div class="rail-header">
+          <span class="rail-icon" data-tint="indigo"><svg class="icon"><use href="#i-flame"/></svg></span>
+          <div class="rail-titles">
+            <span class="rail-eyebrow">House charts</span>
+            <div class="rail-title-row"><h2 class="rail-title">Top 10 in your house this week</h2></div>
+          </div>
+          <span class="rail-spacer" aria-hidden="true"></span>
+        </div>
+        <div class="rail-wrap">
+          <button class="rail-paddle left" aria-label="Scroll Top 10 left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
+          <div class="rail-scroll tt-scroll scrollbar-hide mask-x">
+
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">1</span><span class="tt-poster"><span class="poster" data-motif="waves" style="--p1:#0b1d26;--p2:#14424d;--p3:#4dd7c0"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Dark Harbor</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">2</span><span class="tt-poster"><span class="poster" data-motif="beams" style="--p1:#150a1e;--p2:#43104f;--p3:#e15fd4"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Neon Meridian</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">3</span><span class="tt-poster"><span class="poster" data-motif="rings" style="--p1:#1c1017;--p2:#5c2f24;--p3:#e3b04b"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Hollow Kings</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">4</span><span class="tt-poster"><span class="poster" data-motif="grid" style="--p1:#0d1509;--p2:#294312;--p3:#a3d977"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Palegrove</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">5</span><span class="tt-poster"><span class="poster" data-motif="beams" style="--p1:#16100a;--p2:#453016;--p3:#eab308"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Midnight Cartel</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">6</span><span class="tt-poster"><span class="poster" data-motif="orb" style="--p1:#1c0f0b;--p2:#55261a;--p3:#f2924b"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Salt &amp; Cinder</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">7</span><span class="tt-poster"><span class="poster" data-motif="grid" style="--p1:#101816;--p2:#23443c;--p3:#7ee0c3"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">The Glass Aviary</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">8</span><span class="tt-poster"><span class="poster" data-motif="orb" style="--p1:#1d1116;--p2:#58283c;--p3:#ff9db6"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Comet Season</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">9</span><span class="tt-poster"><span class="poster" data-motif="rings" style="--p1:#070d1c;--p2:#10264d;--p3:#59c2f0"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Orbital Decay</span></span></span></button>
+            <button class="tt-item"><span class="tt-num" aria-hidden="true">10</span><span class="tt-poster"><span class="poster" data-motif="orb" style="--p1:#1c1410;--p2:#57351c;--p3:#fbbf24"><span class="glowfield"></span><span class="motif"></span><span class="shade"></span><span class="p-title">Paper Suns</span></span></span></button>
+
+          </div>
+          <button class="rail-paddle right" aria-label="Scroll Top 10 right"><svg class="icon"><use href="#i-chev-r"/></svg></button>
+        </div>
+      </section>
+
+      <!-- ═══════════ BECAUSE-YOU-FINISHED RAIL — today + №9/№10 ═══════════ -->
+      <section class="rail-container">
+        <div class="rail-header">
+          <span class="rail-icon" data-tint="pink"><svg class="icon"><use href="#i-heart"/></svg></span>
+          <div class="rail-titles">
+            <div class="rail-title-row">
+              <h2 class="rail-title">Because you finished Dark Harbor</h2>
+              <span class="ai-chip"><svg class="icon"><use href="#i-sparkle"/></svg>AI Pick</span>
+            </div>
+            <span class="rail-sub">Coastal dread, slow-burn answers</span>
+          </div>
+          <span class="rail-spacer" aria-hidden="true"></span>
+        </div>
+        <div class="rail-wrap" data-new="10">
+          <button class="rail-paddle left" aria-label="Scroll rail left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
+          <div class="rail-scroll scrollbar-hide mask-x">
+
+            <button class="card" data-new="9">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="waves" style="--p1:#0a1410;--p2:#1e4034;--p3:#6ee7b7">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">The Last Lighthouse</span><span class="p-meta">Thriller · 2022</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="ai-gem" title="AI pick — hover for why" aria-hidden="true"><svg class="icon"><use href="#i-sparkle"/></svg></span>
+                <span class="card-hover">
+                  <span class="reason">“Coastal dread and a keeper who logs a light that shouldn't be there — the same fog Dark Harbor lives in.”</span>
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Last Lighthouse"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">91% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">The Last Lighthouse</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.5 · 2022 · Thriller</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="grid" style="--p1:#0d1509;--p2:#294312;--p3:#a3d977">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Palegrove</span><span class="p-meta">Folk Horror · 2021</span>
+                </span>
+                <span class="lib-badge in-lib" role="button" tabindex="0" aria-label="In My Library — click to remove"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="ai-gem" aria-hidden="true"><svg class="icon"><use href="#i-sparkle"/></svg></span>
+                <span class="card-hover">
+                  <span class="reason">“A village that votes on what the forest is owed. Slow ritual dread, no jump scares.”</span>
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Palegrove"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Remove from My Library"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="qa-match">88% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Palegrove</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.1 · 2021 · Horror</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="grid" style="--p1:#101816;--p2:#23443c;--p3:#7ee0c3">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">The Glass Aviary</span><span class="p-meta">Period Drama · 2023</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Glass Aviary"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">84% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">The Glass Aviary</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.9 · 2023 · Drama</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="beams" style="--p1:#0f1214;--p2:#2e3c42;--p3:#9fb9c4">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Iron Tide</span><span class="p-meta">War · 2021</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Iron Tide"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">80% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Iron Tide</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.4 · 2021 · War</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="rings" style="--p1:#070d1c;--p2:#10264d;--p3:#59c2f0">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Orbital Decay</span><span class="p-meta">Sci-Fi · 2020</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Orbital Decay"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">78% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Orbital Decay</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.7 · 2020 · Sci-Fi</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="grid" style="--p1:#0e1511;--p2:#2f4a33;--p3:#86efac">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Verdigris</span><span class="p-meta">Docuseries · 2022</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Verdigris"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">74% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Verdigris</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.8 · 2022 · Docu</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="lines" style="--p1:#101020;--p2:#333060;--p3:#8b9cf6">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">The Cartographer's Daughter</span><span class="p-meta">Adventure · 2022</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play The Cartographer's Daughter"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">71% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">The Cartographer's Daughter</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.6 · 2022 · Adventure</div>
+              </div>
+            </button>
+
+          </div>
+          <button class="rail-paddle right" aria-label="Scroll rail right"><svg class="icon"><use href="#i-chev-r"/></svg></button>
+        </div>
+      </section>
+
+      <!-- ═══════════ RECENTLY ADDED — Aurora today ═══════════ -->
+      <section class="rail-container">
+        <div class="rail-header">
+          <span class="rail-icon" data-tint="teal"><svg class="icon"><use href="#i-sparkle"/></svg></span>
+          <div class="rail-titles">
+            <div class="rail-title-row"><h2 class="rail-title">Recently Added</h2></div>
+            <span class="rail-sub">Fresh off the scanner</span>
+          </div>
+          <span class="rail-spacer" aria-hidden="true"></span>
+          <button class="rail-see-all">See All <svg class="icon"><use href="#i-chev-r"/></svg></button>
+        </div>
+        <div class="rail-wrap">
+          <button class="rail-paddle left" aria-label="Scroll Recently Added left"><svg class="icon"><use href="#i-chev-l"/></svg></button>
+          <div class="rail-scroll scrollbar-hide mask-x">
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="beams" style="--p1:#150a1e;--p2:#43104f;--p3:#e15fd4">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Neon Meridian</span><span class="p-meta">Sci-Fi Noir · 2025</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-badges"><span class="qbadge">4K</span><span class="qbadge">HDR</span></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Neon Meridian"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">86% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Neon Meridian</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.1 · 2025 · Sci-Fi</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="orb" style="--p1:#1b0e22;--p2:#5b2a6e;--p3:#f9a8d4">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Afterlight Express</span><span class="p-meta">Animation · 2023</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-badges"><span class="qbadge">4K</span></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Afterlight Express"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">82% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Afterlight Express</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>8.2 · 2023 · Animation</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="waves" style="--p1:#130f1d;--p2:#3b2a63;--p3:#b79cff">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Static Fields</span><span class="p-meta">Music Docu · 2025</span>
+                </span>
+                <span class="lib-badge in-lib" role="button" tabindex="0" aria-label="In My Library — click to remove"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Static Fields"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Remove from My Library"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="qa-match">79% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Static Fields</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.7 · 2025 · Docu</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="orb" style="--p1:#1d1116;--p2:#58283c;--p3:#ff9db6">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Comet Season</span><span class="p-meta">Coming of Age · 2024</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-badges"><span class="qbadge">HDR</span></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Comet Season"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">76% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Comet Season</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.9 · 2024 · Drama</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="orb" style="--p1:#1c1410;--p2:#57351c;--p3:#fbbf24">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Paper Suns</span><span class="p-meta">Comedy · 2023</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Paper Suns"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">73% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Paper Suns</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.4 · 2023 · Comedy</div>
+              </div>
+            </button>
+
+            <button class="card">
+              <div class="poster-wrap">
+                <span class="poster" data-motif="orb" style="--p1:#1c0f0b;--p2:#55261a;--p3:#f2924b">
+                  <span class="glowfield"></span><span class="motif"></span><span class="frame"></span><span class="shade"></span>
+                  <span class="p-title">Salt &amp; Cinder</span><span class="p-meta">Food · 2024</span>
+                </span>
+                <span class="lib-badge" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon i-plus"><use href="#i-plus"/></svg><svg class="icon i-check"><use href="#i-check"/></svg></span>
+                <span class="card-hover">
+                  <span class="qa-row">
+                    <span class="qa-btn qa-play" role="button" tabindex="0" aria-label="Play Salt and Cinder"><svg class="icon"><use href="#i-play"/></svg></span>
+                    <span class="qa-btn qa-add" role="button" tabindex="0" aria-label="Add to My Library"><svg class="icon"><use href="#i-plus"/></svg></span>
+                    <span class="qa-match">70% for you</span>
+                  </span>
+                </span>
+              </div>
+              <div class="shelf">
+                <p class="title">Salt &amp; Cinder</p>
+                <div class="meta"><span class="star"><svg class="icon"><use href="#i-star"/></svg></span>7.2 · 2024 · Docu</div>
+              </div>
+            </button>
+
+          </div>
+          <button class="rail-paddle right" aria-label="Scroll Recently Added right"><svg class="icon"><use href="#i-chev-r"/></svg></button>
+        </div>
+      </section>
+
+      <!-- ═══════════ YOUR WEEK + WATCH TOGETHER — Aurora today ═══════════ -->
+      <div class="bands">
+        <section class="band">
+          <h3><svg class="icon"><use href="#i-trophy"/></svg>Your week</h3>
+          <div class="week-grid">
+            <div class="stat">
+              <p class="k">Level</p>
+              <p class="v">7 <small>1,240 / 2,000 XP</small></p>
+              <div class="xp-track"><span class="xp-fill"></span></div>
+            </div>
+            <div class="stat"><p class="k">Streak</p><p class="v">5 days <small>best 11</small></p></div>
+            <div class="stat"><p class="k">Top genre</p><p class="v">Sci-Fi</p></div>
+            <div class="stat"><p class="k">Hours this week</p><p class="v">6.4</p></div>
+          </div>
+        </section>
+        <section class="band">
+          <h3><svg class="icon"><use href="#i-users"/></svg>Watch together</h3>
+          <div class="wt-row">
+            <input class="wt-input" placeholder="ROOM CODE" aria-label="Watch party room code" maxlength="6" />
+            <button class="pill-btn violet"><svg class="icon"><use href="#i-play"/></svg>Start a party</button>
+          </div>
+          <p class="hint">Synced playback, live reactions and chat — invite the household to tonight's pick.</p>
+        </section>
+      </div>
+
+      <!-- ═══════════ FOOTER — Aurea sign-off, Aurora-ized ═══════════ -->
+      <footer class="footer">
+        <p class="wordmark text-gradient">AURORA PRO — YOUR STORIES, YOUR SERVER</p>
+        <p>Design mockup: Aurora's current home with twelve elements adopted from the “Aurea” cinema concept, translated into Aurora's violet/cyan identity. Every title is fictional; all artwork is procedural.</p>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ═══════════ MOCKUP CONTROLS + LEGEND ═══════════ -->
+  <div class="mock-controls">
+    <div class="legend" id="legend" role="note" aria-label="Adopted elements legend">
+      <h4>Adopted from the Aurea concept</h4>
+      <p class="src">Gold → violet/cyan throughout; Aurora's layout, components and data stay as they are today.</p>
+      <ol>
+        <li><span class="n">1</span><span><b>Editorial serif display</b> (Fraunces-style italic) for the hero title, rail headings &amp; poster captions — would ship as a fifth Typeface option.</span></li>
+        <li><span class="n">2</span><span><b>Eyebrow kickers</b> — micro uppercase tracked labels above the hero and chart rail.</span></li>
+        <li><span class="n">3</span><span><b>Hero meta chips</b> — certification + “4K · Dolby Vision” format chip (we already have has_4k / content_rating).</span></li>
+        <li><span class="n">4</span><span><b>Serif tagline quote</b> leading the hero synopsis.</span></li>
+        <li><span class="n">5</span><span><b>Rank tag</b> — “№1 most watched in your house”, real household watch stats.</span></li>
+        <li><span class="n">6</span><span><b>Ken Burns drift</b> on the hero backdrop (idle) + staggered “rise” entrance; existing mouse parallax kept.</span></li>
+        <li><span class="n">7</span><span><b>Genre pill row</b> — one-tap filters between the mood box and the rails.</span></li>
+        <li><span class="n">8</span><span><b>Top 10 rail</b> — giant outlined numerals behind posters, violet stroke that brightens on hover.</span></li>
+        <li><span class="n">9</span><span><b>Hover quick actions</b> on cards — Play / add-to-library + “% for you”, sharing the scrim with the existing AI reason.</span></li>
+        <li><span class="n">10</span><span><b>Edge-fade mask</b> on rail overflow — cards dissolve at the edges instead of clipping.</span></li>
+        <li><span class="n">11</span><span><b>Continue Watching upgrades</b> — episode chip, centered play-on-hover, luminous gradient progress with % + time left.</span></li>
+        <li><span class="n">12</span><span><b>Sidebar touches</b> — section labels, glowing active notch, My Library count, floating “Premiere” spotlight card.</span></li>
+      </ol>
+      <p class="global">Also global: <b>film grain</b> (toggle below · would respect Glow = Subtle &amp; reduced-motion), violet-tinted <b>scrollbar</b> + <b>selection</b> color.</p>
+    </div>
+    <button class="mock-toggle" id="annotateBtn" aria-pressed="false"><span class="swatch" aria-hidden="true"></span>Show adopted elements</button>
+    <button class="mock-toggle secondary" id="grainBtn" aria-pressed="true">Film grain: on</button>
+  </div>
+
+<script>
+  // Annotation toggle
+  var annotateBtn = document.getElementById('annotateBtn');
+  annotateBtn.addEventListener('click', function () {
+    var on = document.body.classList.toggle('annotate');
+    annotateBtn.setAttribute('aria-pressed', String(on));
+    annotateBtn.lastChild.textContent = on ? 'Hide adopted elements' : 'Show adopted elements';
+  });
+
+  // Grain toggle
+  var grainBtn = document.getElementById('grainBtn');
+  grainBtn.addEventListener('click', function () {
+    var off = document.body.classList.toggle('no-grain');
+    grainBtn.setAttribute('aria-pressed', String(!off));
+    grainBtn.textContent = off ? 'Film grain: off' : 'Film grain: on';
+  });
+
+  // Rail paddles — page by ~90% of the visible width; show only when
+  // that direction can scroll (mirrors MediaRail's canLeft/canRight).
+  document.querySelectorAll('.rail-wrap').forEach(function (wrap) {
+    var scroll = wrap.querySelector('.rail-scroll');
+    var left = wrap.querySelector('.rail-paddle.left');
+    var right = wrap.querySelector('.rail-paddle.right');
+    function update() {
+      var max = scroll.scrollWidth - scroll.clientWidth;
+      left.classList.toggle('can', scroll.scrollLeft > 2);
+      right.classList.toggle('can', scroll.scrollLeft < max - 2);
+    }
+    left.addEventListener('click', function () { scroll.scrollBy({ left: -scroll.clientWidth * 0.9, behavior: 'smooth' }); });
+    right.addEventListener('click', function () { scroll.scrollBy({ left: scroll.clientWidth * 0.9, behavior: 'smooth' }); });
+    scroll.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  });
+
+  // Hero parallax (existing Aurora behavior): backdrop drifts ~2% with the mouse.
+  var hero = document.querySelector('.hero');
+  var heroMedia = document.getElementById('heroMedia');
+  hero.addEventListener('mousemove', function (e) {
+    var r = hero.getBoundingClientRect();
+    var x = ((e.clientX - r.left) / r.width - 0.5) * 2;
+    var y = ((e.clientY - r.top) / r.height - 0.5) * 2;
+    heroMedia.style.transform = 'translate(' + x + '%, ' + y + '%)';
+  });
+  hero.addEventListener('mouseleave', function () { heroMedia.style.transform = ''; });
+
+  // Genre pills — visual selection only (static mockup).
+  document.querySelectorAll('.gpill').forEach(function (p) {
+    p.addEventListener('click', function () {
+      document.querySelectorAll('.gpill').forEach(function (q) { q.classList.remove('active'); });
+      p.classList.add('active');
+    });
+  });
+
+  // Library badges + quick-add — visual toggle only.
+  document.querySelectorAll('.lib-badge').forEach(function (b) {
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var inLib = b.classList.toggle('in-lib');
+      b.setAttribute('aria-label', inLib ? 'In My Library — click to remove' : 'Add to My Library');
+    });
+  });
+  document.querySelectorAll('.qa-btn, .card-hover, .ep-chip').forEach(function (el) {
+    el.addEventListener('click', function (e) { e.stopPropagation(); });
+  });
+</script>
+</body>
+</html>
