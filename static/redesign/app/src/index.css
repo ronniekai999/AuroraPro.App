@@ -495,19 +495,23 @@
    Scoped under the data-font attribute so every other typeface system
    renders exactly as before (the safety property that makes VELVET
    opt-in). Sizes bump slightly because Fraunces runs visually smaller
-   than Sora at equal px. */
-html[data-font="velvet"] .hero-title-editorial {
-  font-family: 'Fraunces', 'Iowan Old Style', 'Palatino', Georgia, serif;
-  font-style: italic;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
+   than Sora at equal px.
+
+   HEADLINE-SITE REGISTRY (review 2026-07-17): VELVET's mechanism is
+   invisible from the token layer, so this selector list IS the
+   registry. Adding a headline surface in Phase B/C (Top 10 header,
+   DetailView title, premiere card) means BOTH tagging the element in
+   JSX and adding its selector to the grouped rule below — miss it and
+   VELVET users get a half-serif UI with no error. Shared declarations
+   are grouped so the serif stack is written once. */
+html[data-font="velvet"] .hero-title-editorial,
 html[data-font="velvet"] .rail-header .rail-title {
   font-family: 'Fraunces', 'Iowan Old Style', 'Palatino', Georgia, serif;
   font-style: italic;
   font-weight: 600;
-  font-size: 1.18rem;
 }
+html[data-font="velvet"] .hero-title-editorial { letter-spacing: -0.01em; }
+html[data-font="velvet"] .rail-header .rail-title { font-size: 1.18rem; }
 
 /* Staggered "rise" entrance for the hero copy. Runs once on mount;
    hero rotation does NOT re-trigger it (the copy container isn't
@@ -528,42 +532,63 @@ html[data-font="velvet"] .rail-header .rail-title {
    ONE declaration because both are shorthand `animation` rules — two
    classes would clobber each other. fadeIn owns transform for its
    first 0.4s (translateY settle), then the delayed kenburns track
-   takes over from scale(1) — no visible jump. */
+   takes over from scale(1) — no visible jump.
+   Peaks at 1.06 (review 2026-07-17): it MULTIPLIES with the wrapper's
+   1.02 parallax overscan, so the effective range is ~1.02→1.08 — the
+   first cut's 1.05 × 1.08 stack cropped backdrops ~13% at peak. */
 @keyframes kenburns {
   from { transform: scale(1); }
-  to { transform: scale(1.08); }
+  to { transform: scale(1.06); }
 }
 .hero-kenburns {
   animation:
     fadeIn 0.4s ease-out forwards,
     kenburns 26s ease-in-out 0.4s infinite alternate;
 }
+/* Glow = Subtle is the app's declared weak-GPU mode — a permanently
+   animating full-width backdrop layer doesn't belong in it. Same lever
+   the grain layer respects; keep the fade, drop the zoom. */
+html[data-glow="subtle"] .hero-kenburns {
+  animation: fadeIn 0.4s ease-out forwards;
+}
 
 /* Rail edge fade — cards dissolve at the scroller's edges instead of
    clipping. MediaRail applies fade-l/fade-r from the SAME canLeft /
    canRight state that drives the paddles, so a rail that can't scroll
    (or is parked at an end) keeps a hard edge — no permanent veil over
-   the first card. */
-.rail-scroll.fade-l {
-  -webkit-mask-image: linear-gradient(to right, transparent, black 36px);
-  mask-image: linear-gradient(to right, transparent, black 36px);
-}
+   the first card. One parameterized mask (review 2026-07-17): the
+   classes only flip the per-edge width vars, so the fade width lives
+   in a single declaration instead of three diverging combination
+   rules, and a boundary crossing changes two custom properties rather
+   than swapping between distinct mask-image values. */
+.rail-scroll.fade-l,
 .rail-scroll.fade-r {
-  -webkit-mask-image: linear-gradient(to left, transparent, black 36px);
-  mask-image: linear-gradient(to left, transparent, black 36px);
+  --rail-fade-l: 0px;
+  --rail-fade-r: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent, black var(--rail-fade-l), black calc(100% - var(--rail-fade-r)), transparent);
+  mask-image: linear-gradient(to right, transparent, black var(--rail-fade-l), black calc(100% - var(--rail-fade-r)), transparent);
 }
-.rail-scroll.fade-l.fade-r {
-  -webkit-mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
-  mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
-}
+.rail-scroll.fade-l { --rail-fade-l: 36px; }
+.rail-scroll.fade-r { --rail-fade-r: 36px; }
 
-/* Film grain — a single fixed noise layer over the app, opt-in via
-   Settings → Appearance (html[data-grain="film"], default off per
-   decision 4 of the plan). Costs one composited layer + a 6-step
-   transform animation — deliberately NOT per-card (the Bug 25 rule).
-   z-58 sits above panels/sidebar (z-50) but below the video player
-   shell (z-[60]) so playback never gets textured. Force-off under
-   Glow = Subtle (the existing weak-GPU lever) and reduced motion. */
+/* Film grain — a single fixed noise layer, opt-in via Settings →
+   Appearance (html[data-grain="film"], default off per decision 4 of
+   the plan). Costs one composited layer + a 6-step transform animation
+   — deliberately NOT per-card (the Bug 25 rule).
+   Layering rule (review 2026-07-17): grain textures the CANVAS only —
+   page content, topbar (z-40) — and stays UNDER every floating
+   surface: sidebar + the whole Radix overlay family (z-50), the mobile
+   nav toggle (z-55), the player (z-60), app modals (z-70). Hence z-45;
+   the first cut's z-58 put animated noise over dialog text while z-70
+   modals escaped it. Overscan is 8% (was a mockup-copied 60%): the
+   drift below never exceeds ±3%, and the smaller backing texture
+   matters on exactly the weak GPUs this budget rule exists for.
+   Known limit: the layer keeps animating behind the opaque player
+   during playback — pausing it needs a "playback active" signal on
+   <html>; see the Phase A review note in the plan (Phase B hook).
+   Force-off #1 of 2: Glow = Subtle (the weak-GPU lever) — the
+   reduced-motion twin lives in the media query at the bottom of this
+   section; a new disable condition must be added to BOTH. */
 @keyframes grain-shift {
   0%, 100% { transform: translate(0, 0); }
   20% { transform: translate(-3%, 2%); }
@@ -574,8 +599,8 @@ html[data-font="velvet"] .rail-header .rail-title {
 html[data-grain="film"] body::after {
   content: '';
   position: fixed;
-  inset: -60%;
-  z-index: 58;
+  inset: -8%;
+  z-index: 45;
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
   opacity: 0.04;
@@ -594,6 +619,8 @@ html[data-glow="subtle"][data-grain="film"] body::after {
     /* keep the fade, drop the zoom */
     animation: fadeIn 0.4s ease-out forwards;
   }
+  /* Force-off #2 of 2 for the grain layer — twin of the
+     data-glow="subtle" rule above; keep the two in sync. */
   html[data-grain="film"] body::after {
     content: none;
   }

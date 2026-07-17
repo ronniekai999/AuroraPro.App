@@ -594,8 +594,11 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
 
         <div className="mt-7 text-[0.72rem] uppercase tracking-[0.16em] text-white/50">Typeface</div>
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          {FONT_OPTIONS.map((f) => {
+          {FONT_OPTIONS.map((f, i) => {
             const sel = font === f.id
+            // Odd option count: last chip spans both columns so VELVET
+            // doesn't dangle beside an empty cell (same rule as Settings).
+            const span = i === FONT_OPTIONS.length - 1 && FONT_OPTIONS.length % 2 === 1 ? ' sm:col-span-2' : ''
             return (
               <button
                 key={f.id}
@@ -605,7 +608,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
                   applyFont(f.id)
                 }}
                 className={
-                  'glass-card relative rounded-2xl p-4 text-left transition-all ' +
+                  'glass-card relative rounded-2xl p-4 text-left transition-all' + span + ' ' +
                   (sel ? 'ring-2 ring-[#a855f7]/70' : '')
                 }
               >

@@ -153,6 +153,24 @@ test mirroring deep-debug H3). `npm run build` + `npm test` green.
    - *Go tests*: fields present/omitted correctly; no N+1 (tagline +
      season_count join once in the existing list queries).
 
+## Phase A review notes (2026-07-17)
+
+Adversarial review of the Phase A diff (8 finder angles) confirmed 10
+findings, all fixed in the follow-up commit except two accepted
+residuals, recorded here so they don't read as oversights:
+
+- **Grain keeps animating behind the opaque player** when a film plays
+  with grain enabled. Pausing it needs a "playback active" signal on
+  `<html>` that Phase A (presentation-only) shouldn't invent. Phase B
+  should have the player toggle e.g. `data-playing` and the grain rule
+  gate on it. Mitigations shipped: grain is opt-in, default-off,
+  overscan cut from 220% to 8%, and force-off under Glow = Subtle.
+- **Tag classification exists twice** (HeroSection's FORMAT_TAGS and
+  MediaCardCinema's positional badge classifier). Phase A shrank
+  FORMAT_TAGS to the two values both agree on ('4K', 'HDR'); when
+  richer tags land (Phase C payload work), extract one shared
+  classifier instead of widening either set.
+
 ## Explicitly not in scope
 
 - In-place genre filtering of home rails (v2 of decision 2).

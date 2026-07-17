@@ -157,16 +157,24 @@ export function applyGrain(id: GrainChoice): void {
 /**
  * Apply every stored appearance choice to <html> in one shot — called by
  * main.tsx BEFORE first paint so panels, type, and grain render correctly on
- * the very first frame (no flash of the defaults). Only non-default values
- * set an attribute; defaults leave the DOM clean. Storage/JSON failures fall
- * through to the defaults, same as the old inline shims this replaces.
+ * the very first frame (no flash of the defaults). Defaults REMOVE their
+ * attribute rather than skip it (review 2026-07-17): pre-paint the removal
+ * is a no-op, but it makes the function honestly idempotent for any future
+ * caller re-syncing after a prefs reset or a cross-tab storage event —
+ * set-only would leave a stale data-font="velvet" / data-grain="film" on
+ * <html> while storage says defaults. Storage/JSON failures fall through to
+ * the defaults, same as the old inline shims this replaces.
  */
 export function applyStoredAppearance(): void {
   const prefs = readPrefs()
+  const el = document.documentElement
   const font = normalizeFont(prefs.font_choice)
-  if (font !== 'nova') document.documentElement.setAttribute('data-font', font)
+  if (font === 'nova') el.removeAttribute('data-font')
+  else el.setAttribute('data-font', font)
   const glow = normalizeGlow(prefs.glow_intensity)
-  if (glow !== 'aurora') document.documentElement.setAttribute('data-glow', glow)
+  if (glow === 'aurora') el.removeAttribute('data-glow')
+  else el.setAttribute('data-glow', glow)
   const grain = normalizeGrain(prefs.grain_overlay)
-  if (grain !== 'off') document.documentElement.setAttribute('data-grain', grain)
+  if (grain === 'off') el.removeAttribute('data-grain')
+  else el.setAttribute('data-grain', grain)
 }

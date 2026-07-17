@@ -18,7 +18,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
-import { FONT_OPTIONS } from '@/lib/appearance'
+import { FONT_OPTIONS, applyGrain, normalizeFont, normalizeGrain } from '@/lib/appearance'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { GamificationCard } from '@/components/GamificationCard'
 import {
@@ -213,10 +213,16 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
               <p className="text-white/40 text-xs">Display and body fonts used across the app.</p>
             </div>
             <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
-              {FONT_OPTIONS.map(opt => {
-                const stored = rawRef.current.font_choice
-                const current = typeof stored === 'string' ? stored : 'nova'
-                const active = current === opt.id
+              {FONT_OPTIONS.map((opt, i) => {
+                // normalizeFont (not the raw string) so a stale/invalid
+                // stored id highlights Nova — matching what the app
+                // actually renders — instead of leaving every chip
+                // unselected (review 2026-07-17).
+                const active = normalizeFont(rawRef.current.font_choice) === opt.id
+                // Odd option count: let the last chip span both columns
+                // so the flagship VELVET card doesn't dangle beside an
+                // empty cell.
+                const spanClass = i === FONT_OPTIONS.length - 1 && FONT_OPTIONS.length % 2 === 1 ? ' col-span-2' : ''
                 return (
                   <button
                     key={opt.id}
@@ -233,7 +239,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                       // Force re-render so the active chip updates.
                       setSettings(s => ({ ...s }))
                     }}
-                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60${spanClass} ${
                       active
                         ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
                         : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
@@ -262,9 +268,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 { id: 'off',  label: 'Off',  desc: 'Clean render (default)' },
                 { id: 'film', label: 'Film', desc: 'Subtle animated grain' },
               ] as const).map(opt => {
-                const stored = rawRef.current.grain_overlay
-                const current = stored === 'film' ? 'film' : 'off'
-                const active = current === opt.id
+                const active = normalizeGrain(rawRef.current.grain_overlay) === opt.id
                 return (
                   <button
                     key={opt.id}
@@ -272,12 +276,17 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                     role="radio"
                     aria-checked={active}
                     onClick={() => {
+                      // rawRef only mirrors the value for rendering; the
+                      // WRITE goes through applyGrain, whose writePref does
+                      // a fresh read-merge-write of aurora_prefs (review
+                      // 2026-07-17: flushing the whole mount-time rawRef
+                      // snapshot here would clobber keys other surfaces —
+                      // e.g. the floating player's volume pref — wrote to
+                      // the bucket since Settings mounted). applyGrain also
+                      // owns the data-grain attribute rule, so Settings,
+                      // onboarding, and the pre-paint path can't drift.
                       rawRef.current = { ...rawRef.current, grain_overlay: opt.id }
-                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
-                      // "off" is the default — no attribute (matches the other
-                      // appearance defaults and keeps a clean DOM).
-                      if (opt.id === 'off') document.documentElement.removeAttribute('data-grain')
-                      else document.documentElement.setAttribute('data-grain', opt.id)
+                      applyGrain(opt.id)
                       // Force re-render so the active chip updates.
                       setSettings(s => ({ ...s }))
                     }}

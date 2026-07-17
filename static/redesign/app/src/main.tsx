@@ -45,10 +45,19 @@ const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
 // appearance.ts's allowlists and had to be kept in sync by hand — adding
 // the VELVET typeface would have meant a third copy. Replaced with the
 // exported applyStoredAppearance(), the same validated read the rest of
-// the app uses. Behavior is identical: only non-default stored values
-// set a data-* attribute; parse/storage failures fall through to the
-// defaults.
+// the app uses. Parse/storage failures fall through to the defaults.
 applyStoredAppearance()
+
+// Review 2026-07-17 — the /join companion (the phone "second screen"
+// for watch parties) shares this entry point, so it would inherit the
+// film-grain layer a user enabled in the main app: a permanently
+// animating composited layer on exactly the battery/GPU-constrained
+// device class the companion's own motion suppression protects. Font +
+// glow have always applied there (harmless, static); grain does not
+// belong. Strip it for companion routes only.
+if (window.location.pathname.startsWith(`${BASENAME}/join`)) {
+  document.documentElement.removeAttribute('data-grain')
+}
 
 // 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
 // render-time throw anywhere in the tree shows a fallback instead of

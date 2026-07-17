@@ -3,7 +3,7 @@
 // Phase 2.4) so the lazy BrowseView chunk can reuse it alongside HomeView.
 // heroMatchScore (the cold-start "match %" fallback) is module-private here
 // — only HeroSection uses it.
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
@@ -31,9 +31,15 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 
 // 2026-07-16 (Aurea Phase A) — which of the card tags render as the
 // cyan "format" chip vs the outlined certification chip in the hero
-// meta row. mapMedia only emits "4K" + a content rating today; the
-// extra entries future-proof richer tag payloads without a code change.
-const FORMAT_TAGS = new Set(['4K', 'HDR', 'HDR10', 'DV', 'DOLBY VISION', 'ATMOS'])
+// meta row. Deliberately ONLY the values the app already special-cases
+// ('4K' from mapMedia's has_4k; 'HDR', which MediaCardCinema's badge
+// classifier also exact-matches). Review 2026-07-17: the first cut
+// pre-added guessed future spellings (HDR10/DV/…) — dropped, because
+// this set and MediaCardCinema.tsx's positional classifier are two
+// separate answers to "what is a format tag?", and widening one bakes
+// in divergence. If richer tags ever land, extract ONE shared
+// classifier instead of growing both.
+const FORMAT_TAGS = new Set(['4K', 'HDR'])
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
@@ -84,6 +90,18 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   // useState MUST be called before any conditional return so hook
   // ordering stays stable across renders (Rules of Hooks).
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
+  // 2026-07-17 (Phase A review) — the rise stagger is a page-arrival
+  // moment ONLY. Conditional copy nodes (reason, meta chips,
+  // description) unmount/remount as rotation moves between picks that
+  // do/don't carry those fields, which would replay the entrance on a
+  // lone element mid-session. Gate: rise classes render only during
+  // the intro window, then drop — later (re)mounts render statically.
+  const [introDone, setIntroDone] = useState(false)
+  useEffect(() => {
+    const t = window.setTimeout(() => setIntroDone(true), 1300)
+    return () => window.clearTimeout(t)
+  }, [])
+  const rise = (n: 1 | 2 | 3 | 4) => (introDone ? '' : ` rise rise-${n}`)
   if (!heroProp) {
     return (
       <section className="relative w-full h-[55vh] min-h-[420px] max-h-[600px] rounded-2xl overflow-hidden mb-8 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] border border-white/[0.04] flex items-center justify-center">
@@ -134,6 +152,15 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       // soft border give it the "glass card" treatment from the mockup.
       className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden mt-1 mb-10 bg-[#050505] rounded-2xl border border-purple-300/15"
       onMouseMove={(e) => {
+        // 2026-07-17 (Phase A review) — the old inline-transform
+        // parallax was actually inert in production: .animate-fade-in's
+        // fill-forwards transform overrode the img's inline style. The
+        // ken-burns wrapper refactor revived it, so it needs the same
+        // reduced-motion gate as every other hero motion effect.
+        // Checked per-event (cheap) so a live OS-setting change takes
+        // effect without a reload; mousePos then stays centered → the
+        // wrapper renders translate(0, 0).
+        if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
         const rect = e.currentTarget.getBoundingClientRect()
         setMousePos({
           x: (e.clientX - rect.left) / rect.width,
@@ -168,11 +195,15 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         // an inline transform on the same node). The key stays on the
         // img so rotation still remounts it — restarting both the
         // fade-in and the zoom for the incoming backdrop.
+        // Base scale 1.02 (was 1.05 on the old inline style): parallax
+        // travel is ±1%, so 2% overscan already hides the edges, and
+        // kenburns multiplies on top (1.02 × 1.06 ≈ 1.08 peak — the
+        // intended zoom range without the review-flagged ~13% crop).
         <div
           aria-hidden="true"
           className="absolute inset-0 transition-transform duration-700 ease-out"
           style={{
-            transform: `scale(1.05) translate(${parallaxX}%, ${parallaxY}%)`,
+            transform: `scale(1.02) translate(${parallaxX}%, ${parallaxY}%)`,
           }}
         >
           <img
@@ -267,12 +298,17 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         <div className="max-w-2xl">
           {/* 2026-07-16 (Aurea Phase A) — eyebrow kicker above the pill
               row, plus a one-shot staggered "rise" entrance across the
-              copy stack (rise-1..4). The stagger runs on mount only —
-              hero rotation swaps text in place without re-triggering it. */}
-          <div className="eyebrow rise rise-1 mb-2.5">
-            <Icon name="sparkle" size={11} /> Tonight's pick
+              copy stack (rise-1..4; gated by introDone so conditional
+              nodes never replay it on rotation). The eyebrow copy
+              derives from the SAME state as the badge below, so it can
+              never contradict it — and BrowseView's reused hero gets an
+              honest "Featured" instead of "Tonight's pick" (2026-07-17
+              review fix). */}
+          <div className={`eyebrow mb-2.5${rise(1)}`}>
+            <Icon name="sparkle" size={11} />{' '}
+            {reason ? "Tonight's pick" : isCatalogFallback ? 'New in your library' : 'Featured'}
           </div>
-          <div className="flex items-center gap-3 mb-3 rise rise-1">
+          <div className={`flex items-center gap-3 mb-3${rise(1)}`}>
             {/* 2026-06-05 (Home redesign B) — when a personalization
                 reason exists, lead with an "✨ Aurora picked this for
                 you" pill (replaces the plain "Recommended" copy). No
@@ -301,49 +337,46 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p className="text-purple-200/80 text-xs italic mb-2 max-w-md rise rise-2">{reason}</p>
+            <p className={`text-purple-200/80 text-xs italic mb-2 max-w-md${rise(2)}`}>{reason}</p>
           ) : personalization?.coldStart ? (
-            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md rise rise-2">
+            <p className={`text-purple-200/70 text-xs italic mb-2 max-w-md${rise(2)}`}>
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
             </p>
           ) : null}
           {/* hero-title-editorial is inert outside VELVET — the
               html[data-font="velvet"] override in index.css is what
               swaps it to the Fraunces serif italic. */}
-          <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl hero-title-editorial rise rise-2">{hero.title}</h2>
+          <h2 className={`text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl hero-title-editorial${rise(2)}`}>{hero.title}</h2>
           {/* 2026-07-16 (Aurea Phase A) — meta chips: runtime + the tags
               mapMedia already assembles (4K → cyan format chip,
               content rating → outlined certification chip). Renders
               nothing when the payload carries neither, so sparse
               metadata costs no empty row. */}
-          {((hero.tags && hero.tags.length > 0) || hero.duration) ? (
-            <div className="flex flex-wrap items-center gap-2 mb-3 rise rise-3">
+          {(hero.tags?.length || hero.duration) ? (
+            <div className={`flex flex-wrap items-center gap-2 mb-3${rise(3)}`}>
               {hero.duration ? (
                 <span className="text-white/60 text-[13px]">{hero.duration}</span>
               ) : null}
-              {(hero.tags ?? []).map(tag =>
-                FORMAT_TAGS.has(tag.toUpperCase()) ? (
-                  <span
-                    key={tag}
-                    className="px-2 py-[3px] rounded-md text-[10px] font-bold tracking-[0.1em] bg-white/10 text-cyan-100 border border-cyan-400/25"
-                  >
-                    {tag}
-                  </span>
-                ) : (
-                  <span
-                    key={tag}
-                    className="px-1.5 py-[2px] rounded-md text-[10px] font-bold tracking-[0.08em] border border-white/35 text-white/75"
-                  >
-                    {tag}
-                  </span>
-                )
-              )}
+              {/* One span, two skins — the format/cert split is class-only
+                  so future chip tweaks can't drift between branches.
+                  Index-qualified key guards against duplicate tags in a
+                  future payload. */}
+              {(hero.tags ?? []).map((tag, i) => (
+                <span
+                  key={`${tag}-${i}`}
+                  className={FORMAT_TAGS.has(tag.toUpperCase())
+                    ? 'px-2 py-[3px] rounded-md text-[10px] font-bold tracking-[0.1em] bg-white/10 text-cyan-100 border border-cyan-400/25'
+                    : 'px-1.5 py-[2px] rounded-md text-[10px] font-bold tracking-[0.08em] border border-white/35 text-white/75'}
+                >
+                  {tag}
+                </span>
+              ))}
             </div>
           ) : null}
           {hero.description && (
-            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg rise rise-3">{hero.description}</p>
+            <p className={`text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg${rise(3)}`}>{hero.description}</p>
           )}
-          <div className="flex items-center gap-3 rise rise-4">
+          <div className={`flex items-center gap-3${rise(4)}`}>
             {/* 2026-05-27 — Resume-aware primary CTA. When the hero
                 has a CW match, click resumes at the saved position via
                 resume.onPlay (which threads through to App's
