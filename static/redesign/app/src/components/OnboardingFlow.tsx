@@ -614,11 +614,13 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
                     <CheckIcon className="h-3 w-3" />
                   </span>
                 )}
-                <div className="text-[1.3rem] font-bold text-white" style={{ fontFamily: f.font }}>
+                {/* fontStyle previews VELVET's italic-only serif honestly —
+                    without it the card would render a faux-oblique Georgia. */}
+                <div className="text-[1.3rem] font-bold text-white" style={{ fontFamily: f.font, fontStyle: f.italic ? 'italic' : undefined }}>
                   Aurora Pro
                 </div>
                 <div className="mt-0.5 text-[0.72rem] text-white/45">{f.label} · {f.desc}</div>
-                <div className="mt-2 text-[0.8rem] text-white/60" style={{ fontFamily: f.font }}>
+                <div className="mt-2 text-[0.8rem] text-white/60" style={{ fontFamily: f.font, fontStyle: f.italic ? 'italic' : undefined }}>
                   The quick stream brings stories to life.
                 </div>
               </button>

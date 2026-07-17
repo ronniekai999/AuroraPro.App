@@ -16,10 +16,10 @@ as one mega-change.
 
 | # | Decision | Proposed | Why |
 |---|---|---|---|
-| 1 | Serif display rollout | **Opt-in**: ships as a fifth Typeface system ("VELVET") in Settings → Appearance; NOVA stays default | Flipping the default font under existing users is exactly the kind of jarring change that got Catalogue Edition reverted. The mockup's serif look = VELVET selected. Revisit the default after feedback. |
+| 1 | Serif display rollout — **LOCKED 2026-07-16 (Phase A shipped): opt-in** | **Opt-in**: ships as a fifth Typeface system ("VELVET") in Settings → Appearance; NOVA stays default | Flipping the default font under existing users is exactly the kind of jarring change that got Catalogue Edition reverted. The mockup's serif look = VELVET selected. Revisit the default after feedback. |
 | 2 | Genre pills v1 behavior | **Navigate**: pill click routes to the Movies/Shows browse grid with `?genre=` preapplied | The server-side filter already exists (`GET /api/media?genre=…`); filtering the *home rails* in place would gut curated rails and needs new recommender plumbing. In-place filtering can be a v2. |
 | 3 | Top 10 metric | Distinct **profiles with watch activity per title, trailing 7 days** (fallback: progress-row count when the server has 1 profile); rail hides below 4 qualifying titles | "Plays" is ambiguous for partial watches; distinct-viewers matches "most watched" language and stays meaningful solo. Hide-when-thin = the earn-your-slot rule. |
-| 4 | Film grain default | **Off**; toggle in Settings → Appearance; force-off under `data-glow="subtle"` and `prefers-reduced-motion` | Same GPU budget rules as the existing overlay blur (see the Bug 25 note in `index.css`). |
+| 4 | Film grain default — **LOCKED 2026-07-16 (Phase A shipped): off** | **Off**; toggle in Settings → Appearance; force-off under `data-glow="subtle"` and `prefers-reduced-motion` | Same GPU budget rules as the existing overlay blur (see the Bug 25 note in `index.css`). |
 | 5 | "% for you" on card hover | Only when the item's payload carries a recommender score; otherwise the hover shows Play alone | No fake numbers. Requires threading `score` into discover/anchor rail items (backend, Phase C). |
 | 6 | Premiere "request arrived" audience | Show to **all users**, neutral copy ("Requested 3 days ago"); requester attribution is a possible later enhancement | Deployment-neutral per the 2026-07-16 review pass. |
 

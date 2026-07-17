@@ -6,6 +6,7 @@ import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 import { installSyncDebug } from './lib/syncDebug'
+import { applyStoredAppearance } from './lib/appearance'
 
 // 2026-05-27 — Install the diagnostic buffer as early as possible so
 // the bug-report flow can attach "what was happening before the user
@@ -37,41 +38,17 @@ installSyncDebug()
 // under `/v2/*`. With basename set, navigate composes correctly.
 const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
 
-// Apply the user's glow-style preference BEFORE first paint so panels
-// and cards render with the correct border/halo on the very first
-// frame. Default is "aurora" (white border + purple halo), defined as
-// the unprefixed :root tokens in index.css — so we only set the
-// attribute when the user has explicitly chosen "subtle" or "heavy".
-try {
-  const raw = localStorage.getItem('aurora_prefs')
-  if (raw) {
-    const parsed: unknown = JSON.parse(raw)
-    const glow = parsed && typeof parsed === 'object'
-      ? (parsed as Record<string, unknown>).glow_intensity
-      : null
-    if (glow === 'subtle' || glow === 'heavy') {
-      document.documentElement.setAttribute('data-glow', glow)
-    }
-  }
-} catch { /* ignore — fall through to default */ }
-
-// Apply the user's typeface preference BEFORE first paint so headings
-// and body render in the chosen font on the very first frame (no flash
-// of the default face). Default is "NOVA" (Sora + Inter Tight), defined
-// as the unprefixed :root tokens in index.css — so we only set the
-// attribute when the user has explicitly chosen another system.
-try {
-  const raw = localStorage.getItem('aurora_prefs')
-  if (raw) {
-    const parsed: unknown = JSON.parse(raw)
-    const font = parsed && typeof parsed === 'object'
-      ? (parsed as Record<string, unknown>).font_choice
-      : null
-    if (font === 'current' || font === 'eclipse' || font === 'halo') {
-      document.documentElement.setAttribute('data-font', font)
-    }
-  }
-} catch { /* ignore — fall through to default (NOVA) */ }
+// Apply the user's appearance preferences (glow, typeface, film grain)
+// BEFORE first paint so panels, type, and grain render correctly on the
+// very first frame — no flash of the defaults. 2026-07-16 (Aurea
+// Phase A): the two inline shims that used to live here re-implemented
+// appearance.ts's allowlists and had to be kept in sync by hand — adding
+// the VELVET typeface would have meant a third copy. Replaced with the
+// exported applyStoredAppearance(), the same validated read the rest of
+// the app uses. Behavior is identical: only non-default stored values
+// set a data-* attribute; parse/storage failures fall through to the
+// defaults.
+applyStoredAppearance()
 
 // 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
 // render-time throw anywhere in the tree shows a fallback instead of

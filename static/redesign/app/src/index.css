@@ -54,6 +54,18 @@
   font-display: swap;
   src: url('./fonts/plus-jakarta-sans.woff2') format('woff2');
 }
+/* 2026-07-16 (Aurea Phase A) — the VELVET typeface system's editorial
+   serif. Italic-only BY DESIGN: velvet uses Fraunces exclusively for
+   italic headline sites (hero title, rail headings), so bundling the
+   roman axis would be dead weight. Non-italic text never matches this
+   face and falls through to the sans tokens as before. */
+@font-face {
+  font-family: 'Fraunces';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('./fonts/fraunces-italic.woff2') format('woff2');
+}
 
 @tailwind base;
 @tailwind components;
@@ -157,6 +169,14 @@
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
   }
+
+  /* 2026-07-16 (Aurea Phase A) — VELVET: NOVA's body + display faces
+     (deliberately NO --font-sans/--font-display override, so falling
+     back to the :root tokens) plus a Fraunces serif-italic on the
+     headline sites only. Those element overrides live outside this
+     layer — see "Aurea cinema elements — Phase A" below — because they
+     restyle specific components, not tokens. The attribute value is
+     validated in lib/appearance.ts (normalizeFont). */
 
   /* Cinematic watch-party overlay — reduce-transparency / blur budget.
      The minimal-mode overlay surfaces (VoicePill, MiniDock, the floating
@@ -439,6 +459,144 @@
 * {
   scrollbar-width: thin;
   scrollbar-color: rgba(168, 85, 247, 0.45) transparent;
+}
+
+/* ====================================================================
+   Aurea cinema elements — Phase A (2026-07-16)
+   --------------------------------------------------------------------
+   Presentation-only adoptions from docs/proposals/aurea-cinema-elements
+   (gold → violet/cyan). Everything here is either opt-in (VELVET
+   typeface via data-font, grain via data-grain) or a no-data cosmetic
+   (eyebrow, entrance stagger, ken burns, rail edge fade, selection
+   tint). No component behavior changes.
+   ==================================================================== */
+
+/* Selection tint — violet instead of the browser default. */
+::selection {
+  background: rgba(168, 85, 247, 0.4);
+  color: #f6f0ff;
+}
+
+/* Eyebrow kicker — micro uppercase tracked label ("TONIGHT'S PICK").
+   Sans on purpose (it's chrome, not headline), so it reads the same
+   under every typeface system. */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: #d8b4fe;
+}
+
+/* VELVET headline overrides — the only sites that go serif-italic.
+   Scoped under the data-font attribute so every other typeface system
+   renders exactly as before (the safety property that makes VELVET
+   opt-in). Sizes bump slightly because Fraunces runs visually smaller
+   than Sora at equal px. */
+html[data-font="velvet"] .hero-title-editorial {
+  font-family: 'Fraunces', 'Iowan Old Style', 'Palatino', Georgia, serif;
+  font-style: italic;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+html[data-font="velvet"] .rail-header .rail-title {
+  font-family: 'Fraunces', 'Iowan Old Style', 'Palatino', Georgia, serif;
+  font-style: italic;
+  font-weight: 600;
+  font-size: 1.18rem;
+}
+
+/* Staggered "rise" entrance for the hero copy. Runs once on mount;
+   hero rotation does NOT re-trigger it (the copy container isn't
+   keyed), so the stagger is a page-arrival moment, not a loop. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise { animation: rise 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.rise-1 { animation-delay: 0.05s; }
+.rise-2 { animation-delay: 0.12s; }
+.rise-3 { animation-delay: 0.22s; }
+.rise-4 { animation-delay: 0.34s; }
+
+/* Hero ken burns — a slow idle zoom UNDER the existing mouse parallax
+   (parallax lives on the wrapper div; this animates the <img>, so the
+   two transforms compose instead of fighting). Combined with fadeIn in
+   ONE declaration because both are shorthand `animation` rules — two
+   classes would clobber each other. fadeIn owns transform for its
+   first 0.4s (translateY settle), then the delayed kenburns track
+   takes over from scale(1) — no visible jump. */
+@keyframes kenburns {
+  from { transform: scale(1); }
+  to { transform: scale(1.08); }
+}
+.hero-kenburns {
+  animation:
+    fadeIn 0.4s ease-out forwards,
+    kenburns 26s ease-in-out 0.4s infinite alternate;
+}
+
+/* Rail edge fade — cards dissolve at the scroller's edges instead of
+   clipping. MediaRail applies fade-l/fade-r from the SAME canLeft /
+   canRight state that drives the paddles, so a rail that can't scroll
+   (or is parked at an end) keeps a hard edge — no permanent veil over
+   the first card. */
+.rail-scroll.fade-l {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 36px);
+  mask-image: linear-gradient(to right, transparent, black 36px);
+}
+.rail-scroll.fade-r {
+  -webkit-mask-image: linear-gradient(to left, transparent, black 36px);
+  mask-image: linear-gradient(to left, transparent, black 36px);
+}
+.rail-scroll.fade-l.fade-r {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
+  mask-image: linear-gradient(to right, transparent, black 36px, black calc(100% - 36px), transparent);
+}
+
+/* Film grain — a single fixed noise layer over the app, opt-in via
+   Settings → Appearance (html[data-grain="film"], default off per
+   decision 4 of the plan). Costs one composited layer + a 6-step
+   transform animation — deliberately NOT per-card (the Bug 25 rule).
+   z-58 sits above panels/sidebar (z-50) but below the video player
+   shell (z-[60]) so playback never gets textured. Force-off under
+   Glow = Subtle (the existing weak-GPU lever) and reduced motion. */
+@keyframes grain-shift {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(-3%, 2%); }
+  40% { transform: translate(2%, -3%); }
+  60% { transform: translate(-2%, -2%); }
+  80% { transform: translate(3%, 3%); }
+}
+html[data-grain="film"] body::after {
+  content: '';
+  position: fixed;
+  inset: -60%;
+  z-index: 58;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  animation: grain-shift 9s steps(6) infinite;
+}
+html[data-glow="subtle"][data-grain="film"] body::after {
+  content: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise {
+    animation-duration: 0.01s;
+    animation-delay: 0s;
+  }
+  .hero-kenburns {
+    /* keep the fade, drop the zoom */
+    animation: fadeIn 0.4s ease-out forwards;
+  }
+  html[data-grain="film"] body::after {
+    content: none;
+  }
 }
 
 /* ====================================================================

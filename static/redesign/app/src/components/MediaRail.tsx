@@ -26,7 +26,7 @@ import { type Media } from '@/lib/types'
 // case, not as a "rare exception."
 type RailTint = 'purple' | 'teal' | 'amber' | 'pink' | 'rose' | 'indigo'
 
-export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor }: {
+export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardContext, libraryIds, onToggleLib, onSeeAll, icon, tint, resolveResume, subtitle, aiPick, showBadges, cardSubtitleFor, eyebrow }: {
   title: string
   items: Media[]
   onSelect: (m: Media) => void
@@ -38,6 +38,10 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
   // additive: rails that don't pass them render exactly as before.
   subtitle?: string
   aiPick?: boolean
+  // 2026-07-16 (Aurea Phase A) — optional micro uppercase kicker above
+  // the rail title (e.g. "THE CHARTS" on the future Top 10 rail).
+  // Additive: omitted → header layout unchanged.
+  eyebrow?: string
   // Forward MediaCardCinema's quality/maturity badge opt-in so Home
   // rail cards can show 4K/HDR chips (the mockup shows them).
   showBadges?: boolean
@@ -124,6 +128,7 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
       <div className="rail-header">
         <span className="rail-icon" data-tint={resolvedTint}><Icon name={resolvedIcon} size={16} /></span>
         <div className="flex flex-col gap-0.5 min-w-0">
+          {eyebrow && <span className="eyebrow !text-[9px]">{eyebrow}</span>}
           <div className="flex items-center gap-2.5">
             <h2 className="rail-title">{title}</h2>
             {aiPick && (
@@ -152,7 +157,16 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
             <Icon name="chevronLeft" size={18} />
           </button>
         )}
-        <div ref={scrollRef} className="rail-scroll scrollbar-hide" onScroll={updatePaddles}>
+        {/* 2026-07-16 (Aurea Phase A) — edge fade driven by the SAME
+            canLeft/canRight state as the paddles: only a scrollable
+            direction gets its edge dissolved, so short rails (and rails
+            parked at an end) keep a hard edge instead of a permanent
+            veil over the first/last card. */}
+        <div
+          ref={scrollRef}
+          className={`rail-scroll scrollbar-hide${canLeft ? ' fade-l' : ''}${canRight ? ' fade-r' : ''}`}
+          onScroll={updatePaddles}
+        >
           {items.map((item) => (
             <MediaCardCinema
               key={item.id}

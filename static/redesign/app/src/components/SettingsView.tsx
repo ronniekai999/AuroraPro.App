@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
+import { FONT_OPTIONS } from '@/lib/appearance'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { GamificationCard } from '@/components/GamificationCard'
 import {
@@ -201,19 +202,18 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 <html data-font> so all display + body text reflows into the
                 chosen system immediately (CSS vars --font-sans/--font-display
                 in index.css). Default ("nova": Sora + Inter Tight) is the
-                unprefixed :root token set; only the other three set the
-                attribute. Each chip previews its own display face. */}
+                unprefixed :root token set; only the others set the attribute.
+                Each chip previews its own display face. 2026-07-16 (Aurea
+                Phase A): the option list now comes from lib/appearance's
+                FONT_OPTIONS — this radiogroup used to carry its own copy,
+                which meant every new typeface (like VELVET) had to be added
+                twice or Settings would silently miss it. */}
             <div className="pt-1">
               <p className="text-white/80 text-sm font-medium">Typeface</p>
               <p className="text-white/40 text-xs">Display and body fonts used across the app.</p>
             </div>
             <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
-              {([
-                { id: 'nova',    label: 'Nova',    desc: 'Futuristic · default', font: "'Sora', sans-serif" },
-                { id: 'eclipse', label: 'Eclipse', desc: 'Editorial',            font: "'Bricolage Grotesque', sans-serif" },
-                { id: 'halo',    label: 'Halo',    desc: 'Polished',             font: "'Outfit', sans-serif" },
-                { id: 'current', label: 'Classic', desc: 'Original',             font: "'Space Grotesk', sans-serif" },
-              ] as const).map(opt => {
+              {FONT_OPTIONS.map(opt => {
                 const stored = rawRef.current.font_choice
                 const current = typeof stored === 'string' ? stored : 'nova'
                 const active = current === opt.id
@@ -239,7 +239,55 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                         : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
                     }`}
                   >
-                    <p className={`text-base font-semibold ${active ? 'text-white' : 'text-white/80'}`} style={{ fontFamily: opt.font }}>{opt.label}</p>
+                    <p className={`text-base font-semibold ${active ? 'text-white' : 'text-white/80'}`} style={{ fontFamily: opt.font, fontStyle: opt.italic ? 'italic' : undefined }}>{opt.label}</p>
+                    <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                  </button>
+                )
+              })}
+            </div>
+
+            {/* Film grain — 2026-07-16 (Aurea Phase A). Writes
+                aurora_prefs.grain_overlay and toggles <html data-grain>;
+                index.css paints the fixed noise layer only for "film".
+                Default "off" is attribute-less like the other appearance
+                defaults. The CSS force-disables it under Glow = Subtle and
+                prefers-reduced-motion, so this switch can stay honest about
+                being pure mood. */}
+            <div className="pt-1">
+              <p className="text-white/80 text-sm font-medium">Film Grain</p>
+              <p className="text-white/40 text-xs">A whisper of animated texture over the whole app. Automatically off with Subtle glow or reduced motion.</p>
+            </div>
+            <div role="radiogroup" aria-label="Film grain" className="grid grid-cols-2 gap-3">
+              {([
+                { id: 'off',  label: 'Off',  desc: 'Clean render (default)' },
+                { id: 'film', label: 'Film', desc: 'Subtle animated grain' },
+              ] as const).map(opt => {
+                const stored = rawRef.current.grain_overlay
+                const current = stored === 'film' ? 'film' : 'off'
+                const active = current === opt.id
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => {
+                      rawRef.current = { ...rawRef.current, grain_overlay: opt.id }
+                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
+                      // "off" is the default — no attribute (matches the other
+                      // appearance defaults and keeps a clean DOM).
+                      if (opt.id === 'off') document.documentElement.removeAttribute('data-grain')
+                      else document.documentElement.setAttribute('data-grain', opt.id)
+                      // Force re-render so the active chip updates.
+                      setSettings(s => ({ ...s }))
+                    }}
+                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
+                      active
+                        ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
+                        : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
+                    }`}
+                  >
+                    <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
                     <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
                   </button>
                 )

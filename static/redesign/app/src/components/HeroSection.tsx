@@ -28,6 +28,12 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
   // renders but not clustered at the top of the scale.
   return 35 + (media.id % 31)
 }
+
+// 2026-07-16 (Aurea Phase A) — which of the card tags render as the
+// cyan "format" chip vs the outlined certification chip in the hero
+// meta row. mapMedia only emits "4K" + a content rating today; the
+// extra entries future-proof richer tag payloads without a code change.
+const FORMAT_TAGS = new Set(['4K', 'HDR', 'HDR10', 'DV', 'DOLBY VISION', 'ATMOS'])
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
@@ -154,25 +160,37 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           animation per-tick — without unmounting the parent that
           owns the hover handlers and mousePos state. */}
       {bgImage ? (
-        <img
-          key={bgImage}
-          src={bgImage}
-          alt=""
+        // 2026-07-16 (Aurea Phase A) — parallax and ken burns live on
+        // SEPARATE elements so the two transforms compose instead of
+        // fighting: the wrapper carries the mouse-driven translate
+        // (inline style, smoothed by the transition), the <img> carries
+        // the slow idle kenburns zoom (a CSS animation would override
+        // an inline transform on the same node). The key stays on the
+        // img so rotation still remounts it — restarting both the
+        // fade-in and the zoom for the incoming backdrop.
+        <div
           aria-hidden="true"
-          className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 ease-out animate-fade-in"
+          className="absolute inset-0 transition-transform duration-700 ease-out"
           style={{
             transform: `scale(1.05) translate(${parallaxX}%, ${parallaxY}%)`,
           }}
-          loading="eager"
-          decoding="async"
-          onError={(e) => {
-            // 404 happens when the server hasn't mirrored the TMDB
-            // image yet. Hide the broken-image icon; the gradient
-            // layer below takes over.
-            const img = e.currentTarget
-            img.style.display = 'none'
-          }}
-        />
+        >
+          <img
+            key={bgImage}
+            src={bgImage}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover hero-kenburns"
+            loading="eager"
+            decoding="async"
+            onError={(e) => {
+              // 404 happens when the server hasn't mirrored the TMDB
+              // image yet. Hide the broken-image icon; the gradient
+              // layer below takes over.
+              const img = e.currentTarget
+              img.style.display = 'none'
+            }}
+          />
+        </div>
       ) : null}
 
       {/* Phase 5.3 final QA — gradient stack rebuilt for a seamless
@@ -247,7 +265,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       {/* Subtitle */}
       <div className="absolute bottom-8 left-8 right-8 z-20 flex items-end justify-between gap-4">
         <div className="max-w-2xl">
-          <div className="flex items-center gap-3 mb-3">
+          {/* 2026-07-16 (Aurea Phase A) — eyebrow kicker above the pill
+              row, plus a one-shot staggered "rise" entrance across the
+              copy stack (rise-1..4). The stagger runs on mount only —
+              hero rotation swaps text in place without re-triggering it. */}
+          <div className="eyebrow rise rise-1 mb-2.5">
+            <Icon name="sparkle" size={11} /> Tonight's pick
+          </div>
+          <div className="flex items-center gap-3 mb-3 rise rise-1">
             {/* 2026-06-05 (Home redesign B) — when a personalization
                 reason exists, lead with an "✨ Aurora picked this for
                 you" pill (replaces the plain "Recommended" copy). No
@@ -276,17 +301,49 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p className="text-purple-200/80 text-xs italic mb-2 max-w-md">{reason}</p>
+            <p className="text-purple-200/80 text-xs italic mb-2 max-w-md rise rise-2">{reason}</p>
           ) : personalization?.coldStart ? (
-            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
+            <p className="text-purple-200/70 text-xs italic mb-2 max-w-md rise rise-2">
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
             </p>
           ) : null}
-          <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl">{hero.title}</h2>
+          {/* hero-title-editorial is inert outside VELVET — the
+              html[data-font="velvet"] override in index.css is what
+              swaps it to the Fraunces serif italic. */}
+          <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl hero-title-editorial rise rise-2">{hero.title}</h2>
+          {/* 2026-07-16 (Aurea Phase A) — meta chips: runtime + the tags
+              mapMedia already assembles (4K → cyan format chip,
+              content rating → outlined certification chip). Renders
+              nothing when the payload carries neither, so sparse
+              metadata costs no empty row. */}
+          {((hero.tags && hero.tags.length > 0) || hero.duration) ? (
+            <div className="flex flex-wrap items-center gap-2 mb-3 rise rise-3">
+              {hero.duration ? (
+                <span className="text-white/60 text-[13px]">{hero.duration}</span>
+              ) : null}
+              {(hero.tags ?? []).map(tag =>
+                FORMAT_TAGS.has(tag.toUpperCase()) ? (
+                  <span
+                    key={tag}
+                    className="px-2 py-[3px] rounded-md text-[10px] font-bold tracking-[0.1em] bg-white/10 text-cyan-100 border border-cyan-400/25"
+                  >
+                    {tag}
+                  </span>
+                ) : (
+                  <span
+                    key={tag}
+                    className="px-1.5 py-[2px] rounded-md text-[10px] font-bold tracking-[0.08em] border border-white/35 text-white/75"
+                  >
+                    {tag}
+                  </span>
+                )
+              )}
+            </div>
+          ) : null}
           {hero.description && (
-            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
+            <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg rise rise-3">{hero.description}</p>
           )}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 rise rise-4">
             {/* 2026-05-27 — Resume-aware primary CTA. When the hero
                 has a CW match, click resumes at the saved position via
                 resume.onPlay (which threads through to App's
