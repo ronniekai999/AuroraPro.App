@@ -1935,6 +1935,20 @@ if $SERVICE_OK; then
     echo "    2. Admin → Libraries: add your media folders"
     echo "    3. Aurora scans, matches, and fetches metadata"
     echo ""
+    # Media-access reminder (2026-07-17 install report) — when the
+    # media-directory step was skipped, the first thing a fresh admin
+    # hits is the Libraries form rejecting their path because the
+    # unprivileged `aurora` user can't traverse into /home/<user>.
+    # Say so HERE, before they hit it. (The API's error message now
+    # also explains this, but the summary is the cheaper place to
+    # learn it.)
+    if [ -z "$MEDIA_DIR" ]; then
+        warn "Media access not configured: library paths must be readable by the"
+        warn "  'aurora' service user. Home directories usually aren't (mode 0700/0750)."
+        warn "  Before adding a library under /home, grant access with:"
+        warn "    sudo AURORA_MEDIA_DIR=/path/to/your/media ./scripts/install.sh"
+        echo ""
+    fi
     if [ -n "$DB_PASSWORD" ]; then
         echo "  Database (auto-generated):"
         echo "    User:      ${DB_USER}"
