@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Aurora Pro — self-hosted media server">
+  <!-- Aurora Pro README banner. Brand gradient mirrors the favicon /
+       in-app marks (App.tsx auroraMarkA/B): violet #A855F7 →
+       purple #7C3AED → cyan #22D3EE over a night sky. Self-contained:
+       system font stack, no external refs, own dark background so it
+       reads correctly on GitHub light AND dark themes. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0A0E1E"/>
+      <stop offset="1" stop-color="#101427"/>
+    </linearGradient>
+    <linearGradient id="brand" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#A855F7"/>
+      <stop offset="0.5" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="ribbonA" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#22D3EE" stop-opacity="0.55"/>
+      <stop offset="0.7" stop-color="#7C3AED" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#A855F7" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="ribbonB" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#A855F7" stop-opacity="0"/>
+      <stop offset="0.4" stop-color="#A855F7" stop-opacity="0.45"/>
+      <stop offset="0.75" stop-color="#22D3EE" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#C4B5FD"/>
+      <stop offset="0.55" stop-color="#A855F7"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <filter id="softer" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+    <clipPath id="frame"><rect x="0" y="0" width="1200" height="300" rx="18"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1200" height="300" fill="url(#sky)"/>
+
+    <!-- aurora ribbons -->
+    <path d="M-60,210 C200,120 420,230 640,150 C860,70 1050,160 1260,80 L1260,-40 L-60,-40 Z"
+          fill="url(#ribbonA)" filter="url(#softer)" opacity="0.9"/>
+    <path d="M-60,260 C260,200 480,280 720,210 C940,146 1120,220 1260,170 L1260,60 C1000,140 820,60 600,140 C380,220 160,140 -60,220 Z"
+          fill="url(#ribbonB)" filter="url(#soft)" opacity="0.8"/>
+    <path d="M-60,80 C240,30 520,110 780,50 C980,5 1140,60 1260,30 L1260,-60 L-60,-60 Z"
+          fill="url(#ribbonA)" filter="url(#softer)" opacity="0.45"/>
+
+    <!-- stars -->
+    <g fill="#FFFFFF">
+      <circle cx="96"  cy="52"  r="1.6" opacity="0.85"/>
+      <circle cx="180" cy="118" r="1.1" opacity="0.5"/>
+      <circle cx="298" cy="44"  r="1.3" opacity="0.7"/>
+      <circle cx="402" cy="96"  r="1.0" opacity="0.45"/>
+      <circle cx="540" cy="38"  r="1.5" opacity="0.8"/>
+      <circle cx="662" cy="84"  r="1.1" opacity="0.5"/>
+      <circle cx="742" cy="40"  r="1.2" opacity="0.65"/>
+      <circle cx="852" cy="104" r="1.0" opacity="0.45"/>
+      <circle cx="948" cy="52"  r="1.6" opacity="0.85"/>
+      <circle cx="1046" cy="120" r="1.1" opacity="0.5"/>
+      <circle cx="1122" cy="66" r="1.3" opacity="0.7"/>
+      <circle cx="228" cy="236" r="1.0" opacity="0.4"/>
+      <circle cx="1012" cy="232" r="1.2" opacity="0.5"/>
+      <circle cx="1150" cy="196" r="1.0" opacity="0.4"/>
+    </g>
+
+    <!-- mark: gradient circle + play triangle (favicon geometry, scaled) -->
+    <g transform="translate(392,102)">
+      <circle cx="48" cy="48" r="46" fill="url(#brand)"/>
+      <circle cx="48" cy="48" r="46" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="1.5"/>
+      <path d="M36 27 L70 48 L36 69 Z" fill="#FFFFFF"/>
+    </g>
+
+    <!-- wordmark: one <text>, two tspans — PRO flows after AURORA at
+         whatever width the viewer's font renders, so the gap survives
+         any system font stack (a fixed dx overlapped on some). -->
+    <text x="516" y="162" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+          font-size="64" letter-spacing="10"><tspan font-weight="800"
+          fill="url(#wordmark)">AURORA</tspan><tspan dx="14" font-weight="300"
+          fill="#22D3EE" opacity="0.95">PRO</tspan></text>
+
+    <!-- tagline -->
+    <text x="518" y="200" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+          font-size="19" font-weight="400" letter-spacing="2.5" fill="#9BA3C7">YOUR MOVIES · YOUR SHOWS · YOUR SERVER</text>
+
+    <!-- baseline shimmer -->
+    <rect x="0" y="296" width="1200" height="4" fill="url(#brand)" opacity="0.9"/>
+  </g>
+</svg>
