@@ -69,8 +69,11 @@
       <circle cx="1150" cy="196" r="1.0" opacity="0.4"/>
     </g>
 
-    <!-- mark: gradient circle + play triangle (favicon geometry, scaled) -->
-    <g transform="translate(392,102)">
+    <!-- mark: gradient circle + play triangle (favicon geometry, scaled).
+         Lockup spans mark-left → "PRO"-right ≈ 654 units in a typical
+         system-font render; x-offsets below center that span on the
+         1200-wide canvas (273 left margin ≈ 273 right margin). -->
+    <g transform="translate(273,102)">
       <circle cx="48" cy="48" r="46" fill="url(#brand)"/>
       <circle cx="48" cy="48" r="46" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="1.5"/>
       <path d="M36 27 L70 48 L36 69 Z" fill="#FFFFFF"/>
@@ -79,13 +82,13 @@
     <!-- wordmark: one <text>, two tspans — PRO flows after AURORA at
          whatever width the viewer's font renders, so the gap survives
          any system font stack (a fixed dx overlapped on some). -->
-    <text x="516" y="162" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+    <text x="397" y="162" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
           font-size="64" letter-spacing="10"><tspan font-weight="800"
           fill="url(#wordmark)">AURORA</tspan><tspan dx="14" font-weight="300"
           fill="#22D3EE" opacity="0.95">PRO</tspan></text>
 
     <!-- tagline -->
-    <text x="518" y="200" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+    <text x="399" y="200" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
           font-size="19" font-weight="400" letter-spacing="2.5" fill="#9BA3C7">YOUR MOVIES · YOUR SHOWS · YOUR SERVER</text>
 
     <!-- baseline shimmer -->
