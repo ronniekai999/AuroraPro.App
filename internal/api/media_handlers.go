@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,6 +31,27 @@ type LibraryHandler struct {
 
 func NewLibraryHandler(queries *db.Queries, scanner *library.Scanner, hub *ws.Hub, watcher *library.Watcher, activity *ActivityLogger) *LibraryHandler {
 	return &LibraryHandler{queries: queries, scanner: scanner, hub: hub, watcher: watcher, activity: activity}
+}
+
+// pathAccessError turns a stat/EvalSymlinks failure on a library path
+// into an actionable message. The distinction that matters is
+// permission-denied vs not-found: Aurora runs as the unprivileged
+// `aurora` system user, and home directories default to 0700/0750 on
+// modern distros, so a path the admin plainly sees in their own shell
+// is often unreachable for the service. Reporting that case as "does
+// not exist" sent a real install down a dead end (2026-07-17 report);
+// the message now names the actual problem and the commands that fix
+// it. These strings surface verbatim in the admin UI's alert dialog.
+func pathAccessError(p string, err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return "the Aurora service user cannot access " + p +
+			" (permission denied). Grant read access on the server with:" +
+			" sudo setfacl -m u:aurora:x <each parent directory> &&" +
+			" sudo setfacl -R -m u:aurora:rX " + p +
+			" — or re-run the installer with AURORA_MEDIA_DIR=" + p
+	}
+	return "path does not exist on the server: " + p +
+		" (library paths refer to the server's filesystem)"
 }
 
 func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +96,7 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		// This prevents symlink-to-/etc from bypassing the blocklist.
 		resolved, err := filepath.EvalSymlinks(cleanPath)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "path does not exist: "+p)
+			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
 			return
 		}
 
@@ -85,7 +108,7 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		info, err := os.Lstat(resolved) // Lstat on resolved path (symlinks already resolved)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "path does not exist: "+p)
+			writeError(w, http.StatusBadRequest, pathAccessError(p, err))
 			return
 		}
 		if !info.IsDir() {

@@ -25,6 +25,9 @@
 #   AURORA_SONARR_API_KEY=...
 #   AURORA_TVDB_API_KEY=... + AURORA_TVDB_PIN=...
 #   AURORA_MEDIA_DIR=/path                  — grant read access to a media dir
+#   AURORA_INSTALL_OLLAMA=1                 — install Ollama + pull the
+#                                              semantic-search models
+#                                              (multi-GB download)
 #   AURORA_GIT_TOKEN=<PAT>                  — for private repos: writes
 #                                              /root/.git-credentials so
 #                                              the auto-updater can fetch
@@ -120,6 +123,21 @@ urlencode_password() {
         s="${s//\"/%22}"; s="${s//\!/%21}"; s="${s//\[/%5B}"; s="${s//\]/%5D}"
         printf '%s' "$s"
     fi
+}
+
+# Read a single KEY=value from an existing aurora.env, stripping the
+# surrounding quotes an operator may have added (same Audit H2
+# rationale as the inline DATABASE_URL/TMDB/JWT reads — without the
+# strip, re-runs would bake nested quotes into the file). Prints an
+# empty string when the file or key is absent.
+read_env_key() {
+    local key="$1" val=""
+    if [ -f "$CONFIG_DIR/aurora.env" ]; then
+        val=$(grep "^${key}=" "$CONFIG_DIR/aurora.env" 2>/dev/null | head -1 | cut -d= -f2- || echo "")
+        val="${val#\"}"; val="${val%\"}"
+        val="${val#\'}"; val="${val%\'}"
+    fi
+    printf '%s' "$val"
 }
 
 build_frontend_bundle() {
@@ -255,15 +273,77 @@ install_go() {
     # extract a system-wide binary. HTTPS protects in transit, but
     # a compromise of dl.google.com or a poisoned local CA store on
     # a minimal image would otherwise let an attacker substitute
-    # the toolchain that builds Aurora. The .sha256 file is a tiny
-    # text file (64 hex chars + filename) published alongside every
-    # release tarball.
+    # the toolchain that builds Aurora.
+    #
+    # 2026-07-17 install failure — go.dev's per-file ".sha256"
+    # endpoint answered a real install with an HTML "Redirecting to
+    # documentation..." page at HTTP 200. `curl -f` only fails on
+    # >=400 statuses, so the old code compared that HTML blob
+    # against the tarball hash and aborted with a misleading
+    # "possible tampering" error. Checksums are now sourced from the
+    # official JSON release index (go.dev/dl/?mode=json — the same
+    # data the download page renders) with the .sha256 file as a
+    # fallback, and BOTH sources must yield something that actually
+    # looks like a SHA-256 (64 hex chars) before any comparison
+    # happens. "Tampering" language is reserved for the one case
+    # that suggests it: a well-formed checksum that doesn't match
+    # the tarball we downloaded.
     info "Verifying SHA256..."
-    if ! fetch "${url}.sha256" "$tmp/${tarball}.sha256"; then
-        error "Failed to download SHA256 checksum from ${url}.sha256."
+
+    # A gzip stream starts with bytes 1f 8b. If the tarball URL
+    # itself served an HTML/error page (the same failure mode the
+    # .sha256 endpoint exhibited), diagnose that directly instead of
+    # reporting it as a checksum mismatch.
+    local tarball_magic
+    tarball_magic="$(head -c 2 "$tmp/$tarball" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    if command -v od &>/dev/null && [ "$tarball_magic" != "1f8b" ]; then
+        error "Downloaded '$tarball' is not a gzip archive — go.dev likely served an HTML/error page instead of the file. Re-run to retry, or install Go ${GO_VERSION}+ with your package manager and re-run: the installer accepts a pre-installed Go."
     fi
-    local expected actual
-    expected="$(tr -d '[:space:]' < "$tmp/${tarball}.sha256")"
+
+    local expected="" actual snippet
+    # Primary source: the official JSON release index. include=all
+    # covers versions that have rotated off the front page. python3
+    # is an install.sh prerequisite (Step 1) so it's present by now;
+    # the command -v guard keeps this function safe if reordered.
+    if command -v python3 &>/dev/null && fetch "https://go.dev/dl/?mode=json&include=all" "$tmp/go-index.json"; then
+        expected="$(python3 -c '
+import json, sys
+fname, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as fh:
+        releases = json.load(fh)
+except Exception:
+    sys.exit(0)
+for rel in releases:
+    for f in rel.get("files") or []:
+        if f.get("filename") == fname:
+            print(f.get("sha256") or "")
+            sys.exit(0)
+' "$tarball" "$tmp/go-index.json" 2>/dev/null || true)"
+    fi
+
+    # Fallback: the per-file .sha256 endpoint (a bare checksum,
+    # optionally followed by a filename). Only the first token is
+    # considered so both formats work.
+    if ! printf '%s' "$expected" | grep -qE '^[0-9a-f]{64}$'; then
+        [ -n "$expected" ] && warn "JSON release index had no usable checksum for ${tarball} — falling back to ${url}.sha256"
+        if fetch "${url}.sha256" "$tmp/${tarball}.sha256"; then
+            expected="$(awk '{print $1; exit}' "$tmp/${tarball}.sha256" 2>/dev/null | tr 'A-F' 'a-f' || true)"
+        else
+            warn "Failed to download ${url}.sha256"
+            expected=""
+        fi
+    fi
+
+    if ! printf '%s' "$expected" | grep -qE '^[0-9a-f]{64}$'; then
+        # Neither source produced a checksum. Show a sanitized
+        # snippet of what came back so an HTML page is recognizable
+        # at a glance, and DON'T claim tampering — this is a
+        # serving/network problem, not a security signal.
+        snippet="$(printf '%s' "$expected" | tr -cd '[:print:]' | head -c 80 || true)"
+        error "Could not obtain a valid SHA-256 for ${tarball} from go.dev (got: '${snippet:-nothing}'). The checksum endpoints occasionally serve HTML redirect pages — re-run to retry, or install Go ${GO_VERSION}+ with your package manager (e.g. 'apt install golang') and re-run: the installer accepts a pre-installed Go."
+    fi
+
     if command -v sha256sum &>/dev/null; then
         actual="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
     elif command -v shasum &>/dev/null; then
@@ -272,7 +352,7 @@ install_go() {
         error "Neither sha256sum nor shasum is available — cannot verify Go tarball."
     fi
     if [ "$expected" != "$actual" ]; then
-        error "Go tarball SHA256 mismatch! Expected $expected, got $actual. Aborting — possible tampering."
+        error "Go tarball SHA256 mismatch! Expected $expected, got $actual. Aborting — the download is corrupted or possibly tampered with; re-run to retry with a fresh download."
     fi
     ok "SHA256 verified"
 
@@ -1114,6 +1194,23 @@ if [ -f "$CONFIG_DIR/aurora.env" ]; then
 fi
 JWT_SECRET="${EXISTING_JWT:-$(rand_string 64)}"
 
+# Semantic search / Ollama settings — preserve operator values across
+# re-runs (same pattern as JWT/TMDB above). The model defaults MUST
+# stay in sync with internal/config/config.go (LLMConfig defaults).
+# The URL is the exception: the Go default is http://ollama:11434, a
+# Docker-era hostname that resolves nowhere on the bare-metal installs
+# this script produces — embeddings then fail silently even with a
+# local Ollama running (2026-07-17 install report). The installer
+# therefore always pins an explicit localhost URL unless the operator
+# already configured one.
+EXISTING_OLLAMA_URL="$(read_env_key LLM_OLLAMA_URL)"
+EXISTING_EMBED_MODEL="$(read_env_key LLM_EMBED_MODEL)"
+EXISTING_CHAT_MODEL="$(read_env_key LLM_CHAT_MODEL)"
+EXISTING_LLM_ENABLED="$(read_env_key LLM_ENABLED)"
+OLLAMA_URL="${EXISTING_OLLAMA_URL:-http://localhost:11434}"
+OLLAMA_EMBED_MODEL="${EXISTING_EMBED_MODEL:-embeddinggemma}"
+OLLAMA_CHAT_MODEL="${EXISTING_CHAT_MODEL:-qwen2.5:3b-instruct}"
+
 info "Writing $CONFIG_DIR/aurora.env..."
 # Atomic write: write to .tmp then rename into place. The previous
 # `{ ... } > aurora.env` truncated the file at open time, then
@@ -1133,6 +1230,16 @@ info "Writing $CONFIG_DIR/aurora.env..."
     printf 'JWT_SECRET=%s\n\n' "$JWT_SECRET"
     printf '# TheMovieDB API key\n'
     printf 'TMDB_API_KEY=%s\n' "$TMDB_KEY"
+    # Semantic search / embeddings — Aurora expects an Ollama
+    # instance here. Written explicitly because the Go-side default
+    # (http://ollama:11434) doesn't resolve on bare metal. Model
+    # overrides and LLM_ENABLED are only re-emitted when the
+    # operator had them in the previous aurora.env.
+    printf '\n# Semantic search / LLM (Ollama)\n'
+    printf 'LLM_OLLAMA_URL=%s\n' "$OLLAMA_URL"
+    [ -n "$EXISTING_EMBED_MODEL" ] && printf 'LLM_EMBED_MODEL=%s\n' "$EXISTING_EMBED_MODEL"
+    [ -n "$EXISTING_CHAT_MODEL" ]  && printf 'LLM_CHAT_MODEL=%s\n' "$EXISTING_CHAT_MODEL"
+    [ -n "$EXISTING_LLM_ENABLED" ] && printf 'LLM_ENABLED=%s\n' "$EXISTING_LLM_ENABLED"
     # Auto-updater source dir — where the cloned repo lives. The
     # 5-min timer + admin "Update Now" button both `cd` here and
     # `git pull` before rebuilding. We point at the root-owned
@@ -1211,6 +1318,75 @@ chown root:"$AURORA_GROUP" "$CONFIG_DIR/aurora.env.tmp"
 # version or the new version, never a half-written one.
 mv -f "$CONFIG_DIR/aurora.env.tmp" "$CONFIG_DIR/aurora.env"
 ok "Configuration written"
+
+# ── Ollama (semantic search / embeddings) — opt-in ────────────────
+# Aurora ships with semantic search ENABLED by default, but it needs
+# an Ollama instance serving the embedding + chat models. The base
+# install provides none, so on a fresh box the feature silently
+# degrades to keyword/trigram search (2026-07-17 install report).
+# AURORA_INSTALL_OLLAMA=1 installs Ollama via its official installer
+# and pulls the two models Aurora's config expects. Kept opt-in
+# because the model downloads are multi-GB and some operators run
+# Ollama on a separate GPU box (custom LLM_OLLAMA_URL).
+#
+# Every failure path here warns-and-continues: Aurora is fully
+# usable without Ollama, so a model-pull hiccup must never abort an
+# install. The end-of-install summary probes reachability either
+# way and prints remediation steps if semantic search isn't live.
+if [ "${AURORA_INSTALL_OLLAMA:-}" = "1" ]; then
+    info "Setting up Ollama for semantic search (AURORA_INSTALL_OLLAMA=1)..."
+    case "$OLLAMA_URL" in
+        http://localhost:*|http://127.0.0.1:*)
+            if command -v ollama &>/dev/null; then
+                ok "Ollama already installed"
+            else
+                info "Installing Ollama (official installer from ollama.com)..."
+                OLLAMA_SETUP="$(mktemp)"
+                if curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_SETUP" && sh "$OLLAMA_SETUP"; then
+                    ok "Ollama installed"
+                else
+                    warn "Ollama install failed — semantic search stays on keyword fallback."
+                    warn "  Install manually: curl -fsSL https://ollama.com/install.sh | sh"
+                fi
+                rm -f "$OLLAMA_SETUP"
+            fi
+            if command -v ollama &>/dev/null; then
+                # Ollama's installer normally enables its own systemd
+                # unit; belt-and-suspenders for re-runs / partial installs.
+                systemctl enable ollama &>/dev/null || true
+                systemctl start ollama &>/dev/null || true
+                OLLAMA_UP=false
+                for _ in $(seq 1 30); do
+                    if curl -sf --max-time 2 "$OLLAMA_URL/api/version" &>/dev/null; then
+                        OLLAMA_UP=true
+                        break
+                    fi
+                    sleep 1
+                done
+                if $OLLAMA_UP; then
+                    # Model names must match what Aurora will request
+                    # (config defaults, or the operator's preserved
+                    # LLM_*_MODEL overrides read above).
+                    for model in "$OLLAMA_EMBED_MODEL" "$OLLAMA_CHAT_MODEL"; do
+                        info "Pulling model '$model' (large download — expect several minutes)..."
+                        if ollama pull "$model"; then
+                            ok "Model '$model' ready"
+                        else
+                            warn "Failed to pull '$model' — pull manually later: ollama pull $model"
+                        fi
+                    done
+                else
+                    warn "Ollama API didn't come up at $OLLAMA_URL within 30s — skipping model pulls."
+                    warn "  Pull manually: ollama pull $OLLAMA_EMBED_MODEL && ollama pull $OLLAMA_CHAT_MODEL"
+                fi
+            fi
+            ;;
+        *)
+            warn "AURORA_INSTALL_OLLAMA=1 is set, but LLM_OLLAMA_URL points at a non-local instance ($OLLAMA_URL) — skipping the local install."
+            warn "  Ensure '$OLLAMA_EMBED_MODEL' and '$OLLAMA_CHAT_MODEL' are pulled on that host."
+            ;;
+    esac
+fi
 
 # ── Media directory access ────────────────────────────────────────
 # Aurora runs as the unprivileged `aurora` system user. When the
@@ -1759,6 +1935,20 @@ if $SERVICE_OK; then
     echo "    2. Admin → Libraries: add your media folders"
     echo "    3. Aurora scans, matches, and fetches metadata"
     echo ""
+    # Media-access reminder (2026-07-17 install report) — when the
+    # media-directory step was skipped, the first thing a fresh admin
+    # hits is the Libraries form rejecting their path because the
+    # unprivileged `aurora` user can't traverse into /home/<user>.
+    # Say so HERE, before they hit it. (The API's error message now
+    # also explains this, but the summary is the cheaper place to
+    # learn it.)
+    if [ -z "$MEDIA_DIR" ]; then
+        warn "Media access not configured: library paths must be readable by the"
+        warn "  'aurora' service user. Home directories usually aren't (mode 0700/0750)."
+        warn "  Before adding a library under /home, grant access with:"
+        warn "    sudo AURORA_MEDIA_DIR=/path/to/your/media ./scripts/install.sh"
+        echo ""
+    fi
     if [ -n "$DB_PASSWORD" ]; then
         echo "  Database (auto-generated):"
         echo "    User:      ${DB_USER}"
@@ -1766,6 +1956,60 @@ if $SERVICE_OK; then
         echo "    Password:  stored in $CONFIG_DIR/aurora.env"
         echo ""
     fi
+
+    # ── Semantic-search preflight (2026-07-17 install report) ─────
+    # Aurora enables semantic search by default, but without a
+    # reachable Ollama + pulled models it silently falls back to
+    # keyword search and nothing ever tells the operator. Probe here
+    # — the final screen is the one place they will actually see it.
+    # Skipped when the operator explicitly disabled the LLM stack.
+    case "${EXISTING_LLM_ENABLED:-true}" in
+        true|1|yes)
+            OLLAMA_TAGS="$(curl -sf --max-time 5 "$OLLAMA_URL/api/tags" 2>/dev/null || true)"
+            if [ -z "$OLLAMA_TAGS" ]; then
+                warn "Semantic search: Ollama is NOT reachable at $OLLAMA_URL."
+                warn "  Search will fall back to keyword matching until it is. To enable:"
+                warn "    curl -fsSL https://ollama.com/install.sh | sh"
+                warn "    ollama pull $OLLAMA_EMBED_MODEL && ollama pull $OLLAMA_CHAT_MODEL"
+                warn "    sudo systemctl restart aurora"
+                warn "  (or re-run this installer with AURORA_INSTALL_OLLAMA=1;"
+                warn "   set LLM_ENABLED=false in $CONFIG_DIR/aurora.env to silence this)"
+            else
+                # Reachable — verify the models Aurora will request are
+                # actually pulled. Values passed via env (not
+                # interpolation) per the aurora-update.sh H1 pattern.
+                MISSING_MODELS="$(OLLAMA_TAGS_JSON="$OLLAMA_TAGS" \
+                    WANT_EMBED="$OLLAMA_EMBED_MODEL" \
+                    WANT_CHAT="$OLLAMA_CHAT_MODEL" \
+                    python3 -c '
+import json, os
+names = set()
+try:
+    for m in json.loads(os.environ["OLLAMA_TAGS_JSON"]).get("models") or []:
+        n = m.get("name") or m.get("model") or ""
+        if n:
+            names.add(n)
+except Exception:
+    pass
+missing = []
+for want in (os.environ["WANT_EMBED"], os.environ["WANT_CHAT"]):
+    if not any(n == want or n == want + ":latest" for n in names):
+        missing.append(want)
+print(" ".join(missing))
+' 2>/dev/null || true)"
+                if [ -n "$MISSING_MODELS" ]; then
+                    warn "Semantic search: Ollama is up at $OLLAMA_URL but missing model(s): $MISSING_MODELS"
+                    warn "  Embeddings will fail until they are pulled:"
+                    for m in $MISSING_MODELS; do
+                        warn "    ollama pull $m"
+                    done
+                else
+                    ok "Semantic search ready (Ollama at $OLLAMA_URL, models present)"
+                fi
+            fi
+            ;;
+    esac
+    echo ""
 else
     echo "  Files installed but the service didn't reach a healthy state."
     echo "  Debug:  journalctl -u aurora -n 80"
