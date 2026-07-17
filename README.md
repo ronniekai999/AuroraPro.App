@@ -46,6 +46,7 @@ sudo TMDB_API_KEY=xxxxx \
 | `AURORA_RADARR_URL=` + `AURORA_RADARR_API_KEY=` | Enables movie requests via Radarr |
 | `AURORA_SONARR_URL=` + `AURORA_SONARR_API_KEY=` | Enables TV requests via Sonarr |
 | `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | TVDB metadata fallback |
+| `AURORA_INSTALL_OLLAMA=1` | Installs [Ollama](https://ollama.com) and pulls the semantic-search models (`embeddinggemma` + `qwen2.5:3b-instruct`, ~2.5 GB total). Without a reachable Ollama, Aurora's search silently falls back to keyword matching — the installer now warns about this at the end either way. |
 | `AURORA_GIT_TOKEN=<PAT>` | **For private repos** — writes `/root/.git-credentials` (mode 600) so the auto-updater can `git fetch` non-interactively. Use a fine-grained PAT scoped to `Contents: Read-only` on just this repo. |
 
 The installer is **idempotent** — re-run it any time to rebuild after a
