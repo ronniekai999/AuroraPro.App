@@ -2,7 +2,7 @@
 
 <img src="docs/assets/aurora-banner.svg" alt="Aurora Pro — self-hosted media server" width="100%">
 
-**The self-hosted media server that installs in one command and streams like it cost you a subscription.**
+**The self-hosted media server that installs in one command and streams better than any subscription!**
 
 <br>
 
