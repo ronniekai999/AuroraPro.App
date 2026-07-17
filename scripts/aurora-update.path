@@ -1,9 +1,8 @@
 [Unit]
 Description=Aurora Media Server — update trigger watcher
-Documentation=https://aurorapro.app/
+Documentation=https://github.com/aurora-media/aurora
 # Don't fire during initial boot before aurora itself is up.
 After=aurora.service
-ConditionPathExists=!/usr/local/lib/aurora-installer/db-recovery-pending
 
 [Path]
 # Aurora's "Update Now" handler writes a fresh timestamp to this

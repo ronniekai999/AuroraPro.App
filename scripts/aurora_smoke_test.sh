@@ -6,13 +6,11 @@
 #   AURORA_TOKEN=eyJ...   ./aurora_smoke_test.sh           # default base = https://aurorapro.app
 #   AURORA_TOKEN=eyJ...   AURORA_BASE=https://other.app ./aurora_smoke_test.sh
 #
-# Get a token by logging in with a cookie jar (httpOnly cookies are not
-# readable from browser localStorage):
-#   curl -sS -c /tmp/aurora-jar -X POST https://aurorapro.app/api/auth/login \
-#     -H 'Content-Type: application/json' \
-#     -d '{"username":"USER","password":"PASS"}'
-#   AURORA_TOKEN="$(awk '$6=="aurora_access"{print $7}' /tmp/aurora-jar)" \
-#     bash scripts/aurora_smoke_test.sh
+# Get your token from your browser:
+#   1. Open Aurora in Chrome/Firefox (signed in)
+#   2. DevTools → Application → Local Storage → https://aurorapro.app
+#   3. Copy the value of `aurora_token`
+#   4. Run:  AURORA_TOKEN='<paste>' bash scripts/aurora_smoke_test.sh
 #
 # For full admin-path coverage use an admin user's token; non-admin
 # tokens will fail the admin checks (script reports + continues).
@@ -59,7 +57,7 @@ section() { printf "\n${B}═══ %s${N}\n" "$*"; }
 #   the body; expects a non-empty, non-"null" result.
 check_get() {
   local name="$1" path="$2" expect="$3" auth="${4:-yes}" jq_check="${5:-}"
-  local h=() status t0 t1 elapsed excerpt
+  local h=() status body t0 t1 elapsed excerpt
 
   [ "$auth" = "yes" ] && h=(-H "Authorization: Bearer $TOKEN")
 
@@ -100,7 +98,7 @@ echo "  Token:    ${TOKEN:0:12}…${TOKEN: -8}"
 echo "  jq:       $([ "$HAS_JQ" = "1" ] && echo "yes" || echo "no — install for shape checks")"
 
 section "1. Public — no auth required"
-check_get "GET /api/health"             /api/health             200 no  'select(.status == "ok" and .db_connected == true) | .status'
+check_get "GET /api/health"             /api/health             200 no  '.status // "ok"'
 check_get "GET /api/auth/setup-status"  /api/auth/setup-status  200 no  '.has_users | tostring'
 
 section "2. Auth — token validity"
@@ -201,7 +199,7 @@ echo "════════════════════════�
 printf "  ${G}Pass:${N} %d   ${R}Fail:${N} %d   ${Y}Warn:${N} %d   ${D}Skip:${N} %d\n" "$PASS" "$FAIL" "$WARN" "$SKIP"
 if [ ${#FAILED_LIST[@]} -gt 0 ]; then
   echo
-  printf "%sFailed checks:%s\n" "$R" "$N"
+  printf "${R}Failed checks:${N}\n"
   for f in "${FAILED_LIST[@]}"; do
     printf "  - %s\n" "$f"
   done

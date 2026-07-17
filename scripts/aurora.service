@@ -1,9 +1,8 @@
 [Unit]
 Description=Aurora Media Server
-Documentation=https://aurorapro.app/
+Documentation=https://github.com/aurora-media/aurora
 After=network-online.target postgresql.service
 Wants=network-online.target
-ConditionPathExists=!/usr/local/lib/aurora-installer/db-recovery-pending
 
 [Service]
 Type=simple
@@ -24,13 +23,10 @@ ProtectSystem=strict
 # read-only allows scanning media libraries stored under /home/
 ProtectHome=read-only
 PrivateTmp=yes
-UMask=0027
 # /var/lib/aurora is included so aurora can touch the
 # /var/lib/aurora/trigger-update file used by aurora-update.path
 # to trigger the in-app "Update Now" button without sudo.
-# Deployed code, migrations, and static assets under /opt/aurora are
-# root-owned and read-only to the service. Only runtime state is writable.
-ReadWritePaths=/var/cache/aurora /var/log/aurora /var/lib/aurora
+ReadWritePaths=/var/cache/aurora /opt/aurora /var/log/aurora /var/lib/aurora
 
 [Install]
 WantedBy=multi-user.target
