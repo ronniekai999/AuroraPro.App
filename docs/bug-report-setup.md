@@ -44,8 +44,7 @@ Copy the token immediately — GitHub only shows it once.
 
 ## Step 2 — Set the env vars
 
-Add these to wherever your Aurora env config lives (`docker-compose.yml`,
-systemd unit, `.env` file, etc.):
+Add these to `/etc/aurora/aurora.env`, then restart `aurora.service`:
 
 ```bash
 # Master toggle. Set to true to enable the feature.

@@ -3,7 +3,11 @@
 # Usage:
 #   1. Update the domain below to your actual domain
 #   2. Copy to /etc/caddy/Caddyfile (or include from your main Caddyfile)
-#   3. systemctl reload caddy
+#   3. Set these in /etc/aurora/aurora.env:
+#        AURORA_ALLOWED_ORIGINS=https://aurora.example.com
+#        AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128
+#        AURORA_SECURE_COOKIES=true
+#   4. systemctl restart aurora && systemctl reload caddy
 #
 # Caddy automatically provisions and renews TLS certificates via Let's Encrypt.
 

@@ -163,7 +163,7 @@ type ServerConfig struct {
 	// source of truth, which is the secure-by-default posture. Set this
 	// ONLY for the IPs of reverse proxies you control; misconfiguration
 	// here lets external clients forge their apparent IP and bypass the
-	// auth rate limiter.
+	// auth rate limiter. Env: AURORA_TRUSTED_PROXIES.
 	TrustedProxies []string
 	// SecureCookies forces the Secure attribute on auth cookies even when
 	// Aurora itself sees plain HTTP — set this when a TLS-terminating reverse
@@ -794,6 +794,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("AURORA_ALLOWED_ORIGINS"); v != "" {
 		cfg.Server.AllowedOrigins = parseOrigins(v)
+	}
+	if v := os.Getenv("AURORA_TRUSTED_PROXIES"); v != "" {
+		cfg.Server.TrustedProxies = parseOrigins(v)
 	}
 	if v := os.Getenv("AURORA_SECURE_COOKIES"); v != "" {
 		cfg.Server.SecureCookies = v == "true" || v == "1" || v == "yes"

@@ -87,10 +87,8 @@ curl -sS -c /tmp/jar -X POST "$BASE/api/auth/login" \
 TOKEN="$(awk '$6=="aurora_access"{print $7}' /tmp/jar)"
 ```
 
-> Note: `scripts/aurora_smoke_test.sh`'s header comment predates H10 and tells
-> you to copy `aurora_token` from browser `localStorage`. That's stale — the
-> token is now an httpOnly cookie and isn't in `localStorage`. Use the cookie-jar
-> method above (or `server-test-loop.sh`, which does it for you).
+The smoke-test script documents the same cookie-jar method. The token is
+httpOnly and is not available from browser `localStorage`.
 
 ### 2. Trigger the update (admin token)
 

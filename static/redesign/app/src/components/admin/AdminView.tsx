@@ -282,9 +282,8 @@ function NowPlayingWidget() {
 // Backend wiring:
 //   - GET  /api/admin/system/update/status — returns the JSON written
 //     by scripts/aurora-update.sh into /var/lib/aurora/update-status.json
-//   - POST /api/admin/system/update — shells out to
-//     `sudo -n systemctl start aurora-update.service`; the actual
-//     update runs asynchronously
+//   - POST /api/admin/system/update — writes the root-owned systemd path
+//     trigger file; aurora-update.path starts the updater asynchronously
 //
 // Polling cadence:
 //   - 10 s when in a TERMINAL state (idle / success / failed / unknown)

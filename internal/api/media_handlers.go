@@ -27,6 +27,62 @@ type LibraryHandler struct {
 	activity *ActivityLogger
 }
 
+func pathAtOrBelow(path, root string) bool {
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+}
+
+// libraryPathRejectionReason mirrors the installer's media-root safety policy.
+// A library scan recursively walks every stored root, and reinstall/uninstall
+// may recursively apply or remove ACLs there. Broad system roots would
+// therefore be both a data-exposure risk and an easy accidental server-wide
+// traversal.
+func libraryPathRejectionReason(path string) string {
+	if !filepath.IsAbs(path) {
+		return "path must be absolute"
+	}
+
+	for _, broad := range []string{
+		"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32",
+		"/lib64", "/media", "/mnt", "/opt", "/proc", "/root", "/run",
+		"/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+	} {
+		if path == broad {
+			return "path is a broad system root"
+		}
+	}
+
+	for _, protected := range []string{
+		"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64",
+		"/proc", "/root", "/run", "/sbin", "/sys", "/usr",
+		"/var/lib/aurora", "/var/cache/aurora", "/var/log/aurora",
+		"/opt/aurora", "/tmp/aurora-transcode",
+	} {
+		if pathAtOrBelow(path, protected) {
+			return "path overlaps protected system or Aurora state"
+		}
+	}
+
+	// /var is predominantly service state. Keep the single documented media
+	// namespace and reject database, log, spool, backup, cache, and other
+	// application trees.
+	if pathAtOrBelow(path, "/var") && !pathAtOrBelow(path, "/var/media") {
+		return "only /var/media is accepted beneath /var"
+	}
+
+	if strings.HasPrefix(path, "/home/") {
+		relative := strings.TrimPrefix(path, "/home/")
+		parts := strings.Split(relative, string(filepath.Separator))
+		if len(parts) == 1 {
+			return "an entire user home is too broad"
+		}
+		if len(parts) > 1 && strings.HasPrefix(parts[1], ".") {
+			return "hidden user configuration trees are not media roots"
+		}
+	}
+
+	return ""
+}
+
 func NewLibraryHandler(queries *db.Queries, scanner *library.Scanner, hub *ws.Hub, watcher *library.Watcher, activity *ActivityLogger) *LibraryHandler {
 	return &LibraryHandler{queries: queries, scanner: scanner, hub: hub, watcher: watcher, activity: activity}
 }
@@ -57,17 +113,15 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate library paths exist and are directories.
-	// Resolve symlinks so the blocklist catches the real target.
-	//
-	// 2026-05-19 audit (API-H6) — added /var/lib/aurora to the blocklist.
-	// That's Aurora's own state dir (source mirror, update-status.json,
-	// trigger-update). An admin pointing a library at it would expose
-	// Aurora's internal files via direct-play streaming.
-	blockedPrefixes := []string{"/etc", "/root", "/proc", "/sys", "/dev", "/boot", "/var/run", "/run", "/var/lib/aurora"}
+	// Validate library paths exist and are directories. Resolve symlinks before
+	// applying the same broad-root policy used by installer ACL management.
 	resolvedPaths := make([]string, 0, len(req.Paths))
 	for _, p := range req.Paths {
 		cleanPath := filepath.Clean(p)
+		if !filepath.IsAbs(cleanPath) {
+			writeError(w, http.StatusBadRequest, "path not allowed: "+p)
+			return
+		}
 
 		// Resolve symlinks to get the real filesystem path.
 		// This prevents symlink-to-/etc from bypassing the blocklist.
@@ -77,11 +131,9 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		for _, blocked := range blockedPrefixes {
-			if resolved == blocked || strings.HasPrefix(resolved, blocked+"/") {
-				writeError(w, http.StatusBadRequest, "path not allowed: "+p)
-				return
-			}
+		if libraryPathRejectionReason(resolved) != "" {
+			writeError(w, http.StatusBadRequest, "path not allowed: "+p)
+			return
 		}
 		info, err := os.Lstat(resolved) // Lstat on resolved path (symlinks already resolved)
 		if err != nil {

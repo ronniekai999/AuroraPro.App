@@ -8,6 +8,10 @@ server:
   allowed_origins:
     - "http://localhost:*"
     - "https://localhost:*"
+  # Trust forwarded client IP headers only from reverse proxies you control.
+  trusted_proxies: []
+  # Set true when TLS terminates at a reverse proxy in front of Aurora.
+  secure_cookies: false
 
 database:
   url: "postgres://aurora:aurora@localhost:5432/aurora?sslmode=disable"
