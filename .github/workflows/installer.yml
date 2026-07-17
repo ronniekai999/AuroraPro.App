@@ -1,0 +1,93 @@
+name: Installer
+
+on:
+  push:
+    paths:
+      - "install.sh"
+      - "scripts/**"
+      - "configs/aurora.yaml"
+      - "internal/api/**"
+      - "internal/config/**"
+      - ".github/workflows/installer.yml"
+  pull_request:
+    paths:
+      - "install.sh"
+      - "scripts/**"
+      - "configs/aurora.yaml"
+      - "internal/api/**"
+      - "internal/config/**"
+      - ".github/workflows/installer.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+      - name: Validate shell syntax
+        run: bash -n install.sh scripts/*.sh scripts/lib/*.sh scripts/tests/*.sh
+      - name: Lint installer lifecycle
+        run: >
+          shellcheck
+          install.sh
+          scripts/install.sh
+          scripts/aurora-update.sh
+          scripts/redeploy.sh
+          scripts/setup-domain.sh
+          scripts/uninstall.sh
+          scripts/aurora_smoke_test.sh
+          scripts/lib/env-file.sh
+          scripts/lib/install-state.sh
+          scripts/tests/bootstrap_test.sh
+          scripts/tests/env_file_test.sh
+          scripts/tests/install_state_test.sh
+          scripts/tests/pgvector_source_test.sh
+          scripts/tests/updater_state_test.sh
+      - name: Test installer helpers
+        run: |
+          bash scripts/tests/bootstrap_test.sh
+          bash scripts/tests/env_file_test.sh
+          bash scripts/tests/install_state_test.sh
+          AURORA_TEST_NETWORK=1 bash scripts/tests/pgvector_source_test.sh
+          bash scripts/tests/updater_state_test.sh
+
+  endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test installer-facing Go behavior
+        run: go test ./internal/api ./internal/config
+
+  application-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+          cache-dependency-path: static/redesign/app/package-lock.json
+      - name: Test and build frontend
+        working-directory: static/redesign/app
+        run: |
+          npm ci --no-audit --no-fund
+          npm test -- --run
+          npm run build
+      - name: Test and vet backend
+        run: |
+          go test ./...
+          go vet ./...

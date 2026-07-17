@@ -479,6 +479,28 @@ func TestAllowedOrigins_Override(t *testing.T) {
 	}
 }
 
+func TestTrustedProxies_Override(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "fake-tmdb-key-for-testing")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+	t.Setenv("AURORA_TRUSTED_PROXIES", "127.0.0.1/32, ::1/128")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if len(cfg.Server.TrustedProxies) != 2 {
+		t.Fatalf("TrustedProxies count = %d, want 2", len(cfg.Server.TrustedProxies))
+	}
+	if cfg.Server.TrustedProxies[0] != "127.0.0.1/32" {
+		t.Errorf("TrustedProxies[0] = %q", cfg.Server.TrustedProxies[0])
+	}
+	if cfg.Server.TrustedProxies[1] != "::1/128" {
+		t.Errorf("TrustedProxies[1] = %q", cfg.Server.TrustedProxies[1])
+	}
+}
+
 // A wildcard origin combined with credentialed CORS is the footgun guarded
 // by Config.Validate: go-chi reflects ACAO:* + credentials:true, which every
 // browser rejects, silently breaking cookie/OAuth login. Load must fail fast.

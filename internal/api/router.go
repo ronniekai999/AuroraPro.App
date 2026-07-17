@@ -281,6 +281,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// v2IndexPath caches the index.html path; SPA fallback re-uses
 		// it on every history-API route that doesn't match a real file.
 		v2IndexPath := filepath.Join(deps.StaticDir, "v2", "index.html")
+		installerPaths := []string{
+			filepath.Join(deps.StaticDir, "install.sh"),
+			// Development checkout: StaticDir is usually ./static.
+			filepath.Clean(filepath.Join(deps.StaticDir, "..", "install.sh")),
+		}
 
 		r.Group(func(r chi.Router) {
 			r.Use(frontendHeaders)
@@ -316,6 +321,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Get("/join/{code}", joinShortLinkRedirect)
 			r.Handle("/static/*", http.StripPrefix("/static/",
 				safeFileServer(http.Dir(deps.StaticDir))))
+
+			// Stable public bootstrap endpoint. Deploys copy the
+			// repository-root install.sh into the static tree, so this URL
+			// serves the exact bootstrap from the running release.
+			installerHandler := serveInstallerScript(installerPaths...)
+			r.Get("/install.sh", installerHandler)
+			r.Head("/install.sh", installerHandler)
 
 			// 2026-05-20 — browsers auto-request /favicon.ico from
 			// the document root before the SPA's <link rel="icon">
@@ -1153,6 +1165,33 @@ func frontendHeaders(next http.Handler) http.Handler {
 				"frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// serveInstallerScript returns a deliberately narrow handler for Aurora's
+// public bootstrap. Keeping this separate from the generic file server lets us
+// force a shell-script content type, disable stale caching, and return 404 when
+// a development static tree has not staged install.sh yet.
+func serveInstallerScript(paths ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path := ""
+		for _, candidate := range paths {
+			info, err := os.Lstat(candidate)
+			if err == nil && info.Mode().IsRegular() {
+				path = candidate
+				break
+			}
+		}
+		if path == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+		w.Header().Set("Content-Disposition", `inline; filename="aurora-install.sh"`)
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeFile(w, r, path)
+	}
 }
 
 // safeFileServer wraps http.FileServer to block dotfiles, directory listings,

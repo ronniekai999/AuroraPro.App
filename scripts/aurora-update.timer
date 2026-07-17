@@ -1,6 +1,7 @@
 [Unit]
 Description=Aurora Media Server — Auto-update timer (5 min)
-Documentation=https://github.com/aurora-media/aurora
+Documentation=https://aurorapro.app/
+ConditionPathExists=!/usr/local/lib/aurora-installer/db-recovery-pending
 
 [Timer]
 # Fire 2 minutes after boot, then every 5 minutes thereafter.

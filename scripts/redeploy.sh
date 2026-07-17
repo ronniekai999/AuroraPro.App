@@ -13,10 +13,10 @@
 #   1. Builds the V2 React SPA  (npm ci + vite build → static/v2/)
 #   2. Builds the Go binary     (CGO_ENABLED=0 go build → ./aurora)
 #   3. Installs the binary      (sudo install -m 755 → /usr/local/bin/aurora)
-#   4. Atomic-swaps static/     (cp → /opt/aurora/static.new → mv-swap)
-#   5. Copies migrations/*.sql  (sudo cp → /opt/aurora/migrations/)
-#   6. Restarts aurora.service  (sudo systemctl restart aurora)
-#   7. Polls the health endpoint until it answers (or times out)
+#   4. Atomic-swaps static/ and migrations/ from complete staged directories
+#   5. Restarts aurora.service  (sudo systemctl restart aurora)
+#   6. Polls the health endpoint until Aurora reports status=ok and
+#      db_connected=true (or times out)
 #
 # What it does NOT do:
 #   - System-level prereqs (Go, FFmpeg, Postgres, pgvector). For a
@@ -30,30 +30,41 @@
 #   ./scripts/redeploy.sh                  # build + deploy, idempotent
 #   ./scripts/redeploy.sh --skip-npm       # reuse existing static/v2/ build
 #   ./scripts/redeploy.sh --skip-frontend  # alias for --skip-npm
-#   ./scripts/redeploy.sh --no-restart     # build + install but don't restart aurora
+#   ./scripts/redeploy.sh --no-restart     # build + stage .new artifacts only
 #   ./scripts/redeploy.sh --allow-stale    # deploy even if HEAD is behind origin
 #                                           # (skips the safety check — rarely needed)
 #   ./scripts/redeploy.sh -h               # this help text
 #
 # Exit codes:
-#   0  success (binary installed, service healthy)
+#   0  success (service healthy, or artifacts staged with --no-restart)
 #   1  build failed (npm or go)
 #   2  install / file copy failed
 #   3  service restart failed or health check timed out
 #   4  preflight failure (wrong dir, missing tools, OS, lock held)
 # ── END HELP ──────────────────────────────────────────────────────
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ── Constants (must match install.sh) ────────────────────────────
 INSTALL_BIN="/usr/local/bin/aurora"
 INSTALL_DIR="/opt/aurora"
-INSTALL_USER="aurora"
 INSTALL_GROUP="aurora"
 SPA_SRC_DIR="static/redesign/app"
 SPA_OUTPUT_DIR="static/v2"
 HEALTH_URL="http://localhost:8484/api/health"
-HEALTH_TIMEOUT=30 # seconds to wait for /api/health to answer
+HEALTH_TIMEOUT=30 # seconds to wait for strict /api/health readiness
+BIN_SNAPSHOT="${INSTALL_BIN}.prev"
+STATIC_SNAPSHOT="${INSTALL_DIR}/static.old"
+MIGRATIONS_SNAPSHOT="${INSTALL_DIR}/migrations.old"
+DB_RECOVERY_MARKER="${AURORA_DB_RECOVERY_MARKER:-/usr/local/lib/aurora-installer/db-recovery-pending}"
+DEPLOYMENT_SWAPPED=false
+ROLLBACK_ATTEMPTED=false
+HAD_BIN=false
+HAD_STATIC=false
+HAD_MIGRATIONS=false
+BIN_SWAP_STARTED=false
+STATIC_SWAP_STARTED=false
+MIGRATIONS_SWAP_STARTED=false
 
 # ── Helpers ──────────────────────────────────────────────────────
 info()  { printf '\033[1;34m[INFO]\033[0m  %s\n' "$1"; }
@@ -61,6 +72,186 @@ warn()  { printf '\033[1;33m[WARN]\033[0m  %s\n' "$1"; }
 ok()    { printf '\033[1;32m[ OK ]\033[0m  %s\n' "$1"; }
 error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$1"; exit "${2:-1}"; }
 step()  { printf '\n\033[1;35m▸ %s\033[0m\n\n' "$1"; }
+
+strict_aurora_health() {
+    curl -fsS --max-time 2 "$HEALTH_URL" 2>/dev/null |
+        python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+
+healthy = (
+    isinstance(payload, dict)
+    and payload.get("status") == "ok"
+    and payload.get("db_connected") is True
+)
+raise SystemExit(0 if healthy else 1)
+' >/dev/null 2>&1
+}
+
+wait_for_strict_health() {
+    local deadline
+    deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        if systemctl is-active --quiet aurora && strict_aurora_health; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+rollback_redeploy() {
+    local restore_ok=true
+
+    trap '' INT TERM
+    ROLLBACK_ATTEMPTED=true
+    warn "Restoring the previous binary, static bundle, and migration set..."
+
+    if $BIN_SWAP_STARTED; then
+        sudo rm -f "${INSTALL_BIN}.failed"
+        if [ -e "$INSTALL_BIN" ]; then
+            sudo mv "$INSTALL_BIN" "${INSTALL_BIN}.failed" || restore_ok=false
+        fi
+        if $HAD_BIN; then
+            if [ -f "$BIN_SNAPSHOT" ]; then
+                sudo mv "$BIN_SNAPSHOT" "$INSTALL_BIN" || restore_ok=false
+            else
+                restore_ok=false
+            fi
+        else
+            sudo rm -f "$INSTALL_BIN"
+        fi
+    fi
+
+    if $STATIC_SWAP_STARTED; then
+        if [ -e "$STATIC_SNAPSHOT" ]; then
+            sudo rm -rf "$INSTALL_DIR/static.failed"
+            if [ -e "$INSTALL_DIR/static" ]; then
+                sudo mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.failed" \
+                    || restore_ok=false
+            fi
+            sudo mv "$STATIC_SNAPSHOT" "$INSTALL_DIR/static" \
+                || restore_ok=false
+        elif $HAD_STATIC; then
+            [ -e "$INSTALL_DIR/static" ] || restore_ok=false
+        else
+            sudo rm -rf "$INSTALL_DIR/static"
+        fi
+    fi
+
+    if $MIGRATIONS_SWAP_STARTED; then
+        if [ -e "$MIGRATIONS_SNAPSHOT" ]; then
+            sudo rm -rf "$INSTALL_DIR/migrations.failed"
+            if [ -e "$INSTALL_DIR/migrations" ]; then
+                sudo mv "$INSTALL_DIR/migrations" \
+                    "$INSTALL_DIR/migrations.failed" || restore_ok=false
+            fi
+            sudo mv "$MIGRATIONS_SNAPSHOT" "$INSTALL_DIR/migrations" \
+                || restore_ok=false
+        elif $HAD_MIGRATIONS; then
+            [ -e "$INSTALL_DIR/migrations" ] || restore_ok=false
+        else
+            sudo rm -rf "$INSTALL_DIR/migrations"
+        fi
+    fi
+
+    if $restore_ok \
+        && sudo systemctl restart aurora \
+        && wait_for_strict_health; then
+        sudo rm -rf "$INSTALL_DIR/static.failed" \
+            "$INSTALL_DIR/migrations.failed"
+        DEPLOYMENT_SWAPPED=false
+        return 0
+    fi
+    return 1
+}
+
+recover_interrupted_redeploy() {
+    local restore_ok=true
+
+    if [ ! -e "$BIN_SNAPSHOT" ] \
+        && [ ! -e "$STATIC_SNAPSHOT" ] \
+        && [ ! -e "$MIGRATIONS_SNAPSHOT" ]; then
+        return 0
+    fi
+    $RESTART || return 2
+
+    warn "Found rollback snapshots from an interrupted/unverified redeploy; restoring them before building."
+    if [ -e "$BIN_SNAPSHOT" ]; then
+        sudo rm -f "${INSTALL_BIN}.failed" || restore_ok=false
+        [ ! -e "$INSTALL_BIN" ] \
+            || sudo mv "$INSTALL_BIN" "${INSTALL_BIN}.failed" \
+            || restore_ok=false
+        sudo mv "$BIN_SNAPSHOT" "$INSTALL_BIN" || restore_ok=false
+    fi
+    if [ -e "$STATIC_SNAPSHOT" ]; then
+        sudo rm -rf "$INSTALL_DIR/static.failed" || restore_ok=false
+        [ ! -e "$INSTALL_DIR/static" ] \
+            || sudo mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.failed" \
+            || restore_ok=false
+        sudo mv "$STATIC_SNAPSHOT" "$INSTALL_DIR/static" || restore_ok=false
+    fi
+    if [ -e "$MIGRATIONS_SNAPSHOT" ]; then
+        sudo rm -rf "$INSTALL_DIR/migrations.failed" || restore_ok=false
+        [ ! -e "$INSTALL_DIR/migrations" ] \
+            || sudo mv "$INSTALL_DIR/migrations" \
+                "$INSTALL_DIR/migrations.failed" || restore_ok=false
+        sudo mv "$MIGRATIONS_SNAPSHOT" "$INSTALL_DIR/migrations" \
+            || restore_ok=false
+    fi
+    if $restore_ok \
+        && [ ! -e "$BIN_SNAPSHOT" ] \
+        && [ ! -e "$STATIC_SNAPSHOT" ] \
+        && [ ! -e "$MIGRATIONS_SNAPSHOT" ] \
+        && sudo systemctl restart aurora \
+        && wait_for_strict_health; then
+        sudo rm -f "${INSTALL_BIN}.failed"
+        sudo rm -rf "$INSTALL_DIR/static.failed" \
+            "$INSTALL_DIR/migrations.failed"
+        ok "Interrupted redeploy rolled back to a healthy baseline"
+        return 0
+    fi
+    return 1
+}
+
+# shellcheck disable=SC2329 # invoked by ERR trap after promotion
+on_redeploy_error() {
+    local line="$1" rc="$2"
+    trap - ERR INT TERM
+    set +e
+    warn "Redeploy aborted near line $line (exit $rc)."
+    if $DEPLOYMENT_SWAPPED && ! $ROLLBACK_ATTEMPTED; then
+        if rollback_redeploy; then
+            warn "Previous healthy deployment restored."
+        else
+            warn "Automatic rollback failed; manual recovery is required."
+        fi
+    fi
+    exit "$rc"
+}
+
+# shellcheck disable=SC2329 # invoked by INT/TERM traps after promotion
+on_redeploy_signal() {
+    local signal="$1" rc=1
+    trap - ERR INT TERM
+    set +e
+    warn "Redeploy interrupted by $signal."
+    if $DEPLOYMENT_SWAPPED && ! $ROLLBACK_ATTEMPTED; then
+        if rollback_redeploy; then
+            warn "Previous healthy deployment restored."
+        else
+            warn "Automatic rollback failed; manual recovery is required."
+        fi
+    fi
+    [ "$signal" = INT ] && rc=130
+    [ "$signal" = TERM ] && rc=143
+    exit "$rc"
+}
 
 # ── Argument parsing ─────────────────────────────────────────────
 SKIP_FRONTEND=false
@@ -153,6 +344,13 @@ echo "  ════════════════════════
 echo ""
 info "Project root: $PROJECT_DIR"
 
+# Aurora keeps source-build toolchains out of root's general Node command
+# namespace. Re-establish their paths before dependency checks.
+[ -d /usr/local/lib/aurora-node/bin ] \
+    && export PATH="/usr/local/lib/aurora-node/bin:$PATH"
+[ -d /usr/local/go/bin ] \
+    && export PATH="/usr/local/go/bin:$PATH"
+
 # OS guard. Aurora is bare-metal Linux only — install.sh:391 refuses
 # macOS, redeploy.sh should match. The /opt/aurora layout assumed
 # below doesn't exist on macOS / BSDs anyway, but failing fast with
@@ -167,6 +365,9 @@ esac
 if [ ! -f "$PROJECT_DIR/go.mod" ] || [ ! -d "$PROJECT_DIR/cmd/aurora" ]; then
     error "Not an Aurora checkout (missing go.mod or cmd/aurora) — run from project root or via ./scripts/redeploy.sh" 4
 fi
+if [ ! -f "$PROJECT_DIR/install.sh" ]; then
+    error "Aurora checkout is incomplete (missing repository-root install.sh for the public installer endpoint)" 4
+fi
 
 # Sanity: install dir exists (i.e. install.sh has run at some point).
 if [ ! -d "$INSTALL_DIR" ]; then
@@ -180,8 +381,14 @@ fi
 if ! $SKIP_FRONTEND && ! command -v npm &>/dev/null; then
     error "npm is not on PATH (or use --skip-npm to reuse existing static/v2/)" 4
 fi
+if $RESTART && ! command -v curl &>/dev/null; then
+    error "curl is required for the post-restart Aurora health check — install it or re-run scripts/install.sh" 4
+fi
+if ! command -v python3 &>/dev/null; then
+    error "python3 is required for secure deploy locking and health validation — install it or re-run scripts/install.sh" 4
+fi
 if $RESTART && ! command -v systemctl &>/dev/null; then
-    warn "systemctl not available — service restart will be skipped; pass --no-restart to silence this"
+    error "systemctl is required for verified activation and rollback (or pass --no-restart to stage without verification)" 4
 fi
 
 # Systemd unit drift detection.
@@ -197,22 +404,16 @@ fi
 # because ProtectSystem=strict was blocking the write that the new
 # unit definition would have allowed.
 #
-# Fix: detect drift here, BEFORE building anything, and either
-# auto-update the unit (recommended for routine deploys) or refuse
-# and point the operator at install.sh. We auto-update because
-# unit drift is invisible otherwise — the operator only finds out
-# when a feature breaks in production.
+# Detect drift before building anything and send system-policy changes through
+# the full installer, which owns unit validation, dependencies, and rollback
+# state. Manual redeploy remains an application-artifact workflow.
 #
 # Files we manage: aurora.service + the auto-updater trio. Sudoers
 # is excluded (install.sh's responsibility; safer to require an
 # explicit install.sh re-run for privilege changes).
 #
-# Gated on systemctl availability (audit MED-1) — on hosts without
-# systemd (Alpine, containers), drift detection is meaningless and
-# auto-update would try to write to /etc/systemd/system/ which
-# likely doesn't exist.
+# Gated on systemctl availability for --no-restart developer staging.
 UNIT_FILES_DRIFTED=()
-UPDATE_UNITS=false
 if command -v systemctl &>/dev/null; then
     check_unit_drift() {
         local src="$1" dst="$2"
@@ -255,8 +456,10 @@ if command -v systemctl &>/dev/null; then
         for u in "${UNIT_FILES_DRIFTED[@]}"; do
             warn "    $u"
         done
-        warn "Auto-updating units in step 5 (and re-running daemon-reload before restart)."
-        UPDATE_UNITS=true
+        error "Systemd policy changes require the full repair installer. Run:
+  sudo -i
+  /var/lib/aurora/source/install.sh
+Then rerun this developer redeploy." 4
     fi
 fi
 
@@ -288,25 +491,65 @@ SUDO_KEEPALIVE_PID=$!
 # auto-updater and corrupt /opt/aurora/static (one script's `mv
 # static.new static` can land while the other is mid-cp).
 #
-# We share /var/lock/aurora-deploy.lock with any future flock'd
-# auto-updater. `flock -n` returns non-zero immediately if the lock
+# We share /run/aurora/deploy.lock with the installer and auto-updater.
+# `flock -n` returns non-zero immediately if the lock
 # is held, so the operator gets a clear "auto-updater is running,
 # wait or stop the timer" message rather than a confusing race.
 #
 # fd 9 is arbitrary — chosen high enough to avoid clashing with
 # stdin/stdout/stderr (0,1,2). The trap releases via EXIT so even
 # kill -9 of the script frees the lock (kernel reaps the fd).
-LOCK_FILE="/var/lock/aurora-deploy.lock"
-# Ensure the lockfile is owned in a way both this user and the
-# auto-updater (running as root) can open. /var/lock is typically
-# world-writable + sticky on Linux.
-if ! sudo touch "$LOCK_FILE" 2>/dev/null; then
-    warn "Could not create $LOCK_FILE — running WITHOUT cross-script lock. If aurora-update.timer fires mid-deploy, racy state on /opt/aurora is possible. Consider: sudo systemctl stop aurora-update.timer"
-else
-    exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        error "Another deploy (likely aurora-update.service) is running. Wait for it to finish, or 'sudo systemctl stop aurora-update.timer' to suspend the auto-updater." 4
-    fi
+LOCK_FILE="/run/aurora/deploy.lock"
+command -v flock >/dev/null 2>&1 \
+    || error "flock is required for safe deploy coordination (install util-linux)." 4
+
+# Create/open the root-owned lock without following a malicious symlink. A
+# developer only needs a readable descriptor for Linux flock(2), so the shell
+# opens the verified file read-only after root prepares it.
+if ! sudo python3 - "$LOCK_FILE" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+parent = os.path.dirname(path)
+if os.path.lexists(parent) and os.path.islink(parent):
+    raise OSError(f"{parent} is a symlink")
+os.makedirs(parent, mode=0o755, exist_ok=True)
+parent_stat = os.stat(parent)
+if not stat.S_ISDIR(parent_stat.st_mode):
+    raise OSError(f"{parent} is not a directory")
+if parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
+    raise OSError(f"{parent} is not exclusively root-managed")
+flags = os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+fd = os.open(path, flags, 0o644)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError(f"{path} is not a regular file")
+    os.fchown(fd, 0, 0)
+    os.fchmod(fd, 0o644)
+finally:
+    os.close(fd)
+PY
+then
+    error "Could not safely create/open $LOCK_FILE; refusing an unlocked deploy." 4
+fi
+exec 9<"$LOCK_FILE" \
+    || error "Could not open $LOCK_FILE after secure creation." 4
+if ! flock -n 9; then
+    error "Another deploy (likely aurora-update.service) is running. Wait for it to finish, or 'sudo systemctl stop aurora-update.timer' to suspend the auto-updater." 4
+fi
+
+# A pending installer-owned PostgreSQL recovery keeps the application stopped
+# until its credential and immutable object identities are durably converged.
+# Check with sudo because the recovery directory is intentionally root-only.
+if sudo test -L "$DB_RECOVERY_MARKER"; then
+    error "PostgreSQL recovery state is malformed at $DB_RECOVERY_MARKER. Do not remove it; rerun the full installer." 4
+fi
+if sudo test -e "$DB_RECOVERY_MARKER"; then
+    error "PostgreSQL recovery is pending. Rerun the full installer before any manual redeploy." 4
 fi
 
 # Cleanup on exit: release the lock (closing fd 9 drops it; the
@@ -317,6 +560,10 @@ trap '
     [ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
     exec 9>&- 2>/dev/null || true
 ' EXIT
+
+if ! recover_interrupted_redeploy; then
+    error "Could not restore a healthy baseline from prior redeploy snapshots. Do not delete $BIN_SNAPSHOT, $STATIC_SNAPSHOT, or $MIGRATIONS_SNAPSHOT; inspect the service and recover manually." 3
+fi
 
 # ══════════════════════════════════════════════════════════════════
 # Step 1 — Build the V2 React SPA
@@ -386,21 +633,13 @@ fi
 ok "Binary staged → $INSTALL_BIN.new"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 4 — Atomic-swap static/ + copy migrations/, then promote binary
+# Step 4 — Stage and atomic-swap static/ + migrations/, then promote binary
 # ══════════════════════════════════════════════════════════════════
 step "Step 4/5: Updating static assets + migrations, promoting binary"
 
-# Migrations: small SQL files, just overwrite. Aurora's migration
-# runner reads them at startup and applies only those not in the
-# schema_migrations table.
-#
-# `shopt -s nullglob` (in a subshell) makes an empty migrations dir
-# expand to zero args instead of the literal `*.sql` pattern, which
-# would fail under set -e. install.sh has the same latent issue
-# but only runs once; redeploy.sh runs often enough to care.
-if ! sudo mkdir -p "$INSTALL_DIR/migrations"; then
-    error "Failed to ensure migrations dir" 2
-fi
+# Stage the exact migration set. Overlay-copying into the live directory leaves
+# deleted or renamed, not-yet-applied SQL behind and can execute stale code on
+# the next restart.
 SQL_FILES=()
 shopt -s nullglob
 for f in "$PROJECT_DIR"/migrations/*.sql; do
@@ -408,54 +647,101 @@ for f in "$PROJECT_DIR"/migrations/*.sql; do
 done
 shopt -u nullglob
 if [ "${#SQL_FILES[@]}" -eq 0 ]; then
-    warn "No migration files found in $PROJECT_DIR/migrations — proceeding without copy"
-else
-    if ! sudo cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations/"; then
-        error "Failed to copy migrations" 2
-    fi
-    ok "Copied ${#SQL_FILES[@]} migration files"
+    sudo rm -f "$INSTALL_BIN.new"
+    error "No migration files found in $PROJECT_DIR/migrations — refusing a partial deploy" 2
 fi
+sudo rm -rf "$INSTALL_DIR/migrations.new"
+if ! sudo mkdir -p "$INSTALL_DIR/migrations.new" \
+    || ! sudo cp -f "${SQL_FILES[@]}" "$INSTALL_DIR/migrations.new/"; then
+    sudo rm -f "$INSTALL_BIN.new"
+    sudo rm -rf "$INSTALL_DIR/migrations.new"
+    error "Failed to stage migrations — staged binary rolled back" 2
+fi
+ok "Staged ${#SQL_FILES[@]} migration files"
 
 # Static assets: atomic swap pattern matching install.sh. Deploy the built
 # V2 bundle, not the React source tree or node_modules under static/redesign.
 info "Copying built SPA bundle → $INSTALL_DIR/static.new..."
-sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/static.old"
+sudo rm -rf "$INSTALL_DIR/static.new"
 if ! sudo mkdir -p "$INSTALL_DIR/static.new"; then
     sudo rm -f "$INSTALL_BIN.new"
     error "Failed to create $INSTALL_DIR/static.new — staged binary rolled back" 2
 fi
 if [ -d "$PROJECT_DIR/static" ]; then
-    find "$PROJECT_DIR/static" -mindepth 1 -maxdepth 1 ! -name redesign ! -name v2 \
-        -exec sudo cp -R {} "$INSTALL_DIR/static.new/" \;
+    while IFS= read -r -d '' entry; do
+        if ! sudo cp -R "$entry" "$INSTALL_DIR/static.new/"; then
+            sudo rm -f "$INSTALL_BIN.new"
+            sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/migrations.new"
+            error "Failed to stage committed static asset '$entry'" 2
+        fi
+    done < <(
+        find "$PROJECT_DIR/static" -mindepth 1 -maxdepth 1 \
+            ! -name redesign ! -name v2 -print0
+    )
+fi
+if ! sudo install -m 0644 "$PROJECT_DIR/install.sh" \
+    "$INSTALL_DIR/static.new/install.sh"; then
+    sudo rm -f "$INSTALL_BIN.new"
+    sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/migrations.new"
+    error "Failed to stage the public installer endpoint" 2
 fi
 if ! sudo cp -R "$PROJECT_DIR/$SPA_OUTPUT_DIR" "$INSTALL_DIR/static.new/v2"; then
     # Roll back the staged binary so a subsequent restart can't
     # accidentally pick up the new code against the old static.
     sudo rm -f "$INSTALL_BIN.new"
+    sudo rm -rf "$INSTALL_DIR/static.new" "$INSTALL_DIR/migrations.new"
     error "Failed to copy built SPA bundle — staged binary rolled back" 2
 fi
-if [ -d "$INSTALL_DIR/static" ]; then
-    sudo mv "$INSTALL_DIR/static" "$INSTALL_DIR/static.old"
+
+# Match install.sh + aurora-update.sh: deployed artifacts stay root-owned and
+# non-writable by the service account. Runtime writes belong under
+# /var/cache/aurora, /var/log/aurora, or /var/lib/aurora.
+sudo chown -R root:root "$INSTALL_DIR/static.new" "$INSTALL_DIR/migrations.new"
+sudo chmod -R go-w "$INSTALL_DIR/static.new" "$INSTALL_DIR/migrations.new"
+
+if ! $RESTART; then
+    step "Step 5/5: Staged only (--no-restart)"
+    rm -f "$PROJECT_DIR/aurora"
+    warn "No live artifacts were changed. Staged files remain at:"
+    warn "  $INSTALL_BIN.new"
+    warn "  $INSTALL_DIR/static.new"
+    warn "  $INSTALL_DIR/migrations.new"
+    warn "Rerun without --no-restart to rebuild, activate, and health-check them."
+    exit 0
 fi
+
+# Snapshot every live component before the first mutation. The binary copy is
+# staged and renamed so a signal/disk error cannot leave a partial executable
+# masquerading as rollback state.
+[ -f "$INSTALL_BIN" ] && HAD_BIN=true
+[ -e "$INSTALL_DIR/static" ] && HAD_STATIC=true
+[ -e "$INSTALL_DIR/migrations" ] && HAD_MIGRATIONS=true
+if $HAD_BIN; then
+    if ! sudo cp -p "$INSTALL_BIN" "${BIN_SNAPSHOT}.new" \
+        || ! sudo mv "${BIN_SNAPSHOT}.new" "$BIN_SNAPSHOT"; then
+        sudo rm -f "${BIN_SNAPSHOT}.new"
+        error "Failed to create an atomic binary rollback snapshot; live deployment unchanged" 2
+    fi
+fi
+
+# From the first rename until strict health commits the deployment, every
+# unexpected error or signal triggers rollback.
+trap 'on_redeploy_error "$LINENO" "$?"' ERR
+trap 'on_redeploy_signal INT' INT
+trap 'on_redeploy_signal TERM' TERM
+DEPLOYMENT_SWAPPED=true
+
+STATIC_SWAP_STARTED=true
+$HAD_STATIC && sudo mv "$INSTALL_DIR/static" "$STATIC_SNAPSHOT"
 sudo mv "$INSTALL_DIR/static.new" "$INSTALL_DIR/static"
-sudo rm -rf "$INSTALL_DIR/static.old"
-ok "Static assets swapped"
 
-# Match install.sh + aurora-update.sh: deployed dirs are
-# aurora:aurora-owned so future write paths (cache reflowing into
-# /opt/aurora subdirs, future features) don't trip on root-owned
-# files. World-readable defaults work today but this is
-# defense-in-depth.
-sudo chown -R "$INSTALL_USER:$INSTALL_GROUP" "$INSTALL_DIR/static" "$INSTALL_DIR/migrations" 2>/dev/null || \
-    warn "chown to $INSTALL_USER:$INSTALL_GROUP failed — files left root-owned (readable but not writable by aurora)"
+MIGRATIONS_SWAP_STARTED=true
+$HAD_MIGRATIONS && sudo mv "$INSTALL_DIR/migrations" "$MIGRATIONS_SNAPSHOT"
+sudo mv "$INSTALL_DIR/migrations.new" "$INSTALL_DIR/migrations"
 
-# Final binary swap: rename .new into place. This is the
-# point-of-no-return — after this line, the next systemctl restart
-# picks up the new binary. mv is atomic on a single filesystem.
-if ! sudo mv "$INSTALL_BIN.new" "$INSTALL_BIN"; then
-    error "Failed to promote $INSTALL_BIN.new → $INSTALL_BIN (deploy is in a half-state; investigate manually)" 2
-fi
-ok "Binary promoted → $INSTALL_BIN"
+BIN_SWAP_STARTED=true
+sudo mv "$INSTALL_BIN.new" "$INSTALL_BIN"
+ok "Binary, static assets, and exact migration set promoted"
 
 # Clean up the build artifact in the project dir so a subsequent
 # `git status` is clean. The deployed copy is at $INSTALL_BIN.
@@ -464,54 +750,7 @@ rm -f "$PROJECT_DIR/aurora"
 # ══════════════════════════════════════════════════════════════════
 # Step 5 — Restart aurora + health check
 # ══════════════════════════════════════════════════════════════════
-if ! $RESTART; then
-    step "Step 5/5: Skipping restart (--no-restart)"
-    warn "Aurora is still running the OLD binary until you restart it."
-    warn "  sudo systemctl restart aurora"
-    exit 0
-fi
-
-if ! command -v systemctl &>/dev/null; then
-    step "Step 5/5: Skipping restart (systemctl not available)"
-    warn "Files updated but Aurora not restarted — restart manually."
-    exit 0
-fi
-
 step "Step 5/5: Restarting aurora.service"
-
-# Apply any drifted systemd units BEFORE restart, then daemon-reload
-# so the new ExecStart / ReadWritePaths / etc. take effect on this
-# very restart. Without daemon-reload, systemctl restart uses the
-# previously-cached unit definition.
-#
-# install.sh's pg_service rewrite is applied here too so an admin
-# on Fedora-17 (postgresql-17.service) doesn't see the After= line
-# stomped back to plain postgresql.service.
-if $UPDATE_UNITS; then
-    info "Applying drifted systemd units..."
-    PG_SERVICE_NAME=""
-    for svc in postgresql postgresql-{17,16,15,14,13}; do
-        if systemctl cat "${svc}.service" &>/dev/null; then
-            PG_SERVICE_NAME="$svc"
-            break
-        fi
-    done
-    for unit in aurora.service aurora-update.service aurora-update.timer aurora-update.path; do
-        src="$PROJECT_DIR/scripts/$unit"
-        [ -f "$src" ] || continue
-        if ! sudo cp "$src" "/etc/systemd/system/$unit"; then
-            error "Failed to copy $unit to /etc/systemd/system/" 3
-        fi
-        # Apply the PG-service patch on aurora.service only.
-        if [ "$unit" = "aurora.service" ] && [ -n "$PG_SERVICE_NAME" ] && [ "$PG_SERVICE_NAME" != "postgresql" ]; then
-            sudo sed -i "s/postgresql\.service/${PG_SERVICE_NAME}.service/g" "/etc/systemd/system/$unit"
-        fi
-    done
-    if ! sudo systemctl daemon-reload; then
-        error "systemctl daemon-reload failed — units may be syntactically broken; check 'systemd-analyze verify /etc/systemd/system/aurora.service'" 3
-    fi
-    ok "Systemd units updated + reloaded"
-fi
 
 # Ensure /var/lib/aurora + the trigger-update file exist with the
 # right ownership / mode for the .path-activated updater.
@@ -532,47 +771,58 @@ fi
 # any data in the trigger file (the actual content is just a
 # timestamp written by the Go handler).
 if [ -d "$PROJECT_DIR/scripts" ] && [ -f "$PROJECT_DIR/scripts/aurora-update.path" ]; then
-    sudo install -d -m 0755 -o root -g root /var/lib/aurora
-    if [ ! -f /var/lib/aurora/trigger-update ]; then
-        sudo install -m 0664 -o root -g "$INSTALL_GROUP" /dev/null /var/lib/aurora/trigger-update
-        ok "Created /var/lib/aurora/trigger-update"
-    else
-        # Reset ownership + mode every time — cheap idempotency, and
-        # it'll heal a server whose file got cloned with wrong perms
-        # by some prior buggy script revision.
-        sudo chown root:"$INSTALL_GROUP" /var/lib/aurora/trigger-update
-        sudo chmod 0664 /var/lib/aurora/trigger-update
+    if ! {
+        sudo install -d -m 0755 -o root -g root /var/lib/aurora
+        if [ ! -f /var/lib/aurora/trigger-update ]; then
+            sudo install -m 0664 -o root -g "$INSTALL_GROUP" \
+                /dev/null /var/lib/aurora/trigger-update
+        else
+            sudo chown root:"$INSTALL_GROUP" /var/lib/aurora/trigger-update
+            sudo chmod 0664 /var/lib/aurora/trigger-update
+        fi
+    }; then
+        if rollback_redeploy; then
+            error "Could not prepare the update trigger; previous deployment restored" 2
+        fi
+        error "Could not prepare the update trigger and rollback failed; manual recovery required" 2
     fi
 fi
 
 if ! sudo systemctl restart aurora; then
-    error "systemctl restart aurora failed — check 'journalctl -u aurora -n 50'" 3
+    if rollback_redeploy; then
+        error "New deployment could not restart; previous healthy deployment restored. Database migrations, if any ran, were not reversed." 3
+    fi
+    error "New deployment could not restart and rollback failed; inspect 'journalctl -u aurora -n 80'" 3
 fi
 ok "aurora.service restarted"
 
-# Health check: poll /api/health for up to HEALTH_TIMEOUT seconds.
-# Aurora needs to apply migrations + bind the port before this
-# answers, so we give it a generous window before declaring failure.
-info "Waiting for /api/health to respond (max ${HEALTH_TIMEOUT}s)..."
-deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-        ok "Aurora is healthy"
-        echo ""
-        echo "  ════════════════════════════════════════════════════════════"
-        echo "    Redeploy complete (version: $VERSION)"
-        echo "  ════════════════════════════════════════════════════════════"
-        echo ""
-        echo "    URL:      http://localhost:8484/"
-        echo "    Logs:     journalctl -u aurora -f"
-        echo "    Status:   systemctl status aurora"
-        echo ""
-        exit 0
+# Health check: poll /api/health for up to HEALTH_TIMEOUT seconds. A 200 alone
+# is insufficient: migrations can finish far enough for the handler to respond
+# while the database is still disconnected.
+info "Waiting for /api/health status=ok and db_connected=true (max ${HEALTH_TIMEOUT}s)..."
+if ! wait_for_strict_health; then
+    if rollback_redeploy; then
+        error "New deployment failed strict health; previous healthy deployment restored. Database migrations already applied were not reversed." 3
     fi
-    sleep 1
-done
+    error "Strict health failed and rollback did not restore a healthy service; inspect 'journalctl -u aurora -n 80'" 3
+fi
 
-# Health check timed out. The service may have failed to start, OR
-# it may be doing a slow migration — surface the journal tail so the
-# operator can decide.
-error "Health check timed out after ${HEALTH_TIMEOUT}s — aurora may be down or applying a slow migration. Check: journalctl -u aurora -n 80" 3
+# Strict health is the transaction commit point. Cleanup failures must not roll
+# back a healthy service.
+DEPLOYMENT_SWAPPED=false
+trap - ERR INT TERM
+if ! sudo rm -f "$BIN_SNAPSHOT" "${INSTALL_BIN}.failed" \
+    || ! sudo rm -rf "$STATIC_SNAPSHOT" "$MIGRATIONS_SNAPSHOT" \
+        "$INSTALL_DIR/static.failed" "$INSTALL_DIR/migrations.failed"; then
+    warn "Deployment is healthy, but rollback-snapshot cleanup failed; remove the stale snapshot files manually."
+fi
+ok "Aurora is healthy"
+echo ""
+echo "  ════════════════════════════════════════════════════════════"
+echo "    Redeploy complete (version: $VERSION)"
+echo "  ════════════════════════════════════════════════════════════"
+echo ""
+echo "    URL:      http://localhost:8484/"
+echo "    Logs:     journalctl -u aurora -f"
+echo "    Status:   systemctl status aurora"
+echo ""
