@@ -11,8 +11,8 @@ Aurora installs bare-metal on Linux via systemd + native PostgreSQL.
 One command, on a fresh Debian / Ubuntu / Fedora / RHEL / Arch / openSUSE box:
 
 ```bash
-git clone https://github.com/aurora-media/aurora.git
-cd aurora
+git clone https://github.com/ronniekai999/AuroraPro.app
+cd AuroraPro.app
 sudo ./scripts/install.sh
 ```
 
