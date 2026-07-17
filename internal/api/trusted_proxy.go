@@ -18,10 +18,7 @@ import (
 //
 // This deliberately does NOT use chi.middleware.RealIP, which trusts those
 // headers from anyone — a remote attacker could forge them to spoof
-// arbitrary source IPs and bypass per-IP rate limits. Each trusted edge proxy
-// must also overwrite client-supplied forwarding headers (Aurora's nginx
-// template does); appending an untrusted incoming XFF would preserve a forged
-// left-most address.
+// arbitrary source IPs and bypass per-IP rate limits.
 func TrustedProxyMiddleware(trustedCIDRs []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
