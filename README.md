@@ -79,8 +79,9 @@ You'll be prompted once for:
 
 - **TMDB API key** — free at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)
 - **Media directory** — the folder(s) Aurora should read (see [permissions](#-media-folder-permissions) below)
+- **HTTPS domain** *(optional)* — nginx + a free Let's Encrypt cert; press Enter to skip if your DNS isn't pointed at the server yet (see [adding HTTPS later](#-adding-https-later))
 
-It ends with a health check, a schema verification, a semantic-search preflight, and the URL to open. Re-runs are **idempotent** — your JWT secret, database, and configuration are preserved.
+It ends with a health check, a schema verification, a semantic-search preflight, and the URL to open — plus pointed warnings when something needs you: media-folder access not granted, no HTTPS, or a host firewall blocking port 8484. Re-runs are **idempotent** — your JWT secret, database, and full configuration are preserved, including any keys you've added to `aurora.env` by hand.
 
 ### Unattended install
 
@@ -100,6 +101,7 @@ sudo TMDB_API_KEY=xxxxx \
 | `AURORA_INSTALL_OLLAMA=1` | Installs [Ollama](https://ollama.com) and pulls the semantic-search models (`embeddinggemma` + `qwen2.5:3b-instruct`, ~2.5 GB total) |
 | `AURORA_RADARR_URL=` + `AURORA_RADARR_API_KEY=` | Enables movie requests via Radarr |
 | `AURORA_SONARR_URL=` + `AURORA_SONARR_API_KEY=` | Enables TV requests via Sonarr |
+| `AURORA_RADARR_4K_URL/_API_KEY=`, `AURORA_SONARR_4K_URL/_API_KEY=` | Separate 4K Radarr/Sonarr instances |
 | `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | TVDB metadata fallback |
 | `AURORA_GIT_TOKEN=<PAT>` | **For private repos** — writes `/root/.git-credentials` (mode 600) so the auto-updater can `git fetch` non-interactively. Use a fine-grained PAT scoped to `Contents: Read-only` on just this repo. |
 
@@ -120,6 +122,20 @@ sudo setfacl -dR -m u:aurora:rX /home/you/media          # new files inherit acc
 ```
 
 Storing media outside `/home` (e.g. `/srv/media`) avoids the issue entirely. Note the systemd unit mounts `/home` **read-only** for Aurora — it can scan and stream your files but never modify them.
+
+### 🔐 Adding HTTPS later
+
+Skipped the domain prompt? Aurora serves plain HTTP on `:8484` until a reverse proxy fronts it — fine on a trusted LAN, not fine on the open internet (logins are cookie-based). Once your DNS A record points at the server, either of these sets up nginx + Let's Encrypt and enables auto-renewal:
+
+```bash
+# Fast path (~30s): just the domain/HTTPS setup
+sudo DOMAIN=media.example.com EMAIL=you@example.com ./scripts/setup-domain.sh
+
+# Or a full installer re-run with the domain
+sudo AURORA_DOMAIN=media.example.com AURORA_CERTBOT_EMAIL=you@example.com ./scripts/install.sh
+```
+
+`setup-domain.sh` is also the tool for pointing a **second** domain at the same server — it appends to the existing nginx config and expands the certificate instead of overwriting. Both paths pin Aurora's allowed origins to the domain, and the installer marks auth cookies `Secure` when a domain fronts the install.
 
 ## 🧠 Enabling semantic search (Ollama)
 
@@ -149,6 +165,8 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `embeddinggemma`, `qwen2.5:3b-instruct`) |
 | `REQUESTS_ENABLED` + `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` | Requests integrations |
 | `AURORA_ALLOWED_ORIGINS` | CORS / WebSocket origins (same-origin always allowed) |
+| `AURORA_SECURE_COOKIES` | Force the `Secure` flag on auth cookies — set automatically when a domain fronts the install (TLS terminates at nginx, so the Go server can't infer it) |
+| `AURORA_VOICE_STUN_SERVERS` / `AURORA_TURN_URL` + `AURORA_TURN_USERNAME` + `AURORA_TURN_CREDENTIAL` | Watch-party voice ICE servers. Defaults to Google's public STUN, which covers most home NATs; behind CGNAT or symmetric NAT, point these at your own TURN relay (e.g. coturn) |
 | `CACHE_IMAGE_DIR` / `CACHE_TRANSCODE_DIR` / `CACHE_SUBTITLE_DIR` | Cache locations |
 | `LOG_DIR` / `LOG_LEVEL` | Logging |
 | `AURORA_SOURCE_DIR` / `AURORA_UPDATE_BRANCH` / `AURORA_EXPECTED_REMOTE` | Auto-updater source (root-owned mirror) |

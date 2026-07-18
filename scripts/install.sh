@@ -18,11 +18,15 @@
 #
 # Opt-in extras (set env vars before invocation):
 #   AURORA_DOMAIN=media.example.com         — set up nginx + Let's Encrypt HTTPS
+#                                              (also prompted interactively on
+#                                              TTY installs when unset)
 #   AURORA_CERTBOT_EMAIL=you@example.com    — required if AURORA_DOMAIN is set
 #   AURORA_RADARR_URL=http://...            — enable Requests via Radarr
 #   AURORA_RADARR_API_KEY=...
 #   AURORA_SONARR_URL=http://...            — enable Requests via Sonarr
 #   AURORA_SONARR_API_KEY=...
+#   AURORA_RADARR_4K_URL / AURORA_RADARR_4K_API_KEY   — separate 4K Radarr
+#   AURORA_SONARR_4K_URL / AURORA_SONARR_4K_API_KEY   — separate 4K Sonarr
 #   AURORA_TVDB_API_KEY=... + AURORA_TVDB_PIN=...
 #   AURORA_MEDIA_DIR=/path                  — grant read access to a media dir
 #   AURORA_INSTALL_OLLAMA=1                 — install Ollama + pull the
@@ -914,6 +918,30 @@ if [ -z "$TMDB_KEY" ]; then
 fi
 ok "TMDB API key set"
 
+# ── Optional HTTPS domain prompt (2026-07-18) ─────────────────────
+# The HTTPS flow used to be reachable ONLY via the AURORA_DOMAIN env
+# var, which first-time installers don't know exists — the observed
+# result was fresh servers running cookie-based logins over plain
+# HTTP on :8484 indefinitely. Ask interactively (TTY installs only;
+# Enter skips). Env vars still take precedence, so unattended
+# installs behave exactly as before.
+if [ -z "${AURORA_DOMAIN:-}" ] && [ -t 0 ]; then
+    echo ""
+    info "Optional: serve Aurora over HTTPS (nginx + free Let's Encrypt cert)."
+    echo "  Requires a DNS A record for the domain already pointing at this"
+    echo "  server's public IP, with ports 80 and 443 reachable from the"
+    echo "  internet. Leave empty to skip — you can add it any time later."
+    printf '\033[1;36m[?]\033[0m Domain for HTTPS (e.g. media.example.com, empty to skip): '
+    read -r AURORA_DOMAIN || true
+fi
+if [ -n "${AURORA_DOMAIN:-}" ] && [ -z "${AURORA_CERTBOT_EMAIL:-}" ] && [ -t 0 ]; then
+    printf "\033[1;36m[?]\033[0m Email for Let's Encrypt registration: "
+    read -r AURORA_CERTBOT_EMAIL || true
+    if [ -z "$AURORA_CERTBOT_EMAIL" ]; then
+        warn "No email given — HTTPS setup will be skipped (Let's Encrypt requires a contact email)."
+    fi
+fi
+
 # ══════════════════════════════════════════════════════════════════
 # STEP 4: Build + install + configure + start
 # ══════════════════════════════════════════════════════════════════
@@ -1295,22 +1323,68 @@ info "Writing $CONFIG_DIR/aurora.env..."
         DOMAIN_HOST="${AURORA_DOMAIN#*://}"
         DOMAIN_HOST="${DOMAIN_HOST%%/*}"
         printf 'AURORA_ALLOWED_ORIGINS=https://%s\n' "$DOMAIN_HOST"
+        # TLS terminates at nginx, so the Go server only ever sees plain
+        # HTTP and would never mark auth cookies Secure on its own.
+        # Force it whenever a domain fronts the install (2026-07-18).
+        printf 'AURORA_SECURE_COOKIES=true\n'
     else
-        printf 'AURORA_ALLOWED_ORIGINS=http://localhost:*,https://localhost:*\n'
+        # Re-run without AURORA_DOMAIN: keep whatever origins the previous
+        # config had (a prior domain setup, or an operator edit) instead
+        # of resetting them to the localhost defaults (2026-07-18).
+        EXISTING_ORIGINS="$(read_env_key AURORA_ALLOWED_ORIGINS)"
+        printf 'AURORA_ALLOWED_ORIGINS=%s\n' "${EXISTING_ORIGINS:-http://localhost:*,https://localhost:*}"
     fi
     printf '\n# Logging\n'
     printf 'LOG_DIR=%s\n' "$LOG_DIR"
     printf 'LOG_LEVEL=info\n'
     # Optional Requests integration via env override.
-    if [ -n "${AURORA_RADARR_URL:-}" ] || [ -n "${AURORA_SONARR_URL:-}" ]; then
+    if [ -n "${AURORA_RADARR_URL:-}" ] || [ -n "${AURORA_SONARR_URL:-}" ] || [ -n "${AURORA_RADARR_4K_URL:-}" ] || [ -n "${AURORA_SONARR_4K_URL:-}" ]; then
         printf '\n# Requests integration (Radarr / Sonarr)\n'
         printf 'REQUESTS_ENABLED=true\n'
         [ -n "${AURORA_RADARR_URL:-}" ]      && printf 'RADARR_URL=%s\n' "$AURORA_RADARR_URL"
         [ -n "${AURORA_RADARR_API_KEY:-}" ]  && printf 'RADARR_API_KEY=%s\n' "$AURORA_RADARR_API_KEY"
         [ -n "${AURORA_SONARR_URL:-}" ]      && printf 'SONARR_URL=%s\n' "$AURORA_SONARR_URL"
         [ -n "${AURORA_SONARR_API_KEY:-}" ]  && printf 'SONARR_API_KEY=%s\n' "$AURORA_SONARR_API_KEY"
+        # Separate 4K instances (server reads RADARR_4K_* / SONARR_4K_*;
+        # previously these were configurable only by hand-editing).
+        [ -n "${AURORA_RADARR_4K_URL:-}" ]     && printf 'RADARR_4K_URL=%s\n' "$AURORA_RADARR_4K_URL"
+        [ -n "${AURORA_RADARR_4K_API_KEY:-}" ] && printf 'RADARR_4K_API_KEY=%s\n' "$AURORA_RADARR_4K_API_KEY"
+        [ -n "${AURORA_SONARR_4K_URL:-}" ]     && printf 'SONARR_4K_URL=%s\n' "$AURORA_SONARR_4K_URL"
+        [ -n "${AURORA_SONARR_4K_API_KEY:-}" ] && printf 'SONARR_4K_API_KEY=%s\n' "$AURORA_SONARR_4K_API_KEY"
     fi
 } > "$CONFIG_DIR/aurora.env.tmp"
+
+# ── Idempotency: carry forward operator config (2026-07-18) ───────
+# The template above regenerates aurora.env from scratch, which used
+# to silently DROP every key it doesn't itself write on a re-run:
+# the TVDB / Radarr / Sonarr blocks (gated on their env vars being
+# re-passed on EVERY run), and all hand-added keys (BUG_REPORT_*,
+# TRANSCODE_*, AURORA_TURN_* voice relay, LOG_MAX_*, ...). Since
+# re-running the installer is the documented path for adding media
+# dirs and domains, that made "idempotent" quietly false the moment
+# an operator customized anything. Append any KEY=value line from
+# the previous config that the fresh template didn't just write.
+if [ -f "$CONFIG_DIR/aurora.env" ]; then
+    PRESERVED_HEADER_WRITTEN=false
+    while IFS= read -r _env_line; do
+        case "$_env_line" in
+            [A-Z]*=*) ;;
+            *) continue ;;
+        esac
+        _env_key="${_env_line%%=*}"
+        # Only well-formed env keys — skips comments and junk lines.
+        if ! printf '%s' "$_env_key" | grep -qE '^[A-Z][A-Z0-9_]*$'; then
+            continue
+        fi
+        if ! grep -q "^${_env_key}=" "$CONFIG_DIR/aurora.env.tmp"; then
+            if ! $PRESERVED_HEADER_WRITTEN; then
+                printf '\n# Preserved from previous configuration (keys the installer template does not manage)\n' >> "$CONFIG_DIR/aurora.env.tmp"
+                PRESERVED_HEADER_WRITTEN=true
+            fi
+            printf '%s\n' "$_env_line" >> "$CONFIG_DIR/aurora.env.tmp"
+        fi
+    done < "$CONFIG_DIR/aurora.env"
+fi
 chmod 640 "$CONFIG_DIR/aurora.env.tmp"
 chown root:"$AURORA_GROUP" "$CONFIG_DIR/aurora.env.tmp"
 # Atomic rename — on POSIX this is a single inode swap. Concurrent
@@ -1948,6 +2022,37 @@ if $SERVICE_OK; then
         warn "  Before adding a library under /home, grant access with:"
         warn "    sudo AURORA_MEDIA_DIR=/path/to/your/media ./scripts/install.sh"
         echo ""
+    fi
+    # HTTPS reminder (2026-07-18) — without a domain, cookie-based
+    # logins ride plain HTTP. Suppressed when a prior run already set
+    # up the proxy (.proxy-setup marker).
+    if [ -z "${AURORA_DOMAIN:-}" ] && [ ! -f "$CONFIG_DIR/.proxy-setup" ]; then
+        warn "No HTTPS configured: Aurora is serving plain HTTP on :8484, so logins"
+        warn "  and session cookies are unencrypted beyond your LAN. Add a domain +"
+        warn "  free Let's Encrypt cert any time with either:"
+        warn "    sudo DOMAIN=media.example.com EMAIL=you@example.com ./scripts/setup-domain.sh"
+        warn "    sudo AURORA_DOMAIN=media.example.com AURORA_CERTBOT_EMAIL=you@example.com ./scripts/install.sh"
+        echo ""
+    fi
+    # Firewall visibility (2026-07-18) — the installer never opens
+    # ports, and the health check above probes localhost so it can't
+    # notice a host firewall. On firewalld/ufw distros a fresh install
+    # looks "Ready" but is unreachable from any other machine; say so.
+    if command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null; then
+        if ! firewall-cmd --list-ports 2>/dev/null | grep -q '8484'; then
+            warn "firewalld is active and port 8484 is not open — Aurora is only"
+            warn "  reachable from this machine. To open it:"
+            warn "    sudo firewall-cmd --permanent --add-port=8484/tcp && sudo firewall-cmd --reload"
+            warn "  (with HTTPS, open the web ports instead: --add-service=http --add-service=https)"
+            echo ""
+        fi
+    elif command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        if ! ufw status 2>/dev/null | grep -qE '8484'; then
+            warn "ufw is active and port 8484 is not open — Aurora is only reachable"
+            warn "  from this machine. To open it:  sudo ufw allow 8484/tcp"
+            warn "  (with HTTPS, open the web ports instead: sudo ufw allow 80,443/tcp)"
+            echo ""
+        fi
     fi
     if [ -n "$DB_PASSWORD" ]; then
         echo "  Database (auto-generated):"
