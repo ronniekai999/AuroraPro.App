@@ -380,6 +380,279 @@ nav.jump a:hover{color:#fff;background:rgba(255,255,255,0.05);border-color:rgba(
 .tgl.on{background:var(--primary)}
 .tgl.on i{transform:translateX(24px)}
 
+/* ============================================================
+   SIGN IN screen
+   ============================================================ */
+.signin-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:76px}
+.signin-brand{width:380px;display:flex;flex-direction:column;align-items:flex-start;gap:0}
+.signin-brand .bigmark{width:88px;height:88px;border-radius:26px;display:grid;place-items:center;
+  background:rgba(168,85,247,0.14);border:1px solid rgba(168,85,247,0.32);box-shadow:var(--glow-halo)}
+.signin-brand .bigmark svg{width:60px;height:60px}
+.signin-brand h2{font-family:var(--font-display);font-weight:800;font-size:40px;letter-spacing:.12em;margin:26px 0 0}
+.signin-brand h2 b{font-weight:300;color:var(--cyan)}
+.signin-brand .tag{color:var(--text-secondary);font-size:16px;margin-top:8px}
+.server-chip{display:inline-flex;align-items:center;gap:9px;margin-top:26px;padding:9px 16px;border-radius:999px;
+  background:rgba(255,255,255,0.04);border:1px solid var(--glow-border);color:rgba(255,255,255,0.75);font-size:13.5px}
+.server-chip i{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(16,185,129,.6)}
+.signin-card{width:432px;border-radius:20px;padding:32px 34px;background:var(--card-bg);
+  border:1px solid var(--glow-border);box-shadow:var(--glow-halo)}
+.signin-card h3{font-family:var(--font-display);font-size:23px;font-weight:700;margin:0 0 4px}
+.signin-card .sub{color:var(--text-secondary);font-size:13.5px;margin:0 0 22px}
+.field{margin-bottom:16px}
+.field label{display:block;color:rgba(255,255,255,0.6);font-size:12.5px;margin-bottom:7px}
+.tv-input{display:flex;align-items:center;height:46px;padding:0 15px;border-radius:11px;font-size:14.5px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);color:rgba(255,255,255,0.92)}
+.tv-input.focus{border-color:rgba(168,85,247,0.6);box-shadow:var(--focus-ring)}
+.tv-input .caret{width:2px;height:20px;background:var(--primary);margin-left:2px;animation:blink 1s steps(1) infinite}
+.tv-input .ghost{color:rgba(255,255,255,0.28)}
+.btn-cta{display:flex;width:100%;height:48px;border-radius:12px;align-items:center;justify-content:center;gap:9px;
+  background:#9333EA;color:#fff;font-weight:600;font-size:15px;border:1px solid rgba(216,180,254,0.35);
+  box-shadow:0 8px 26px rgba(147,51,234,0.35);margin-top:6px}
+.btn-cta.focus{box-shadow:var(--focus-ring)}
+.or-row{display:flex;align-items:center;gap:12px;margin:20px 0 14px;color:rgba(255,255,255,0.3);
+  font-size:10.5px;letter-spacing:.14em;text-transform:uppercase}
+.or-row i{flex:1;height:1px;background:rgba(255,255,255,0.06)}
+.oauth-row{display:flex;gap:10px}
+.oauth-tile{flex:1;height:48px;border-radius:12px;display:grid;place-items:center;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10)}
+.oauth-tile.focus{box-shadow:var(--focus-ring)}
+.oauth-tile b{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;font-size:12.5px;font-weight:800;color:#fff}
+.oauth-caption{margin-top:11px;text-align:center;color:rgba(255,255,255,0.38);font-size:11.5px}
+.signin-foot{margin-top:20px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.06);
+  color:rgba(255,255,255,0.45);font-size:12.5px;text-align:center}
+.signin-foot b{color:#d8b4fe;font-weight:600}
+
+/* ============================================================
+   WHO'S WATCHING screen
+   ============================================================ */
+.profiles-stage{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.profiles-stage h2{font-family:var(--font-display);font-size:42px;font-weight:800;margin:0;letter-spacing:-0.01em}
+.profiles-stage .sub{color:var(--text-secondary);font-size:15px;margin-top:10px}
+.profile-row{display:flex;gap:44px;margin-top:52px}
+.ptile{display:flex;flex-direction:column;align-items:center;gap:16px;width:140px}
+.orb{width:118px;height:118px;border-radius:50%;position:relative;overflow:hidden;display:grid;place-items:center;
+  border:1px solid rgba(255,255,255,0.14);font-family:var(--font-display);font-weight:800;font-size:38px;color:rgba(255,255,255,0.95);
+  text-shadow:0 2px 12px rgba(0,0,0,0.5)}
+.ptile b{font-size:16.5px;font-weight:600;color:rgba(255,255,255,0.72)}
+.ptile small{font-size:11.5px;color:var(--text-secondary);margin-top:-10px}
+.ptile.focus .orb{box-shadow:var(--focus-ring);transform:scale(1.09)}
+.ptile.focus b{color:#fff}
+.orb.add{background:rgba(255,255,255,0.03);border:2px dashed rgba(255,255,255,0.22);color:rgba(255,255,255,0.45);font-size:40px;font-weight:300}
+.profiles-hint{margin-top:56px;color:rgba(255,255,255,0.35);font-size:12.5px}
+.profiles-hint code{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:2px 8px;color:rgba(255,255,255,0.6);font-family:var(--font-sans)}
+
+/* ============================================================
+   SHOW DETAIL screen (episodes + Catch Me Up)
+   ============================================================ */
+.show-detail{position:absolute;inset:0;padding:46px 52px 0 150px;display:flex;gap:34px;z-index:2}
+.show-detail .poster-card{flex:none;width:200px;border-radius:16px;overflow:hidden;border:1px solid var(--glow-border);box-shadow:var(--glow-halo);align-self:flex-start}
+.show-detail .info{flex:1;min-width:0}
+.show-detail .info h2{font-family:var(--font-display);font-weight:800;font-size:40px;line-height:1;margin:8px 0 0;letter-spacing:-0.02em}
+.show-detail .synopsis{color:rgba(235,235,245,0.8);font-size:14px;line-height:1.5;margin-top:12px;max-width:640px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.season-chips{display:flex;gap:10px;margin-top:20px}
+.schip{font-size:13px;font-weight:600;color:rgba(255,255,255,0.55);padding:8px 18px;border-radius:999px;
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.09)}
+.schip.active{color:#fff;background:rgba(168,85,247,0.16);border-color:rgba(168,85,247,0.5)}
+.ep-list{margin-top:14px;display:flex;flex-direction:column;gap:10px;max-width:760px}
+.ep{display:flex;gap:16px;align-items:center;padding:9px 12px;border-radius:14px;
+  background:var(--card-bg);border:1px solid var(--glow-border)}
+.ep.focus{border-color:var(--glow-border-strong);box-shadow:var(--focus-ring)}
+.ep-thumb{position:relative;flex:none;width:138px;aspect-ratio:16/9;border-radius:9px;overflow:hidden;background-size:cover}
+.ep-thumb .card-prog{left:0;right:0;border-radius:0}
+.ep-num{flex:none;font-family:var(--font-display);font-weight:700;font-size:15px;color:#d8b4fe;width:34px;text-align:center}
+.ep-body{flex:1;min-width:0}
+.ep-body b{display:block;font-size:15px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ep-body small{display:block;color:var(--text-secondary);font-size:12px;margin-top:3px}
+.ep-state{flex:none;font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:8px}
+.ep-state .done{color:var(--green)}
+.ep .resume-pill{position:static;flex:none}
+
+/* ============================================================
+   CATCH ME UP (recap overlay)
+   ============================================================ */
+.recap-dim{position:absolute;inset:0;background:rgba(0,0,0,0.68);backdrop-filter:blur(7px);z-index:5}
+.recap-modal{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:620px;z-index:6;border-radius:18px;overflow:hidden;
+  background:linear-gradient(180deg,#16131d,#100e15);border:1px solid rgba(168,85,247,0.30);box-shadow:0 30px 90px rgba(0,0,0,0.7),var(--glow-halo-strong)}
+.recap-head{padding:24px 28px 18px;border-bottom:1px solid rgba(255,255,255,0.10)}
+.recap-kicker{display:flex;align-items:center;gap:7px;color:#d8b4fe;font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase}
+.recap-head h2{font-family:var(--font-display);font-weight:700;font-size:26px;margin:8px 0 0;line-height:1.2}
+.recap-head h2 span{color:#e9d5ff}
+.recap-body{padding:20px 28px 6px;color:rgba(235,235,245,0.85);font-size:14.5px;line-height:1.65}
+.recap-body .caret{display:inline-block;width:2px;height:16px;background:var(--primary);vertical-align:-2px;margin-left:2px;animation:blink 1s steps(1) infinite}
+.recap-foot{display:flex;align-items:center;gap:12px;padding:18px 28px 24px}
+.upto-chip{font-size:12px;color:#d8b4fe;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);border-radius:999px;padding:6px 13px;font-weight:600;white-space:nowrap}
+.recap-note{color:rgba(255,255,255,0.35);font-size:11.5px;margin-left:auto;text-align:right;line-height:1.4}
+
+/* ============================================================
+   PLAYER — Smart Skip pill
+   ============================================================ */
+.skip-pill{position:absolute;left:50px;bottom:196px;z-index:5;display:inline-flex;align-items:center;gap:10px;
+  height:46px;padding:0 20px;border-radius:12px;font-weight:700;font-size:14.5px;color:#0a0a0a;background:#fff;
+  box-shadow:var(--focus-ring)}
+.skip-pill small{font-weight:600;font-size:11px;color:rgba(10,10,10,0.55);border:1px solid rgba(10,10,10,0.25);border-radius:5px;padding:1px 6px}
+
+/* ============================================================
+   WATCH PARTY screen
+   ============================================================ */
+.member-strip{position:absolute;top:26px;right:44px;z-index:6;display:flex;align-items:center;gap:14px}
+.mini-avs{display:flex}
+.mini-avs .avatar{width:34px;height:34px;font-size:12.5px;border:2px solid rgba(5,5,5,0.85);margin-left:-8px}
+.mini-avs .avatar:first-child{margin-left:0}
+.mini-avs .avatar.talking{box-shadow:0 0 0 2px var(--green),0 0 14px rgba(16,185,129,0.7)}
+.sync-badge{display:inline-flex;align-items:center;gap:7px;height:32px;padding:0 13px;border-radius:999px;font-size:12px;font-weight:600;color:#a7f3d0;
+  background:rgba(16,185,129,0.12);border:1px solid rgba(16,185,129,0.35)}
+.sync-badge i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px rgba(16,185,129,.8)}
+.party-chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.08em;
+  color:#d8b4fe;background:rgba(168,85,247,0.16);border:1px solid rgba(168,85,247,0.45)}
+.chat-stack{position:absolute;left:44px;bottom:112px;z-index:6;display:flex;flex-direction:column;gap:8px;max-width:360px}
+.chat-line{display:flex;align-items:center;gap:9px;padding:9px 14px;border-radius:13px;font-size:13.5px;color:rgba(255,255,255,0.88);
+  background:rgba(10,8,16,0.62);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,0.09);width:max-content}
+.chat-line b{color:#d8b4fe;font-weight:600}
+.chat-line.sys{color:var(--text-secondary);font-size:12.5px}
+.mini-dock{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);z-index:6;display:flex;align-items:center;gap:6px;
+  padding:7px 9px;border-radius:999px;background:rgba(10,8,16,0.72);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.12)}
+.dock-btn{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-size:17px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.10);color:#fff}
+.dock-btn.focus{box-shadow:var(--focus-ring)}
+.dock-btn.muted{color:#f87171;border-color:rgba(248,113,113,0.4)}
+.dock-field{display:flex;align-items:center;height:40px;padding:0 16px;border-radius:999px;min-width:190px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);color:rgba(255,255,255,0.35);font-size:13px}
+.voice-pill{position:absolute;right:44px;bottom:112px;z-index:6;display:inline-flex;align-items:center;gap:10px;height:40px;padding:0 16px;border-radius:999px;
+  background:rgba(10,8,16,0.72);backdrop-filter:blur(10px);border:1px solid rgba(16,185,129,0.35);color:#a7f3d0;font-size:12.5px;font-weight:600}
+.vbars{display:flex;align-items:flex-end;gap:2.5px;height:14px}
+.vbars i{width:3px;border-radius:2px;background:var(--green)}
+.float-emoji{position:absolute;z-index:5;font-size:32px;filter:drop-shadow(0 4px 10px rgba(0,0,0,0.5))}
+.invite-card{position:absolute;right:44px;top:112px;z-index:6;width:238px;border-radius:16px;overflow:hidden;
+  background:rgba(10,8,16,0.78);backdrop-filter:blur(12px);border:1px solid var(--glow-border);box-shadow:var(--glow-halo)}
+.invite-card .in{padding:16px 18px}
+.invite-card h4{margin:0;font-family:var(--font-display);font-size:14.5px;font-weight:700}
+.invite-card .code{font-family:var(--font-display);font-weight:800;font-size:27px;letter-spacing:.34em;color:#e9d5ff;margin-top:9px;text-shadow:0 0 22px rgba(168,85,247,0.55)}
+.invite-card .qr{margin:13px auto 0;width:118px;height:118px;border-radius:10px;background:#fff;display:grid;place-items:center}
+.invite-card .link{margin-top:11px;text-align:center;color:rgba(255,255,255,0.42);font-size:10.5px;word-break:break-all}
+.party-prog{position:absolute;left:0;right:0;bottom:0;height:4px;background:rgba(255,255,255,0.14);z-index:6}
+.party-prog i{display:block;height:100%;width:46%;background:linear-gradient(90deg,#A855F7,#D8B4FE);box-shadow:0 0 10px rgba(168,85,247,0.7)}
+
+/* ============================================================
+   REQUESTS screen
+   ============================================================ */
+.req-stage{position:absolute;inset:0 0 0 96px;padding:38px 46px}
+.req-head{display:flex;align-items:center;gap:14px}
+.req-head h2{font-family:var(--font-display);font-size:30px;font-weight:800;margin:0}
+.req-head .sub{color:var(--text-secondary);font-size:13px;margin-top:6px}
+.btn.sm{height:44px;padding:0 20px;font-size:14px;border-radius:11px}
+.req-search{display:flex;align-items:center;gap:12px;height:52px;padding:0 18px;border-radius:13px;margin-top:20px;
+  background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);color:rgba(255,255,255,0.35);font-size:14.5px}
+.req-search .ic{width:20px;height:20px;color:var(--text-secondary)}
+.req-search .hint{margin-left:auto;font-size:11px;color:rgba(255,255,255,0.25);letter-spacing:.06em}
+.req-list{margin-top:18px;display:flex;flex-direction:column;gap:9px}
+.req{display:flex;align-items:center;gap:15px;padding:9px 14px;border-radius:14px;
+  background:var(--card-bg);border:1px solid var(--glow-border)}
+.req.focus{border-color:var(--glow-border-strong);box-shadow:var(--focus-ring)}
+.req-poster{flex:none;width:44px;aspect-ratio:2/3;border-radius:7px;background-size:cover;position:relative;overflow:hidden}
+.req-info{flex:1;min-width:0}
+.req-info b{display:block;font-size:14.5px;font-weight:600}
+.req-info small{display:block;color:var(--text-secondary);font-size:11.5px;margin-top:2px}
+.qbadge{flex:none;font-size:10px;font-weight:700;padding:3px 7px;border-radius:6px;letter-spacing:.04em}
+.qbadge.k4{color:#d8b4fe;background:rgba(168,85,247,0.10);border:1px solid rgba(168,85,247,0.2)}
+.qbadge.hd{color:rgba(255,255,255,0.6);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06)}
+.req-prog{flex:none;width:110px}
+.req-prog .bar{height:5px}
+.req-prog small{display:block;color:#60a5fa;font-size:10.5px;margin-top:4px;text-align:right}
+.sbadge{flex:none;font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid transparent;text-transform:capitalize}
+.sbadge.amber{color:#fbbf24;background:rgba(245,158,11,0.10);border-color:rgba(245,158,11,0.2)}
+.sbadge.orange{color:#fdba74;background:rgba(249,115,22,0.10);border-color:rgba(249,115,22,0.2)}
+.sbadge.blue{color:#60a5fa;background:rgba(59,130,246,0.10);border-color:rgba(59,130,246,0.2)}
+.sbadge.green{color:#34d399;background:rgba(16,185,129,0.10);border-color:rgba(16,185,129,0.2)}
+.sbadge.red{color:#f87171;background:rgba(239,68,68,0.10);border-color:rgba(239,68,68,0.2)}
+.rbtn{flex:none;height:34px;padding:0 14px;border-radius:9px;font-size:12.5px;font-weight:600;display:inline-flex;align-items:center;gap:6px;
+  background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#fff}
+.rbtn.ok{background:rgba(16,185,129,0.14);border-color:rgba(16,185,129,0.4);color:#a7f3d0}
+.rbtn.no{background:rgba(239,68,68,0.10);border-color:rgba(239,68,68,0.3);color:#fca5a5}
+.rbtn.focus{box-shadow:var(--focus-ring)}
+
+/* ============================================================
+   LIBRARY · COLLECTIONS · CALENDAR screen
+   ============================================================ */
+.libv-stage{position:absolute;inset:0 0 0 96px;padding:36px 44px;display:flex;gap:26px}
+.libv-left{flex:1;min-width:0}
+.coll-row{display:flex;gap:16px;margin-bottom:24px}
+.coll{width:186px;border-radius:16px;background:var(--card-bg);border:1px solid var(--glow-border);box-shadow:var(--glow-halo);padding:12px}
+.coll.focus{border-color:var(--glow-border-strong);box-shadow:var(--focus-ring)}
+.coll-art{position:relative;height:126px}
+.coll-art i{position:absolute;top:0;bottom:0;width:84px;border-radius:8px;background-size:cover;border:1px solid rgba(255,255,255,0.14);box-shadow:0 8px 22px rgba(0,0,0,0.5)}
+.coll-art i:nth-child(1){left:0;transform:rotate(-5deg);z-index:1}
+.coll-art i:nth-child(2){left:40px;top:-4px;z-index:2}
+.coll-art i:nth-child(3){left:80px;transform:rotate(5deg);z-index:3}
+.coll b{display:block;font-size:14px;font-weight:600;margin-top:12px}
+.coll small{display:block;color:var(--text-secondary);font-size:11.5px;margin-top:3px}
+.card.sm{width:150px;border-radius:13px}
+.card.sm .poster-wrap{padding:6px 6px 0}
+.card.sm .shelf{padding:9px 11px 11px}
+.card.sm .shelf .title{font-size:12.5px}
+.card.sm .shelf .meta{font-size:10.5px;margin-top:3px}
+.card.sm .pw{font-size:13px;bottom:8px}
+.card.sm .pw small{font-size:8px;letter-spacing:.14em;margin-bottom:2px}
+.cal-panel{flex:none;width:330px;border-radius:18px;background:var(--rail-bg);border:1px solid var(--glow-border);box-shadow:var(--glow-halo);padding:20px 20px;overflow:hidden}
+.cal-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.cal-head h3{font-family:var(--font-display);font-size:17px;font-weight:700;margin:0}
+.cal-head .mode{margin-left:auto;font-size:11px;color:#d8b4fe;background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.3);padding:4px 10px;border-radius:999px}
+.cal-day{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:rgba(255,255,255,0.42);font-weight:700;margin:14px 0 8px}
+.cal-ep{display:flex;gap:11px;align-items:center;padding:8px;border-radius:11px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);margin-bottom:7px}
+.cal-ep.focus{box-shadow:var(--focus-ring)}
+.cal-thumb{flex:none;width:74px;aspect-ratio:16/9;border-radius:7px;background-size:cover}
+.cal-ep b{display:block;font-size:12.5px;font-weight:600;line-height:1.25}
+.cal-ep small{display:block;color:var(--text-secondary);font-size:10.5px;margin-top:2px}
+.prem-chip{display:inline-block;font-size:9px;font-weight:700;letter-spacing:.06em;color:#fcd34d;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);border-radius:5px;padding:1px 6px;margin-top:3px}
+
+/* ============================================================
+   ADMIN screen
+   ============================================================ */
+.admin-stage{position:absolute;inset:0 0 0 96px;padding:30px 42px}
+.admin-head{display:flex;align-items:center;gap:16px}
+.admin-head h2{font-family:var(--font-display);font-size:28px;font-weight:800;margin:0}
+.atab-row{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 16px}
+.atab{font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);padding:7px 14px;border-radius:999px;
+  background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);text-transform:capitalize}
+.atab.active{color:#fff;background:rgba(168,85,247,0.16);border-color:rgba(168,85,247,0.5)}
+.atab.focus{box-shadow:var(--focus-ring)}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px}
+.stat{border-radius:14px;padding:14px 16px;background:var(--card-bg);border:1px solid var(--glow-border)}
+.stat .v{font-family:var(--font-display);font-weight:800;font-size:21px}
+.stat .v em{font-style:normal;font-size:12px;color:var(--text-secondary);font-weight:500;margin-left:5px}
+.stat .l{color:var(--text-secondary);font-size:11px;margin-top:4px;letter-spacing:.03em}
+.stat.warn .v{color:#fcd34d}
+.admin-cols{display:flex;gap:14px;margin-top:14px}
+.apanel{border-radius:16px;background:var(--rail-bg);border:1px solid var(--glow-border);padding:16px 18px}
+.apanel h4{margin:0 0 12px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);font-weight:700;display:flex;align-items:center;gap:8px}
+.apanel h4 .ic{width:14px;height:14px;color:#d8b4fe}
+.sess{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid rgba(255,255,255,0.05)}
+.sess:first-of-type{border-top:0}
+.sess .avatar{width:30px;height:30px;font-size:11.5px}
+.sess .si b{display:block;font-size:13px;font-weight:600}
+.sess .si small{display:block;color:var(--text-secondary);font-size:11px;margin-top:1px}
+.sess .tag{margin-left:auto;flex:none;font-size:10px;font-weight:700;letter-spacing:.05em;padding:3px 8px;border-radius:6px}
+.sess .tag.nvenc{color:#a7f3d0;background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.3)}
+.sess .tag.direct{color:#93c5fd;background:rgba(59,130,246,0.10);border:1px solid rgba(59,130,246,0.3)}
+.sess .spd{flex:none;font-size:11px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+.flag-file{font-size:11.5px;color:rgba(255,255,255,0.55);background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);
+  border-radius:7px;padding:6px 10px;word-break:break-all;line-height:1.4}
+.flag-match{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:13px}
+.flag-match b{font-weight:600}
+.conf{flex:1;height:5px;border-radius:5px;background:rgba(255,255,255,0.10);overflow:hidden}
+.conf i{display:block;height:100%;width:78%;background:linear-gradient(90deg,#f59e0b,#fcd34d)}
+.upd-row{display:flex;align-items:center;gap:11px}
+.upd-chip{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:600;color:#34d399;
+  background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.3);border-radius:999px;padding:6px 12px}
+.upd-note{color:rgba(255,255,255,0.38);font-size:11px;margin-top:10px;line-height:1.5}
+
+/* ============================================================
+   SEARCH — semantic additions
+   ============================================================ */
+.smart-badge{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:700;letter-spacing:.06em;color:#d8b4fe;
+  background:rgba(168,85,247,0.14);border:1px solid rgba(168,85,247,0.4);border-radius:999px;padding:4px 11px;text-transform:uppercase}
+.search-tip{margin-top:18px;color:rgba(255,255,255,0.35);font-size:12.5px;line-height:1.55}
+.search-tip b{color:rgba(255,255,255,0.55);font-weight:600}
+
 .legend{margin-top:54px;border-top:1px solid rgba(255,255,255,0.07);padding-top:28px}
 .legend h2{font-family:var(--font-display);font-size:22px;margin:0 0 16px}
 .legend .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
@@ -411,12 +684,19 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
     </div>
     <div class="spacer"></div>
     <nav class="jump">
+      <a href="#signin">Sign In</a>
+      <a href="#profiles">Profiles</a>
       <a href="#home">Home</a>
       <a href="#detail">Detail</a>
+      <a href="#show">Episodes</a>
       <a href="#player">Player</a>
+      <a href="#party">Party</a>
       <a href="#search">Search</a>
+      <a href="#requests">Requests</a>
+      <a href="#library">Library</a>
+      <a href="#admin">Admin</a>
       <a href="#settings">Settings</a>
-      <a href="#legend">Parity notes</a>
+      <a href="#legend">Notes</a>
     </nav>
   </div>
 </header>
@@ -428,20 +708,106 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
        tokens — the same near-black <code style="color:#d8b4fe">#050505</code> canvas, the
        <code style="color:#d8b4fe">#A855F7</code> aurora purple, the violet→cyan logo mark, the NOVA typeface pairing
        (Sora&nbsp;display + Inter&nbsp;Tight&nbsp;body), the glass rails and the cinematic poster cards. It is re-laid-out for the
-       10-foot living-room experience: a focusable left nav rail, D-pad focus rings, and larger type, all at native 1280×720 (16:9).</p>
+       10-foot living-room experience: a focusable left nav rail, D-pad focus rings, and larger type, all at native 1280×720 (16:9).
+       Thirteen screens cover the full web feature set — sign-in &amp; OAuth, profiles, the personalized home, semantic search,
+       movie &amp; episode detail, Catch&nbsp;Me&nbsp;Up recaps, the player with Smart&nbsp;Skip, watch parties, requests, collections,
+       the calendar, and the admin panel.</p>
     <div class="pillrow">
       <span>Native 1280 × 720 · 16:9</span>
       <span>D-pad / focus-ring navigation</span>
       <span>Tokens lifted 1:1 from index.css</span>
       <span>NOVA — Sora + Inter Tight</span>
+      <span>13 screens · full web-feature parity</span>
       <span>Maps to Compose for TV / Leanback</span>
     </div>
   </section>
 
+  <!-- ===================== SIGN IN ===================== -->
+  <div class="screen-block" id="signin">
+    <div class="screen-label">
+      <span class="n">1 · Sign In</span>
+      <span class="d">The web login card, TV-sized: username/password, the purple CTA, and the same OAuth providers the server enables.</span>
+      <span class="chip">Auth</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="aurora-bg"></div>
+      <div class="signin-stage">
+        <div class="signin-brand">
+          <div class="bigmark"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" fill="url(#auroraMark)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg></div>
+          <h2>AURORA <b>PRO</b></h2>
+          <div class="tag">Your personal media universe</div>
+          <div class="server-chip"><i></i> aurorapro.app · server online</div>
+        </div>
+        <div class="signin-card">
+          <h3>Welcome Back</h3>
+          <p class="sub">Sign in to your media server</p>
+          <div class="field">
+            <label>Username</label>
+            <div class="tv-input">ronnie</div>
+          </div>
+          <div class="field">
+            <label>Password</label>
+            <div class="tv-input focus">••••••••••<span class="caret"></span></div>
+          </div>
+          <div class="btn-cta"><svg class="ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Sign In</div>
+          <div class="or-row"><i></i> or continue with <i></i></div>
+          <div class="oauth-row">
+            <div class="oauth-tile" title="Google"><b style="background:#EA4335">G</b></div>
+            <div class="oauth-tile" title="Discord"><b style="background:#5865F2">D</b></div>
+            <div class="oauth-tile" title="Twitch"><b style="background:#9146FF">T</b></div>
+            <div class="oauth-tile" title="Facebook"><b style="background:#1877F2">f</b></div>
+            <div class="oauth-tile" title="X"><b style="background:#000;border:1px solid rgba(255,255,255,0.25)">𝕏</b></div>
+          </div>
+          <div class="oauth-caption">Google · Discord · Twitch · Facebook · X</div>
+          <div class="signin-foot">New to this server? <b>Create Account</b> — invite code from your admin</div>
+        </div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> HTTPS · Let's Encrypt</span><span class="clock">9:40</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>App.tsx LoginView — cookie JWT + refresh, Argon2, invite codes, OAuth from setupStatus flags</span></div>
+  </div>
+
+  <!-- ===================== WHO'S WATCHING ===================== -->
+  <div class="screen-block" id="profiles">
+    <div class="screen-label">
+      <span class="n">2 · Who's Watching</span>
+      <span class="d">Per-user profiles with nebula avatars — the TV take on the web ProfileSwitcher. Watch history, taste and resume stay per-profile.</span>
+      <span class="chip">Profiles</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="aurora-bg"></div>
+      <div class="profiles-stage">
+        <h2>Who's watching?</h2>
+        <p class="sub">Continue watching, recommendations and My List follow each profile.</p>
+        <div class="profile-row">
+          <div class="ptile focus">
+            <div class="orb" style="background:radial-gradient(60% 60% at 30% 25%,#c084fc,transparent 70%),radial-gradient(70% 70% at 75% 70%,#22d3ee,transparent 65%),linear-gradient(135deg,#3b0764,#1e1b4b)">R</div>
+            <b>Ronnie</b><small>Admin</small>
+          </div>
+          <div class="ptile">
+            <div class="orb" style="background:radial-gradient(60% 60% at 70% 25%,#f0abfc,transparent 70%),radial-gradient(70% 70% at 25% 75%,#a855f7,transparent 65%),linear-gradient(135deg,#4a044e,#312e81)">M</div>
+            <b>Maya</b><small>Member</small>
+          </div>
+          <div class="ptile">
+            <div class="orb" style="background:radial-gradient(60% 60% at 30% 70%,#5eead4,transparent 70%),radial-gradient(70% 70% at 70% 30%,#7c3aed,transparent 65%),linear-gradient(135deg,#042f2e,#1e1b4b)">T</div>
+            <b>Theo</b><small>Member</small>
+          </div>
+          <div class="ptile">
+            <div class="orb add">+</div>
+            <b style="color:rgba(255,255,255,0.5)">Add Profile</b><small>Invite code</small>
+          </div>
+        </div>
+        <div class="profiles-hint">New profiles get the <code>taste onboarding</code> flow — pick a few favorites to seed recommendations</div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> aurorapro.app</span><span class="clock">9:40</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>ProfileSwitcher.tsx + NebulaAvatar.tsx · TasteOnboarding.tsx seeds the personalized home</span></div>
+  </div>
+
   <!-- ===================== HOME ===================== -->
   <div class="screen-block" id="home">
     <div class="screen-label">
-      <span class="n">1 · Home</span>
+      <span class="n">3 · Home</span>
       <span class="d">Personalized hero + glass rails. The focused poster shows the D-pad selection state.</span>
       <span class="chip">Browse</span>
     </div>
@@ -613,8 +979,8 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
   <!-- ===================== DETAIL ===================== -->
   <div class="screen-block" id="detail">
     <div class="screen-label">
-      <span class="n">2 · Title detail</span>
-      <span class="d">Backdrop + poster, synopsis, cast, version chips. Primary action (Play) holds focus.</span>
+      <span class="n">4 · Movie detail</span>
+      <span class="d">Backdrop + poster, synopsis, cast, version chips. Primary action (Play) holds focus; Watch Party starts a synced room.</span>
       <span class="chip">Detail</span>
     </div>
     <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
@@ -652,7 +1018,8 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
           <div class="cta-row" style="margin-top:24px">
             <button class="btn btn-primary focus"><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play · 4K HDR</button>
             <button class="btn btn-ghost"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg> Trailer</button>
-            <button class="btn btn-ghost"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> My List</button>
+            <button class="btn btn-ghost btn-icon" title="My List"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+            <button class="btn btn-ghost"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg> Watch Party</button>
             <button class="btn btn-ghost btn-icon"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
           </div>
           <div class="cast-row">
@@ -669,11 +1036,121 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
     <div class="tv-foot"><span class="dot on"></span><span>Single source of truth: DetailView.tsx hero + version chips</span></div>
   </div>
 
+  <!-- ===================== SHOW DETAIL ===================== -->
+  <div class="screen-block" id="show">
+    <div class="screen-label">
+      <span class="n">5 · Show detail — episodes</span>
+      <span class="d">Season selector + episode list with watched state and resume, plus the Catch Me Up entry point.</span>
+      <span class="chip">Series</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="detail-bg" style="background:linear-gradient(115deg,#050b0e 0%,#0a2530 40%,#0e5b6e 72%,#14b8c9 105%)"></div>
+      <nav class="rail-nav">
+        <div class="rail-brand" style="justify-content:center"><div class="mark"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" fill="url(#auroraMark)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg></div></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></div>
+        <div class="nav-item active"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+        <div class="nav-spacer"></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>
+      </nav>
+
+      <div class="show-detail">
+        <div class="poster-card"><div class="poster" style="background:linear-gradient(135deg,#050b0e,#0a2530 40%,#0e5b6e 78%,#14b8c9)"><div class="pw" style="bottom:14px;font-size:17px">Severance</div></div></div>
+        <div class="info">
+          <div class="kicker">Series · 2022–2025 · 2 Seasons</div>
+          <h2>Severance</h2>
+          <div class="chiprow" style="margin-top:12px">
+            <span class="gchip"><span style="color:var(--star)">★</span> 8.7</span>
+            <span class="gchip">97% Match</span>
+            <span class="gchip">TV-MA</span>
+            <span class="gchip">Sci-Fi · Thriller</span>
+            <span class="qb k4" style="font-size:12px;padding:5px 10px">4K</span>
+          </div>
+          <p class="synopsis">Mark leads a team of office workers whose memories have been surgically divided between their
+            work and personal lives. When a mysterious colleague appears outside of work, a journey to discover the truth begins.</p>
+          <div class="cta-row" style="margin-top:16px">
+            <button class="btn btn-primary focus"><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Resume S2 · E5</button>
+            <button class="btn btn-ghost"><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L13.5 8.5 20 10 13.5 11.5 12 18 10.5 11.5 4 10 10.5 8.5z"/></svg> Catch Me Up</button>
+            <button class="btn btn-ghost btn-icon" title="My List"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+            <button class="btn btn-ghost btn-icon" title="Watch Party"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg></button>
+          </div>
+          <div class="season-chips">
+            <span class="schip">Season 1</span>
+            <span class="schip active">Season 2</span>
+          </div>
+          <div class="ep-list">
+            <div class="ep">
+              <span class="ep-num">E4</span>
+              <div class="ep-thumb" style="background:linear-gradient(135deg,#0b1d2e,#0e5b6e 60%,#031018)"></div>
+              <div class="ep-body"><b>Woe's Hollow</b><small>The team is sent on a bizarre outdoor retreat.</small></div>
+              <div class="ep-state"><svg class="ic done" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Watched · 46m</div>
+            </div>
+            <div class="ep focus">
+              <span class="ep-num">E5</span>
+              <div class="ep-thumb" style="background:linear-gradient(135deg,#102030,#14707e 60%,#04141c)"><div class="card-prog"><i style="width:62%"></i></div></div>
+              <div class="ep-body"><b>Trojan's Horse</b><small>Lumon tightens its grip on the severed floor.</small></div>
+              <div class="resume-pill"><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Resume · 17m left</div>
+            </div>
+            <div class="ep">
+              <span class="ep-num">E6</span>
+              <div class="ep-thumb" style="background:linear-gradient(135deg,#0a1622,#0a4a58 60%,#020c12)"></div>
+              <div class="ep-body"><b>Attila</b><small>Mark pushes Cold Harbor toward completion.</small></div>
+              <div class="ep-state">44m</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> Direct Play available</span><span class="clock">9:43</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>DetailView.tsx + EpisodeList/EpisodeRow.tsx — watched state, resume, season chips</span></div>
+  </div>
+
+  <!-- ===================== CATCH ME UP ===================== -->
+  <div class="screen-block" id="recap">
+    <div class="screen-label">
+      <span class="n">6 · Catch Me Up</span>
+      <span class="d">AI episode recap so you can rejoin a show — generated locally by your server through Ollama, typewriter reveal.</span>
+      <span class="chip">Local AI</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="detail-bg" style="background:linear-gradient(115deg,#050b0e 0%,#0a2530 40%,#0e5b6e 72%,#14b8c9 105%)"></div>
+      <div class="show-detail" style="filter:blur(2px)">
+        <div class="poster-card"><div class="poster" style="background:linear-gradient(135deg,#050b0e,#0a2530 40%,#0e5b6e 78%,#14b8c9)"><div class="pw" style="bottom:14px;font-size:17px">Severance</div></div></div>
+        <div class="info">
+          <div class="kicker">Series · 2022–2025 · 2 Seasons</div>
+          <h2>Severance</h2>
+        </div>
+      </div>
+      <div class="recap-dim"></div>
+      <div class="recap-modal">
+        <div class="recap-head">
+          <div class="recap-kicker"><svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L13.5 8.5 20 10 13.5 11.5 12 18 10.5 11.5 4 10 10.5 8.5z"/></svg> Previously</div>
+          <h2>Previously, on <span>Severance</span></h2>
+        </div>
+        <div class="recap-body">
+          <p>Milchick marched the refiners into the frozen wild for a team-building ORTBO at Woe's Hollow. Helly carried
+            the weight of what happened during the merge, Irving saw more than he was meant to and was dismissed from the
+            severed floor — and Cold Harbor is closer to completion than anyone down there realizes.<span class="caret"></span></p>
+        </div>
+        <div class="recap-foot">
+          <button class="btn btn-primary focus" style="height:46px;font-size:14.5px;padding:0 20px"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play S2 · E5</button>
+          <button class="btn btn-ghost" style="height:46px;font-size:14.5px;padding:0 20px">Close</button>
+          <span class="upto-chip">Caught up to S2 · E4</span>
+          <span class="recap-note">Generated on your server · Ollama</span>
+        </div>
+      </div>
+      <div class="tv-status"><span class="clock">9:43</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>RecapModal.tsx — “Previously, on …”, typewriter reveal, spoiler-safe up-to marker · recap package</span></div>
+  </div>
+
   <!-- ===================== PLAYER ===================== -->
   <div class="screen-block" id="player">
     <div class="screen-label">
-      <span class="n">3 · Player</span>
-      <span class="d">10-foot transport controls, scrubber and Up-Next, over the video surface. Play/Pause holds focus.</span>
+      <span class="n">7 · Player</span>
+      <span class="d">10-foot transport, scrubber and Up-Next over the video surface — plus the Smart Skip pill from intro/credits detection.</span>
       <span class="chip">Playback</span>
     </div>
     <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
@@ -687,6 +1164,9 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
         <div class="un-thumb" style="background:linear-gradient(135deg,#0c1a2b,#1d4ed8 55%,#020617)"><div class="pw" style="font-size:15px;bottom:8px">Blade Runner 2049</div></div>
         <div class="un-body"><small>Up next</small><b>Blade Runner 2049</b></div>
       </div>
+
+      <!-- Smart Skip — skipmarkers analysis workers detected the intro window -->
+      <div class="skip-pill"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Skip Intro <small>OK</small></div>
 
       <div class="player-controls">
         <div class="scrub">
@@ -707,15 +1187,99 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
         </div>
       </div>
     </div></div></div>
-    <div class="tv-foot"><span class="dot on"></span><span>VideoPlayer.tsx + PlayerControls.tsx → ExoPlayer / Media3</span></div>
+    <div class="tv-foot"><span class="dot on"></span><span>VideoPlayer.tsx + PlayerControls.tsx → ExoPlayer / Media3 · skipmarkers workers → “Skip Intro”</span></div>
+  </div>
+
+  <!-- ===================== WATCH PARTY ===================== -->
+  <div class="screen-block" id="party">
+    <div class="screen-label">
+      <span class="n">8 · Watch Party</span>
+      <span class="d">Synced playback with live chat, reactions, WebRTC voice — and the QR invite so friends join from their phones.</span>
+      <span class="chip">Together</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="player-bg" style="background:radial-gradient(130% 110% at 40% 25%,#6d28d9 0%,#3b0764 40%,#12031a 78%,#05030a 100%)"></div>
+
+      <div class="player-top">
+        <div class="back"><svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></div>
+        <div class="pt-title">Arcane<small>S1 · E3 — “The Base Violence Necessary for Change”</small></div>
+        <span class="party-chip" style="margin-left:6px"><svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg> WATCH PARTY</span>
+      </div>
+
+      <div class="member-strip">
+        <span class="sync-badge"><i></i> In sync · 4 watching</span>
+        <div class="mini-avs">
+          <div class="avatar talking">R</div>
+          <div class="avatar" style="background:linear-gradient(135deg,#f0abfc,#a855f7)">M</div>
+          <div class="avatar" style="background:linear-gradient(135deg,#5eead4,#7c3aed)">T</div>
+          <div class="avatar" style="background:linear-gradient(135deg,#818cf8,#22d3ee)">J</div>
+        </div>
+      </div>
+
+      <div class="invite-card">
+        <div class="in">
+          <h4>Invite friends</h4>
+          <div class="code">XK4Q7P</div>
+          <div class="qr">
+            <svg width="100" height="100" viewBox="0 0 21 21" shape-rendering="crispEdges" fill="#0a0a0a">
+              <rect x="0" y="0" width="7" height="7"/><rect x="1" y="1" width="5" height="5" fill="#fff"/><rect x="2" y="2" width="3" height="3"/>
+              <rect x="14" y="0" width="7" height="7"/><rect x="15" y="1" width="5" height="5" fill="#fff"/><rect x="16" y="2" width="3" height="3"/>
+              <rect x="0" y="14" width="7" height="7"/><rect x="1" y="15" width="5" height="5" fill="#fff"/><rect x="2" y="16" width="3" height="3"/>
+              <rect x="8" y="0" width="1" height="1"/><rect x="10" y="1" width="1" height="1"/><rect x="12" y="0" width="1" height="1"/>
+              <rect x="9" y="2" width="1" height="1"/><rect x="11" y="3" width="1" height="1"/><rect x="8" y="4" width="1" height="1"/>
+              <rect x="10" y="5" width="1" height="1"/><rect x="12" y="4" width="1" height="1"/><rect x="9" y="6" width="1" height="1"/>
+              <rect x="0" y="8" width="1" height="1"/><rect x="2" y="9" width="1" height="1"/><rect x="4" y="8" width="1" height="1"/>
+              <rect x="6" y="9" width="1" height="1"/><rect x="1" y="11" width="1" height="1"/><rect x="3" y="12" width="1" height="1"/>
+              <rect x="5" y="11" width="1" height="1"/><rect x="8" y="8" width="2" height="2"/><rect x="11" y="9" width="1" height="1"/>
+              <rect x="13" y="8" width="1" height="1"/><rect x="15" y="9" width="1" height="1"/><rect x="17" y="8" width="2" height="1"/>
+              <rect x="20" y="9" width="1" height="1"/><rect x="9" y="11" width="1" height="1"/><rect x="12" y="11" width="2" height="1"/>
+              <rect x="16" y="11" width="1" height="1"/><rect x="19" y="11" width="1" height="1"/><rect x="8" y="13" width="1" height="1"/>
+              <rect x="10" y="13" width="1" height="1"/><rect x="14" y="13" width="1" height="1"/><rect x="18" y="13" width="1" height="1"/>
+              <rect x="20" y="13" width="1" height="1"/><rect x="8" y="15" width="1" height="1"/><rect x="11" y="15" width="2" height="1"/>
+              <rect x="15" y="15" width="1" height="1"/><rect x="18" y="15" width="1" height="1"/><rect x="9" y="17" width="1" height="1"/>
+              <rect x="12" y="17" width="1" height="1"/><rect x="14" y="18" width="1" height="1"/><rect x="17" y="17" width="2" height="2"/>
+              <rect x="20" y="17" width="1" height="1"/><rect x="8" y="19" width="1" height="1"/><rect x="11" y="19" width="1" height="1"/>
+              <rect x="13" y="20" width="1" height="1"/><rect x="15" y="19" width="1" height="1"/><rect x="20" y="20" width="1" height="1"/>
+            </svg>
+          </div>
+          <div class="link">aurorapro.app/v2/join/XK4Q7P<br>Scan to join on your phone</div>
+        </div>
+      </div>
+
+      <span class="float-emoji" style="left:34%;top:38%;transform:rotate(-8deg)">🔥</span>
+      <span class="float-emoji" style="left:41%;top:52%;font-size:26px;opacity:.85;transform:rotate(6deg)">💜</span>
+      <span class="float-emoji" style="left:30%;top:58%;font-size:22px;opacity:.7">😂</span>
+
+      <div class="chat-stack">
+        <div class="chat-line sys">Maya joined the party</div>
+        <div class="chat-line"><b>Maya</b> THIS SCENE 🔥</div>
+        <div class="chat-line"><b>Theo</b> wait for it…</div>
+        <div class="chat-line"><b>Ronnie</b> 😂😂</div>
+      </div>
+
+      <div class="voice-pill">
+        <svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+        Voice · 3
+        <span class="vbars"><i style="height:6px"></i><i style="height:12px"></i><i style="height:9px"></i><i style="height:14px"></i><i style="height:7px"></i></span>
+      </div>
+
+      <div class="mini-dock">
+        <div class="dock-btn focus">😄</div>
+        <div class="dock-field">Quick reply…</div>
+        <div class="dock-btn"><svg class="ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 00-3 3v7a3 3 0 006 0V5a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></div>
+      </div>
+
+      <div class="party-prog"><i></i></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>PartyPanel.tsx cinematic mode — CinematicChatTicker, ReactionOverlay, VoicePill, MiniDock · PartyInvite.tsx QR → /v2/join/CODE</span></div>
   </div>
 
   <!-- ===================== SEARCH ===================== -->
   <div class="screen-block" id="search">
     <div class="screen-label">
-      <span class="n">4 · Search</span>
-      <span class="d">On-screen keyboard for D-pad input with live result grid. Voice search via the mic key.</span>
-      <span class="chip">Find</span>
+      <span class="n">9 · Semantic search</span>
+      <span class="d">Describe a vibe in plain English — pgvector embeddings + a local model resolve it; trigram search stays the fallback. Voice via the mic key.</span>
+      <span class="chip">Local AI</span>
     </div>
     <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
       <div class="aurora-bg"></div>
@@ -733,7 +1297,7 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
         <div class="search-left">
           <div class="search-field">
             <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <span class="q">blade run</span><span class="caret"></span>
+            <span class="q" style="font-size:19px">movies about space and loneliness</span><span class="caret"></span>
           </div>
           <div class="kbd">
             <div class="key">A</div><div class="key">B</div><div class="key">C</div><div class="key">D</div><div class="key">E</div><div class="key">F</div>
@@ -745,26 +1309,288 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
             <div class="key wide">SPACE</div>
             <div class="key wide"><svg class="ic" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4H8l-7 8 7 8h13a2 2 0 002-2V6a2 2 0 00-2-2z"/><line x1="18" y1="9" x2="12" y2="15"/><line x1="12" y1="9" x2="18" y2="15"/></svg></div>
           </div>
+          <p class="search-tip"><b>Tip:</b> describe a vibe — “cozy mysteries”, “movies like Arrival”, “something my kids
+            will love”. Aurora searches meaning, not just titles.</p>
         </div>
         <div class="search-right">
-          <h3>Results · 6 titles</h3>
+          <h3 style="display:flex;align-items:center;gap:10px">Results · 4 titles
+            <span class="smart-badge"><svg class="ic" width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L13.5 8.5 20 10 13.5 11.5 12 18 10.5 11.5 4 10 10.5 8.5z"/></svg> Semantic</span></h3>
           <div class="result-grid">
-            <div class="card focus"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#0f172a,#334155 55%,#020409)"><div class="pw" style="font-size:15px">Blade Runner 2049</div></div><div class="card-badges"><span class="minib k4">4K</span></div></div><div class="shelf"><div class="title">Blade Runner 2049</div><div class="meta"><span class="star">★ 8.0</span><span class="sep">•</span>2017</div></div></div>
-            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#1a1410,#b45309 55%,#0a0604)"><div class="pw" style="font-size:15px">Blade Runner</div></div></div><div class="shelf"><div class="title">Blade Runner</div><div class="meta"><span class="star">★ 8.1</span><span class="sep">•</span>1982</div></div></div>
-            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#111827,#dc2626 60%,#0a0306)"><div class="pw" style="font-size:15px">Blade</div></div></div><div class="shelf"><div class="title">Blade</div><div class="meta"><span class="star">★ 7.1</span><span class="sep">•</span>1998</div></div></div>
-            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#0c1a2b,#0e7490 55%,#020617)"><div class="pw" style="font-size:14px">Blade Runner: Black Lotus</div></div></div><div class="shelf"><div class="title">Black Lotus</div><div class="meta"><span class="star">★ 6.6</span><span class="sep">•</span>2021</div></div></div>
+            <div class="card focus"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#1e1b4b,#4c1d95 55%,#0b1020)"><div class="pw" style="font-size:15px;bottom:38px">Interstellar</div></div><div class="card-badges"><span class="minib k4">4K</span></div></div><div class="shelf"><div class="title">Interstellar</div><div class="meta"><span class="star">★ 8.7</span><span class="sep">•</span>2014</div></div></div>
+            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#1c1917,#57534e 55%,#0a0a0a)"><div class="pw" style="font-size:15px">Moon</div></div></div><div class="shelf"><div class="title">Moon</div><div class="meta"><span class="star">★ 7.8</span><span class="sep">•</span>2009</div></div></div>
+            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#0c1a2b,#1d4ed8 55%,#020617)"><div class="pw" style="font-size:15px">Gravity</div></div></div><div class="shelf"><div class="title">Gravity</div><div class="meta"><span class="star">★ 7.7</span><span class="sep">•</span>2013</div></div></div>
+            <div class="card"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#431407,#ea580c 55%,#150702)"><div class="pw" style="font-size:15px">Ad Astra</div></div></div><div class="shelf"><div class="title">Ad Astra</div><div class="meta"><span class="star">★ 6.5</span><span class="sep">•</span>2019</div></div></div>
           </div>
         </div>
       </div>
       <div class="tv-status"><span class="clock">9:42</span></div>
     </div></div></div>
-    <div class="tv-foot"><span class="dot on"></span><span>SearchView.tsx / SearchPalette.tsx → Leanback SearchSupportFragment</span></div>
+    <div class="tv-foot"><span class="dot on"></span><span>SearchView.tsx “Smart” badge fires only when the semantic path answers · pgvector + Ollama, trigram fallback</span></div>
+  </div>
+
+  <!-- ===================== REQUESTS ===================== -->
+  <div class="screen-block" id="requests">
+    <div class="screen-label">
+      <span class="n">10 · Requests</span>
+      <span class="d">Radarr / Sonarr-backed request flow — every status from the web app, with inline admin approval.</span>
+      <span class="chip">Requests</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="aurora-bg"></div>
+      <nav class="rail-nav">
+        <div class="rail-brand" style="justify-content:center"><div class="mark"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" fill="url(#auroraMark)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg></div></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg></div>
+        <div class="nav-item active"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
+        <div class="nav-spacer"></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>
+      </nav>
+
+      <div class="req-stage">
+        <div class="req-head">
+          <div><h2>Requests</h2><div class="sub">Powered by Radarr · Sonarr — separate 4K instances supported</div></div>
+          <div class="rail-spacer" style="flex:1"></div>
+          <button class="btn btn-primary sm focus"><svg class="ic" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> New Request</button>
+        </div>
+        <div class="req-search">
+          <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Search TMDB for title…
+          <span class="hint">TMDB · TVDB FALLBACK</span>
+        </div>
+        <div class="req-list">
+          <div class="req">
+            <div class="req-poster" style="background:linear-gradient(160deg,#0f172a,#0891b2 60%,#020617)"></div>
+            <div class="req-info"><b>Mickey 17</b><small>Movie · 2025 · requested by Maya · 3 days ago</small></div>
+            <span class="qbadge k4">4K</span>
+            <span class="sbadge green">Available</span>
+          </div>
+          <div class="req">
+            <div class="req-poster" style="background:linear-gradient(160deg,#0a0a0a,#3f3f46 60%,#050505)"></div>
+            <div class="req-info"><b>The Penguin — Season 2</b><small>Series · requested by Theo · yesterday</small></div>
+            <span class="qbadge hd">1080p</span>
+            <div class="req-prog"><div class="bar"><div class="fill" style="width:64%;background:linear-gradient(90deg,#3b82f6,#93c5fd);box-shadow:0 0 8px rgba(59,130,246,0.5)"></div></div><small>64% · Sonarr</small></div>
+            <span class="sbadge blue">Processing</span>
+          </div>
+          <div class="req focus">
+            <div class="req-poster" style="background:linear-gradient(160deg,#0f172a,#334155 60%,#020409)"></div>
+            <div class="req-info"><b>Blade Runner 2049</b><small>Movie · 2017 · requested by Jules · 2 hours ago</small></div>
+            <span class="qbadge k4">4K</span>
+            <span class="sbadge orange">Pending approval</span>
+            <button class="rbtn ok focus"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Approve</button>
+            <button class="rbtn no">Decline</button>
+          </div>
+          <div class="req">
+            <div class="req-poster" style="background:linear-gradient(160deg,#450a0a,#b91c1c 60%,#0b0306)"></div>
+            <div class="req-info"><b>Sinners</b><small>Movie · 2025 · requested by Maya · just now</small></div>
+            <span class="qbadge hd">1080p</span>
+            <span class="sbadge amber">Pending</span>
+          </div>
+          <div class="req">
+            <div class="req-poster" style="background:linear-gradient(160deg,#1c1917,#a16207 60%,#0a0a0a)"></div>
+            <div class="req-info"><b>Andor — Season 2</b><small>Series · requested by Theo · last week</small></div>
+            <span class="qbadge k4">4K</span>
+            <button class="rbtn">Retry</button>
+            <span class="sbadge red">Failed</span>
+          </div>
+        </div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> Radarr · Sonarr linked</span><span class="clock">9:44</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>RequestsView.tsx — statusColors: pending, pending_approval, processing, available, failed · approval workflow</span></div>
+  </div>
+
+  <!-- ===================== LIBRARY · COLLECTIONS · CALENDAR ===================== -->
+  <div class="screen-block" id="library">
+    <div class="screen-label">
+      <span class="n">11 · My Library — Collections &amp; Calendar</span>
+      <span class="d">Watchlist, curated collections, and the upcoming-episode calendar in one 10-foot view.</span>
+      <span class="chip">Library</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="aurora-bg"></div>
+      <nav class="rail-nav">
+        <div class="rail-brand" style="justify-content:center"><div class="mark"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" fill="url(#auroraMark)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg></div></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></div>
+        <div class="nav-item active"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>
+        <div class="nav-spacer"></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>
+      </nav>
+
+      <div class="libv-stage">
+        <div class="libv-left">
+          <div class="rail-head" style="padding-right:0;margin-bottom:12px">
+            <div class="rail-icon purple"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
+            <div class="rail-title" style="font-size:18px">Collections</div>
+            <div class="rail-spacer"></div>
+            <div class="rail-see">See all</div>
+          </div>
+          <div class="coll-row">
+            <div class="coll focus">
+              <div class="coll-art">
+                <i style="background:linear-gradient(135deg,#0a0a16,#5b2a86)"></i>
+                <i style="background:linear-gradient(135deg,#1e1b4b,#4c1d95)"></i>
+                <i style="background:linear-gradient(135deg,#0c1a2b,#1d4ed8)"></i>
+              </div>
+              <b>Villeneuve Nights</b><small>6 titles · curated by Ronnie</small>
+            </div>
+            <div class="coll">
+              <div class="coll-art">
+                <i style="background:linear-gradient(135deg,#052e16,#16a34a)"></i>
+                <i style="background:linear-gradient(135deg,#4a044e,#a21caf)"></i>
+                <i style="background:linear-gradient(135deg,#431407,#ea580c)"></i>
+              </div>
+              <b>Family Movie Night</b><small>12 titles · shared</small>
+            </div>
+            <div class="coll">
+              <div class="coll-art">
+                <i style="background:linear-gradient(135deg,#450a0a,#b91c1c)"></i>
+                <i style="background:linear-gradient(135deg,#0a0a0a,#3f3f46)"></i>
+                <i style="background:linear-gradient(135deg,#1c1917,#a16207)"></i>
+              </div>
+              <b>Oscar Season</b><small>9 titles · auto from TMDB</small>
+            </div>
+          </div>
+          <div class="rail-head" style="padding-right:0;margin-bottom:12px">
+            <div class="rail-icon teal"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg></div>
+            <div class="rail-title" style="font-size:18px">My List</div>
+            <div class="rail-spacer"></div>
+            <div class="rail-see">24 titles</div>
+          </div>
+          <div class="rail-track" style="gap:14px;padding-top:8px">
+            <div class="card sm"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#3b0764,#7c3aed 55%,#0b0414)"><div class="pw">Arcane</div></div></div><div class="shelf"><div class="title">Arcane</div><div class="meta"><span class="star">★ 9.0</span></div></div></div>
+            <div class="card sm"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#450a0a,#b91c1c 55%,#0b0306)"><div class="pw">Shōgun</div></div></div><div class="shelf"><div class="title">Shōgun</div><div class="meta"><span class="star">★ 8.7</span></div></div></div>
+            <div class="card sm"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#042f2e,#0e7490 55%,#020617)"><div class="pw">Foundation</div></div></div><div class="shelf"><div class="title">Foundation</div><div class="meta"><span class="star">★ 7.5</span></div></div></div>
+            <div class="card sm"><div class="poster-wrap"><div class="poster" style="background:linear-gradient(160deg,#0f172a,#334155 55%,#020409)"><div class="pw" style="font-size:11px">Blade Runner 2049</div></div></div><div class="shelf"><div class="title">Blade Runner 2049</div><div class="meta"><span class="star">★ 8.0</span></div></div></div>
+          </div>
+        </div>
+
+        <div class="cal-panel">
+          <div class="cal-head">
+            <svg class="ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#d8b4fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <h3>Calendar</h3>
+            <span class="mode">Upcoming</span>
+          </div>
+          <div class="cal-day">Friday · Jul 18</div>
+          <div class="cal-ep focus">
+            <div class="cal-thumb" style="background:linear-gradient(135deg,#0b1d2e,#0e5b6e)"></div>
+            <div><b>Severance</b><small>S2 · E6 — “Attila”</small></div>
+          </div>
+          <div class="cal-day">Sunday · Jul 20</div>
+          <div class="cal-ep">
+            <div class="cal-thumb" style="background:linear-gradient(135deg,#052e16,#16a34a)"></div>
+            <div><b>The Last of Us</b><small>S2 · E8 — season finale</small></div>
+          </div>
+          <div class="cal-day">Tuesday · Jul 22</div>
+          <div class="cal-ep">
+            <div class="cal-thumb" style="background:linear-gradient(135deg,#042f2e,#0e7490)"></div>
+            <div><b>Foundation</b><small>S3 · E1</small><span class="prem-chip">SEASON PREMIERE</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> Library watch · auto-scan on</span><span class="clock">9:44</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>LibraryView.tsx + CollectionsView.tsx + CalendarView.tsx (Upcoming / Month View)</span></div>
+  </div>
+
+  <!-- ===================== ADMIN ===================== -->
+  <div class="screen-block" id="admin">
+    <div class="screen-label">
+      <span class="n">12 · Admin</span>
+      <span class="d">Dashboard stats, live transcode sessions, the AI flagged-match queue, and the auto-updater — every web admin tab present.</span>
+      <span class="chip">Admin only</span>
+    </div>
+    <div class="tv-bezel"><div class="tv-wrap"><div class="tv">
+      <div class="aurora-bg"></div>
+      <nav class="rail-nav">
+        <div class="rail-brand" style="justify-content:center"><div class="mark"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="16" fill="url(#auroraMark)"/><path d="M14 11L26 18L14 25Z" fill="#fff"/></svg></div></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z M9 22V12h6v10"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><path d="M7 2v20M17 2v20M2 12h20"/></svg></div>
+        <div class="nav-item"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="15" rx="2"/><polyline points="17 2 12 7 7 2"/></svg></div>
+        <div class="nav-item active"><svg class="ic" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg></div>
+        <div class="nav-spacer"></div>
+        <div class="nav-profile" style="justify-content:center;border:0"><div class="avatar">R</div></div>
+      </nav>
+
+      <div class="admin-stage">
+        <div class="admin-head">
+          <h2>Admin</h2>
+          <div class="rail-spacer" style="flex:1"></div>
+          <span class="upd-chip"><svg class="ic" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Up to date · v2.6.1</span>
+        </div>
+        <div class="atab-row">
+          <span class="atab active">Dashboard</span><span class="atab">Users</span><span class="atab">Libraries</span>
+          <span class="atab">Rooms</span><span class="atab">Requests</span><span class="atab">Activity</span>
+          <span class="atab">Sessions</span><span class="atab">Flagged</span><span class="atab">Logs</span>
+          <span class="atab">Server</span><span class="atab">LLM</span><span class="atab">OAuth</span><span class="atab">Backup</span>
+        </div>
+        <div class="stat-grid">
+          <div class="stat"><div class="v">3</div><div class="l">Active Streams</div></div>
+          <div class="stat"><div class="v">412.6 <em>GB</em></div><div class="l">Disk Free</div></div>
+          <div class="stat"><div class="v">8.4 <em>TB</em></div><div class="l">Library Size</div></div>
+          <div class="stat"><div class="v">1,284 <em>· 6,412</em></div><div class="l">Movies · Episodes</div></div>
+          <div class="stat"><div class="v">12</div><div class="l">Users</div></div>
+          <div class="stat"><div class="v">1</div><div class="l">Active Parties</div></div>
+          <div class="stat"><div class="v">218 <em>MB</em></div><div class="l">Memory</div></div>
+          <div class="stat"><div class="v">21d 6h</div><div class="l">Uptime</div></div>
+        </div>
+        <div class="admin-cols">
+          <div class="apanel" style="flex:1.15">
+            <h4><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> Live Transcode Sessions</h4>
+            <div class="sess">
+              <div class="avatar" style="background:linear-gradient(135deg,#f0abfc,#a855f7)">M</div>
+              <div class="si"><b>Dune: Part Two</b><small>Maya · Living Room TV · 1:12:40</small></div>
+              <span class="spd">1.8×</span>
+              <span class="tag nvenc">NVENC · 4K→1080p</span>
+            </div>
+            <div class="sess">
+              <div class="avatar" style="background:linear-gradient(135deg,#5eead4,#7c3aed)">T</div>
+              <div class="si"><b>The Bear — S1 · E7</b><small>Theo · Pixel 9 · 0:12:03</small></div>
+              <span class="spd">—</span>
+              <span class="tag direct">DIRECT PLAY</span>
+            </div>
+            <div class="sess">
+              <div class="avatar">R</div>
+              <div class="si"><b>Arcane — S1 · E3</b><small>Watch party · 4 viewers · 0:22:41</small></div>
+              <span class="spd">1.2×</span>
+              <span class="tag nvenc">NVENC · HEVC</span>
+            </div>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:14px">
+            <div class="apanel">
+              <h4><svg class="ic" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L13.5 8.5 20 10 13.5 11.5 12 18 10.5 11.5 4 10 10.5 8.5z"/></svg> Flagged Match — AI Review</h4>
+              <div class="flag-file">Severance.S02E05.PROPER.2160p.WEB.H265-NTb.mkv</div>
+              <div class="flag-match"><b>→ Severance · S2 E5</b><div class="conf"><i></i></div><span style="color:#fcd34d;font-size:12px;font-weight:700">78%</span></div>
+              <div style="display:flex;gap:8px;margin-top:12px">
+                <button class="rbtn ok focus"><svg class="ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Approve</button>
+                <button class="rbtn">Fix Match…</button>
+              </div>
+            </div>
+            <div class="apanel">
+              <h4><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg> Auto-Updater</h4>
+              <div class="upd-row">
+                <button class="rbtn" style="height:38px;padding:0 16px;background:rgba(168,85,247,0.16);border-color:rgba(168,85,247,0.5);color:#e9d5ff">Update Now</button>
+                <span style="color:var(--text-secondary);font-size:11.5px">Checking → Pulling → Building → Restarting</span>
+              </div>
+              <div class="upd-note">aurora-update.timer · every 5 min · builds origin/main · signed-commit verify on · pg_dump backup &amp; restore in Backup tab</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tv-status"><span class="net"><i></i> systemd · hardened unit</span><span class="clock">9:45</span></div>
+    </div></div></div>
+    <div class="tv-foot"><span class="dot on"></span><span>AdminView.tsx — 13 tabs · stat tiles from /api/admin/stats · UpdatePanel states · ManualMatchModal</span></div>
   </div>
 
   <!-- ===================== SETTINGS ===================== -->
   <div class="screen-block" id="settings">
     <div class="screen-label">
-      <span class="n">5 · Settings · Appearance</span>
+      <span class="n">13 · Settings · Appearance</span>
       <span class="d">Theme, NOVA typeface system, and glow style — the same controls the web Settings → Appearance exposes.</span>
       <span class="chip">Settings</span>
     </div>
@@ -840,11 +1666,18 @@ footer.site{color:rgba(255,255,255,0.35);font-size:12.5px;text-align:center;padd
         <div class="cell"><b>TV adaptation</b><p>Hover → focus: a bright white + purple <code>--focus-ring</code> and a lift/scale replace mouse hover. The sidebar becomes a collapsible icon rail that expands on focus. Everything is 1280×720, 16:9.</p></div>
         <div class="cell"><b>Build target</b><p>Recommended native stack: <b>Jetpack Compose for TV</b> (or Leanback) with <b>Media3 / ExoPlayer</b> for HLS direct-play + transcode fallback. Each screen here maps to a Compose route; the design tokens become a Compose <code>Theme</code>.</p></div>
         <div class="cell"><b>Alternative</b><p>Because the SPA is already responsive React, a <b>TV-WebView</b> wrapper with D-pad focus handling could ship parity fastest, reusing this exact CSS.</p></div>
+        <div class="cell"><b>Auth &amp; OAuth</b><p>The Sign In card mirrors the web LoginView — cookie JWT + refresh, Argon2, invite codes, and exactly the providers <code>setupStatus</code> can enable: Google, Discord, Twitch, Facebook, X.</p></div>
+        <div class="cell"><b>Watch parties</b><p>The cinematic overlay is the web's minimal party mode: <code>CinematicChatTicker</code>, <code>ReactionOverlay</code>, <code>VoicePill</code>, <code>MiniDock</code>, and the <code>PartyInvite</code> 6-char code + server-rendered QR (<code>/v2/join/CODE</code>).</p></div>
+        <div class="cell"><b>Local AI</b><p>Semantic search (pgvector + Ollama, trigram fallback, the “Smart” badge), Catch Me Up recaps (<code>RecapModal</code>), AI flagged-match review, and the personalized hero — all run on the server, none require cloud calls.</p></div>
+        <div class="cell"><b>Smart Skip</b><p>The player's “Skip Intro” pill is <code>VideoPlayer.tsx</code>'s <code>skipLabel</code> (Intro / Recap / Credits) from the sandboxed skip-marker analysis workers; credits trigger the Next-Episode card.</p></div>
+        <div class="cell"><b>Requests</b><p>Row badges use <code>RequestsView</code>'s exact status palette — pending (amber), pending_approval (orange), processing (blue), available (emerald), failed (red) — plus 4K/1080p flags and inline admin approval.</p></div>
+        <div class="cell"><b>Admin</b><p>All 13 web admin tabs appear; the dashboard shows the same stat tiles, live transcode sessions (NVENC vs Direct Play), the flagged-match queue, and the auto-updater's Checking→Pulling→Building→Restarting states.</p></div>
+        <div class="cell"><b>Not re-drawn</b><p>Features covered by these screens' affordances rather than dedicated mocks: taste onboarding (noted on Profiles), trailer modal, bug reporter, notifications panel, backup/restore detail, and casting — a TV app is a cast <i>target</i>, not a sender.</p></div>
       </div>
     </div>
   </div>
 
-  <footer class="site">Aurora Pro · Android TV UI mockup · derived from <code style="color:#d8b4fe">static/redesign/app</code> design tokens</footer>
+  <footer class="site">Aurora Pro · Android TV UI mockup · 13 screens · full web-feature parity · derived from <code style="color:#d8b4fe">static/redesign/app</code> design tokens</footer>
 </div>
 
 <script>
