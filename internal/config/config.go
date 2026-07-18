@@ -215,7 +215,7 @@ type TMDBConfig struct {
 type TVDBConfig struct {
 	APIKey   string // TVDB V4 API key
 	PIN      string // Optional subscriber PIN
-	Enabled  bool   // Feature flag — false by default
+	Enabled  bool   // Auto-enabled in Load when an API key is present; TVDB_ENABLED=false opts out
 	Language string // 3-letter language code (e.g. "eng", "deu", "jpn")
 }
 
@@ -390,12 +390,27 @@ func Load() (*Config, error) {
 			WatchDebounce: 2000 * time.Millisecond,
 		},
 		TMDB: TMDBConfig{
+			// Bundled application key (2026-07-18) — registered for the
+			// Aurora project so fresh installs need no per-user signup,
+			// the same model Jellyfin and Kodi use. TMDB rate-limits per
+			// client IP rather than per key, so self-hosted installs
+			// sharing this key don't affect each other. Override with
+			// TMDB_API_KEY (env) or tmdb.api_key (yaml). TMDB's terms
+			// require the attribution notice rendered in Settings.
+			APIKey:             "8051eb7a3f6f762b94b77ed7b9838bad",
 			MetadataRefresh:    168 * time.Hour,
 			Language:           "en",
 			AutoMatchThreshold: 85,
 			ReviewThreshold:    50,
 		},
 		TVDB: TVDBConfig{
+			// Bundled v4 project key (2026-07-18) — authenticates without
+			// a subscriber PIN (verified against api4.thetvdb.com), so the
+			// TVDB fallback works out of the box: the auto-enable in Load
+			// flips Enabled to true because this key is present.
+			// TVDB_ENABLED=false opts out; TVDB_PIN remains available for
+			// user-supported subscriptions; TVDB_API_KEY overrides.
+			APIKey:   "1bd0745a-f255-4a26-9fc2-5e9d0214ee89",
 			Enabled:  false,
 			Language: "eng",
 		},
@@ -489,8 +504,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters long")
 	}
 
+	// Unreachable while the bundled default key ships; kept as a guard
+	// in case the default is ever removed or blanked by a fork.
 	if cfg.TMDB.APIKey == "" {
-		return nil, fmt.Errorf("TMDB_API_KEY environment variable is required (get one at https://www.themoviedb.org/settings/api)")
+		return nil, fmt.Errorf("no TMDB API key configured — set TMDB_API_KEY (get one at https://www.themoviedb.org/settings/api)")
 	}
 
 	// Auto-enable TVDB if API key is provided
