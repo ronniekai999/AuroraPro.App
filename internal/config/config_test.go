@@ -202,14 +202,54 @@ func TestLoad_PlaceholderJWTSecret(t *testing.T) {
 	}
 }
 
-func TestLoad_MissingTMDBKey(t *testing.T) {
+// With no TMDB_API_KEY in the environment, Load must fall back to the
+// bundled application key (2026-07-18) instead of erroring — this is
+// what makes fresh installs work with zero signup. The bundled TVDB
+// project key likewise auto-enables the TVDB fallback.
+func TestLoad_MissingTMDBKeyUsesBundledDefaults(t *testing.T) {
 	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
 	t.Setenv("TMDB_API_KEY", "")
 	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
 
-	_, err := Load()
-	if err == nil {
-		t.Error("Load() should error when TMDB_API_KEY is missing")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() should succeed via the bundled TMDB key, got error: %v", err)
+	}
+	if cfg.TMDB.APIKey == "" {
+		t.Error("TMDB.APIKey should be the bundled default when TMDB_API_KEY is unset")
+	}
+	if cfg.TVDB.APIKey == "" || !cfg.TVDB.Enabled {
+		t.Errorf("bundled TVDB key should auto-enable the fallback (key=%q enabled=%v)", cfg.TVDB.APIKey, cfg.TVDB.Enabled)
+	}
+}
+
+// An explicit TMDB_API_KEY must still override the bundled default.
+func TestLoad_ExplicitTMDBKeyOverridesBundled(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TMDB_API_KEY", "my-own-key")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.TMDB.APIKey != "my-own-key" {
+		t.Errorf("TMDB.APIKey = %q, want the explicit override", cfg.TMDB.APIKey)
+	}
+}
+
+// TVDB_ENABLED=false must opt out of the auto-enabled bundled fallback.
+func TestLoad_TVDBExplicitDisableWinsOverBundledKey(t *testing.T) {
+	t.Setenv("JWT_SECRET", "a-valid-jwt-secret-that-is-at-least-32-characters-long-12345678")
+	t.Setenv("TVDB_ENABLED", "false")
+	t.Setenv("AURORA_CONFIG_FILE", "/nonexistent/aurora.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.TVDB.Enabled {
+		t.Error("TVDB.Enabled should be false when TVDB_ENABLED=false, even with the bundled key present")
 	}
 }
 

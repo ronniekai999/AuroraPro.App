@@ -75,21 +75,21 @@ sudo ./scripts/install.sh
 
 The installer takes care of **everything**: the Go toolchain (with checksum verification against Go's official release index), FFmpeg, PostgreSQL + pgvector + pg_trgm, the `aurora` system user, the systemd unit, database role + schema, JWT secret generation, the frontend + backend build, and the auto-updater timer.
 
-You'll be prompted once for:
+**No API-key signup required** — Aurora ships with bundled TMDB and TVDB application keys, so metadata works out of the box. You'll be prompted once for:
 
-- **TMDB API key** — free at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)
 - **Media directory** — the folder(s) Aurora should read (see [permissions](#-media-folder-permissions) below)
 - **HTTPS domain** *(optional)* — nginx + a free Let's Encrypt cert; press Enter to skip if your DNS isn't pointed at the server yet (see [adding HTTPS later](#-adding-https-later))
+- **TMDB API key** *(optional)* — press Enter to use the bundled key, or paste your own to override
 
 It ends with a health check, a schema verification, a semantic-search preflight, and the URL to open — plus pointed warnings when something needs you: media-folder access not granted, no HTTPS, or a host firewall blocking port 8484. Re-runs are **idempotent** — your JWT secret, database, and full configuration are preserved, including any keys you've added to `aurora.env` by hand.
 
 ### Unattended install
 
 ```bash
-sudo TMDB_API_KEY=xxxxx \
-     AURORA_MEDIA_DIR=/srv/media \
-     ./scripts/install.sh
+sudo AURORA_MEDIA_DIR=/srv/media ./scripts/install.sh
 ```
+
+Non-TTY runs (CI, `ssh` without `-t`) prompt for nothing — no env vars are required at all.
 
 ### Opt-in extras
 
@@ -102,7 +102,7 @@ sudo TMDB_API_KEY=xxxxx \
 | `AURORA_RADARR_URL=` + `AURORA_RADARR_API_KEY=` | Enables movie requests via Radarr |
 | `AURORA_SONARR_URL=` + `AURORA_SONARR_API_KEY=` | Enables TV requests via Sonarr |
 | `AURORA_RADARR_4K_URL/_API_KEY=`, `AURORA_SONARR_4K_URL/_API_KEY=` | Separate 4K Radarr/Sonarr instances |
-| `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | TVDB metadata fallback |
+| `AURORA_TVDB_API_KEY=` + `AURORA_TVDB_PIN=` | Override the bundled TVDB key / add your subscriber PIN (the fallback works out of the box without either) |
 | `AURORA_GIT_TOKEN=<PAT>` | **For private repos** — writes `/root/.git-credentials` (mode 600) so the auto-updater can `git fetch` non-interactively. Use a fine-grained PAT scoped to `Contents: Read-only` on just this repo. |
 
 ### 📂 Media folder permissions
@@ -159,7 +159,7 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 |-----|---------|
 | `DATABASE_URL` | PostgreSQL connection string |
 | `JWT_SECRET` | Session signing secret (auto-generated; keep private) |
-| `TMDB_API_KEY` / `TVDB_API_KEY` + `TVDB_PIN` | Metadata providers |
+| `TMDB_API_KEY` / `TVDB_API_KEY` + `TVDB_PIN` | Metadata providers — optional overrides for Aurora's bundled application keys (`TVDB_ENABLED=false` disables the TVDB fallback) |
 | `LLM_ENABLED` | AI stack on/off (default on) |
 | `LLM_OLLAMA_URL` | Ollama endpoint (installer pins `http://localhost:11434`) |
 | `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `embeddinggemma`, `qwen2.5:3b-instruct`) |

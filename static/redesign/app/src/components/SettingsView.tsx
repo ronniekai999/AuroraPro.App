@@ -704,6 +704,18 @@ function ProfilesAndWatchlistsCard() {
           )}
         </>
       )}
+      {/* Metadata attribution — TMDB's API terms require this notice
+          wherever their data is used; TheTVDB asks for a linkback. */}
+      <div className="mt-8 pt-4 border-t border-white/[0.06] space-y-1">
+        <p className="text-white/40 text-xs">
+          This product uses the TMDB API but is not endorsed or certified by{' '}
+          <a href="https://www.themoviedb.org" target="_blank" rel="noreferrer" className="text-white/60 hover:text-white/90 underline">TMDB</a>.
+        </p>
+        <p className="text-white/40 text-xs">
+          TV metadata provided by{' '}
+          <a href="https://thetvdb.com" target="_blank" rel="noreferrer" className="text-white/60 hover:text-white/90 underline">TheTVDB</a>.
+        </p>
+      </div>
     </div>
   )
 }

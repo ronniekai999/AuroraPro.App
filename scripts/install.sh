@@ -2,19 +2,20 @@
 # Aurora Media Server — One-and-Done Installer
 #
 # Auto-installs every prerequisite (Go, FFmpeg, PostgreSQL, build
-# tools) and configures Aurora as a systemd service on Linux. The
-# only thing you supply is your TMDB API key (free from
-# https://www.themoviedb.org/settings/api). Everything else — Go
-# tarball download, package install, database creation, JWT secret
-# generation, build, service startup — runs without confirmation
-# prompts. Re-runs are idempotent: existing JWT/DB/config are
-# preserved.
+# tools) and configures Aurora as a systemd service on Linux. No API
+# keys are required: Aurora ships with bundled TMDB + TVDB
+# application keys (defaults in internal/config/config.go); set
+# TMDB_API_KEY / AURORA_TVDB_API_KEY to use your own instead.
+# Everything else — Go tarball download, package install, database
+# creation, JWT secret generation, build, service startup — runs
+# without confirmation prompts. Re-runs are idempotent: existing
+# JWT/DB/config are preserved.
 #
 # Usage:
 #   sudo ./scripts/install.sh
 #
-# Unattended (no prompts at all):
-#   sudo TMDB_API_KEY=xxx ./scripts/install.sh
+# Unattended: non-TTY runs (CI, curl | bash, ssh without -t) prompt
+# for nothing and need no env vars at all.
 #
 # Opt-in extras (set env vars before invocation):
 #   AURORA_DOMAIN=media.example.com         — set up nginx + Let's Encrypt HTTPS
@@ -886,9 +887,9 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# STEP 3: API keys — TMDB only (everything else is opt-in)
+# STEP 3: Metadata providers — bundled keys, optional overrides
 # ══════════════════════════════════════════════════════════════════
-step "Step 3/5: TMDB API key"
+step "Step 3/5: Metadata providers (TMDB / TVDB)"
 
 # If a previous install already wrote a TMDB key, reuse it. Saves a
 # prompt on every re-run.
@@ -900,23 +901,27 @@ if [ -f "$CONFIG_DIR/aurora.env" ]; then
     EXISTING_TMDB="${EXISTING_TMDB#\'}"; EXISTING_TMDB="${EXISTING_TMDB%\'}"
 fi
 
+# 2026-07-18 — Aurora ships bundled TMDB + TVDB application keys
+# (defaults live in internal/config/config.go), so no signup is
+# needed and unattended installs no longer require TMDB_API_KEY.
+# Precedence: TMDB_API_KEY env > previously configured key > optional
+# prompt > bundled default (by writing nothing to aurora.env).
 TMDB_KEY="${TMDB_API_KEY:-$EXISTING_TMDB}"
-if [ -z "$TMDB_KEY" ]; then
-    if [ ! -t 0 ]; then
-        error "TMDB_API_KEY is not set and stdin is not a terminal. Pass TMDB_API_KEY=... in the environment for unattended runs."
-    fi
-    echo "  Aurora uses TheMovieDB for movie/TV metadata and artwork."
-    echo "  Get a free key: https://www.themoviedb.org/settings/api"
-    echo ""
-    while [ -z "$TMDB_KEY" ]; do
-        printf '\033[1;36m[?]\033[0m TMDB API Key: '
-        read -r TMDB_KEY
-        if [ -z "$TMDB_KEY" ]; then
-            warn "TMDB API key is required. Press Ctrl+C to abort."
-        fi
-    done
+if [ -z "$TMDB_KEY" ] && [ -t 0 ]; then
+    echo "  Aurora includes a bundled TMDB key — metadata works out of the box."
+    echo "  Press Enter to use it, or paste your own key"
+    echo "  (free at https://www.themoviedb.org/settings/api)."
+    printf '\033[1;36m[?]\033[0m TMDB API key (Enter = use bundled key): '
+    read -r TMDB_KEY || true
 fi
-ok "TMDB API key set"
+if [ -n "$TMDB_KEY" ]; then
+    ok "TMDB API key set (custom key)"
+else
+    ok "TMDB: using Aurora's bundled application key"
+fi
+# TVDB fallback also works out of the box via its bundled project
+# key (auto-enabled server-side). AURORA_TVDB_API_KEY / AURORA_TVDB_PIN
+# still override — see the opt-in extras in the header.
 
 # ── Optional HTTPS domain prompt (2026-07-18) ─────────────────────
 # The HTTPS flow used to be reachable ONLY via the AURORA_DOMAIN env
@@ -1256,8 +1261,12 @@ info "Writing $CONFIG_DIR/aurora.env..."
     printf 'DATABASE_URL=%s\n\n' "$DB_URL"
     printf '# JWT signing secret (do not share)\n'
     printf 'JWT_SECRET=%s\n\n' "$JWT_SECRET"
-    printf '# TheMovieDB API key\n'
-    printf 'TMDB_API_KEY=%s\n' "$TMDB_KEY"
+    if [ -n "$TMDB_KEY" ]; then
+        printf '# TheMovieDB API key (custom — the bundled key applies when unset)\n'
+        printf 'TMDB_API_KEY=%s\n' "$TMDB_KEY"
+    else
+        printf '# TheMovieDB: using the bundled application key. Set TMDB_API_KEY= to override.\n'
+    fi
     # Semantic search / embeddings — Aurora expects an Ollama
     # instance here. Written explicitly because the Go-side default
     # (http://ollama:11434) doesn't resolve on bare metal. Model
