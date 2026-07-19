@@ -160,6 +160,12 @@ type PlaybackDecision struct {
 
 var knownVideoCodecs = map[string]bool{
 	"h264": true, "h265": true, "hevc": true, "vp8": true, "vp9": true, "av1": true,
+	// hevc_main10 is not an ffprobe codec name — it is the frontend's
+	// separate Main-10-profile probe (hvc1.2.4.*). The plain "hevc" cap is
+	// probed with an 8-bit Main codec string and over-reports for 10-bit
+	// content on Main-only hardware decoders; DecidePlayback gates 10-bit
+	// HEVC sources on this key instead.
+	"hevc_main10": true,
 }
 
 var knownAudioCodecs = map[string]bool{
@@ -248,6 +254,22 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	isH264_10bit := (vc == "h264" || vc == "avc" || vc == "avc1") && strings.Contains(videoPixFmt, "10")
 	if isH264_10bit {
 		videoOK = false // MSE/direct play will not work
+	}
+
+	// HEVC 10-bit (Main 10) guard (2026-07 review): the frontend's plain
+	// "hevc" cap is probed with an 8-bit Main-profile codec string
+	// (hvc1.1.6.*), which over-reports for 10-bit content on decoders that
+	// stop at Main profile (e.g. Intel Gen9-era hardware decode behind
+	// Chrome). Virtually all 4K and HDR HEVC is 10-bit, so a wrong "yes"
+	// here direct-played files the browser then failed to decode. Modern
+	// frontends probe Main 10 separately (hvc1.2.4.* — caps key
+	// "hevc_main10"); without that cap a 10-bit HEVC source must transcode.
+	// Caps strings from older SPA builds lack the key and take the safe
+	// direction (transcode). HDR sources additionally get the tonemap via
+	// SessionOpts.SourceHDR at session-create time.
+	isHEVC10bit := (vc == "hevc" || vc == "h265") && strings.Contains(videoPixFmt, "10")
+	if isHEVC10bit && !clientCaps.VideoCodecs["hevc_main10"] {
+		videoOK = false // decoder stops at Main profile; 10-bit will not decode
 	}
 
 	remuxVideoOK := videoOK
@@ -408,6 +430,8 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	reason := fmt.Sprintf("video codec %q not supported by browser", vc)
 	if isH264_10bit {
 		reason = "H.264 10-bit (Hi10P) not supported by browser MediaSource API; transcoding to 8-bit H.264"
+	} else if isHEVC10bit && !clientCaps.VideoCodecs["hevc_main10"] {
+		reason = "HEVC 10-bit (Main 10) not supported by this browser; transcoding to 8-bit H.264"
 	} else if videoOK && !remuxVideoOK && (vc == "vp8" || vc == "vp9" || vc == "av1") {
 		reason = fmt.Sprintf("%s cannot be remuxed into HLS segments; transcoding to H.264", strings.ToUpper(vc))
 	} else if videoOK && !remuxVideoOK && (vc == "hevc" || vc == "h265") {
@@ -637,10 +661,11 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 		// clone: a remux source session has HDRTonemap=false (video copied,
 		// browser handles HDR), while its clone re-encodes to 8-bit H.264 and
 		// would produce washed-out gray without the tonemap.
-		HDRTonemap:       src.HDRTonemap,
-		SourceHDR:        src.SourceHDR,
-		SourceVideoCodec: src.SourceVideoCodec,
-		StartSec:         src.StartSec,
+		HDRTonemap:        src.HDRTonemap,
+		SourceHDR:         src.SourceHDR,
+		SourceVideoCodec:  src.SourceVideoCodec,
+		SourceVideoPixFmt: src.SourceVideoPixFmt,
+		StartSec:          src.StartSec,
 		// SubtitleTracks intentionally omitted: the Chromecast Default Media
 		// Receiver (Shaka) stalls after loadMedia resolves when the master
 		// playlist declares a SUBTITLES rendition group (issue #328). The
@@ -1017,6 +1042,11 @@ type TranscodeSession struct {
 	FMP4 bool `json:"-"`
 	// Source video codec for BSF selection in remux mode (e.g., "hevc" needs hevc_mp4toannexb)
 	SourceVideoCodec string `json:"-"`
+	// SourceVideoPixFmt is the source pixel format from the library's probe
+	// data (e.g. "yuv420p10le"). Consumed with SourceVideoCodec by
+	// HWAccelInfo.PlanDecode to gate hardware decode per source (Hi10P
+	// H.264 and 10-bit-on-8-bit-only-hardware must stay on CPU decode).
+	SourceVideoPixFmt string `json:"-"`
 	// StartSec is the resume seek offset passed to FFmpeg via -ss. When > 0,
 	// HLS segments start at ~this position in the source file. The frontend
 	// must add this offset back when reporting playback progress.
@@ -1079,6 +1109,13 @@ type QualityVariant struct {
 	// "resume from the next segment" without consuming the crash-restart
 	// budget. Guarded by variantMu.
 	reaped bool
+	// swDecodeFallback forces the crash-restart relaunch to run WITHOUT
+	// hardware decode (2026-07): if a file that slipped past the startup
+	// decode probes kills FFmpeg, the retry must not fail the same way —
+	// software decode always works. Set by the crash path in EnsureVariant;
+	// never set by the reap-resume path (a reap is not a failure).
+	// Guarded by variantMu.
+	swDecodeFallback bool
 }
 
 // defaultMaxSessions is the concurrency ceiling applied when the configured
@@ -1230,6 +1267,16 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 
 	hwAccel := DetectHWAccel(tcCfg.HWAccel)
 
+	// Decode-side acceleration (2026-07): probe unless configured off.
+	// Probing is a handful of tiny bounded FFmpeg runs; on boxes without a
+	// working encoder backend it is skipped entirely (ProbeHWDecode no-ops
+	// for HWAccelNone).
+	if strings.EqualFold(strings.TrimSpace(tcCfg.HWDecode), "off") {
+		slog.Info("hardware decode disabled by config")
+	} else {
+		ProbeHWDecode(&hwAccel, baseDir)
+	}
+
 	maxCache := tcCfg.MaxCacheBytes
 	if maxCache <= 0 {
 		maxCache = defaultMaxCacheBytes
@@ -1267,8 +1314,16 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	if !fmp4 {
 		segFormat = "ts"
 	}
+	hwDecode := "off"
+	if hwAccel.DecodeType != "" && hwAccel.DecodeType != HWAccelNone {
+		hwDecode = string(hwAccel.DecodeType)
+		if hwAccel.FullGPU {
+			hwDecode += "+zero-copy"
+		}
+	}
 	slog.Info("transcode manager ready",
 		"hw_accel", hwAccel.DisplayName,
+		"hw_decode", hwDecode,
 		"max_sessions", tcCfg.MaxSessions,
 		"max_sessions_per_user", effectiveMaxSessionsPerUser(tcCfg.MaxSessionsPerUser),
 		"profiles", tcCfg.Profiles,
@@ -1674,7 +1729,10 @@ type SessionOpts struct {
 	// to re-derive HDRTonemap whenever video is actually re-encoded.
 	SourceHDR        bool
 	SourceVideoCodec string // source video codec (e.g., "hevc", "h264") for BSF selection in remux mode
-	StartSec         int    // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
+	// SourceVideoPixFmt is the source pixel format from the library's OWN
+	// probe data (never a client echo) — see TranscodeSession.SourceVideoPixFmt.
+	SourceVideoPixFmt string
+	StartSec          int // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
 	// SubtitleTracks lists text-based subtitle tracks to extract inline via
 	// the HLS pipeline. Each track gets its own WebVTT segmented output chain
 	// appended to the FFmpeg command, piggybacking on the same file I/O as
@@ -1813,6 +1871,7 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		session.HDRTonemap = o.HDRTonemap
 		session.SourceHDR = o.SourceHDR
 		session.SourceVideoCodec = strings.ToLower(o.SourceVideoCodec)
+		session.SourceVideoPixFmt = strings.ToLower(o.SourceVideoPixFmt)
 		session.StartSec = o.StartSec
 		session.SubtitleTracks = o.SubtitleTracks
 	}
@@ -2219,6 +2278,13 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 			// time — fixed now.
 			if v.restartAttempts < variantRestartMax {
 				v.restartAttempts++
+				// 2026-07 — the relaunch runs with SOFTWARE decode. If the
+				// crash came from a hardware-decode edge case the startup
+				// probes couldn't foresee (exotic profile, driver bug), the
+				// retry must not fail identically; if the crash was
+				// unrelated, losing decode offload for one variant
+				// generation is a negligible cost.
+				v.swDecodeFallback = true
 				// Audit M3 — subtitles freeze at the crash point on
 				// restart. The original FFmpeg process produced both
 				// video and subtitle outputs in one invocation; on
@@ -2431,21 +2497,25 @@ func segmentNumberPart(name string) (string, bool) {
 //     audioCodec=="ac3" (re-encoded surround OR fMP4 copy), or E-AC-3 (ec-3)
 //     when audioCodec=="eac3" (fMP4 passthrough only).
 func hlsCodecString(height int, audioCodec string) string {
-	// Level selection per H.264 Annex A:
-	//   Level 3.0 (1e): up to 480p (40,500 MB/s)
-	//   Level 3.1 (1f): up to 720p (108,000 MB/s)
-	//   Level 4.0 (28): up to 1080p (245,760 MB/s)
-	//   Level 5.1 (33): up to 2160p
+	// Level selection per H.264 Annex A — one notch above each tier's 30fps
+	// minimum so 50/60fps sources stay conformant (frame rate is not probed;
+	// see h264Level in hwaccel.go, which this MUST mirror):
+	//   Level 3.1 (1f): 480p up to 60fps
+	//   Level 3.2 (20): 720p up to 60fps
+	//   Level 4.2 (2a): 1080p up to 60fps
+	//   Level 5.2 (34): 2160p up to 60fps
+	// Declaring the higher level for low-fps content is legal (a level is a
+	// decoder-capability ceiling) and decodes everywhere Aurora plays.
 	var level string
 	switch {
 	case height > 1080:
-		level = "33" // Level 5.1 for 4K
+		level = "34" // Level 5.2 for 4K
 	case height > 720:
-		level = "28" // Level 4.0 for 1080p
+		level = "2a" // Level 4.2 for 1080p
 	case height > 480:
-		level = "1f" // Level 3.1 for 720p
+		level = "20" // Level 3.2 for 720p
 	default:
-		level = "1e" // Level 3.0 for 480p and below
+		level = "1f" // Level 3.1 for 480p and below
 	}
 
 	audio := "mp4a.40.2" // AAC-LC
@@ -2614,6 +2684,23 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		args = append(args, "-readrate", readRateFactor)
 	}
 
+	// Hardware decode (2026-07): input-side flags, must precede -i. Remux
+	// sessions never decode at all. PlanDecode gates on the startup-probed
+	// capabilities, the source codec + bit depth (from the library's own
+	// probe data), CPU-only filters (subtitle burn-in), and the
+	// per-variant software-decode crash fallback. decodeFullGPU selects
+	// the Tier-2 zero-copy encoder chain below.
+	decodeFullGPU := false
+	if !session.Remux {
+		burnIn := session.BurnSubIndex >= 0 || session.BurnSubExternal != ""
+		decodeArgs, fullGPU := tm.hwAccel.PlanDecode(
+			session.SourceVideoCodec, session.SourceVideoPixFmt,
+			session.HDRTonemap, burnIn, v.swDecodeFallback,
+		)
+		args = append(args, decodeArgs...)
+		decodeFullGPU = fullGPU
+	}
+
 	args = append(args, "-i", session.FilePath)
 
 	// Output muxer option: increase interleave queue for container remux
@@ -2683,21 +2770,36 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}
 	} else {
 		// ── Full transcode mode ──
-		// Video encoder (hardware-accelerated or software)
-		encoderArgs := tm.hwAccel.VideoEncoderArgs(p.Width, p.Height)
+		if decodeFullGPU {
+			// Tier-2 zero-copy (2026-07): decode, scale (and VAAPI HDR
+			// tonemap) all operate on GPU frames delivered by
+			// -hwaccel_output_format. PlanDecode only selects this tier when
+			// burn-in is absent and HDR (if any) is handled on-GPU, so the
+			// CPU-chain injectors in the branch below MUST NOT run — they
+			// would splice CPU-only filters into a hardware-frame graph.
+			// Bitrate control, keyframe forcing and audio args below are
+			// shared with the CPU path.
+			args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap)...)
+		} else {
+			// Video encoder (hardware-accelerated or software). When
+			// PlanDecode chose Tier 1, the frames were hardware-DECODED but
+			// arrive in system memory, so this CPU filter chain applies
+			// unchanged.
+			encoderArgs := tm.hwAccel.VideoEncoderArgs(p.Width, p.Height)
 
-		// HDR-to-SDR tonemapping: inject before subtitle burn-in so tonemap
-		// operates on the raw decoded frames, then subtitles overlay the SDR output.
-		if session.HDRTonemap {
-			encoderArgs = injectTonemapFilter(encoderArgs, p.Width, p.Height)
+			// HDR-to-SDR tonemapping: inject before subtitle burn-in so tonemap
+			// operates on the raw decoded frames, then subtitles overlay the SDR output.
+			if session.HDRTonemap {
+				encoderArgs = injectTonemapFilter(encoderArgs, p.Width, p.Height)
+			}
+
+			// Inject subtitle burn-in into the filter chain if configured
+			if session.BurnSubIndex >= 0 || session.BurnSubExternal != "" {
+				encoderArgs = injectBurnInFilter(encoderArgs, session)
+			}
+
+			args = append(args, encoderArgs...)
 		}
-
-		// Inject subtitle burn-in into the filter chain if configured
-		if session.BurnSubIndex >= 0 || session.BurnSubExternal != "" {
-			encoderArgs = injectBurnInFilter(encoderArgs, session)
-		}
-
-		args = append(args, encoderArgs...)
 
 		// Bitrate control
 		if tm.hwAccel.Type == HWAccelNone {

@@ -239,7 +239,13 @@ type TranscodeConfig struct {
 	// CMAF fragmented MP4, required by Apple for HEVC, no client-side
 	// TS remux) or "ts" (legacy MPEG-TS, kept as a rollback path).
 	SegmentFormat string
-	Profiles      []string
+	// HWDecode controls GPU-accelerated DECODE for transcode sessions
+	// (2026-07): "auto" (default — probe at startup, use where proven) or
+	// "off" (rollback knob: encode-side acceleration only, the pre-2026-07
+	// pipeline). Decode offload is what removes the dominant CPU cost of
+	// the 4K-HEVC→H.264 transcode; see streaming.ProbeHWDecode.
+	HWDecode string
+	Profiles []string
 	// MaxCacheBytes bounds the total on-disk size of the transcode output
 	// tree (HLS EVENT playlists keep every segment of a title so seek-back
 	// works, so long/concurrent transcodes can grow it without bound). When
@@ -301,6 +307,7 @@ type yamlConfig struct {
 		MaxSessions        int      `yaml:"max_sessions"`
 		MaxSessionsPerUser int      `yaml:"max_sessions_per_user"`
 		HWAccel            string   `yaml:"hw_accel"`
+		HWDecode           string   `yaml:"hw_decode"`
 		SessionTimeoutSec  int      `yaml:"session_timeout_sec"`
 		SegmentDuration    int      `yaml:"segment_duration"`
 		SegmentFormat      string   `yaml:"segment_format"`
@@ -425,6 +432,9 @@ func Load() (*Config, error) {
 			// transient second session + a stereo cast clone.
 			MaxSessionsPerUser: 0,
 			HWAccel:            "auto",
+			// GPU decode offload: probe at startup, use where proven.
+			// "off" restores the encode-only acceleration pipeline.
+			HWDecode: "auto",
 			// 5 minutes (was 120s). Keepalive pings every 10s, but browsers
 			// throttle/suspend timers in backgrounded tabs and on locked
 			// phones; a 2-minute idle window let a backgrounded stream's
@@ -700,6 +710,9 @@ func loadYAML(cfg *Config) error {
 	}
 	if yc.Transcode.SegmentFormat != "" {
 		cfg.Transcode.SegmentFormat = yc.Transcode.SegmentFormat
+	}
+	if yc.Transcode.HWDecode != "" {
+		cfg.Transcode.HWDecode = yc.Transcode.HWDecode
 	}
 	if yc.Transcode.MaxSessionsPerUser > 0 {
 		cfg.Transcode.MaxSessionsPerUser = yc.Transcode.MaxSessionsPerUser

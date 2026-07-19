@@ -27,6 +27,14 @@ type HWAccelInfo struct {
 	VideoEncoder string      `json:"video_encoder"` // e.g. "h264_nvenc"
 	DevicePath   string      `json:"device_path,omitempty"`
 	DisplayName  string      `json:"display_name"`
+
+	// Decode-side capabilities, probed at startup by ProbeHWDecode
+	// (hwdecode.go). Zero values = decode stays on the CPU (the pre-2026-07
+	// pipeline), which is also the `hw_decode: off` rollback state.
+	DecodeType   HWAccelType     `json:"decode_type,omitempty"`   // cuda (nvenc) or vaapi (vaapi/qsv/amf boxes)
+	DecodeCodecs map[string]bool `json:"decode_codecs,omitempty"` // decodeKey* entries that passed the probe
+	FullGPU      bool            `json:"full_gpu,omitempty"`      // Tier-2 zero-copy cycle proven
+	TonemapVAAPI bool            `json:"tonemap_vaapi,omitempty"` // GPU HDR→SDR chain proven (VAAPI only)
 }
 
 type hwProbe struct {
@@ -225,7 +233,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 		// (aac_low/aac_main/…), and FFmpeg aborts at encoder init before
 		// producing a single segment. Review 2026-06 finding B1.
 		return []string{"-c:v", "h264_qsv", "-preset", "faster",
-			"-profile:v", profile, "-level", level, "-vf", scale}
+			"-profile:v", profile, "-level", qsvLevel(level), "-vf", scale}
 	case HWAccelVAAPI:
 		// VAAPI does not support explicit baseline profile constraint — leave as-is.
 		// The format=nv12 step here is the equivalent 8-bit downconvert.
@@ -259,15 +267,41 @@ func h264Profile(height int) string {
 // h264Level returns the appropriate H.264 level string for a given output height.
 // Must match hlsCodecString() in streaming.go so the CODECS attribute in the
 // master playlist agrees with the actual encoded level.
+//
+// 2026-07 review: each tier declares one level notch above its 30fps minimum
+// so 50/60fps sources stay conformant. The scanner does not (yet) record
+// frame rate, and fps passes through the transcode untouched, so a
+// height-only table must cover the worst realistic case: 1080p60 exceeds
+// Level 4.0's macroblock rate (489,600 > 245,760 MB/s — libx264 warns
+// "MB rate > level limit" and stamps a non-conformant stream), while 4.2
+// covers it exactly. Declaring the higher level for 24fps content is always
+// legal (levels are ceilings, not targets) and every playback target Aurora
+// supports (browser MSE, Chromecast gen-2+, AirPlay) decodes High@L5.2.
+//
+//	480p and below → 3.1 (854x480@60 needs 3.1; @30 needs 3.0)
+//	720p           → 3.2 (1280x720@60 needs 3.2; @30 needs 3.1)
+//	1080p          → 4.2 (1920x1080@60 needs 4.2; @30 needs 4.0)
+//	2160p          → 5.2 (3840x2160@60 needs 5.2; @30 needs 5.1)
 func h264Level(height int) string {
 	switch {
 	case height > 1080:
-		return "5.1" // 4K
+		return "5.2" // 4K up to 60fps
 	case height > 720:
-		return "4.0" // 1080p
+		return "4.2" // 1080p up to 60fps
 	case height > 480:
-		return "3.1" // 720p
+		return "3.2" // 720p up to 60fps
 	default:
-		return "3.0" // 480p and below
+		return "3.1" // 480p and below up to 60fps
 	}
+}
+
+// qsvLevel converts a dotted H.264 level ("4.2") to the numeric level_idc
+// form ("42") that h264_qsv needs. Unlike libx264 (string option), NVENC,
+// VAAPI and AMF (named integer constants like "4.2"), h264_qsv exposes no
+// named level constants — the generic integer AVOption silently evaluates
+// "4.2" as the number 4, which is not a valid MFX CodecLevel (level 4.0 is
+// 40), so the constraint was never applied. The numeric IDC form parses to
+// the correct MFX constant on every FFmpeg version.
+func qsvLevel(level string) string {
+	return strings.ReplaceAll(level, ".", "")
 }

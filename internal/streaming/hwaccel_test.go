@@ -12,21 +12,23 @@ func TestVideoEncoderArgs_Software(t *testing.T) {
 	assertContains(t, args, "-c:v", "libx264")
 	assertContains(t, args, "-preset", "veryfast")
 	assertContains(t, args, "-profile:v", "high")
-	assertContains(t, args, "-level", "4.0")
+	assertContains(t, args, "-level", "4.2")
 	assertContainsVF(t, args, "scale=1920:-2")
 }
 
 func TestVideoEncoderArgs_LevelByResolution(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"}
 
+	// One notch above each tier's 30fps minimum (60fps headroom; frame rate
+	// is not probed) — must mirror hlsCodecString in streaming.go.
 	tests := []struct {
 		width, height int
 		wantLevel     string
 	}{
-		{854, 480, "3.0"},
-		{1280, 720, "3.1"},
-		{1920, 1080, "4.0"},
-		{3840, 2160, "5.1"},
+		{854, 480, "3.1"},
+		{1280, 720, "3.2"},
+		{1920, 1080, "4.2"},
+		{3840, 2160, "5.2"},
 	}
 	for _, tt := range tests {
 		args := hw.VideoEncoderArgs(tt.width, tt.height)
@@ -44,7 +46,7 @@ func TestVideoEncoderArgs_NVENC(t *testing.T) {
 	assertContains(t, args, "-tune", "hq")
 	assertContains(t, args, "-rc", "vbr")
 	assertContains(t, args, "-profile:v", "high")
-	assertContains(t, args, "-level", "3.1")
+	assertContains(t, args, "-level", "3.2")
 	assertContainsVF(t, args, "scale=1280:-2")
 }
 
@@ -59,6 +61,10 @@ func TestVideoEncoderArgs_QSV(t *testing.T) {
 	// applies to the audio stream too, and the AAC encoder rejects "high",
 	// killing every QSV transcode that re-encodes audio (finding B1).
 	assertContains(t, args, "-profile:v", "high")
+	// h264_qsv has no named "3.1"-style level constants — the dotted form
+	// silently evaluates to the wrong integer. QSV must get numeric
+	// level_idc ("31"), unlike libx264/NVENC/VAAPI/AMF (see qsvLevel).
+	assertContains(t, args, "-level", "31")
 	assertContainsVF(t, args, "scale=854:-2")
 	for _, a := range args {
 		if a == "-profile" {
@@ -229,4 +235,16 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestQSVLevelNumericForm(t *testing.T) {
+	// h264_qsv has no named dotted-level constants; the generic integer
+	// option evaluates "4.2" to 4 (not MFX level_idc 42), silently dropping
+	// the constraint. qsvLevel must emit the numeric IDC form.
+	tests := map[string]string{"3.1": "31", "3.2": "32", "4.2": "42", "5.2": "52"}
+	for in, want := range tests {
+		if got := qsvLevel(in); got != want {
+			t.Errorf("qsvLevel(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

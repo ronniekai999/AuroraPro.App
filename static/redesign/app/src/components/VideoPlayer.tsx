@@ -44,6 +44,7 @@ import { PlayerControls } from './PlayerControls'
 import {
   buildSessionRequest,
   createCastToken,
+  createDirectCastToken,
   createSession,
   deleteSession,
   getStreamInfo,
@@ -1332,15 +1333,38 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           ? Math.floor(target.resumePositionMs / 1000)
           : 0
 
-        if (stream.decision === 'direct_play' && stream.stream_url) {
+        // forceTranscode also bypasses DIRECT PLAY (2026-07 review): the
+        // MEDIA_ERROR fallback below re-emits the target with
+        // forceTranscode=true, and for a direct-play decision that retry
+        // must land on the HLS transcode path — the decision engine's
+        // "direct play" was, empirically, wrong for this browser+file.
+        if (stream.decision === 'direct_play' && stream.stream_url && !target.forceTranscode) {
           // Direct play: <video src> + token query param. The server's
           // token-promotion middleware whitelists /api/stream/, so the
           // ?token= rides safely.
           setStatus(`Direct Play · ${stream.video_codec ?? ''} / ${stream.audio_codec ?? ''}`)
           const vid = videoRef.current
           if (!vid) return
-          vid.src = withToken(stream.stream_url)
+          // AirPlay auth (#317's direct-play twin, 2026-07 review): auth
+          // lives in an httpOnly cookie the Apple TV can't send, and
+          // withToken() has been a no-op since the cookie migration — an
+          // AirPlayed direct-play title 401'd on every range request. When
+          // the environment exposes AirPlay APIs, mint a FILE-scoped cast
+          // token (server binds it to exactly this file) and use the
+          // token-bearing /api/stream/direct/{id} URL instead. Local
+          // playback works with either URL; on mint failure we keep the
+          // cookie URL so local playback never breaks.
+          let directSrc = withToken(stream.stream_url)
+          if ('WebKitPlaybackTargetAvailabilityEvent' in window) {
+            try {
+              const dct = await createDirectCastToken(target.fileId, target.fileType, ac.signal)
+              directSrc = absoluteUrl(dct.url)
+            } catch { /* cookie URL still plays locally; AirPlay will 401 */ }
+            if (cancelled) return
+          }
+          vid.src = directSrc
           vid.load()
+          let onCanPlayResume: (() => void) | null = null
           if (resumeSec > 0) {
             // Wait for canplay so the seek lands inside a buffered
             // range — seeking before the metadata is parsed is a
@@ -1349,6 +1373,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               vid.currentTime = resumeSec
               vid.removeEventListener('canplay', onCanPlay)
             }
+            onCanPlayResume = onCanPlay
             vid.addEventListener('canplay', onCanPlay)
           }
           // Audit M2 (Phase 4.5) — reapply the user's prior subtitle
@@ -1379,13 +1404,55 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           }
           vid.addEventListener('loadedmetadata', onLoadedMetadata)
           vid.addEventListener('canplay', onCanPlayForSub)
+          // 2026-07 review — direct play previously had NO error handling:
+          // a decode/network failure mid-stream froze the player with the
+          // status still reading "Direct Play". Mirror the hls.js path's
+          // one-shot fallback: first fatal error retries as a full
+          // transcode (the decision engine's direct-play call was wrong
+          // for this browser+file — e.g. 10-bit HEVC on a Main-only
+          // decoder); if the retry also fails, or no fallback is wired,
+          // surface a terminal error and release the <video>.
+          const onDirectError = () => {
+            if (cancelled) return
+            const e = vid.error
+            console.warn('[Aurora direct-play] media error code', e?.code, '—', e?.message)
+            // Detach these listeners BEFORE closeAndCleanup(): it calls
+            // vid.load() on an empty src, which can re-queue an error
+            // event and re-enter this handler (same pattern as the
+            // native-HLS onNativeError).
+            nativeHlsDiagCleanupRef.current?.()
+            nativeHlsDiagCleanupRef.current = null
+            if (!mediaErrorFallbackTriedRef.current && !target.forceTranscode && onFallbackToTranscode) {
+              mediaErrorFallbackTriedRef.current = true
+              setStatus('Direct play failed — retrying with transcode…')
+              closeAndCleanup()
+              onFallbackToTranscode()
+              return
+            }
+            setErrorMsg('Playback failed — this file could not be played in your browser')
+            closeAndCleanup()
+          }
+          vid.addEventListener('error', onDirectError)
+          // Registered under the shared media-diagnostics cleanup ref (the
+          // play-effect cleanup invokes it): removes the error handler AND
+          // the one-shot canplay/loadedmetadata listeners above. Without
+          // this, a listener that never fired (quick target switch before
+          // canplay) survived into the NEXT target's playback on the same
+          // <video> element and applied the PREVIOUS title's resume
+          // position / subtitle pick (2026-07 review).
+          nativeHlsDiagCleanupRef.current = () => {
+            vid.removeEventListener('error', onDirectError)
+            vid.removeEventListener('canplay', onCanPlayForSub)
+            vid.removeEventListener('loadedmetadata', onLoadedMetadata)
+            if (onCanPlayResume) vid.removeEventListener('canplay', onCanPlayResume)
+          }
           // Booted: re-enable host broadcasts. The deferred resume seek + play
           // below are the host's intended state, safe to propagate.
           playerReadyRef.current = true
           await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
           // A direct-play target has no castable HLS session; bump anyway so a
           // pending cast auto-advance resolves (loadCurrent finds no media and
-          // stops the cast — direct-play can't be cast).
+          // stops the cast — direct-play can't be cast to Chromecast).
           setCastReloadEpoch(n => n + 1)
           return
         }
@@ -1493,11 +1560,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // HLS-time-0 IS the resume point). When start_sec === 0 despite a
           // resume position, seek client-side once metadata is ready — mirrors
           // the MANIFEST_PARSED fallback in the hls.js path.
+          let onCanPlaySeekNative: (() => void) | null = null
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
             const onCanPlaySeek = () => {
               vid.currentTime = resumeSec
               vid.removeEventListener('canplay', onCanPlaySeek)
             }
+            onCanPlaySeekNative = onCanPlaySeek
             vid.addEventListener('canplay', onCanPlaySeek)
           }
           // Disable DEFAULT=YES subtitle groups the native player auto-selects
@@ -1616,6 +1685,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             vid.removeEventListener('waiting', onNativeWaiting)
             vid.removeEventListener('stalled', onNativeStalled)
             vid.removeEventListener('error', onNativeError)
+            // 2026-07 review — also remove the one-shot canplay/
+            // loadedmetadata listeners: if they never fired (quick target
+            // switch before canplay), they'd survive into the NEXT
+            // target's playback on the same <video> element and apply the
+            // PREVIOUS title's resume position / subtitle pick.
+            vid.removeEventListener('canplay', onNativeCanPlay)
+            vid.removeEventListener('loadedmetadata', onNativeLoadedMetadata)
+            if (onCanPlaySeekNative) vid.removeEventListener('canplay', onCanPlaySeekNative)
           }
 
           playerReadyRef.current = true
@@ -1805,19 +1882,50 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => enforceNoAutoSub('SUBTITLE_TRACKS_UPDATED'))
         hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, () => enforceNoAutoSub('SUBTITLE_TRACK_SWITCH'))
 
-        // Error handling — basic. V1's full ladder is in Phase 2.5.
-        // We do the standard hls.js advisories: media errors → try
-        // recoverMediaError once; network errors → startLoad to
-        // resume after transient connectivity hiccups.
+        // Error handling — the standard hls.js recovery ladder, BOUNDED
+        // (2026-07 review; previously every branch retried without a
+        // budget, so a chronically-failing stream looped recover→error→
+        // recover for the life of the tab — endless stutter, never an
+        // error screen, ffmpeg kept alive by the keepalive ticker).
+        //
+        //  * MEDIA_ERROR: remux→transcode fallback first (one-shot);
+        //    then hls.js's documented pattern — recoverMediaError(); if
+        //    another fatal media error lands within 3s, swapAudioCodec()
+        //    before the next recover; hard cap on total attempts.
+        //  * NETWORK_ERROR: 401 → token refresh (bounded); anything else
+        //    → startLoad() with a small retry budget, reset by any
+        //    successfully loaded fragment so a long movie can survive
+        //    many isolated blips but a dead session can't retry forever.
         //
         // Audit H2 (2026-05-16) — 401 detection. Aurora access tokens
-        // expire after 15 minutes; movies are 90-120+. The xhrSetup
-        // reads the token from localStorage synchronously, but if the
-        // token expires and no other API call has triggered a
-        // background refresh, segment XHRs will start 401-ing. hls.js
-        // packages this as a NETWORK_ERROR; without intervention,
-        // startLoad just re-fires the same expired token. Detect the
-        // 401 specifically, force a refresh, then resume.
+        // expire after 15 minutes; movies are 90-120+. If the token
+        // expires and no other API call has triggered a background
+        // refresh, segment XHRs start 401-ing; hls.js packages that as a
+        // NETWORK_ERROR and startLoad alone would re-fire the same
+        // expired token. Detect the 401 specifically, refresh, resume.
+        const MEDIA_RECOVER_MAX = 4
+        const MEDIA_SWAP_WINDOW_MS = 3000
+        const NETWORK_RETRY_MAX = 3
+        const AUTH_REFRESH_MAX = 2
+        let mediaRecoverAttempts = 0
+        let lastMediaRecoverAt = 0
+        let audioCodecSwapped = false
+        let networkRetryAttempts = 0
+        let authRefreshAttempts = 0
+        hls.on(Hls.Events.FRAG_LOADED, () => {
+          // Forward progress: transient-blip budgets refill so bounded
+          // retries never accumulate across a 2-hour movie's lifetime.
+          networkRetryAttempts = 0
+          authRefreshAttempts = 0
+        })
+        const failPlayback = (msg: string) => {
+          setErrorMsg(msg)
+          // Fatal-non-recoverable: without this teardown the hls instance
+          // stays alive AND the keepalive interval keeps pinging the
+          // server-side FFmpeg session for the lifetime of the tab
+          // (Audit HIGH-2, Phase 4.5 final).
+          closeAndCleanup()
+        }
         hls.on(Hls.Events.ERROR, (_evt, data) => {
           if (cancelled) return
           if (!data.fatal) return
@@ -1828,13 +1936,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             (data.response && (data.response.code as number | undefined)) ??
             ((data.networkDetails as XMLHttpRequest | undefined)?.status)
           if (status === 401 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            if (authRefreshAttempts >= AUTH_REFRESH_MAX) {
+              // Refresh "succeeded" but streams still 401 (revoked token
+              // version, clock skew, proxy stripping cookies) — retrying
+              // forever would hammer the auth endpoint for the tab's life.
+              failPlayback('Session expired. Please sign in again.')
+              return
+            }
+            authRefreshAttempts++
             void (async () => {
               const refreshed = await forceTokenRefresh()
               if (cancelled) return
               if (refreshed) {
-                try { hls.startLoad() } catch { setErrorMsg('Playback failed — token refresh') }
+                try { hls.startLoad() } catch { failPlayback('Playback failed — token refresh') }
               } else {
-                setErrorMsg('Session expired. Please sign in again.')
+                failPlayback('Session expired. Please sign in again.')
               }
             })()
             return
@@ -1870,24 +1986,46 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               onFallbackToTranscode()
               return
             }
-            try { hls.recoverMediaError() } catch {
-              setErrorMsg('Playback failed — media error')
-              // Audit HIGH-2 (Phase 4.5 final) — fatal-non-recoverable
-              // path. Without this teardown the hls instance stays
-              // alive AND the keepalive interval keeps pinging the
-              // server-side FFmpeg session for the lifetime of the
-              // browser tab. The user sees an error screen and
-              // walks away; FFmpeg burns CPU until tab close.
-              closeAndCleanup()
+            // hls.js's documented recovery ladder, bounded. A second fatal
+            // media error inside the swap window means plain recovery
+            // didn't take — swapAudioCodec() re-creates the audio
+            // SourceBuffer with the alternate codec mapping before the
+            // next recover (the hls.js-recommended second step). The
+            // total cap catches slow loops the window can't (a decode
+            // that fails every ~5s "recovers" forever otherwise).
+            if (mediaRecoverAttempts >= MEDIA_RECOVER_MAX) {
+              failPlayback('Playback failed — media error')
+              return
+            }
+            mediaRecoverAttempts++
+            const now = Date.now()
+            const withinSwapWindow = now - lastMediaRecoverAt < MEDIA_SWAP_WINDOW_MS
+            lastMediaRecoverAt = now
+            try {
+              if (withinSwapWindow && !audioCodecSwapped) {
+                audioCodecSwapped = true
+                hls.swapAudioCodec()
+              }
+              hls.recoverMediaError()
+            } catch {
+              failPlayback('Playback failed — media error')
             }
           } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            // Fatal network error = hls.js's own per-request retries are
+            // already exhausted. A bounded startLoad budget covers
+            // transient connectivity loss (wifi handoff, server restart);
+            // a GC'd session whose segments 404/410 forever hits the cap
+            // and surfaces instead of silently retrying for hours.
+            if (networkRetryAttempts >= NETWORK_RETRY_MAX) {
+              failPlayback('Playback failed — network error')
+              return
+            }
+            networkRetryAttempts++
             try { hls.startLoad() } catch {
-              setErrorMsg('Playback failed — network error')
-              closeAndCleanup()
+              failPlayback('Playback failed — network error')
             }
           } else {
-            setErrorMsg('Playback failed — ' + (data.details ?? 'unknown'))
-            closeAndCleanup()
+            failPlayback('Playback failed — ' + (data.details ?? 'unknown'))
           }
         })
       } catch (err) {
@@ -2505,6 +2643,17 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     const vid = videoRef.current
     if (!vid) return
     const localSec = sec - (startSecRef.current ?? 0)
+    // DIRECT PLAY (no server session): the browser seeks natively via
+    // byte-range requests, so the buffered-edge / session-rebuild logic
+    // below — which exists for SEQUENTIAL TRANSCODES whose future
+    // segments aren't on disk yet — must not run. Before this guard,
+    // every jump past the (small) native buffer paid a full session
+    // teardown + stream-info + reload; the skip-marker path already had
+    // exactly this exemption (2026-07 review).
+    if (sessionIdRef.current === null) {
+      try { vid.currentTime = Math.max(0, localSec) } catch { /* defensive */ }
+      return
+    }
     // Party gate is shared by both the backward-seek and forward-seek
     // rebuild paths below; compute it once here.
     const isPartySyncingThisMedia = !!party

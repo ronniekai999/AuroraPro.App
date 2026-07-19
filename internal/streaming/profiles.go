@@ -45,6 +45,14 @@ var AllProfiles = map[string]QualityProfile{
 // ProfileOrder is highest to lowest quality.
 var ProfileOrder = []string{"2160p", "1080p", "720p", "480p", "360p"}
 
+// nearWidthTolerance is how far a profile's nominal width may exceed the
+// source width before the profile is dropped from the ladder. 4% comfortably
+// covers real-world crop-encoded widths (1912, 1904, 1888 for nominal 1920;
+// 3832/3808 for nominal 3840) without ever bridging the gap to the next rung
+// down (1920 → 1280 is a 33% step). Kept-but-clamped profiles encode at the
+// source width, so no upscaling ever happens.
+const nearWidthTolerance = 1.04
+
 // ResolveProfiles returns the profiles that are both enabled and don't exceed source width.
 // Each profile's Height is adjusted to preserve the source aspect ratio — the nominal
 // height in AllProfiles is just a label. This prevents stretching ultrawide (2.4:1),
@@ -72,8 +80,24 @@ func ResolveProfiles(enabled []string, sourceWidth, sourceHeight int) []QualityP
 		}
 		// Don't upscale: skip profiles whose width exceeds the source.
 		// Height is computed from the source aspect ratio, so only width matters.
+		//
+		// Near-miss tolerance (2026-07 review): plenty of "1080p" releases are
+		// crop-encoded a few pixels narrow (1912/1916 wide after black-bar
+		// cropping). A hard `p.Width > sourceWidth` cutoff silently dropped the
+		// 1080p rung for those files and capped the ladder at 720p — a large,
+		// invisible quality loss. Within nearWidthTolerance the profile is KEPT
+		// and clamped to the source width (never upscaled): the 1912-wide file
+		// gets a 1912-wide top rung labeled 1080p.
 		if p.Width > sourceWidth {
-			continue
+			if float64(p.Width) > float64(sourceWidth)*nearWidthTolerance {
+				continue
+			}
+			// Clamp to source width, rounded down to even (required by
+			// H.264 encoders, same constraint as AdjustProfileHeight).
+			p.Width = sourceWidth &^ 1
+			if p.Width < 2 {
+				continue
+			}
 		}
 		// Adjust height to preserve source aspect ratio.
 		p.Height = AdjustProfileHeight(p.Width, sourceWidth, sourceHeight)
