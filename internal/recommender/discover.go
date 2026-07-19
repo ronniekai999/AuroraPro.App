@@ -376,25 +376,32 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		seedsOnly = true
 	}
 
-	// Tighter budget for the heavy tail (listwise rerank + annotate + LLM
-	// curation). Cancellation-detachment is NOT this ctx's job anymore —
-	// DiscoverFor's doFlight already runs the whole build on a context
-	// detached from every request (buildFlightBudget) — this simply keeps
-	// the historical guarantee that the LLM tail can't consume more than
-	// discoverBudget (60s) of that flight, staying under the client
-	// HTTPTimeout (70s) invariant.
-	llmCtx, cancel := context.WithTimeout(ctx, discoverBudget)
-	defer cancel()
-
 	// Phase B: listwise rerank the (larger) recall pool down to the prompt
 	// pool by taste relevance, then debias the candidate order so the LLM curates
 	// on merit not position. Both no-op gracefully when the reranker is off
 	// (rerankCandidates caps the slice; debiasOrder just reorders). Rerank runs
-	// BEFORE annotateGenres so we only genre-annotate the candidates that survive.
+	// BEFORE annotateGenres so we only genre-annotate the candidates that
+	// survive, and on the flight ctx rather than inside the discoverBudget
+	// window below: it bounds itself with rerankBudget (30s), and sharing the
+	// curation window would leave a pegged rerank only 60-30=30s for the
+	// curate call — under the ~40s a slow curation is observed to need.
+	// Sequenced this way the worst-case LLM tail is 30s + 60s, landing exactly
+	// on the buildFlightBudget (90s) ceiling; both stages degrade gracefully
+	// (vector order here, vector rail on a curate timeout) if it's ever hit.
 	if h.rerankEnabled() {
-		candidates = h.rerankCandidates(llmCtx, anchors, candidates, discoverPoolSize)
+		candidates = h.rerankCandidates(ctx, anchors, candidates, discoverPoolSize)
 	}
 	candidates = debiasOrder(candidates, profileID)
+
+	// Tighter budget for the heavy tail (annotate + LLM curation).
+	// Cancellation-detachment is NOT this ctx's job anymore — DiscoverFor's
+	// doFlight already runs the whole build on a context detached from every
+	// request (buildFlightBudget) — this simply keeps the historical
+	// guarantee that the curation call can't consume more than
+	// discoverBudget (60s) of that flight, staying under the client
+	// HTTPTimeout (70s) invariant.
+	llmCtx, cancel := context.WithTimeout(ctx, discoverBudget)
+	defer cancel()
 
 	// Genre-annotate candidates so the prompt has the same depth of
 	// signal the search reranker gets. One batched query, no N+1.

@@ -311,7 +311,8 @@ func (h *HeroHandler) kickDiscoverBuild(ctx context.Context, profileID, userID i
 	h.builds.mu.Unlock()
 
 	go func() {
-		// DiscoverFor bounds the LLM with discoverBudget (60s) internally and is
+		// DiscoverFor bounds its LLM calls internally (rerankBudget then
+		// discoverBudget, sequenced inside the 90s flight ceiling) and is
 		// singleflight-deduped, so concurrent waiters share one build.
 		rails, err := h.hero.DiscoverFor(ctx, profileID)
 
