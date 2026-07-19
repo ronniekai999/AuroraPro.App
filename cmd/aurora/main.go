@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -304,6 +305,7 @@ func main() {
 			ChatModel:   cfg.LLM.ChatModel,
 			Dims:        cfg.LLM.EmbedDims,
 			HTTPTimeout: cfg.LLM.HTTPTimeout,
+			NumCtx:      cfg.LLM.NumCtx,
 		}
 		applyLLMOverrides(ctx, queries, &llmCfg)
 		llmClient = llm.NewClient(llmCfg)
@@ -328,6 +330,13 @@ func main() {
 		pingCancel()
 
 		embedder = embedding.New(llmClient, queries, cfg.LLM.BackfillWorkers, cfg.LLM.BackfillBatch)
+		// Tell the model-space guard whether the embed model is an explicit
+		// operator choice (env var or admin-saved DB row) vs the binary
+		// default — pre-marker installs with a pinned model keep their
+		// vectors (same space), default-followers get nulled+re-embedded on
+		// a default swap. See embedding.ensureModelSpace.
+		_, embedPinnedDB, _ := queries.GetSettingExists(ctx, "llm_embed_model")
+		embedder.SetModelPinned(embedPinnedDB || os.Getenv("LLM_EMBED_MODEL") != "")
 		semanticSearcher = search.New(llmClient, queries)
 		heroRecommender = recommender.New(queries, llmClient)
 		// Phase B2 anti-repetition window (hours; 0 disables). Restart-required,
@@ -1170,11 +1179,20 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 		*dst = v // includes intentional empty-string clears
 	}
 
-	// Provider is informational only — local vs cloud is implied by whether
-	// the operator filled in OllamaURL + APIKey. We still read it so future
-	// validation can warn on mismatched combinations.
+	// Provider is MECHANICAL as of Phase E4 (it used to be a log-only label,
+	// which meant flipping it in the admin UI silently did nothing). The
+	// policy itself lives in llm.CheckProviderCombo — ONE rule source shared
+	// with UpdateLLMSettings, which 400s violations at save time; boot only
+	// warns (below) so a legacy row can't brick startup. The one boot-side
+	// MECHANIC is the Cloud embed coercion: our embedding models aren't
+	// hosted on Ollama Cloud, so with provider=ollama_cloud and no embed
+	// URL, embeddings route to the pre-override env/default URL — captured
+	// here BEFORE the DB overrides rewrite BaseURL to the Cloud endpoint —
+	// provided that URL actually looks local (an env chain that sets
+	// LLM_OLLAMA_URL=https://ollama.com must not be "coerced" to itself).
 	var provider string
 	get("llm_provider", &provider)
+	localBaseURL := cfg.BaseURL // env/default URL, pre-override
 
 	get("llm_ollama_url", &cfg.BaseURL)
 	get("llm_embed_url", &cfg.EmbedURL)
@@ -1197,6 +1215,31 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 
 	if v, ok, _ := queries.GetSettingExists(ctx, "llm_debug_log"); ok {
 		cfg.Debug = v == "true"
+	}
+
+	if provider == llm.ProviderCloud && cfg.EmbedURL == "" {
+		// Cloud chat, local embeddings: without this, /api/embed calls would
+		// hit ollama.com, where our embedding models don't run. Only coerce
+		// when the pre-override URL is plausibly a local box — otherwise
+		// (env itself points at Cloud) there is no local endpoint to route
+		// to, and pretending otherwise would send the operator down the
+		// wrong debugging path.
+		if !strings.HasPrefix(localBaseURL, "https://") {
+			slog.Info("llm_provider=ollama_cloud with no embed URL — routing embeddings to the pre-override URL", "embed_url", localBaseURL)
+			cfg.EmbedURL = localBaseURL
+		} else {
+			slog.Warn("llm_provider=ollama_cloud with no embed URL and no local pre-override URL — embeddings will fail until llm_embed_url points at a local Ollama")
+		}
+	}
+	for _, violation := range llm.CheckProviderCombo(provider, cfg.APIKey, cfg.BaseURL, cfg.EmbedURL) {
+		slog.Warn("LLM provider config incoherent (fix in Admin → LLM)", "provider", provider, "problem", violation)
+	}
+	if cfg.NumCtx > 0 && cfg.StructuredOutputs {
+		// num_ctx rides Ollama's native /api/chat options; the OpenAI-compat
+		// /v1 path (structured outputs) has no options field, so the knob is
+		// inert exactly on the big-prompt surfaces it was set for. Warn loud.
+		slog.Warn("LLM_NUM_CTX is ignored on the structured-outputs (/v1) path — surfaces using it fall back to the model's default context",
+			"num_ctx", cfg.NumCtx)
 	}
 
 	if provider != "" {

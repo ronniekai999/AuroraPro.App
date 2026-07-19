@@ -3,6 +3,7 @@ package recommender
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/llmjson"
 	"github.com/aurora-media/aurora/internal/models"
 )
@@ -266,14 +268,20 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 	// (LLM cold path); an Invalidate that fires in that window must NOT
 	// be overwritten by the stale build's Store.
 	startEpoch := h.epochFor(profileID).Load()
-	result, err, _ := h.discoverGroup.Do(key, func() (any, error) {
+	// doFlight (shared DoChan + detached-build scaffold — see hero.go). This
+	// also closes an old asymmetry: buildDiscover used to detach only its
+	// LLM middle section, so a leader cancelling could still blank the
+	// pre-LLM recall or drop the post-LLM annotation for every waiter.
+	// Detaching the WHOLE build makes the flight's fate independent of any
+	// single request.
+	return doFlight(ctx, &h.discoverGroup, key, buildFlightBudget, func(bctx context.Context) ([]DiscoverRail, error) {
 		if cached, ok := h.discoverCache.Load(profileID); ok {
 			e := cached.(discoverCacheEntry)
 			if time.Since(e.builtAt) < discoverCacheTTL {
 				return e.rails, nil
 			}
 		}
-		rails, buildErr := h.buildDiscover(ctx, profileID)
+		rails, buildErr := h.buildDiscover(bctx, profileID)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -283,14 +291,10 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 				builtAt: time.Now(),
 			})
 			// Remember the surfaced rail items so the next rebuild rotates (B2).
-			h.recordSurfaced(ctx, profileID, surfaceDiscover, railItemIDs(rails))
+			h.recordSurfaced(bctx, profileID, surfaceDiscover, railItemIDs(rails))
 		}
 		return rails, nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return result.([]DiscoverRail), nil
 }
 
 // DiscoverCached returns a profile's Discover rails from cache WITHOUT
@@ -372,17 +376,14 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		seedsOnly = true
 	}
 
-	// Detach the heavy tail (listwise rerank + LLM curation) from the
-	// request lifetime UP FRONT. Discover runs inside singleflight (DiscoverFor)
-	// and is cached 24h, so a client that navigates away mid-build — the SPA
-	// aborts the /api/me/discover fetch via its AbortController — must NOT cancel
-	// work that other waiters are blocked on. Critically this now also covers the
-	// rerank: on the raw request ctx, a mid-rerank abort would silently drop to
-	// vector order and cache THAT degraded build for 24h. WithoutCancel keeps ctx
-	// values (auth/trace) but drops the caller's cancellation + deadline;
-	// discoverBudget (60s) is the single bound for rerank (≤8s) + annotate + the
-	// LLM call. Same detached-build rationale as rail_reasons' async fill.
-	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
+	// Tighter budget for the heavy tail (listwise rerank + annotate + LLM
+	// curation). Cancellation-detachment is NOT this ctx's job anymore —
+	// DiscoverFor's doFlight already runs the whole build on a context
+	// detached from every request (buildFlightBudget) — this simply keeps
+	// the historical guarantee that the LLM tail can't consume more than
+	// discoverBudget (60s) of that flight, staying under the client
+	// HTTPTimeout (70s) invariant.
+	llmCtx, cancel := context.WithTimeout(ctx, discoverBudget)
 	defer cancel()
 
 	// Phase B: listwise rerank the (larger) recall pool down to the prompt
@@ -626,22 +627,15 @@ func chatJSONWithRetryOn5xx(
 	return callChat(ctx)
 }
 
-// isLLMServerError detects 5xx errors from the LLM client. ChatJSON wraps
-// HTTP failures into errors of the form "ollama chat: status N: ..." (see
-// internal/llm/client.go:289). We look for "status 5" because that uniquely
-// identifies the 5xx class — "status 4xx" would be a client-side bug
-// (auth, malformed request) that retry would not fix, and "status 200"
-// never reaches this path (caller only sees err on non-2xx).
-//
-// This is a brittle string check. If ChatJSON's error format changes, the
-// retry stops firing but the surrounding logic still works — failure mode
-// is "no retry on 5xx", not "wrong behavior". An audit of ChatJSON's error
-// shape is the cheapest place to harden this later.
+// isLLMServerError detects 5xx errors from the LLM client via the typed
+// *llm.StatusError (errors.As unwraps through any fmt.Errorf %w wrapping the
+// call sites add). 5xx is the only class worth retrying — a 4xx is a
+// client-side bug (auth, malformed request) that a retry would just repeat.
+// This replaced the old `strings.Contains(err, "ollama chat: status 5")`
+// check, whose failure mode on message drift was silently never retrying.
 func isLLMServerError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "ollama chat: status 5")
+	var se *llm.StatusError
+	return errors.As(err, &se) && se.IsServerError()
 }
 
 // buildDiscoverPrompt formats the user-side message: anchors followed by a

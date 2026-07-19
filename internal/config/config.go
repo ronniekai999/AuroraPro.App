@@ -68,13 +68,20 @@ type BugReportConfig struct {
 // system falls back to the existing trigram path; nothing else needs to know.
 type LLMConfig struct {
 	Enabled         bool
-	OllamaURL       string        // e.g. http://ollama:11434
+	OllamaURL       string        // e.g. http://localhost:11434
 	EmbedModel      string        // Ollama tag for the embedding model
 	ChatModel       string        // Ollama tag for the query-parser / reranker
 	EmbedDims       int           // target vector dimensionality (must match migration)
 	BackfillWorkers int           // parallel backfill goroutines
 	BackfillBatch   int           // items per Ollama batch
 	HTTPTimeout     time.Duration // per-request budget
+	// NumCtx (env LLM_NUM_CTX) is sent as options.num_ctx on native
+	// /api/chat calls when > 0. Ollama's default context (4096) silently
+	// truncates over-long prompts; our prompt caps are tuned to stay
+	// under it, but operators running bigger candidate pools or wordier
+	// catalogs can raise this instead of discovering truncation the hard
+	// way. 0 (default) omits the option → Ollama/model default applies.
+	NumCtx int
 
 	// AI-driven re-matching for items the heuristic enricher flagged as
 	// 'needs_review' (TMDB confidence 50..84). See internal/matching.
@@ -465,11 +472,24 @@ func Load() (*Config, error) {
 			Compress:   true,
 		},
 		LLM: LLMConfig{
-			Enabled:         true,
-			OllamaURL:       "http://ollama:11434",
-			EmbedModel:      "embeddinggemma", // Phase E2: 768-dim, MRL, runs on CPU
-			ChatModel:       "qwen2.5:3b-instruct",
-			EmbedDims:       768, // Phase E2: must match migration 040's vector(768)
+			Enabled: true,
+			// localhost, not the old Docker-style `http://ollama:11434`:
+			// Aurora deploys on bare metal (systemd), where the `ollama`
+			// hostname doesn't resolve. The Docker-hostname default made
+			// manual installs (anyone not using install.sh, which papers
+			// over it via LLM_OLLAMA_URL) silently fall back to keyword
+			// search — reported 2026-07-17.
+			OllamaURL: "http://localhost:11434",
+			// Phase E4: qwen3-embedding:0.6b (1024-dim native, MRL) is the
+			// 2026 small-embedder quality leader; the client truncates its
+			// Matryoshka output to EmbedDims=768 so migration 040's
+			// vector(768) column and HNSW index carry over unchanged.
+			EmbedModel: "qwen3-embedding:0.6b",
+			// Phase E4: qwen3:4b-instruct (non-thinking 2507 line) replaces
+			// qwen2.5:3b-instruct — better instruction-following and JSON
+			// discipline at a comparable CPU footprint.
+			ChatModel:       "qwen3:4b-instruct",
+			EmbedDims:       768, // must match migration 040's vector(768); qwen3-embedding is MRL-truncated to this
 			BackfillWorkers: 2,
 			BackfillBatch:   16,
 			// 70s = 10s margin over the longest recommender per-call
@@ -1056,6 +1076,11 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("LLM_HTTP_TIMEOUT_SEC"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil && i > 0 {
 			cfg.LLM.HTTPTimeout = time.Duration(i) * time.Second
+		}
+	}
+	if v := os.Getenv("LLM_NUM_CTX"); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 {
+			cfg.LLM.NumCtx = i
 		}
 	}
 	// AI matcher (internal/matching). Env-only, matching the

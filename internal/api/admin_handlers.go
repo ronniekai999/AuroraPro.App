@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -326,6 +327,36 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Provider is mechanical as of Phase E4. The policy lives in ONE place —
+	// llm.CheckProviderCombo, shared with boot (main.go warns on legacy
+	// rows, save rejects) so the two enforcement points cannot drift.
+	// Validation runs against the EFFECTIVE combo: posted values where the
+	// field is present (the form state that would be saved), stored rows
+	// otherwise — a sparse save can't sneak a broken half-config past it.
+	// Note a key with provider=local is deliberately ALLOWED: operators
+	// legitimately front LAN Ollama with bearer-checking reverse proxies.
+	if req.Provider != nil {
+		if !llm.ValidProvider(*req.Provider) {
+			writeError(w, http.StatusBadRequest, `provider must be empty, "local", or "ollama_cloud"`)
+			return
+		}
+		effective := func(posted *string, dbKey string) string {
+			if posted != nil {
+				return strings.TrimSpace(*posted)
+			}
+			v, _, _ := h.queries.GetSettingExists(r.Context(), dbKey)
+			return strings.TrimSpace(v)
+		}
+		if violations := llm.CheckProviderCombo(*req.Provider,
+			effective(req.APIKey, llmSettingKeys.APIKey),
+			effective(req.OllamaURL, llmSettingKeys.OllamaURL),
+			effective(req.EmbedURL, llmSettingKeys.EmbedURL),
+		); len(violations) > 0 {
+			writeError(w, http.StatusBadRequest, violations[0])
+			return
+		}
+	}
+
 	// 2026-05-19 audit (BE-H6) — validate LLM URLs to prevent SSRF. An
 	// admin (or a token leaked from admin) can otherwise point these at
 	// cloud metadata services (169.254.169.254) and exfiltrate IAM
@@ -375,11 +406,17 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		restartRequired = true
 		return nil
 	}
+	// Provider is written LAST on purpose: the SetSetting calls are
+	// individual autocommit writes (no transaction), so a mid-loop failure
+	// leaves a partial save. With provider last, its prerequisites (key,
+	// URLs) always land BEFORE the provider flip that makes them
+	// load-bearing — a partial failure leaves the OLD provider with some
+	// new field values (harmless), never a new provider missing the fields
+	// validation demanded.
 	for _, p := range []struct {
 		key string
 		val *string
 	}{
-		{llmSettingKeys.Provider, req.Provider},
 		{llmSettingKeys.OllamaURL, req.OllamaURL},
 		{llmSettingKeys.EmbedURL, req.EmbedURL},
 		{llmSettingKeys.APIKey, req.APIKey},
@@ -390,6 +427,7 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.ReasoningEffort, req.ReasoningEffort},
 		{llmSettingKeys.RerankModel, req.RerankModel},
 		{llmSettingKeys.RerankURL, req.RerankURL},
+		{llmSettingKeys.Provider, req.Provider},
 	} {
 		if err := apply(p.key, p.val); err != nil {
 			slog.Warn("UpdateLLMSettings: write failed", "key", p.key, "error", err)
@@ -472,6 +510,218 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		"ok":               true,
 		"restart_required": restartRequired,
 	})
+}
+
+// llmTestEndpoint is one probed Ollama endpoint in the TestLLMConnection
+// response. Models maps each configured model name expected at this endpoint
+// to whether the endpoint actually serves it.
+type llmTestEndpoint struct {
+	Role      string          `json:"role"` // "chat" | "embed" | "rerank"
+	URL       string          `json:"url"`
+	Reachable bool            `json:"reachable"`
+	Error     string          `json:"error,omitempty"`
+	Models    map[string]bool `json:"models,omitempty"`
+}
+
+// TestLLMConnection probes the configured (or posted, pre-save) Ollama
+// endpoints: is each reachable, and does it serve the models Aurora is
+// configured to use. ARR-test parity for the LLM stack — previously the only
+// signals were a startup log line and semantic search silently degrading to
+// keyword matching.
+//
+// POST /api/admin/llm/test with an optional sparse body
+// {ollama_url, embed_url, chat_model, embed_model}. A POSTED field is the
+// form state and therefore exactly what saving would persist — it wins even
+// when empty (blanking a field clears the row, and the probe must describe
+// the config the operator is about to save, not a stored row that blank
+// would replace). An OMITTED field falls back to the stored setting, then
+// the live client — so an empty body tests the running config.
+//
+// SECURITY: the stored API key never travels to a request-supplied URL — an
+// admin session could otherwise exfiltrate it with a single POST pointing
+// ollama_url at an attacker host. The bearer rides only to the PERSISTED
+// chat endpoint (the URL save-time validation approved and real traffic
+// already uses), and the key is never echoed in the response.
+func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OllamaURL  *string `json:"ollama_url,omitempty"`
+		EmbedURL   *string `json:"embed_url,omitempty"`
+		ChatModel  *string `json:"chat_model,omitempty"`
+		EmbedModel *string `json:"embed_model,omitempty"`
+	}
+	// Empty body = "test what's configured": tolerate the EOF decodeJSON
+	// surfaces for it (still 1MB-capped like every other handler).
+	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// One batched settings read — same GetAllSettings pattern (and reason)
+	// as GetLLMSettings above.
+	all, err := h.queries.GetAllSettings(r.Context())
+	if err != nil {
+		slog.Warn("TestLLMConnection: settings read failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to read settings")
+		return
+	}
+	byKey := make(map[string]string, len(all))
+	for _, s := range all {
+		byKey[s.Key] = s.Value
+	}
+	stored := func(key string) string { return strings.TrimSpace(byKey[key]) }
+	live := func(f func() string) string {
+		if h.llmClient == nil {
+			return ""
+		}
+		return f()
+	}
+	resolve := func(posted *string, key string, liveVal string) string {
+		if posted != nil {
+			return strings.TrimSpace(*posted) // posted wins, even when empty
+		}
+		if v := stored(key); v != "" {
+			return v
+		}
+		return liveVal
+	}
+
+	provider := stored(llmSettingKeys.Provider)
+	chatURL := resolve(req.OllamaURL, llmSettingKeys.OllamaURL, live(func() string { return h.llmClient.BaseURL() }))
+	if chatURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "no Ollama URL configured to test (LLM disabled?)")
+		return
+	}
+	embedURL := resolve(req.EmbedURL, llmSettingKeys.EmbedURL, "")
+	if embedURL == "" {
+		// Blank embed = "follow the runtime fallback". The live client
+		// embodies boot's resolution (including the Cloud→local-embed
+		// coercion) when the field wasn't posted; a posted blank mirrors
+		// what boot WOULD do after saving it: Cloud installs embed on the
+		// local default, everyone else follows the chat URL.
+		switch {
+		case req.EmbedURL == nil && live(func() string { return h.llmClient.EmbedBaseURL() }) != "":
+			embedURL = h.llmClient.EmbedBaseURL()
+		case provider == llm.ProviderCloud:
+			embedURL = "http://localhost:11434"
+		default:
+			embedURL = chatURL
+		}
+	}
+	for name, u := range map[string]string{"ollama_url": chatURL, "embed_url": embedURL} {
+		if err := validateLLMURL(u); err != nil {
+			writeError(w, http.StatusBadRequest, name+": "+err.Error())
+			return
+		}
+	}
+
+	chatModel := resolve(req.ChatModel, llmSettingKeys.ChatModel, live(func() string { return h.llmClient.ChatModel() }))
+	embedModel := resolve(req.EmbedModel, llmSettingKeys.EmbedModel, live(func() string { return h.llmClient.EmbedModel() }))
+	fastModel := stored(llmSettingKeys.ChatModelFast)
+	smartModel := stored(llmSettingKeys.ChatModelSmart)
+	rerankModel := resolve(nil, llmSettingKeys.RerankModel, live(func() string { return h.llmClient.RerankModelName() }))
+	rerankURL := stored(llmSettingKeys.RerankURL)
+	if rerankURL == "" {
+		rerankURL = chatURL // mirror client.rerankBaseURL()
+	}
+
+	// The bearer target: the PERSISTED chat endpoint only (see the security
+	// note in the doc comment). When the posted chat URL differs, the probe
+	// of that unsaved URL runs unauthenticated — a Cloud endpoint will show
+	// a 401, which is still an honest "reachable, save first to test with
+	// auth" signal, and infinitely better than key exfiltration.
+	persistedChatURL := stored(llmSettingKeys.OllamaURL)
+	if persistedChatURL == "" {
+		persistedChatURL = live(func() string { return h.llmClient.BaseURL() })
+	}
+	storedKey := byKey[llmSettingKeys.APIKey]
+
+	// Throwaway probe client: same SSRF-guarded transport as real traffic,
+	// short per-request timeout so a black-holed URL can't eat the admin
+	// route budget.
+	probe := llm.NewClient(llm.Config{
+		BaseURL:     chatURL,
+		APIKey:      storedKey,
+		HTTPTimeout: 10 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	type roleSpec struct {
+		role   string
+		url    string
+		models []string
+	}
+	specs := []roleSpec{
+		{role: "chat", url: chatURL, models: dedupeNonEmpty(chatModel, fastModel, smartModel)},
+		{role: "embed", url: embedURL, models: dedupeNonEmpty(embedModel)},
+	}
+	if rerankModel != "" {
+		specs = append(specs, roleSpec{role: "rerank", url: rerankURL, models: []string{rerankModel}})
+	}
+
+	// One probe per DISTINCT URL, all in PARALLEL: split configs (Cloud chat
+	// + local embed + separate rerank box) are exactly when multiple URLs
+	// exist, and serial probes would stack their 10s timeouts into the 30s
+	// budget when boxes are down.
+	type probeOutcome struct {
+		tags []string
+		err  error
+	}
+	outcomes := make(map[string]*probeOutcome, len(specs))
+	for _, s := range specs {
+		outcomes[s.url] = &probeOutcome{}
+	}
+	var wg sync.WaitGroup
+	for u, out := range outcomes {
+		wg.Add(1)
+		go func(u string, out *probeOutcome) {
+			defer wg.Done()
+			out.tags, out.err = probe.ListModels(ctx, u, u == persistedChatURL && storedKey != "")
+		}(u, out)
+	}
+	wg.Wait()
+
+	results := make([]llmTestEndpoint, 0, len(specs))
+	allFound := true
+	for _, s := range specs {
+		out := outcomes[s.url]
+		ep := llmTestEndpoint{Role: s.role, URL: s.url}
+		if out.err != nil {
+			ep.Error = out.err.Error()
+			allFound = false
+		} else {
+			ep.Reachable = true
+			ep.Models = make(map[string]bool, len(s.models))
+			for _, m := range s.models {
+				found := llm.HasModelTag(out.tags, m)
+				ep.Models[m] = found
+				if !found {
+					allFound = false
+				}
+			}
+		}
+		results = append(results, ep)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        allFound,
+		"endpoints": results,
+	})
+}
+
+// dedupeNonEmpty returns the distinct non-empty values, preserving order.
+func dedupeNonEmpty(vals ...string) []string {
+	out := make([]string, 0, len(vals))
+	seen := map[string]bool{}
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // maskAPIKey returns a UI-safe preview of an API key — first 4 + last 4

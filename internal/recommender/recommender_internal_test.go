@@ -3,6 +3,7 @@ package recommender
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -13,10 +14,11 @@ import (
 	"github.com/aurora-media/aurora/internal/models"
 )
 
-// TestIsLLMServerError covers the brittle string-check helper that gates
-// discover's single-retry on cloud 500s. Lock in the exact match shape so a
-// future refactor of ChatJSON's error format breaks here visibly rather than
-// silently turning off the retry path.
+// TestIsLLMServerError covers the typed-error helper that gates discover's
+// single-retry on cloud 500s. The client returns *llm.StatusError for every
+// non-2xx (possibly wrapped with %w by intermediate layers); anything else —
+// timeouts, parse failures, or a plain string that merely LOOKS like the old
+// error format — must not trigger a retry.
 func TestIsLLMServerError(t *testing.T) {
 	cases := []struct {
 		name string
@@ -24,11 +26,12 @@ func TestIsLLMServerError(t *testing.T) {
 		want bool
 	}{
 		{"nil err", nil, false},
-		{"500 from ChatJSON", errors.New("ollama chat: status 500: {\"error\":\"Internal Server Error\"}"), true},
-		{"502 bad gateway", errors.New("ollama chat: status 502: bad gateway"), true},
-		{"503 unavailable", errors.New("ollama chat: status 503: maintenance"), true},
-		{"400 bad request (no retry)", errors.New("ollama chat: status 400: malformed"), false},
-		{"401 auth (no retry)", errors.New("ollama chat: status 401: unauthorized"), false},
+		{"500 typed", &llm.StatusError{Op: "chat", Status: 500, Body: `{"error":"Internal Server Error"}`}, true},
+		{"502 typed", &llm.StatusError{Op: "chat", Status: 502, Body: "bad gateway"}, true},
+		{"503 wrapped once", fmt.Errorf("rerank: %w", &llm.StatusError{Op: "chat", Status: 503, Body: "maintenance"}), true},
+		{"400 typed (no retry)", &llm.StatusError{Op: "chat", Status: 400, Body: "malformed"}, false},
+		{"401 typed (no retry)", &llm.StatusError{Op: "chat", Status: 401, Body: "unauthorized"}, false},
+		{"string lookalike (no retry)", errors.New("ollama chat: status 500: not actually typed"), false},
 		{"context deadline (no retry)", errors.New("ollama chat: context deadline exceeded"), false},
 		{"parse failure (no retry)", errors.New("decode top-level: invalid character"), false},
 	}
@@ -198,6 +201,37 @@ func TestMMRDiversify_AllUnparseable(t *testing.T) {
 	got := mmrDiversify(cands, []float32{1, 0, 0}, 0.7, 2)
 	if len(got) != 2 {
 		t.Fatalf("want 2 from fallback, got %d", len(got))
+	}
+}
+
+func TestMMRDiversify_QueryMagnitudeInvariant(t *testing.T) {
+	// Regression: RailFor passes the raw BuildProfileVector centroid, which is
+	// an AVG() of unit vectors and therefore SHORTER than unit length. Before
+	// mmrDiversify normalized the query, that shrank the relevance term
+	// (dot(unit, sub-unit)) while the diversity term stayed a true cosine —
+	// so a diverse profile (short centroid) over-weighted diversity.
+	//
+	// Numbers at λ=0.7, k=2, query along x:
+	//   A=(1,0,0) simQ=1.0 → first pick.
+	//   B=(0.96,0.28,0) simQ=0.96, sim(B,A)=0.96 → 0.7·0.96 − 0.3·0.96 = 0.384
+	//   C=(0,1,0)       simQ=0.0,  sim(C,A)=0.0  → 0.0
+	//   → second pick is B (relevance wins).
+	// With the query scaled to 0.2 and NO normalization, simQ compresses to
+	// 0.2/0.192/0 and B scores 0.7·0.192 − 0.3·0.96 = −0.154 < 0 → C would
+	// win, flipping the outcome on magnitude alone.
+	cands := []*db.RailCandidate{
+		makeCand(1, []float32{1, 0, 0}),
+		makeCand(2, []float32{0.96, 0.28, 0}), // unit length: 0.96²+0.28²=1
+		makeCand(3, []float32{0, 1, 0}),
+	}
+	unit := mmrDiversify(cands, []float32{1, 0, 0}, 0.7, 2)
+	scaled := mmrDiversify(cands, []float32{0.2, 0, 0}, 0.7, 2)
+	if len(unit) != 2 || unit[0].Item.ID != 1 || unit[1].Item.ID != 2 {
+		t.Fatalf("unit query: want [1 2], got %v", picksIDs(unit))
+	}
+	if len(scaled) != 2 || scaled[0].Item.ID != unit[0].Item.ID || scaled[1].Item.ID != unit[1].Item.ID {
+		t.Errorf("scaled query must pick identically to unit query; unit=%v scaled=%v",
+			picksIDs(unit), picksIDs(scaled))
 	}
 }
 
@@ -751,7 +785,7 @@ func TestChatJSONWithRetryOn5xx_5xxRetryThenSuccess(t *testing.T) {
 		func(ctx context.Context) (string, error) {
 			calls++
 			if calls == 1 {
-				return "", errors.New("ollama chat: status 500: transient")
+				return "", &llm.StatusError{Op: "chat", Status: 500, Body: "transient"}
 			}
 			return "rails", nil
 		},
@@ -780,9 +814,9 @@ func TestChatJSONWithRetryOn5xx_5xxThen5xx(t *testing.T) {
 		func(ctx context.Context) (string, error) {
 			calls++
 			if calls == 1 {
-				return "", errors.New("ollama chat: status 500: first")
+				return "", &llm.StatusError{Op: "chat", Status: 500, Body: "first"}
 			}
-			return "", errors.New("ollama chat: status 502: second")
+			return "", &llm.StatusError{Op: "chat", Status: 502, Body: "second"}
 		},
 		nil,
 	)
@@ -809,7 +843,7 @@ func TestChatJSONWithRetryOn5xx_NoRetryOn4xx(t *testing.T) {
 		context.Background(),
 		func(ctx context.Context) (string, error) {
 			calls++
-			return "", errors.New("ollama chat: status 400: bad request")
+			return "", &llm.StatusError{Op: "chat", Status: 400, Body: "bad request"}
 		},
 		func(err error) { retryHookFired = true },
 	)
@@ -864,7 +898,7 @@ func TestChatJSONWithRetryOn5xx_ContextCancelDuringBackoff(t *testing.T) {
 		func(c context.Context) (string, error) {
 			calls++
 			if calls == 1 {
-				return "", errors.New("ollama chat: status 500: x")
+				return "", &llm.StatusError{Op: "chat", Status: 500, Body: "x"}
 			}
 			return "should-not-reach", nil
 		},
@@ -892,7 +926,7 @@ func TestChatJSONWithRetryOn5xx_NilOnRetryHook(t *testing.T) {
 		func(ctx context.Context) (string, error) {
 			calls++
 			if calls == 1 {
-				return "", errors.New("ollama chat: status 500: x")
+				return "", &llm.StatusError{Op: "chat", Status: 500, Body: "x"}
 			}
 			return "ok", nil
 		},

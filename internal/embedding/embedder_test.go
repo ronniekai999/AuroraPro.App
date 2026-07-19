@@ -3,7 +3,63 @@ package embedding
 import (
 	"reflect"
 	"testing"
+
+	"github.com/aurora-media/aurora/internal/db"
 )
+
+// decideMarkerAction is the policy core of the model-space guard; these cases
+// document the upgrade matrix it must satisfy.
+func TestDecideMarkerAction(t *testing.T) {
+	cases := []struct {
+		name      string
+		marker    string
+		exists    bool
+		effective string
+		pinned    bool
+		want      markerAction
+	}{
+		{"marker matches", "qwen3-embedding:0.6b", true, "qwen3-embedding:0.6b", false, markerKeep},
+		{"marker matches pinned", "nomic-embed-text", true, "nomic-embed-text", true, markerKeep},
+		{"model changed via UI/env", "embeddinggemma", true, "qwen3-embedding:0.6b", false, markerReset},
+		{"model changed while pinned", "nomic-embed-text", true, "bge-m3", true, markerReset},
+		{"pre-marker upgrade, default follower", "", false, "qwen3-embedding:0.6b", false, markerReset},
+		{"pre-marker upgrade, pinned operator keeps vectors", "", false, "nomic-embed-text", true, markerAdopt},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := decideMarkerAction(c.marker, c.exists, c.effective, c.pinned); got != c.want {
+				t.Errorf("decideMarkerAction(%q,%v,%q,pinned=%v) = %v, want %v",
+					c.marker, c.exists, c.effective, c.pinned, got, c.want)
+			}
+		})
+	}
+}
+
+func TestFilterFailed(t *testing.T) {
+	cands := []*db.EmbeddingCandidate{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}
+	// Empty set: same slice back, no filtering cost.
+	if got := filterFailed(cands, nil); len(got) != 4 {
+		t.Fatalf("empty set: want 4, got %d", len(got))
+	}
+	failed := map[int64]struct{}{2: {}, 4: {}}
+	got := filterFailed(cands, failed)
+	if len(got) != 2 || got[0].ID != 1 || got[1].ID != 3 {
+		t.Fatalf("want [1 3], got %v", ids(got))
+	}
+	// All poisoned → empty (RunBackfill treats this as terminal).
+	all := map[int64]struct{}{1: {}, 2: {}, 3: {}, 4: {}}
+	if got := filterFailed(cands, all); len(got) != 0 {
+		t.Fatalf("all failed: want 0, got %d", len(got))
+	}
+}
+
+func ids(cands []*db.EmbeddingCandidate) []int64 {
+	out := make([]int64, len(cands))
+	for i, c := range cands {
+		out[i] = c.ID
+	}
+	return out
+}
 
 // TestChunkRanges verifies the partition logic that runWave uses to split a
 // fetched wave into per-worker batches. The ranges must be gap-free,

@@ -104,7 +104,7 @@ func TestEvalGoldenSet(t *testing.T) {
 
 	model := os.Getenv("OLLAMA_CHAT_MODEL")
 	if model == "" {
-		model = "qwen2.5:3b-instruct"
+		model = "qwen3:4b-instruct" // keep in sync with the config default
 	}
 
 	client := llm.NewClient(llm.Config{

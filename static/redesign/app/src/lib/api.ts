@@ -1527,6 +1527,28 @@ export async function updateAdminLLM(body: Partial<{
 }>): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { method: 'PUT', body })
 }
+export interface LLMTestEndpoint {
+  role: 'chat' | 'embed' | 'rerank'
+  url: string
+  reachable: boolean
+  error?: string
+  models?: Record<string, boolean>
+}
+export interface LLMTestResult {
+  ok: boolean
+  endpoints: LLMTestEndpoint[]
+}
+// Probes the (possibly unsaved) form values: is each Ollama endpoint
+// reachable, and does it serve the configured models. Omitted fields fall
+// back server-side to stored settings, then the live client.
+export async function testAdminLLM(body: Partial<{
+  ollama_url: string
+  embed_url: string
+  chat_model: string
+  embed_model: string
+}>): Promise<LLMTestResult> {
+  return apiFetch<LLMTestResult>('/api/admin/llm/test', { method: 'POST', body })
+}
 
 // Phase B — added Discord + Twitch fields alongside Google's. Each
 // provider has the same 6-field shape (enabled, client_id,

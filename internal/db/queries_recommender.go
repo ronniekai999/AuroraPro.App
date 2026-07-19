@@ -71,6 +71,13 @@ const minHistoryItems = 3
 // are skipped (the real watch row supersedes them), which is also how the
 // onboarding prior fades out as genuine history accrues. Seeds stay in the
 // unweighted slice — nothing to weight, so the HARD-LEARNED note above holds.
+//
+// NOT UNIT-LENGTH: the returned literal is a raw AVG() of unit vectors, so
+// ‖result‖ < 1 (shorter the more diverse the profile) — the deployed
+// pgvector predates l2_normalize so we can't fix it in SQL. Passing it to
+// pgvector's <=> is fine (cosine is magnitude-invariant), but any Go-side
+// consumer doing dot-product math (recommender.cosineSimilarity assumes
+// unit inputs) MUST normalize right after ParseVector — see RailFor.
 func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (string, error) {
 	row := q.pool.QueryRow(ctx, tasteRecentSliceCTE+`
 		SELECT

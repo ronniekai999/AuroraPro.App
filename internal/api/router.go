@@ -935,6 +935,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Delete("/skip-markers/{fileID}", skipMarkerH.DeleteMarker)
 				r.Get("/llm", adminH.GetLLMSettings)
 				r.Put("/llm", adminH.UpdateLLMSettings)
+				// Connectivity probe (ARR-test parity): reachability +
+				// which configured models each Ollama endpoint actually
+				// serves, so a bad URL or un-pulled model surfaces here
+				// instead of as a silent keyword-search fallback.
+				r.Post("/llm/test", adminH.TestLLMConnection)
 				// Phase 3 (Google OAuth): admin-only configuration.
 				// client_secret is masked in responses; submission with a
 				// masked value is treated as "leave alone" so admins can

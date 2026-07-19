@@ -45,6 +45,7 @@ import {
   purgeImageCache,
   scanLibrary,
   startAIRematch,
+  testAdminLLM,
   testARRConnection,
   tmdbPosterURL,
   triggerUpdate,
@@ -59,6 +60,7 @@ import {
   type EmbeddingStatus,
   type Library,
   type LLMSettings,
+  type LLMTestResult,
   type LogEntry,
   type MediaRequest,
   type OAuthSettings,
@@ -1282,6 +1284,9 @@ function AdminLLMTab() {
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [apiKeyEdit, setApiKeyEdit] = useState('')
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<LLMTestResult | null>(null)
+  const [testError, setTestError] = useState<string | null>(null)
   useEffect(() => {
     const ac = new AbortController()
     getAdminLLM(ac.signal).then(setS).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
@@ -1292,11 +1297,11 @@ function AdminLLMTab() {
   return (
     <div className="glass-panel rounded-xl p-5 space-y-3">
       <h3 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h3>
-      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Leave provider blank to disable.</p>
+      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box (an API key is optional, for bearer-checking proxies); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
           <select value={s.provider} onChange={e => setS({ ...s, provider: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
-            <option value="">Disabled</option>
+            <option value="">Default (env config)</option>
             <option value="ollama_cloud">Ollama Cloud</option>
             <option value="local">Local (Ollama)</option>
           </select>
@@ -1356,31 +1361,70 @@ function AdminLLMTab() {
           <input type="number" min={1} max={3} value={s.taste_centroids ?? 3} onChange={e => setS({ ...s, taste_centroids: Math.min(3, Math.max(1, parseInt(e.target.value || '1', 10) || 1)) })} placeholder="multi-centroid taste · 1 = off" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
       </div>
-      <button
-        disabled={saving}
-        onClick={async () => {
-          setSaving(true)
-          try {
-            const body: Record<string, unknown> = {
-              provider: s.provider, ollama_url: s.ollama_url, embed_url: s.embed_url,
-              chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
-              chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
-              structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
-              rerank_model: s.rerank_model ?? '', rerank_url: s.rerank_url ?? '',
-              repeat_window_hours: s.repeat_window_hours ?? 72,
-              taste_centroids: s.taste_centroids ?? 3,
-            }
-            if (apiKeyEdit) body.api_key = apiKeyEdit
-            const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
-            setS(next); setApiKeyEdit('')
-            window.alert('LLM settings saved.')
-          } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
-          finally { setSaving(false) }
-        }}
-        className="mt-3 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-      >
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+      <div className="flex items-center gap-2 mt-3">
+        <button
+          disabled={saving}
+          onClick={async () => {
+            setSaving(true)
+            try {
+              const body: Record<string, unknown> = {
+                provider: s.provider, ollama_url: s.ollama_url, embed_url: s.embed_url,
+                chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
+                chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
+                structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
+                rerank_model: s.rerank_model ?? '', rerank_url: s.rerank_url ?? '',
+                repeat_window_hours: s.repeat_window_hours ?? 72,
+                taste_centroids: s.taste_centroids ?? 3,
+              }
+              if (apiKeyEdit) body.api_key = apiKeyEdit
+              const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
+              setS(next); setApiKeyEdit('')
+              window.alert('LLM settings saved.')
+            } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
+            finally { setSaving(false) }
+          }}
+          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          disabled={testing}
+          onClick={async () => {
+            setTesting(true); setTestResult(null); setTestError(null)
+            try {
+              setTestResult(await testAdminLLM({
+                ollama_url: s.ollama_url, embed_url: s.embed_url,
+                chat_model: s.chat_model, embed_model: s.embed_model,
+              }))
+            } catch (e) { setTestError(e instanceof Error ? e.message : 'test failed') }
+            finally { setTesting(false) }
+          }}
+          className="px-4 py-2 bg-white/[0.06] hover:bg-white/[0.1] text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {testing ? 'Testing…' : 'Test connection'}
+        </button>
+      </div>
+      {testError && <p className="text-red-300 text-xs mt-2">{testError}</p>}
+      {testResult && (
+        <div className="mt-2 space-y-1 text-xs">
+          {testResult.endpoints.map(ep => (
+            <div key={ep.role + ep.url} className="text-white/70">
+              <span className="uppercase text-white/40 mr-1">{ep.role}</span>
+              <span className="mr-2">{ep.url}</span>
+              {ep.reachable ? (
+                <span className="text-emerald-300">reachable</span>
+              ) : (
+                <span className="text-red-300">unreachable{ep.error ? ` — ${ep.error}` : ''}</span>
+              )}
+              {ep.models && Object.entries(ep.models).map(([m, ok]) => (
+                <span key={m} className={ok ? 'ml-2 text-emerald-300' : 'ml-2 text-amber-300'}>
+                  {m}: {ok ? 'found' : 'missing — ollama pull ' + m}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

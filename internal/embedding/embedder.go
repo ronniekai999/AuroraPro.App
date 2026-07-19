@@ -40,8 +40,21 @@ import (
 //     overviews separate in the vector space. Same 768 dims → no migration; the
 //     bump alone makes RunBackfill re-embed in place.
 //
+// Phase E4 (qwen3-embedding swap) did NOT bump this: model changes are now
+// detected by the llm_embed_model_active marker (see ensureModelSpace),
+// which nulls-and-re-embeds whenever the effective model differs from the
+// one that produced the stored vectors — including admin-UI model changes
+// that a hardcoded migration/version bump could never see. This constant
+// remains the TEXT-TEMPLATE version: bump it when BuildText's output
+// changes, never for model swaps.
+//
 // Do NOT bump for trivial code refactors that produce identical output.
 const CurrentVersion int16 = 3
+
+// markerKey is the server_settings row recording which embedding model
+// produced the vectors currently stored in media_items.embedding. Written
+// by ensureModelSpace after it verifies (or restores) space consistency.
+const markerKey = "llm_embed_model_active"
 
 // Embedder coordinates the embedding model client with the database. Safe for
 // concurrent use; multiple goroutines may call EmbedItem in parallel.
@@ -50,6 +63,13 @@ type Embedder struct {
 	q       *db.Queries
 	workers int
 	batch   int
+	// modelPinned records whether the operator explicitly chose the embed
+	// model (env LLM_EMBED_MODEL or a DB llm_embed_model row), as opposed to
+	// following the binary default. ensureModelSpace uses it to decide how to
+	// treat pre-marker installs: pinned vectors are adopted as-is (the pin
+	// predates the marker, so the stored vectors were produced by it), while
+	// default-following vectors must be nulled on a default swap.
+	modelPinned bool
 }
 
 // New constructs an Embedder. workers controls backfill concurrency; batch is
@@ -63,6 +83,86 @@ func New(llmClient *llm.Client, q *db.Queries, workers, batch int) *Embedder {
 		batch = 16
 	}
 	return &Embedder{llm: llmClient, q: q, workers: workers, batch: batch}
+}
+
+// SetModelPinned tells the embedder whether the effective embed model came
+// from an explicit operator choice. Call before RunBackfill; main.go wires it
+// from the env var / DB override presence.
+func (e *Embedder) SetModelPinned(pinned bool) { e.modelPinned = pinned }
+
+// markerAction is ensureModelSpace's decision for the current boot.
+type markerAction int
+
+const (
+	markerKeep  markerAction = iota // marker matches — nothing to do
+	markerAdopt                     // write marker, keep vectors (pre-marker pinned install, or empty library)
+	markerReset                     // model changed — null all vectors, then write marker
+)
+
+// decideMarkerAction is the pure decision core of ensureModelSpace, split out
+// for direct unit testing.
+//
+//   - marker == effective → keep.
+//   - marker set but different → the stored vectors are from another model's
+//     space → reset (null + re-embed). This covers admin-UI/env model changes.
+//   - marker missing (pre-E4 install or fresh DB):
+//     pinned    → adopt: the operator's explicit model predates the marker, so
+//     the stored vectors were produced by it; nulling would be a
+//     pointless same-space re-embed outage.
+//     unpinned  → reset: the vectors followed the OLD binary default while the
+//     effective model is the NEW default (the E4 swap) — spaces
+//     differ, so they must be nulled. On a fresh library the UPDATE
+//     touches zero rows, making this a cheap marker write.
+func decideMarkerAction(marker string, markerExists bool, effective string, pinned bool) markerAction {
+	if markerExists && marker == effective {
+		return markerKeep
+	}
+	if markerExists {
+		return markerReset
+	}
+	if pinned {
+		return markerAdopt
+	}
+	return markerReset
+}
+
+// ensureModelSpace guarantees the stored vectors and the effective embedding
+// model belong to the same vector space before any backfill work runs.
+// Different models embed into unrelated spaces; a mixed column silently
+// corrupts every cosine ranking, which is why model changes MUST null the
+// old vectors. Centralizing the rule here (instead of per-swap migrations
+// like 040's null step) also covers model changes made through the admin UI
+// or env — paths a migration can never see.
+//
+// Best-effort: on read/write errors we log and skip (returning true) rather
+// than block embedding entirely — the next boot retries.
+func (e *Embedder) ensureModelSpace(ctx context.Context) {
+	effective := e.llm.EmbedModel()
+	marker, exists, err := e.q.GetSettingExists(ctx, markerKey)
+	if err != nil {
+		slog.Warn("embedding: model-marker read failed; skipping space check this boot", "error", err)
+		return
+	}
+	switch decideMarkerAction(marker, exists, effective, e.modelPinned) {
+	case markerKeep:
+		return
+	case markerAdopt:
+		slog.Info("embedding: adopting existing vectors for pinned model", "model", effective)
+	case markerReset:
+		nulled, err := e.q.NullAllEmbeddings(ctx)
+		if err != nil {
+			slog.Error("embedding: model changed but nulling old vectors failed — NOT updating marker; retry next boot",
+				"old_marker", marker, "model", effective, "error", err)
+			return
+		}
+		if nulled > 0 {
+			slog.Info("embedding: model changed — cleared old-space vectors for re-embed",
+				"old_marker", marker, "model", effective, "cleared", nulled)
+		}
+	}
+	if err := e.q.SetSetting(ctx, markerKey, effective); err != nil {
+		slog.Warn("embedding: model-marker write failed; space check will re-run next boot", "error", err)
+	}
 }
 
 // BuildText assembles the canonical text representation of a media item.
@@ -94,11 +194,14 @@ func BuildText(title string, year int, mediaType, overview string, genres []stri
 		fmt.Fprintf(&b, "[%s] ", mediaType)
 	}
 	if overview != "" {
-		// Cap overview at ~2000 chars. embeddinggemma accepts a 2048-token
-		// context and Ollama silently truncates beyond that, which produces
-		// degraded embeddings without a signal. Pathological NFO files from
-		// scraper plugins can carry multi-MB synopses; trimming up-front keeps
-		// the embedding quality predictable and the per-batch payload small.
+		// Cap overview at ~2000 chars. Originally forced by embeddinggemma's
+		// 2048-token context (Ollama silently truncates beyond a model's
+		// window, degrading embeddings without a signal). The Phase E4
+		// default (qwen3-embedding, 32K context) no longer needs it, but the
+		// cap stays: pathological NFO files from scraper plugins can carry
+		// multi-MB synopses, the lead ~2000 chars carry the retrieval signal
+		// anyway, and the cap keeps per-batch payloads small and narrower
+		// fallback models safe.
 		const maxOverviewChars = 2000
 		if len(overview) > maxOverviewChars {
 			overview = overview[:maxOverviewChars]
@@ -182,6 +285,12 @@ func (e *Embedder) EmbedItem(ctx context.Context, item *models.MediaItem) error 
 // Safe to invoke on every startup: if everything is up-to-date it returns
 // immediately after a single COUNT query.
 func (e *Embedder) RunBackfill(ctx context.Context) {
+	// FIRST: make sure the stored vectors and the effective model share a
+	// vector space (nulls the column when the model changed). Must precede
+	// the pending count — a model change turns "nothing to do" into
+	// "re-embed everything".
+	e.ensureModelSpace(ctx)
+
 	pending, err := e.q.CountPendingEmbeddings(ctx, CurrentVersion)
 	if err != nil {
 		slog.Warn("embedding backfill: count failed, skipping", "error", err)
@@ -230,12 +339,24 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 	// One wave fetches at most this many candidates, then fans them out across
 	// up to `workers` concurrent embedBatch calls (one HTTP round-trip each).
 	waveSize := workers * batch
+	// Per-row write failures are CONTAINED, not fatal: a row whose UPDATE
+	// keeps failing (row-level constraint, lock timeout) lands in this set
+	// and is filtered out of later waves, so it can neither hot-spin the
+	// cursor-free fetch (it re-selects the lowest pending IDs forever) nor
+	// abort the run and strand every higher-ID row. The cap bounds memory
+	// and converts a SYSTEMIC write failure (everything failing) into a
+	// clean give-up instead of a 1000-entry crawl.
+	const maxFailedWrites = 1000
+	failedWrites := make(map[int64]struct{})
 	for {
 		if ctx.Err() != nil {
 			slog.Info("embedding backfill: cancelled", "embedded", done, "remaining", pending-done)
 			return
 		}
-		candidates, err := e.q.FetchEmbeddingCandidates(ctx, CurrentVersion, waveSize)
+		// Widen the fetch window by the number of known-bad rows: they still
+		// match the pending predicate, so they occupy the front of the
+		// id-ordered window and would otherwise hide live rows behind them.
+		candidates, err := e.q.FetchEmbeddingCandidates(ctx, CurrentVersion, waveSize+len(failedWrites))
 		if err != nil {
 			failures++
 			if failures >= maxFailures {
@@ -256,23 +377,50 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 		if len(candidates) == 0 {
 			break
 		}
+		live := filterFailed(candidates, failedWrites)
+		if len(live) == 0 {
+			slog.Error("embedding backfill: every remaining pending row has a failing write; stopping",
+				"failed_rows", len(failedWrites), "embedded", done)
+			return
+		}
+		if len(live) > waveSize {
+			live = live[:waveSize]
+		}
 		// Split the wave into batch-sized chunks and embed them concurrently.
 		// Each chunk holds DISTINCT item IDs (the fetch returned a single
 		// ordered window), so the parallel embedBatch calls never contend on
 		// the same rows. We wait for the whole wave before fetching again so
 		// the cursor-free fetch query advances past these rows.
-		embedded, waveErr := e.runWave(ctx, candidates, workers, batch)
+		embedded, failedIDs, waveErr := e.runWave(ctx, live, workers, batch)
 		done += embedded
+		for _, id := range failedIDs {
+			failedWrites[id] = struct{}{}
+		}
+		if len(failedIDs) > 0 {
+			slog.Warn("embedding backfill: row writes failed; excluding rows for this run",
+				"count", len(failedIDs), "total_excluded", len(failedWrites))
+			if len(failedWrites) > maxFailedWrites {
+				slog.Error("embedding backfill: write failures look systemic, giving up",
+					"failed_rows", len(failedWrites), "embedded", done)
+				return
+			}
+		}
 		if waveErr != nil {
+			// Embed-call (LLM-side) failure — the whole chunk got no vectors.
+			// This is the transient-Ollama-outage path: back off, give up
+			// after maxFailures. Write failures deliberately do NOT feed this
+			// counter (they're contained above and the loop makes progress
+			// past them).
 			failures++
 			if failures >= maxFailures {
-				slog.Error("embedding backfill: too many batch failures, giving up",
-					"failures", failures, "embedded", done, "last_error", waveErr)
+				slog.Error("embedding backfill: too many embed failures, giving up",
+					"failures", failures, "embedded", done, "last_error", waveErr,
+					"hint", "if the error is model-not-found, run: ollama pull "+e.llm.EmbedModel())
 				return
 			}
 			wait := backoffDelay()
 			slog.Warn("embedding backfill: wave failed, backing off",
-				"error", waveErr, "wave_size", len(candidates), "attempt", failures, "wait", wait)
+				"error", waveErr, "wave_size", len(live), "attempt", failures, "wait", wait)
 			select {
 			case <-ctx.Done():
 				return
@@ -290,28 +438,48 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 				"embedded", done, "of", pending, "elapsed", time.Since(start).Round(time.Second))
 		}
 	}
-	slog.Info("embedding backfill: complete", "embedded", done, "elapsed", time.Since(start).Round(time.Second))
+	slog.Info("embedding backfill: complete", "embedded", done,
+		"write_failures", len(failedWrites), "elapsed", time.Since(start).Round(time.Second))
+}
+
+// filterFailed returns the candidates whose IDs are not in the failed set,
+// preserving order. Pure; unit-tested directly.
+func filterFailed(cands []*db.EmbeddingCandidate, failed map[int64]struct{}) []*db.EmbeddingCandidate {
+	if len(failed) == 0 {
+		return cands
+	}
+	out := make([]*db.EmbeddingCandidate, 0, len(cands))
+	for _, c := range cands {
+		if _, bad := failed[c.ID]; !bad {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // runWave embeds a single wave of candidates by splitting it into batch-sized
 // chunks and running up to e.workers embedBatch calls concurrently. It returns
-// the number of items embedded across the chunks that SUCCEEDED (so the caller
-// can keep an accurate running total even when one chunk fails) and the first
-// error any chunk reported (nil if all chunks succeeded). All goroutines are
-// joined before returning, so no work outlives this call.
+// the per-row count of successful writes, the IDs whose individual writes
+// failed (for the caller's containment set), and the first EMBED-side error
+// any chunk reported (nil when every chunk got vectors back — write failures
+// are reported via the ID list, not the error). All goroutines are joined
+// before returning, so no work outlives this call.
 //
 // The chunks share no item IDs (the caller passed one ordered fetch window),
 // so concurrent embedBatch calls never race on the same media_items row. The
-// only shared state here is the atomic counter and the once-guarded error.
+// shared state is the atomic counter, the mutex-guarded failure list, and the
+// once-guarded error.
 //
 // workers and batch are passed in (already clamped to >= 1 by the caller) so
 // the chunk size and concurrency bound stay consistent with the wave size.
-func (e *Embedder) runWave(ctx context.Context, candidates []*db.EmbeddingCandidate, workers, batch int) (int64, error) {
+func (e *Embedder) runWave(ctx context.Context, candidates []*db.EmbeddingCandidate, workers, batch int) (int64, []int64, error) {
 	var (
-		embedded atomic.Int64
-		wg       sync.WaitGroup
-		errOnce  sync.Once
-		firstErr error
+		embedded  atomic.Int64
+		wg        sync.WaitGroup
+		errOnce   sync.Once
+		firstErr  error
+		failedMu  sync.Mutex
+		failedIDs []int64
 	)
 	// Bound concurrency to `workers` even if the wave holds more chunks than
 	// that (it won't under normal sizing, but stay robust to odd batch/worker
@@ -325,15 +493,20 @@ func (e *Embedder) runWave(ctx context.Context, candidates []*db.EmbeddingCandid
 		go func(chunk []*db.EmbeddingCandidate) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if err := e.embedBatch(ctx, chunk); err != nil {
-				errOnce.Do(func() { firstErr = err })
-				return
+			written, failed, err := e.embedBatch(ctx, chunk)
+			embedded.Add(int64(written))
+			if len(failed) > 0 {
+				failedMu.Lock()
+				failedIDs = append(failedIDs, failed...)
+				failedMu.Unlock()
 			}
-			embedded.Add(int64(len(chunk)))
+			if err != nil {
+				errOnce.Do(func() { firstErr = err })
+			}
 		}(chunk)
 	}
 	wg.Wait()
-	return embedded.Load(), firstErr
+	return embedded.Load(), failedIDs, firstErr
 }
 
 // chunkRanges partitions [0,n) into consecutive [start,end) half-open ranges of
@@ -362,15 +535,25 @@ func chunkRanges(n, batch int) [][2]int {
 // embedBatch sends one Ollama call for the whole batch, then writes results
 // back row-by-row. We intentionally do not use a transaction — partial
 // progress is fine and recoverable on the next run.
-func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCandidate) error {
+//
+// Returns (rows successfully written, IDs whose write failed, embed error).
+// The error is non-nil only when the EMBED call itself failed (no vectors
+// for the whole chunk) — that's the transient-outage signal RunBackfill
+// backs off on. Per-row write failures are logged and returned as IDs so the
+// caller can exclude them from later waves: leaving them silently pending
+// used to hot-spin the cursor-free fetch, and failing the whole wave on one
+// bad row would strand every higher-ID item behind it.
+func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCandidate) (int, []int64, error) {
 	texts := make([]string, len(candidates))
 	for i, c := range candidates {
 		texts[i] = BuildText(c.Title, c.Year, c.Type, c.Overview, c.Genres, c.ContentRating)
 	}
 	vectors, err := e.llm.EmbedBatch(ctx, texts)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
+	written := 0
+	var failed []int64
 	for i, c := range candidates {
 		if vectors[i] == nil {
 			continue // empty text — skip rather than store a zero vector
@@ -386,8 +569,11 @@ func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCan
 		writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err := e.q.SetItemEmbeddingIfStale(writeCtx, c.ID, llm.FormatVector(vectors[i]), CurrentVersion); err != nil {
 			slog.Warn("embedding backfill: write failed", "id", c.ID, "error", err)
+			failed = append(failed, c.ID)
+		} else {
+			written++
 		}
 		writeCancel()
 	}
-	return nil
+	return written, failed, nil
 }
