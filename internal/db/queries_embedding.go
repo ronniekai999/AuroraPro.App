@@ -120,6 +120,25 @@ func (q *Queries) SetItemEmbeddingIfStale(ctx context.Context, itemID int64, vec
 	return nil
 }
 
+// NullAllEmbeddings clears every stored vector (and resets the version) so
+// the backfill re-embeds the whole catalog. Called by the embedder's
+// model-marker check when the effective embedding model no longer matches
+// the model that produced the stored vectors — embeddings from different
+// models live in unrelated vector spaces, so serving a mixed column would
+// silently corrupt every similarity ranking. Runs post-boot in the backfill
+// goroutine (never blocks startup); the HNSW index shrinks as rows null and
+// refills as the backfill writes.
+func (q *Queries) NullAllEmbeddings(ctx context.Context) (int64, error) {
+	tag, err := q.pool.Exec(ctx, `
+		UPDATE media_items
+		SET embedding = NULL, embedding_version = 0
+		WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return 0, fmt.Errorf("null all embeddings: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // SemanticFilter narrows ANN search to a structured slice of the catalog.
 // Empty fields are no-ops; pass the zero value to search everywhere.
 type SemanticFilter struct {

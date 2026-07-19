@@ -268,21 +268,19 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 	// (LLM cold path); an Invalidate that fires in that window must NOT
 	// be overwritten by the stale build's Store.
 	startEpoch := h.epochFor(profileID).Load()
-	// DoChan + detached build ctx — same shape as PoolFor. This also closes
-	// an old asymmetry: buildDiscover detached only its LLM middle section,
-	// so a leader cancelling could still blank the pre-LLM recall or drop
-	// the post-LLM annotation for every waiter. Detaching the WHOLE build
-	// makes the flight's fate independent of any single request.
-	ch := h.discoverGroup.DoChan(key, func() (_ any, err error) {
-		defer flightRecover(&err)
+	// doFlight (shared DoChan + detached-build scaffold — see hero.go). This
+	// also closes an old asymmetry: buildDiscover used to detach only its
+	// LLM middle section, so a leader cancelling could still blank the
+	// pre-LLM recall or drop the post-LLM annotation for every waiter.
+	// Detaching the WHOLE build makes the flight's fate independent of any
+	// single request.
+	return doFlight(ctx, &h.discoverGroup, key, buildFlightBudget, func(bctx context.Context) ([]DiscoverRail, error) {
 		if cached, ok := h.discoverCache.Load(profileID); ok {
 			e := cached.(discoverCacheEntry)
 			if time.Since(e.builtAt) < discoverCacheTTL {
 				return e.rails, nil
 			}
 		}
-		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildFlightBudget)
-		defer cancel()
 		rails, buildErr := h.buildDiscover(bctx, profileID)
 		if buildErr != nil {
 			return nil, buildErr
@@ -297,15 +295,6 @@ func (h *Hero) DiscoverFor(ctx context.Context, profileID int64) ([]DiscoverRail
 		}
 		return rails, nil
 	})
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]DiscoverRail), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 // DiscoverCached returns a profile's Discover rails from cache WITHOUT
@@ -387,17 +376,14 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 		seedsOnly = true
 	}
 
-	// Detach the heavy tail (listwise rerank + LLM curation) from the
-	// request lifetime UP FRONT. Discover runs inside singleflight (DiscoverFor)
-	// and is cached 24h, so a client that navigates away mid-build — the SPA
-	// aborts the /api/me/discover fetch via its AbortController — must NOT cancel
-	// work that other waiters are blocked on. Critically this now also covers the
-	// rerank: on the raw request ctx, a mid-rerank abort would silently drop to
-	// vector order and cache THAT degraded build for 24h. WithoutCancel keeps ctx
-	// values (auth/trace) but drops the caller's cancellation + deadline;
-	// discoverBudget (60s) is the single bound for rerank (≤8s) + annotate + the
-	// LLM call. Same detached-build rationale as rail_reasons' async fill.
-	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), discoverBudget)
+	// Tighter budget for the heavy tail (listwise rerank + annotate + LLM
+	// curation). Cancellation-detachment is NOT this ctx's job anymore —
+	// DiscoverFor's doFlight already runs the whole build on a context
+	// detached from every request (buildFlightBudget) — this simply keeps
+	// the historical guarantee that the LLM tail can't consume more than
+	// discoverBudget (60s) of that flight, staying under the client
+	// HTTPTimeout (70s) invariant.
+	llmCtx, cancel := context.WithTimeout(ctx, discoverBudget)
 	defer cancel()
 
 	// Phase B: listwise rerank the (larger) recall pool down to the prompt

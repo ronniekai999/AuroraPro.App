@@ -314,14 +314,7 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 	// have advanced and we'll skip the Store — preventing a stale build
 	// from resurrecting cache contents the user just asked to refresh.
 	startEpoch := h.epochFor(profileID).Load()
-	// DoChan (not Do) so each waiter can stop waiting the moment ITS OWN
-	// request is cancelled. Do had no per-waiter escape hatch: a user who
-	// navigated away still had their handler goroutine pinned for up to
-	// the full build. The flight itself runs on a DETACHED context (see
-	// buildFlightBudget) so one waiter bailing — including the leader —
-	// never aborts the shared build or wastes committed LLM spend.
-	ch := h.buildGroup.DoChan(key, func() (_ any, err error) {
-		defer flightRecover(&err)
+	return doFlight(ctx, &h.buildGroup, key, buildFlightBudget, func(bctx context.Context) ([]HeroPick, error) {
 		// Inside the singleflight, re-check the cache: the first caller
 		// may have just populated it and a second waiter shouldn't re-build.
 		if cached, ok := h.cache.Load(profileID); ok {
@@ -334,8 +327,6 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 				return e.picks, nil
 			}
 		}
-		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildFlightBudget)
-		defer cancel()
 		picks, quality, err := h.build(bctx, profileID)
 		if err != nil {
 			return nil, err
@@ -359,15 +350,6 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 		}
 		return picks, nil
 	})
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]HeroPick), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 // RailFor returns a longer list of personalized picks suitable for a
@@ -420,6 +402,17 @@ func (h *Hero) RailFor(ctx context.Context, profileID int64, limit int) ([]*mode
 					"profile", profileID, "error", perr)
 				items = candsToItems(cands, limit)
 			} else {
+				// Normalize at the producer boundary: BuildProfileVector is
+				// an AVG() of unit vectors (sub-unit length — the deployed
+				// pgvector can't normalize server-side), and every Go-side
+				// consumer of a centroid assumes unit inputs because
+				// cosineSimilarity is a bare dot product. Do it HERE, where
+				// the centroid enters Go, so future consumers (cross-profile
+				// matchers etc.) can't silently re-inherit the magnitude
+				// bias. mmrDiversify normalizes defensively too — that's the
+				// pure function guarding its own contract, not a substitute
+				// for fixing the source.
+				queryVec = normalizeVec(queryVec)
 				selected := mmrDiversify(cands, queryVec, mmrLambda, limit)
 				// Anchor match against recent watch history. Failure non-fatal:
 				// rail renders without "Because you watched X" captions.
@@ -1137,11 +1130,49 @@ func buildRerankPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem,
 // returned error. Rationale: with Group.Do a panic re-panics on every waiting
 // caller's stack, where chi's Recoverer turns it into a 500; with DoChan the
 // closure runs on an internal goroutine with no waiter stack, so an
-// unrecovered panic would crash the whole process. Every DoChan closure in
-// this package must `defer flightRecover(&err)` first thing.
+// unrecovered panic would crash the whole process. doFlight owns the defer
+// structurally so no surface can forget it.
 func flightRecover(err *error) {
 	if r := recover(); r != nil {
 		*err = fmt.Errorf("recommender build panic: %v", r)
+	}
+}
+
+// doFlight is the ONE implementation of this package's cached-surface flight
+// pattern (hero pool, discover, engagement rails): collapse concurrent
+// builders via singleflight, run the build on a context DETACHED from the
+// leader's request, and let each waiter stop waiting the moment its own
+// request is cancelled.
+//
+//   - DoChan (not Do): Do had no per-waiter escape hatch — a user who
+//     navigated away still had their handler goroutine pinned for up to the
+//     full build.
+//   - context.WithoutCancel: the flight's result lands in a shared cache, so
+//     a leader bailing must neither abort the shared build nor waste LLM
+//     spend already committed. `budget` replaces the route timeout the build
+//     used to inherit; inner LLM calls keep their own tighter budgets.
+//   - flightRecover: structural, not conventional — a forgotten recover in a
+//     hand-rolled DoChan closure would turn one build panic into a process
+//     crash (no waiter stack to re-panic on).
+//
+// The build closure receives the detached context and must do its own cache
+// re-check / epoch-guarded store (those differ per surface).
+func doFlight[T any](ctx context.Context, g *singleflight.Group, key string, budget time.Duration, build func(bctx context.Context) (T, error)) (T, error) {
+	ch := g.DoChan(key, func() (_ any, err error) {
+		defer flightRecover(&err)
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
+		defer cancel()
+		return build(bctx)
+	})
+	var zero T
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return zero, res.Err
+		}
+		return res.Val.(T), nil
+	case <-ctx.Done():
+		return zero, ctx.Err()
 	}
 }
 

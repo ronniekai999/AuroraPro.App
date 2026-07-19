@@ -70,37 +70,21 @@ func (h *Hero) EngagementRailsFor(ctx context.Context, profileID int64) ([]Engag
 	}
 	key := strconv.FormatInt(profileID, 10)
 	startEpoch := h.epochFor(profileID).Load()
-	// DoChan (mirrors PoolFor/DiscoverFor) so a waiter whose own request is
-	// cancelled stops waiting immediately instead of blocking on the shared
-	// flight; the build itself was already detached below.
-	ch := h.engagementGroup.DoChan(key, func() (_ any, err error) {
-		defer flightRecover(&err)
+	// doFlight (shared DoChan + detached-build scaffold — see hero.go), with
+	// this surface's own tighter budget bounding the cheap SQL.
+	return doFlight(ctx, &h.engagementGroup, key, engagementBuildBudget, func(bctx context.Context) ([]EngagementRail, error) {
 		if cached, ok := h.engagementCache.Load(profileID); ok {
 			e := cached.(engagementCacheEntry)
 			if time.Since(e.builtAt) < engagementCacheTTL {
 				return e.rails, nil
 			}
 		}
-		// Detach from the request ctx (mirrors DiscoverFor) so a lead caller
-		// navigating away mid-build doesn't blank the rails for singleflight
-		// waiters on the same profile; the budget bounds the cheap SQL.
-		buildCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), engagementBuildBudget)
-		defer cancel()
-		rails := h.buildEngagementRails(buildCtx, profileID)
+		rails := h.buildEngagementRails(bctx, profileID)
 		if len(rails) > 0 && h.epochFor(profileID).Load() == startEpoch {
 			h.engagementCache.Store(profileID, engagementCacheEntry{rails: rails, builtAt: time.Now()})
 		}
 		return rails, nil
 	})
-	select {
-	case res := <-ch:
-		if res.Err != nil {
-			return nil, res.Err
-		}
-		return res.Val.([]EngagementRail), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 // buildEngagementRails runs the four signal queries, de-dups the unwatched rails,

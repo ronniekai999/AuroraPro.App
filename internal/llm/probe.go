@@ -83,9 +83,7 @@ func HasModelTag(tags []string, want string) bool {
 func (c *Client) BaseURL() string { return c.cfg.BaseURL }
 
 // EmbedBaseURL exposes the effective embeddings endpoint (EmbedURL override
-// when set, else BaseURL) for the admin test handler.
+// when set, else BaseURL) for the admin test handler. It embodies boot's
+// full resolution — including the Cloud→local embed coercion — which is why
+// the handler prefers it over re-deriving the fallback.
 func (c *Client) EmbedBaseURL() string { return c.embedURL() }
-
-// RerankBaseURL exposes the effective reranker endpoint (RerankURL override
-// when set, else BaseURL) for the admin test handler.
-func (c *Client) RerankBaseURL() string { return c.rerankBaseURL() }

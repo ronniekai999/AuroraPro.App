@@ -330,6 +330,13 @@ func main() {
 		pingCancel()
 
 		embedder = embedding.New(llmClient, queries, cfg.LLM.BackfillWorkers, cfg.LLM.BackfillBatch)
+		// Tell the model-space guard whether the embed model is an explicit
+		// operator choice (env var or admin-saved DB row) vs the binary
+		// default — pre-marker installs with a pinned model keep their
+		// vectors (same space), default-followers get nulled+re-embedded on
+		// a default swap. See embedding.ensureModelSpace.
+		_, embedPinnedDB, _ := queries.GetSettingExists(ctx, "llm_embed_model")
+		embedder.SetModelPinned(embedPinnedDB || os.Getenv("LLM_EMBED_MODEL") != "")
 		semanticSearcher = search.New(llmClient, queries)
 		heroRecommender = recommender.New(queries, llmClient)
 		// Phase B2 anti-repetition window (hours; 0 disables). Restart-required,
@@ -1173,25 +1180,19 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	}
 
 	// Provider is MECHANICAL as of Phase E4 (it used to be a log-only label,
-	// which meant flipping it in the admin UI silently did nothing):
-	//
-	//   "local"        → the API key is dropped, so no bearer token can leak
-	//                    to a LAN box. UpdateLLMSettings clears the stored
-	//                    key on save; this handles legacy rows saved before
-	//                    that enforcement existed.
-	//   "ollama_cloud" → embeddings must stay on the local box (our embed
-	//                    models aren't Cloud-hosted), so an empty EmbedURL
-	//                    falls back to the env/default local URL captured
-	//                    BEFORE the DB overrides rewrite BaseURL to the
-	//                    Cloud endpoint. Incoherent combos (no API key,
-	//                    non-https chat URL) get loud warnings — the save
-	//                    path rejects them outright; boot only warns so a
-	//                    legacy misconfig can't brick startup.
-	//   ""             → unset (form never saved / pre-provider install):
-	//                    no inference, behave exactly as before.
+	// which meant flipping it in the admin UI silently did nothing). The
+	// policy itself lives in llm.CheckProviderCombo — ONE rule source shared
+	// with UpdateLLMSettings, which 400s violations at save time; boot only
+	// warns (below) so a legacy row can't brick startup. The one boot-side
+	// MECHANIC is the Cloud embed coercion: our embedding models aren't
+	// hosted on Ollama Cloud, so with provider=ollama_cloud and no embed
+	// URL, embeddings route to the pre-override env/default URL — captured
+	// here BEFORE the DB overrides rewrite BaseURL to the Cloud endpoint —
+	// provided that URL actually looks local (an env chain that sets
+	// LLM_OLLAMA_URL=https://ollama.com must not be "coerced" to itself).
 	var provider string
 	get("llm_provider", &provider)
-	localBaseURL := cfg.BaseURL // env/default local URL, pre-override
+	localBaseURL := cfg.BaseURL // env/default URL, pre-override
 
 	get("llm_ollama_url", &cfg.BaseURL)
 	get("llm_embed_url", &cfg.EmbedURL)
@@ -1216,25 +1217,29 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 		cfg.Debug = v == "true"
 	}
 
-	switch provider {
-	case "local":
-		if cfg.APIKey != "" {
-			slog.Warn("llm_provider=local with a stored API key — dropping the key so no bearer is sent to the local box (re-save the LLM settings to clear it permanently)")
-			cfg.APIKey = ""
-		}
-	case "ollama_cloud":
-		if cfg.EmbedURL == "" {
-			// Cloud chat, local embeddings: without this, /api/embed calls
-			// would hit ollama.com, where our embedding models don't run.
-			slog.Info("llm_provider=ollama_cloud with no embed URL — routing embeddings to the local default", "embed_url", localBaseURL)
+	if provider == llm.ProviderCloud && cfg.EmbedURL == "" {
+		// Cloud chat, local embeddings: without this, /api/embed calls would
+		// hit ollama.com, where our embedding models don't run. Only coerce
+		// when the pre-override URL is plausibly a local box — otherwise
+		// (env itself points at Cloud) there is no local endpoint to route
+		// to, and pretending otherwise would send the operator down the
+		// wrong debugging path.
+		if !strings.HasPrefix(localBaseURL, "https://") {
+			slog.Info("llm_provider=ollama_cloud with no embed URL — routing embeddings to the pre-override URL", "embed_url", localBaseURL)
 			cfg.EmbedURL = localBaseURL
+		} else {
+			slog.Warn("llm_provider=ollama_cloud with no embed URL and no local pre-override URL — embeddings will fail until llm_embed_url points at a local Ollama")
 		}
-		if cfg.APIKey == "" {
-			slog.Warn("llm_provider=ollama_cloud but no API key is stored — Cloud chat calls will be rejected; set the key in Admin → LLM")
-		}
-		if !strings.HasPrefix(cfg.BaseURL, "https://") {
-			slog.Warn("llm_provider=ollama_cloud but the chat URL is not an https endpoint — chat will hit that URL, not Ollama Cloud", "url", cfg.BaseURL)
-		}
+	}
+	for _, violation := range llm.CheckProviderCombo(provider, cfg.APIKey, cfg.BaseURL, cfg.EmbedURL) {
+		slog.Warn("LLM provider config incoherent (fix in Admin → LLM)", "provider", provider, "problem", violation)
+	}
+	if cfg.NumCtx > 0 && cfg.StructuredOutputs {
+		// num_ctx rides Ollama's native /api/chat options; the OpenAI-compat
+		// /v1 path (structured outputs) has no options field, so the knob is
+		// inert exactly on the big-prompt surfaces it was set for. Warn loud.
+		slog.Warn("LLM_NUM_CTX is ignored on the structured-outputs (/v1) path — surfaces using it fall back to the model's default context",
+			"num_ctx", cfg.NumCtx)
 	}
 
 	if provider != "" {

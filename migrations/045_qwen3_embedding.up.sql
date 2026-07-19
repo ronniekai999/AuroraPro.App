@@ -1,33 +1,30 @@
 -- Phase E4 — embedding model upgrade: embeddinggemma (768 native) →
 -- qwen3-embedding:0.6b (1024 native, Matryoshka-truncated to 768 in the client).
 --
--- MUCH lighter than migration 040: the target dimensionality is unchanged
--- (the client truncates qwen3-embedding's MRL output to the existing
--- vector(768) column), so there is NO column re-type and NO HNSW drop/rebuild
--- — the 040-style table-rewrite lock is avoided entirely. We only:
+-- Deliberately TINY compared to migration 040. The dimensionality is
+-- unchanged (the client truncates qwen3-embedding's MRL output to the
+-- existing vector(768) column), so there is no column re-type and no HNSW
+-- rebuild. And unlike 040, the null-out of old-model vectors does NOT
+-- happen here: the embedder now maintains a `llm_embed_model_active`
+-- marker (internal/embedding ensureModelSpace) and nulls-and-re-embeds
+-- whenever the effective model differs from the one that produced the
+-- stored vectors. That mechanism runs post-boot (never blocks startup on a
+-- full-table UPDATE under the HNSW index), covers admin-UI/env model
+-- changes that bespoke migrations can never see, and preserves the vectors
+-- of operators pinned to an unchanged model.
 --
---   1. Drop a persisted `llm_embed_model` override IF it still points at the
---      old default (embeddinggemma), so the new binary default takes over.
---      Unlike 040 this is conditional: an operator who deliberately pinned a
---      DIFFERENT 768-compatible model (e.g. nomic-embed-text at its native
---      768) keeps their choice — same-dims models can't corrupt the column,
---      so there is no safety reason to wipe a genuine customization. (040
---      wiped unconditionally because the column width itself changed.)
---   2. Null the stored vectors. Embeddings from different models live in
---      different spaces — cosine between an embeddinggemma vector and a
---      qwen3-embedding vector is meaningless — so a mixed-space column
---      during an in-place re-embed would silently corrupt similarity
---      ranking. Nulling everything keeps search honest (trigram fallback)
---      until the version-4 backfill (embedding.CurrentVersion bump) refills.
+-- The one thing that must happen at migration level: un-pin installs whose
+-- admin UI persisted the OLD DEFAULT as an explicit llm_embed_model row
+-- (saving the form writes every field). Deleting only rows valued at the
+-- old default lets the new binary default take over while a genuine custom
+-- choice (e.g. nomic-embed-text at native 768) is preserved.
 --
--- OPERATIONAL PREREQ: `ollama pull qwen3-embedding:0.6b` on the embed host
--- before deploy. If absent, the backfill fails-and-retries (embeddings stay
--- NULL, recommender falls back to popular/empty) until the model is pulled.
--- install.sh's preflight prints the exact pull commands when models are
--- missing.
+-- OPERATIONAL PREREQ: `ollama pull qwen3-embedding:0.6b` (and the chat
+-- model `qwen3:4b-instruct`) on the box before deploy. install.sh and
+-- scripts/aurora-update.sh both ensure this; if the model is absent the
+-- backfill fails-and-retries with a pull hint in the log, and old-model
+-- vectors keep serving until the space check succeeds in re-embedding.
 
 DELETE FROM server_settings
     WHERE key = 'llm_embed_model'
     AND value IN ('embeddinggemma', 'embeddinggemma:latest');
-
-UPDATE media_items SET embedding = NULL, embedding_version = 0 WHERE embedding IS NOT NULL;

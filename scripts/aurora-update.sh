@@ -502,6 +502,50 @@ rm -rf "$FRONTEND_TMP"
 
 chown -R aurora:aurora "$INSTALL_DIR"
 
+# ── Ensure LLM models (best-effort) ───────────────────────────────
+# A rebuilt binary may default to Ollama models this box has never pulled
+# (the Phase E4 swap to qwen3-embedding/qwen3, and any future one). Only
+# install.sh used to pull models, so timer-driven updates could strand
+# semantic search on a 404ing model until an operator intervened. Pull
+# anything missing BEFORE the restart — the old server keeps serving
+# during the download — and stay strictly best-effort: no ollama CLI, a
+# non-local URL, or a failed pull must never block the update. Admin-UI
+# (DB) model overrides aren't visible here (no psql dependency); env +
+# binary defaults are the right signal for exactly the installs that are
+# at risk (default-followers).
+ensure_llm_models() {
+    case "${LLM_ENABLED:-true}" in
+        false|0|no) return 0 ;;
+    esac
+    _OLLAMA_URL="${LLM_OLLAMA_URL:-http://localhost:11434}"
+    _EMBED_MODEL="${LLM_EMBED_MODEL:-qwen3-embedding:0.6b}"
+    _CHAT_MODEL="${LLM_CHAT_MODEL:-qwen3:4b-instruct}"
+    case "$_OLLAMA_URL" in
+        "http://localhost:"*|"http://127.0.0.1:"*|"http://[::1]:"*|"http://localhost"|"http://127.0.0.1") ;;
+        *) log "LLM model check skipped (non-local Ollama URL: $_OLLAMA_URL)"; return 0 ;;
+    esac
+    command -v ollama >/dev/null 2>&1 || { log "LLM model check skipped (no ollama CLI)"; return 0; }
+    _TAGS="$(curl -sf --max-time 5 "$_OLLAMA_URL/api/tags" 2>/dev/null || true)"
+    [ -n "$_TAGS" ] || { log "LLM model check skipped (Ollama not reachable at $_OLLAMA_URL)"; return 0; }
+    for _m in "$_EMBED_MODEL" "$_CHAT_MODEL"; do
+        # Same match rule as install.sh's preflight: exact tag, or the
+        # ":latest" form for an untagged name. -F: model names contain
+        # dots, which must not act as regex wildcards.
+        if printf '%s' "$_TAGS" | grep -qF "\"name\":\"$_m\""; then continue; fi
+        case "$_m" in
+            *:*) ;;
+            *) if printf '%s' "$_TAGS" | grep -qF "\"name\":\"$_m:latest\""; then continue; fi ;;
+        esac
+        log "LLM model $_m missing — pulling (old server keeps serving during download)..."
+        if ollama pull "$_m" >>"$LOG_FILE" 2>&1; then
+            log "pulled $_m"
+        else
+            log "WARNING: ollama pull $_m failed — semantic search may degrade until it is pulled manually"
+        fi
+    done
+}
+ensure_llm_models
+
 # ── Restart + health check ────────────────────────────────────────
 
 # Drain active HLS stream sessions before restarting: systemctl restart

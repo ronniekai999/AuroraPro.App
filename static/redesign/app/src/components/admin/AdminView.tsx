@@ -1297,7 +1297,7 @@ function AdminLLMTab() {
   return (
     <div className="glass-panel rounded-xl p-5 space-y-3">
       <h3 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h3>
-      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local keeps everything on this box (no API key); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
+      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box (an API key is optional, for bearer-checking proxies); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
           <select value={s.provider} onChange={e => setS({ ...s, provider: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">

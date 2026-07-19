@@ -209,20 +209,11 @@ func (c *Client) Dims() int { return c.cfg.Dims }
 // Ping verifies Ollama is reachable. Use this from main.go to fail fast or to
 // degrade gracefully (skip embedding init) if the sidecar is down. We use
 // /api/tags on the embed URL (local Ollama) so a Cloud-only chat config still
-// pings the local box where embeddings actually live.
+// pings the local box where embeddings actually live. Delegates to ListModels
+// (probe.go) so there is exactly one /api/tags implementation.
 func (c *Client) Ping(ctx context.Context) error {
-	url := c.embedURL() + "/api/tags"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
+	if _, err := c.ListModels(ctx, c.embedURL(), false); err != nil {
 		return fmt.Errorf("ollama ping: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ollama ping: status %d", resp.StatusCode)
 	}
 	return nil
 }

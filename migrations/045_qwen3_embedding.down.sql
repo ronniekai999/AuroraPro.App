@@ -1,12 +1,9 @@
--- Down: revert to the embeddinggemma default. The schema never changed in
--- the up migration (same vector(768) column, same indexes), so down is just
--- the same null-and-re-embed dance in reverse: clear vectors produced by
--- qwen3-embedding so the (older) binary's embeddinggemma backfill re-embeds
--- from scratch, and drop any qwen3 embed-model override row so the older
--- default wins.
-
-DELETE FROM server_settings
-    WHERE key = 'llm_embed_model'
-    AND value IN ('qwen3-embedding:0.6b', 'qwen3-embedding');
-
-UPDATE media_items SET embedding = NULL, embedding_version = 0 WHERE embedding IS NOT NULL;
+-- Down: nothing structural to revert (the up migration only removed
+-- old-default llm_embed_model override rows, which cannot be restored).
+-- Vector-space consistency on a rollback is handled by the same
+-- llm_embed_model_active marker mechanism: the older binary's default
+-- (embeddinggemma) will differ from the marker (qwen3-embedding:0.6b),
+-- so the embedder nulls and re-embeds on next boot — provided the older
+-- binary carries the marker code; for a rollback to a pre-marker binary,
+-- run: UPDATE media_items SET embedding = NULL, embedding_version = 0;
+SELECT 1;
