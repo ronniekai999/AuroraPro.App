@@ -19,12 +19,15 @@ func TestVideoEncoderArgs_Software(t *testing.T) {
 func TestVideoEncoderArgs_LevelByResolution(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"}
 
+	// Low rungs carry 60fps headroom (3.1/3.2 — safe under every receiver
+	// ceiling); the 1080p/2160p rungs are pinned to 4.0/5.1 by Chromecast
+	// capability filtering — see h264LevelIDC for the per-device ceilings.
 	tests := []struct {
 		width, height int
 		wantLevel     string
 	}{
-		{854, 480, "3.0"},
-		{1280, 720, "3.1"},
+		{854, 480, "3.1"},
+		{1280, 720, "3.2"},
 		{1920, 1080, "4.0"},
 		{3840, 2160, "5.1"},
 	}
@@ -44,7 +47,7 @@ func TestVideoEncoderArgs_NVENC(t *testing.T) {
 	assertContains(t, args, "-tune", "hq")
 	assertContains(t, args, "-rc", "vbr")
 	assertContains(t, args, "-profile:v", "high")
-	assertContains(t, args, "-level", "3.1")
+	assertContains(t, args, "-level", "3.2")
 	assertContainsVF(t, args, "scale=1280:-2")
 }
 
@@ -59,6 +62,10 @@ func TestVideoEncoderArgs_QSV(t *testing.T) {
 	// applies to the audio stream too, and the AAC encoder rejects "high",
 	// killing every QSV transcode that re-encodes audio (finding B1).
 	assertContains(t, args, "-profile:v", "high")
+	// h264_qsv has no named "3.1"-style level constants — the dotted form
+	// silently evaluates to the wrong integer. QSV must get numeric
+	// level_idc ("31"), unlike libx264/NVENC/VAAPI/AMF (see qsvLevel).
+	assertContains(t, args, "-level", "31")
 	assertContainsVF(t, args, "scale=854:-2")
 	for _, a := range args {
 		if a == "-profile" {
@@ -229,4 +236,33 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestH264LevelRenderings(t *testing.T) {
+	// One level_idc table (h264LevelIDC) feeds three renderings that MUST
+	// agree: dotted for libx264/NVENC/VAAPI/AMF, numeric for h264_qsv (no
+	// named dotted constants — "4.0" silently evaluates to the integer 4
+	// there), and two hex digits for the CODECS attribute.
+	tests := []struct {
+		height     int
+		wantIDC    int
+		wantDotted string
+		wantHex    string
+	}{
+		{480, 31, "3.1", "1f"},
+		{720, 32, "3.2", "20"},
+		{1080, 40, "4.0", "28"},
+		{2160, 51, "5.1", "33"},
+	}
+	for _, tt := range tests {
+		if got := h264LevelIDC(tt.height); got != tt.wantIDC {
+			t.Errorf("h264LevelIDC(%d) = %d, want %d", tt.height, got, tt.wantIDC)
+		}
+		if got := h264Level(tt.height); got != tt.wantDotted {
+			t.Errorf("h264Level(%d) = %q, want %q", tt.height, got, tt.wantDotted)
+		}
+		if got := h264LevelHex(tt.height); got != tt.wantHex {
+			t.Errorf("h264LevelHex(%d) = %q, want %q", tt.height, got, tt.wantHex)
+		}
+	}
 }

@@ -1,6 +1,7 @@
 package streaming
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/models"
@@ -787,13 +788,16 @@ func TestHlsCodecString(t *testing.T) {
 		audio  string
 		want   string
 	}{
-		{360, "aac", "avc1.64001e,mp4a.40.2"},  // High, Level 3.0
-		{480, "aac", "avc1.64001e,mp4a.40.2"},  // High, Level 3.0
-		{720, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		// Values derive from h264LevelIDC (hwaccel.go): 60fps headroom on
+		// the low rungs; 1080p/2160p pinned to 4.0/5.1 by Chromecast
+		// receiver ceilings (gen-1/2 filter out >4.1, Google TV >5.1).
+		{360, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		{480, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		{720, "aac", "avc1.640020,mp4a.40.2"},  // High, Level 3.2
 		{1080, "aac", "avc1.640028,mp4a.40.2"}, // High, Level 4.0
 		{2160, "aac", "avc1.640033,mp4a.40.2"}, // High, Level 5.1 (4K)
 		{1080, "ac3", "avc1.640028,ac-3"},      // High + AC-3 surround
-		{720, "", "avc1.64001f,mp4a.40.2"},     // empty audio defaults to AAC
+		{720, "", "avc1.640020,mp4a.40.2"},     // empty audio defaults to AAC
 	}
 	for _, tt := range tests {
 		got := hlsCodecString(tt.height, tt.audio)
@@ -863,7 +867,7 @@ func TestCastCloneOpts(t *testing.T) {
 		SubtitleTracks:   []HLSSubtitleTrack{{AbsoluteIndex: 3, Language: "eng"}},
 		BurnSubIndex:     -1,
 	}
-	opts := castCloneOpts(src, false)
+	opts := castCloneOpts(src, false, false)
 
 	// Audio is forced to a stereo AAC re-encode — never AC-3, never copy.
 	if opts.AudioCodecOut != "aac" {
@@ -896,7 +900,7 @@ func TestCastCloneOpts(t *testing.T) {
 	src.BurnSubIndex = 4
 	src.BurnSubRelIndex = 1
 	src.BurnSubBitmap = true
-	if bo := castCloneOpts(src, false).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
+	if bo := castCloneOpts(src, false, false).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
 		t.Errorf("BurnIn not preserved: %+v", bo)
 	}
 }
@@ -908,4 +912,69 @@ func stringContains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// 2026-07 review — the plain "hevc" cap is probed with an 8-bit Main codec
+// string and over-reports for 10-bit content on Main-only decoders. 10-bit
+// HEVC (virtually all 4K/HDR HEVC) must be gated on the separate
+// "hevc_main10" cap.
+func TestDecidePlayback_HEVC10BitRequiresMain10Cap(t *testing.T) {
+	tracks := []models.AudioTrack{{Codec: "aac", IsDefault: true}}
+
+	capsWithout := ParseClientCaps("h264,hevc,aac,mp4_container,hls_js")
+	capsWith := ParseClientCaps("h264,hevc,hevc_main10,aac,mp4_container,hls_js")
+
+	// Without the main10 cap: 10-bit HEVC must fully transcode — no direct
+	// play, no remux (the browser can't decode the copied bits either way).
+	pd := DecidePlayback("mp4", "hevc", tracks, capsWithout, "yuv420p10le")
+	if pd.Decision != "transcode" {
+		t.Fatalf("10-bit HEVC without hevc_main10: decision = %q, want transcode (reason %q)", pd.Decision, pd.TranscodeReason)
+	}
+	if !strings.Contains(pd.TranscodeReason, "Main 10") {
+		t.Errorf("transcode reason should name Main 10, got %q", pd.TranscodeReason)
+	}
+
+	// With the main10 cap: 10-bit HEVC in mp4 direct-plays as before.
+	pd = DecidePlayback("mp4", "hevc", tracks, capsWith, "yuv420p10le")
+	if pd.Decision != "direct_play" {
+		t.Errorf("10-bit HEVC with hevc_main10: decision = %q, want direct_play (reason %q)", pd.Decision, pd.TranscodeReason)
+	}
+
+	// 8-bit HEVC must be unaffected by the absence of the main10 cap.
+	pd = DecidePlayback("mp4", "hevc", tracks, capsWithout, "yuv420p")
+	if pd.Decision != "direct_play" {
+		t.Errorf("8-bit HEVC without hevc_main10: decision = %q, want direct_play (reason %q)", pd.Decision, pd.TranscodeReason)
+	}
+
+	// 10-bit HEVC in an MKV with the main10 cap: remux (container swap only),
+	// video still copied — Main10 decode ability covers the copied bits.
+	pd = DecidePlayback("matroska", "hevc", tracks, capsWith, "yuv420p10le")
+	if pd.Decision != "direct_stream" {
+		t.Errorf("10-bit HEVC MKV with hevc_main10: decision = %q, want direct_stream (reason %q)", pd.Decision, pd.TranscodeReason)
+	}
+
+	// Same MKV without the cap: full transcode, not remux.
+	pd = DecidePlayback("matroska", "hevc", tracks, capsWithout, "yuv420p10le")
+	if pd.Decision != "transcode" {
+		t.Errorf("10-bit HEVC MKV without hevc_main10: decision = %q, want transcode (reason %q)", pd.Decision, pd.TranscodeReason)
+	}
+}
+
+func TestParseClientCaps_HEVCMain10(t *testing.T) {
+	// hevc_main10 is a dedicated ClientCaps field, NOT a VideoCodecs entry —
+	// same design as EAC3MSE: it is a profile capability, not an ffprobe
+	// codec name, and the VideoCodecs namespace is matched against ffprobe
+	// names.
+	caps := ParseClientCaps("hevc,hevc_main10")
+	if !caps.VideoCodecs["hevc"] || !caps.HEVCMain10 {
+		t.Errorf("hevc_main10 cap not parsed: HEVCMain10=%v videoCodecs=%v", caps.HEVCMain10, caps.VideoCodecs)
+	}
+	if caps.VideoCodecs["hevc_main10"] {
+		t.Error("hevc_main10 must not leak into the VideoCodecs codec namespace")
+	}
+	// The main10 key alone must NOT imply plain hevc support.
+	solo := ParseClientCaps("hevc_main10")
+	if solo.VideoCodecs["hevc"] || solo.VideoCodecs["h265"] {
+		t.Errorf("hevc_main10 alone must not set hevc/h265: %v", solo.VideoCodecs)
+	}
 }

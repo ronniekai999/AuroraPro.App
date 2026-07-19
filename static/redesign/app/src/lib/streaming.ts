@@ -297,6 +297,20 @@ export function clientCaps(): string {
   ) {
     caps.push('hevc', 'h265')
   }
+  // HEVC Main 10 (10-bit) — probed SEPARATELY from the 8-bit Main probe
+  // above. Virtually all 4K/HDR HEVC content is 10-bit, and some decoders
+  // (e.g. Intel Gen9-era hardware behind Chrome) stop at Main: for them the
+  // plain "hevc" cap is true but 10-bit files fail to decode. The server
+  // gates 10-bit HEVC sources on this key and transcodes when it's absent.
+  // hvc1.2.4.L120.B0 = Main 10 profile, Main tier, level 4.0 — same level
+  // the 8-bit probe uses (L93 ≈ 3.1); profile support, not level, is what
+  // varies across hardware.
+  if (
+    supports('video/mp4; codecs="hvc1.2.4.L120.B0"', 'video/mp4; codecs="hvc1.2.4.L120.B0"', el) ||
+    supports('video/mp4; codecs="hev1.2.4.L120.B0"', 'video/mp4; codecs="hev1.2.4.L120.B0"', el)
+  ) {
+    caps.push('hevc_main10')
+  }
   if (supports('video/webm; codecs="vp8"', 'video/webm; codecs="vp8"', el)) {
     caps.push('vp8')
   }
@@ -336,7 +350,14 @@ export function clientCaps(): string {
   if (supports('audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="ec-3"', el)) caps.push('eac3')
   if (supportsMSE('audio/mp4; codecs="ec-3"')) caps.push('eac3_mse')
   if (supports('audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"', el)) caps.push('opus')
-  if (supports('audio/ogg; codecs="flac"', 'audio/mp4; codecs="flac"', el)) caps.push('flac')
+  // FLAC: probe the fMP4 form on BOTH legs. The MSE arg was historically
+  // 'audio/ogg' (never MSE-supported — dead code); the native leg must stay
+  // 'audio/mp4' because that is the container Aurora direct-plays FLAC in,
+  // and Safari/iOS answer canPlayType('audio/mp4; codecs="flac"') even
+  // where MediaSource is absent — swapping the native leg to Ogg (which
+  // Safari never supports) would silently force-transcode files iPhones
+  // decode natively. (2026-07 review, finder B.)
+  if (supports('audio/mp4; codecs="flac"', 'audio/mp4; codecs="flac"', el)) caps.push('flac')
   if (supports('audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"', el)) caps.push('vorbis')
 
   // HLS delivery. The server restricts HLS audio handling when hls_js is set
@@ -423,5 +444,28 @@ export async function createCastToken(
   return apiFetch<CastTokenResponse>(
     `/api/stream/sessions/${sessionId}/cast-token${qs}`,
     { method: 'POST', signal: opts.signal },
+  )
+}
+
+// Direct-play twin of createCastToken (2026-07 review): there is no
+// transcode session to bind to, so the server mints a cast-scoped token
+// bound to exactly ONE file and returns the token-bearing
+// /api/stream/direct/{id} URL. Used for AirPlay hand-off of direct-play
+// titles — the Apple TV can't send the httpOnly auth cookie, so without a
+// ?token= in the URL every range request 401s (#317's direct-play twin).
+export interface DirectCastTokenResponse {
+  token: string
+  expires_at: number // Unix seconds
+  url: string // /api/stream/direct/{fileID}?type=...&token=...
+}
+
+export async function createDirectCastToken(
+  fileId: number,
+  fileType: 'media' | 'episode',
+  signal?: AbortSignal,
+): Promise<DirectCastTokenResponse> {
+  return apiFetch<DirectCastTokenResponse>(
+    `/api/stream/${fileId}/cast-token?type=${fileType}`,
+    { method: 'POST', signal },
   )
 }

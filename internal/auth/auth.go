@@ -36,8 +36,16 @@ type JWTClaims struct {
 	// Scope, when non-empty, restricts the token to a narrow purpose
 	// (e.g. ScopeCast for HLS-only). Regular access tokens have Scope == "".
 	Scope string `json:"scope,omitempty"`
-	// SessionID is the HLS transcode session this token is bound to.
-	// Only set when Scope == ScopeCast; empty otherwise.
+	// SessionID is the resource binding for cast-scoped tokens; empty for
+	// regular access tokens. Two binding forms exist (2026-07):
+	//   - an HLS transcode session ID (32 hex chars) — the original form,
+	//     enforced by requireSessionAccess on the HLS routes;
+	//   - the direct-play file sentinel "direct:<media|episode>:<fileID>",
+	//     minted by the API layer's CreateDirectCastToken and enforced by
+	//     ServeDirectCastFile. The prefix can never collide with a hex
+	//     session ID, so each consumer matches exactly one form.
+	// Consumers MUST NOT assume this names a transcode session (e.g. by
+	// blindly calling GetSession with it).
 	SessionID string `json:"sid,omitempty"`
 	jwt.RegisteredClaims
 }

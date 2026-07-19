@@ -779,23 +779,61 @@ func IsTextSubtitle(codec string) bool {
 	return false
 }
 
-// escapeFFmpegPath escapes special characters in file paths for an FFmpeg
-// FILTERGRAPH literal (e.g. the argument to subtitles=...). FFmpeg's filtergraph
-// parser treats these characters as syntax unless each is prefixed with a single
-// backslash; there is NO shell-style quote-region concept here. A single quote is
-// therefore escaped as backslash-quote (\') -- NOT the shell-style close/escape/
-// reopen sequence, which would toggle quote regions and produce a malformed
-// filter (audit LOW).
-func escapeFFmpegPath(path string) string {
+// escapeFilterOptionValue escapes a string for FFmpeg's INNER (option-level)
+// filtergraph parsing pass. When a filter's argument string is split into
+// options, av_get_token treats backslash as an escape, single quotes as a
+// quoting region, ':' as the option separator, and '=' as the key/value
+// separator — all four must be escaped for the value to survive intact.
+// '[', ']', ';' and ',' are not special at this level; the extra backslash
+// they get here is harmless (a backslash before a non-special character
+// yields the character) and keeps this list aligned with the historical
+// behavior.
+func escapeFilterOptionValue(path string) string {
 	// Order matters: escape backslash first so the backslashes we add for the
 	// other characters (and for the quote below) aren't themselves re-escaped.
 	path = strings.ReplaceAll(path, "\\", "\\\\")
 	path = strings.ReplaceAll(path, ":", "\\:")
-	path = strings.ReplaceAll(path, "'", "\\'") // Filtergraph quote: escape, don't toggle regions
+	path = strings.ReplaceAll(path, "'", "\\'") // option-level quote: escape, don't toggle regions
 	path = strings.ReplaceAll(path, "[", "\\[")
 	path = strings.ReplaceAll(path, "]", "\\]")
-	path = strings.ReplaceAll(path, ";", "\\;") // Filter chain separator
-	path = strings.ReplaceAll(path, "=", "\\=") // Key-value separator
-	path = strings.ReplaceAll(path, ",", "\\,") // Filter graph separator
+	path = strings.ReplaceAll(path, ";", "\\;")
+	path = strings.ReplaceAll(path, "=", "\\=")
+	path = strings.ReplaceAll(path, ",", "\\,")
 	return path
+}
+
+// escapeFilterGraphLevel escapes a string for FFmpeg's OUTER (graph-level)
+// filtergraph parsing pass, which runs BEFORE option parsing and strips one
+// layer of escapes itself: backslash escapes, single-quote regions, ','
+// (next filter in a chain), ';' (next chain) and '[' / ']' (link labels).
+// ':' and '=' are NOT special at this level and stay as-is.
+func escapeFilterGraphLevel(s string) string {
+	// Backslash first, same reasoning as escapeFilterOptionValue.
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "'", "\\'")
+	s = strings.ReplaceAll(s, ",", "\\,")
+	s = strings.ReplaceAll(s, ";", "\\;")
+	s = strings.ReplaceAll(s, "[", "\\[")
+	s = strings.ReplaceAll(s, "]", "\\]")
+	return s
+}
+
+// escapeFFmpegPath escapes a file path for embedding in an FFmpeg filtergraph
+// literal (e.g. the argument to subtitles=...:stream_index=N).
+//
+// FFmpeg parses a filtergraph string TWICE — first the graph-level pass
+// (filters, chains, link labels, quoting), then the option-level pass on each
+// filter's argument string (option separation, key=value, quoting) — and EACH
+// pass interprets and strips one layer of backslash/quote escaping. A literal
+// path therefore needs two levels of escaping, option level first. See "Notes
+// on filtergraph escaping" in the ffmpeg-filters documentation.
+//
+// Single-level escaping is the classic mistake and was a real bug here
+// (verified against FFmpeg 7.0): subtitles=/m/Ocean\'s.srt reaches the option
+// parser as /m/Ocean's.srt, whose bare quote opens an option-level quoting
+// region that swallows the rest of the argument string — the filter then
+// tries to open "/m/Oceans.srt:stream_index=0" (apostrophe deleted, options
+// eaten) and every burn-in on an apostrophe or colon path failed to start.
+func escapeFFmpegPath(path string) string {
+	return escapeFilterGraphLevel(escapeFilterOptionValue(path))
 }

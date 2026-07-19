@@ -3,12 +3,14 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -18,6 +20,21 @@ import (
 
 func getClaimsFromRequest(r *http.Request) *auth.JWTClaims {
 	return auth.GetClaims(r.Context())
+}
+
+// extendWriteDeadline lengthens the connection write deadline for handlers
+// whose responses legitimately outlive the server-wide WriteTimeout (long
+// direct-play transfers, slow subtitle extraction). Requires every
+// ResponseWriter wrapper in the middleware chain to expose Unwrap() — see
+// statusCapture.Unwrap. A failure is logged at Warn because it means a
+// wrapper regressed and the global WriteTimeout will silently truncate this
+// response after all; that was an invisible production bug once already
+// (2026-07 streaming review).
+func extendWriteDeadline(w http.ResponseWriter, r *http.Request, d time.Duration, what string) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil {
+		slog.Warn("write deadline extension failed; server WriteTimeout still applies",
+			"handler", what, "path", r.URL.Path, "extend_to", d.String(), "error", err)
+	}
 }
 
 // queryParamTokenKey is the context key for the raw JWT token extracted from

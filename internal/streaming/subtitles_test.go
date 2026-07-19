@@ -243,23 +243,35 @@ func TestEscapeFFmpegPath(t *testing.T) {
 		input string
 		want  string
 	}{
+		// Expectations are TWO-LEVEL escaped (option level, then graph level),
+		// because FFmpeg strips one escape layer in each of its two filtergraph
+		// parsing passes. Verified against a real ffmpeg in
+		// TestEscapeFFmpegPath_RealFFmpeg. Raw strings: `\\:` is backslash-
+		// backslash-colon on the wire.
 		{name: "no special chars", input: "/media/movie.mkv", want: "/media/movie.mkv"},
-		{name: "colon", input: "C:/media/movie.mkv", want: "C\\:/media/movie.mkv"},
-		{name: "brackets", input: "/media/[movie].mkv", want: "/media/\\[movie\\].mkv"},
-		{name: "semicolon", input: "/media/a;b.mkv", want: "/media/a\\;b.mkv"},
-		{name: "equals", input: "/media/a=b.mkv", want: "/media/a\\=b.mkv"},
-		{name: "comma", input: "/media/a,b.mkv", want: "/media/a\\,b.mkv"},
-		{name: "backslash", input: "C:\\media\\movie.mkv", want: "C\\:\\\\media\\\\movie.mkv"},
-		// Filtergraph escaping: a single quote becomes \' (backslash-quote), NOT
-		// shell-style '\'' which would toggle quote regions (audit LOW).
-		{name: "single quote", input: "/media/it's.mkv", want: "/media/it\\'s.mkv"},
+		// ':' is option-level-only syntax: one escape backslash, itself
+		// escaped for the graph level → \\:
+		{name: "colon", input: "C:/media/movie.mkv", want: `C\\:/media/movie.mkv`},
+		// '[' ']' are graph-level syntax; they arrive at the graph parser as
+		// \\\[ (escaped backslash + escaped bracket) → option parser sees \[
+		// → literal [.
+		{name: "brackets", input: "/media/[movie].mkv", want: `/media/\\\[movie\\\].mkv`},
+		{name: "semicolon", input: "/media/a;b.mkv", want: `/media/a\\\;b.mkv`},
+		// '=' is option-level-only syntax, like ':'.
+		{name: "equals", input: "/media/a=b.mkv", want: `/media/a\\=b.mkv`},
+		{name: "comma", input: "/media/a,b.mkv", want: `/media/a\\\,b.mkv`},
+		// A literal backslash needs escaping at BOTH levels: \ → \\ → \\\\.
+		{name: "backslash", input: `C:\media\movie.mkv`, want: `C\\:\\\\media\\\\movie.mkv`},
+		// A single quote is syntax at BOTH levels (quoting regions), so it
+		// carries an escape through each: ' → \' → \\\'. Never the shell-style
+		// '\'' toggle (audit LOW).
+		{name: "single quote", input: "/media/it's.mkv", want: `/media/it\\\'s.mkv`},
 		// Every filtergraph metacharacter present at once must round-trip to a
-		// literal form: each is prefixed with exactly one backslash and the
-		// quote never opens a region (no bare leading/trailing ' left unescaped).
+		// literal form and the quote must never open a region at either level.
 		{
 			name:  "all filtergraph metachars",
 			input: "/m/a:b;c=d,e[f]g'h.mkv",
-			want:  "/m/a\\:b\\;c\\=d\\,e\\[f\\]g\\'h.mkv",
+			want:  `/m/a\\:b\\\;c\\=d\\\,e\\\[f\\\]g\\\'h.mkv`,
 		},
 	}
 

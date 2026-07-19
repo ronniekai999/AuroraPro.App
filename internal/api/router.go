@@ -731,6 +731,20 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// client-aware decision engine when it has already validated codecs
 				r.Get("/{fileID}/direct", streamH.ServeDirectFile)
 
+				// HEAD support on the byte-serving routes (2026-07 review).
+				// Chrome/Safari and native players (AVFoundation, download
+				// managers) preflight media with HEAD before GET; without an
+				// explicit HEAD route chi matches nothing here and the
+				// preflight fails, which makes some players refuse to start —
+				// the same failure documented and fixed for feedback
+				// attachments (see the HEAD note above that route).
+				// http.ServeContent answers HEAD natively (headers +
+				// Content-Length, no body); the handlers skip their
+				// activity-log side effects for HEAD.
+				r.Head("/media/{fileID}", streamH.StreamMediaFile)
+				r.Head("/episode/{fileID}", streamH.StreamEpisodeFile)
+				r.Head("/{fileID}/direct", streamH.ServeDirectFile)
+
 				// Phase 3: Transcode session management
 				r.Post("/sessions", streamH.CreateSession)
 				r.With(auth.RequireAdmin).Get("/sessions", streamH.ListSessions)
@@ -740,6 +754,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// receivers. Bound to a single sessionID; rejected by
 				// RequireAuth so it cannot impersonate a regular session.
 				r.Post("/sessions/{sessionID}/cast-token", streamH.CreateCastToken)
+				// Direct-play twin: mint a cast token bound to a single FILE
+				// (no transcode session exists to bind to). Consumed by the
+				// AirPlay hand-off of direct-play titles; the returned URL
+				// targets the cast-capable /api/stream/direct/{fileID} route.
+				r.Post("/{fileID}/cast-token", streamH.CreateDirectCastToken)
 
 				// NOTE: HLS playlist + segment routes live in a sibling
 				// group (search for "RequireStreamAuth" below) so they can
@@ -753,6 +772,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Subtitles (includes Phase 3 burn-in support)
 				r.Get("/{fileID}/subtitles", streamH.GetSubtitles)
 				r.Get("/{fileID}/subtitles/{trackIdx}", streamH.ServeSubtitle)
+				r.Head("/{fileID}/subtitles/{trackIdx}", streamH.ServeSubtitle)
 			})
 
 			// Personalization endpoints (Phase 5).
@@ -1060,6 +1080,26 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// URLs: /api/stream/hls/{sessionID}/subs_N.m3u8 (playlist)
 			//        /api/stream/hls/{sessionID}/subs_N_NNNNN.vtt (segment)
 			r.Get("/api/stream/hls/{sessionID}/{subsFile}", streamH.ServeHLSSubtitleFile)
+
+			// HEAD support (2026-07 review): native HLS players and cast
+			// receivers may preflight playlists/segments with HEAD; chi
+			// routes methods independently, so GET-only registration made
+			// those preflights 404/405. Handlers are HEAD-safe —
+			// http.ServeFile answers HEAD without a body, and net/http
+			// discards manually-written bodies for HEAD responses.
+			r.Head("/api/stream/hls/{sessionID}/master.m3u8", streamH.ServeMasterPlaylist)
+			r.Head("/api/stream/hls/{sessionID}/{profile}/stream.m3u8", streamH.ServeVariantPlaylist)
+			r.Head("/api/stream/hls/{sessionID}/{profile}/{segment}", streamH.ServeHLSSegment)
+			r.Head("/api/stream/hls/{sessionID}/{subsFile}", streamH.ServeHLSSubtitleFile)
+
+			// Direct-play byte serving for receivers (AirPlay): accepts a
+			// regular token OR a cast token bound to this exact file via
+			// CreateDirectCastToken. A static "direct" path segment —
+			// sibling of "hls" — so it coexists cleanly with the mounted
+			// /api/stream subrouter above. The browser's own direct play
+			// keeps using /api/stream/{fileID}/direct with cookie auth.
+			r.Get("/api/stream/direct/{fileID}", streamH.ServeDirectCastFile)
+			r.Head("/api/stream/direct/{fileID}", streamH.ServeDirectCastFile)
 		})
 
 		// WebSocket (authenticated via query param for browser compat)

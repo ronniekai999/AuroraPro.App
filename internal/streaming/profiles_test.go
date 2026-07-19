@@ -268,3 +268,65 @@ func assertProfileAbsent(t *testing.T, names []string, name string) {
 		}
 	}
 }
+
+// 2026-07 review — crop-encoded sources a few pixels narrower than a tier's
+// nominal width (1912/1916-wide "1080p" releases) must keep that tier,
+// clamped to the source width, instead of silently topping out a rung lower.
+func TestResolveProfiles_NearWidthToleranceKeepsTier(t *testing.T) {
+	// 1912x1036 crop of a nominal 1080p encode.
+	profiles := ResolveProfiles(nil, 1912, 1036)
+	names := profileNames(profiles)
+	assertProfilePresent(t, names, "1080p")
+	assertProfileAbsent(t, names, "2160p")
+	for _, p := range profiles {
+		if p.Name == "1080p" {
+			if p.Width != 1912 {
+				t.Errorf("1080p tier width = %d, want clamped source width 1912 (never upscale)", p.Width)
+			}
+			if p.Height != AdjustProfileHeight(1912, 1912, 1036) {
+				t.Errorf("1080p tier height = %d, want aspect-adjusted for clamped width", p.Height)
+			}
+		}
+	}
+
+	// 3832-wide 4K crop keeps the 2160p tier the same way.
+	profiles4k := ResolveProfiles(nil, 3832, 2076)
+	names4k := profileNames(profiles4k)
+	assertProfilePresent(t, names4k, "2160p")
+	for _, p := range profiles4k {
+		if p.Name == "2160p" && p.Width != 3832 {
+			t.Errorf("2160p tier width = %d, want clamped source width 3832", p.Width)
+		}
+	}
+}
+
+func TestResolveProfiles_NearWidthToleranceBounds(t *testing.T) {
+	// Outside the 4% tolerance the tier must still be dropped: a 1280-wide
+	// source is nowhere near 1920, so the ladder tops out at 720p exactly as
+	// before.
+	names := profileNames(ResolveProfiles(nil, 1280, 720))
+	assertProfilePresent(t, names, "720p")
+	assertProfileAbsent(t, names, "1080p")
+
+	// Just past the boundary (1920/1.04 ≈ 1846): 1840 wide must NOT get the
+	// 1080p tier.
+	namesEdge := profileNames(ResolveProfiles(nil, 1840, 1000))
+	assertProfileAbsent(t, namesEdge, "1080p")
+
+	// Odd source width clamps to even (H.264 requires even dimensions).
+	for _, p := range ResolveProfiles(nil, 1913, 1037) {
+		if p.Name == "1080p" && p.Width%2 != 0 {
+			t.Errorf("clamped width %d must be even", p.Width)
+		}
+	}
+}
+
+// Exact-width sources must be untouched by the tolerance path (no clamp, no
+// behavior change from the historical ladder).
+func TestResolveProfiles_ExactWidthUnchanged(t *testing.T) {
+	for _, p := range ResolveProfiles(nil, 1920, 1080) {
+		if p.Name == "1080p" && p.Width != 1920 {
+			t.Errorf("exact-width source: 1080p tier width = %d, want 1920", p.Width)
+		}
+	}
+}

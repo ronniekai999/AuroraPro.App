@@ -47,6 +47,7 @@ cache:
 transcode:
   max_sessions: 0               # 0 = unlimited
   hw_accel: "auto"              # auto, nvenc, qsv, vaapi, amf, none
+  hw_decode: "auto"             # auto (probe GPU decode at startup), off (encode-side accel only)
   session_timeout_sec: 120
   segment_duration: 6
   profiles:

@@ -290,7 +290,7 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 		SourceHDR:        true,
 	}
 	// When needsVideoTranscode=true, Remux must be disabled and SourceVideoCodec cleared.
-	opts := castCloneOpts(src, true)
+	opts := castCloneOpts(src, true, false)
 	if opts.Remux {
 		t.Error("castCloneOpts(needsVideoTranscode=true): Remux should be false")
 	}
@@ -306,7 +306,7 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 		t.Error("castCloneOpts: SourceHDR not carried from source session")
 	}
 	// When needsVideoTranscode=false (audio-only clone), Remux is preserved.
-	opts2 := castCloneOpts(src, false)
+	opts2 := castCloneOpts(src, false, false)
 	if !opts2.Remux {
 		t.Error("castCloneOpts(needsVideoTranscode=false): Remux should mirror source")
 	}

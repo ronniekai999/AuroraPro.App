@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -48,6 +49,36 @@ func (sc *statusCapture) Write(b []byte) (int, error) {
 		// behavior as net/http's implicit-200 path.
 	}
 	return sc.ResponseWriter.Write(b)
+}
+
+// Unwrap exposes the wrapped ResponseWriter to http.ResponseController,
+// which walks Unwrap() to reach the real connection for SetWriteDeadline /
+// SetReadDeadline / EnableFullDuplex.
+//
+// 2026-07 streaming review — without this, every
+// `http.NewResponseController(w).SetWriteDeadline(...)` in the streaming
+// handlers returned http.ErrNotSupported (RequestLogger wraps ALL requests),
+// so the per-request deadline extensions written for long direct-play
+// transfers and slow subtitle extractions were silent no-ops and the global
+// 120s WriteTimeout killed those connections anyway.
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
+}
+
+// ReadFrom restores the io.ReaderFrom fast path (sendfile/splice) that
+// wrapping otherwise hides: http.ServeContent/ServeFile use io.Copy, which
+// only reaches sendfile when the ResponseWriter it was handed implements
+// io.ReaderFrom. Direct play serves multi-gigabyte files through this path,
+// so losing it meant every media byte was copied through userspace.
+func (sc *statusCapture) ReadFrom(src io.Reader) (int64, error) {
+	if !sc.wroteHeader {
+		// Mirror Write's implicit-200 bookkeeping.
+		sc.wroteHeader = true
+	}
+	if rf, ok := sc.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(sc.ResponseWriter, src)
 }
 
 // Hijack implements http.Hijacker, required for WebSocket upgrades.

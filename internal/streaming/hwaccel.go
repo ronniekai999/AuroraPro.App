@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,15 @@ type HWAccelInfo struct {
 	VideoEncoder string      `json:"video_encoder"` // e.g. "h264_nvenc"
 	DevicePath   string      `json:"device_path,omitempty"`
 	DisplayName  string      `json:"display_name"`
+
+	// Decode-side capabilities, probed at startup by ProbeHWDecode
+	// (hwdecode.go). Zero values = decode stays on the CPU (the pre-2026-07
+	// pipeline), which is also the `hw_decode: off` rollback state.
+	DecodeType   HWAccelType     `json:"decode_type,omitempty"`    // cuda (nvenc) or vaapi (vaapi/qsv/amf boxes)
+	DecodeCodecs map[string]bool `json:"decode_codecs,omitempty"`  // decodeKey* entries that passed the probe
+	FullGPU      bool            `json:"full_gpu,omitempty"`       // Tier-2 zero-copy cycle proven (8-bit NV12 pipeline)
+	FullGPU10    bool            `json:"full_gpu_10bit,omitempty"` // Tier-2 cycle proven for 10-bit P010 sources
+	TonemapVAAPI bool            `json:"tonemap_vaapi,omitempty"`  // GPU HDR→SDR chain proven (VAAPI only)
 }
 
 type hwProbe struct {
@@ -98,14 +108,12 @@ func tryProbe(p hwProbe) (HWAccelInfo, bool) {
 }
 
 // runTestEncode generates 1 frame of synthetic video and encodes it.
+// Thin wrapper over runProbeFFmpeg (hwdecode.go) so encode and decode
+// probes share one bounded runner and can't drift in hardening behavior.
 func runTestEncode(extraArgs []string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	args := append([]string{"-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=1"}, extraArgs...)
 	args = append(args, "-frames:v", "1", "-f", "null", "-")
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	return cmd.Run() == nil
+	return runProbeFFmpeg(args)
 }
 
 // ============================================================
@@ -225,7 +233,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int) []string {
 		// (aac_low/aac_main/…), and FFmpeg aborts at encoder init before
 		// producing a single segment. Review 2026-06 finding B1.
 		return []string{"-c:v", "h264_qsv", "-preset", "faster",
-			"-profile:v", profile, "-level", level, "-vf", scale}
+			"-profile:v", profile, "-level", strconv.Itoa(h264LevelIDC(height)), "-vf", scale}
 	case HWAccelVAAPI:
 		// VAAPI does not support explicit baseline profile constraint — leave as-is.
 		// The format=nv12 step here is the equivalent 8-bit downconvert.
@@ -256,18 +264,52 @@ func h264Profile(height int) string {
 	return "high"
 }
 
-// h264Level returns the appropriate H.264 level string for a given output height.
-// Must match hlsCodecString() in streaming.go so the CODECS attribute in the
-// master playlist agrees with the actual encoded level.
-func h264Level(height int) string {
+// h264LevelIDC returns the H.264 level_idc for a given output height — the
+// SINGLE source of truth from which every rendering derives: the dotted form
+// for libx264/NVENC/VAAPI/AMF (-level "4.0"), the numeric form for h264_qsv
+// (level_idc integer — QSV has no named dotted constants; "4.0" silently
+// evaluates to 4 there), and the two-hex-digit form for the master
+// playlist's CODECS attribute (hlsCodecString). One table means the encoder
+// constraint and the advertised capability can never drift apart.
+//
+// Level choice per tier (2026-07 review, Chromecast-verified):
+//
+//	480p and below → 3.1 (31): covers 854x480@60; ≤ every receiver ceiling.
+//	720p           → 3.2 (32): covers 1280x720@60; ≤ every receiver ceiling.
+//	1080p          → 4.0 (40): Chromecast gen-1/2 and Nest Hub enforce an
+//	                 H.264 High ceiling of Level 4.1 via canDisplayType, so
+//	                 the 1080p rung must declare ≤ 4.1 or those receivers
+//	                 filter it out and silently cap casts at 720p. 4.0 keeps
+//	                 the historical value. 1080p60 technically needs 4.2 —
+//	                 libx264 logs "MB rate > level limit" and proceeds, and
+//	                 no supported player enforces the stamped level for
+//	                 local playback — a per-client CODECS split needs frame-
+//	                 rate probing (scanner doesn't record fps yet).
+//	2160p          → 5.1 (51): Chromecast with Google TV's H.264 ceiling is
+//	                 exactly 5.1; declaring 5.2 loses its 4K rung. Same
+//	                 60fps caveat as 1080p.
+func h264LevelIDC(height int) int {
 	switch {
 	case height > 1080:
-		return "5.1" // 4K
+		return 51
 	case height > 720:
-		return "4.0" // 1080p
+		return 40
 	case height > 480:
-		return "3.1" // 720p
+		return 32
 	default:
-		return "3.0" // 480p and below
+		return 31
 	}
+}
+
+// h264Level renders the level in the dotted form ("4.0") accepted by
+// libx264 (string option) and by NVENC/VAAPI/AMF (named constants).
+func h264Level(height int) string {
+	idc := h264LevelIDC(height)
+	return fmt.Sprintf("%d.%d", idc/10, idc%10)
+}
+
+// h264LevelHex renders level_idc as the two hex digits used in the
+// avc1.PPCC LL CODECS attribute (e.g. 40 → "28").
+func h264LevelHex(height int) string {
+	return fmt.Sprintf("%02x", h264LevelIDC(height))
 }

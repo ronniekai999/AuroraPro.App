@@ -732,8 +732,109 @@ func (h *StreamHandler) ServeDirectFile(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid file id")
 		return
 	}
+	h.serveDirectFile(w, r, fileID, r.URL.Query().Get("type"))
+}
 
+// directCastSessionID is the sentinel SessionID value a cast-scoped token is
+// bound to for DIRECT-PLAY hand-offs (AirPlay of a file the browser plays
+// natively — no transcode session exists to bind to). The "direct:" prefix
+// can never collide with real transcode session IDs (32 hex chars), so a
+// direct cast token fails every HLS handler's SessionID match and grants
+// access to exactly one file through ServeDirectCastFile.
+func directCastSessionID(fileType string, fileID int64) string {
+	return "direct:" + fileType + ":" + strconv.FormatInt(fileID, 10)
+}
+
+// ServeDirectCastFile is the receiver-facing twin of ServeDirectFile,
+// registered under RequireStreamAuth (sibling group of the HLS routes) so it
+// accepts EITHER a regular access token/cookie OR a cast-scoped ?token=
+// (promoted to Authorization by the router's cast-promotion middleware —
+// AirPlay receivers cannot send the httpOnly auth cookie, which made every
+// AirPlayed direct-play title 401 before this route existed; #317's
+// direct-play twin, 2026-07 review).
+//
+// Cast tokens minted by CreateDirectCastToken are bound to exactly one
+// (fileType, fileID); any mismatch is a uniform 403 regardless of file
+// existence, mirroring requireSessionAccess's anti-probing posture.
+func (h *StreamHandler) ServeDirectCastFile(w http.ResponseWriter, r *http.Request) {
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid file id")
+		return
+	}
 	fileType := r.URL.Query().Get("type") // "media" or "episode"
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if claims.Scope == auth.ScopeCast {
+		if (fileType != "media" && fileType != "episode") ||
+			claims.SessionID != directCastSessionID(fileType, fileID) {
+			writeError(w, http.StatusForbidden, "cast token does not grant access to this file")
+			return
+		}
+	}
+	h.serveDirectFile(w, r, fileID, fileType)
+}
+
+// CreateDirectCastToken mints a cast-scoped token bound to a single FILE for
+// the direct-play AirPlay hand-off (POST /api/stream/{fileID}/cast-token
+// ?type=media|episode). The session-scoped equivalent is CreateCastToken;
+// this exists because a direct-play title has no transcode session to bind
+// to. Registered under RequireAuth — only a fully-authenticated browser
+// session can mint, and the token inherits the cast TTL + token-version
+// revocation exactly like session cast tokens.
+func (h *StreamHandler) CreateDirectCastToken(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid file id")
+		return
+	}
+	// The binding must be exact, so the type is required — no
+	// resolveFilePath-style media→episode fallback probing here.
+	fileType := r.URL.Query().Get("type")
+	if fileType != "media" && fileType != "episode" {
+		writeError(w, http.StatusBadRequest, "type must be media or episode")
+		return
+	}
+	// Existence check against the exact table the token will be bound to.
+	if fileType == "media" {
+		if _, ferr := h.queries.GetMediaFileByID(r.Context(), fileID); ferr != nil {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+	} else {
+		if _, ferr := h.queries.GetEpisodeFileByID(r.Context(), fileID); ferr != nil {
+			writeError(w, http.StatusNotFound, "file not found")
+			return
+		}
+	}
+
+	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
+		claims.UserID, claims.Username, claims.Role, claims.TokenVersion,
+		directCastSessionID(fileType, fileID),
+	)
+	if err != nil {
+		slog.Error("generate direct cast token", "file_id", fileID, "user_id", claims.UserID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to mint cast token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token":      tokenStr,
+		"expires_at": expiresAt.Unix(),
+		"url":        fmt.Sprintf("/api/stream/direct/%d?type=%s&token=%s", fileID, fileType, tokenStr),
+	})
+}
+
+// serveDirectFile is the shared byte-serving core behind ServeDirectFile
+// (RequireAuth: browser cookies/bearer) and ServeDirectCastFile
+// (RequireStreamAuth: also file-bound cast tokens).
+func (h *StreamHandler) serveDirectFile(w http.ResponseWriter, r *http.Request, fileID int64, fileType string) {
 	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
@@ -744,44 +845,48 @@ func (h *StreamHandler) ServeDirectFile(w http.ResponseWriter, r *http.Request) 
 	// (120s) is far too short for streaming a full movie. Each range-request chunk
 	// should reset the deadline, but http.ServeContent sends the entire range in
 	// one write, so we give it 4 hours — matching a typical feature-length film.
-	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Now().Add(4 * time.Hour))
-	}
+	extendWriteDeadline(w, r, 4*time.Hour, "direct file")
 
 	claims := auth.GetClaims(r.Context())
-	if h.activity != nil && claims != nil {
-		h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(filePath), "direct_play")
-	}
-	// Register / extend a direct-play session entry so the admin
-	// Active Streams view can show this stream alongside transcodes.
-	// Range requests during playback keep calling this handler →
-	// touching extends LastAccess. Idle gaps > TTL expire the entry.
-	//
-	// fileType is whitelisted to prevent a malicious client from
-	// iterating arbitrary `?type=` strings against the same fileID
-	// and creating unbounded registry entries before TTL sweeps them.
-	if h.directPlay != nil && claims != nil {
-		ft := fileType
-		if ft != "media" && ft != "episode" {
-			// Match the resolveFilePath fallback above: media first,
-			// episode second. We use the same disambiguator (which
-			// table the lookup succeeded against) by re-checking.
-			if _, err := h.queries.GetMediaFileByID(r.Context(), fileID); err == nil {
-				ft = "media"
-			} else {
-				ft = "episode"
-			}
+	// HEAD is a preflight, not playback: skip every side effect so probes
+	// don't create phantom "now streaming" entries or activity rows. One
+	// enclosing guard (2026-07 review) so future side effects can't forget
+	// their own clause.
+	if claims != nil && r.Method != http.MethodHead {
+		if h.activity != nil {
+			h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(filePath), "direct_play")
 		}
-		sid := h.directPlay.Touch(claims.UserID, claims.Username, ft, fileID, filepath.Base(filePath), "direct_play")
-		// Heartbeat the registry while the response is being written
-		// — http.ServeFile is synchronous and for single-range
-		// requests (one Range: bytes=0-) won't re-enter this handler
-		// for the duration of playback, so without a heartbeat the
-		// entry would expire mid-stream and admin UI would show no
-		// active stream.
-		stopHB := make(chan struct{})
-		go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, ft, fileID, filepath.Base(filePath), stopHB)
-		defer close(stopHB)
+		// Register / extend a direct-play session entry so the admin
+		// Active Streams view can show this stream alongside transcodes.
+		// Range requests during playback keep calling this handler →
+		// touching extends LastAccess. Idle gaps > TTL expire the entry.
+		//
+		// fileType is whitelisted to prevent a malicious client from
+		// iterating arbitrary `?type=` strings against the same fileID
+		// and creating unbounded registry entries before TTL sweeps them.
+		if h.directPlay != nil {
+			ft := fileType
+			if ft != "media" && ft != "episode" {
+				// Match the resolveFilePath fallback above: media first,
+				// episode second. We use the same disambiguator (which
+				// table the lookup succeeded against) by re-checking.
+				if _, err := h.queries.GetMediaFileByID(r.Context(), fileID); err == nil {
+					ft = "media"
+				} else {
+					ft = "episode"
+				}
+			}
+			sid := h.directPlay.Touch(claims.UserID, claims.Username, ft, fileID, filepath.Base(filePath), "direct_play")
+			// Heartbeat the registry while the response is being written
+			// — http.ServeFile is synchronous and for single-range
+			// requests (one Range: bytes=0-) won't re-enter this handler
+			// for the duration of playback, so without a heartbeat the
+			// entry would expire mid-stream and admin UI would show no
+			// active stream.
+			stopHB := make(chan struct{})
+			go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, ft, fileID, filepath.Base(filePath), stopHB)
+			defer close(stopHB)
+		}
 	}
 
 	streaming.ServeFile(w, r, filePath, h.mediaRoots(r.Context()))
@@ -834,25 +939,28 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 	// Check if direct play is possible
 	if streaming.CanDirectPlay(file.Container, file.VideoCodec, file.AudioCodec) {
 		// Extend write deadline for direct play (default 120s is too short for movies)
-		if rc := http.NewResponseController(w); rc != nil {
-			_ = rc.SetWriteDeadline(time.Now().Add(4 * time.Hour))
-		}
-		// Log direct play stream start
+		extendWriteDeadline(w, r, 4*time.Hour, "direct play media")
+		// HEAD preflights (see the HEAD route registrations) skip every side
+		// effect — no activity row, no registry entry, no now_playing
+		// broadcast. ONE enclosing guard so the next side effect added here
+		// can't forget its own clause and reintroduce phantom "now
+		// streaming" entries for player preflights.
 		claims := auth.GetClaims(r.Context())
-		if h.activity != nil && claims != nil {
-			h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
-		}
-		// Register / extend a direct-play session entry (see comment
-		// in ServeDirectFile for the rationale + heartbeat detail).
-		if h.directPlay != nil && claims != nil {
-			fileName := filepath.Base(file.Path)
-			sid := h.directPlay.Touch(claims.UserID, claims.Username, "media", fileID, fileName, "direct_play")
-			stopHB := make(chan struct{})
-			go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "media", fileID, fileName, stopHB)
-			defer close(stopHB)
-		}
-		// Broadcast now_playing for direct play
-		if claims != nil {
+		if claims != nil && r.Method != http.MethodHead {
+			// Log direct play stream start
+			if h.activity != nil {
+				h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
+			}
+			// Register / extend a direct-play session entry (see comment
+			// in ServeDirectFile for the rationale + heartbeat detail).
+			if h.directPlay != nil {
+				fileName := filepath.Base(file.Path)
+				sid := h.directPlay.Touch(claims.UserID, claims.Username, "media", fileID, fileName, "direct_play")
+				stopHB := make(chan struct{})
+				go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "media", fileID, fileName, stopHB)
+				defer close(stopHB)
+			}
+			// Broadcast now_playing for direct play
 			mediaTitle := filepath.Base(file.Path)
 			if item, err := h.queries.GetMediaItem(r.Context(), file.MediaItemID); err == nil && item != nil {
 				mediaTitle = item.Title
@@ -869,9 +977,27 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	// HEAD preflight: this route answers JSON (the HLS redirect shape) for
+	// non-direct-playable files. Report reachability without spawning a
+	// transcode session as a side effect.
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	startSec, _ := strconv.Atoi(r.URL.Query().Get("start"))
 	srcW, srcH := parseResolution(file.Resolution)
-	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
+	// Source facts from the library's own probe data gate hardware decode
+	// and HDR tonemapping in the session (2026-07 — this legacy path used
+	// to pass none of them, so hw decode never engaged and HDR sources
+	// transcoded washed-out here; CreateSession re-derives HDRTonemap from
+	// SourceHDR for full transcodes).
+	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH,
+		streaming.SessionOpts{
+			SourceVideoCodec:  file.VideoCodec,
+			SourceVideoPixFmt: file.VideoPixFmt,
+			SourceHDR:         streaming.IsHDRColorTransfer(file.ColorTransfer),
+		})
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
 		writeSessionCreateError(w, claims.UserID, err)
@@ -911,25 +1037,25 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 
 	if streaming.CanDirectPlay(file.Container, file.VideoCodec, file.AudioCodec) {
 		// Extend write deadline for direct play (default 120s is too short for episodes)
-		if rc := http.NewResponseController(w); rc != nil {
-			_ = rc.SetWriteDeadline(time.Now().Add(4 * time.Hour))
-		}
-		// Log direct play stream start
+		extendWriteDeadline(w, r, 4*time.Hour, "direct play episode")
+		// HEAD preflights skip every side effect — one enclosing guard, same
+		// rationale as StreamMediaFile.
 		claims := auth.GetClaims(r.Context())
-		if h.activity != nil && claims != nil {
-			h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
-		}
-		// Register / extend a direct-play session entry (see comment
-		// in ServeDirectFile for the rationale + heartbeat detail).
-		if h.directPlay != nil && claims != nil {
-			fileName := filepath.Base(file.Path)
-			sid := h.directPlay.Touch(claims.UserID, claims.Username, "episode", fileID, fileName, "direct_play")
-			stopHB := make(chan struct{})
-			go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "episode", fileID, fileName, stopHB)
-			defer close(stopHB)
-		}
-		// Broadcast now_playing for direct play
-		if claims != nil {
+		if claims != nil && r.Method != http.MethodHead {
+			// Log direct play stream start
+			if h.activity != nil {
+				h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
+			}
+			// Register / extend a direct-play session entry (see comment
+			// in ServeDirectFile for the rationale + heartbeat detail).
+			if h.directPlay != nil {
+				fileName := filepath.Base(file.Path)
+				sid := h.directPlay.Touch(claims.UserID, claims.Username, "episode", fileID, fileName, "direct_play")
+				stopHB := make(chan struct{})
+				go heartbeatRegistry(r.Context(), h.directPlay, sid, claims, "episode", fileID, fileName, stopHB)
+				defer close(stopHB)
+			}
+			// Broadcast now_playing for direct play
 			mediaTitle := filepath.Base(file.Path)
 			episodeInfo := ""
 			if showTitle, sNum, eNum, epTitle, err := h.queries.GetEpisodeNowPlayingInfo(r.Context(), file.EpisodeID); err == nil {
@@ -950,9 +1076,27 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	// HEAD preflight: this route answers JSON (the HLS redirect shape) for
+	// non-direct-playable files. Report reachability without spawning a
+	// transcode session as a side effect.
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	startSec, _ := strconv.Atoi(r.URL.Query().Get("start"))
 	srcW, srcH := parseResolution(file.Resolution)
-	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH)
+	// Source facts from the library's own probe data gate hardware decode
+	// and HDR tonemapping in the session (2026-07 — this legacy path used
+	// to pass none of them, so hw decode never engaged and HDR sources
+	// transcoded washed-out here; CreateSession re-derives HDRTonemap from
+	// SourceHDR for full transcodes).
+	session, err := h.transcode.GetOrCreateSession(file.Path, startSec, claims.UserID, claims.Username, srcW, srcH,
+		streaming.SessionOpts{
+			SourceVideoCodec:  file.VideoCodec,
+			SourceVideoPixFmt: file.VideoPixFmt,
+			SourceHDR:         streaming.IsHDRColorTransfer(file.ColorTransfer),
+		})
 	if err != nil {
 		slog.Error("transcode session failed", "file_id", fileID, "error", err)
 		writeSessionCreateError(w, claims.UserID, err)
@@ -1206,6 +1350,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var filePath, resolution, fileAudioCodec, fileColorTransfer string
+	var fileVideoCodec, fileVideoPixFmt string
 	var fileAudioTracks []models.AudioTrack
 	if req.FileType == "episode" {
 		f, err := h.queries.GetEpisodeFileByID(r.Context(), req.FileID)
@@ -1218,6 +1363,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		fileAudioCodec = f.AudioCodec
 		fileAudioTracks = f.AudioTracks
 		fileColorTransfer = f.ColorTransfer
+		fileVideoCodec = f.VideoCodec
+		fileVideoPixFmt = f.VideoPixFmt
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), req.FileID)
 		if err != nil {
@@ -1229,6 +1376,8 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		fileAudioCodec = f.AudioCodec
 		fileAudioTracks = f.AudioTracks
 		fileColorTransfer = f.ColorTransfer
+		fileVideoCodec = f.VideoCodec
+		fileVideoPixFmt = f.VideoPixFmt
 	}
 
 	srcW, srcH := parseResolution(resolution)
@@ -1270,7 +1419,16 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		// copy (TS-mode remux promotion, forceTranscode retries, cast clones).
 		SourceHDR:        streaming.IsHDRColorTransfer(fileColorTransfer),
 		SourceVideoCodec: req.VideoCodec,
-		StartSec:         req.StartSec,
+		// Same trust boundary for the video source facts the hardware-decode
+		// gate needs: bit depth always comes from the library's probe, and
+		// the DB's codec — when the scanner recorded one — overrides the
+		// client echo (it describes the exact file FFmpeg will read; a stale
+		// echo would mis-gate hw decode and remux BSF selection alike).
+		SourceVideoPixFmt: fileVideoPixFmt,
+		StartSec:          req.StartSec,
+	}
+	if fileVideoCodec != "" {
+		opts.SourceVideoCodec = fileVideoCodec
 	}
 
 	if req.Remux {
@@ -1823,6 +1981,17 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HEAD preflight (2026-07 review): answer with the content type only.
+	// The GET path may run a full FFmpeg extraction that reads through the
+	// entire container (minutes for large MKVs) while holding an
+	// ffprobeGate slot — burning all of that to produce a body net/http
+	// then discards would let a handful of preflights exhaust the gate.
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	// Issue #131 — resume offset for cue-time shift. Clamp to a sane
 	// range: negative = ignore (same as 0); insanely large = also
 	// ignore (defensive; would just produce an empty VTT). 24 hours
@@ -1971,10 +2140,7 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	// interleaved subtitle packets from multi-GB MKV files (FFmpeg must read
 	// through the entire container). Go 1.20+ ResponseController lets us
 	// extend the deadline per-handler without affecting other endpoints.
-	rc := http.NewResponseController(w)
-	if err := rc.SetWriteDeadline(time.Now().Add(10 * time.Minute)); err != nil {
-		slog.Debug("could not extend write deadline for subtitle extraction", "error", err)
-	}
+	extendWriteDeadline(w, r, 10*time.Minute, "subtitle extraction")
 
 	// Text-based subtitle — extract with FFmpeg. Bounded by ffprobeGate
 	// (audit MED) so concurrent extractions can't fork-bomb ffmpeg.

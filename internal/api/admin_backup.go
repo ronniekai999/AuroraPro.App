@@ -144,8 +144,12 @@ func (h *AdminHandler) Backup(w http.ResponseWriter, r *http.Request) {
 	// every row in a single transaction — roughly an order of magnitude
 	// slower per byte. The asymmetric deadlines reflect the asymmetric
 	// work.
+	// extendWriteDeadline logs when a wrapper regression makes the
+	// extension a no-op (the invisible-truncation class the 2026-07
+	// streaming review found); the read-deadline half stays hand-rolled
+	// (no shared helper for it yet).
+	extendWriteDeadline(w, r, 35*time.Minute, "admin backup")
 	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Now().Add(35 * time.Minute))
 		_ = rc.SetReadDeadline(time.Now().Add(35 * time.Minute))
 	}
 
@@ -391,8 +395,10 @@ func (h *AdminHandler) Restore(w http.ResponseWriter, r *http.Request) {
 	// restore itself succeeded. The 65min extension matches the
 	// handler's own 60min ctx timeout with a small buffer for the
 	// final writeJSON response.
+	// See the backup handler: write half via the logging helper, read half
+	// hand-rolled.
+	extendWriteDeadline(w, r, 65*time.Minute, "admin restore")
 	if rc := http.NewResponseController(w); rc != nil {
-		_ = rc.SetWriteDeadline(time.Now().Add(65 * time.Minute))
 		_ = rc.SetReadDeadline(time.Now().Add(65 * time.Minute))
 	}
 
