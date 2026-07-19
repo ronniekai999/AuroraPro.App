@@ -38,9 +38,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -58,27 +60,38 @@ const (
 
 // decodeKeyFor maps a source codec + pixel format to the DecodeCodecs
 // capability key, or "" when hardware decode must not be attempted for this
-// source (unknown codec, AV1 — not probed, or Hi10P H.264).
-func decodeKeyFor(codec, pixFmt string) string {
-	is10bit := strings.Contains(strings.ToLower(pixFmt), "10")
+// source (unknown codec, AV1 — not probed, Hi10P H.264, or 12-bit).
+// depthKnown reports whether the bit depth was actually recorded: rows
+// scanned before the video_pix_fmt column existed have pixFmt == "", and
+// for those the caller must stay on Tier 1 (whose in-process software
+// fallback tolerates a wrong guess) — Tier 2 would crash outright on a
+// 10-bit file decoded by 8-bit-only hardware.
+func decodeKeyFor(codec, pixFmt string) (key string, depthKnown bool) {
+	pf := strings.ToLower(pixFmt)
+	depthKnown = pf != ""
+	highBit := pixFmtIsHighBitDepth(pf)
+	is10bit := strings.Contains(pf, "10")
 	switch strings.ToLower(codec) {
 	case "h264", "avc", "avc1":
-		if is10bit {
-			return "" // Hi10P: no hardware decoder exists, anywhere
+		if highBit {
+			return "", depthKnown // Hi10P family: no hardware decoder exists, anywhere
 		}
-		return decodeKeyH264
+		return decodeKeyH264, depthKnown
 	case "hevc", "h265":
 		if is10bit {
-			return decodeKeyHEVC10
+			return decodeKeyHEVC10, depthKnown
 		}
-		return decodeKeyHEVC
+		if highBit {
+			return "", depthKnown // Main 12 / 9-bit: not probed, not assumed
+		}
+		return decodeKeyHEVC, depthKnown
 	case "vp9":
-		if is10bit {
-			return "" // VP9 profile-2 hardware decode is too patchy to assume
+		if highBit {
+			return "", depthKnown // VP9 profile-2 hardware decode is too patchy to assume
 		}
-		return decodeKeyVP9
+		return decodeKeyVP9, depthKnown
 	}
-	return ""
+	return "", depthKnown
 }
 
 // PlanDecode decides the decode pipeline for one transcode variant. Returns
@@ -94,12 +107,22 @@ func (h HWAccelInfo) PlanDecode(codec, pixFmt string, hdrTonemap, burnIn, forceS
 	if forceSoftware || h.DecodeType == "" || h.DecodeType == HWAccelNone || len(h.DecodeCodecs) == 0 {
 		return nil, false
 	}
-	key := decodeKeyFor(codec, pixFmt)
+	key, depthKnown := decodeKeyFor(codec, pixFmt)
 	if key == "" || !h.DecodeCodecs[key] {
 		return nil, false
 	}
-	// Tier 2: the whole filter chain must be expressible on the GPU.
-	if h.FullGPU && !burnIn {
+	// Tier 2: the whole filter chain must be expressible on the GPU, the
+	// bit depth must be KNOWN (an unrecorded pix_fmt could hide a 10-bit
+	// file whose decode init would kill the command — Tier 1's in-process
+	// fallback tolerates that, Tier 2 doesn't), and the tier-2 cycle for
+	// this bit depth must have been probed: FullGPU covers the 8-bit NV12
+	// pipeline, FullGPU10 the P010 pipeline (10-bit sources exercise a
+	// different scale conversion — e.g. scale_cuda P010→yuv420p).
+	tier2Proven := h.FullGPU
+	if key == decodeKeyHEVC10 {
+		tier2Proven = h.FullGPU10
+	}
+	if tier2Proven && depthKnown && !burnIn {
 		if !hdrTonemap {
 			return h.decodeInputArgs(true), true
 		}
@@ -241,8 +264,10 @@ func ProbeHWDecode(info *HWAccelInfo, workDir string) {
 	// Tier-1 decode probes. `-hwaccel X` alone exits 0 even when it falls
 	// back to software, so force the frames THROUGH the hardware path with
 	// -hwaccel_output_format + hwdownload: that pipeline only succeeds when
-	// the hardware decoder actually engaged.
-	base, outFmt := probeDecodeFlags(info)
+	// the hardware decoder actually engaged. The flags come from the SAME
+	// builder sessions use (decodeInputArgs) so probe and production can
+	// never validate different invocations.
+	base := info.decodeInputArgs(true) // -hwaccel X [-hwaccel_device dev] -hwaccel_output_format X
 	info.DecodeCodecs = map[string]bool{}
 	downloadFmt := map[string]string{
 		decodeKeyH264:   "nv12",
@@ -252,7 +277,6 @@ func ProbeHWDecode(info *HWAccelInfo, workDir string) {
 	}
 	for key, sample := range samples {
 		args := append(append([]string{"-hide_banner"}, base...),
-			"-hwaccel_output_format", outFmt,
 			"-i", sample,
 			"-vf", "hwdownload,format="+downloadFmt[key],
 			"-f", "null", "-")
@@ -268,52 +292,41 @@ func ProbeHWDecode(info *HWAccelInfo, workDir string) {
 		return
 	}
 
-	// Tier-2 cycle probe: the EXACT zero-copy shape startVariantImpl will
+	// Tier-2 cycle probes: the EXACT zero-copy shapes startVariantImpl will
 	// run (decode → GPU scale → GPU encode). Only NVENC/VAAPI encoders can
-	// consume GPU frames; QSV/AMF stay Tier 1.
-	if (info.Type == HWAccelNVENC || info.Type == HWAccelVAAPI) && info.DecodeCodecs[decodeKeyH264] {
-		enc := info.FullGPUEncoderArgs(96, 54, false)
-		args := append(append([]string{"-hide_banner"}, base...),
-			"-hwaccel_output_format", outFmt,
-			"-i", samples[decodeKeyH264])
-		args = append(args, enc...)
+	// consume GPU frames; QSV/AMF stay Tier 1. The 8-bit (NV12) and 10-bit
+	// (P010) pipelines exercise different scale conversions, so each gets
+	// its own probe and its own capability bit.
+	tier2Cycle := func(sample string, hdr bool) bool {
+		args := append(append([]string{"-hide_banner"}, base...), "-i", sample)
+		args = append(args, info.FullGPUEncoderArgs(96, 54, hdr)...)
 		args = append(args, "-frames:v", "2", "-f", "null", "-")
-		info.FullGPU = runProbeFFmpeg(args)
+		return runProbeFFmpeg(args)
+	}
+	if (info.Type == HWAccelNVENC || info.Type == HWAccelVAAPI) && info.DecodeCodecs[decodeKeyH264] {
+		info.FullGPU = tier2Cycle(samples[decodeKeyH264], false)
+	}
+	if info.FullGPU && info.DecodeCodecs[decodeKeyHEVC10] {
+		if sample, ok := samples[decodeKeyHEVC10]; ok {
+			info.FullGPU10 = tier2Cycle(sample, false)
+		}
 	}
 
 	// GPU tonemap probe (VAAPI only): decode the HDR sample and run the
 	// exact tonemap_vaapi chain. Requires the 10-bit decode to have passed.
 	if info.Type == HWAccelVAAPI && info.FullGPU && info.DecodeCodecs[decodeKeyHEVC10] {
 		if sample, ok := samples[decodeKeyHEVC10]; ok {
-			enc := info.FullGPUEncoderArgs(96, 54, true)
-			args := append(append([]string{"-hide_banner"}, base...),
-				"-hwaccel_output_format", outFmt,
-				"-i", sample)
-			args = append(args, enc...)
-			args = append(args, "-frames:v", "2", "-f", "null", "-")
-			info.TonemapVAAPI = runProbeFFmpeg(args)
+			info.TonemapVAAPI = tier2Cycle(sample, true)
 		}
 	}
 
 	slog.Info("hardware decode probed",
 		"decode_backend", string(info.DecodeType),
-		"codecs", decodeCodecList(info.DecodeCodecs),
+		"codecs", slices.Sorted(maps.Keys(info.DecodeCodecs)),
 		"zero_copy", info.FullGPU,
+		"zero_copy_10bit", info.FullGPU10,
 		"gpu_tonemap", info.TonemapVAAPI,
 	)
-}
-
-// probeDecodeFlags returns the input flags and the GPU frame format name
-// used by the probe pipelines for info's decode backend.
-func probeDecodeFlags(info *HWAccelInfo) ([]string, string) {
-	if info.DecodeType == HWAccelNVENC {
-		return []string{"-hwaccel", "cuda"}, "cuda"
-	}
-	dev := info.DevicePath
-	if dev == "" {
-		dev = findDRIDevice()
-	}
-	return []string{"-hwaccel", "vaapi", "-hwaccel_device", dev}, "vaapi"
 }
 
 // runProbeFFmpeg runs one bounded probe invocation; any non-zero exit or
@@ -324,12 +337,4 @@ func runProbeFFmpeg(args []string) bool {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	return cmd.Run() == nil
-}
-
-func decodeCodecList(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }

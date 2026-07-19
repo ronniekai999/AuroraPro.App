@@ -17,7 +17,7 @@ func nvencFull() HWAccelInfo {
 		DecodeCodecs: map[string]bool{
 			decodeKeyH264: true, decodeKeyHEVC: true, decodeKeyHEVC10: true, decodeKeyVP9: true,
 		},
-		FullGPU: true,
+		FullGPU: true, FullGPU10: true,
 	}
 }
 
@@ -28,29 +28,39 @@ func vaapiFull() HWAccelInfo {
 		DecodeCodecs: map[string]bool{
 			decodeKeyH264: true, decodeKeyHEVC: true, decodeKeyHEVC10: true,
 		},
-		FullGPU: true, TonemapVAAPI: true,
+		FullGPU: true, FullGPU10: true, TonemapVAAPI: true,
 	}
 }
 
 func TestDecodeKeyFor(t *testing.T) {
 	tests := []struct {
 		codec, pixFmt, want string
+		wantDepthKnown      bool
 	}{
-		{"h264", "yuv420p", decodeKeyH264},
-		{"avc1", "yuv420p", decodeKeyH264},
-		{"h264", "yuv420p10le", ""}, // Hi10P: no hardware decoder exists
-		{"hevc", "yuv420p", decodeKeyHEVC},
-		{"h265", "yuv420p10le", decodeKeyHEVC10},
-		{"hevc", "yuv422p10le", decodeKeyHEVC10},
-		{"vp9", "yuv420p", decodeKeyVP9},
-		{"vp9", "yuv420p10le", ""}, // profile-2 support too patchy
-		{"av1", "yuv420p", ""},     // not probed → never hw-decoded
-		{"mpeg2video", "yuv420p", ""},
-		{"", "", ""},
+		{"h264", "yuv420p", decodeKeyH264, true},
+		{"avc1", "yuv420p", decodeKeyH264, true},
+		{"h264", "yuv420p10le", "", true}, // Hi10P: no hardware decoder exists
+		{"h264", "yuv420p12le", "", true}, // 12-bit Hi10P family likewise
+		{"hevc", "yuv420p", decodeKeyHEVC, true},
+		{"h265", "yuv420p10le", decodeKeyHEVC10, true},
+		{"hevc", "yuv422p10le", decodeKeyHEVC10, true},
+		{"hevc", "yuv420p12le", "", true}, // Main 12: not probed, not assumed
+		{"vp9", "yuv420p", decodeKeyVP9, true},
+		{"vp9", "yuv420p10le", "", true}, // profile-2 support too patchy
+		{"av1", "yuv420p", "", true},     // not probed → never hw-decoded
+		{"mpeg2video", "yuv420p", "", true},
+		// Unknown bit depth (pre-migration library rows): key still maps —
+		// Tier 1's in-process fallback is safe — but depthKnown=false keeps
+		// Tier 2 off.
+		{"h264", "", decodeKeyH264, false},
+		{"hevc", "", decodeKeyHEVC, false},
+		{"", "", "", false},
 	}
 	for _, tt := range tests {
-		if got := decodeKeyFor(tt.codec, tt.pixFmt); got != tt.want {
-			t.Errorf("decodeKeyFor(%q, %q) = %q, want %q", tt.codec, tt.pixFmt, got, tt.want)
+		got, depthKnown := decodeKeyFor(tt.codec, tt.pixFmt)
+		if got != tt.want || depthKnown != tt.wantDepthKnown {
+			t.Errorf("decodeKeyFor(%q, %q) = (%q, %v), want (%q, %v)",
+				tt.codec, tt.pixFmt, got, depthKnown, tt.want, tt.wantDepthKnown)
 		}
 	}
 }
@@ -140,14 +150,35 @@ func TestPlanDecode_Tiers(t *testing.T) {
 			wantTier2: false,
 		},
 		{
-			name: "no probe results → software",
-			hw:   HWAccelInfo{Type: HWAccelNVENC, VideoEncoder: "h264_nvenc"},
+			// Unknown bit depth (pre-migration library rows): Tier 1 is safe
+			// (in-process fallback), Tier 2 must stay off — a hidden 10-bit
+			// file would kill the zero-copy command at decode init.
+			name: "nvenc unknown pix_fmt → tier1 only",
+			hw:   nv, codec: "hevc", pixFmt: "",
+			wantArgs:  []string{"-hwaccel", "cuda"},
+			wantTier2: false,
+		},
+		{
+			// 10-bit tier2 requires its own probed capability (P010 pipeline
+			// differs from the 8-bit NV12 one).
+			name: "nvenc hevc10 without FullGPU10 → tier1",
+			hw: func() HWAccelInfo {
+				h := nvencFull()
+				h.FullGPU10 = false
+				return h
+			}(), codec: "hevc", pixFmt: "yuv420p10le",
+			wantArgs:  []string{"-hwaccel", "cuda"},
+			wantTier2: false,
+		},
+		{
+			name:  "no probe results → software",
+			hw:    HWAccelInfo{Type: HWAccelNVENC, VideoEncoder: "h264_nvenc"},
 			codec: "h264", pixFmt: "yuv420p",
 			wantArgs: nil, wantTier2: false,
 		},
 		{
-			name: "software encoder box → software decode",
-			hw:   HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"},
+			name:  "software encoder box → software decode",
+			hw:    HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"},
 			codec: "h264", pixFmt: "yuv420p",
 			wantArgs: nil, wantTier2: false,
 		},
@@ -199,7 +230,7 @@ func TestFullGPUEncoderArgs(t *testing.T) {
 	va := vaapiFull()
 	sdr := va.FullGPUEncoderArgs(1920, 1080, false)
 	assertContains(t, sdr, "-c:v", "h264_vaapi")
-	assertContains(t, sdr, "-level", "4.2")
+	assertContains(t, sdr, "-level", "4.0")
 	assertContainsVF(t, sdr, "scale_vaapi=w=1920:h=-2:format=nv12")
 
 	hdr := va.FullGPUEncoderArgs(1920, 1080, true)
@@ -221,6 +252,17 @@ func TestFullGPUEncoderArgs(t *testing.T) {
 func TestProbeHWDecode_NoHardwareDegradesToOff(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not in PATH")
+	}
+	// The assertion below is "hardware is ABSENT, so probes must fail" — on
+	// a machine that actually has GPU decode (nvidia driver or a DRI render
+	// node), the probes legitimately succeed and this test would wrongly
+	// fail. CLAUDE.md requires `go test ./...` green everywhere, including
+	// GPU deploy boxes, so skip when any decode hardware might exist.
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		t.Skip("NVIDIA driver present; probe outcome is hardware-dependent")
+	}
+	if driDeviceExists() {
+		t.Skip("DRI render node present; probe outcome is hardware-dependent")
 	}
 	// Pretend an NVENC encoder was detected; on this GPU-less machine the
 	// cuda hwaccel probes must all fail.

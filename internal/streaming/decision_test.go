@@ -788,15 +788,15 @@ func TestHlsCodecString(t *testing.T) {
 		audio  string
 		want   string
 	}{
-		// Levels are one notch above each tier's 30fps minimum so 50/60fps
-		// sources stay conformant (frame rate is not probed) — must mirror
-		// h264Level in hwaccel.go.
+		// Values derive from h264LevelIDC (hwaccel.go): 60fps headroom on
+		// the low rungs; 1080p/2160p pinned to 4.0/5.1 by Chromecast
+		// receiver ceilings (gen-1/2 filter out >4.1, Google TV >5.1).
 		{360, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
 		{480, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
 		{720, "aac", "avc1.640020,mp4a.40.2"},  // High, Level 3.2
-		{1080, "aac", "avc1.64002a,mp4a.40.2"}, // High, Level 4.2
-		{2160, "aac", "avc1.640034,mp4a.40.2"}, // High, Level 5.2 (4K)
-		{1080, "ac3", "avc1.64002a,ac-3"},      // High + AC-3 surround
+		{1080, "aac", "avc1.640028,mp4a.40.2"}, // High, Level 4.0
+		{2160, "aac", "avc1.640033,mp4a.40.2"}, // High, Level 5.1 (4K)
+		{1080, "ac3", "avc1.640028,ac-3"},      // High + AC-3 surround
 		{720, "", "avc1.640020,mp4a.40.2"},     // empty audio defaults to AAC
 	}
 	for _, tt := range tests {
@@ -867,7 +867,7 @@ func TestCastCloneOpts(t *testing.T) {
 		SubtitleTracks:   []HLSSubtitleTrack{{AbsoluteIndex: 3, Language: "eng"}},
 		BurnSubIndex:     -1,
 	}
-	opts := castCloneOpts(src, false)
+	opts := castCloneOpts(src, false, false)
 
 	// Audio is forced to a stereo AAC re-encode — never AC-3, never copy.
 	if opts.AudioCodecOut != "aac" {
@@ -900,7 +900,7 @@ func TestCastCloneOpts(t *testing.T) {
 	src.BurnSubIndex = 4
 	src.BurnSubRelIndex = 1
 	src.BurnSubBitmap = true
-	if bo := castCloneOpts(src, false).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
+	if bo := castCloneOpts(src, false, false).BurnIn; bo == nil || bo.SubIndex != 4 || bo.RelIndex != 1 || !bo.IsBitmap {
 		t.Errorf("BurnIn not preserved: %+v", bo)
 	}
 }
@@ -961,9 +961,16 @@ func TestDecidePlayback_HEVC10BitRequiresMain10Cap(t *testing.T) {
 }
 
 func TestParseClientCaps_HEVCMain10(t *testing.T) {
+	// hevc_main10 is a dedicated ClientCaps field, NOT a VideoCodecs entry —
+	// same design as EAC3MSE: it is a profile capability, not an ffprobe
+	// codec name, and the VideoCodecs namespace is matched against ffprobe
+	// names.
 	caps := ParseClientCaps("hevc,hevc_main10")
-	if !caps.VideoCodecs["hevc"] || !caps.VideoCodecs["hevc_main10"] {
-		t.Errorf("hevc_main10 cap not parsed: %v", caps.VideoCodecs)
+	if !caps.VideoCodecs["hevc"] || !caps.HEVCMain10 {
+		t.Errorf("hevc_main10 cap not parsed: HEVCMain10=%v videoCodecs=%v", caps.HEVCMain10, caps.VideoCodecs)
+	}
+	if caps.VideoCodecs["hevc_main10"] {
+		t.Error("hevc_main10 must not leak into the VideoCodecs codec namespace")
 	}
 	// The main10 key alone must NOT imply plain hevc support.
 	solo := ParseClientCaps("hevc_main10")

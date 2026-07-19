@@ -4993,11 +4993,20 @@ export default function App() {
           } : prev)
         }}
         onSendReaction={party.state.code && party.state.roomConnected ? party.sendReaction : undefined}
-        onFallbackToTranscode={() => {
+        onFallbackToTranscode={(resumeAtMs) => {
           // Re-emit current target with forceTranscode=true. The
           // player's mediaErrorFallbackTriedRef prevents an infinite
-          // loop if transcode also fails.
-          setPlayerTarget(prev => prev ? { ...prev, forceTranscode: true } : prev)
+          // loop if transcode also fails. resumeAtMs (2026-07 review)
+          // carries the CURRENT playback position into the retry — a
+          // mid-movie fallback used to restart at the target's original
+          // resume point, losing up to hours of position.
+          setPlayerTarget(prev => prev ? {
+            ...prev,
+            forceTranscode: true,
+            resumePositionMs: resumeAtMs !== undefined && resumeAtMs > 0
+              ? Math.floor(resumeAtMs)
+              : prev.resumePositionMs,
+          } : prev)
         }}
         onSeekRebuild={(newStartSec) => {
           // 2026-05-27 — Forward-seek past buffer. Same teardown +

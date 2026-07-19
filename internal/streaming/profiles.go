@@ -94,10 +94,10 @@ func ResolveProfiles(enabled []string, sourceWidth, sourceHeight int) []QualityP
 			}
 			// Clamp to source width, rounded down to even (required by
 			// H.264 encoders, same constraint as AdjustProfileHeight).
+			// No lower-bound guard needed: this branch is only reachable
+			// when sourceWidth ≥ p.Width/1.04, and the narrowest ladder
+			// width is 640.
 			p.Width = sourceWidth &^ 1
-			if p.Width < 2 {
-				continue
-			}
 		}
 		// Adjust height to preserve source aspect ratio.
 		p.Height = AdjustProfileHeight(p.Width, sourceWidth, sourceHeight)

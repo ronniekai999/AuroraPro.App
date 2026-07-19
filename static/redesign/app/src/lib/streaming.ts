@@ -350,11 +350,14 @@ export function clientCaps(): string {
   if (supports('audio/mp4; codecs="ec-3"', 'audio/mp4; codecs="ec-3"', el)) caps.push('eac3')
   if (supportsMSE('audio/mp4; codecs="ec-3"')) caps.push('eac3_mse')
   if (supports('audio/webm; codecs="opus"', 'audio/ogg; codecs="opus"', el)) caps.push('opus')
-  // MSE arg is the fMP4 form, native fallback the Ogg form — these were
-  // swapped ('audio/ogg' is never MSE-supported, so the MSE leg was dead
-  // code and the cap rode entirely on canPlayType). Matches the opus line's
-  // MSE-container/native-container pattern above.
-  if (supports('audio/mp4; codecs="flac"', 'audio/ogg; codecs="flac"', el)) caps.push('flac')
+  // FLAC: probe the fMP4 form on BOTH legs. The MSE arg was historically
+  // 'audio/ogg' (never MSE-supported — dead code); the native leg must stay
+  // 'audio/mp4' because that is the container Aurora direct-plays FLAC in,
+  // and Safari/iOS answer canPlayType('audio/mp4; codecs="flac"') even
+  // where MediaSource is absent — swapping the native leg to Ogg (which
+  // Safari never supports) would silently force-transcode files iPhones
+  // decode natively. (2026-07 review, finder B.)
+  if (supports('audio/mp4; codecs="flac"', 'audio/mp4; codecs="flac"', el)) caps.push('flac')
   if (supports('audio/webm; codecs="vorbis"', 'audio/ogg; codecs="vorbis"', el)) caps.push('vorbis')
 
   // HLS delivery. The server restricts HLS audio handling when hls_js is set
