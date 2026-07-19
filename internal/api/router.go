@@ -789,12 +789,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// Rail (pure vector retrieval, no LLM) returns in <100ms so the
 			// wider budget has no perf impact for that endpoint.
 			r.Route("/api/me", func(r chi.Router) {
-				// 90s covers Discover's worst case: discoverBudget=60s for
-				// the LLM call + ~5s for pre-work (BuildProfileVector,
-				// NearestUnwatched(50), RecentTasteAnchors, annotateGenres)
-				// + ~5s for post-work (parse, resolvePick loop,
-				// annotateDiscoverItems with 2 batched queries) ≈ 70s,
-				// leaving 20s of jitter margin.
+				// 90s covers the slowest path that still blocks a request:
+				// Hero's synchronous flight wait — rerankBudget (30s) +
+				// heroRerankBudget (45s) + vector/anchor pre-work and
+				// annotation (~5s) ≈ 80s, leaving ~10s of jitter margin.
+				// Discover no longer rides this timeout: a cold cache
+				// returns "building" immediately and the build runs
+				// detached under buildFlightBudget (90s).
 				//
 				// MUST be strictly greater than the internal LLM ctx
 				// timeout — chi cancels the request from the OUTSIDE while
@@ -802,8 +803,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// trip. Hero faced the exact same regression last round
 				// (15s route vs 30s LLM); same fix here, different scale.
 				//
-				// Hero (30s LLM) and Rail (sub-100ms) both fit cleanly
-				// under the wider bound.
+				// Rail and anchor-rails (pure vector, sub-300ms) sit
+				// comfortably under the wider bound.
 				r.Use(middleware.Timeout(90 * time.Second))
 				r.Get("/hero", heroH.Get)
 				r.Get("/recommendations", heroH.Rail)
