@@ -26,7 +26,20 @@ const (
 	rerankHeroRecall     = 40 // hero recall pool when reranking (narrowed to candidatePool)
 	rerankDiscoverRecall = 50 // discover recall pool when reranking (narrowed to discoverPoolSize)
 	rerankAnchorCount    = 12 // recent anchors summarized into the reranker's taste query
-	rerankBudget         = 8 * time.Second
+	// rerankBudget bounds the single listwise scoring call. Originally 8s —
+	// tuned when the reranker ran on Cloud (gpt-oss) or a small local model.
+	// Production logs 2026-07-19 (first boot on the qwen3:4b-instruct
+	// defaults, GPU-less box) showed both the 40- and 50-candidate calls
+	// hitting the 8s deadline: prompt-eval alone on a ~2K-token candidate
+	// list plus a cold model load doesn't fit. 16s gives a warm 4B local
+	// model realistic room while keeping this a bounded PRE-stage — the
+	// budget math around it still holds: discover fits rerank (16s) +
+	// curate (≤~40s) inside discoverBudget (60s), hero fits 16s + 45s
+	// inside buildFlightBudget (90s), and every per-call ctx stays under
+	// the client HTTPTimeout (70s) invariant. Timeout fallback is unchanged
+	// and benign (vector order feeds the hero/discover curation, which is
+	// the real quality gate).
+	rerankBudget = 16 * time.Second
 )
 
 // rerankEnabled reports whether a reranker model is configured.
