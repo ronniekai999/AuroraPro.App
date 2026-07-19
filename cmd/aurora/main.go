@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -304,6 +305,7 @@ func main() {
 			ChatModel:   cfg.LLM.ChatModel,
 			Dims:        cfg.LLM.EmbedDims,
 			HTTPTimeout: cfg.LLM.HTTPTimeout,
+			NumCtx:      cfg.LLM.NumCtx,
 		}
 		applyLLMOverrides(ctx, queries, &llmCfg)
 		llmClient = llm.NewClient(llmCfg)
@@ -1170,11 +1172,26 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 		*dst = v // includes intentional empty-string clears
 	}
 
-	// Provider is informational only — local vs cloud is implied by whether
-	// the operator filled in OllamaURL + APIKey. We still read it so future
-	// validation can warn on mismatched combinations.
+	// Provider is MECHANICAL as of Phase E4 (it used to be a log-only label,
+	// which meant flipping it in the admin UI silently did nothing):
+	//
+	//   "local"        → the API key is dropped, so no bearer token can leak
+	//                    to a LAN box. UpdateLLMSettings clears the stored
+	//                    key on save; this handles legacy rows saved before
+	//                    that enforcement existed.
+	//   "ollama_cloud" → embeddings must stay on the local box (our embed
+	//                    models aren't Cloud-hosted), so an empty EmbedURL
+	//                    falls back to the env/default local URL captured
+	//                    BEFORE the DB overrides rewrite BaseURL to the
+	//                    Cloud endpoint. Incoherent combos (no API key,
+	//                    non-https chat URL) get loud warnings — the save
+	//                    path rejects them outright; boot only warns so a
+	//                    legacy misconfig can't brick startup.
+	//   ""             → unset (form never saved / pre-provider install):
+	//                    no inference, behave exactly as before.
 	var provider string
 	get("llm_provider", &provider)
+	localBaseURL := cfg.BaseURL // env/default local URL, pre-override
 
 	get("llm_ollama_url", &cfg.BaseURL)
 	get("llm_embed_url", &cfg.EmbedURL)
@@ -1197,6 +1214,27 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 
 	if v, ok, _ := queries.GetSettingExists(ctx, "llm_debug_log"); ok {
 		cfg.Debug = v == "true"
+	}
+
+	switch provider {
+	case "local":
+		if cfg.APIKey != "" {
+			slog.Warn("llm_provider=local with a stored API key — dropping the key so no bearer is sent to the local box (re-save the LLM settings to clear it permanently)")
+			cfg.APIKey = ""
+		}
+	case "ollama_cloud":
+		if cfg.EmbedURL == "" {
+			// Cloud chat, local embeddings: without this, /api/embed calls
+			// would hit ollama.com, where our embedding models don't run.
+			slog.Info("llm_provider=ollama_cloud with no embed URL — routing embeddings to the local default", "embed_url", localBaseURL)
+			cfg.EmbedURL = localBaseURL
+		}
+		if cfg.APIKey == "" {
+			slog.Warn("llm_provider=ollama_cloud but no API key is stored — Cloud chat calls will be rejected; set the key in Admin → LLM")
+		}
+		if !strings.HasPrefix(cfg.BaseURL, "https://") {
+			slog.Warn("llm_provider=ollama_cloud but the chat URL is not an https endpoint — chat will hit that URL, not Ollama Cloud", "url", cfg.BaseURL)
+		}
 	}
 
 	if provider != "" {

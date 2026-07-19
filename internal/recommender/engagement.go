@@ -70,7 +70,11 @@ func (h *Hero) EngagementRailsFor(ctx context.Context, profileID int64) ([]Engag
 	}
 	key := strconv.FormatInt(profileID, 10)
 	startEpoch := h.epochFor(profileID).Load()
-	result, err, _ := h.engagementGroup.Do(key, func() (any, error) {
+	// DoChan (mirrors PoolFor/DiscoverFor) so a waiter whose own request is
+	// cancelled stops waiting immediately instead of blocking on the shared
+	// flight; the build itself was already detached below.
+	ch := h.engagementGroup.DoChan(key, func() (_ any, err error) {
+		defer flightRecover(&err)
 		if cached, ok := h.engagementCache.Load(profileID); ok {
 			e := cached.(engagementCacheEntry)
 			if time.Since(e.builtAt) < engagementCacheTTL {
@@ -88,10 +92,15 @@ func (h *Hero) EngagementRailsFor(ctx context.Context, profileID int64) ([]Engag
 		}
 		return rails, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]EngagementRail), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return result.([]EngagementRail), nil
 }
 
 // buildEngagementRails runs the four signal queries, de-dups the unwatched rails,

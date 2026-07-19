@@ -81,6 +81,18 @@ const (
 	// fetch + annotation around this LLM call.
 	heroRerankBudget = 45 * time.Second
 
+	// buildFlightBudget caps a detached hero/discover singleflight build.
+	// Since the DoChan conversion, the flight runs on a context detached
+	// from the leader's request (a leader navigating away must neither
+	// abort the shared build nor waste LLM spend already committed — its
+	// result lands in the 24h cache either way), so this ceiling replaces
+	// the /api/me route timeout (90s) the build used to inherit; matching
+	// it keeps worst-case wall-clock identical to the pre-detach behavior.
+	// Inner LLM calls carry their own tighter budgets (heroRerankBudget,
+	// rerankBudget, discoverBudget), so the client HTTPTimeout invariant
+	// (70s > longest per-call ctx) is untouched by this outer bound.
+	buildFlightBudget = 90 * time.Second
+
 	// mmrLambda is the relevance-vs-diversity knob for the rail.
 	//   1.0 = pure relevance (no diversification, same as plain kNN order)
 	//   0.0 = pure diversity (most distant items win)
@@ -302,7 +314,14 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 	// have advanced and we'll skip the Store — preventing a stale build
 	// from resurrecting cache contents the user just asked to refresh.
 	startEpoch := h.epochFor(profileID).Load()
-	result, err, _ := h.buildGroup.Do(key, func() (any, error) {
+	// DoChan (not Do) so each waiter can stop waiting the moment ITS OWN
+	// request is cancelled. Do had no per-waiter escape hatch: a user who
+	// navigated away still had their handler goroutine pinned for up to
+	// the full build. The flight itself runs on a DETACHED context (see
+	// buildFlightBudget) so one waiter bailing — including the leader —
+	// never aborts the shared build or wastes committed LLM spend.
+	ch := h.buildGroup.DoChan(key, func() (_ any, err error) {
+		defer flightRecover(&err)
 		// Inside the singleflight, re-check the cache: the first caller
 		// may have just populated it and a second waiter shouldn't re-build.
 		if cached, ok := h.cache.Load(profileID); ok {
@@ -315,7 +334,9 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 				return e.picks, nil
 			}
 		}
-		picks, quality, err := h.build(ctx, profileID)
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), buildFlightBudget)
+		defer cancel()
+		picks, quality, err := h.build(bctx, profileID)
 		if err != nil {
 			return nil, err
 		}
@@ -332,14 +353,21 @@ func (h *Hero) PoolFor(ctx context.Context, profileID int64) ([]HeroPick, error)
 			})
 			// Remember what we just showed so the next rebuild rotates (B2).
 			// Only here (epoch-guarded Store) so cache hits don't churn it.
-			h.recordSurfaced(ctx, profileID, surfaceHero, pickItemIDs(picks))
+			// Uses the detached bctx: the surfaced-memory write must not be
+			// dropped just because the leader's request ended first.
+			h.recordSurfaced(bctx, profileID, surfaceHero, pickItemIDs(picks))
 		}
 		return picks, nil
 	})
-	if err != nil {
-		return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.([]HeroPick), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return result.([]HeroPick), nil
 }
 
 // RailFor returns a longer list of personalized picks suitable for a
@@ -1105,6 +1133,18 @@ func buildRerankPrompt(anchors []db.TasteAnchor, candidates []*models.MediaItem,
 	return b.String()
 }
 
+// flightRecover converts a panic inside a singleflight DoChan closure into a
+// returned error. Rationale: with Group.Do a panic re-panics on every waiting
+// caller's stack, where chi's Recoverer turns it into a 500; with DoChan the
+// closure runs on an internal goroutine with no waiter stack, so an
+// unrecovered panic would crash the whole process. Every DoChan closure in
+// this package must `defer flightRecover(&err)` first thing.
+func flightRecover(err *error) {
+	if r := recover(); r != nil {
+		*err = fmt.Errorf("recommender build panic: %v", r)
+	}
+}
+
 // Data-block delimiters for the recommender's LLM prompts (hero rerank +
 // discover curate). Untrusted, operator/user-controlled metadata (titles,
 // overviews, genres) is wrapped between these fences with an explicit
@@ -1213,6 +1253,18 @@ func mmrDiversify(cands []*db.RailCandidate, queryVec []float32, lambda float64,
 	if len(cands) <= k {
 		return cands
 	}
+
+	// Normalize the query vector before scoring. RailFor passes the raw
+	// BuildProfileVector centroid — an AVG() of unit vectors, which is NOT
+	// unit-length (‖avg‖ < 1, and the more diverse the profile, the shorter
+	// it gets). cosineSimilarity is a bare dot product, so an un-normalized
+	// query compresses the relevance term while maxSim (unit·unit) stays a
+	// true cosine — the two MMR terms end up on different scales and λ
+	// over-weights diversity for eclectic profiles. Normalizing here fixes
+	// the scale for every caller; cosine RANKING against the query is
+	// magnitude-invariant, so pick order vs the query is unchanged — only
+	// the relevance/diversity BALANCE is corrected.
+	queryVec = normalizeVec(queryVec)
 
 	// Pre-parse embeddings once; cands without a parseable embedding are
 	// excluded from MMR (no way to score them) but kept in a fallback list

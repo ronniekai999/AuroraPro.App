@@ -30,11 +30,11 @@ const maxLoggedBody = 8 * 1024 * 1024
 // Config controls how the client talks to Ollama. All fields have sensible
 // defaults applied by NewClient when zero — callers only set what they want.
 type Config struct {
-	BaseURL    string // e.g. "http://ollama:11434" or "https://ollama.com"
+	BaseURL    string // e.g. "http://localhost:11434" or "https://ollama.com"
 	EmbedURL   string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
 	APIKey     string // optional bearer token for Ollama Cloud
-	EmbedModel string // e.g. "nomic-embed-text"
-	ChatModel  string // e.g. "gemma3:12b", "gpt-oss:20b", "qwen2.5:1.5b-instruct"
+	EmbedModel string // e.g. "qwen3-embedding:0.6b"
+	ChatModel  string // e.g. "qwen3:4b-instruct", "gemma3:12b", "gpt-oss:20b"
 	// Per-surface routing (Phase A). Empty → fall back to ChatModel, so a
 	// deployment that sets none behaves exactly as before. Fast = frequent,
 	// latency-sensitive surfaces (hero rerank, rail reasons); Smart = the
@@ -61,7 +61,12 @@ type Config struct {
 	RerankURL   string
 	Dims        int           // target embedding dimensionality (truncated if model is wider)
 	HTTPTimeout time.Duration // per-request budget; embedding is fast, chat is not
-	Debug       bool          // initial debug-logging state; hot-swap later via SetDebug
+	// NumCtx, when > 0, is sent as options.num_ctx on native /api/chat
+	// requests so prompts larger than Ollama's default context (4096) are
+	// not silently truncated. Not applied on the OpenAI-compat /v1 path
+	// (no options field there — model defaults govern).
+	NumCtx int
+	Debug  bool // initial debug-logging state; hot-swap later via SetDebug
 }
 
 // Client is safe for concurrent use; the underlying http.Client handles pooling
@@ -89,17 +94,21 @@ func NewClient(cfg Config) *Client {
 	cfg.EmbedModel = strings.TrimSpace(cfg.EmbedModel)
 	cfg.RerankModel = strings.TrimSpace(cfg.RerankModel)
 
+	// Fallback defaults for a zero Config. Keep these IN SYNC with the
+	// canonical defaults in internal/config (Load's LLMConfig block) — the
+	// two drifted once (qwen2.5:1.5b here vs 3b there) and the config-layer
+	// value silently won because main.go always passes it through.
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "http://ollama:11434"
+		cfg.BaseURL = "http://localhost:11434"
 	}
 	if cfg.EmbedModel == "" {
-		cfg.EmbedModel = "embeddinggemma" // Phase E2 default (768-dim, MRL)
+		cfg.EmbedModel = "qwen3-embedding:0.6b" // Phase E4 default (1024-dim MRL, truncated to Dims)
 	}
 	if cfg.ChatModel == "" {
-		cfg.ChatModel = "qwen2.5:1.5b-instruct"
+		cfg.ChatModel = "qwen3:4b-instruct"
 	}
 	if cfg.Dims == 0 {
-		cfg.Dims = 768 // Phase E2: must match migration 040's vector(768)
+		cfg.Dims = 768 // must match migration 040's vector(768)
 	}
 	if cfg.HTTPTimeout == 0 {
 		// 70s default = 10s margin over the longest per-call ctx budget
@@ -284,7 +293,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	c.logResponseEmbed(reqID, resp.StatusCode, raw)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama embed: status %d: %s", resp.StatusCode, snippet(raw, 512))
+		return nil, &StatusError{Op: "embed", Status: resp.StatusCode, Body: snippet(raw, 512)}
 	}
 	if capErr != nil {
 		// Surface truncation explicitly so the operator sees "body exceeds cap"
@@ -341,12 +350,18 @@ type ChatMessage struct {
 }
 
 type chatRequest struct {
-	Model    string         `json:"model"`
-	Messages []ChatMessage  `json:"messages"`
-	Stream   bool           `json:"stream"`
-	Format   any            `json:"format,omitempty"`
-	Think    bool           `json:"think"` // gpt-oss / cloud models default to true; force off
-	Options  map[string]any `json:"options,omitempty"`
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+	Format   any           `json:"format,omitempty"`
+	// Think is always serialized (no omitempty) and always false: thinking
+	// models (gpt-oss, hybrid qwen3) default it to true and would burn the
+	// budget on hidden traces. Sending `think:false` to a model WITHOUT the
+	// thinking capability is safe — Ollama only rejects `think:true` there —
+	// verified in production against qwen2.5/gemma3 and by the current
+	// non-thinking default (qwen3:4b-instruct).
+	Think   bool           `json:"think"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type chatResponse struct {
@@ -454,6 +469,10 @@ func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, s
 // avoid shipping the Cloud API key to a non-chat endpoint (e.g. a local
 // reranker URL); see Rerank.
 func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, model, system, user string, schema any) (string, error) {
+	options := map[string]any{"temperature": 0.1}
+	if c.cfg.NumCtx > 0 {
+		options["num_ctx"] = c.cfg.NumCtx
+	}
 	body, err := json.Marshal(chatRequest{
 		Model: model,
 		Messages: []ChatMessage{
@@ -463,7 +482,7 @@ func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, 
 		Stream:  false,
 		Format:  schema,
 		Think:   false,
-		Options: map[string]any{"temperature": 0.1},
+		Options: options,
 	})
 	if err != nil {
 		return "", err
@@ -492,7 +511,7 @@ func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, 
 	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama chat: status %d: %s", resp.StatusCode, snippet(raw, 512))
+		return "", &StatusError{Op: "chat", Status: resp.StatusCode, Body: snippet(raw, 512)}
 	}
 	if capErr != nil {
 		return "", fmt.Errorf("ollama chat: %w", capErr)
@@ -512,9 +531,9 @@ func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, 
 // reaching this path for reasoning_effort. strict is false on purpose: our
 // schemas use keywords (minItems/maxItems) that strict mode rejects on some
 // providers, and the tolerant parser is the real safety net — we want strong
-// guidance, not hard validation that 400s the request. The error string keeps
-// the "ollama chat: status N" shape so isLLMServerError (discover.go) still
-// matches for the 5xx retry.
+// guidance, not hard validation that 400s the request. Non-2xx responses come
+// back as *StatusError so callers (discover's 5xx retry) can errors.As on the
+// status instead of string-matching.
 //
 // Thinking suppression on this path comes from ReasoningEffort (the gpt-oss
 // reasoning_effort field), NOT the native `think:false` — gpt-oss ignores the
@@ -569,7 +588,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, baseURL string, sendAuth 
 	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama chat: status %d: %s", resp.StatusCode, snippet(raw, 512))
+		return "", &StatusError{Op: "chat", Status: resp.StatusCode, Body: snippet(raw, 512)}
 	}
 	if capErr != nil {
 		return "", fmt.Errorf("ollama chat: %w", capErr)
@@ -690,11 +709,12 @@ func snippet(body []byte, n int) string {
 }
 
 // truncate keeps the leading n dimensions of a Matryoshka-trained embedding.
-// nomic-embed-text, bge, and embeddinggemma are all trained this way; the
-// leading dims carry the most signal, so a prefix loses very little retrieval
-// quality. As of Phase E2 the target (768) equals embeddinggemma's native dim,
-// so this is a no-op (n >= len(v) → returns v unchanged); it stays in place so a
-// future wider model (e.g. qwen3-embedding at 1024) can be truncated to 768.
+// nomic-embed-text, bge, embeddinggemma, and qwen3-embedding are all trained
+// this way; the leading dims carry the most signal, so a prefix loses very
+// little retrieval quality. As of Phase E4 the default model
+// (qwen3-embedding:0.6b) is 1024-dim native and this truncates it to the
+// vector(768) column from migration 040 — which is exactly the future-wider-
+// model case this helper was kept around for in Phase E2.
 func truncate(v []float32, n int) []float32 {
 	if n <= 0 || n >= len(v) {
 		return v

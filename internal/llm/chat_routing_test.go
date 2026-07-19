@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -144,10 +145,11 @@ func TestChatModelAccessorsFallback(t *testing.T) {
 	}
 }
 
-// TestChatJSONWithStructured500: a 5xx on the OpenAI path must keep the
-// "ollama chat: status 5..." error shape — that exact substring is the
-// cross-package contract isLLMServerError (recommender/discover.go) matches to
-// fire the 5xx retry. A reworded error would silently disable that retry.
+// TestChatJSONWithStructured500: a 5xx on the OpenAI path must surface as a
+// typed *StatusError — that's the cross-package contract isLLMServerError
+// (recommender/discover.go) uses (via errors.As) to fire the 5xx retry. The
+// legacy "ollama chat: status 5..." string shape is asserted too so log grep
+// patterns stay stable.
 func TestChatJSONWithStructured500(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -156,6 +158,10 @@ func TestChatJSONWithStructured500(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m"})
 	_, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, true)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusInternalServerError || !se.IsServerError() {
+		t.Errorf("want typed *StatusError with 500, got %v", err)
+	}
 	if err == nil || !strings.Contains(err.Error(), "ollama chat: status 5") {
 		t.Errorf("want error containing 'ollama chat: status 5', got %v", err)
 	}

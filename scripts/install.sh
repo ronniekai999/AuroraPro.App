@@ -1228,21 +1228,26 @@ fi
 JWT_SECRET="${EXISTING_JWT:-$(rand_string 64)}"
 
 # Semantic search / Ollama settings — preserve operator values across
-# re-runs (same pattern as JWT/TMDB above). The model defaults MUST
-# stay in sync with internal/config/config.go (LLMConfig defaults).
-# The URL is the exception: the Go default is http://ollama:11434, a
-# Docker-era hostname that resolves nowhere on the bare-metal installs
-# this script produces — embeddings then fail silently even with a
-# local Ollama running (2026-07-17 install report). The installer
-# therefore always pins an explicit localhost URL unless the operator
-# already configured one.
+# re-runs (same pattern as JWT/TMDB above). The defaults MUST stay in
+# sync with internal/config/config.go (LLMConfig defaults). Since Phase
+# E4 the Go URL default is also http://localhost:11434 (the old
+# http://ollama:11434 Docker-era hostname resolved nowhere on bare
+# metal — 2026-07-17 install report — and was fixed at the source);
+# the installer still writes the URL explicitly so operators see the
+# knob in aurora.env.
 EXISTING_OLLAMA_URL="$(read_env_key LLM_OLLAMA_URL)"
 EXISTING_EMBED_MODEL="$(read_env_key LLM_EMBED_MODEL)"
 EXISTING_CHAT_MODEL="$(read_env_key LLM_CHAT_MODEL)"
 EXISTING_LLM_ENABLED="$(read_env_key LLM_ENABLED)"
 OLLAMA_URL="${EXISTING_OLLAMA_URL:-http://localhost:11434}"
-OLLAMA_EMBED_MODEL="${EXISTING_EMBED_MODEL:-embeddinggemma}"
-OLLAMA_CHAT_MODEL="${EXISTING_CHAT_MODEL:-qwen2.5:3b-instruct}"
+# Phase E4 models: qwen3-embedding:0.6b (1024-dim MRL, truncated to the
+# vector(768) column client-side) + qwen3:4b-instruct (non-thinking
+# 2507 line). Operators upgrading from embeddinggemma/qwen2.5 get the
+# new defaults automatically UNLESS they had pinned overrides in
+# aurora.env (preserved above); migration 045 nulls old vectors so the
+# backfill re-embeds with whatever model is effective.
+OLLAMA_EMBED_MODEL="${EXISTING_EMBED_MODEL:-qwen3-embedding:0.6b}"
+OLLAMA_CHAT_MODEL="${EXISTING_CHAT_MODEL:-qwen3:4b-instruct}"
 
 info "Writing $CONFIG_DIR/aurora.env..."
 # Atomic write: write to .tmp then rename into place. The previous
@@ -1268,10 +1273,11 @@ info "Writing $CONFIG_DIR/aurora.env..."
         printf '# TheMovieDB: using the bundled application key. Set TMDB_API_KEY= to override.\n'
     fi
     # Semantic search / embeddings — Aurora expects an Ollama
-    # instance here. Written explicitly because the Go-side default
-    # (http://ollama:11434) doesn't resolve on bare metal. Model
-    # overrides and LLM_ENABLED are only re-emitted when the
-    # operator had them in the previous aurora.env.
+    # instance here. The URL matches the Go-side default (localhost
+    # since Phase E4) but is written explicitly so the knob is
+    # visible in aurora.env. Model overrides and LLM_ENABLED are
+    # only re-emitted when the operator had them in the previous
+    # aurora.env.
     printf '\n# Semantic search / LLM (Ollama)\n'
     printf 'LLM_OLLAMA_URL=%s\n' "$OLLAMA_URL"
     [ -n "$EXISTING_EMBED_MODEL" ] && printf 'LLM_EMBED_MODEL=%s\n' "$EXISTING_EMBED_MODEL"

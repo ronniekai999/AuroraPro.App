@@ -98,7 +98,7 @@ Non-TTY runs (CI, `ssh` without `-t`) prompt for nothing — no env vars are req
 | `AURORA_MEDIA_DIR=/path[,/path2]` | Grants the `aurora` user read access to your media (comma-separated for multiple paths) |
 | `AURORA_DOMAIN=media.example.com` | Sets up nginx reverse proxy + Let's Encrypt HTTPS |
 | `AURORA_CERTBOT_EMAIL=you@example.com` | Required if `AURORA_DOMAIN` is set |
-| `AURORA_INSTALL_OLLAMA=1` | Installs [Ollama](https://ollama.com) and pulls the semantic-search models (`embeddinggemma` + `qwen2.5:3b-instruct`, ~2.5 GB total) |
+| `AURORA_INSTALL_OLLAMA=1` | Installs [Ollama](https://ollama.com) and pulls the semantic-search models (`qwen3-embedding:0.6b` + `qwen3:4b-instruct`, ~3 GB total) |
 | `AURORA_RADARR_URL=` + `AURORA_RADARR_API_KEY=` | Enables movie requests via Radarr |
 | `AURORA_SONARR_URL=` + `AURORA_SONARR_API_KEY=` | Enables TV requests via Sonarr |
 | `AURORA_RADARR_4K_URL/_API_KEY=`, `AURORA_SONARR_4K_URL/_API_KEY=` | Separate 4K Radarr/Sonarr instances |
@@ -143,8 +143,8 @@ Semantic search is on by default but needs a local [Ollama](https://ollama.com) 
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull embeddinggemma          # 768-dim embeddings (CPU-friendly)
-ollama pull qwen2.5:3b-instruct     # query parsing / reranking
+ollama pull qwen3-embedding:0.6b    # embeddings (1024-dim MRL, stored at 768 — CPU-friendly)
+ollama pull qwen3:4b-instruct       # query parsing / reranking
 sudo systemctl restart aurora
 ```
 
@@ -162,7 +162,7 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | `TMDB_API_KEY` / `TVDB_API_KEY` + `TVDB_PIN` | Metadata providers — optional overrides for Aurora's bundled application keys (`TVDB_ENABLED=false` disables the TVDB fallback) |
 | `LLM_ENABLED` | AI stack on/off (default on) |
 | `LLM_OLLAMA_URL` | Ollama endpoint (installer pins `http://localhost:11434`) |
-| `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `embeddinggemma`, `qwen2.5:3b-instruct`) |
+| `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `qwen3-embedding:0.6b`, `qwen3:4b-instruct`) |
 | `REQUESTS_ENABLED` + `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` | Requests integrations |
 | `AURORA_ALLOWED_ORIGINS` | CORS / WebSocket origins (same-origin always allowed) |
 | `AURORA_SECURE_COOKIES` | Force the `Secure` flag on auth cookies — set automatically when a domain fronts the install (TLS terminates at nginx, so the Go server can't infer it) |
@@ -230,7 +230,7 @@ flowchart LR
     B -.->|"LAN / direct"| A
     A --> P[("PostgreSQL 14+<br/>pgvector · pg_trgm")]
     A --> F["FFmpeg<br/>direct play · HLS · hw-accel"]
-    A --> O["Ollama (optional)<br/>embeddinggemma · qwen2.5"]
+    A --> O["Ollama (optional)<br/>qwen3-embedding · qwen3"]
     A --> M["TMDB / TVDB"]
     A --> R["Radarr / Sonarr<br/>(optional)"]
 ```
@@ -240,7 +240,7 @@ A single Go binary serves the API, WebSockets (live scan progress, watch parties
 ## 📦 Requirements
 
 - **OS**: Linux with systemd (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE) — bare metal, no Docker in this repo
-- **Disk**: ~500 MB for binary + cache + Go toolchain, plus your media; ~2.5 GB more if you enable the local AI models
+- **Disk**: ~500 MB for binary + cache + Go toolchain, plus your media; ~3 GB more if you enable the local AI models
 - **RAM**: 1 GB minimum; 4 GB recommended with the local LLM enabled
 - **PostgreSQL**: 14+ (installed automatically)
 

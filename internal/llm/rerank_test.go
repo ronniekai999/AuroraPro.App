@@ -196,7 +196,7 @@ func TestNewClientTrimsConfig(t *testing.T) {
 		t.Errorf("RerankURL not trimmed: %q", got)
 	}
 	// Spaces-only model still defaults (trim happens before the default check).
-	if got := NewClient(Config{ChatModel: "   "}).ChatModel(); got != "qwen2.5:1.5b-instruct" {
+	if got := NewClient(Config{ChatModel: "   "}).ChatModel(); got != "qwen3:4b-instruct" {
 		t.Errorf("spaces-only ChatModel should default, got %q", got)
 	}
 }

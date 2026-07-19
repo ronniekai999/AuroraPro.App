@@ -39,9 +39,13 @@ import (
 //     into the text so gentle (TV-G) and intense (R) titles with near-identical
 //     overviews separate in the vector space. Same 768 dims → no migration; the
 //     bump alone makes RunBackfill re-embed in place.
+//   - 4: Phase E4 — qwen3-embedding:0.6b (1024-dim native, MRL-truncated to
+//     768 by the client). Migration 045 nulls stored vectors (different
+//     model = different vector space; mixing would corrupt similarity) but
+//     needs no column/index change since the stored width stays 768.
 //
 // Do NOT bump for trivial code refactors that produce identical output.
-const CurrentVersion int16 = 3
+const CurrentVersion int16 = 4
 
 // Embedder coordinates the embedding model client with the database. Safe for
 // concurrent use; multiple goroutines may call EmbedItem in parallel.
@@ -94,11 +98,14 @@ func BuildText(title string, year int, mediaType, overview string, genres []stri
 		fmt.Fprintf(&b, "[%s] ", mediaType)
 	}
 	if overview != "" {
-		// Cap overview at ~2000 chars. embeddinggemma accepts a 2048-token
-		// context and Ollama silently truncates beyond that, which produces
-		// degraded embeddings without a signal. Pathological NFO files from
-		// scraper plugins can carry multi-MB synopses; trimming up-front keeps
-		// the embedding quality predictable and the per-batch payload small.
+		// Cap overview at ~2000 chars. Originally forced by embeddinggemma's
+		// 2048-token context (Ollama silently truncates beyond a model's
+		// window, degrading embeddings without a signal). The Phase E4
+		// default (qwen3-embedding, 32K context) no longer needs it, but the
+		// cap stays: pathological NFO files from scraper plugins can carry
+		// multi-MB synopses, the lead ~2000 chars carry the retrieval signal
+		// anyway, and the cap keeps per-batch payloads small and narrower
+		// fallback models safe.
 		const maxOverviewChars = 2000
 		if len(overview) > maxOverviewChars {
 			overview = overview[:maxOverviewChars]
@@ -362,6 +369,16 @@ func chunkRanges(n, batch int) [][2]int {
 // embedBatch sends one Ollama call for the whole batch, then writes results
 // back row-by-row. We intentionally do not use a transaction — partial
 // progress is fine and recoverable on the next run.
+//
+// Write failures are NOT swallowed: a row whose UPDATE fails stays inside the
+// `embedding IS NULL OR version < current` predicate, so the cursor-free
+// fetch re-selects it on the very next wave. Before this returned an error,
+// a persistently failing write (e.g. a DB constraint or connection pool
+// exhaustion) made RunBackfill hot-spin the same lowest IDs forever — each
+// wave "succeeded", reset the failure counter, and re-paid the Ollama call.
+// Returning the first write error routes the wave into RunBackfill's
+// existing backoff → give-up path instead. Rows written before the failing
+// one keep their vectors (no transaction), so progress made is progress kept.
 func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCandidate) error {
 	texts := make([]string, len(candidates))
 	for i, c := range candidates {
@@ -371,6 +388,7 @@ func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCan
 	if err != nil {
 		return err
 	}
+	var firstWriteErr error
 	for i, c := range candidates {
 		if vectors[i] == nil {
 			continue // empty text — skip rather than store a zero vector
@@ -386,8 +404,11 @@ func (e *Embedder) embedBatch(ctx context.Context, candidates []*db.EmbeddingCan
 		writeCtx, writeCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		if err := e.q.SetItemEmbeddingIfStale(writeCtx, c.ID, llm.FormatVector(vectors[i]), CurrentVersion); err != nil {
 			slog.Warn("embedding backfill: write failed", "id", c.ID, "error", err)
+			if firstWriteErr == nil {
+				firstWriteErr = fmt.Errorf("write embedding for item %d: %w", c.ID, err)
+			}
 		}
 		writeCancel()
 	}
-	return nil
+	return firstWriteErr
 }
