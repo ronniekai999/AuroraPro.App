@@ -1205,7 +1205,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		req.StartSec = 0
 	}
 
-	var filePath, resolution, fileAudioCodec string
+	var filePath, resolution, fileAudioCodec, fileColorTransfer string
 	var fileAudioTracks []models.AudioTrack
 	if req.FileType == "episode" {
 		f, err := h.queries.GetEpisodeFileByID(r.Context(), req.FileID)
@@ -1217,6 +1217,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		resolution = f.Resolution
 		fileAudioCodec = f.AudioCodec
 		fileAudioTracks = f.AudioTracks
+		fileColorTransfer = f.ColorTransfer
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), req.FileID)
 		if err != nil {
@@ -1227,6 +1228,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		resolution = f.Resolution
 		fileAudioCodec = f.AudioCodec
 		fileAudioTracks = f.AudioTracks
+		fileColorTransfer = f.ColorTransfer
 	}
 
 	srcW, srcH := parseResolution(resolution)
@@ -1262,6 +1264,11 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AudioChannels:    req.AudioChannels,
 		AudioCodecOut:    audioCodecOut,
 		HDRTonemap:       req.HDRTonemap,
+		// Resolved from the library's own probe data, NOT echoed from the
+		// client: CreateSession uses it to force tonemapping whenever a
+		// session re-encodes video that the stream-info decision expected to
+		// copy (TS-mode remux promotion, forceTranscode retries, cast clones).
+		SourceHDR:        streaming.IsHDRColorTransfer(fileColorTransfer),
 		SourceVideoCodec: req.VideoCodec,
 		StartSec:         req.StartSec,
 	}
@@ -1654,15 +1661,16 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 	// input). 2026-05-24 fix.
 	//
 	// Canonical HDR signal: color_transfer is one of "smpte2084" (PQ /
-	// HDR10) or "arib-std-b67" (HLG). color_primaries == "bt2020" is a
-	// less reliable secondary signal (wide-gamut SDR also uses bt2020).
+	// HDR10) or "arib-std-b67" (HLG) — see streaming.IsHDRColorTransfer.
+	// color_primaries == "bt2020" is a less reliable secondary signal
+	// (wide-gamut SDR also uses bt2020).
 	//
 	// For files scanned before the color-metadata migration (color_*
 	// fields empty), we default to NO tonemap — washed-out SDR output
 	// is a much milder failure than total transcode crash. Users with
 	// real HDR content should re-scan to pick up the metadata, or
 	// pass hdr_tonemap=true explicitly on the session create payload.
-	isHDR := colorTransfer == "smpte2084" || colorTransfer == "arib-std-b67"
+	isHDR := streaming.IsHDRColorTransfer(colorTransfer)
 	hdrTonemap := isHDR && pd.Decision == "transcode"
 	_ = videoPixFmt    // retained for future use (10-bit logging / metrics)
 	_ = colorPrimaries // retained for future use (wide-gamut SDR detection)

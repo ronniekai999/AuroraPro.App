@@ -143,49 +143,79 @@ func TestCreateSession_PerUserQuota(t *testing.T) {
 	}
 }
 
-// TestCreateSession_RemuxAudioRecodeFallback verifies that a remux session with
-// audio re-encoding (RemuxAudioCopy=false) is silently promoted to full
-// transcode so -force_key_frames can enforce clean segment boundaries and
-// prevent native-HLS audio skipping (issue #344).
+// TestCreateSession_RemuxAudioRecodeFallback verifies the segment-format-aware
+// remux→transcode promotion. In MPEG-TS mode a remux session with audio
+// re-encoding (RemuxAudioCopy=false) is silently promoted to full transcode so
+// -force_key_frames can enforce clean segment boundaries and prevent
+// native-HLS audio skipping (issue #344). In fMP4/CMAF mode (the default) the
+// remux is KEPT: fragments carry explicit baseMediaDecodeTime, so irregular
+// video-copy cut points cause no timeline discontinuities — and promoting
+// e.g. a 4K HEVC HDR + DTS file to a full-rate video transcode is exactly the
+// encoder-can't-keep-up buffering failure the fMP4 path avoids.
 func TestCreateSession_RemuxAudioRecodeFallback(t *testing.T) {
 	fakeFFmpegOnPath(t)
-	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
-	if err != nil {
-		t.Fatalf("new transcode manager: %v", err)
-	}
-	defer tm.Close()
 
 	tests := []struct {
 		name           string
+		segmentFormat  string // TranscodeConfig.SegmentFormat ("" = fmp4 default)
 		remux          bool
 		remuxAudioCopy bool
+		forceTS        bool
 		wantRemux      bool
 	}{
 		{
-			name:           "remux+audio_copy stays remux",
+			name:           "fmp4: remux+audio_copy stays remux",
 			remux:          true,
 			remuxAudioCopy: true,
 			wantRemux:      true,
 		},
 		{
-			name:           "remux+audio_recode falls back to transcode",
+			name:           "fmp4: remux+audio_recode STAYS remux (no promotion)",
+			remux:          true,
+			remuxAudioCopy: false,
+			wantRemux:      true,
+		},
+		{
+			name:           "fmp4: pure transcode unchanged",
+			remux:          false,
+			remuxAudioCopy: false,
+			wantRemux:      false,
+		},
+		{
+			name:           "ts: remux+audio_recode falls back to transcode",
+			segmentFormat:  "ts",
 			remux:          true,
 			remuxAudioCopy: false,
 			wantRemux:      false,
 		},
 		{
-			name:           "pure transcode unchanged",
-			remux:          false,
+			name:           "ts: remux+audio_copy stays remux",
+			segmentFormat:  "ts",
+			remux:          true,
+			remuxAudioCopy: true,
+			wantRemux:      true,
+		},
+		{
+			name:           "fmp4 server but ForceTS session: remux+audio_recode falls back to transcode",
+			remux:          true,
 			remuxAudioCopy: false,
+			forceTS:        true,
 			wantRemux:      false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: tt.segmentFormat})
+			if err != nil {
+				t.Fatalf("new transcode manager: %v", err)
+			}
+			defer tm.Close()
+
 			s, err := tm.CreateSession(1, "alice", "/tmp/a.mkv", 1920, 1080, SessionOpts{
 				Remux:          tt.remux,
 				RemuxAudioCopy: tt.remuxAudioCopy,
+				ForceTS:        tt.forceTS,
 			})
 			if err != nil {
 				t.Fatalf("CreateSession: %v", err)
@@ -193,16 +223,172 @@ func TestCreateSession_RemuxAudioRecodeFallback(t *testing.T) {
 			if s.Remux != tt.wantRemux {
 				t.Errorf("session.Remux = %v, want %v", s.Remux, tt.wantRemux)
 			}
-			// When promoted to transcode, profiles must carry quality params
-			// (CRF, bitrate strings) rather than the bare source-resolution stub.
 			if !s.Remux && len(s.Profiles) > 0 {
+				// Transcoding sessions (explicit or promoted) must carry quality
+				// params (CRF, bitrate strings) rather than the bare
+				// source-resolution stub.
 				for _, p := range s.Profiles {
 					if p.CRF == 0 && p.VideoBitrate == "" {
 						t.Errorf("profile %q has no quality params after transcode promotion", p.Name)
 					}
 				}
 			}
+			if s.Remux && tt.remux {
+				// Remux sessions must keep the single source-resolution profile —
+				// codec copy can't change resolution, so a quality ladder would
+				// advertise variants the session can't produce.
+				if len(s.Profiles) != 1 || s.Profiles[0].Name != "source" {
+					t.Errorf("remux session profiles = %+v, want single 'source' profile", s.Profiles)
+				}
+			}
 		})
+	}
+}
+
+// TestCreateSession_HDRTonemapRederived pins the SourceHDR contract: any
+// session that re-encodes video from an HDR source gets HDRTonemap forced on,
+// even when the API layer's stream-info decision said hdr_tonemap=false
+// (it only sets the flag when ITS decision was "transcode" — the TS-mode
+// remux promotion and client forceTranscode retries arrive here with the
+// remux decision's false). Without this, promoted sessions re-encode 10-bit
+// PQ frames into washed-out gray 8-bit H.264.
+func TestCreateSession_HDRTonemapRederived(t *testing.T) {
+	fakeFFmpegOnPath(t)
+
+	tests := []struct {
+		name          string
+		segmentFormat string
+		opts          SessionOpts
+		wantRemux     bool
+		wantTonemap   bool
+	}{
+		{
+			name:          "ts promotion of HDR remux enables tonemap",
+			segmentFormat: "ts",
+			opts:          SessionOpts{Remux: true, RemuxAudioCopy: false, SourceHDR: true},
+			wantRemux:     false,
+			wantTonemap:   true,
+		},
+		{
+			name:          "ts promotion of SDR remux leaves tonemap off",
+			segmentFormat: "ts",
+			opts:          SessionOpts{Remux: true, RemuxAudioCopy: false, SourceHDR: false},
+			wantRemux:     false,
+			wantTonemap:   false,
+		},
+		{
+			name: "fmp4 HDR remux keeps video copy and NO tonemap",
+			opts: SessionOpts{Remux: true, RemuxAudioCopy: false, SourceHDR: true},
+			// Video is copied untouched — the browser receives the original
+			// HDR stream; tonemapping is neither needed nor possible (-c:v copy).
+			wantRemux:   true,
+			wantTonemap: false,
+		},
+		{
+			name: "forced transcode of HDR source enables tonemap (client echoed false)",
+			opts: SessionOpts{Remux: false, SourceHDR: true, HDRTonemap: false},
+			// The Phase-5 MEDIA_ERROR fallback re-creates the session with
+			// remux=false but echoes the remux decision's hdr_tonemap=false.
+			wantRemux:   false,
+			wantTonemap: true,
+		},
+		{
+			name:        "explicit tonemap request preserved",
+			opts:        SessionOpts{Remux: false, SourceHDR: false, HDRTonemap: true},
+			wantRemux:   false,
+			wantTonemap: true,
+		},
+		{
+			name:        "SDR transcode untouched",
+			opts:        SessionOpts{Remux: false, SourceHDR: false},
+			wantRemux:   false,
+			wantTonemap: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: tt.segmentFormat})
+			if err != nil {
+				t.Fatalf("new transcode manager: %v", err)
+			}
+			defer tm.Close()
+
+			s, err := tm.CreateSession(1, "alice", "/tmp/a.mkv", 3840, 2160, tt.opts)
+			if err != nil {
+				t.Fatalf("CreateSession: %v", err)
+			}
+			if s.Remux != tt.wantRemux {
+				t.Errorf("session.Remux = %v, want %v", s.Remux, tt.wantRemux)
+			}
+			if s.HDRTonemap != tt.wantTonemap {
+				t.Errorf("session.HDRTonemap = %v, want %v", s.HDRTonemap, tt.wantTonemap)
+			}
+			if s.SourceHDR != tt.opts.SourceHDR {
+				t.Errorf("session.SourceHDR = %v, want %v (must be carried for cast clones)", s.SourceHDR, tt.opts.SourceHDR)
+			}
+		})
+	}
+}
+
+// TestCloneForCast_HDRRemuxSource verifies the full chain for casting an HDR
+// remux session: the clone always re-encodes video for the Default Media
+// Receiver, so CreateSession's SourceHDR re-derivation must switch tonemapping
+// on even though the source session (video copy) had HDRTonemap=false.
+func TestCloneForCast_HDRRemuxSource(t *testing.T) {
+	fakeFFmpegOnPath(t)
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	src, err := tm.CreateSession(1, "alice", "/tmp/hdr.mkv", 3840, 2160, SessionOpts{
+		Remux:            true,
+		RemuxAudioCopy:   true,
+		AudioCodecOut:    "aac",
+		SourceHDR:        true,
+		SourceVideoCodec: "hevc",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession(src): %v", err)
+	}
+	if !src.Remux || src.HDRTonemap {
+		t.Fatalf("src session Remux=%v HDRTonemap=%v, want remux without tonemap", src.Remux, src.HDRTonemap)
+	}
+
+	clone, err := tm.CloneForCast(1, "alice", src.ID)
+	if err != nil {
+		t.Fatalf("CloneForCast: %v", err)
+	}
+	if clone.ID == src.ID {
+		t.Fatal("CloneForCast returned the source session; a remux source must be cloned")
+	}
+	if clone.Remux {
+		t.Error("cast clone of a remux source must transcode (Remux=false)")
+	}
+	if !clone.HDRTonemap {
+		t.Error("cast clone re-encodes video from an HDR source but HDRTonemap=false — washed-out cast output")
+	}
+	if clone.FMP4 {
+		t.Error("cast clone must use MPEG-TS segments (ForceTS)")
+	}
+}
+
+// TestIsHDRColorTransfer pins the canonical HDR transfer-function set. Keep in
+// sync with hdrColorTransfers (internal/db) and formatHdr() in lib/detail.ts.
+func TestIsHDRColorTransfer(t *testing.T) {
+	hdr := []string{"smpte2084", "arib-std-b67", "SMPTE2084", " smpte2084 "}
+	for _, v := range hdr {
+		if !IsHDRColorTransfer(v) {
+			t.Errorf("IsHDRColorTransfer(%q) = false, want true", v)
+		}
+	}
+	sdr := []string{"", "bt709", "bt2020-10", "smpte170m", "unknown"}
+	for _, v := range sdr {
+		if IsHDRColorTransfer(v) {
+			t.Errorf("IsHDRColorTransfer(%q) = true, want false", v)
+		}
 	}
 }
 

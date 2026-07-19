@@ -287,6 +287,7 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 		StartSec:         42,
 		BurnSubIndex:     -1,
 		BurnSubRelIndex:  -1,
+		SourceHDR:        true,
 	}
 	// When needsVideoTranscode=true, Remux must be disabled and SourceVideoCodec cleared.
 	opts := castCloneOpts(src, true)
@@ -298,6 +299,11 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 	}
 	if opts.AudioCodecOut != "aac" {
 		t.Errorf("castCloneOpts: AudioCodecOut = %q, want aac", opts.AudioCodecOut)
+	}
+	// SourceHDR must ride along so CreateSession's HDR re-derivation can turn
+	// tonemapping on for the (always video-re-encoding) clone.
+	if !opts.SourceHDR {
+		t.Error("castCloneOpts: SourceHDR not carried from source session")
 	}
 	// When needsVideoTranscode=false (audio-only clone), Remux is preserved.
 	opts2 := castCloneOpts(src, false)
