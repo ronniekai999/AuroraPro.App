@@ -524,6 +524,23 @@ func NormalizeSessionAudio(remux, reqCopy bool, reqCodecOut, sourceCodec string,
 	return false, "aac"
 }
 
+// IsHDRColorTransfer reports whether an ffprobe color_transfer value marks
+// content as HDR: "smpte2084" (PQ — HDR10/HDR10+ and the base layer of most
+// Dolby Vision profiles) or "arib-std-b67" (HLG). Wide-gamut bt2020 primaries
+// alone deliberately do NOT count (plenty of SDR content is mastered
+// wide-gamut), and unknown/empty values default to SDR: a missing tonemap
+// merely washes colors out, while a tonemap applied to SDR input crashes
+// zscale with "no path between colorspaces" (2026-05-24 fix). Keep the value
+// set in sync with hdrColorTransfers in internal/db and formatHdr() in
+// lib/detail.ts.
+func IsHDRColorTransfer(colorTransfer string) bool {
+	switch strings.ToLower(strings.TrimSpace(colorTransfer)) {
+	case "smpte2084", "arib-std-b67":
+		return true
+	}
+	return false
+}
+
 // SelectAudioCodecOut decides the audio codec for an HLS session's RE-ENCODE
 // path. Default "aac" (stereo downmix — universally safe in MPEG-TS via
 // hls.js). Returns "ac3" only when audio is actually being re-encoded, the
@@ -615,7 +632,13 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode bool) SessionOpts 
 		AudioCodecOut:    "aac", // stereo AAC — universally decodable
 		AudioTrackIndex:  src.AudioTrackIndex,
 		AudioChannels:    src.AudioChannels,
+		// HDRTonemap mirrors the source session, but SourceHDR rides along so
+		// CreateSession's HDR re-derivation can switch tonemapping ON for the
+		// clone: a remux source session has HDRTonemap=false (video copied,
+		// browser handles HDR), while its clone re-encodes to 8-bit H.264 and
+		// would produce washed-out gray without the tonemap.
 		HDRTonemap:       src.HDRTonemap,
+		SourceHDR:        src.SourceHDR,
 		SourceVideoCodec: src.SourceVideoCodec,
 		StartSec:         src.StartSec,
 		// SubtitleTracks intentionally omitted: the Chromecast Default Media
@@ -962,6 +985,11 @@ type TranscodeSession struct {
 	BurnSubRelIndex int `json:"-"`
 	// HDR-to-SDR tonemapping: set when transcoding 10-bit HEVC HDR to 8-bit H.264
 	HDRTonemap bool `json:"hdr_tonemap,omitempty"`
+	// SourceHDR: the source file is HDR per its color_transfer metadata (see
+	// SessionOpts.SourceHDR). Carried on the session so cast clones — which
+	// always re-encode video — can enable tonemapping even when this session
+	// itself copies the video stream untouched.
+	SourceHDR bool `json:"-"`
 	// Bandwidth estimation: total bytes served for this session
 	BytesServed int64 `json:"-"`
 	// Remux mode: copy video codec, near-zero CPU (Phase 3 direct stream)
@@ -1637,6 +1665,14 @@ type SessionOpts struct {
 	AudioChannels    int    // source audio channel count for bitrate scaling (0 = default to 2)
 	AudioCodecOut    string // codec the output audio carries: ""/"aac", "ac3", "eac3" (copied) — see TranscodeSession.AudioCodecOut
 	HDRTonemap       bool   // true = inject HDR-to-SDR tonemapping filters (10-bit HEVC → 8-bit H.264)
+	// SourceHDR records that the source file's color_transfer metadata marks it
+	// HDR (smpte2084/PQ or arib-std-b67/HLG). Distinct from HDRTonemap, which
+	// is the "apply the tonemap filter" decision: the API layer only sets
+	// HDRTonemap when its playback decision was a transcode, but a session can
+	// be flipped to transcoding after that decision (TS-mode remux promotion,
+	// client forceTranscode retries, cast clones). CreateSession uses SourceHDR
+	// to re-derive HDRTonemap whenever video is actually re-encoded.
+	SourceHDR        bool
 	SourceVideoCodec string // source video codec (e.g., "hevc", "h264") for BSF selection in remux mode
 	StartSec         int    // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
 	// SubtitleTracks lists text-based subtitle tracks to extract inline via
@@ -1668,18 +1704,47 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		return nil, fmt.Errorf("create session dir: %w", err)
 	}
 
-	// Remux with audio re-encode (RemuxAudioCopy=false) causes audio skipping
-	// on native HLS players (issue #344). Video-copy segment boundaries are
-	// dictated by the source GOP — ffmpeg can only cut at existing keyframes, so
-	// segment lengths vary with scene-cut cadence. Re-encoded AAC against those
-	// irregular cuts produces small PTS discontinuities at each segment boundary
-	// that AVPlayer and Chrome-native-HLS hear as audible audio skips. Fall back
-	// to full transcode: -force_key_frames enforces clean segDuration-aligned
-	// boundaries. The audio recode cost is identical either way; only video
-	// encode is added.
-	if len(opts) > 0 && opts[0].Remux && !opts[0].RemuxAudioCopy {
+	// Remux with audio re-encode (RemuxAudioCopy=false) into MPEG-TS segments
+	// causes audio skipping on native HLS players (issue #344). Video-copy
+	// segment boundaries are dictated by the source GOP — ffmpeg can only cut at
+	// existing keyframes, so segment lengths vary with scene-cut cadence.
+	// Re-encoded AAC against those irregular cuts produces small PTS
+	// discontinuities at each segment boundary that AVPlayer and Chrome-native-
+	// HLS hear as audible audio skips. In TS mode, fall back to full transcode:
+	// -force_key_frames enforces clean segDuration-aligned boundaries. The audio
+	// recode cost is identical either way; only video encode is added.
+	//
+	// fMP4/CMAF segments (the default since M1) do NOT have this failure mode:
+	// every fragment carries an explicit baseMediaDecodeTime (tfdt), so the
+	// timeline stays continuous across irregular cut points and players never
+	// re-derive timestamps from segment boundaries. Keeping the remux there
+	// matters enormously for files whose VIDEO is browser-compatible but whose
+	// AUDIO isn't (DTS/TrueHD/FLAC MKVs): promotion turned a near-free video
+	// copy into the most expensive session the server can run — a full-rate
+	// video transcode, pathological for 4K HEVC HDR sources, and the encoder
+	// falling behind realtime surfaces to the user as endless buffering.
+	sessionFMP4 := tm.fmp4
+	if len(opts) > 0 && opts[0].ForceTS {
+		sessionFMP4 = false
+	}
+	if len(opts) > 0 && opts[0].Remux && !opts[0].RemuxAudioCopy && !sessionFMP4 {
 		opts[0].Remux = false
-		slog.Info("remux promoted to transcode: audio re-encode incompatible with video-copy segment boundaries",
+		slog.Info("remux promoted to transcode: audio re-encode incompatible with video-copy MPEG-TS segment boundaries",
+			"file", filepath.Base(filePath))
+	}
+
+	// Any session that re-encodes video from an HDR source must tonemap, or the
+	// 10-bit BT.2020/PQ frames come out washed-out gray in 8-bit H.264. The API
+	// layer sets HDRTonemap only when ITS playback decision was already a
+	// transcode — but a remux decision can end up transcoding anyway: the
+	// TS-mode promotion above, a client MEDIA_ERROR forceTranscode retry (which
+	// echoes the remux decision's hdr_tonemap=false), or a cast clone of a remux
+	// source. SourceHDR carries the file's color_transfer verdict into this
+	// method so the tonemap decision is re-derived wherever the remux→transcode
+	// flip actually happens.
+	if len(opts) > 0 && !opts[0].Remux && opts[0].SourceHDR && !opts[0].HDRTonemap {
+		opts[0].HDRTonemap = true
+		slog.Info("HDR tonemap enabled: transcoding session re-encodes an HDR source",
 			"file", filepath.Base(filePath))
 	}
 
@@ -1746,6 +1811,7 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		session.AudioChannels = o.AudioChannels
 		session.AudioCodecOut = o.AudioCodecOut
 		session.HDRTonemap = o.HDRTonemap
+		session.SourceHDR = o.SourceHDR
 		session.SourceVideoCodec = strings.ToLower(o.SourceVideoCodec)
 		session.StartSec = o.StartSec
 		session.SubtitleTracks = o.SubtitleTracks
