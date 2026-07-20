@@ -64,3 +64,36 @@ func TestAllowedRatingsForMax(t *testing.T) {
 		}
 	}
 }
+
+// TestRatingToneBuckets pins the ladder-derived tone buckets used by
+// internal/reasonguard: mature = R/TV-MA level and above, kid = TV-Y7 level
+// and below, everything else (teen middle, unknown, foreign, empty) in
+// neither. Derived from ageRatingOrder so vetting can never disagree with
+// the parental-controls ladder.
+func TestRatingToneBuckets(t *testing.T) {
+	mature := []string{"R", "TV-MA", "NC-17", " r ", "tv-ma"}
+	for _, r := range mature {
+		if !IsMatureRating(r) {
+			t.Errorf("IsMatureRating(%q) = false, want true", r)
+		}
+		if IsKidRating(r) {
+			t.Errorf("IsKidRating(%q) = true, want false", r)
+		}
+	}
+	kid := []string{"G", "TV-Y", "TV-G", "TV-Y7", "g", " tv-y7 "}
+	for _, r := range kid {
+		if !IsKidRating(r) {
+			t.Errorf("IsKidRating(%q) = false, want true", r)
+		}
+		if IsMatureRating(r) {
+			t.Errorf("IsMatureRating(%q) = true, want false", r)
+		}
+	}
+	neither := []string{"PG", "TV-PG", "PG-13", "TV-14", "", "BOGUS", "MA15+", "18"}
+	for _, r := range neither {
+		if IsMatureRating(r) || IsKidRating(r) {
+			t.Errorf("rating %q must be in neither tone bucket (mature=%v kid=%v)",
+				r, IsMatureRating(r), IsKidRating(r))
+		}
+	}
+}
