@@ -108,7 +108,7 @@ func TestAssembleHeroPicks_TitleFallback(t *testing.T) {
 // genres before building this prompt specifically so this block renders.
 func TestBuildRerankPrompt_RendersCandidateGenresAndRating(t *testing.T) {
 	anchors := []db.TasteAnchor{
-		{Title: "The Day After Tomorrow", Year: 2004, Type: "movie",
+		{Title: "The Day After Tomorrow", Year: 2004, Type: "movie", ContentRating: "PG",
 			Genres: []string{"Adventure", "Science Fiction", "Thriller"}},
 	}
 	candidates := assembleTestCandidates()
@@ -126,8 +126,34 @@ func TestBuildRerankPrompt_RendersCandidateGenresAndRating(t *testing.T) {
 	if !strings.Contains(out, "[Aurora 48]") {
 		t.Errorf("prompt missing Aurora score tag:\n%s", out)
 	}
-	// Anchor genre grounding (BUG-010) still renders.
-	if !strings.Contains(out, "Adventure, Science Fiction, Thriller") {
-		t.Errorf("prompt missing anchor genres:\n%s", out)
+	// Anchor rating + genre grounding: the anchor line must carry its content
+	// rating (audience-tier baseline for the 2026-07-20 tier-fit fix) between
+	// the type and the genre list.
+	if !strings.Contains(out, "The Day After Tomorrow (2004) [movie] [PG] — Adventure, Science Fiction, Thriller") {
+		t.Errorf("prompt missing anchor rating+genre line:\n%s", out)
+	}
+}
+
+func TestSuppressWeakMatchReasons(t *testing.T) {
+	picks := []HeroPick{
+		{Item: &models.MediaItem{ID: 1}, Reason: "strong pick", Match: 48},
+		{Item: &models.MediaItem{ID: 2}, Reason: "weak pick", Match: 32},
+		{Item: &models.MediaItem{ID: 3}, Reason: "borderline", Match: heroReasonMatchFloor},
+		// Cold-start pick: Match 0 means "no personal calibration", not
+		// "weak" — its (empty) reason state must not be touched.
+		{Item: &models.MediaItem{ID: 4}, Reason: "", Match: 0},
+	}
+	suppressWeakMatchReasons(picks)
+	if picks[0].Reason != "strong pick" {
+		t.Errorf("above-floor reason must survive, got %q", picks[0].Reason)
+	}
+	if picks[1].Reason != "" {
+		t.Errorf("below-floor reason must be suppressed, got %q", picks[1].Reason)
+	}
+	if picks[2].Reason != "borderline" {
+		t.Errorf("at-floor reason must survive, got %q", picks[2].Reason)
+	}
+	if picks[3].Reason != "" {
+		t.Errorf("cold-start pick must stay reasonless, got %q", picks[3].Reason)
 	}
 }

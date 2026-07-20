@@ -1642,12 +1642,14 @@ export interface Profile {
   updated_at: string
   // Hard content ceiling (e.g. "PG", "TV-14"); empty/unset = unrestricted.
   max_age_rating?: string
-  // Phase E2c content-tone recall lean: -1 off, 0 family, 1 teen, 2 mature.
+  // Phase E2c content-tone recall lean: -1 Auto (server derives the lean
+  // from the profile's watched/seeded tiers), 0 family, 1 teen, 2 mature.
   maturity_pref?: number
 }
 
-// setProfileMaturity sets a profile's content-tone preference (-1 off, 0 family,
-// 1 teen, 2 mature) — a soft recall bias toward that maturity tier.
+// setProfileMaturity sets a profile's content-tone preference (-1 Auto —
+// follows watch history, 0 family, 1 teen, 2 mature) — a soft recall bias
+// toward the resolved maturity tier.
 export async function setProfileMaturity(id: number, pref: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}`, { method: 'PUT', body: { maturity_pref: pref } })
 }

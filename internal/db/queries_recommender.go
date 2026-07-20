@@ -247,25 +247,94 @@ func (q *Queries) ProfileMaxAgeRating(ctx context.Context, profileID int64) (str
 	return rating, nil
 }
 
+// maturityTierCase returns a SQL CASE expression mapping a content-rating
+// column to its coarse maturity tier (0 family, 1 teen, 2 mature; NULL when
+// unknown). Shared by the penalty expression's item side and its derived-
+// preference side so the two bucketings can't diverge.
+func maturityTierCase(col string) string {
+	return `(CASE
+		              WHEN ` + col + ` IN ('G','TV-Y','TV-Y7','TV-Y7-FV','TV-G','PG','TV-PG') THEN 0
+		              WHEN ` + col + ` IN ('PG-13','TV-14') THEN 1
+		              WHEN ` + col + ` IN ('R','TV-MA','NC-17','NC17','X') THEN 2
+		              ELSE NULL
+		            END)`
+}
+
 // maturityPenaltyExpr (Phase E2c) is a SELECT-list expression that adds a small
 // cosine-distance penalty to items whose maturity tier is far from the profile's
-// maturity_pref — a SOFT content-tone lean (the HARD ceiling is allowedRatings).
+// content-tone preference — a SOFT lean (the HARD ceiling is allowedRatings).
 // Self-contained on $1 (profileID) + m.content_rating, so it injects with NO new
-// bind param (mirrors dislikedNotExists). It yields 0 when the preference is off
-// (-1 → NULLIF → NULL arithmetic → COALESCE 0) or the item's rating is unknown
-// (tier NULL → same). 0.04 per tier-step ≈ ~10 recall ranks at the local cosine
-// density, so a 2-step gap (~0.08) is a clear lean without overriding the taste
-// match. Why text-embedding tone failed but this works: maturity is categorical
-// and lives in content_rating; encode it as a structured ranking term, not as a
-// few tokens the encoder drowns under the plot overview (Phase E2b, retired).
-const maturityPenaltyExpr = `COALESCE(0.04 * ABS(
-		           (CASE
-		              WHEN m.content_rating IN ('G','TV-Y','TV-Y7','TV-Y7-FV','TV-G','PG','TV-PG') THEN 0
-		              WHEN m.content_rating IN ('PG-13','TV-14') THEN 1
-		              WHEN m.content_rating IN ('R','TV-MA','NC-17','NC17','X') THEN 2
-		              ELSE NULL
-		            END)
-		           - NULLIF((SELECT maturity_pref FROM user_profiles WHERE id = $1), -1)
+// bind param (mirrors dislikedNotExists).
+//
+// The effective preference resolves in two steps:
+//  1. An EXPLICIT maturity_pref (0/1/2 from the Content Tone dial) always wins.
+//  2. When the dial is on Auto (-1, the default), the preference is DERIVED
+//     from behavior: the DOMINANT tier across the DISTINCT titles the profile
+//     has watched or picked in taste onboarding, and only when that tier
+//     covers ≥ 60%% of the rated titles. 2026-07-20 hero regression: a
+//     family-comedy watch history (Haunted Mansion, tier 0) was getting
+//     R-horror heroes (The Omen, The Exorcist) at 32-48%% match because
+//     haunted-house THEME proximity dominates the embedding while the
+//     audience tier lived only in this dial — which nobody had touched, so
+//     the lean was inert. Deriving from behavior makes the default what users
+//     actually expect: "surface things like what I watch."
+//
+// Derivation details, each load-bearing (adversarial review 2026-07-20):
+//   - DISTINCT titles, not watch rows: watch_progress holds one row PER
+//     EPISODE for shows, so a single 40-episode TV-MA binge must count once,
+//     not 40x against a handful of family movies.
+//   - UNION taste_seeds: a freshly-onboarded profile has no watches — its
+//     seed picks are its only tone signal, and they already bootstrap the
+//     taste vector (tasteRecentSliceCTE), so the lean must see them too.
+//   - thumbs-down exclusion: a watched-then-disliked title must not pull the
+//     lean toward its own tier (disliking an R film should never cause MORE
+//     R recommendations).
+//   - majority gate (n*5 >= total*3): a mixed household profile (half G/PG,
+//     half R/TV-MA) has NO dominant tier — the old mean-based idea would
+//     have leaned it toward PG-13 content nobody actually watches. No
+//     majority → NULL → no lean, the pre-change neutral behavior. The gate
+//     also keeps a stray abandoned play or two from steering the default.
+//     Tie-break (ORDER BY n DESC, tier ASC) is unreachable under the 60%%
+//     gate; it exists only to keep the row order deterministic.
+//
+// It yields 0 when no preference resolves (Auto + no majority / no rated
+// titles → NULL arithmetic → COALESCE 0) or the item's rating is unknown
+// (tier NULL → same). All subqueries reference only $1, so they're
+// uncorrelated InitPlans (evaluated once per statement), scanning one
+// profile's history — small by construction. 0.04 per tier-step ≈ ~10 recall
+// ranks at the local cosine density, so a 2-step gap (~0.08) is a clear lean
+// without overriding the taste match. Why text-embedding tone failed but this
+// works: maturity is categorical and lives in content_rating; encode it as a
+// structured ranking term, not as a few tokens the encoder drowns under the
+// plot overview (Phase E2b, retired).
+var maturityPenaltyExpr = `COALESCE(0.04 * ABS(
+		           ` + maturityTierCase("m.content_rating") + `
+		           - COALESCE(
+		               NULLIF((SELECT maturity_pref FROM user_profiles WHERE id = $1), -1),
+		               (SELECT g.tier FROM (
+		                   SELECT dt.tier, COUNT(*) AS n, SUM(COUNT(*)) OVER () AS total
+		                   FROM (
+		                     SELECT ` + maturityTierCase("mw.content_rating") + ` AS tier
+		                     FROM (
+		                       SELECT media_item_id FROM watch_progress WHERE profile_id = $1
+		                       UNION
+		                       SELECT media_item_id FROM taste_seeds WHERE profile_id = $1
+		                     ) src_mt
+		                     JOIN media_items mw ON mw.id = src_mt.media_item_id
+		                     WHERE NOT EXISTS (
+		                       SELECT 1 FROM item_feedback dfb
+		                       WHERE dfb.profile_id = $1
+		                         AND dfb.media_item_id = src_mt.media_item_id
+		                         AND dfb.feedback = 'down'
+		                     )
+		                   ) dt
+		                   WHERE dt.tier IS NOT NULL
+		                   GROUP BY dt.tier
+		                 ) g
+		                 WHERE g.n * 5 >= g.total * 3
+		                 ORDER BY g.n DESC, g.tier ASC
+		                 LIMIT 1)
+		             )
 		         ), 0)`
 
 // NearestUnwatched returns the top-N items by cosine distance to the given
@@ -282,7 +351,17 @@ const maturityPenaltyExpr = `COALESCE(0.04 * ABS(
 // It's a demotion, not an exclusion: stale items still backfill if too few fresh
 // ones exist (no starvation). surface == "" makes the whole thing a no-op
 // (unchanged behavior — that's how NearestUnwatchedRich/anchor-rails stay clean).
-func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string, surface string, withinSeconds int64) ([]*models.MediaItem, error) {
+//
+// applyTonePenalty opts a caller into the Phase E2c content-tone lean
+// (maturityPenaltyExpr), which shifts this query's FINAL order — there is no
+// downstream re-rank here. Centroid-driven surfaces (hero pool recall) pass
+// true: "things like what I watch" should lean toward the tiers they watch.
+// Anchor-PINNED surfaces (the "Because You Watched X" rails) pass false: a
+// rail promising "more in that exact vein" must stay pure similarity-to-
+// anchor, even when the anchor's tier is far from the profile's usual one —
+// a family-history profile's one R-horror anchor rail should still surface
+// R-horror.
+func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorLit string, limit int, allowedRatings []string, surface string, withinSeconds int64, applyTonePenalty bool) ([]*models.MediaItem, error) {
 	if limit <= 0 {
 		limit = 12
 	}
@@ -325,9 +404,10 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
 		       added_at, updated_at, distance
 		FROM ranked
-		ORDER BY recently_surfaced ASC, (distance + maturity_penalty) ASC
+		ORDER BY recently_surfaced ASC,
+		         (distance + CASE WHEN $7 THEN maturity_penalty ELSE 0 END) ASC
 		LIMIT $3`,
-		profileID, vectorLit, limit, allowedRatings, surface, withinSeconds,
+		profileID, vectorLit, limit, allowedRatings, surface, withinSeconds, applyTonePenalty,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("nearest unwatched: %w", err)
@@ -389,7 +469,8 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		         COALESCE(m.backdrop_path, '') AS backdrop_path,
 		         m.added_at, m.updated_at,
 		         m.embedding::text AS embedding_text,
-		         (m.embedding <=> $2::vector) AS distance
+		         (m.embedding <=> $2::vector) AS distance,
+		         `+maturityPenaltyExpr+` AS maturity_penalty
 		  FROM media_items m
 		  WHERE m.embedding IS NOT NULL
 		    AND m.backdrop_path IS NOT NULL
@@ -409,7 +490,15 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		       runtime_minutes, content_rating, poster_path, backdrop_path,
 		       added_at, updated_at, embedding_text, distance
 		FROM ranked
-		ORDER BY distance ASC
+		-- Content-tone lean: shapes POOL COMPOSITION always (wrong-tier items
+		-- fall out when the pool overflows), and shapes ORDER whenever the
+		-- Go-side MMR pass is bypassed — mmrDiversify returns pools <= k
+		-- as-is, and the centroid-parse-fail fallback skips MMR entirely —
+		-- so small/filtered libraries render this order verbatim. Both are
+		-- acceptable on this centroid-driven surface ("more like what you
+		-- watch" should lean toward the tiers they watch); anchor-pinned
+		-- surfaces use NearestUnwatched with applyTonePenalty=false instead.
+		ORDER BY (distance + maturity_penalty) ASC
 		LIMIT $3`,
 		profileID, vectorLit, limit, allowedRatings,
 	)
@@ -536,7 +625,7 @@ func (q *Queries) RecentTasteAnchors(ctx context.Context, profileID int64, limit
 		limit = 5
 	}
 	rows, err := q.pool.Query(ctx, `
-		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0)
+		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, '')
 		FROM watch_progress wp
 		JOIN media_items m ON m.id = wp.media_item_id
 		WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL
@@ -552,7 +641,7 @@ func (q *Queries) RecentTasteAnchors(ctx context.Context, profileID int64, limit
 	var ids []int64
 	for rows.Next() {
 		var a TasteAnchor
-		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year); err != nil {
+		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -595,7 +684,7 @@ func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit i
 		limit = 5
 	}
 	rows, err := q.pool.Query(ctx, `
-		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0)
+		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, '')
 		FROM taste_seeds ts
 		JOIN media_items m ON m.id = ts.media_item_id
 		WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
@@ -611,7 +700,7 @@ func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit i
 	var ids []int64
 	for rows.Next() {
 		var a TasteAnchor
-		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year); err != nil {
+		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -646,11 +735,17 @@ func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit i
 // Genres carries the anchor's actual genre tags; passed to the LLM so it
 // doesn't have to infer them (QA BUG-010).
 type TasteAnchor struct {
-	ID     int64
-	Title  string
-	Type   string
-	Year   int
-	Genres []string
+	ID    int64
+	Title string
+	Type  string
+	Year  int
+	// ContentRating is the anchor's content rating (e.g. "PG", "TV-MA"; ""
+	// when unknown). Surfaced in the LLM prompts alongside genres so the
+	// model can judge AUDIENCE-TIER fit — a family-comedy history should not
+	// justify an R-horror pick on theme overlap alone (2026-07-20 hero
+	// regression).
+	ContentRating string
+	Genres        []string
 }
 
 // PopularUnwatched is the cold-start fallback: top-rated items the profile

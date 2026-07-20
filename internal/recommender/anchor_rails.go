@@ -91,8 +91,12 @@ func (h *Hero) AnchorRailsFor(ctx context.Context, profileID int64) ([]AnchorRai
 		// centroid rail uses; only the input vector differs.
 		// "", 0 → no anti-repetition demotion: the "Because You Watched X" anchor
 		// rails are intentionally anchor-pinned, not part of B2's per-surface
-		// temporal de-dup.
-		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch, allowed, "", 0)
+		// temporal de-dup. applyTonePenalty=false for the same reason: this
+		// rail promises "more like THAT title", so it must stay pure
+		// similarity-to-anchor — the profile-wide content-tone lean would
+		// evict the on-tone-with-the-anchor items exactly when the anchor's
+		// tier differs from the profile's usual one.
+		items, ierr := h.q.NearestUnwatched(ctx, profileID, a.EmbeddingText, anchorRailOverfetch, allowed, "", 0, false)
 		if ierr != nil {
 			slog.Warn("anchor rails: kNN failed",
 				"anchor", a.Title, "profile", profileID, "error", ierr)

@@ -64,7 +64,7 @@ func TestThumbsDownExcludesFromRecall(t *testing.T) {
 	query := oneHotLit(0)
 
 	recall := func() map[int64]bool {
-		items, err := q.NearestUnwatched(ctx, profileID, query, 10, nil, "", 0)
+		items, err := q.NearestUnwatched(ctx, profileID, query, 10, nil, "", 0, false)
 		if err != nil {
 			t.Fatalf("nearest: %v", err)
 		}

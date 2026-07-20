@@ -319,7 +319,7 @@ func (h *Hero) tasteRecall(ctx context.Context, profileID int64, pool int, allow
 	// just a degenerate merge.
 	lists := make([][]*models.MediaItem, 0, len(centroids))
 	for _, c := range centroids {
-		cands, err := h.q.NearestUnwatched(ctx, profileID, c, pool, allowed, surface, within)
+		cands, err := h.q.NearestUnwatched(ctx, profileID, c, pool, allowed, surface, within, true)
 		if err != nil {
 			slog.Warn("taste: per-centroid recall failed, single centroid", "profile", profileID, "error", err)
 			return h.singleCentroidRecall(ctx, profileID, pool, allowed, surface, within)
@@ -336,5 +336,5 @@ func (h *Hero) singleCentroidRecall(ctx context.Context, profileID int64, pool i
 	if err != nil {
 		return nil, err
 	}
-	return h.q.NearestUnwatched(ctx, profileID, vec, pool, allowed, surface, within)
+	return h.q.NearestUnwatched(ctx, profileID, vec, pool, allowed, surface, within, true)
 }

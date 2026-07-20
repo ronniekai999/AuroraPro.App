@@ -43,9 +43,13 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 // ratingForAge maps a chosen age to the profile's content settings, matching the
 // canonical rating ladder (internal/db/ratings.go): max_age_rating is a HARD
 // ceiling expanded through that ladder, maturity_pref is the SOFT recall lean
-// (-1 off / 0 family / 1 teen / 2 mature). Boundaries mirror the onboarding
-// mock's tiers; "TV-14" (not "PG-13") is the teen cap so teen TV is included
-// while R / TV-MA stay blocked.
+// (-1 Auto — the server derives the lean from watched/seeded tiers / 0 family /
+// 1 teen / 2 mature). Adults get Auto, not "no lean": the "Up to R · TV-MA"
+// tag describes the unrestricted CEILING, while what surfaces first follows
+// what they actually watch (an adult with an all-family history leans family
+// until their history says otherwise, or they pick an explicit tone in
+// Settings). Boundaries mirror the onboarding mock's tiers; "TV-14" (not
+// "PG-13") is the teen cap so teen TV is included while R / TV-MA stay blocked.
 function ratingForAge(age: number): {
   maxRating: string
   maturityPref: number

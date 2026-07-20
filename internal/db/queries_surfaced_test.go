@@ -133,7 +133,7 @@ func TestNearestUnwatchedDemotion(t *testing.T) {
 	queryVec := oneHotLit(0)
 
 	order := func(surface string, within int64) []int64 {
-		items, err := q.NearestUnwatched(ctx, profileID, queryVec, 10, nil, surface, within)
+		items, err := q.NearestUnwatched(ctx, profileID, queryVec, 10, nil, surface, within, false)
 		if err != nil {
 			t.Fatalf("nearest: %v", err)
 		}

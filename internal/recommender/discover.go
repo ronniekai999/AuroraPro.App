@@ -674,6 +674,11 @@ func buildDiscoverPrompt(anchors []db.TasteAnchor, candidates []*models.MediaIte
 			fmt.Fprintf(&b, " (%d)", a.Year)
 		}
 		fmt.Fprintf(&b, " [%s]", a.Type)
+		// Anchor content rating — audience-tier baseline, mirrors the hero
+		// rerank prompt (2026-07-20 tier-fit fix).
+		if a.ContentRating != "" {
+			fmt.Fprintf(&b, " [%s]", sanitizePromptText(a.ContentRating, 16))
+		}
 		// QA BUG-010 — mirror buildRerankPrompt's genre grounding
 		// so Discover rail-naming has real anchor metadata too.
 		if len(a.Genres) > 0 {
