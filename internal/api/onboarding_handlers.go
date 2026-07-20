@@ -161,7 +161,13 @@ func (h *OnboardingHandler) Preview(w http.ResponseWriter, r *http.Request) {
 	// NearestUnwatched already age-filters by `allowed` in SQL, so no Go-side
 	// rating pass is needed here.
 	allowed := allowedRatingsForMax(profile.MaxAgeRating)
-	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36, allowed, "", 0)
+	// applyTonePenalty=true: the preview should mirror the real centroid
+	// surfaces it advertises (hero/rails pass true). Mid-onboarding a brand
+	// new profile has no watches or saved seeds, so the derived lean resolves
+	// to NULL → no penalty — identical behavior either way; it only differs
+	// for an existing profile re-running onboarding, where matching the real
+	// feed is exactly what a preview is for.
+	items, err := h.queries.NearestUnwatched(r.Context(), profile.ID, vec, 36, allowed, "", 0, true)
 	if err != nil {
 		slog.Warn("onboarding: preview failed", "profile", profile.ID, "error", err)
 		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})

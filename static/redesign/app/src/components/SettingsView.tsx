@@ -309,7 +309,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
               </div>
               <div role="radiogroup" aria-label="Content tone" className="grid grid-cols-2 gap-3">
                 {([
-                  { v: -1, label: 'Off', desc: 'No lean (default)' },
+                  // -1 is AUTO, not off: the recommender derives the lean from
+                  // the profile's watched rating tiers (server-side, Phase E2c
+                  // auto mode). Explicit picks (0/1/2) always override it.
+                  { v: -1, label: 'Auto', desc: 'Follows what you watch (default)' },
                   { v: 0, label: 'Family', desc: 'Gentle · G–PG / TV-G' },
                   { v: 1, label: 'Teen', desc: 'PG-13 · TV-14' },
                   { v: 2, label: 'Mature', desc: 'Intense · R · TV-MA' },
