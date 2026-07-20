@@ -14,6 +14,7 @@ import (
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/llmjson"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/reasonguard"
 )
 
 // DiscoverRail is one themed section of the personalized Discover home —
@@ -529,7 +530,11 @@ func (h *Hero) buildDiscover(ctx context.Context, profileID int64) ([]DiscoverRa
 			// callers sharing the candidate slice (same pattern as
 			// hero pool / rail).
 			cp := *item
-			cp.Reason = strings.TrimSpace(p.Reason)
+			// Vet the blurb against the candidate's real metadata (genres
+			// were attached pre-prompt by annotateGenres above; rating
+			// comes on the recall row). A dropped reason keeps the pick —
+			// the card just renders without a caption.
+			cp.Reason = reasonguard.Vet(p.Reason, item.Genres, item.ContentRating)
 			rail.Items = append(rail.Items, &cp)
 		}
 		// Skip rails that ended up empty after resolution + dedup.

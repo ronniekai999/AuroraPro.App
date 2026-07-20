@@ -35,6 +35,7 @@ import (
 	"github.com/aurora-media/aurora/internal/llm"
 	"github.com/aurora-media/aurora/internal/llmjson"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/reasonguard"
 )
 
 // vectorRecallSize is how many candidates we pull from pgvector before the
@@ -361,8 +362,14 @@ func (s *Searcher) Search(ctx context.Context, query string, limit int) ([]Hit, 
 		used[idx] = true
 		item := deduped[idx]
 		out = append(out, Hit{
-			Item:   item,
-			Reason: p.Reason,
+			Item: item,
+			// Vet the LLM's blurb against the item's real metadata before it
+			// reaches a result card — same guard as the recommender's hero/
+			// discover/rail surfaces, so an overlong or genre/rating-
+			// contradicting reason renders as no caption rather than a wrong
+			// one. Genres were batch-annotated pre-rerank (annotateGenres);
+			// an absent ContentRating just skips the rating gates.
+			Reason: reasonguard.Vet(p.Reason, item.Genres, item.ContentRating),
 			Score:  scoreForHit(item.ID, distByID),
 		})
 		if len(out) >= limit {
