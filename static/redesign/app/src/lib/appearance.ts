@@ -7,13 +7,35 @@
 // "Make it yours" step reuses these helpers so a choice made there persists and
 // renders identically to one made in Settings.
 //
-// The two defaults — font 'nova' and glow 'aurora' — are intentionally
+// The two defaults — font 'eclipse' and glow 'aurora' — are intentionally
 // ATTRIBUTE-LESS: they map to the unprefixed :root tokens, so we REMOVE the
 // attribute rather than set it (keeps a clean DOM for users who never changed
 // the setting, and matches main.tsx which only honors the non-default values).
+//
+// 2026-07-25 (Aurora Stage Phase 0) — the default font flipped 'nova' →
+// 'eclipse' (Bricolage + Inter), so 'nova' became an attributed system. An
+// explicit Nova choice SURVIVES the flip because the choice is persisted to
+// aurora_prefs.font_choice whether or not an attribute was written, and
+// currentFont() below only falls back to the default when nothing valid is
+// stored. Three places encode the default and must agree: this file, the
+// pre-paint shim in main.tsx, and the inline radiogroup in SettingsView.
 
 export type FontChoice = 'nova' | 'current' | 'eclipse' | 'halo'
 export type GlowChoice = 'subtle' | 'aurora' | 'heavy'
+
+/**
+ * Every typeface system EXCEPT the attribute-less default — i.e. exactly the
+ * values that get written to `<html data-font>`.
+ *
+ * Exported so the pre-paint shim in main.tsx and the Settings radiogroup can
+ * consume this list instead of re-typing it. Those two plus applyFont() below
+ * are the three places that have to agree on which system is the default; a
+ * literal in each is how they silently drift (and neither of the other two is
+ * covered by appearance.test.ts, so the drift would be invisible).
+ */
+export const ATTRIBUTED_FONTS: readonly FontChoice[] = ['nova', 'current', 'halo']
+/** The attribute-less default — the system the :root tokens in index.css hold. */
+export const DEFAULT_FONT: FontChoice = 'eclipse'
 
 export interface FontOption {
   id: FontChoice
@@ -30,8 +52,8 @@ export interface GlowOption {
 
 // Order + copy intentionally match Settings → Appearance.
 export const FONT_OPTIONS: readonly FontOption[] = [
-  { id: 'nova', label: 'Nova', desc: 'Futuristic · default', font: "'Sora', sans-serif" },
-  { id: 'eclipse', label: 'Eclipse', desc: 'Editorial', font: "'Bricolage Grotesque', sans-serif" },
+  { id: 'eclipse', label: 'Eclipse', desc: 'Editorial · default', font: "'Bricolage Grotesque', sans-serif" },
+  { id: 'nova', label: 'Nova', desc: 'Futuristic', font: "'Sora', sans-serif" },
   { id: 'halo', label: 'Halo', desc: 'Polished', font: "'Outfit', sans-serif" },
   { id: 'current', label: 'Classic', desc: 'Original', font: "'Space Grotesk', sans-serif" },
 ]
@@ -70,10 +92,10 @@ function writePref(key: string, value: string): void {
   }
 }
 
-/** The stored typeface choice, defaulting to 'nova' when unset/invalid. */
+/** The stored typeface choice, defaulting to 'eclipse' when unset/invalid. */
 export function currentFont(): FontChoice {
   const v = readPrefs().font_choice
-  return v === 'current' || v === 'eclipse' || v === 'halo' ? v : 'nova'
+  return ATTRIBUTED_FONTS.includes(v as FontChoice) ? (v as FontChoice) : DEFAULT_FONT
 }
 
 /** The stored glow choice, defaulting to 'aurora' when unset/invalid. */
@@ -95,10 +117,14 @@ export function currentPreferredQuality(): QualityChoice {
   return v === '4k' || v === '1080p' ? v : 'auto'
 }
 
-/** Persist + live-apply a typeface choice ('nova' is the attribute-less default). */
+/** Persist + live-apply a typeface choice ('eclipse' is the attribute-less default). */
 export function applyFont(id: FontChoice): void {
+  // The write happens for EVERY choice, including the attribute-less
+  // default. That is what makes "explicitly chose the default" recoverable
+  // and distinguishable from "never chose" — the invariant the nova →
+  // eclipse default flip rests on. Do not "optimize" it away.
   writePref('font_choice', id)
-  if (id === 'nova') document.documentElement.removeAttribute('data-font')
+  if (id === DEFAULT_FONT) document.documentElement.removeAttribute('data-font')
   else document.documentElement.setAttribute('data-font', id)
 }
 

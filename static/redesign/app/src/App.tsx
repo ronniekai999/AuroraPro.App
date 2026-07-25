@@ -84,8 +84,7 @@ import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
-import { ProfileAvatar } from '@/components/ProfileAvatar'
-import { ProfileSwitcher } from '@/components/ProfileSwitcher'
+import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
 import { useParty } from '@/hooks/useParty'
@@ -598,125 +597,6 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
       {config.icon}
       {label}
     </a>
-  )
-}
-
-/* ─────────────────────── SIDEBAR ─────────────────────── */
-// Sidebar conditionally renders the Admin link for admins. The
-// server-side /api/admin/* endpoints enforce the gate too — the
-// frontend check is for UX, not security.
-function Sidebar({ user: sidebarUser, currentView, onNavigate, serverOpen, setServerOpen, notifOpen, setNotifOpen, notifCount, mobileOpen, onMobileClose }: {
-  user?: ApiUser
-  currentView: string
-  onNavigate: (v: string) => void
-  serverOpen: boolean
-  setServerOpen: (v: boolean) => void
-  notifOpen: boolean
-  setNotifOpen: (v: boolean) => void
-  notifCount: number
-  // QA BUG-012 — mobile drawer support. Below md (768px) the sidebar
-  // is hidden by default and slides in over content when mobileOpen
-  // is true. md+ ignores both props; the sidebar is always visible.
-  mobileOpen: boolean
-  onMobileClose: () => void
-}) {
-  const isAdmin = sidebarUser?.role === 'admin'
-  const navItems = [
-    { id: 'home', label: 'Home', icon: 'home' },
-    { id: 'movies', label: 'Movies', icon: 'movie' },
-    { id: 'shows', label: 'TV Shows', icon: 'tv' },
-    { id: 'collections', label: 'Collections', icon: 'star' },
-    { id: 'calendar', label: 'Calendar', icon: 'clock' },
-    { id: 'library', label: 'My Library', icon: 'library' },
-    { id: 'requests', label: 'Requests', icon: 'download' },
-    ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: 'settings' }] : []),
-  ]
-
-  return (
-    <aside className={`fixed left-0 top-0 bottom-0 w-[240px] bg-[#050505] border-r border-white/[0.06] z-50 flex flex-col transition-transform duration-200 md:translate-x-0 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-      {/* Brand — Phase 8 fix: clicking the logo always returns to
-          home, matching every other media-app convention (Netflix,
-          Spotify, YouTube etc). `type="button"` prevents form
-          submission if the sidebar ever ends up inside a form. */}
-      <button
-        type="button"
-        onClick={() => { onNavigate('home'); onMobileClose() }}
-        className="p-5 flex items-center gap-3 hover:bg-white/[0.02] transition-colors"
-        aria-label="Go to home"
-      >
-        <div className="w-9 h-9 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center">
-          <svg width="20" height="20" viewBox="0 0 36 36" fill="none">
-            <defs>
-              <linearGradient id="auroraMarkB" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#A855F7" />
-                <stop offset="0.5" stopColor="#7C3AED" />
-                <stop offset="1" stopColor="#22D3EE" />
-              </linearGradient>
-            </defs>
-            <circle cx="18" cy="18" r="16" fill="url(#auroraMarkB)" />
-            <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
-          </svg>
-        </div>
-        <span className="text-white font-bold text-lg font-display tracking-wider">AURORA PRO</span>
-      </button>
-
-      {/* Nav */}
-      <nav className="flex-1 px-3 py-2 space-y-1">
-        {navItems.map((item) => (
-          <button
-            key={item.id}
-            className={`nav-link-item w-full ${currentView === item.id ? 'active' : ''}`}
-            onClick={() => { onNavigate(item.id); onMobileClose() }}
-          >
-            <Icon name={item.icon} size={18} />
-            {item.label}
-          </button>
-        ))}
-      </nav>
-
-      {/* Bottom Actions */}
-      <div className="p-3 border-t border-white/[0.06]">
-        <button
-          className={`nav-link-item w-full ${serverOpen ? 'active' : ''}`}
-          onClick={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
-        >
-          <Icon name="server" size={18} />
-          Server Status
-        </button>
-        <button
-          className={`nav-link-item w-full ${notifOpen ? 'active' : ''}`}
-          onClick={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
-        >
-          <div className="relative">
-            <Icon name="bell" size={18} />
-            {notifCount > 0 && (
-              <span className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-purple-600 rounded-full text-[10px] font-bold flex items-center justify-center">
-                {notifCount}
-              </span>
-            )}
-          </div>
-          Notifications
-        </button>
-        <button
-          className={`nav-link-item w-full ${currentView === 'settings' ? 'active' : ''}`}
-          onClick={() => { onNavigate('settings'); onMobileClose() }}
-        >
-          <Icon name="settings" size={18} />
-          Settings
-        </button>
-        <div className="mt-2 pt-2 border-t border-white/[0.04]">
-          <div className="flex items-center gap-3 px-3 py-2">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold">
-              {sidebarUser?.username[0]?.toUpperCase() || 'U'}
-            </div>
-            <div className="min-w-0">
-              <p className="text-white/80 text-sm font-medium truncate">{sidebarUser?.username || 'User'}</p>
-              <p className="text-white/40 text-xs capitalize">{sidebarUser?.role || 'online'}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </aside>
   )
 }
 
@@ -1364,22 +1244,27 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },
     ]
     : []
-  // QA BUG-005 — anchor near the Server Status trigger in the sidebar
-  // footer (bottom-left) instead of spanning the entire top of the
-  // content area. The previous `top-0 left-[240px] right-0` covered
-  // the global header (search, watch-party button, account avatar),
-  // making them unreachable while the panel was open. Mirroring the
-  // NotificationPanel layout (also a sidebar-footer trigger) but at
-  // ~480px wide to fit a 2-column tile grid.
+  // QA BUG-005 kept the panel next to whatever opens it, rather than
+  // spanning the content area and burying the header controls. That
+  // trigger moved: 2026-07-25 (Aurora Stage Phase 2) it went from the
+  // sidebar footer (bottom-left) to the TopNav's right cluster + the
+  // avatar dropdown, so the panel now hangs from the TOP-RIGHT, directly
+  // under its button, instead of `bottom-4 md:left-[252px]`.
   //
-  // z-[45] sits above the sticky top-bar stack (40) and below
-  // ContextMenu (100) / modals (60s).
+  // z-[45] deliberately sits BELOW the sticky nav stack (50) so the nav's
+  // own triggers stay clickable while the panel is open — that was the
+  // whole point of BUG-005 — and below ContextMenu (100) / modals (60s).
   return (
-    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto">
-      {/* No "Server Status" heading — the trigger button in the
-          sidebar (line ~960) already shows that label, and the panel
-          opens directly under it. Matching the NotificationPanel
-          pattern, we DO offer a close affordance for symmetry. */}
+    <div
+      id="stage-server-panel"
+      role="dialog"
+      aria-label="Server status"
+      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
+      style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
+    >
+      {/* No "Server Status" heading — the nav trigger already shows that
+          label and the panel opens directly under it. Matching the
+          NotificationPanel pattern, we DO offer a close affordance. */}
       <button
         onClick={onClose}
         className="absolute top-3 right-3 text-white/40 hover:text-white transition-colors"
@@ -1480,16 +1365,23 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
     return `${Math.floor(diff / 86_400_000)} d ago`
   }
   if (!open) return null
-  // QA BUG-006 — anchor near the Notifications trigger in the sidebar
-  // footer (bottom-left) instead of the top-left of the content area.
-  // The previous `top-0 left-[240px]` covered the page heading and
-  // looked unrelated to the button that opened it. `bottom-4` plus a
-  // bounded max-height keeps the panel reachable on short viewports
-  // (content scrolls inside).
+  // QA BUG-006 — anchor near the Notifications trigger rather than the
+  // top-left of the content area, where it covered the page heading and
+  // looked unrelated to the button that opened it. As with ServerPanel,
+  // that trigger moved to the TopNav right cluster + avatar dropdown in
+  // Aurora Stage Phase 2, so the panel hangs from the top-right. The
+  // bounded max-height keeps it reachable on short viewports (content
+  // scrolls inside).
   //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="fixed bottom-4 left-2 right-2 md:left-[252px] md:right-auto md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto">
+    <div
+      id="stage-notification-panel"
+      role="dialog"
+      aria-label="Notifications"
+      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
+      style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
+    >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">Notifications</h3>
         <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
@@ -1616,122 +1508,6 @@ function pathToView(pathname: string): string {
   // still resolve to the top-level view that contains them.
   const first = pathname.split('/').filter(Boolean)[0]
   return VIEW_BY_PATH['/' + (first ?? '')] ?? 'home'
-}
-
-/* ─────────────────────── USER MENU (avatar dropdown) ─────────────────────── */
-// Top-bar avatar opens a small menu instead of deep-scrolling to the
-// Settings → Account section. Standard expectation (Plex / Netflix /
-// Jellyfin all expose Profile / Settings / Sign Out via the avatar).
-//
-// Closes on: outside click, Escape, route change (any setView via
-// onNavigate also flips `open` shut). The trigger toggles open state
-// so re-clicking the avatar dismisses without needing to outside-click.
-function UserMenu({
-  user,
-  avatarUrl,
-  onNavigate,
-  onSignOut,
-}: {
-  user: ApiUser
-  // Active profile's avatar. When it's a built-in nebula ("nebula:<id>") the
-  // trigger shows the living orb chosen in onboarding; otherwise it falls back
-  // to the username initial.
-  avatarUrl?: string
-  onNavigate: (v: string) => void
-  onSignOut: () => void
-}) {
-  const [open, setOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
-  const triggerRef = useRef<HTMLButtonElement | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDocClick = (e: MouseEvent) => {
-      if (!rootRef.current) return
-      if (rootRef.current.contains(e.target as Node)) return
-      setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setOpen(false)
-        triggerRef.current?.focus()
-      }
-    }
-    document.addEventListener('mousedown', onDocClick)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDocClick)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  const go = (view: string) => {
-    setOpen(false)
-    onNavigate(view)
-  }
-
-  return (
-    <div ref={rootRef} className="relative">
-      <button
-        ref={triggerRef}
-        onClick={() => setOpen(o => !o)}
-        title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="rounded-full focus:outline-none focus:ring-2 focus:ring-purple-400/60"
-      >
-        <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={40} />
-      </button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 mt-2 w-56 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[50] overflow-hidden animate-fade-in"
-        >
-          {/* Header — show identity so users with multiple accounts
-              know which one is signed in. role=admin gets a small
-              chip; non-admin users get a clean header. */}
-          <div className="px-4 py-3 border-b border-white/[0.06]">
-            <p className="text-white text-sm font-medium truncate">{user.username}</p>
-            <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
-              {user.role === 'admin' ? (
-                <>
-                  <span className="px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px] font-semibold uppercase tracking-wide">Admin</span>
-                  Account
-                </>
-              ) : 'Account'}
-            </p>
-          </div>
-          <button
-            role="menuitem"
-            onClick={() => go('settings')}
-            className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
-          >
-            <Icon name="settings" size={14} className="text-white/50" />
-            Settings
-          </button>
-          {user.role === 'admin' && (
-            <button
-              role="menuitem"
-              onClick={() => go('admin')}
-              className="w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2"
-            >
-              <Icon name="shield" size={14} className="text-white/50" />
-              Admin
-            </button>
-          )}
-          <div className="border-t border-white/[0.06] mt-1" />
-          <button
-            role="menuitem"
-            onClick={() => { setOpen(false); onSignOut() }}
-            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2"
-          >
-            <Icon name="log-out" size={14} className="text-red-400/60" />
-            Sign out
-          </button>
-        </div>
-      )}
-    </div>
-  )
 }
 
 export default function App() {
@@ -1900,6 +1676,33 @@ export default function App() {
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
   // input stays for click-to-search flows).
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // 2026-07-25 (Aurora Stage Phase 2, debug-review fix) — publish the
+  // measured height of the sticky chrome stack as --chrome-h so every
+  // overlay below it (both drawers, the mobile menu sheet + its scrim,
+  // DetailRail's sticky offset) anchors to reality instead of to the nav's
+  // nominal 64px. The stack grows by ~37px per actively-scanning library
+  // because ScanProgressBar renders in flow above the nav, and an admin
+  // mid-scan was the case where all five hardcoded offsets broke.
+  const chromeRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = chromeRef.current
+    if (!el) return
+    const publish = () => {
+      const h = el.getBoundingClientRect().height
+      if (h > 0) document.documentElement.style.setProperty('--chrome-h', `${Math.round(h)}px`)
+    }
+    publish()
+    // ResizeObserver rather than a resize listener: the height changes when
+    // a scan STARTS or STOPS, which is not a viewport event.
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      document.documentElement.style.removeProperty('--chrome-h')
+    }
+    // Re-attach when the login state flips — the chrome only exists once
+    // the shell renders, so the ref is null on the auth screen.
+  }, [user])
   const [serverOpen, setServerOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   // QA 2026-05-25 — popovers were sticking around after route
@@ -1909,9 +1712,9 @@ export default function App() {
   // over the new page until the user manually closed it. Auto-close
   // both when `view` changes. Same effect mounts once and runs on
   // every view transition — cheap, no extra deps needed.
-  // QA BUG-012 — mobile sidebar drawer state. Below md (768px) the
-  // sidebar is hidden by default and toggles in over content.
-  const [sidebarMobileOpen, setSidebarMobileOpen] = useState(false)
+  // (QA BUG-012's mobile drawer state lived here; the drawer moved into
+  // TopNav's menu sheet with the Aurora Stage Phase 2 nav swap, so the
+  // open/close state is local to that component now.)
   // My Library — user-saved titles. The authoritative set lives server-side
   // (a per-profile default watchlist) so saves sync across every device;
   // localStorage is only an instant-paint + offline SNAPSHOT cache (full
@@ -4369,49 +4172,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#050505] aurora-bg">
-      {/* Sidebar */}
-      <Sidebar
-        user={user}
-        currentView={view}
-        onNavigate={handleNavigate}
-        serverOpen={serverOpen}
-        setServerOpen={setServerOpen}
-        notifOpen={notifOpen}
-        setNotifOpen={setNotifOpen}
-        notifCount={unreadCount}
-        mobileOpen={sidebarMobileOpen}
-        onMobileClose={() => setSidebarMobileOpen(false)}
-      />
-
-      {/* QA BUG-012 — mobile sidebar backdrop + hamburger trigger.
-          Both are md:hidden so the desktop layout (sidebar always
-          present at 240px) is unchanged. The backdrop dismisses
-          on tap. The hamburger sits at the top-left in the space
-          the sidebar would normally occupy. z-40 for backdrop puts
-          it above content (10-30) but below sidebar (50). */}
-      {sidebarMobileOpen && (
-        <div
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
-          onClick={() => setSidebarMobileOpen(false)}
-          aria-hidden="true"
-        />
-      )}
-      <button
-        type="button"
-        className={`fixed top-3 z-[55] md:hidden w-10 h-10 rounded-lg bg-[#0a0a0f]/80 backdrop-blur-sm border border-white/[0.08] flex items-center justify-center text-white/80 hover:text-white hover:bg-[#0a0a0f] ${
-          // QA BUG-012 follow-up — when the sidebar drawer is open
-          // the hamburger sits ABOVE the AURORA brand button (also
-          // top-left of the sidebar). Tapping the upper-left would
-          // close the drawer instead of triggering the documented
-          // brand-as-home affordance. Swap to top-right while open.
-          sidebarMobileOpen ? 'right-3' : 'left-3'
-        }`}
-        onClick={() => setSidebarMobileOpen(o => !o)}
-        aria-label={sidebarMobileOpen ? 'Close menu' : 'Open menu'}
-        aria-expanded={sidebarMobileOpen}
-      >
-        <Icon name={sidebarMobileOpen ? 'x' : 'menu'} size={18} />
-      </button>
+      {/* 2026-07-25 (Aurora Stage Phase 2) — the 240px <Sidebar> and its
+          mobile drawer + hamburger (QA BUG-012) are gone; <TopNav> below
+          owns navigation at every breakpoint, with its own menu sheet
+          below md carrying the drawer's role. */}
 
       <ServerPanel
         open={serverOpen}
@@ -4447,92 +4211,72 @@ export default function App() {
         }}
       />
 
-      {/* Main Content */}
-      <main className="md:ml-[240px] min-h-screen">
-        {/* Sticky stack: scan bar + header in one sticky container
-            so the scan bar contributes its height to flow and both
-            pin together on scroll. */}
-        <div className="sticky top-0 z-40">
+      {/* Main Content. No left offset any more — the sidebar is gone, so
+          pages run the full width of the viewport (Aurora Stage M2). */}
+      <main className="min-h-screen">
+        {/* Sticky stack: scan bar + nav in one sticky container so the
+            scan bar contributes its height to flow and both pin together
+            on scroll. The bar stays ABOVE the nav, as in the mockup. */}
+        <div ref={chromeRef} className="sticky top-0 z-50">
           {/* Global scan progress bar (admin-only). Returns null when
-              no scan is active. */}
+              no scan is active. NOTE: it renders IN FLOW above the nav, so
+              it changes the height of this whole sticky stack — which is
+              why chromeRef publishes the measured height as --chrome-h
+              (see the effect above) for everything anchored below it. */}
           <ScanProgressBar isAdmin={user.role === 'admin'} />
-          {/* Top Bar */}
-          <header className="bg-[#050505]/80 backdrop-blur-xl border-b border-white/[0.04] px-8 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-4 flex-1">
-            {/* Search */}
-            <div className="relative max-w-md w-full">
-              <Icon name="search" size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
-              {/* !pl-10 (important): the global `input` rule in index.css
-                  (`input:not([type="range"])`, specificity 0,1,1) sets
-                  `padding: 12px 16px`, which outranks the plain `pl-10` utility
-                  (0,1,0) and collapses the left padding to 16px — overlapping the
-                  magnifying-glass icon (absolute left-3) with the placeholder
-                  text (#209). The important modifier wins the cascade so the icon
-                  clears the text. */}
-              <input
-                ref={searchInputRef}
-                type="text"
-                placeholder="Search titles... (⌘K)"
-                className="w-full !pl-10 pr-4 py-2.5 text-sm bg-white/[0.03] border-white/[0.06] focus:bg-white/[0.05]"
-                value={searchQuery}
-                onChange={(e) => {
-                  setSearchQuery(e.target.value)
-                  if (e.target.value) {
-                    setView('search')
-                  } else if (view === 'search') {
-                    setView('home')
-                  }
-                }}
-                onFocus={() => setSearchOpen(true)}
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {/* Party — M10 Phase 4. Click opens the panel if already
-                in a party, otherwise prompts for a code to join. */}
-            <button
-              onClick={() => {
-                if (party.state.code) {
-                  setPartyPanelOpen(o => !o)
-                } else {
-                  setPartyJoinPrompt(true)
-                }
-              }}
-              title={party.state.code ? `In party ${party.state.code}` : 'Join a watch party'}
-              className="relative w-10 h-10 rounded-xl bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] flex items-center justify-center text-white/60 hover:text-white transition-all"
-            >
-              <Icon name="users" size={18} />
-              {party.state.code && (
-                <span className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full border-2 border-[#050505]" />
-              )}
-            </button>
-            {/* Phase 5 — profile picker. Shows the active profile's nebula +
-                name; a static chip with one profile, a switch menu with several. */}
-            {profiles.length > 0 && (
-              <ProfileSwitcher
-                profiles={profiles}
-                activeProfileId={activeProfileId}
-                onSelect={setActiveProfileId}
-              />
-            )}
-            {/* User — QA 2026-05-25: avatar now opens a dropdown menu
-                instead of deep-scrolling to the Account section of
-                Settings. The previous behavior surprised users who
-                expected a Plex/Netflix-style profile menu (Profile /
-                Settings / Sign Out). */}
-            <UserMenu
-              user={user}
-              avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
-              onNavigate={(v) => handleNavigate(v)}
-              onSignOut={() => { void handleLogout() }}
-            />
-          </div>
-        </header>
+          <TopNav
+            user={user}
+            currentView={view}
+            onNavigate={handleNavigate}
+            searchQuery={searchQuery}
+            onSearchQueryChange={(v) => {
+              setSearchQuery(v)
+              if (v) {
+                setView('search')
+              } else if (view === 'search') {
+                setView('home')
+              }
+            }}
+            onSearchFocus={() => setSearchOpen(true)}
+            searchInputRef={searchInputRef}
+            onOpenPalette={() => setPaletteOpen(true)}
+            // Party — M10 Phase 4. Click opens the panel if already in a
+            // party, otherwise prompts for a code to join.
+            partyActive={!!party.state.code}
+            partyLabel={party.state.code ? `In party ${party.state.code}` : 'Join a watch party'}
+            onPartyClick={() => {
+              if (party.state.code) {
+                setPartyPanelOpen(o => !o)
+              } else {
+                setPartyJoinPrompt(true)
+              }
+            }}
+            partyPanelOpen={partyPanelOpen}
+            serverOpen={serverOpen}
+            onToggleServer={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
+            notifOpen={notifOpen}
+            onToggleNotifications={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
+            // Force-open variants for the avatar dropdown's rows. A row
+            // labelled "Notifications" must never CLOSE the panel because it
+            // happened to already be open — below md that dropdown is the
+            // only surface for these, with no icon state to explain it.
+            onOpenServerPanel={() => { setServerOpen(true); setNotifOpen(false) }}
+            onOpenNotificationsPanel={() => { setNotifOpen(true); setServerOpen(false) }}
+            notifCount={unreadCount}
+            profiles={profiles}
+            activeProfileId={activeProfileId}
+            onSelectProfile={setActiveProfileId}
+            avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
+            onSignOut={() => { void handleLogout() }}
+          />
         </div>{/* /sticky stack */}
 
-        {/* Page Content */}
-        <div className="p-8">
+        {/* Page Content. The global `p-8` is gone (Aurora Stage M2): pages
+            are full-bleed and opt IN to the standard gutter via
+            .stage-page, so a hero can reach the viewport edge. `detail`
+            opts out entirely — its backdrop hero is edge-to-edge and
+            DetailView pads its own body. */}
+        <div className={view === 'detail' ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
               onSelect={handleSelect}
@@ -5279,13 +5023,19 @@ export default function App() {
           // 2026-05-27 (PR #107 follow-up — deep-debug H1/M1):
           // Restored serverOpen / notifOpen and added partyPanelOpen.
           // The previous PR's reasoning "panels anchor LEFT" is only
-          // true on desktop — at the md breakpoint both panels span
-          // `left-2 right-2` (full viewport width), covering the
-          // bottom-right launcher at z-45 > z-40. PartyPanel is a
-          // right-edge drawer at z-70 that covers the launcher on
-          // every viewport when open. Hiding the launcher in these
-          // cases is the cheap, correct fix — the admin can close
-          // the panel and reopen the bug-report flow.
+          // true on desktop — below md both panels span `left-2 right-2`
+          // (full viewport width). PartyPanel is a right-edge drawer at
+          // z-70 that covers the launcher on every viewport when open.
+          // Hiding the launcher in these cases is the cheap, correct fix
+          // — the admin can close the panel and reopen the bug-report
+          // flow.
+          //
+          // 2026-07-25 (Aurora Stage Phase 2) — the two drawers moved
+          // from bottom-anchored to top-anchored (they follow their
+          // trigger, which moved to the TopNav), so on a normal viewport
+          // they no longer reach the bottom-right launcher. Keeping them
+          // in this list anyway: it still holds on short viewports, where
+          // top + max-h-[70vh] can run into the launcher.
           hidden={!!playerTarget || serverOpen || notifOpen || partyPanelOpen}
           // 2026-05-27 — PAT health diagnostics. Server populates
           // these fields only for admin requesters; the modal shows

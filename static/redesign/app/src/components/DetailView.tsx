@@ -327,7 +327,13 @@ export default function DetailView({
   const mediaNode = <MediaInfoPanel audio={audioVMs} subtitles={subtitleVMs} subtitleFormat={subtitleFormat} />
 
   return (
-    <div className="animate-fade-in -mx-8 -mt-8">
+    // 2026-07-25 (Aurora Stage Phase 2) — the `-mx-8 -mt-8` bleed is gone.
+    // App's content wrapper no longer applies a global `p-8`, and the
+    // `detail` view opts out of the .stage-page gutter entirely, so there
+    // is nothing left to escape. Keeping the negative margins would now
+    // push the hero 32px past the viewport edge and cause a horizontal
+    // scrollbar.
+    <div className="animate-fade-in">
       <DetailHero
         backdrop={realBackdrop}
         title={media.title}
@@ -342,7 +348,11 @@ export default function DetailView({
         onBack={onBack}
       />
 
-      <div className="px-8 pt-9 pb-12 max-w-[1400px]">
+      {/* Gutter reads --page-gutter so detail lines up with every other
+          page. It was px-8 (32px) to match the old global p-8; after the
+          Phase 2 shell change every other page moved to 48px and detail
+          alone stayed behind, shifting content 16px on navigation. */}
+      <div className="px-[var(--page-gutter)] pt-9 pb-12 max-w-[1400px]">
         <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
           <DetailRail
             poster={realPoster}

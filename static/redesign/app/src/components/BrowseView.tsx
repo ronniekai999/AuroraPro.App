@@ -243,7 +243,12 @@ export default function BrowseView({
       {!heroMedia && (
         <div
           aria-hidden="true"
-          className="absolute -top-8 -left-8 -right-8 h-[360px] pointer-events-none overflow-hidden"
+          // Negative insets track --page-gutter so the glow still reaches
+          // the page edges. They were -8 (32px) to cancel the old global
+          // p-8 exactly; after the Phase 2 shell change the gutter is 48px
+          // and the glow silently stopped 16px short on each side, which is
+          // the one thing an "edgeless" glow must not do.
+          className="absolute -top-[var(--page-gutter)] -left-[var(--page-gutter)] -right-[var(--page-gutter)] h-[360px] pointer-events-none overflow-hidden"
         >
           <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-purple-500/[0.08] blur-3xl" />
           <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.05] blur-3xl" />

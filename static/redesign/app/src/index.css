@@ -92,11 +92,22 @@
 
     /* Typeface system tokens — drive body + display type everywhere
        (body, .font-display, .holo-text all read these vars). Default
-       (no data-font attribute) is "NOVA": Sora display + Inter Tight
-       body. Users override via Settings → Appearance → Typeface, which
-       writes data-font="current" | "eclipse" | "halo" on <html>. */
-    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Sora', 'Inter Tight', sans-serif;
+       (no data-font attribute) is "ECLIPSE": Bricolage Grotesque display
+       + Inter body. Users override via Settings → Appearance → Typeface,
+       which writes data-font="nova" | "current" | "halo" on <html>.
+
+       2026-07-25 (Aurora Stage Phase 0) — the attribute-less default
+       moved from NOVA (Sora + Inter Tight) to ECLIPSE. Option B's
+       editorial art direction is built on the Bricolage/Inter pairing,
+       and Bricolage is what carries the oversized display sizes below.
+       NOVA is unchanged and still selectable — it just became an
+       ATTRIBUTED system (html[data-font="nova"]) instead of the bare
+       :root set. Users who explicitly picked Nova keep it: the choice is
+       persisted as aurora_prefs.font_choice regardless of whether an
+       attribute was written, so applyFont()/the main.tsx pre-paint shim
+       can still tell "explicitly chose Nova" from "never chose". */
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
 
     /* Glow theme tokens — drive the white/purple edge + halo on
        .glass-panel, .glass-card, and .media-card. Default is
@@ -113,6 +124,71 @@
       0 0 0 1px rgba(220, 200, 255, 0.25),
       0 0 34px rgba(168, 85, 247, 0.20),
       0 0 72px rgba(255, 255, 255, 0.08);
+
+    /* ============================================================
+       Aurora Stage (Option B) — Phase 0 tokens
+       do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md
+       ============================================================
+       The mockup's :root is otherwise identical to the tokens above
+       (#050505 bg, --glow-border, --glow-halo == the mockup's --halo);
+       these are the genuinely new ones. Palette tokens are prefixed
+       `--stage-` because the bare names the mockup uses (--primary,
+       --cyan) are ALREADY TAKEN here by the shadcn/Tailwind HSL
+       triplets (`--primary: 270 91% 65%`, consumed as
+       hsl(var(--primary))). Redefining those to hex would break every
+       Tailwind color utility in the app. */
+
+    /* Chrome metrics. --topnav-h is the height of the Phase 1 TopNav and
+       the anchor for every sticky offset below it (browse toolbar, admin
+       tab strip). The mockup hard-codes `top: 64px` in both places; read
+       this token instead so nav height stays changeable in one edit. */
+    --topnav-h: 64px;
+    /* Measured height of the WHOLE sticky chrome stack — the admin
+       ScanProgressBar (which renders in flow ABOVE the nav, ~37px per
+       actively-scanning library) plus the nav. App writes the real value
+       here via a ResizeObserver; 64px is the no-scan fallback.
+       ------------------------------------------------------------------
+       Anything positioned below the chrome must anchor to THIS, not to
+       --topnav-h. Phase 2 shipped five offsets keyed to --topnav-h and all
+       five were wrong for an admin mid-scan: the nav overlapped the
+       notification panel's own close button, and on a phone the menu
+       scrim covered the bottom of the buttons that dismiss it.
+       BrowseView's toolbar comment had already documented this exact
+       hazard ("a fixed sticky offset here would gap/overlap") before
+       Phase 2 walked into it. --topnav-h remains the nav's OWN height. */
+    --chrome-h: 64px;
+    --page-gutter: 48px;
+
+    /* Display type scale. Option B's whole "content is the UI" read
+       comes from oversized Bricolage display type, so the sizes are
+       tokens rather than per-component literals — one place to tune the
+       editorial voice, and one place to check when a user switches to a
+       typeface system with different metrics. */
+    --fs-hero: 84px;      /* home hero title */
+    --fs-detail: 64px;    /* title-detail hero */
+    --fs-browse: 52px;    /* movies / TV browse hero strip */
+    --fs-page: 38px;      /* requests / library / settings page heads */
+    --fs-section: 24px;   /* pane + section heads */
+    --fs-rail: 21px;      /* rail titles */
+
+    /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
+       token and stays untouched.) */
+    --card-bg: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
+
+    /* Palette, for the Stage primitives further down. Same hexes the app
+       already uses inline; named so the primitives don't re-litter them. */
+    --stage-purple: #A855F7;
+    --stage-purple-2: #7C3AED;
+    --stage-purple-lt: #d8b4fe;
+    --stage-cyan: #22D3EE;
+    --stage-star: #facc15;
+
+    /* Backdrop tint — the three radial washes .page-tint composites. Each
+       page overrides them (Phase 2 drives them off the current backdrop's
+       dominant color); these defaults are the mockup's home screen. */
+    --tint-1: radial-gradient(1100px 700px at 70% -8%, rgba(124, 58, 237, 0.22), transparent 62%);
+    --tint-2: radial-gradient(800px 600px at -5% 40%, rgba(30, 27, 75, 0.50), transparent 60%);
+    --tint-3: radial-gradient(900px 700px at 105% 85%, rgba(14, 116, 144, 0.10), transparent 55%);
   }
 
   html[data-glow="subtle"] {
@@ -140,14 +216,28 @@
   }
 
   /* Typeface systems — see Settings → Appearance → Typeface. The
-     default (NOVA: Sora + Inter Tight) lives in the :root tokens above;
-     these blocks override per the user's choice. "current" is the
-     original Space Grotesk + Inter pairing (labelled "Classic" in UI). */
+     default (ECLIPSE: Bricolage Grotesque + Inter) lives in the :root
+     tokens above; these blocks override per the user's choice. "current"
+     is the original Space Grotesk + Inter pairing (labelled "Classic" in
+     UI). */
   html[data-font="current"] {
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Space Grotesk', 'Inter', sans-serif;
   }
 
+  /* NOVA — the pre-Aurora-Stage default. Now an attributed system so the
+     :root set can carry Eclipse; values are byte-for-byte what :root held
+     before, so an explicit Nova user sees no change. */
+  html[data-font="nova"] {
+    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Sora', 'Inter Tight', sans-serif;
+  }
+
+  /* ECLIPSE is the attribute-less default (see :root). This block is kept
+     so an explicit data-font="eclipse" — a stale attribute from before
+     the default flip, or a deliberate write — still resolves to the same
+     pairing instead of silently falling through to whatever :root holds
+     next. It is intentionally redundant, not dead. */
   html[data-font="eclipse"] {
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
@@ -314,7 +404,464 @@
     filter: blur(46px);
     pointer-events: none;
   }
+
+  /* Display type scale utilities. Every Option B headline reads its size
+     from a token (see :root) so the editorial voice is tunable in one
+     place — and so a typeface switch has one list of sizes to re-check
+     rather than a dozen inline `text-[84px]`s. line-height/tracking are
+     baked in: at 84px the browser default leading is unusable. */
+  .type-hero    { font-size: var(--fs-hero);    line-height: 0.94; letter-spacing: -0.03em; }
+  .type-detail  { font-size: var(--fs-detail);  line-height: 0.96; letter-spacing: -0.03em; }
+  .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
+  .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
+  .type-section { font-size: var(--fs-section); line-height: 1.1;  letter-spacing: -0.01em; }
+  .type-rail    { font-size: var(--fs-rail);    line-height: 1.15; letter-spacing: -0.01em; }
 }
+
+/* ====================================================================
+   AURORA STAGE (Option B) — shared primitives
+   do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md · Phase 0
+
+   Ported 1:1 from the mockup so Phases 1–8 consume them instead of
+   re-deriving the same chrome per screen. Nothing here is wired up yet
+   — Phase 0 ships the vocabulary, later phases apply it.
+
+   All classes are `stage-`/`type-` prefixed. The mockup uses bare names
+   (.btn-primary, .pill, .qb); during a nine-phase migration a prefix is
+   what lets you tell new chrome from old at a glance in the DOM, and it
+   guarantees no collision with the 85 existing *-pill class names or a
+   future shadcn button variant.
+
+   ⚠️ CASCADE HAZARD — read before adding a rule here.
+   This block is UNLAYERED and sits after `@tailwind utilities`, so for any
+   property a rule here sets, it BEATS the equivalent Tailwind utility of
+   the same specificity (both are 0,1,0 — later wins). Tailwind hoists
+   media-query variants to the end of the file, so `md:flex` still wins at
+   md+ while plain `hidden` LOSES everywhere. That asymmetry shipped a
+   `hidden md:flex` element visible at every breakpoint (found in the Phase
+   2 debug review: the desktop tab strip and search pill rendered on
+   phones, overflowing a bar whose only nav control is the menu button).
+
+   The rule that follows from it: a `.stage-*` class must NOT set
+   `display`. Set display at the call site with Tailwind utilities, where
+   the responsive variants can do their job. Same caution applies to any
+   other property you intend to override per-breakpoint.
+   ==================================================================== */
+
+/* Backdrop tint — the per-page wash that makes each page "a stage lit
+   for its content". Sits behind content (z-0) inside a positioned
+   ancestor; the three gradients come from --tint-1/2/3 so a page (or,
+   from Phase 2, the current backdrop's dominant color) can retint by
+   setting three custom properties instead of restyling the element. */
+.page-tint {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--tint-1), var(--tint-2), var(--tint-3);
+}
+
+/* Starfield — the faint sparkle over auth / hero backdrops. Pure
+   gradients (no image request), and cheap: eight 1–1.5px radials on a
+   non-animated layer. */
+.stage-stars {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1.5px 1.5px at 12% 22%, #fff, transparent),
+    radial-gradient(1px 1px at 34% 8%, #e9d5ff, transparent),
+    radial-gradient(1.5px 1.5px at 58% 18%, #fff, transparent),
+    radial-gradient(1px 1px at 76% 34%, #a5f3fc, transparent),
+    radial-gradient(1.5px 1.5px at 88% 12%, #fff, transparent),
+    radial-gradient(1px 1px at 46% 30%, #fff, transparent),
+    radial-gradient(1px 1px at 24% 42%, #c4b5fd, transparent),
+    radial-gradient(1.5px 1.5px at 68% 44%, #fff, transparent);
+}
+
+/* ── Chrome: the slim top navigation (Phase 2) ──────────────────────── */
+/* Replaces the 240px sidebar. Height is --topnav-h so every sticky offset
+   under it (browse toolbar, admin tab strip) tracks one value. z-index 50:
+   above page content and the sticky sub-toolbars (40), below the drawers
+   (45 is intentionally *under* the nav so the nav's own triggers stay
+   clickable — see ServerPanel/NotificationPanel), the palette, the party
+   panel, modals, and the player (60+). */
+.stage-topnav {
+  position: relative;
+  /* z-index is load-bearing, not decoration. `backdrop-filter` below makes
+     this bar a stacking context, so the avatar dropdown inside it paints
+     atomically at the BAR's level — not at its own z-[55]. Without a
+     z-index here the bar sits at level 0 among its siblings in App's
+     sticky wrapper, which puts it (and the dropdown) UNDER the mobile
+     sheet's scrim (48) and panel (49): the dropdown became invisible and
+     unclickable, and below md it is the only route to Settings /
+     Notifications / Sign out. 51 clears both. */
+  z-index: 51;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: var(--topnav-h);
+  padding: 0 18px;
+  background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.62));
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+@media (min-width: 768px) {
+  .stage-topnav { padding: 0 30px; }
+}
+html[data-glow="subtle"] .stage-topnav {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #050505;
+}
+
+.stage-tab {
+  position: relative;
+  padding: 9px 13px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
+.stage-tab[aria-current="page"] {
+  color: #fff;
+  font-weight: 600;
+  background: rgba(168, 85, 247, 0.14);
+}
+/* Gradient underline on the active tab — the top-nav counterpart of the
+   sidebar's 3px left bar (.nav-link-item.active::before). */
+.stage-tab[aria-current="page"]::after {
+  content: '';
+  position: absolute;
+  left: 13px;
+  right: 13px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--stage-purple), var(--stage-cyan));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+}
+/* Inset so the scrolling strip can't clip it — see .stage-tabstrip. */
+.stage-tab:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgba(216, 180, 254, 0.9);
+}
+/* Admin marker on the Admin tab. */
+.stage-tab-adm {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  /* The mockup draws this at 8.5px (≈6.4pt), below any practical
+     legibility floor — and the same class is reused in the mobile sheet's
+     15px rows, where 8.5px reads as an artefact. */
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--stage-purple-lt);
+  background: rgba(168, 85, 247, 0.16);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+/* Tab strip. Between md and xl the eight tabs don't fit, so the strip
+   scrolls horizontally (TopNav scrolls the active tab into view on
+   change) and edge masks signal there's more. Below md the strip is
+   replaced by the menu sheet. */
+.stage-tabstrip {
+  /* No `display` — see the CASCADE HAZARD note above. The call site sets
+     `hidden md:flex`; declaring display:flex here made `hidden` lose. */
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  /* `overflow-x: auto` makes overflow-y compute from visible to auto, so
+     this box clips vertically too — and the tabs are exactly as tall as
+     it is. Without breathing room that clips away the active tab's
+     underline glow AND the focus ring. Pad the clip box out and pull the
+     same amount back off the margin, so nothing shifts in the bar. */
+  padding-block: 10px;
+  margin-block: -10px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Fade the overflowing edges so a clipped tab reads as "scrollable"
+     rather than as a rendering glitch. Ramp kept SHORT (6px): at 14px the
+     leading tab — which at md–lg is left-aligned and often the active one
+     — sat far enough into the ramp to composite down to ~2.3:1, failing
+     contrast on a tab that isn't even clipped. */
+  mask-image: linear-gradient(90deg, transparent 0, #000 6px, #000 calc(100% - 6px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 6px, #000 calc(100% - 6px), transparent 100%);
+}
+.stage-tabstrip::-webkit-scrollbar { display: none; }
+/* NOTE: the strip stays a scroll container at EVERY width. An earlier
+   version switched to `overflow-x: visible` at xl (1280px) on the
+   assumption the eight tabs fit there — they don't. The tabs are
+   `white-space: nowrap`, so their min-content width (~700px for an admin)
+   can't shrink, and at 1280px the fixed chrome (brand + a 196px search
+   pill + four 38px controls + the profile chip) leaves ~545px. With
+   overflow visible and `justify-center` the surplus escaped in BOTH
+   directions and painted over the wordmark and the search field — on
+   1280×800 and 1366×768, two of the most common laptop sizes. Scrolling
+   degrades gracefully; visible overflow does not.
+
+   Centering is likewise deferred to 2xl (1536px), where the tabs actually
+   fit — `justify-content: center` on an overflowing scroller makes the
+   leading items unreachable, so it must only apply when there's slack. */
+
+/* Search pill in the nav. Wraps a real <input> (not a button) so the
+   type-to-search-results flow the header had is preserved verbatim; the
+   ⌘K chip is a hint that the palette is also available. */
+.stage-navsearch {
+  /* No `display` — see the CASCADE HAZARD note above. */
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  /* Without this the pill's min-content floor (~85px) can push the bar
+     wider than the viewport; `body { overflow-x: hidden }` would then clip
+     the right cluster rather than scroll to it. */
+  min-width: 0;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+/* `all: unset` on the input (below) strips its own border and background,
+   so the global input:focus treatment has nothing to paint and the global
+   :focus-visible outline exempts inputs. That leaves this as the ONLY
+   focus indicator for the field — so it has to clear SC 1.4.11's 3:1, not
+   just look tinted. rgba(216,180,254,.9) is ~7.5:1 on the bar; the ring
+   adds a second, non-colour-dependent cue. */
+.stage-navsearch:focus-within {
+  border-color: rgba(216, 180, 254, 0.9);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.28);
+}
+/* The global `input:not([type="range"])` rule in this file sets padding,
+   background, border and radius; the nav input must opt out or the pill
+   breaks. The `:not([type="range"])` here is NOT redundant — it is the
+   whole point. `.stage-navsearch input` is (0,1,1), exactly TIED with that
+   global rule, which is declared LATER in this file and therefore won
+   every longhand: `all: unset` expanded to declarations that each lost
+   individually, and the input kept its 12px/16px padding, its own border
+   and radius, and a second nested focus ring inside the pill. Adding the
+   :not() takes this to (0,2,1) and it actually applies. */
+.stage-navsearch input:not([type="range"]) {
+  all: unset;
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  color: rgba(255, 255, 255, 0.92);
+  /* 16px below lg so iOS/iPadOS Safari doesn't zoom the viewport on focus
+     (it zooms any focused input under 16px); the designed 12.5px applies
+     from lg, where a touch keyboard is not the primary input. */
+  font-size: 16px;
+}
+@media (min-width: 1024px) {
+  .stage-navsearch input:not([type="range"]) { font-size: 12.5px; }
+}
+/* `all: unset` above only resets the BASE state. The global
+   `input:not([type="range"]):focus` rule is (0,2,1) — tied with the rule
+   above and declared later — so on focus it re-applied its own background
+   and a 3px ring, drawing a second ring nested inside the pill's
+   :focus-within treatment. (0,2,2) here settles it. The pill is the focus
+   indicator; the input inside it must stay invisible. */
+.stage-navsearch input:not([type="range"]):focus,
+.stage-navsearch input:not([type="range"]):focus-visible {
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+}
+/* --text-secondary, not a hand-tuned alpha of it: rgba(220,220,232,0.42)
+   is that token's exact RGB dialled down to ~3.3:1, which is the very
+   failure the token was introduced to fix (see its :root comment). */
+.stage-navsearch input::placeholder { color: var(--text-secondary); }
+.stage-navsearch kbd {
+  flex: none;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+/* Circular icon control in the nav right cluster (party, bell, menu). */
+.stage-iconbtn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+.stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+.stage-iconbtn[aria-expanded="true"] {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+}
+.stage-iconbtn:focus-visible {
+  outline: none;
+  border-color: rgba(216, 180, 254, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+}
+
+/* Standard page gutter. Replaces the global `p-8` that App's content
+   wrapper used to apply to every view: pages are full-bleed now and opt
+   IN to the gutter, so a hero can reach the viewport edge. */
+.stage-page {
+  padding: 28px var(--page-gutter) 70px;
+}
+@media (max-width: 767px) {
+  .stage-page { padding: 20px 18px 56px; }
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────── */
+.stage-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  height: 46px;
+  padding: 0 24px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 14.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+.stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stage-btn:not(:disabled):hover { transform: translateY(-1px); }
+.stage-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
+}
+.stage-btn-primary {
+  background: linear-gradient(135deg, var(--stage-purple), var(--stage-purple-2));
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
+}
+.stage-btn-white { background: #fff; color: #0a0a0a; }
+.stage-btn-ghost {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+}
+.stage-btn-quiet {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 500;
+}
+.stage-btn-quiet:hover { color: #fff; }
+
+/* ── Filter / toggle pills ─────────────────────────────────────────── */
+.stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 15px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.stage-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.stage-pill.is-on,
+.stage-pill[aria-pressed="true"],
+.stage-pill[aria-selected="true"] {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+  font-weight: 600;
+}
+.stage-pill:focus-visible {
+  outline: none;
+  border-color: rgba(216, 180, 254, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+}
+
+/* ── Badges ───────────────────────────────────────────────────────────
+   .stage-badge is the glass chip that sits ON artwork (detail hero
+   "MOVIE" / "PG-13"). The 0.18 white border + blurred dark fill is what
+   keeps it legible over an arbitrary backdrop. */
+.stage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: rgba(10, 8, 18, 0.55);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Quality badges. These go on card art in Phase 3, so each variant
+   carries its own opaque-enough fill — they must not rely on the poster
+   underneath for contrast. */
+.stage-qb {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  color: #fff;
+}
+.stage-qb-4k {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.9), rgba(126, 34, 206, 0.9));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
+}
+.stage-qb-hdr {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.9), rgba(180, 83, 9, 0.9));
+}
+.stage-qb-hd {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(6px);
+}
+
+/* Reduced motion — the lift on hover is decorative. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-btn { transition: none; }
+  .stage-btn:not(:disabled):hover { transform: none; }
+}
+
+/* Glow = Subtle honours the blur budget the same way .aurora-glass-overlay
+   does (see the html[data-glow="subtle"] note above): the Stage primitives
+   that layer backdrop-blur drop it for a flat fill. */
+html[data-glow="subtle"] .stage-btn-ghost,
+html[data-glow="subtle"] .stage-badge,
+html[data-glow="subtle"] .stage-qb-hd {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 
 @keyframes chromaticShift {
   0% { background-position: 0% 50%; }
@@ -533,42 +1080,10 @@
 }
 
 /* Sidebar nav link */
-.nav-link-item {
-  position: relative;
-  padding: 10px 14px;
-  border-radius: 10px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 0.875rem;
-  font-weight: 500;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  cursor: pointer;
-}
-
-.nav-link-item:hover {
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.nav-link-item.active {
-  color: #fff;
-  background: rgba(168, 85, 247, 0.15);
-}
-
-.nav-link-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  background: #A855F7;
-  border-radius: 0 3px 3px 0;
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
-}
+/* .nav-link-item — REMOVED 2026-07-25 (Aurora Stage Phase 2).
+   This was the sidebar nav row (including the 3px purple left bar on
+   .active). The sidebar is gone; the top-nav equivalent is .stage-tab,
+   whose active state uses a gradient underline instead. */
 
 /* Progress bar */
 .progress-bar {
@@ -1717,7 +2232,18 @@ textarea:focus-visible {
   .animate-shimmer,
   .aurora-pulse-blob,
   .animate-pulse,
-  .animate-spin {
+  .animate-spin,
+  /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
+     translateY, i.e. real motion, and were missed by the sweep above. The
+     gap is old; the blast radius is new, because the nav now applies
+     .animate-fade-in to the avatar dropdown and the mobile menu sheet —
+     the primary navigation of every phone session.
+
+     `animation: none` is safe for these two, unlike `.onb-stagger > *`
+     handled above: neither declares a base `opacity: 0`, so removing the
+     animation leaves them at their author style (visible, untransformed).*/
+  .animate-fade-in,
+  .animate-slide-in {
     animation: none !important;
   }
 }

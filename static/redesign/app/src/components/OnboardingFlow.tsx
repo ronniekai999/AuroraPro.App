@@ -234,6 +234,23 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
   }
   const goTo = (s: Step) => {
     setError(null)
+    // 2026-07-25 (Aurora Stage Phase 0 follow-up) — commit the appearance
+    // choices when leaving the "style" step, even if the user never tapped
+    // a chip.
+    //
+    // Why this matters: the chips seed from currentFont()/currentGlow() and
+    // render the seeded one as SELECTED (ring + check badge), but applyFont
+    // was only ever called from onClick. A user who liked what "Make it
+    // yours" showed them and pressed Continue therefore left with NO
+    // font_choice stored at all — even though the UI told them they had
+    // chosen. That was invisible until the default flipped nova → eclipse:
+    // those users would silently become Bricolage users despite having
+    // "picked" Nova. Persisting the accepted default closes the one hole in
+    // the flip's non-destructiveness.
+    if (step === 'style') {
+      applyFont(font)
+      applyGlow(glow)
+    }
     setStep(s)
   }
   const next = () => {

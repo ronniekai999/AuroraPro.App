@@ -133,8 +133,13 @@ export function DetailRail({
   const progressPct = Math.round((resumeFraction ?? 0) * 100)
   const tileCount = 1 + (onAddToList ? 1 : 0) + (onParty ? 1 : 0)
   return (
-    // top offset clears the app's sticky header (~60px) + a small gap.
-    <div className={cn('lg:sticky lg:top-[76px] self-start space-y-5', className)}>
+    // Top offset clears the app's sticky nav + a small gap. Reads
+    // --topnav-h (2026-07-25, Aurora Stage Phase 2) instead of the old
+    // hardcoded 76px so it tracks the bar rather than drifting the next
+    // time its height changes. Note the admin scan bar sits above the nav
+    // and adds ~3px while a scan runs; that pre-existing few-pixel drift
+    // is the same one BrowseView's toolbar comment calls out.
+    <div className={cn('lg:sticky lg:top-[calc(var(--chrome-h,var(--topnav-h))+12px)] self-start space-y-5', className)}>
       {/* Poster + resume overlay */}
       <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl">
         <img src={poster} alt={title} className="w-full aspect-[2/3] object-cover" />

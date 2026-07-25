@@ -6,6 +6,10 @@ import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 import { installSyncDebug } from './lib/syncDebug'
+// The single source of truth for "which font values get an attribute".
+// Importing it here is what keeps the pre-paint shim from drifting out of
+// step with applyFont() — see appearance.ts.
+import { ATTRIBUTED_FONTS } from './lib/appearance'
 
 // 2026-05-27 — Install the diagnostic buffer as early as possible so
 // the bug-report flow can attach "what was happening before the user
@@ -57,9 +61,18 @@ try {
 
 // Apply the user's typeface preference BEFORE first paint so headings
 // and body render in the chosen font on the very first frame (no flash
-// of the default face). Default is "NOVA" (Sora + Inter Tight), defined
-// as the unprefixed :root tokens in index.css — so we only set the
-// attribute when the user has explicitly chosen another system.
+// of the default face). Default is "ECLIPSE" (Bricolage Grotesque +
+// Inter), defined as the unprefixed :root tokens in index.css — so we
+// only set the attribute when the user has explicitly chosen another
+// system.
+//
+// 2026-07-25 (Aurora Stage Phase 0) — the default flipped 'nova' →
+// 'eclipse', so 'nova' MOVED INTO this allowlist and 'eclipse' moved out.
+// A user who explicitly picked Nova still has font_choice: 'nova' in
+// aurora_prefs (the pref is written even when no attribute is), so they
+// keep Sora + Inter Tight; only users who never chose pick up Eclipse.
+// Keep in sync with applyFont() in lib/appearance.ts and the inline
+// radiogroup in SettingsView.
 try {
   const raw = localStorage.getItem('aurora_prefs')
   if (raw) {
@@ -67,11 +80,11 @@ try {
     const font = parsed && typeof parsed === 'object'
       ? (parsed as Record<string, unknown>).font_choice
       : null
-    if (font === 'current' || font === 'eclipse' || font === 'halo') {
+    if (typeof font === 'string' && (ATTRIBUTED_FONTS as readonly string[]).includes(font)) {
       document.documentElement.setAttribute('data-font', font)
     }
   }
-} catch { /* ignore — fall through to default (NOVA) */ }
+} catch { /* ignore — fall through to default (ECLIPSE) */ }
 
 // 2026-05-19 audit (FE-H1) — wrap the app in an ErrorBoundary so a
 // render-time throw anywhere in the tree shows a fallback instead of
