@@ -15,6 +15,8 @@ import {
   type ServerMediaItem,
 } from '@/lib/api'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
+import { Icon } from '@/components/Icon'
+import { PageHeader } from '@/components/PageHeader'
 import {
   AlertDialog,
   AlertDialogContent,
@@ -25,6 +27,30 @@ import {
   AlertDialogCancel,
   AlertDialogAction,
 } from '@/components/ui/alert-dialog'
+
+// Which images the stacked-poster card draws, in order (Aurora Stage Phase 6).
+// Exported and pure so the three-branch fallback is testable — an untested
+// fallback chain is how you end up shipping blank cards against a server that
+// predates the field.
+//
+//   1. poster_paths — up to four MEMBER posters. Four strips read as "a group
+//      of titles", which is the whole point of the card.
+//   2. cover_path — one image, auto-populated server-side from the first item
+//      ever added. Reads as one title, but beats an empty card. This is the
+//      path a frontend deployed ahead of its server takes.
+//   3. nothing — a genuinely empty collection, or one whose members all lack
+//      poster art. The card falls back to its own flat background.
+//
+// NOT `.map(posterURL)`: map passes the index as the second argument and
+// posterURL's second parameter is `size`, so strip 1 would request size `1`.
+// w185 because each strip is only ~110px wide on this card.
+export function collectionStrips(
+  c: Pick<Collection, 'poster_paths' | 'cover_path'>,
+): string[] {
+  if (c.poster_paths?.length) return c.poster_paths.map(p => posterURL(p, 'w185'))
+  if (c.cover_path) return [backdropURL(c.cover_path)]
+  return []
+}
 
 interface Props {
   isAdmin: boolean
@@ -256,26 +282,21 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
   return (
     <>
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
-            <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">
-              Curated
-            </span>
-          </div>
-          <h1 className="text-white text-4xl font-bold font-display">Collections</h1>
-          <p className="text-white/60 text-sm mt-2">
-            {collections.length} collection{collections.length === 1 ? '' : 's'} —
-            curated manually or by Aurora's AI.
-          </p>
-        </div>
-        <button
-          onClick={onOpenCreate}
-          className="px-5 py-2.5 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-full transition-all glow-purple"
-        >
-          + New Collection
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Curated"
+        title="Collections"
+        sub={`Smart shelves, yours and Aurora's — ${collections.length} collection${collections.length === 1 ? '' : 's'}`}
+        action={
+          // The mockup's dashed "+ New Collection" tile. Dashed reads as "this
+          // creates a new thing" rather than "this is a thing", which matters
+          // here because it sits directly above a grid of solid cards that all
+          // OPEN something.
+          <button type="button" onClick={onOpenCreate} className="stage-newcol inline-flex px-5">
+            <Icon name="plus" size={14} />
+            New Collection
+          </button>
+        }
+      />
 
       {collections.length === 0 ? (
         <div className="text-center py-20">
@@ -295,67 +316,82 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
         // inside <button> is invalid HTML, whereas role="button" avoids
         // that. The delete button stops propagation on BOTH click and keydown,
         // so its activation never bubbles up to this card handler.
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
-          {collections.map((c) => (
-            <div
-              key={c.id}
-              role="button"
-              tabIndex={0}
-              aria-label={`Open collection ${c.name}`}
-              onClick={() => setSelected(c.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  setSelected(c.id)
-                }
-              }}
-              className="cursor-pointer rounded-2xl border border-white/[0.06] overflow-hidden bg-gradient-to-br from-purple-900/30 via-[#0a0a0f] to-[#050505] hover:border-purple-500/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400 focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505] transition-all group relative h-[180px] p-5 flex flex-col justify-end"
-            >
-              {c.cover_path && (
-                <img
-                  src={backdropURL(c.cover_path)}
-                  alt=""
-                  className="absolute inset-0 w-full h-full object-cover opacity-30 group-hover:opacity-40 transition-opacity"
-                  loading="lazy"
-                />
-              )}
-              <div className="absolute inset-0 bg-gradient-to-t from-[#050505] via-[#050505]/70 to-transparent" />
-              <div className="relative">
-                <div className="flex items-center gap-2 mb-2">
-                  {c.kind === 'ai' && (
-                    <span className="px-2 py-0.5 text-[10px] uppercase tracking-wider bg-purple-500/20 text-purple-200 border border-purple-500/30 rounded">
-                      ✨ AI
-                    </span>
-                  )}
-                  {c.is_public && (
-                    <span className="px-2 py-0.5 text-[10px] uppercase tracking-wider bg-emerald-500/15 text-emerald-200 border border-emerald-500/30 rounded">
-                      Public
-                    </span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+          {collections.map((c) => {
+            const strips = collectionStrips(c)
+            return (
+              <div
+                key={c.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`Open collection ${c.name}, ${c.item_count || 0} titles`}
+                onClick={() => setSelected(c.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setSelected(c.id)
+                  }
+                }}
+                className="stage-colcard group"
+              >
+                {/* aria-hidden: the strips are decorative here — the card's
+                    aria-label already names the collection and its size, and
+                    announcing four member posters as unlabelled images would
+                    add noise without information. */}
+                <div className="absolute inset-0 flex" aria-hidden="true">
+                  {strips.map((src, i) => (
+                    <img
+                      key={i}
+                      src={src}
+                      alt=""
+                      loading="lazy"
+                      // flex-1 min-w-0 so 1, 2, 3 or 4 strips each fill the
+                      // card evenly — the count is data-driven (a collection
+                      // with two members yields two strips), so a fixed 25%
+                      // would leave dead space.
+                      className="flex-1 min-w-0 h-full object-cover"
+                    />
+                  ))}
+                </div>
+                <div className="stage-colcard-scrim" />
+                {/* items-end + h-full so the text sits on the floor of the
+                    118px band regardless of how many lines it takes. */}
+                <div className="relative z-[2] h-full flex flex-col justify-end px-[17px] pb-[14px]">
+                  <h3 className="font-display text-[16.5px] font-bold text-white truncate">{c.name}</h3>
+                  <p className="text-[11.5px] text-white/60 mt-0.5">
+                    {c.item_count || 0} title{c.item_count === 1 ? '' : 's'}
+                  </p>
+                </div>
+                {/* Badges top-right. The admin delete control also wants that
+                    corner, so it is offset LEFT of the badges rather than
+                    stacked on top of them — the previous version put both at
+                    top-3 right-3 and the × landed on the "Public" chip. */}
+                <div className="absolute top-3 right-3.5 z-[3] flex items-center gap-1.5">
+                  {c.kind === 'ai' && <span className="stage-cbadge stage-cbadge-ai">✨ AI</span>}
+                  {c.is_public && <span className="stage-cbadge stage-cbadge-pub">PUBLIC</span>}
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })
+                      }}
+                      onKeyDown={(e) => e.stopPropagation()}
+                      // focus-visible:opacity-100 alongside the hover reveal:
+                      // opacity-0 alone left this focusable but invisible, so
+                      // a keyboard user tabbing the grid hit an unseen control
+                      // (WCAG 2.4.7).
+                      className="w-6 h-6 rounded-md grid place-items-center bg-black/60 hover:bg-red-500/80 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      title="Delete collection"
+                      aria-label={`Delete collection ${c.name}`}
+                    >
+                      <Icon name="trash" size={12} />
+                    </button>
                   )}
                 </div>
-                <h3 className="text-white text-xl font-bold font-display mb-1">
-                  {c.name}
-                </h3>
-                <p className="text-white/50 text-xs">
-                  {c.item_count || 0} title{c.item_count === 1 ? '' : 's'}
-                </p>
               </div>
-              {isAdmin && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })
-                  }}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  className="absolute top-3 right-3 w-7 h-7 rounded-full bg-black/40 hover:bg-red-500/80 text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-xs z-10"
-                  title="Delete collection"
-                  aria-label={`Delete collection ${c.name}`}
-                >
-                  ×
-                </button>
-              )}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

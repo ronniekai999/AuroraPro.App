@@ -1804,6 +1804,12 @@ export interface Collection {
   is_public: boolean
   cover_path?: string
   item_count?: number
+  // Up to four member posters in collection order, for the stacked-poster
+  // card in the collections grid. Returned by GET /api/collections only —
+  // the single-collection GET omits it, since that view renders the real
+  // member grid. Optional (and the card falls back to cover_path) so a
+  // frontend deployed ahead of the server doesn't render empty cards.
+  poster_paths?: string[]
   created_at: string
   updated_at: string
 }

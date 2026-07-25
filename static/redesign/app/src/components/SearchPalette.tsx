@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { searchMedia, type UIMedia } from '@/lib/api'
+import { Icon } from '@/components/Icon'
 
 interface Props {
   open: boolean
@@ -152,7 +153,10 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
       {/* Palette panel */}
       <div
-        className="relative w-full max-w-2xl rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden"
+        // 760px, up from max-w-2xl (672). The result rows carry a poster, a
+        // title, a meta line and a ⏎ hint; at 672 the meta line was the first
+        // thing to truncate on ordinary titles.
+        className="relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
@@ -175,7 +179,14 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search Aurora — titles, vibes, anything…"
-            className="flex-1 bg-transparent border-0 outline-none text-white text-lg placeholder-white/30 focus:ring-0"
+            // 22px display type on the query, not 18px body. The query is the
+            // subject of this overlay, so it gets the same treatment a page
+            // title would. font-display + min-w-0 so the flex child can still
+            // shrink — without min-w-0 a long query pushed the Esc key legend
+            // off the panel's right edge, because an <input>'s default
+            // min-width is `auto` and it refuses to shrink below its size
+            // attribute's intrinsic width.
+            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/30 focus:ring-0"
             spellCheck={false}
             autoComplete="off"
           />
@@ -183,8 +194,9 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               "Smart" was overused on the V2 top bar (always-on
               static badge); here it's earned. */}
           {mode === 'semantic' && results.length > 0 && (
-            <span className="text-xs px-2 py-1 rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-200 font-medium flex items-center gap-1">
-              <span className="text-[10px]">✨</span> Smart
+            <span className="stage-smartchip inline-flex flex-shrink-0">
+              <Icon name="sparkle" size={12} />
+              Smart
             </span>
           )}
           <kbd className="text-[10px] uppercase tracking-wider text-white/40 border border-white/10 rounded px-1.5 py-0.5 font-mono">Esc</kbd>

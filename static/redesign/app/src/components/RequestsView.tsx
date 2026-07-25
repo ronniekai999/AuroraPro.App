@@ -5,8 +5,9 @@
 // module-private helper — RequestsView is its only consumer. The status/
 // date formatting uses formatRequestDate (shared leaf, Phase 0a).
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Icon } from '@/components/Icon'
+import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import {
   createRequest,
@@ -132,14 +133,20 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     return () => { window.clearTimeout(id); ac.abort() }
   }, [searchQ, createOpen])
 
-  const statusColors: Record<string, string> = {
-    pending: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+  // Status → .stage-stb variant. The five colours are UNCHANGED from the
+  // Tailwind map this replaces (amber pending / orange pending-approval / blue
+  // processing / emerald available / red failed) — they moved into index.css
+  // because each is a coordinated fill+border+text triple, and the mockup's
+  // own badge palette happens to agree with all five. The semantics are the
+  // server's, so this is a relocation, not a recolour.
+  const statusBadge: Record<string, string> = {
+    pending: 'stage-stb-pending',
     // Held for admin approval (carve-out C) — distinct orange so it reads
     // apart from the amber "pending" (admitted, awaiting dispatch).
-    pending_approval: 'bg-orange-500/10 text-orange-300 border-orange-500/20',
-    processing: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-    available: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-    failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+    pending_approval: 'stage-stb-approval',
+    processing: 'stage-stb-processing',
+    available: 'stage-stb-available',
+    failed: 'stage-stb-failed',
   }
   // Status display labels. snake_case statuses (pending_approval) need an
   // explicit human label since the badge otherwise renders the raw value.
@@ -147,13 +154,41 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     pending_approval: 'Pending approval',
   }
 
+  // Counts for the filter pills. Computed in one pass over the list rather
+  // than a .filter() per pill inside the render (which is what the previous
+  // inline version did — six passes over every request on every keystroke of
+  // the unrelated TMDB search box, because that state lives in this
+  // component). Keyed on `requests` so it recomputes only when the data does.
+  const statusCounts = useMemo(() => {
+    const c: Record<string, number> = {}
+    for (const r of requests ?? []) c[r.status] = (c[r.status] ?? 0) + 1
+    return c
+  }, [requests])
+
+  const filterOptions: FilterPillOption<typeof filter>[] = [
+    { value: 'all', label: 'All', count: requests?.length ?? 0 },
+    { value: 'pending', label: 'Pending', count: statusCounts.pending ?? 0 },
+    { value: 'pending_approval', label: 'Pending approval', count: statusCounts.pending_approval ?? 0 },
+    { value: 'processing', label: 'Processing', count: statusCounts.processing ?? 0 },
+    { value: 'available', label: 'Available', count: statusCounts.available ?? 0 },
+    { value: 'failed', label: 'Failed', count: statusCounts.failed ?? 0 },
+  ]
+
+  const newRequestButton = (
+    <button
+      type="button"
+      onClick={() => setCreateOpen(true)}
+      className="stage-btn stage-btn-primary"
+    >
+      <Icon name="plus" size={15} />
+      Request New
+    </button>
+  )
+
   if (requests === null) {
     return (
       <div className="animate-fade-in">
-        <div className="mb-6">
-          <h1 className="text-white text-3xl font-bold font-display">Requests</h1>
-          <p className="text-white/40 text-sm mt-2">Loading requests…</p>
-        </div>
+        <PageHeader title="Requests" sub="Loading requests…" />
       </div>
     )
   }
@@ -162,18 +197,11 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-6 flex items-start justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-white text-3xl font-bold font-display">Requests</h1>
-          <p className="text-white/50 text-sm mt-1">{requests.length} total</p>
-        </div>
-        <button
-          onClick={() => setCreateOpen(true)}
-          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-medium transition-colors"
-        >
-          Request New
-        </button>
-      </div>
+      <PageHeader
+        title="Requests"
+        sub={`${requests.length} total`}
+        action={newRequestButton}
+      />
 
       {/* Phase 4.6 — TMDB search + create dialog. Small modal so
           users don't lose scroll position in the requests list. */}
@@ -290,30 +318,30 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         </div>
       )}
 
-      <div className="flex items-center gap-2 mb-6 flex-wrap">
-        {(['all', 'pending', 'pending_approval', 'processing', 'available', 'failed'] as const).map(f => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-all capitalize ${
-              filter === f
-                ? 'bg-purple-600/20 text-purple-300 border border-purple-500/30'
-                : 'bg-white/5 text-white/50 border border-white/[0.06] hover:bg-white/10'
-            }`}
-          >
-            {statusLabels[f] ?? f} {f !== 'all' && `(${requests.filter(r => r.status === f).length})`}
-          </button>
-        ))}
-      </div>
+      <FilterPills
+        options={filterOptions}
+        value={filter}
+        onChange={setFilter}
+        label="Filter requests by status"
+        className="mb-6"
+      />
 
       {filtered.length === 0 ? (
         <div className="text-center py-20">
           <Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />
-          <h3 className="text-white/60 text-lg mb-2">No requests {filter !== 'all' ? `in "${filter}"` : 'yet'}</h3>
+          <h3 className="text-white/60 text-lg mb-2">
+            No requests {filter !== 'all' ? `in "${statusLabels[filter] ?? filter}"` : 'yet'}
+          </h3>
           <p className="text-white/40 text-sm">Use the "Request New" button above to submit one.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        // Single column, not the previous 2-up grid: the mockup's request row
+        // is wide (70×105 poster, a title line that carries year + kind + 4K +
+        // status, a meta line, and a right-hand date/delete stack), and half a
+        // page cannot hold that without the title line wrapping on almost
+        // every entry. xl:grid-cols-2 is deliberately NOT restored — at 1400px
+        // the row still wants ~700px.
+        <div className="flex flex-col gap-3">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
             const isExpanded = expanded.has(req.id)
@@ -328,13 +356,23 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
               })
             }
             return (
-              <div key={req.id} className={`glass-card rounded-xl p-4 flex gap-4 ${hasOverview ? 'cursor-pointer hover:bg-white/[0.02] transition-colors' : 'cursor-default'}`}
+              <div key={req.id} className={`stage-req flex gap-4 sm:gap-[18px] p-3 sm:pr-[18px] ${hasOverview ? 'cursor-pointer' : 'cursor-default'}`}
                 onClick={toggle}
                 role={hasOverview ? 'button' : undefined}
+                tabIndex={hasOverview ? 0 : undefined}
+                // A div with role="button" is not keyboard-operable on its own.
+                // The row has been clickable-to-expand since QA 2026-05-25 and
+                // reachable only by mouse ever since; Enter/Space now activate
+                // it. The nested delete <button> already stops propagation on
+                // click, and stops keydown too so its own Enter can't also
+                // toggle the overview.
+                onKeyDown={hasOverview ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() }
+                } : undefined}
                 aria-expanded={hasOverview ? isExpanded : undefined}
-                aria-label={hasOverview ? `${req.title}, click to ${isExpanded ? 'hide' : 'show'} overview` : undefined}
+                aria-label={hasOverview ? `${req.title}, ${isExpanded ? 'hide' : 'show'} overview` : undefined}
               >
-                <div className="w-[70px] h-[105px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5 flex items-center justify-center">
+                <div className="stage-req-poster flex-shrink-0 flex items-center justify-center">
                   {/* Layout invariant: the img and the fallback div
                       are mutually-exclusive flex siblings — only one
                       is `display: flex/block` at a time. Don't add a
@@ -378,55 +416,90 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     <Icon name={req.media_type === 'tv' ? 'tv' : 'film'} size={22} className="text-white/25" />
                   </div>
                 </div>
+                {/* Info column. The mockup puts everything that identifies the
+                    request on ONE line — title, year, kind, quality, status —
+                    with a secondary meta line under it. The old layout split
+                    those across three rows and pushed the status badge into a
+                    justify-between footer, which meant the two things you scan
+                    for (what it is, where it's up to) were at opposite ends of
+                    the card. */}
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-white text-sm font-semibold truncate">{req.title}{req.year ? ` (${req.year})` : ''}</h3>
-                  <div className="flex items-center gap-2 mt-1 mb-2 flex-wrap">
-                    <span className="text-white/40 text-xs uppercase">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
-                    {req.quality_4k && <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px]">4K</span>}
-                    {req.quality_1080p && <span className="badge-glass bg-white/[0.04] text-white/60 border border-white/[0.06] text-[10px]">1080p</span>}
+                  <div className="flex items-center gap-x-[9px] gap-y-1.5 flex-wrap">
+                    <h3 className="text-[15px] font-semibold text-white min-w-0 truncate max-w-full">{req.title}</h3>
+                    {req.year > 0 && <span className="text-white/55 text-[13px]">({req.year})</span>}
+                    <span className="stage-typetag">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
+                    {req.quality_4k && <span className="stage-typetag !text-purple-200 !border-purple-400/40 !bg-purple-500/15">4K</span>}
+                    {req.quality_1080p && <span className="stage-typetag">1080p</span>}
+                    <span className={`stage-stb ${statusBadge[req.status] ?? 'stage-stb-pending'}`}>
+                      {statusLabels[req.status] ?? req.status}
+                    </span>
                   </div>
-                  {hasOverview && isExpanded && (
-                    <p className="text-white/60 text-xs mb-2 leading-relaxed">{req.overview}</p>
-                  )}
+                  {/* Meta line. `username` is optional on MediaRequest (the
+                      server omits it for requests whose user was deleted), so
+                      the "requested by" clause is conditional rather than
+                      rendering "requested by undefined". */}
+                  <div className="mt-1.5 flex items-center gap-x-[9px] gap-y-1 flex-wrap text-xs text-white/55">
+                    {req.username && <span>requested by {req.username}</span>}
+                    {req.username && <span className="text-white/25">·</span>}
+                    <span>{formatRequestDate(req.requested_at)}</span>
+                  </div>
                   {req.error_message && (
                     // Phase 5.3 final QA — show humanized error in
                     // the body; keep the raw server response in the
                     // tooltip so admins can still debug.
-                    <p className="text-red-400 text-xs mb-2 line-clamp-2" title={req.error_message}>
+                    <p className="text-red-300 text-xs mt-2 line-clamp-2 flex items-start gap-1.5" title={req.error_message}>
+                      <Icon name="alertTriangle" size={13} className="shrink-0 mt-px" />
                       {humanizeRequestError(req.error_message, req.media_type)}
                     </p>
                   )}
-                  <div className="flex items-center justify-between">
-                    <span className={`badge-glass border text-xs capitalize ${statusColors[req.status]}`}>
-                      {statusLabels[req.status] ?? req.status}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-white/30 text-xs">{formatRequestDate(req.requested_at)}</span>
-                      {(req.status === 'pending' || req.status === 'failed') && (
-                        <button
-                          onClick={async (e) => {
-                            // Wrap click stops propagation to the
-                            // newly-clickable card wrapper — without
-                            // this, clicking delete also toggles the
-                            // overview expand.
-                            e.stopPropagation()
-                            if (!window.confirm(`Delete request for "${req.title}"?`)) return
-                            try {
-                              await deleteRequest(req.id)
-                              onRequestDeleted(req.id)
-                            } catch (err) {
-                              window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
-                            }
-                          }}
-                          className="text-red-400/70 hover:text-red-300 text-xs"
-                          title="Delete request"
-                        >
-                          delete
-                        </button>
-                      )}
-                    </div>
-                  </div>
+                  {hasOverview && (
+                    isExpanded ? (
+                      <p className="text-white/65 text-xs mt-2 leading-relaxed">{req.overview}</p>
+                    ) : (
+                      // The mockup's .expand-hint. The row has been
+                      // expandable since QA 2026-05-25 with nothing to say so
+                      // — "cursor: pointer" was the only affordance, which
+                      // touch users and keyboard users never see.
+                      <div className="mt-1.5 text-[11px] text-white/40 inline-flex items-center gap-1.5">
+                        <Icon name="chevronDown" size={12} />
+                        Click to expand overview
+                      </div>
+                    )
+                  )}
                 </div>
+                {/* Right stack — delete above, nothing below. Kept as a
+                    column so a future second control lands in the mockup's
+                    intended place; the requested-at date moved to the meta
+                    line, where it reads with "requested by". */}
+                {(req.status === 'pending' || req.status === 'failed') && (
+                  <div className="flex-none flex flex-col items-end gap-2.5">
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        // Stops propagation to the clickable row wrapper —
+                        // without this, clicking delete also toggles the
+                        // overview expand.
+                        e.stopPropagation()
+                        if (!window.confirm(`Delete request for "${req.title}"?`)) return
+                        try {
+                          await deleteRequest(req.id)
+                          onRequestDeleted(req.id)
+                        } catch (err) {
+                          window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
+                        }
+                      }}
+                      // Enter on this button would otherwise bubble to the
+                      // row's new onKeyDown and expand the overview behind
+                      // the confirm dialog.
+                      onKeyDown={(e) => e.stopPropagation()}
+                      className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04] border border-white/[0.08] hover:text-red-300 hover:border-red-500/40 transition-colors"
+                      title="Delete request"
+                      aria-label={`Delete request for ${req.title}`}
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </div>
+                )}
               </div>
             )
           })}

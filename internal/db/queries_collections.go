@@ -20,6 +20,29 @@ import (
 // so they can manage/curate the full server library. Audit M1 fix.
 // Ordered by updated_at desc so freshly-modified collections surface
 // first.
+// posterPathsSelect is the up-to-four member posters each row carries for the
+// collections grid's stacked-poster card (Aurora Stage Phase 6). Ordered by
+// (position, id) to match the index on collection_items(collection_id,
+// position) and to agree with the order the collection detail view lists its
+// members in — so the mosaic is the first four titles you'd see inside, not an
+// arbitrary four.
+//
+// Empty poster_paths are filtered out rather than returned as blanks: a
+// half-scanned collection would otherwise render gaps, and the card can lay
+// out any count from 0 to 4. COALESCE keeps the column non-NULL so the scan
+// target can be a plain []string.
+const posterPathsSelect = `
+	COALESCE((
+	  SELECT array_agg(p.poster_path)
+	    FROM (SELECT mi.poster_path
+	            FROM collection_items ci
+	            JOIN media_items mi ON mi.id = ci.media_item_id
+	           WHERE ci.collection_id = c.id
+	             AND COALESCE(mi.poster_path, '') <> ''
+	           ORDER BY ci.position, ci.id
+	           LIMIT 4) p
+	), '{}') AS poster_paths`
+
 func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAdmin bool) ([]*models.Collection, error) {
 	var sql string
 	var args []any
@@ -29,7 +52,7 @@ func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAd
 			       c.kind, COALESCE(c.prompt, ''), c.is_public,
 			       COALESCE(c.cover_path, ''),
 			       (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS item_count,
-			       c.created_at, c.updated_at
+			       c.created_at, c.updated_at,` + posterPathsSelect + `
 			  FROM collections c
 			 ORDER BY c.updated_at DESC
 		`
@@ -39,7 +62,7 @@ func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAd
 			       c.kind, COALESCE(c.prompt, ''), c.is_public,
 			       COALESCE(c.cover_path, ''),
 			       (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id) AS item_count,
-			       c.created_at, c.updated_at
+			       c.created_at, c.updated_at,` + posterPathsSelect + `
 			  FROM collections c
 			 WHERE c.owner_user_id = $1 OR c.is_public = true
 			 ORDER BY c.updated_at DESC
@@ -56,7 +79,7 @@ func (q *Queries) ListCollectionsForUser(ctx context.Context, userID int64, isAd
 		c := &models.Collection{}
 		if err := rows.Scan(&c.ID, &c.OwnerUserID, &c.Name, &c.Description,
 			&c.Kind, &c.Prompt, &c.IsPublic, &c.CoverPath,
-			&c.ItemCount, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.ItemCount, &c.CreatedAt, &c.UpdatedAt, &c.PosterPaths); err != nil {
 			return nil, fmt.Errorf("scan collection: %w", err)
 		}
 		out = append(out, c)

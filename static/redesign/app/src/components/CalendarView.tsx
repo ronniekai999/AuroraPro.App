@@ -15,6 +15,8 @@
 
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import { getCalendar, posterURL, type UpcomingEpisode } from '@/lib/api'
+import { PageHeader } from '@/components/PageHeader'
+import { Icon } from '@/components/Icon'
 
 interface Props {
   onOpenMedia: (id: number) => void
@@ -55,7 +57,12 @@ function lastOfMonthUTC(d: Date): Date {
 // calendar year from today (relevant for the rolling 30-day list view
 // when it crosses Dec→Jan, and for the grid when the user navigates
 // to a future/past month).
-function formatGroupDate(iso: string): string {
+// Split into parts (Aurora Stage Phase 6) so the list header can render
+// "Today" as the mockup's pill instead of as words. Composing the string and
+// then trying to detect/strip the prefix would have been locale-broken the
+// moment a translation lands; the caller now just chooses whether to draw
+// `relative` as text or as a pill.
+export function groupDateParts(iso: string): { relative: string; monthDay: string; isToday: boolean } {
   const datePart = iso.length >= 10 ? iso.slice(0, 10) : iso
   const d = new Date(`${datePart}T00:00:00Z`)
   const today = todayUTC()
@@ -69,9 +76,13 @@ function formatGroupDate(iso: string): string {
     dateOpts.year = 'numeric'
   }
   const monthDay = d.toLocaleDateString(undefined, dateOpts)
-  if (diffDays === 0) return `Today · ${monthDay}`
-  if (diffDays === 1) return `Tomorrow · ${monthDay}`
-  return `${weekday} · ${monthDay}`
+  const relative = diffDays === 0 ? 'Today' : diffDays === 1 ? 'Tomorrow' : weekday
+  return { relative, monthDay, isToday: diffDays === 0 }
+}
+
+function formatGroupDate(iso: string): string {
+  const { relative, monthDay } = groupDateParts(iso)
+  return `${relative} · ${monthDay}`
 }
 
 export default function CalendarView({ onOpenMedia }: Props) {
@@ -148,15 +159,10 @@ export default function CalendarView({ onOpenMedia }: Props) {
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-8 flex items-end justify-between gap-4 flex-wrap">
-        <div>
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
-            <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">
-              {viewMode === 'list' ? 'Upcoming' : 'Month View'}
-            </span>
-          </div>
-          <h1 className="text-white text-4xl font-bold font-display">Calendar</h1>
-          {episodes && (() => {
+      <PageHeader
+        eyebrow={viewMode === 'list' ? 'Upcoming' : 'Month view'}
+        title="Calendar"
+        sub={episodes && (() => {
             // QA BUG-004 — make the window explicit + leading in both
             // views, in matching shape, so the count delta between
             // List ("next 30 days") and Grid ("May 2026") is
@@ -183,44 +189,36 @@ export default function CalendarView({ onOpenMedia }: Props) {
               ? `Next ${LIST_WINDOW_DAYS} days`
               : cursorMonth.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' })
             const epWord = `episode${displayed.length === 1 ? '' : 's'}`
+            // Returned as a fragment, not a template literal. This subline is
+            // mixed markup (a highlighted range label plus a separator dot)
+            // and PageHeader's `sub` is typed ReactNode precisely so it can be
+            // — the Phase 4 `[object Object]` bug was a JSX fragment forced
+            // through a string-typed prop.
             return (
-              <p className="text-white/60 text-sm mt-2">
+              <>
                 <span className="text-white/85 font-medium">{rangeLabel}</span>
                 <span className="text-white/30 mx-1.5">•</span>
                 {displayed.length === 0
                   ? 'no upcoming episodes from shows in your library'
                   : `${displayed.length} ${epWord} from shows in your library`}
-              </p>
+              </>
             )
           })()}
-        </div>
-
-        {/* View-mode toggle */}
-        <div className="inline-flex rounded-full bg-white/[0.04] border border-white/[0.06] p-1">
-          <button
-            onClick={() => setViewMode('list')}
-            className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              viewMode === 'list'
-                ? 'bg-purple-500/30 text-purple-100'
-                : 'text-white/60 hover:text-white/85'
-            }`}
-            aria-pressed={viewMode === 'list'}
-          >
-            List
-          </button>
-          <button
-            onClick={() => setViewMode('grid')}
-            className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              viewMode === 'grid'
-                ? 'bg-purple-500/30 text-purple-100'
-                : 'text-white/60 hover:text-white/85'
-            }`}
-            aria-pressed={viewMode === 'grid'}
-          >
-            Calendar
-          </button>
-        </div>
-      </div>
+        action={
+          // The mockup's .lm-seg: a hard-edged two-up segment, not two pills
+          // in a rounded tray. Labels are "List" and "Month" — the old second
+          // label was "Calendar", which named the page rather than the mode
+          // it switches to.
+          <div className="stage-seg inline-flex" role="group" aria-label="Calendar view mode">
+            <button type="button" onClick={() => setViewMode('list')} aria-pressed={viewMode === 'list'}>
+              List
+            </button>
+            <button type="button" onClick={() => setViewMode('grid')} aria-pressed={viewMode === 'grid'}>
+              Month
+            </button>
+          </div>
+        }
+      />
 
       {episodes === null ? (
         <p className="text-white/40">Loading calendar…</p>
@@ -282,19 +280,39 @@ function ListView({
   }
   const orderedKeys = [...groups.keys()].sort()
   return (
-    <div className="space-y-8">
-      {orderedKeys.map((key) => (
-        <section key={key}>
-          <h2 className="text-white/85 text-lg font-semibold mb-4">
-            {formatGroupDate(groups.get(key)![0].air_date)}
-          </h2>
-          <div className="space-y-2">
-            {groups.get(key)!.map((ep) => (
-              <EpisodeRow key={`${ep.media_item_id}-${ep.episode_id}`} ep={ep} onOpenMedia={onOpenMedia} />
-            ))}
-          </div>
-        </section>
-      ))}
+    // Tighter than the old space-y-8: the mockup's date groups are 18px
+    // apart, which lets three or four days sit on screen at once. Eight
+    // units (32px) meant a week of episodes took two scrolls to scan.
+    <div className="space-y-[18px]">
+      {orderedKeys.map((key) => {
+        const eps = groups.get(key)!
+        const { relative, monthDay, isToday } = groupDateParts(eps[0].air_date)
+        return (
+          <section key={key}>
+            {/* .stage-caldate — the mockup's group header: a small purple
+                date line with a TODAY pill, rather than a bare 18px heading.
+                The pill is the reason the header can be small: it carries the
+                emphasis that the type size used to.
+
+                `relative` is rendered as the pill OR as text, never both —
+                groupDateParts hands over the pieces precisely so this doesn't
+                become "Today Today · May 28". */}
+            <h2 className="stage-caldate flex flex-wrap mb-2.5">
+              {isToday
+                ? <><span className="today">Today</span>{monthDay}</>
+                : <>{relative} · {monthDay}</>}
+              <small className="text-white/40 font-medium">
+                · {eps.length} episode{eps.length === 1 ? '' : 's'}
+              </small>
+            </h2>
+            <div className="space-y-1.5">
+              {eps.map((ep) => (
+                <EpisodeRow key={`${ep.media_item_id}-${ep.episode_id}`} ep={ep} onOpenMedia={onOpenMedia} />
+              ))}
+            </div>
+          </section>
+        )
+      })}
     </div>
   )
 }
@@ -304,28 +322,33 @@ function EpisodeRow({ ep, onOpenMedia }: { ep: UpcomingEpisode; onOpenMedia: (id
     <button
       type="button"
       onClick={() => onOpenMedia(ep.media_item_id)}
-      className="w-full text-left flex items-center gap-4 p-3 rounded-xl bg-white/[0.02] border border-white/[0.04] hover:bg-white/[0.05] hover:border-purple-500/30 transition-all"
+      className="stage-calrow w-full text-left flex"
     >
-      <div className="w-[60px] h-[90px] rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+      {/* 44×66, down from 60×90. The mockup's row has no poster at all — it is
+          a single 38px line — but dropping the art entirely loses the only
+          visual anchor for "which show is this". Shrinking it keeps the row
+          near the mockup's height while the poster still reads. */}
+      <div className="w-[44px] h-[66px] rounded-md overflow-hidden flex-shrink-0 bg-[#12101c]">
         {ep.poster_path ? (
           <img
             src={posterURL(ep.poster_path, 'w185')}
-            alt={ep.show_title}
+            alt=""
             className="w-full h-full object-cover"
             loading="lazy"
           />
         ) : null}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-purple-300 text-sm font-semibold">
-            S{ep.season_number}E{ep.episode_number}
-          </span>
-          <h3 className="text-white text-sm font-medium truncate">{ep.show_title}</h3>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <span className="stage-eptag">S{ep.season_number}E{ep.episode_number}</span>
+          <h3 className="text-white text-sm font-semibold min-w-0 truncate">{ep.show_title}</h3>
+          {ep.episode_title && (
+            // Em-dash lead-in, matching the mockup's "— The Undertow": the
+            // episode title reads as a continuation of the show title rather
+            // than as a second, competing heading.
+            <span className="text-white/60 text-[11.5px] min-w-0 truncate">— {ep.episode_title}</span>
+          )}
         </div>
-        {ep.episode_title && (
-          <p className="text-white/70 text-sm truncate">{ep.episode_title}</p>
-        )}
         {ep.overview && (
           <p className="text-white/40 text-xs line-clamp-1 mt-1">{ep.overview}</p>
         )}
@@ -469,28 +492,32 @@ function GridView({
       {/* Month nav */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
+          {/* Real chevron icons, not the ‹ › single-guillemets these were.
+              Those are punctuation characters — they render at text weight,
+              sit off-centre in a 36px box, and a screen reader announces the
+              literal glyph. The icons match every other nav control in the
+              app and the aria-labels stay. */}
           <button
+            type="button"
             onClick={goPrev}
-            className="w-9 h-9 inline-flex items-center justify-center rounded-full hover:bg-white/10 text-white/70 hover:text-white transition-colors"
+            className="stage-iconbtn"
             aria-label="Previous month"
             title="Previous month"
           >
-            ‹
+            <Icon name="chevronLeft" size={16} />
           </button>
-          <h2 className="text-white text-xl font-semibold font-display">{monthLabel}</h2>
+          <h2 className="text-white font-display font-bold type-section min-w-[9.5ch] text-center">{monthLabel}</h2>
           <button
+            type="button"
             onClick={goNext}
-            className="w-9 h-9 inline-flex items-center justify-center rounded-full hover:bg-white/10 text-white/70 hover:text-white transition-colors"
+            className="stage-iconbtn"
             aria-label="Next month"
             title="Next month"
           >
-            ›
+            <Icon name="chevronRight" size={16} />
           </button>
         </div>
-        <button
-          onClick={goToday}
-          className="px-4 py-1.5 rounded-full text-sm font-medium bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] text-white/85 transition-colors"
-        >
+        <button type="button" onClick={goToday} className="stage-btn stage-btn-ghost !h-9 !px-4 !text-[13px]">
           Today
         </button>
       </div>
@@ -498,16 +525,19 @@ function GridView({
       {/* Weekday header — rotated so the first column matches the
           locale's first-day-of-week (Sun-first in US, Mon-first in
           ISO/Europe). Audit L2. */}
-      <div className="grid grid-cols-7 gap-2 text-center">
+      <div className="stage-calmonth grid text-center">
         {WEEKDAY_LABELS_ROTATED.map((label) => (
-          <div key={label} className="text-white/40 text-xs uppercase tracking-wider py-2">
+          <div key={label} className="text-white/45 text-[9.5px] font-bold uppercase tracking-wider py-1">
             {label}
           </div>
         ))}
       </div>
 
-      {/* Day grid */}
-      <div className="grid grid-cols-7 gap-2">
+      {/* Day grid. .stage-calmonth carries the 7-column template + 4px gap so
+          the header row above and the cells below can never disagree about
+          column widths — they did before, at gap-2 each, which is only
+          coincidentally consistent. */}
+      <div className="stage-calmonth grid !mt-2">
         {grid.map((cell) => {
           const cellISO = toISODate(cell)
           const cellEpisodes = groups.get(cellISO) ?? []
@@ -520,51 +550,43 @@ function GridView({
               key={cellISO}
               type="button"
               onClick={() => setSelectedDay(isSelected ? null : cellISO)}
-              className={`relative min-h-[110px] p-2 rounded-lg text-left transition-all border ${
-                isSelected
-                  ? 'border-purple-500/70 bg-purple-500/15'
-                  : isToday
-                    ? 'border-purple-500/40 bg-purple-500/5 hover:bg-purple-500/10'
-                    : 'border-white/[0.04] bg-white/[0.015] hover:bg-white/[0.04] hover:border-white/[0.08]'
-              } ${!inMonth ? 'opacity-40' : ''}`}
+              // Order matters: -today then -sel, so a selected today gets the
+              // selection ring rather than the (identically-specific) today
+              // ring. Both are single classes at 0,1,0, so this is source
+              // order in index.css doing the work — -sel is declared after
+              // -today there for exactly this reason.
+              className={[
+                'stage-calcell text-left',
+                isToday && 'stage-calcell-today',
+                isSelected && 'stage-calcell-sel',
+                !inMonth && 'stage-calcell-dim',
+              ].filter(Boolean).join(' ')}
+              aria-pressed={isSelected}
               aria-label={`${cell.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })}${hasEpisodes ? `, ${cellEpisodes.length} episode${cellEpisodes.length === 1 ? '' : 's'}` : ''}`}
             >
-              <div className="flex items-center justify-between mb-1.5">
-                <span className={`text-sm font-semibold ${
-                  isToday ? 'text-purple-200' : inMonth ? 'text-white/90' : 'text-white/40'
-                }`}>
-                  {cell.getUTCDate()}
-                </span>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[12.5px] font-semibold">{cell.getUTCDate()}</span>
                 {hasEpisodes && (
-                  <span className="text-[10px] text-purple-300/80 font-medium">
-                    {cellEpisodes.length}
-                  </span>
+                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length}</span>
                 )}
               </div>
               {/* Episode chips — up to 3, then "+N more". */}
               <div className="space-y-1">
-                {cellEpisodes.slice(0, 3).map((ep) => (
+                {cellEpisodes.slice(0, 3).map((ep, i) => (
                   <div
                     key={`${ep.media_item_id}-${ep.episode_id}`}
-                    className="flex items-center gap-1 text-[10px] leading-tight text-white/80 truncate"
+                    // .stage-calchip-p (purple) on the first chip only, so a
+                    // day with several airings still reads as one day rather
+                    // than a solid purple block — the mockup alternates the
+                    // two fills for the same reason.
+                    className={`stage-calchip block ${i === 0 ? 'stage-calchip-p' : ''}`}
                     title={`S${ep.season_number}E${ep.episode_number} ${ep.show_title}${ep.episode_title ? ' — ' + ep.episode_title : ''}`}
                   >
-                    {ep.poster_path && (
-                      <img
-                        src={posterURL(ep.poster_path, 'w92')}
-                        alt=""
-                        className="w-3 h-4 rounded-sm object-cover flex-shrink-0"
-                        loading="lazy"
-                      />
-                    )}
-                    <span className="truncate">
-                      <span className="text-purple-300">S{ep.season_number}E{ep.episode_number}</span>{' '}
-                      <span className="text-white/70">{ep.show_title}</span>
-                    </span>
+                    S{ep.season_number}E{ep.episode_number} {ep.show_title}
                   </div>
                 ))}
                 {cellEpisodes.length > 3 && (
-                  <div className="text-[10px] text-white/50">
+                  <div className="text-[9.5px] text-white/55 pl-1">
                     +{cellEpisodes.length - 3} more
                   </div>
                 )}

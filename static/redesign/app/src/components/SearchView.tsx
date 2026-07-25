@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
+import { PageHeader } from '@/components/PageHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { searchMedia } from '@/lib/api'
 import { type Media } from '@/lib/types'
@@ -78,26 +79,35 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-6">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h1 className="text-white text-3xl font-bold font-display">Search Results</h1>
-          {/* Smart badge renders only when the server actually used
-              the semantic path. */}
-          {!loading && results.length > 0 && searchMode === 'semantic' && (
-            <span className="px-3 py-1 rounded-full bg-purple-500/15 border border-purple-500/30 text-purple-200 text-xs font-medium">
-              ✨ Smart search
-            </span>
-          )}
-        </div>
-        <p className="text-white/50 text-sm mt-1">
-          {loading
-            ? `Searching for "${query}"…`
-            : query
-              ? `${results.length} result${results.length === 1 ? '' : 's'} for "${query}"`
-              : 'Type in the search box above to find titles'}
-        </p>
-        {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
-      </div>
+      <PageHeader
+        // No eyebrow: every other page's kicker names a category the page
+        // belongs to ("Curated", "Upcoming"). Search results aren't a
+        // category, and a made-up one would be noise.
+        title={
+          <span className="inline-flex items-baseline gap-3 flex-wrap">
+            Search Results
+            {/* Smart chip renders only when the server actually used the
+                semantic path — it is a statement about how the results were
+                produced, so faking it on the lexical path would misreport. */}
+            {!loading && results.length > 0 && searchMode === 'semantic' && (
+              <span className="stage-smartchip inline-flex">
+                <Icon name="sparkle" size={13} />
+                Smart search
+              </span>
+            )}
+          </span>
+        }
+        sub={
+          <>
+            {loading
+              ? `Searching for "${query}"…`
+              : query
+                ? `${results.length} result${results.length === 1 ? '' : 's'} for "${query}"`
+                : 'Type in the search box above to find titles'}
+            {error && <span className="block text-red-400 mt-1">{error}</span>}
+          </>
+        }
+      />
 
       {!loading && query && results.length === 0 && !error ? (
         <div className="text-center py-20">

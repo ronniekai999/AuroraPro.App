@@ -26,6 +26,13 @@ export function Icon({ name, size = 20, className = '' }: { name: string; size?:
     star: <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />,
     chevronRight: <polyline points="9 18 15 12 9 6" />,
     chevronLeft: <polyline points="15 18 9 12 15 6" />,
+    // chevronDown / alertTriangle added for Aurora Stage Phase 6 (the
+    // request row's "click to expand" hint and its error line). Same Feather
+    // 24×24 geometry and stroke conventions as the rest of the map — these
+    // render through the shared <svg> below, so they inherit its
+    // fill="none"/stroke="currentColor"/strokeWidth and must not set their own.
+    chevronDown: <polyline points="6 9 12 15 18 9" />,
+    alertTriangle: <><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>,
     arrowLeft: <><line x1="19" y1="12" x2="5" y2="12" /><polyline points="12 19 5 12 12 5" /></>,
     moreVertical: <><circle cx="12" cy="12" r="1" /><circle cx="12" cy="5" r="1" /><circle cx="12" cy="19" r="1" /></>,
     eye: <><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></>,
