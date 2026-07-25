@@ -123,10 +123,24 @@ const readPrefs = readPrefsSnapshot
  * chance to clobber a concurrent writer, which is precisely the bug Phase 7a
  * found in SettingsView. Not appearance-specific despite living here; this
  * module is the blob's owner.
+ *
+ * The PR that exported it claimed the consolidation was complete apart from
+ * VideoPlayer's volume writer. It wasn't — SettingsView's persist effect was a
+ * third implementation. Both now route through here or through `writePrefs`
+ * below, so the claim is true as of this pass.
  */
 export function writePrefKey(key: string, value: string | number | boolean): void {
-  const prefs = readPrefs()
-  prefs[key] = value
+  writePrefs({ [key]: value })
+}
+
+/**
+ * Merge several keys at once over a FRESH read. Same contract as
+ * `writePrefKey` — which is now a one-key call into this — and the same reason
+ * for existing: the read has to happen at write time, not at mount time, or a
+ * concurrent writer's keys get reverted by the next save.
+ */
+export function writePrefs(patch: Record<string, unknown>): void {
+  const prefs = { ...readPrefs(), ...patch }
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
   } catch {

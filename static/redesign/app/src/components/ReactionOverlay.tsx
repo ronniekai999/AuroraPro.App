@@ -100,7 +100,10 @@ export function ReactionOverlay({ events }: Props) {
       `}</style>
       <div
         aria-hidden="true"
-        className="fixed pointer-events-none z-[65] inset-0 overflow-hidden"
+        // .stage-party-reactions confines the float area to the theater box
+        // while the theater is up, so reactions don't drift across the dimmed
+        // app either side of the picture.
+        className="stage-party-reactions fixed pointer-events-none z-[65] inset-0 overflow-hidden"
         // 2026-05-27 (holistic deep-debug H1) — exclude from
         // BugReport screenshot capture. Floating emoji reactions
         // from other party members are transient meta-UI and would

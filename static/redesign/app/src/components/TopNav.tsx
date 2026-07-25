@@ -25,6 +25,7 @@ import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
 import type { Profile, User as ApiUser } from '@/lib/api'
+import { lockBodyScroll } from '@/lib/scrollLock'
 
 export interface NavTab {
   id: string
@@ -300,12 +301,9 @@ function MobileSheet({
   }, [onClose])
 
   // Lock the page behind the sheet — without this a drag over the scrim
-  // scrolls the content underneath on iOS.
-  useEffect(() => {
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = prev }
-  }, [])
+  // scrolls the content underneath on iOS. Shared ref-counted lock, so the
+  // theater and the profile gate can hold it at the same time in any order.
+  useEffect(() => lockBodyScroll(), [])
 
   return (
     <>

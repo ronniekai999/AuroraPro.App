@@ -363,7 +363,11 @@ from every earlier phase.
   fullscreen surface.
 - Watch party overlays (`PartyPanel`, `MiniDock`, `VoicePill`, `ReactionOverlay`) are
   positioned against the viewport today; in windowed mode they need to anchor to the
-  theater box instead.
+  theater box instead. **Done in the 7b fix pass**, via `--theater-inset-x/y` custom
+  properties that both `.stage-theater` and the three `.stage-party-*` anchors read,
+  gated on `html[data-player-surface="theater"]` so fullscreen and the minimized cast
+  widget keep their viewport offsets. `VoicePill` needed no change — it renders inside
+  `PartyPanel`'s rail.
 
 ---
 

@@ -412,19 +412,47 @@ describe('shouldShowProfileGate', () => {
   })
 
   it('waits until the profile list has loaded', () => {
-    // Without this the gate evaluates `profileCount < 2` against an empty array
-    // on first paint, decides it is unnecessary, and never appears — the flag
-    // is not even involved. `ready` outranks `forced` for the same reason.
+    // `ready` outranks everything, INCLUDING `forced`: a gate that pops up
+    // mid-fetch and then re-decides is worse than one that waits a beat.
+    //
+    // These rows used to be unreachable, and that is worth recording. App wired
+    // `ready={profiles.length > 0}` while passing `profileCount={profiles.length}`
+    // — both derived from the same array — so `!ready` implied `profileCount === 0`
+    // implied `profileCount < 2`, and the `ready` guard could not change the
+    // result for ANY input the app could construct. Every `ready` mutant died
+    // here, in impossible space: mutation-adequate over a domain that cannot
+    // occur, which is the exact mistake the maturity-scale bug taught one phase
+    // earlier. App now passes a real `profilesLoaded` flag, which distinguishes
+    // "not fetched" from "fetched, and there are none", so `profileCount >= 2`
+    // with `ready: false` is a state the app genuinely produces — between the
+    // listProfiles() resolution and its setState, and on every re-login.
     expect(shouldShowProfileGate({ profileCount: 0, seen: false, forced: false, ready: false })).toBe(false)
     expect(shouldShowProfileGate({ profileCount: 3, seen: false, forced: false, ready: false })).toBe(false)
     expect(shouldShowProfileGate({ profileCount: 3, seen: true, forced: true, ready: false })).toBe(false)
   })
 
-  it('asks again if a server grows a second profile after the flag was set', () => {
-    // The count check short-circuits ahead of `seen`, so a flag set during the
-    // solo era does not permanently suppress the gate. Adding a second profile
-    // makes the question meaningful for the first time.
-    expect(shouldShowProfileGate({ profileCount: 1, seen: false, forced: false, ready: true })).toBe(false)
-    expect(shouldShowProfileGate({ profileCount: 2, seen: false, forced: false, ready: true })).toBe(true)
+  it('does NOT re-ask once seen, even after the server grows a second profile', () => {
+    // This test used to be titled "asks again if a server grows a second profile
+    // after the flag was set" and then passed `seen: false` in both assertions —
+    // so the flag was never set, and it asserted nothing about the scenario it
+    // named. The real behaviour is the opposite of the old title: `seen` is a
+    // per-device "you have answered this question" flag, not a per-count one, so
+    // growing the server does not re-nag. The switcher's "See all profiles" entry
+    // point is how you revisit the choice.
+    expect(shouldShowProfileGate({ profileCount: 2, seen: true, forced: false, ready: true })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 5, seen: true, forced: false, ready: true })).toBe(false)
+  })
+
+  it('asks a device that has never answered, at every count above one', () => {
+    // What the count guard short-circuiting ahead of `seen` actually buys: a
+    // device that never saw the gate (because there was nothing to choose) still
+    // gets asked the first time there is. Iterated rather than sampled at the
+    // boundary, so a guard rewritten as `=== 2` or `<= 2` cannot survive.
+    for (const profileCount of [2, 3, 4, 9]) {
+      expect(shouldShowProfileGate({ profileCount, seen: false, forced: false, ready: true })).toBe(true)
+    }
+    for (const profileCount of [0, 1]) {
+      expect(shouldShowProfileGate({ profileCount, seen: false, forced: false, ready: true })).toBe(false)
+    }
   })
 })

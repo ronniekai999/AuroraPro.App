@@ -149,7 +149,10 @@ export function PartyPanel({
           <button
             type="button"
             onClick={onToggleVariant}
-            className="aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
+            // .stage-party-dock re-anchors this to the theater box while the
+            // theater is up (see index.css); the `top-4 left-4` below stays as
+            // the fullscreen/minimized position.
+            className="stage-party-dock aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
                        bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.16)]
                        text-white/70 hover:text-white hover:border-[rgba(220,200,255,0.3)]
                        text-xs font-medium transition-colors"
@@ -180,7 +183,10 @@ export function PartyPanel({
   // rounded) so the movie glows through and around it. On phones it
   // still spans (nearly) full width but keeps the float inset + radius.
   return (
-    <aside className="aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
+    // .stage-party-rail insets this by the theater's own offsets while the
+    // theater is up — it used to straddle the boundary, ~250px over the picture
+    // and ~90px over the dimmed app behind it.
+    <aside className="stage-party-rail aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
       {/* Header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
         <div className="min-w-0">

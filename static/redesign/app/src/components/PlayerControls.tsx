@@ -178,6 +178,12 @@ export function PlayerControls(props: PlayerControlsProps) {
         visible ? 'opacity-100' : 'opacity-0'
       }`}
       aria-hidden={!visible}
+      // Marks this as an auto-hiding region. VideoPlayer's hide timer refuses
+      // to fire while focus is inside one — going `inert` under a focused
+      // element triggers the HTML focus-fixup rule and dumps activeElement to
+      // <body>, so a keyboard user parked on the scrub bar used to lose their
+      // place after three idle seconds.
+      data-player-chrome=""
       // 2026-05-20 — React 19 supports `inert` as a proper boolean
       // prop. The previous code used `{inert: '' | undefined}` as a
       // React-18-era hack; React 19's native form is cleaner and
@@ -191,7 +197,12 @@ export function PlayerControls(props: PlayerControlsProps) {
       inert={!visible || undefined}
     >
       {/* Gradient backdrop to lift legibility off bright frames. */}
-      <div className="bg-gradient-to-t from-black via-black/70 to-transparent pt-12 pb-4 px-6 pointer-events-auto">
+      {/* `.stage-controls-scrim`, not `from-black via-black/70 to-transparent`:
+          the utility resolved to 0.533 alpha at the scrub row's y, where the
+          12.5px readouts measured 3.04:1 over a white frame and no text alpha
+          could reach 4.5. The primitive also pins the scrub track's backdrop, so
+          the track/buffered ratios stop depending on the video. */}
+      <div className="stage-controls-scrim pt-12 pb-4 px-6 pointer-events-auto">
         {/* Scrub bar row */}
         <div className="flex items-center gap-3.5 mb-4">
           {/* tabular-nums, not font-mono: the mockup's readout is the body face
@@ -220,12 +231,50 @@ export function PlayerControls(props: PlayerControlsProps) {
             aria-valuemin={0}
             aria-valuemax={Math.max(1, Math.floor(durationSec))}
             aria-valuenow={Math.floor(displaySec)}
+            // Without this a screen reader reads aria-valuenow raw and
+            // announces "2704" for 45:04 — a number with no unit, on the one
+            // control where the value IS a duration (WCAG 4.1.2, APG Slider:
+            // supply aria-valuetext whenever the numeric value is not what a
+            // user would say out loud).
+            aria-valuetext={hasDuration ? `${formatTime(displaySec)} of ${formatTime(durationSec)}` : 'Duration unknown'}
             tabIndex={0}
+            // Keyboard contract. ArrowUp/ArrowDown are deliberately NOT handled
+            // here — they bubble to the player's window-level handler, which
+            // maps them to volume, and that shortcut predates the slider.
+            // Everything this DOES handle is stopped so the window handler
+            // can't apply the same seek twice.
+            onKeyDown={e => {
+              if (!hasDuration) return
+              const abs = (sec: number) => {
+                e.preventDefault()
+                e.stopPropagation()
+                onSeek(Math.min(durationSec, Math.max(0, sec)))
+              }
+              switch (e.key) {
+                case 'ArrowLeft': abs(displaySec - 10); break
+                case 'ArrowRight': abs(displaySec + 10); break
+                // PageUp/PageDown are the APG "large step". A minute matches
+                // the ±10s arrows' ratio to a typical 45-90 minute runtime.
+                case 'PageDown': abs(displaySec - 60); break
+                case 'PageUp': abs(displaySec + 60); break
+                case 'Home': abs(0); break
+                case 'End': abs(durationSec); break
+              }
+            }}
             // h-3.5 on the hit target, 5px on the visible track: the mockup's
             // .scrub wraps a thin bar in a taller row so the pointer has 14px
             // to find rather than 5. Fitts's law — the bar this thin is
             // otherwise genuinely hard to grab.
-            className={`relative flex-1 h-3.5 flex items-center ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} group`}
+            // `.stage-scrub` is the hook the knob's hover/focus growth hangs
+            // off in index.css. It used to be `group` + `group-hover:scale-110`
+            // on the knob itself, and at (0,3,0) that variant beat the knob's
+            // own (0,1,0) `transform: translate(-50%, -50%)` and REPLACED it —
+            // Tailwind v3 emits the whole transform chain with
+            // `--tw-translate-x/y` defaulting to 0 — so hovering the bar kicked
+            // the knob 7px down and 7px right, out of a 5px track, and left it
+            // there for the whole drag. `group` stays for the ring on the
+            // avatar-style children; the transform is CSS's now.
+            className={`stage-scrub relative flex-1 h-3.5 flex items-center ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} group`}
           >
             <div className="stage-scrub-track">
               {/* Buffered fill — the transcoder's progress. Sits below the
@@ -235,15 +284,22 @@ export function PlayerControls(props: PlayerControlsProps) {
               <div className="stage-scrub-pos" style={{ width: `${pct}%` }} />
               {/* Handle. */}
               <div
-                className="stage-scrub-knob transition-transform group-hover:scale-110"
+                className="stage-scrub-knob"
                 style={{ left: `${pct}%` }}
               />
               {/* Hover readout — what time a click would seek to. Suppressed
                   while dragging, since the knob already shows that position and
                   two competing indicators read as a bug.
-                  clamp() keeps the label inside the track at the extremes: at
-                  0% and 100% a translateX(-50%) label would hang half outside
-                  the theater's overflow:hidden box and get sliced. */}
+
+                  clamp() keeps the label roughly inside the TRACK at the
+                  extremes. It does not, as previously claimed, save it from the
+                  theater's overflow:hidden — the track's left edge already sits
+                  ~90px inside that box (px-6 + the 52px readout + gap-3.5) and
+                  the widest h:mm:ss label is ~66px, so slicing was never
+                  geometrically possible. The real (small) cost of the clamp is
+                  that the readout stops tracking the pointer in the outer 28px
+                  of the track, which is the lesser of the two evils against a
+                  label half-hanging off the end of the bar. */}
               {hoverSec !== null && !dragging && hasDuration && (
                 <div
                   className="stage-scrub-ts"

@@ -199,6 +199,7 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
           {onOpenProfilesGate && (
             <button
               ref={el => { itemRefs.current[profiles.length] = el }}
+              type="button"
               role="menuitem"
               onClick={() => { close(false); onOpenProfilesGate() }}
               className="flex w-full items-center gap-3 border-t border-white/[0.06] px-3.5 py-2.5 text-left text-white/70 transition-colors hover:bg-white/[0.06] hover:text-white"
