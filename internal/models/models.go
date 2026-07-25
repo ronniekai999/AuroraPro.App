@@ -729,6 +729,14 @@ type Collection struct {
 	IsPublic    bool      `json:"is_public"`
 	CoverPath   string    `json:"cover_path,omitempty"`
 	ItemCount   int       `json:"item_count,omitempty"`
+	// PosterPaths is up to four member posters in collection order, for the
+	// stacked-poster card the collections grid draws. CoverPath is a single
+	// image (auto-populated from the first item added), which reads as one
+	// title rather than as a grouping — this is what lets the card show that
+	// a collection HAS members. Populated by the list query only; the
+	// single-collection GET leaves it empty because that view renders the
+	// real member grid and has no use for a mosaic.
+	PosterPaths []string  `json:"poster_paths,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }

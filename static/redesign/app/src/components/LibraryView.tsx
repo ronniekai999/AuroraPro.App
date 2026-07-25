@@ -8,6 +8,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
+import { PageHeader, FilterPills, type FilterPillOption } from '@/components/PageHeader'
 import { MediaCardCinema } from '@/components/MediaCardCinema'
 import { isResumable } from '@/lib/format'
 import { mapContinueToMedia, type ContinueWatchingItem } from '@/lib/api'
@@ -34,6 +35,22 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
     ? library
     : library.filter(m => (filter === 'show' ? (m.type === 'show' || m.type === 'anime') : m.type === filter))
   const libraryIds = useMemo(() => new Set(library.map(m => m.id)), [library])
+  // Pill counts. `show` folds in `anime` to match the filter predicate above —
+  // if the count and the predicate disagreed, a pill would advertise a number
+  // the grid beneath it doesn't produce.
+  const filterOptions: FilterPillOption<typeof filter>[] = useMemo(() => {
+    let movies = 0
+    let shows = 0
+    for (const m of library) {
+      if (m.type === 'movie') movies++
+      else if (m.type === 'show' || m.type === 'anime') shows++
+    }
+    return [
+      { value: 'all', label: 'All', count: library.length },
+      { value: 'movie', label: 'Movies', count: movies },
+      { value: 'show', label: 'TV Shows', count: shows },
+    ]
+  }, [library])
   // Deep-debug H3 — latest-continueItems ref so the Resume pill
   // click handler resolves the freshest record at click-time, not
   // render-time. Without this, a mid-hover refetch (e.g. cross-tab
@@ -43,38 +60,27 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-6">
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
-          <Icon name="library" size={12} className="text-purple-300" />
-          <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">Saved by You</span>
-        </div>
-        <h1 className="text-white text-4xl font-bold font-display">My Library</h1>
-        <p className="text-white/60 text-sm mt-2">
-          {library.length === 0
+      <PageHeader
+        eyebrow="Saved by you"
+        title="My Library"
+        sub={
+          library.length === 0
             ? 'Hover any card and click + to save titles here.'
             : library.length === 1
-              ? '1 saved title.'
-              : `${library.length} saved titles.`}
-        </p>
-      </div>
+              ? '1 saved title'
+              : `${library.length} saved titles`
+        }
+      />
 
       {/* Filter pills — only relevant when there are saved items */}
       {library.length > 0 && (
-        <div className="flex items-center gap-3 mb-6">
-          {(['all', 'movie', 'show'] as const).map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                filter === f
-                  ? 'bg-purple-600/20 text-purple-300 border border-purple-500/30'
-                  : 'bg-white/5 text-white/50 border border-white/[0.06] hover:bg-white/10'
-              }`}
-            >
-              {f === 'all' ? 'All' : f === 'movie' ? 'Movies' : 'TV Shows'}
-            </button>
-          ))}
-        </div>
+        <FilterPills
+          options={filterOptions}
+          value={filter}
+          onChange={setFilter}
+          label="Filter saved titles by kind"
+          className="mb-6"
+        />
       )}
 
       {/* Saved items grid.
@@ -85,7 +91,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       {library.length === 0 ? (
         <div className="text-center py-16">
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
-          <h3 className="text-white/70 text-lg mb-2">No saved titles yet</h3>
+          <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
           <p className="text-white/40 text-sm max-w-md mx-auto">
             Hover any title and click the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>
@@ -116,9 +122,12 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       {continueItems.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-4">
-            <Icon name="clock" size={16} className="text-purple-300" />
-            <h2 className="text-white text-xl font-semibold">Continue Watching</h2>
-            <span className="text-white/40 text-sm">({continueItems.length})</span>
+            <Icon name="clock" size={18} className="text-purple-300" />
+            {/* .type-section (--fs-section, 24px) rather than text-xl, so this
+                secondary head sits on the same display scale as every other
+                section head in the app instead of one arbitrary step below. */}
+            <h2 className="text-white font-display font-bold type-section">Continue Watching</h2>
+            <span className="text-white/45 text-sm">({continueItems.length})</span>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
             {continueItems.map(c => {
