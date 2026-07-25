@@ -177,7 +177,7 @@
        and the reason line. The 9vh term scales the type with the frame that
        has to hold it. */
     --fs-hero: clamp(2.5rem, min(6vw, 9vh), 5.25rem);  /* home hero title, ≤84px */
-    --fs-detail: 4rem;        /* title-detail hero, 64px */
+    --fs-detail: clamp(2rem, min(4.6vw, 7.4vh), 4rem);  /* title-detail hero, ≤64px */
     --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
     --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
@@ -191,6 +191,11 @@
        system" — this is that list, finally kept. Overrides live with the
        html[data-font] blocks below. */
     --lh-hero: 0.94;
+    /* Same per-face story one step down the scale — see --lh-hero. At 64px
+       Bricolage clears comfortably at 0.96; Sora and Outfit (1.26em content
+       area vs Bricolage's 1.20em) do not, and the detail title wraps far more
+       often than the hero's because its column is narrower. */
+    --lh-detail: 0.96;
 
     /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
        token and stays untouched.) */
@@ -255,6 +260,7 @@
     /* Sora's content area is 1.26em vs Bricolage's 1.20em — 0.94 leaves
        negative ink clearance on a wrapped title. */
     --lh-hero: 1;
+    --lh-detail: 1;
   }
 
   /* ECLIPSE is the attribute-less default (see :root). This block is kept
@@ -272,6 +278,7 @@
     --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
     /* Same 1.26em content area as Sora — see the --lh-hero note in :root. */
     --lh-hero: 1;
+    --lh-detail: 1;
   }
 
   /* Cinematic watch-party overlay — reduce-transparency / blur budget.
@@ -437,7 +444,7 @@
      rather than a dozen inline `text-[84px]`s. line-height/tracking are
      baked in: at 84px the browser default leading is unusable. */
   .type-hero    { font-size: var(--fs-hero);    line-height: var(--lh-hero); letter-spacing: -0.03em; }
-  .type-detail  { font-size: var(--fs-detail);  line-height: 0.96; letter-spacing: -0.03em; }
+  .type-detail  { font-size: var(--fs-detail);  line-height: var(--lh-detail); letter-spacing: -0.03em; }
   .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
   .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
   .type-section { font-size: var(--fs-section); line-height: 1.1;  letter-spacing: -0.01em; }
@@ -833,6 +840,28 @@ html:has(.stage-toolbar) {
      and its 1px border. 80 leaves slack for the wrapped two-line case. */
   scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 80px);
 }
+
+/* ── Detail hero (Aurora Stage Phase 5) ─────────────────────────────
+   Two-layer scrim, same construction as .stage-hero-scrim but tuned for the
+   detail page: the left ramp is stronger (the title column is narrower and
+   sits further left) and the bottom fade reaches higher, because the poster
+   rail overlaps UP into this hero and needs a dark floor to sit against. */
+.stage-detail-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(5, 5, 5, 0.92) 0%, rgba(5, 5, 5, 0.55) 45%, rgba(5, 5, 5, 0.15) 75%, rgba(5, 5, 5, 0.4) 100%),
+    linear-gradient(0deg, #050505 3%, rgba(5, 5, 5, 0.2) 38%, transparent 65%);
+}
+
+/* NOTE — the hero↔rail overlap is expressed with Tailwind utilities at the
+   call sites in DetailView/DetailRail (`lg:-mt-[238px]`, `lg:z-20`,
+   `lg:pt-[252px]`), not as classes here. An earlier draft put them in this
+   block and `.stage-detail-rail{position:relative}` then raced Tailwind's
+   `lg:sticky` at equal specificity — sticky won only because Tailwind hoists
+   its variants later in the file. That is the same ordering trap the CASCADE
+   HAZARD note above describes; keeping the overlap in one system removes it. */
 
 /* ── Browse toolbar, now sticky ─────────────────────────────────────
    The toolbar was deliberately left in-flow with a comment explaining why:

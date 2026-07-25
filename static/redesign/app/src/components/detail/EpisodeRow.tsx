@@ -70,7 +70,9 @@ export function EpisodeRow({ ep, onPlay, onUnavailable }: EpisodeRowProps) {
         'group flex gap-4 p-[0.7rem] transition-all cursor-pointer text-left w-full hover:bg-white/[0.03] group-hover/row:bg-white/[0.03]',
       )}
     >
-      <div className="relative w-[140px] sm:w-[176px] aspect-video rounded-xl overflow-hidden flex-shrink-0 bg-white/5">
+      {/* 212px at lg per the mockup — the still is the row's anchor, and the
+          detail main column got wider when the rail moved to 216px. */}
+      <div className="relative w-[140px] sm:w-[176px] lg:w-[212px] aspect-video rounded-xl overflow-hidden flex-shrink-0 bg-white/5">
         <img
           src={ep.still}
           alt=""

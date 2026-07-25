@@ -1270,7 +1270,10 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
   // trigger moved: 2026-07-25 (Aurora Stage Phase 2) it went from the
   // sidebar footer (bottom-left) to the TopNav's right cluster + the
   // avatar dropdown, so the panel now hangs from the TOP-RIGHT, directly
-  // under its button, instead of `bottom-4 md:left-[252px]`.
+  // under its button, instead of bottom-anchored beside the old sidebar.
+  // (Deliberately not naming the old Tailwind classes here: Tailwind's
+  // extractor scans comments too, so a class named in prose gets emitted as
+  // dead CSS — this line was shipping a left-252px rule nothing used.)
   //
   // z-[45] deliberately sits BELOW the sticky nav stack (50) so the nav's
   // own triggers stay clickable while the panel is open — that was the

@@ -57,21 +57,18 @@ export function DetailHero({
   if (tagline) metaParts.push(<span className="italic text-purple-200/70">&ldquo;{tagline}&rdquo;</span>)
 
   return (
-    <section className="relative h-[58vh] min-h-[480px] overflow-hidden">
+    <section className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden">
       <img
         src={backdrop}
         alt=""
         className="w-full h-full object-cover scale-105"
         style={{ objectPosition }}
       />
-      <div
-        className="absolute inset-0"
-        style={{ background: 'linear-gradient(to top,#050505 3%,rgba(5,5,5,.42) 52%,rgba(5,5,5,.05) 100%)' }}
-      />
-      <div
-        className="absolute inset-0"
-        style={{ background: 'linear-gradient(to right,rgba(5,5,5,.85),transparent 62%)' }}
-      />
+      {/* Phase 5 — the mockup's two-layer ramp as one element. Replaces two
+          inline-styled gradient divs; the bottom fade now reaches higher
+          because the poster rail overlaps up into this hero from lg and needs
+          a dark floor beneath it. */}
+      <div className="stage-detail-scrim" />
       <div className="aurora-floor" />
 
       <button
@@ -82,7 +79,14 @@ export function DetailHero({
         <ArrowLeftIcon size={16} /> Back
       </button>
 
-      <div className="absolute bottom-7 left-8 right-8 md:left-10 md:right-10">
+      {/* From lg the poster rail rides up into this hero (see
+          .stage-detail-body), so the text column shifts right by the rail's
+          width + gap — 216 + 40 + the 48px gutter = 304px. That offset is
+          what makes the overlap safe: it is the collision this file's header
+          comment warns about, avoided by geometry rather than by dropping the
+          overlap. Below lg the grid is single-column, there is no overlap, and
+          the text keeps the full width. */}
+      <div className="absolute bottom-7 left-8 right-8 md:left-10 md:right-10 lg:left-[304px] lg:right-[var(--page-gutter)]">
         <div className="flex items-center gap-2.5 mb-3">
           <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/25 uppercase tracking-wide">
             {kindLabel}
@@ -91,7 +95,12 @@ export function DetailHero({
             <span className="badge-glass bg-white/5 text-white/55 border border-white/10">{contentRating}</span>
           )}
         </div>
-        <h1 className="font-display font-bold text-4xl md:text-[3.5rem] leading-none mb-3 drop-shadow-[0_2px_24px_rgba(0,0,0,0.6)]">
+        {/* .type-detail is --fs-detail (fluid, ≤64px) with per-typeface
+            leading — same mechanism Phase 4 introduced for the home hero
+            after a fixed size overflowed its frame and clipped content off
+            the top. line-clamp-2 bounds the pathological title; this column
+            is narrower than home's, so it wraps sooner. */}
+        <h1 className="font-display font-extrabold text-4xl sm:text-5xl lg:type-detail mb-3 line-clamp-2 drop-shadow-[0_2px_24px_rgba(0,0,0,0.6)]">
           {title}
         </h1>
         <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-[15px]">
