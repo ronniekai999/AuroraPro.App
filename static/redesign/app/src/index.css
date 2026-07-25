@@ -451,6 +451,188 @@
     radial-gradient(1.5px 1.5px at 68% 44%, #fff, transparent);
 }
 
+/* ── Chrome: the slim top navigation (Phase 2) ──────────────────────── */
+/* Replaces the 240px sidebar. Height is --topnav-h so every sticky offset
+   under it (browse toolbar, admin tab strip) tracks one value. z-index 50:
+   above page content and the sticky sub-toolbars (40), below the drawers
+   (45 is intentionally *under* the nav so the nav's own triggers stay
+   clickable — see ServerPanel/NotificationPanel), the palette, the party
+   panel, modals, and the player (60+). */
+.stage-topnav {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: var(--topnav-h);
+  padding: 0 18px;
+  background: linear-gradient(180deg, rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.62));
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+@media (min-width: 768px) {
+  .stage-topnav { padding: 0 30px; }
+}
+html[data-glow="subtle"] .stage-topnav {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #050505;
+}
+
+.stage-tab {
+  position: relative;
+  padding: 9px 13px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
+.stage-tab[aria-current="page"] {
+  color: #fff;
+  font-weight: 600;
+  background: rgba(168, 85, 247, 0.14);
+}
+/* Gradient underline on the active tab — the top-nav counterpart of the
+   sidebar's 3px left bar (.nav-link-item.active::before). */
+.stage-tab[aria-current="page"]::after {
+  content: '';
+  position: absolute;
+  left: 13px;
+  right: 13px;
+  bottom: 3px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--stage-purple), var(--stage-cyan));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+}
+.stage-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.75);
+}
+/* Admin marker on the Admin tab. */
+.stage-tab-adm {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  vertical-align: 2px;
+  color: var(--stage-purple-lt);
+  background: rgba(168, 85, 247, 0.16);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+/* Tab strip. Between md and xl the eight tabs don't fit, so the strip
+   scrolls horizontally (TopNav scrolls the active tab into view on
+   change) and edge masks signal there's more. Below md the strip is
+   replaced by the menu sheet. */
+.stage-tabstrip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  /* Fade the overflowing edges so a clipped tab reads as "scrollable"
+     rather than as a rendering glitch. */
+  mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+}
+.stage-tabstrip::-webkit-scrollbar { display: none; }
+@media (min-width: 1280px) {
+  /* Everything fits — drop the mask so the first/last tab aren't dimmed. */
+  .stage-tabstrip {
+    overflow-x: visible;
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+}
+
+/* Search pill in the nav. Wraps a real <input> (not a button) so the
+   type-to-search-results flow the header had is preserved verbatim; the
+   ⌘K chip is a hint that the palette is also available. */
+.stage-navsearch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+.stage-navsearch:focus-within {
+  border-color: rgba(168, 85, 247, 0.55);
+  background: rgba(255, 255, 255, 0.07);
+}
+/* The global `input:not([type="range"])` rule in this file sets
+   padding: 12px 16px and a background; the nav input has to opt out of
+   all of it or it breaks the pill. */
+.stage-navsearch input {
+  all: unset;
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.92);
+}
+.stage-navsearch input::placeholder { color: rgba(220, 220, 232, 0.42); }
+.stage-navsearch kbd {
+  flex: none;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+/* Circular icon control in the nav right cluster (party, bell, menu). */
+.stage-iconbtn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+.stage-iconbtn:hover { background: rgba(255, 255, 255, 0.09); color: #fff; }
+.stage-iconbtn[aria-expanded="true"] {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+}
+.stage-iconbtn:focus-visible {
+  outline: none;
+  border-color: rgba(216, 180, 254, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+}
+
+/* Standard page gutter. Replaces the global `p-8` that App's content
+   wrapper used to apply to every view: pages are full-bleed now and opt
+   IN to the gutter, so a hero can reach the viewport edge. */
+.stage-page {
+  padding: 28px var(--page-gutter) 70px;
+}
+@media (max-width: 767px) {
+  .stage-page { padding: 20px 18px 56px; }
+}
+
 /* ── Buttons ───────────────────────────────────────────────────────── */
 .stage-btn {
   display: inline-flex;
@@ -803,42 +985,10 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 }
 
 /* Sidebar nav link */
-.nav-link-item {
-  position: relative;
-  padding: 10px 14px;
-  border-radius: 10px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 0.875rem;
-  font-weight: 500;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  cursor: pointer;
-}
-
-.nav-link-item:hover {
-  color: rgba(255, 255, 255, 0.85);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.nav-link-item.active {
-  color: #fff;
-  background: rgba(168, 85, 247, 0.15);
-}
-
-.nav-link-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 20px;
-  background: #A855F7;
-  border-radius: 0 3px 3px 0;
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
-}
+/* .nav-link-item — REMOVED 2026-07-25 (Aurora Stage Phase 2).
+   This was the sidebar nav row (including the 3px purple left bar on
+   .active). The sidebar is gone; the top-nav equivalent is .stage-tab,
+   whose active state uses a gradient underline instead. */
 
 /* Progress bar */
 .progress-bar {
