@@ -600,6 +600,11 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
   )
 }
 
+// Views that render their own edge-to-edge hero and therefore opt out of
+// the .stage-page gutter, padding their inner sections with .stage-gutter.
+// Anything not listed here gets the standard page pad from App's wrapper.
+const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
+
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
 // reuses the previously-fetched data.
@@ -762,9 +767,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           X titles" clause only renders when a real library total is
           reachable (libraryTotal != null) — omitted, never faked,
           otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
-      <div className="flex items-end justify-between gap-5 mt-2 mb-5">
+      <div className="stage-gutter flex items-end justify-between gap-5 pt-10 mb-1">
         <div className="min-w-0">
-          <h1 className="font-display text-3xl font-bold tracking-tight leading-tight">
+          <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
             Good {greetWord},{' '}
             <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
           </h1>
@@ -834,8 +839,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           deliberate "now describe your own vibe" moment between the one curated
           pick and the browsable rails. Fires the semantic search on Enter (not
           per-keystroke) to bound LLM cost. */}
+      {/* Phase 4 — pulled UP into the hero's foot (the mockup's -26px) so
+          it reads as one composition with the hero rather than a separate
+          widget floating above the rails. relative + z-20 keeps it above
+          the hero's scrim. */}
       {onConversationalSearch && (
-        <div className="mt-7 mb-8 max-w-2xl mx-auto">
+        <div className="stage-gutter relative z-20 -mt-7 mb-8 max-w-3xl">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -878,6 +887,15 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           </div>
         </div>
       )}
+      {/* Everything below the hero + conversational search opts back into
+          the page gutter. HomeView is full-bleed (FULL_BLEED_VIEWS) so the
+          hero can reach the viewport edge; the rest lines up with the
+          hero's text column because both read --page-gutter.
+          
+          The wrapper opens HERE, above the status banners — not at the
+          rails — because those banners are page content too and would
+          otherwise sit flush against the viewport edge. */}
+      <div className="stage-gutter">
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
           <div>
@@ -972,6 +990,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           <WatchTogetherCard onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
         </>
       )}
+      <div className="h-16" />
+      </div>{/* /stage-gutter */}
     </div>
   )
 }
@@ -4273,10 +4293,13 @@ export default function App() {
 
         {/* Page Content. The global `p-8` is gone (Aurora Stage M2): pages
             are full-bleed and opt IN to the standard gutter via
-            .stage-page, so a hero can reach the viewport edge. `detail`
-            opts out entirely — its backdrop hero is edge-to-edge and
-            DetailView pads its own body. */}
-        <div className={view === 'detail' ? undefined : 'stage-page'}>
+            .stage-page, so a hero can reach the viewport edge.
+            
+            FULL_BLEED_VIEWS opt out entirely because they lead with an
+            edge-to-edge hero and pad their own sections with .stage-gutter
+            instead (Phase 4 added home/movies/shows to what was just
+            `detail`). Everything else keeps the standard page pad. */}
+        <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
               onSelect={handleSelect}

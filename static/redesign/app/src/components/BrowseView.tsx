@@ -234,6 +234,15 @@ export default function BrowseView({
           onInfo={onSelect}
           onPauseChange={setHeroPaused}
           resume={heroResume}
+          // 2026-07-25 (Aurora Stage Phase 4) — the browse pages get the
+          // mockup's 250px title band instead of Home's full stage, and it
+          // carries the page's own eyebrow / title / count. The separate
+          // header block below therefore only renders when there is NO
+          // hero (empty library, or no title with a backdrop yet).
+          compact
+          eyebrow={pillLabel}
+          pageTitle={title}
+          countLabel={`${subtitle} · ${countLabel}`}
         />
       )}
 
@@ -255,8 +264,11 @@ export default function BrowseView({
         </div>
       )}
 
-      {/* Page title + count */}
-      <div className="relative mb-5">
+      {/* Page title + count — FALLBACK ONLY. With a hero the compact
+          variant above renders these over the backdrop; this is the
+          no-backdrop path (fresh library, or a filter with no art yet). */}
+      {!heroMedia && (
+      <div className="stage-gutter relative pt-8 mb-5">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
           <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-purple-300" />
           <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
@@ -268,14 +280,24 @@ export default function BrowseView({
           {countLabel}
         </p>
       </div>
+      )}
 
       {/* ── Toolbar: genre chips · density toggle · sort ─────────────
-          In-flow (not sticky): the app's top header is itself sticky
-          with a DYNAMIC height (the admin ScanProgressBar appears and
-          disappears), so a fixed sticky offset here would gap/overlap.
-          Sticky is a clean follow-up once that header exposes a stable
-          height. */}
-      <div className="browse-toolbar relative mb-6 flex items-center gap-3 flex-wrap">
+          STICKY as of Aurora Stage Phase 4. This was deliberately left
+          in-flow, with a comment naming the blocker: "the app's top header
+          is itself sticky with a DYNAMIC height (the admin
+          ScanProgressBar appears and disappears), so a fixed sticky offset
+          here would gap/overlap. Sticky is a clean follow-up once that
+          header exposes a stable height."
+          
+          Phase 2 made it expose one — --chrome-h is the MEASURED height of
+          the scan bar + nav, republished by a ResizeObserver when a scan
+          starts or stops — so .stage-toolbar can anchor to it instead of
+          guessing. It is a direct child of the full-bleed root, so its
+          blurred backdrop already spans the viewport; it only needs the
+          gutter as PADDING to line its contents up with the grid below.
+          (No negative margins — those would push it past the edge.) */}
+      <div className="stage-toolbar browse-toolbar relative mb-6 flex items-center gap-3 flex-wrap px-[var(--page-gutter)] max-md:px-[18px]">
         {/* Genre chips — replaces the old <select>. Horizontally
             scrollable so a long genre list never wraps into a tall
             block. "All Genres" maps to the empty-string filter the
@@ -339,6 +361,10 @@ export default function BrowseView({
         </div>
       </div>
 
+      {/* Content opts back into the page gutter — BrowseView is full-bleed
+          (FULL_BLEED_VIEWS) so its compact hero reaches the viewport edge,
+          and the sticky toolbar spans full width via negative margins. */}
+      <div className="stage-gutter">
       {/* ── Continue Watching rail (grid view only) ──────────────────
           Hidden in list view (which is the lean, no-chrome density
           mode) and when there's nothing in progress for this type. */}
@@ -438,6 +464,7 @@ export default function BrowseView({
           </p>
         </div>
       )}
+      </div>{/* /stage-gutter */}
     </div>
   )
 }
