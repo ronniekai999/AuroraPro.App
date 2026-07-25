@@ -234,6 +234,25 @@ export default function BrowseView({
           onInfo={onSelect}
           onPauseChange={setHeroPaused}
           resume={heroResume}
+          // 2026-07-25 (Aurora Stage Phase 4) — the browse pages get the
+          // mockup's 250px title band instead of Home's full stage, and it
+          // carries the page's own eyebrow / title / count. The separate
+          // header block below therefore only renders when there is NO
+          // hero (empty library, or no title with a backdrop yet).
+          compact
+          eyebrow={pillLabel}
+          pageTitle={title}
+          // h1: with a hero present BrowseView's own <h1> is gated off, so
+          // without this the browse pages had NO h1 at all and an
+          // h2-without-h1 outline. The app never sets document.title
+          // either, so this heading is the page's only identity signal.
+          titleAs="h1"
+          // A FRAGMENT, not a template literal. `countLabel` above is JSX
+          // (it bolds the number), so `${...}`-ing it rendered the literal
+          // text "[object Object]" under the title on both browse pages.
+          // TypeScript accepted it because template literals stringify any
+          // non-symbol, and nothing in the suite renders this component.
+          countLabel={<>{subtitle} · {countLabel}</>}
         />
       )}
 
@@ -243,20 +262,24 @@ export default function BrowseView({
       {!heroMedia && (
         <div
           aria-hidden="true"
-          // Negative insets track --page-gutter so the glow still reaches
-          // the page edges. They were -8 (32px) to cancel the old global
-          // p-8 exactly; after the Phase 2 shell change the gutter is 48px
-          // and the glow silently stopped 16px short on each side, which is
-          // the one thing an "edgeless" glow must not do.
-          className="absolute -top-[var(--page-gutter)] -left-[var(--page-gutter)] -right-[var(--page-gutter)] h-[360px] pointer-events-none overflow-hidden"
+          // No negative insets. They existed to cancel a parent gutter —
+          // first the global p-8, then --page-gutter — but BrowseView is
+          // full-bleed as of Phase 4, so the cancellation target is now 0
+          // and the offsets overshot 48px past each edge and 48px up behind
+          // the sticky nav. Third time this box has been re-tuned; anchoring
+          // it to the edges directly ends that.
+          className="absolute inset-x-0 top-0 h-[360px] pointer-events-none overflow-hidden"
         >
           <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-purple-500/[0.08] blur-3xl" />
           <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.05] blur-3xl" />
         </div>
       )}
 
-      {/* Page title + count */}
-      <div className="relative mb-5">
+      {/* Page title + count — FALLBACK ONLY. With a hero the compact
+          variant above renders these over the backdrop; this is the
+          no-backdrop path (fresh library, or a filter with no art yet). */}
+      {!heroMedia && (
+      <div className="stage-gutter relative pt-8 mb-5">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-500/10 border border-purple-500/20 mb-3">
           <Icon name={mediaType === 'show' ? 'tv' : 'film'} size={12} className="text-purple-300" />
           <span className="text-purple-200 text-xs font-medium uppercase tracking-wider">{pillLabel}</span>
@@ -268,14 +291,30 @@ export default function BrowseView({
           {countLabel}
         </p>
       </div>
+      )}
 
       {/* ── Toolbar: genre chips · density toggle · sort ─────────────
-          In-flow (not sticky): the app's top header is itself sticky
-          with a DYNAMIC height (the admin ScanProgressBar appears and
-          disappears), so a fixed sticky offset here would gap/overlap.
-          Sticky is a clean follow-up once that header exposes a stable
-          height. */}
-      <div className="browse-toolbar relative mb-6 flex items-center gap-3 flex-wrap">
+          STICKY as of Aurora Stage Phase 4. This was deliberately left
+          in-flow, with a comment naming the blocker: "the app's top header
+          is itself sticky with a DYNAMIC height (the admin
+          ScanProgressBar appears and disappears), so a fixed sticky offset
+          here would gap/overlap. Sticky is a clean follow-up once that
+          header exposes a stable height."
+          
+          Phase 2 made it expose one — --chrome-h is the MEASURED height of
+          the scan bar + nav, republished by a ResizeObserver when a scan
+          starts or stops — so .stage-toolbar can anchor to it instead of
+          guessing. It is a direct child of the full-bleed root, so its
+          blurred backdrop already spans the viewport; it only needs the
+          gutter as PADDING to line its contents up with the grid below.
+          (No negative margins — those would push it past the edge.)
+          
+          Deliberately NO `relative` in the class list: nothing inside is
+          absolutely positioned, and `.relative{position:relative}` ties
+          `.stage-toolbar{position:sticky}` at single-class specificity — so
+          sticky would win only by source order. Reordering the Stage block,
+          or moving it into a @layer, would silently un-stick this. */}
+      <div className="stage-toolbar browse-toolbar mb-6 flex items-center gap-3 flex-wrap px-[var(--page-gutter)] max-md:px-[18px]">
         {/* Genre chips — replaces the old <select>. Horizontally
             scrollable so a long genre list never wraps into a tall
             block. "All Genres" maps to the empty-string filter the
@@ -339,6 +378,10 @@ export default function BrowseView({
         </div>
       </div>
 
+      {/* Content opts back into the page gutter — BrowseView is full-bleed
+          (FULL_BLEED_VIEWS) so its compact hero reaches the viewport edge,
+          and the sticky toolbar spans full width via negative margins. */}
+      <div className="stage-gutter">
       {/* ── Continue Watching rail (grid view only) ──────────────────
           Hidden in list view (which is the lean, no-chrome density
           mode) and when there's nothing in progress for this type. */}
@@ -438,6 +481,11 @@ export default function BrowseView({
           </p>
         </div>
       )}
+      {/* .stage-page used to supply 70px of bottom padding; .stage-gutter is
+          left/right only, so browse needs the same trailing spacer Home has
+          or the last poster row touches the viewport bottom. */}
+      <div className="h-16" />
+      </div>{/* /stage-gutter */}
     </div>
   )
 }

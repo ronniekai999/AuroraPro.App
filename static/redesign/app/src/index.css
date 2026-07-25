@@ -164,12 +164,33 @@
        tokens rather than per-component literals — one place to tune the
        editorial voice, and one place to check when a user switches to a
        typeface system with different metrics. */
-    --fs-hero: 84px;      /* home hero title */
-    --fs-detail: 64px;    /* title-detail hero */
-    --fs-browse: 52px;    /* movies / TV browse hero strip */
-    --fs-page: 38px;      /* requests / library / settings page heads */
-    --fs-section: 24px;   /* pane + section heads */
-    --fs-rail: 21px;      /* rail titles */
+    /* rem, not px: px tokens ignore the user's browser font-size preference,
+       and mixing them with Tailwind's rem sizes inverted the ladder — at a
+       24px root the greeting went 45px below md and 38px at md, i.e. it got
+       SMALLER on gaining room. These values are identical at a 16px root.
+
+       --fs-hero is additionally FLUID and vh-aware because the hero frame is
+       vh-driven (62vh, floor 480px). A fixed 84px produced a 550px content
+       stack inside a 480px frame on 1366x768 and 1440x900 — and since the
+       column is bottom-anchored inside overflow-hidden, the overflow was
+       clipped off the TOP, silently deleting the "Aurora picked this" pill
+       and the reason line. The 9vh term scales the type with the frame that
+       has to hold it. */
+    --fs-hero: clamp(2.5rem, min(6vw, 9vh), 5.25rem);  /* home hero title, ≤84px */
+    --fs-detail: 4rem;        /* title-detail hero, 64px */
+    --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
+    --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
+    --fs-section: 1.5rem;     /* pane + section heads, 24px */
+    --fs-rail: 1.3125rem;     /* rail titles, 21px */
+
+    /* Leading is PER TYPEFACE, not per size. 0.94 is tuned for Bricolage
+       (+2.9px ink clearance between stacked lines); measured against the real
+       font tables it gives Sora and Outfit NEGATIVE clearance (-0.9px), so a
+       descender on line 1 touches a capital on line 2. Phase 0's token
+       comment promised "one list to re-check when a user switches typeface
+       system" — this is that list, finally kept. Overrides live with the
+       html[data-font] blocks below. */
+    --lh-hero: 0.94;
 
     /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
        token and stays untouched.) */
@@ -231,6 +252,9 @@
   html[data-font="nova"] {
     --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Sora', 'Inter Tight', sans-serif;
+    /* Sora's content area is 1.26em vs Bricolage's 1.20em — 0.94 leaves
+       negative ink clearance on a wrapped title. */
+    --lh-hero: 1;
   }
 
   /* ECLIPSE is the attribute-less default (see :root). This block is kept
@@ -246,6 +270,8 @@
   html[data-font="halo"] {
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+    /* Same 1.26em content area as Sora — see the --lh-hero note in :root. */
+    --lh-hero: 1;
   }
 
   /* Cinematic watch-party overlay — reduce-transparency / blur budget.
@@ -410,7 +436,7 @@
      place — and so a typeface switch has one list of sizes to re-check
      rather than a dozen inline `text-[84px]`s. line-height/tracking are
      baked in: at 84px the browser default leading is unusable. */
-  .type-hero    { font-size: var(--fs-hero);    line-height: 0.94; letter-spacing: -0.03em; }
+  .type-hero    { font-size: var(--fs-hero);    line-height: var(--lh-hero); letter-spacing: -0.03em; }
   .type-detail  { font-size: var(--fs-detail);  line-height: 0.96; letter-spacing: -0.03em; }
   .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
   .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
@@ -727,6 +753,131 @@ html[data-glow="subtle"] .stage-topnav {
 @media (max-width: 767px) {
   .stage-page { padding: 20px 18px 56px; }
 }
+
+/* ── Full-bleed page sections (Aurora Stage Phase 4) ───────────────
+   Home, Movies, TV and the detail view opt OUT of .stage-page so their
+   heroes reach the viewport edge; their non-hero content opts back IN to
+   the same gutter with this class. Keeping the gutter in ONE token means a
+   hero and the rails beneath it can never drift apart. */
+.stage-gutter {
+  padding-left: var(--page-gutter);
+  padding-right: var(--page-gutter);
+}
+@media (max-width: 767px) {
+  .stage-gutter {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+}
+
+/* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────
+   The mockup's defining move: edge to edge, no radius, no border, and an
+   oversized display title. The scrim is two layers — a left-to-right sweep
+   for the text column and a bottom fade that lands on EXACTLY #050505 so
+   there is no seam where the hero ends and the rails begin. */
+.stage-hero-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(5, 5, 5, 0.95) 0%, rgba(5, 5, 5, 0.72) 40%, rgba(5, 5, 5, 0.15) 72%, rgba(5, 5, 5, 0.35) 100%),
+    linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
+}
+
+/* "Aurora picked this for you" — the AI provenance pill above the title. */
+.stage-pick-pill {
+  align-self: flex-start;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f5d0fe;
+  background: rgba(88, 28, 135, 0.5);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(216, 180, 254, 0.4);
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.35);
+}
+html[data-glow="subtle"] .stage-pick-pill {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(59, 19, 90, 0.95);
+  /* Drop the 20px purple bloom too. Every other subtle-mode override in this
+     file kills the halo along with the blur (--glow-halo collapses to a
+     hairline); leaving it meant a user who chose Subtle to stop the glow
+     still got one on the hero pill. */
+  box-shadow: none;
+}
+
+/* Eyebrow above a page/browse title ("MOVIES"). */
+.stage-eyebrow {
+  font-size: 11.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--stage-purple-lt);
+  font-weight: 700;
+}
+
+/* Focus must not land under the sticky chrome (WCAG 2.2 SC 2.4.11). The
+   document is the scroll container, so the browser parks a newly focused
+   element at viewport top — behind the nav, and on the browse pages behind
+   the sticky toolbar as well. `:has()` scopes the larger allowance to pages
+   that actually have a toolbar, so every other page scrolls only as far as
+   the chrome requires instead of over-scrolling by 80px. */
+html {
+  scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 12px);
+}
+html:has(.stage-toolbar) {
+  /* .stage-toolbar is ~67px: 14px padding top and bottom, a 38px chip row,
+     and its 1px border. 80 leaves slack for the wrapped two-line case. */
+  scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 80px);
+}
+
+/* ── Browse toolbar, now sticky ─────────────────────────────────────
+   The toolbar was deliberately left in-flow with a comment explaining why:
+   "the app's top header is itself sticky with a DYNAMIC height (the admin
+   ScanProgressBar appears and disappears), so a fixed sticky offset here
+   would gap/overlap. Sticky is a clean follow-up once that header exposes
+   a stable height."
+   
+   Phase 2 made it expose one. --chrome-h is the MEASURED height of the
+   whole sticky stack (scan bar + nav), republished by a ResizeObserver
+   whenever a scan starts or stops, so this offset tracks it instead of
+   guessing. That is the entire reason this can be sticky now. */
+.stage-toolbar {
+  position: sticky;
+  top: var(--chrome-h, var(--topnav-h));
+  /* Under the nav stack (50) and its drawers (45), above page content. */
+  z-index: 30;
+  padding-top: 14px;
+  padding-bottom: 14px;
+  background: linear-gradient(180deg, rgba(5, 5, 5, 0.92), rgba(5, 5, 5, 0.78));
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+html[data-glow="subtle"] .stage-toolbar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #050505;
+}
+/* Not sticky on phones. Below md the toolbar wraps to two rows (the sort
+   group's ~184px doesn't fit beside the density toggle in ~284px), so
+   pinning it under the 64px nav would hold ~186px — about 29% of a 640px
+   viewport — permanently. Scrolling it away is the right trade there. */
+@media (max-width: 767px) {
+  .stage-toolbar {
+    position: static;
+  }
+}
+
+/* NOTE — no .stage-band / .stage-band-live here on purpose. The mockup
+   styles "Your week" and "Watch together" as glass panels, and YourWeekBand
+   / WatchTogetherCard already carry an equivalent treatment (glass fill,
+   --glow-border, --glow-halo). Adding a second set of band classes would
+   either sit unused or force those two components to be re-plumbed for a
+   purely cosmetic delta — so this phase leaves them alone rather than
+   shipping dead CSS. */
 
 /* ── Buttons ───────────────────────────────────────────────────────── */
 .stage-btn {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, lazy } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
@@ -600,6 +600,11 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
   )
 }
 
+// Views that render their own edge-to-edge hero and therefore opt out of
+// the .stage-page gutter, padding their inner sections with .stage-gutter.
+// Anything not listed here gets the standard page pad from App's wrapper.
+const FULL_BLEED_VIEWS = new Set(['home', 'movies', 'shows', 'detail'])
+
 /* ─────────────────────── HOME VIEW ─────────────────────── */
 // HomeView. Rails are cached at App level so navigating away-and-back
 // reuses the previously-fetched data.
@@ -762,9 +767,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           X titles" clause only renders when a real library total is
           reachable (libraryTotal != null) — omitted, never faked,
           otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
-      <div className="flex items-end justify-between gap-5 mt-2 mb-5">
+      <div className="stage-gutter flex items-end justify-between gap-5 pt-10 mb-1">
         <div className="min-w-0">
-          <h1 className="font-display text-3xl font-bold tracking-tight leading-tight">
+          <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
             Good {greetWord},{' '}
             <span className="bg-gradient-to-r from-purple-300 to-purple-500 bg-clip-text text-transparent">{firstName}</span>
           </h1>
@@ -834,8 +839,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           deliberate "now describe your own vibe" moment between the one curated
           pick and the browsable rails. Fires the semantic search on Enter (not
           per-keystroke) to bound LLM cost. */}
+      {/* Phase 4 — pulled UP into the hero's foot (the mockup's -26px) so
+          it reads as one composition with the hero rather than a separate
+          widget floating above the rails. relative + z-20 keeps it above
+          the hero's scrim. */}
       {onConversationalSearch && (
-        <div className="mt-7 mb-8 max-w-2xl mx-auto">
+        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -867,8 +876,18 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           </div>
         </div>
       )}
+      {/* Everything below the hero + conversational search opts back into
+          the page gutter. HomeView is full-bleed (FULL_BLEED_VIEWS) so the
+          hero can reach the viewport edge; the rest lines up with the
+          hero's text column because both read --page-gutter.
+
+          The wrapper opens HERE, above every status banner — convoLoading
+          included. It was left outside on the first pass, and `max-w-2xl
+          mx-auto` hid that above 672px while going flush to both edges
+          below it. */}
+      <div className="stage-gutter">
       {convoLoading && (
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-3xl">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
           <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
@@ -972,6 +991,8 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           <WatchTogetherCard onStartParty={onOpenParty} onJoinParty={onJoinParty} currentUserId={user?.id} />
         </>
       )}
+      <div className="h-16" />
+      </div>{/* /stage-gutter */}
     </div>
   )
 }
@@ -1450,7 +1471,11 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 // Quiet placeholder while a browse list is in flight.
 function BrowseLoadingState({ title }: { title: string }) {
   return (
-    <div className="animate-fade-in">
+    // stage-gutter: movies/shows are in FULL_BLEED_VIEWS, so this no longer
+    // inherits .stage-page's padding. It renders on every sort and genre
+    // change (the parent resets the list to null), so without the gutter the
+    // skeleton flashed edge-to-edge and then snapped in by 48px.
+    <div className="animate-fade-in stage-gutter pt-8">
       <div className="mb-8">
         <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
         <p className="text-white/60 text-sm mt-2">Loading your library…</p>
@@ -1684,12 +1709,24 @@ export default function App() {
   // because ScanProgressBar renders in flow above the nav, and an admin
   // mid-scan was the case where all five hardcoded offsets broke.
   const chromeRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: this runs BEFORE paint. With useEffect an
+  // admin whose scan was already running at mount painted one frame against
+  // the 64px :root fallback while the real stack was ~101px, putting the
+  // toolbar's chips under the scan bar before snapping into place.
+  useLayoutEffect(() => {
     const el = chromeRef.current
     if (!el) return
+    // Only write when the ROUNDED value actually changes. ScanProgressBar
+    // polls every 4s and its live counts ("1,234 / 12,345 · 89 new") can
+    // reflow the row by a pixel, which would otherwise republish --chrome-h
+    // and visibly step the pinned toolbar while an admin reads the grid.
+    let last = -1
     const publish = () => {
-      const h = el.getBoundingClientRect().height
-      if (h > 0) document.documentElement.style.setProperty('--chrome-h', `${Math.round(h)}px`)
+      const h = Math.round(el.getBoundingClientRect().height)
+      if (h > 0 && h !== last) {
+        last = h
+        document.documentElement.style.setProperty('--chrome-h', `${h}px`)
+      }
     }
     publish()
     // ResizeObserver rather than a resize listener: the height changes when
@@ -4273,10 +4310,13 @@ export default function App() {
 
         {/* Page Content. The global `p-8` is gone (Aurora Stage M2): pages
             are full-bleed and opt IN to the standard gutter via
-            .stage-page, so a hero can reach the viewport edge. `detail`
-            opts out entirely — its backdrop hero is edge-to-edge and
-            DetailView pads its own body. */}
-        <div className={view === 'detail' ? undefined : 'stage-page'}>
+            .stage-page, so a hero can reach the viewport edge.
+            
+            FULL_BLEED_VIEWS opt out entirely because they lead with an
+            edge-to-edge hero and pad their own sections with .stage-gutter
+            instead (Phase 4 added home/movies/shows to what was just
+            `detail`). Everything else keeps the standard page pad. */}
+        <div className={FULL_BLEED_VIEWS.has(view) ? undefined : 'stage-page'}>
           {view === 'home' && (
             <HomeView
               onSelect={handleSelect}

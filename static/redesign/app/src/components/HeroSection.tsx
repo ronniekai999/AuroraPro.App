@@ -31,7 +31,7 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback }: {
+export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2' }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -54,6 +54,31 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   // than a pick from the personalized pool. Renders "Recently Added"
   // instead of "Featured" so the label is accurate.
   isCatalogFallback?: boolean
+  // 2026-07-25 (Aurora Stage Phase 4) — compact variant for the browse
+  // pages (Movies / TV). The mockup gives them a 250px title band rather
+  // than Home's full 60vh stage: same backdrop / parallax / rotation
+  // machinery, shorter frame, page-title type scale, an eyebrow + item
+  // count, and no match ring (there is no room, and a browse page's
+  // featured pick isn't a personalized recommendation anyway).
+  //
+  // The Play / Resume / More Info actions are KEPT. The mockup drops them
+  // — its browse hero is a pure title band — but that would delete the
+  // only one-click play affordance on the browse pages, so the compact
+  // hero keeps them at a smaller size. Flagged in the PR as a deliberate
+  // deviation rather than silently either way.
+  compact?: boolean
+  /** Eyebrow + count for the compact variant ("MOVIES" · "847 titles").
+   * countLabel is a ReactNode: callers pass JSX so the number can be
+   * emphasised. It was typed `string`, which silently accepted a fragment
+   * stringified into a template literal. */
+  eyebrow?: string
+  countLabel?: React.ReactNode
+  pageTitle?: string
+  /** Heading level for the title. Browse passes 'h1' — it IS the page
+   * heading there, and gating BrowseView's own <h1> behind `!heroMedia`
+   * otherwise left those pages with no h1 at all and an h2-without-h1 gap.
+   * Home stays 'h2' (its greeting owns the h1). */
+  titleAs?: 'h1' | 'h2'
   // "Not tonight" — advance to the next pick in the loaded hero pool
   // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
   // the button doesn't render.
@@ -80,7 +105,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   if (!heroProp) {
     return (
-      <section className="relative w-full h-[55vh] min-h-[420px] max-h-[600px] rounded-2xl overflow-hidden mb-8 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] border border-white/[0.04] flex items-center justify-center">
+      // 2026-07-25 (Aurora Stage Phase 4, review fix) — matches the real
+      // hero's frame. It kept `rounded-2xl border mb-8` and a different
+      // height from the inset-card era; once `home` went full-bleed those
+      // rounded corners landed on the viewport edges on every cold load,
+      // and the frame then SNAPPED when the real hero arrived.
+      <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
+        compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
+      }`}>
         <div className="text-center px-8">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
             <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
@@ -126,7 +158,17 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
       // `-mx-8 -mt-8` so the hero aligns with the greeting band and the
       // rails below it inside the page's p-8 padding. rounded-2xl + a
       // soft border give it the "glass card" treatment from the mockup.
-      className="relative w-full h-[60vh] min-h-[480px] max-h-[680px] overflow-hidden mt-1 mb-10 bg-[#050505] rounded-2xl border border-purple-300/15"
+      // 2026-07-25 (Aurora Stage Phase 4) — FULL BLEED. The rounded inset
+      // card is gone: no radius, no border, no side margins, and the
+      // bottom scrim lands on #050505 so the hero dissolves into the
+      // rails instead of ending at a visible edge. The `home`/`movies`/
+      // `shows` views opt out of .stage-page for exactly this, and their
+      // other sections opt back in via .stage-gutter.
+      className={
+        compact
+          ? 'relative w-full h-[250px] overflow-hidden bg-[#050505]'
+          : 'relative w-full h-[62vh] min-h-[480px] max-h-[680px] overflow-hidden bg-[#050505]'
+      }
       onMouseMove={(e) => {
         const rect = e.currentTarget.getBoundingClientRect()
         setMousePos({
@@ -175,23 +217,13 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         />
       ) : null}
 
-      {/* Phase 5.3 final QA — gradient stack rebuilt for a seamless
-          "futuristic" feel. Three layers, each with a job:
-          1. Bottom fade — covers the lower two-thirds of the hero,
-             ramping from solid #050505 at the bottom to transparent
-             at the top of the fade. The bottom matches the page
-             background EXACTLY (#050505) so there's no visible seam
-             where the hero ends and the rails begin.
-          2. Left fade — a softer, more gradual sweep so the
-             subtitle text reads cleanly without a hard "the
-             gradient starts here" line. Doesn't go fully solid at
-             the left edge — keeps a hint of the image visible.
-          3. Aurora-violet glow — subtle radial wash at the focal
-             point, mix-blend-screen so it tints the image rather
-             than overlaying it. Adds the brand's purple mood
-             without dominating the artwork. */}
-      <div className="absolute bottom-0 left-0 right-0 h-2/3 bg-gradient-to-t from-[#050505] via-[#050505]/95 to-transparent pointer-events-none" />
-      <div className="absolute top-0 bottom-0 left-0 w-2/3 bg-gradient-to-r from-[#050505]/95 via-[#050505]/45 to-transparent pointer-events-none" />
+      {/* Phase 4 — the two-layer sweep from the mockup, as one element:
+          a left→right ramp for the text column plus a bottom fade that
+          terminates on EXACTLY #050505 (same as the page) so there is no
+          seam where the hero meets the rails. Replaces the previous
+          three separate gradient divs, whose bottom layer stopped at 2/3
+          height and left a faint band once the hero went full-bleed. */}
+      <div className="stage-hero-scrim" />
       <div
         className="absolute inset-0 pointer-events-none mix-blend-screen opacity-30"
         style={{
@@ -216,9 +248,15 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           "{n}% match" (see heroMatchScore). The inner number + label are
           aria-hidden (decorative), so role="img" + aria-label on the wrap
           is what exposes the score to assistive tech. The cold-start path
-          keeps it (an honest derived signal); sits above scrims (z-20). */}
+          keeps it (an honest derived signal); sits above scrims (z-20).
+          
+          Not on the compact (browse) variant: a 250px band has no room for
+          an 84px ring, and a browse page's featured title is a catalog
+          pick, not a personalized match — the number would be honest but
+          meaningless there. */}
+      {!compact && (
       <div
-        className="absolute top-6 right-6 md:top-8 md:right-8 z-20 flex flex-col items-center gap-1.5"
+        className="absolute top-6 right-6 md:top-11 md:right-[52px] z-20 flex flex-col items-center gap-1.5"
         role="img"
         aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
       >
@@ -243,10 +281,21 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         </div>
         <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
       </div>
+      )}
 
-      {/* Subtitle */}
-      <div className="absolute bottom-8 left-8 right-8 z-20 flex items-end justify-between gap-4">
+      {/* Content column. Left/right padding reads --page-gutter so the
+          hero's text lines up with the rails beneath it — the whole point
+          of moving the gutter into a token in Phase 0. */}
+      <div className="absolute bottom-0 left-0 right-0 z-20 flex items-end justify-between gap-4 px-[var(--page-gutter)] max-md:px-[18px] pb-9">
         <div className="max-w-2xl">
+          {/* Compact (browse) — eyebrow above the page title. */}
+          {compact && eyebrow && <div className="stage-eyebrow mb-2">{eyebrow}</div>}
+          {/* Not in compact: this row is the featured title's provenance
+              badge + its genre/year, which on a browse page read as the
+              PAGE's metadata ("Movies … Drama • 2016"). The compact band
+              names the featured title on its own line below instead, and
+              dropping this reclaims 33px of a 250px frame. */}
+          {!compact && (
           <div className="flex items-center gap-3 mb-3">
             {/* 2026-06-05 (Home redesign B) — when a personalization
                 reason exists, lead with an "✨ Aurora picked this for
@@ -254,8 +303,11 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 reason → keep "Featured". The cold-start hint copy below
                 is untouched. */}
             {reason ? (
-              <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/30">
-                <Icon name="sparkle" size={12} /> Aurora picked this for you
+              // Phase 4 — the mockup's provenance pill, not the generic
+              // glass badge: this is the one element that says the pick
+              // came from the recommender, so it gets its own treatment.
+              <span className="stage-pick-pill inline-flex">
+                <Icon name="sparkle" size={13} /> Aurora picked this for you
               </span>
             ) : isCatalogFallback ? (
               <span className="badge-glass bg-purple-500/10 text-purple-300 border border-purple-500/20">
@@ -270,20 +322,72 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
           </div>
+          )}
           {/* Phase 5.3 — personalization reason ("Because you watched X").
               When the reason is empty AND we're in cold-start mode, show
               a hint about the watch-history threshold instead — same
               visual slot, but explanatory copy that tells the user why
               the picks aren't personalized yet. */}
           {reason ? (
-            <p className="text-purple-200/80 text-xs italic mb-2 max-w-md">{reason}</p>
+            <p className="text-purple-100/85 text-sm italic mb-2 max-w-lg drop-shadow">{reason}</p>
           ) : personalization?.coldStart ? (
             <p className="text-purple-200/70 text-xs italic mb-2 max-w-md">
               Watch {Math.max(0, personalization.threshold - personalization.historyCount)} more {personalization.threshold - personalization.historyCount === 1 ? 'title' : 'titles'} to unlock personalized picks &amp; Discover rails ({personalization.historyCount}/{personalization.threshold} so far).
             </p>
           ) : null}
-          <h2 className="text-white text-4xl md:text-5xl font-bold font-display mb-3 drop-shadow-2xl">{hero.title}</h2>
-          {hero.description && (
+          {/* The display scale comes from the Phase 0 tokens, not inline
+              sizes: .type-hero is --fs-hero (84px) with its line-height
+              and tracking baked in, .type-browse is --fs-browse (52px).
+              One place to tune, and one list to re-check when a user
+              switches typeface system. Both step down below md, where 84px
+              would be roughly six characters per line. */}
+          {(() => {
+            const Heading = titleAs
+            return (
+              <Heading
+                // line-clamp is load-bearing at this size, not tidiness.
+                // .type-hero is 84px at line-height .94 ≈ 79px per line, and
+                // this column is bottom-anchored inside the root's
+                // overflow-hidden — so extra lines are clipped off the TOP,
+                // taking the provenance pill and the reason with them. At the
+                // min-h-[480px] floor (any viewport under ~774px tall, i.e.
+                // most laptops) the title budget is ~262px = 3.3 lines, and
+                // ~15 chars/line at this size means a title like "Pirates of
+                // the Caribbean: The Curse of the Black Pearl" wants four.
+                // Clamping bounds it at every viewport instead of only the
+                // ones that happen to fit.
+                className={
+                  compact
+                    // line-clamp-1: pageTitle is "Movies" / "TV Shows", never
+                    // long, and the 250px band has no room for a second line.
+                    ? 'text-white font-extrabold font-display mb-1.5 drop-shadow-2xl text-3xl md:type-browse line-clamp-1'
+                    // md:text-6xl closes a hierarchy inversion: without it the
+                    // home hero held 48px from 640px to 1023px while the browse
+                    // band went to 52px at 768px, so the browse page's title
+                    // was BIGGER than the hero's on every tablet-width screen.
+                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
+                }
+              >
+                {compact ? (pageTitle ?? hero.title) : hero.title}
+              </Heading>
+            )
+          })()}
+          {/* Compact only: NAME the featured title. In compact the heading is
+              the PAGE name, the description is suppressed, and the backdrop
+              rotates every 9s — so before this line the Play and More Info
+              buttons retargeted silently and the user could play a title
+              whose name was never on screen. line-clamp-1 keeps the count on
+              one line: the compact frame has ~15px of slack, and a wrap
+              clips the eyebrow off the top (the column is bottom-anchored
+              inside overflow-hidden). */}
+          {compact && (
+            <p className="text-white/70 text-sm mb-2.5 line-clamp-1">
+              <span className="text-white/50">Featured: </span>
+              <span className="text-white font-semibold">{hero.title}</span>
+              {countLabel ? <span className="text-white/50"> — {countLabel}</span> : null}
+            </p>
+          )}
+          {!compact && hero.description && (
             <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
           )}
           <div className="flex items-center gap-3">
@@ -353,9 +457,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             ) : (
               <button
                 onClick={() => onPlay(hero)}
-                className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+                // Names the target: in compact the heading is the page name,
+                // so "Play" alone had no referent for a screen reader.
+                aria-label={`Play ${hero.title}`}
+                className={`flex items-center gap-2 rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple bg-purple-600 hover:bg-purple-500 text-white ${
+                  compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
+                }`}
               >
-                <Icon name="play" size={18} /> Play
+                <Icon name="play" size={compact ? 15 : 18} /> Play
               </button>
             )}
             {/* 2026-06-05 (Home redesign B) — "My List" toggle. Adds /
@@ -381,9 +490,12 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             })()}
             <button
               onClick={() => onInfo(hero)}
-              className="flex items-center gap-2 px-6 py-3 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20"
+              aria-label={`More info about ${hero.title}`}
+              className={`flex items-center gap-2 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20 ${
+                compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
+              }`}
             >
-              <Icon name="info" size={18} /> More Info
+              <Icon name="info" size={compact ? 15 : 18} /> More Info
             </button>
           </div>
         </div>

@@ -85,8 +85,14 @@ export function ScanProgressBar({ isAdmin }: { isAdmin: boolean }) {
           : 0
         return (
           <div key={lib.id} className="px-4 py-1.5">
-            <div className="flex items-center justify-between gap-3 mb-1">
-              <span className="text-white/80 text-xs font-medium">
+            {/* Fixed row height + nowrap. This bar sits ABOVE the nav inside
+                the sticky chrome stack, and App publishes that stack's
+                measured height as --chrome-h. The counts here update every
+                4s, so if the text can wrap as digits grow the stack height
+                changes and every consumer of --chrome-h (the sticky browse
+                toolbar, both drawers, DetailRail) steps with it. */}
+            <div className="flex items-center justify-between gap-3 mb-1 h-4">
+              <span className="text-white/80 text-xs font-medium whitespace-nowrap overflow-hidden text-ellipsis">
                 Scanning <strong className="text-purple-200">{lib.name}</strong>
                 {s.total_files > 0 && (
                   <span className="text-white/40 ml-2">
