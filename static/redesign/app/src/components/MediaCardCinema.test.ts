@@ -59,6 +59,26 @@ describe('buildCardMeta', () => {
     expect(values(tokens)).not.toContain('')
   })
 
+  // Surviving-mutant closure. `if (opts.subtitle)` → `!== undefined` passed the
+  // whole suite before this test existed, because the property sweep below
+  // never varied `subtitle` — and that branch is the one route to a blank
+  // token. An empty subtitle means "no override", NOT "render a blank row".
+  it('treats an empty subtitle as no override, not a blank row', () => {
+    expect(values(buildCardMeta(FULL, { subtitle: '' }))).toEqual(['8.4', '2008', 'Crime'])
+    expect(values(buildCardMeta(FULL, { subtitle: undefined }))).toEqual(['8.4', '2008', 'Crime'])
+  })
+
+  // Surviving-mutant closure. `> 0` → `!== 0` shipped "★ -1.5" with a green
+  // suite. The guard is correct; nothing pinned it.
+  it('rejects negative and non-finite ratings', () => {
+    expect(values(buildCardMeta({ rating: -1.5 }))).toEqual([])
+    expect(values(buildCardMeta({ rating: Number.NaN }))).toEqual([])
+    // Infinity is > 0 and would stringify as "Infinity"; no real payload
+    // produces it, but state the expectation so a future guard change is a
+    // deliberate decision rather than a surprise on screen.
+    expect(values(buildCardMeta({ rating: Number.POSITIVE_INFINITY }))).toEqual(['Infinity'])
+  })
+
   it('lets a subtitle replace the whole row', () => {
     // Continue Watching passes "S2E4 · 23m left"; it must not be joined onto
     // the rating/year/genre tokens.
@@ -83,8 +103,13 @@ describe('buildCardMeta', () => {
     ]
     for (const p of partials) {
       for (const showLength of [false, true]) {
-        const tokens = buildCardMeta(p, { showLength })
-        expect(tokens.every(t => t.value.length > 0), JSON.stringify({ p, showLength })).toBe(true)
+        // `subtitle` is swept too — leaving it out is what let a mutant that
+        // emits a blank token through the subtitle branch survive this test.
+        for (const subtitle of [undefined, '', 'S2E4 · 23m left']) {
+          const tokens = buildCardMeta(p, { showLength, subtitle })
+          const ctx = JSON.stringify({ p, showLength, subtitle })
+          expect(tokens.every(t => t.value.length > 0), ctx).toBe(true)
+        }
       }
     }
   })

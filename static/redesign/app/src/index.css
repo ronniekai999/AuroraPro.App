@@ -1307,13 +1307,19 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 }
 /* The no-poster placeholder shares .poster-img for its box (so grid
    alignment doesn't shift when real art lands) but needs to CENTER its
-   glyph. It can't do that with Tailwind utilities at the call site:
+   glyph. It cannot do that with Tailwind utilities at the call site:
    `.media-card-cinema .poster-img` is (0,2,0) and `.flex` is (0,1,0), so
-   this rule wins regardless of order and `flex items-center` were silently
-   dead — the icon sat top-left on every item without a poster. Same
-   cascade trap the Phase 2 review found on the nav; here the fix is to own
-   the centering in CSS rather than fight it from the class list. */
-.media-card-cinema .poster-placeholder {
+   the img rule wins regardless of order and `flex items-center` were
+   silently dead — the icon sat top-left on every posterless item.
+
+   COMPOUND SELECTOR, not a separate class: the first attempt at this fix
+   used `.media-card-cinema .poster-placeholder`, which is ALSO (0,2,0) —
+   equal to the .poster-img rule and declared before it, so `display: block`
+   still won and `place-items: center` was still inert. Verifying only
+   against `.flex` missed the sibling rule 90 bytes further down. Qualifying
+   with .poster-img makes this (0,3,0) so declaration order stops mattering
+   at all. */
+.media-card-cinema .poster-img.poster-placeholder {
   display: grid;
   place-items: center;
   background: rgba(255, 255, 255, 0.03);
@@ -1326,14 +1332,12 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   /* No radius — the card clips. See the .poster-wrap note above. */
   transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
-/* 2026-05-27 (deep-debug Bug 21) — reduced hover scale from 1.04 to
-   1.02. At 1.04, the scaled image's rounded corners (border-radius 9px,
-   now larger after scale) hit the wrap's edge before its own corners
-   reach there, producing a flat-edge clip at the top corners during
-   hover. At 1.02 the scaling stays within the wrap's safe area and
-   the rounding is preserved. The subtle scale still reads as a hover
-   affordance — it's the lift (translateY) on the parent that does most
-   of the work anyway. */
+/* Hover scale is 1.02, from deep-debug Bug 21: at 1.04 the scaled image's
+   own 9px corners clipped against the wrap's edge. Phase 3 removed the
+   image's radius entirely (the card is the sole clipping authority), so
+   that specific artifact can no longer occur — 1.02 is kept because the
+   lift (translateY on the parent) does most of the work and a bigger scale
+   just costs texture sharpness. */
 .media-card-cinema:hover .poster-img { transform: scale(1.02); }
 
 /* Larger "+" / library badge — sits in poster top-left. Filled
@@ -1475,7 +1479,7 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   font-style: italic;
   line-height: 1.34;
   color: rgba(238, 232, 252, 0.97);
-  /* the full ≤80-char reason fits ~3 lines at the 180px rail width; the
+  /* the full ≤80-char reason fits ~3 lines at the 206px rail width; the
      clamp guards the rare longer string without spilling over the art. */
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -1499,7 +1503,15 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    problem. `.co-meta` keeps --text-secondary, the token introduced when
    the old shelf meta measured ~4.47:1 and missed AA (deep-debug Bug 17);
    over this scrim's ≥0.9 alpha floor it composites well clear of 4.5:1.
-   If you lighten the ramp, re-measure both lines first. */
+   If you lighten the ramp, re-measure both lines first.
+
+   `padding-top: 34px` is part of the mechanism, not spacing: it parks the
+   whole text block at or below the gradient's 60% knee, where alpha is
+   still ≥0.89. Measured over a pure-white poster that gives the title
+   ~15.9:1 and the meta ~6.1:1. Drop the padding to 12px and the title's top
+   edge rides up to ~0.81 of the box, alpha ~0.43 — about 2.8:1, a hard AA
+   failure. (It also self-corrects the right way: taller content pushes the
+   text DOWN the ramp, raising alpha.) */
 .media-card-cinema .card-overlay {
   position: absolute;
   left: 0;
@@ -1515,10 +1527,15 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
     rgba(6, 5, 12, 0.9) 60%,
     rgba(6, 5, 12, 0) 100%
   );
+  /* The gradient layer must not swallow hits — but .co-title opts back IN
+     below, because pointer-events inherits and its native title= tooltip
+     is the only way to read a truncated title. */
   pointer-events: none;
-  transition: opacity 0.22s ease;
 }
 .media-card-cinema .card-overlay .co-title {
+  /* Re-enable hit-testing so the tooltip fires. A click here still bubbles
+     to the card root's onSelect, so click-to-detail is unaffected. */
+  pointer-events: auto;
   font-size: 0.9rem;
   font-weight: 600;
   color: rgba(255, 255, 255, 0.97);
@@ -1537,7 +1554,18 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   display: flex;
   align-items: center;
   gap: 5px;
-  flex-wrap: wrap;
+  /* NOWRAP is load-bearing, not a style choice. The overlay is anchored to
+     the card bottom and grows UPWARD, while .card-badges and .resume-pill
+     clear it via fixed offsets. A wrapped row pushes the title up INTO the
+     badges, which are z:3 against the overlay's z:1 — opaque "4K" chips
+     painting over the title, at rest, no hover needed. Measured at real
+     Inter metrics this was the COMMON case: at the widest desktop layout
+     (1440px, 6-up, ~179px of content) "★ 9.5 · 2008 · 2h 55m · Comedy"
+     already wraps, as does any longer genre. Truncating to one line keeps
+     those offsets true. Wrapping also let a line begin with a stray "·". */
+  flex-wrap: nowrap;
+  min-width: 0;
+  overflow: hidden;
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
 .media-card-cinema .card-overlay .co-meta .star {
@@ -1547,17 +1575,69 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   align-items: center;
   gap: 2px;
 }
-.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.3); }
+/* 0.45, not 0.3: at 0.3 the dots measured 2.71:1 over the scrim on a bright
+   poster — under even the 3:1 non-text floor — and the row read as
+   "8.5 2008 Crime" run together. 0.45 is ~4:1 and still recedes. */
+.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.45); }
 
-/* The reason scrim occupies the same corner. When it reveals, fade the
-   permanent title/meta out so the reason isn't printed over it — the same
-   swap already done for .card-badges just below. */
-.media-card-cinema:hover .card-overlay,
-.media-card-cinema:focus-within .card-overlay {
-  opacity: 0;
+/* The reason scrim occupies the same corner, so when it reveals the
+   permanent title/meta fades out rather than being printed over.
+
+   SCOPED WITH `~`, exactly like .card-badges below — and for the reason
+   that rule's own comment gives. Unscoped (as first shipped) this fired on
+   every card, and only AI-picked cards have a .reason-scrim to swap IN: on
+   Movies, TV, My Library, Search, Collections and Continue Watching the
+   title and meta simply blanked to bare art. `:focus-within` matches the
+   card itself (it is role="button" tabIndex=0), so it also erased the
+   label of the exact card a keyboard user had tabbed onto. */
+.media-card-cinema .reason-scrim ~ .card-overlay {
+  transition: opacity 0.22s ease;
 }
-@media (prefers-reduced-motion: reduce) {
-  .media-card-cinema .card-overlay { transition: none; }
+/* :hover ONLY, and only where hover is real.
+   
+   No `:focus-within`: it matches the card itself (role="button" tabIndex=0),
+   so it hid the label of the very card a keyboard user had tabbed onto. It
+   also STICKS — clicking the + badge leaves focus on that button, so the
+   title stayed hidden indefinitely after the pointer left. Dropping it
+   costs little: the reason scrim carries its own ~0.9-alpha backdrop, so a
+   focused reason-card's title sits behind it rather than competing.
+   
+   The hover query guards the touch equivalent: iOS Safari and Android
+   Chrome apply :hover on tap and hold it until you tap elsewhere, which
+   would leave a tapped card's title blanked. This file already documents
+   that trap for .resume-pill ("no :hover on touch", deep-debug C1) — this
+   is the first place it needed a media query. */
+@media (hover: hover) and (pointer: fine) {
+  .media-card-cinema:hover .reason-scrim ~ .card-overlay {
+    opacity: 0;
+  }
+}
+
+/* Forced colors (Windows High Contrast). The UA drops any non-url()
+   `background-image`, so the scrim — the entire mechanism keeping this text
+   legible — is suppressed, while the poster <img> survives. That is a real
+   regression from moving the text onto the art: the old shelf sat on the
+   card's own background and fell back to Canvas. Give both on-art text
+   layers an explicit opaque backdrop, and stop hiding the title (a
+   crossfade between two layers is meaningless once both are Canvas).
+
+   This is the first forced-colors block in the file; there was no existing
+   handling to be consistent with.
+
+   ORDER MATTERS: this block must stay AFTER the @media (hover: hover) fade
+   above. Neither media query contributes specificity, so the later
+   `opacity: 1` here is the only thing that beats the `opacity: 0` there.
+   Placed before it — as first written — the fade won and the title still
+   vanished in forced-colors mode. Caught by checking the BUILT css, not the
+   source; the source read correctly either way. */
+@media (forced-colors: active) {
+  .media-card-cinema .card-overlay,
+  .media-card-cinema .reason-scrim {
+    background-color: Canvas;
+  }
+  .media-card-cinema:hover .reason-scrim ~ .card-overlay {
+    opacity: 1;
+  }
 }
 
 /* Progress bar — shared shape with the legacy card so existing CSS
@@ -1566,10 +1646,14 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 .media-card-cinema .progress-bar {
   position: absolute;
   bottom: 0;
-  /* Full width, no radius: the 8px inset frame the left/right offsets used
-     to clear is gone (Phase 3), and the card's own overflow rounds it. */
-  left: 0;
-  right: 0;
+  /* Inset 6px, not flush: at 3px above the bottom edge the card's 14px
+     corner radius clips ~4.7px horizontally at each end, so a title at 2%
+     progress drew entirely inside the clipped corner and read as no
+     progress at all. Starting past the curve makes every percentage
+     visible. (The pre-Phase-3 bar was inset 8px and had the same issue for
+     a different reason.) */
+  left: 6px;
+  right: 6px;
   /* Above .card-overlay (z:1) so a partly-watched card keeps showing
      progress under the title block. */
   z-index: 2;
@@ -1598,7 +1682,11 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    users get a distinct ring on top of the dark indigo gradient. */
 .media-card-cinema .resume-pill {
   position: absolute;
-  /* Same reason as .card-badges — sits above the on-art title block. */
+  /* Clears the on-art title block. This offset only earns its keep because
+     the overlay fade is SCOPED to reason-cards: Continue-Watching cards
+     (the only ones given an onResume) carry a subtitle and no reason, so
+     hovering shows the pill and the title block AT THE SAME TIME. Measured
+     from the card bottom the title box ends ~52px up, hence 58. */
   bottom: 58px;
   right: 10px;
   z-index: 3;
@@ -1895,7 +1983,8 @@ textarea:focus-visible {
    keyboard focus. pointer-events:none so it never intercepts clicks on
    the lib/resume buttons stacked above it — the card's own onClick
    (open detail) is what fires. Lives inside .poster-wrap, which is
-   already position:relative + overflow:hidden. */
+   position:relative — the CARD ROOT does the clipping since Phase 3 moved
+   overflow:hidden off the wrap. */
 .media-card-cinema .card-hover-preview {
   position: absolute;
   inset: 0;

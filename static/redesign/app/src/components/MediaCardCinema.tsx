@@ -3,8 +3,8 @@
 // 2028-05-28 — Extracted from App.tsx so the same card design renders
 // consistently across the home rails (via MediaRail) AND the grid views
 // (Movies, TV Shows, My Library, Search, Collections detail). Single
-// source of truth for: poster, library badge, AI gem, progress bar,
-// shelf with title/meta/reason. Future tweaks happen here once instead
+// source of truth for: poster, library badge, AI gem, progress bar, and
+// the on-art title/meta overlay. Future tweaks happen here once instead
 // of in 6 inline copies.
 //
 // Defined here rather than in App.tsx because CollectionsView lives in
@@ -40,9 +40,10 @@ export interface MediaLike {
   year?: number
   rating?: number
   genre?: string
-  // LLM-generated per-pick reason. Surfaces as a tooltip on the outer
-  // card + a visible italic caption in the shelf. Triggers the AI gem
-  // top-right badge.
+  // LLM-generated per-pick reason. Triggers the AI gem top-right badge and
+  // the reveal-on-intent .reason-scrim over the poster bottom. (It is NOT a
+  // tooltip on the card, and no longer a caption below it — the shelf that
+  // held one was removed in Aurora Stage Phase 3.)
   reason?: string
   // 0..1 fraction; when > 0 renders a progress bar at the bottom of
   // the poster (e.g. Continue Watching).
@@ -70,8 +71,8 @@ export interface MediaCardCinemaProps {
   // Library state. When BOTH provided the lib badge renders.
   libraryIds?: Set<number>
   onToggleLib?: () => void
-  // Optional sizing class — rails pass `w-[180px]`, grids leave empty
-  // (parent grid sets column width).
+  // Optional sizing class — rails pass `w-[206px]` (or `w-[336px]` for
+  // landscape), grids leave it empty (the grid column sets the width).
   className?: string
   // Optional subtitle override (e.g. "S2E5" for Continue Watching).
   // Replaces the star/year/genre meta when provided.
@@ -131,6 +132,12 @@ export function buildCardMeta(
 ): CardMetaToken[] {
   // A caller-supplied subtitle (e.g. "S2E4 · 23m left" for Continue
   // Watching) REPLACES the whole row rather than joining it.
+  //
+  // Truthiness, deliberately: an EMPTY subtitle means "no override, use the
+  // default row", not "render a blank row". Callers type it as
+  // `string | undefined` and a resolver that misses returns undefined, but
+  // '' is the plausible near-miss — so the behaviour is pinned by a test
+  // rather than left to whichever reading a future editor assumes.
   if (opts.subtitle) return [{ kind: 'text', value: opts.subtitle }]
 
   const tokens: CardMetaToken[] = []
@@ -215,8 +222,7 @@ export function MediaCardCinema({
   // metadata-less rows clean.
   const badges = showBadges && item.tags ? item.tags.filter(Boolean) : []
   // Length token only when opted in and present (movies → "2h 55m",
-  // shows → episode runtime like "45m"). Empty string from mapMedia
-  // (no runtime_minutes) omits it without leaving a stray separator.
+  // The whole meta row, as tokens (see buildCardMeta above for the rules).
   const metaTokens = buildCardMeta(item, { subtitle, showLength })
 
   return (
@@ -243,7 +249,20 @@ export function MediaCardCinema({
       // MediaListRow was missing (added there too).
       role="button"
       tabIndex={0}
-      aria-label={`${item.title}${item.year ? ` (${item.year})` : ''}`}
+      // role="button" makes descendants presentational, so EVERYTHING inside
+      // the card is pruned from the a11y tree and this label is the only
+      // thing a screen reader gets. Title + year alone left rating, runtime,
+      // genre and the quality/maturity chips with no accessible equivalent —
+      // a gap that predates Phase 3 but that Phase 3 consolidated by moving
+      // all of it onto the art. Fold the same tokens the eye sees into the
+      // name, comma-separated so it reads as a list rather than a sentence.
+      aria-label={[
+        `${item.title}${item.year ? ` (${item.year})` : ''}`,
+        metaTokens.length > 0
+          ? metaTokens.map(t => (t.kind === 'rating' ? `rated ${t.value}` : t.value)).join(', ')
+          : '',
+        badges.length > 0 ? badges.join(', ') : '',
+      ].filter(Boolean).join(' — ')}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget) return
         if (e.key === 'Enter' || e.key === ' ') {
@@ -384,8 +403,8 @@ export function MediaCardCinema({
             Bottom-left of the poster so they don't collide with the
             top-corner lib badge / AI gem. First tag (quality, e.g. "4K")
             gets the accent treatment; the rest (maturity) are neutral
-            glass. Hidden behind the progress bar's 3px strip is fine —
-            badges sit 14px up. */}
+            glass. They sit ABOVE the on-art title block (bottom: 62px in
+            index.css) — which is why .co-meta must stay one line. */}
         {badges.length > 0 && (
           <div className="card-badges" aria-hidden="true">
             {badges.map((b, i) => (
@@ -427,7 +446,12 @@ export function MediaCardCinema({
           {metaTokens.length > 0 && (
             <div className="co-meta">
               {metaTokens.map((t, i) => (
-                <Fragment key={`${t.kind}-${t.value}`}>
+                // key={i}: the list is purely positional with no per-item
+                // state to preserve, and a content-derived key can COLLIDE —
+                // year, runtime and genre are all kind:'text', so an item
+                // with year 1917 and genre "1917" produced two identical
+                // keys. The index buys the same stability without the risk.
+                <Fragment key={i}>
                   {i > 0 && <span className="sep" aria-hidden="true">·</span>}
                   {t.kind === 'rating' ? (
                     <span className="star"><StarSvg /> {t.value}</span>
@@ -442,7 +466,17 @@ export function MediaCardCinema({
         {/* Progress bar — only when progress > 0. Sits above the overlay
             so a partially-watched card still shows its state. */}
         {item.progress !== undefined && item.progress > 0 && (
-          <div className="progress-bar">
+          <div
+            className="progress-bar"
+            // Not decorative: this is the only indication of how far in the
+            // user is, and the "23m left" that used to convey it sits in the
+            // pruned subtitle. role+valuenow makes it readable.
+            role="progressbar"
+            aria-label={`${item.title} watch progress`}
+            aria-valuenow={Math.round(item.progress * 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
             <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
           </div>
         )}
