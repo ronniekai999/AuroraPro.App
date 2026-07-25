@@ -17,6 +17,7 @@
 // also keeps the rendered SVG markup smaller — `Icon` ships every
 // listed glyph in its lookup table even when only one is used.
 
+import { Fragment } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react'
 
 // MediaLike is the structural subset of App.tsx's `Media` interface
@@ -110,6 +111,48 @@ export interface MediaCardCinemaProps {
   hoverPreview?: boolean
 }
 
+/* ─────────────────────── meta row (pure) ───────────────────────── */
+// 2026-07-25 (Aurora Stage Phase 3) — the meta row's assembly is pure, so
+// it lives here as a function instead of as nested JSX conditionals. Two
+// reasons: it's the part with real rules worth testing (see
+// MediaCardCinema.test.ts), and building a TOKEN LIST and joining with "·"
+// at render removes the hand-written "should I emit a separator?" checks
+// that each new token used to add — the mechanism that produces stray
+// leading/trailing separators.
+export interface CardMetaToken {
+  /** 'rating' renders the star glyph before the value; 'text' is plain. */
+  kind: 'rating' | 'text'
+  value: string
+}
+
+export function buildCardMeta(
+  item: Pick<MediaLike, 'rating' | 'year' | 'genre' | 'duration'>,
+  opts: { subtitle?: string; showLength?: boolean } = {},
+): CardMetaToken[] {
+  // A caller-supplied subtitle (e.g. "S2E4 · 23m left" for Continue
+  // Watching) REPLACES the whole row rather than joining it.
+  if (opts.subtitle) return [{ kind: 'text', value: opts.subtitle }]
+
+  const tokens: CardMetaToken[] = []
+  // Star only for a real rating. Continue-Watching items carry rating=0
+  // (the progress endpoint returns no TMDB rating) and "★ 0" is a visible
+  // lie, not a missing value.
+  if (item.rating !== undefined && item.rating > 0) {
+    tokens.push({ kind: 'rating', value: item.rating.toFixed(1) })
+  }
+  if (item.year !== undefined && item.year > 0) {
+    tokens.push({ kind: 'text', value: String(item.year) })
+  }
+  // Runtime, browse grid only, before genre so the row reads
+  // "★ 9.5 · 2008 · 2h 55m · Crime". mapMedia gives '' when a title has no
+  // runtime, which must not become an empty token.
+  if (opts.showLength && item.duration) {
+    tokens.push({ kind: 'text', value: item.duration })
+  }
+  if (item.genre) tokens.push({ kind: 'text', value: item.genre })
+  return tokens
+}
+
 // ─── Inlined SVG icons (decorative — wrapped in aria-hidden) ───
 // Same path data as App.tsx's Icon component for visual consistency.
 function PlusSvg() {
@@ -174,7 +217,7 @@ export function MediaCardCinema({
   // Length token only when opted in and present (movies → "2h 55m",
   // shows → episode runtime like "45m"). Empty string from mapMedia
   // (no runtime_minutes) omits it without leaving a stray separator.
-  const lengthText = showLength && item.duration ? item.duration : ''
+  const metaTokens = buildCardMeta(item, { subtitle, showLength })
 
   return (
     // 2028-05-28 (deep-debug Bug A) — `group` class so the
@@ -230,7 +273,7 @@ export function MediaCardCinema({
           // enrichment, library entries pre-metadata-sync). Same
           // aspect so grid alignment doesn't shift when a real poster
           // lands.
-          <div className="poster-img bg-white/[0.03] flex items-center justify-center" style={landscapeStyle}>
+          <div className="poster-img poster-placeholder" style={landscapeStyle}>
             <MovieSvg />
           </div>
         )}
@@ -359,53 +402,50 @@ export function MediaCardCinema({
             ))}
           </div>
         )}
-        {/* Progress bar — only when progress > 0. */}
+        {/* 2026-07-25 (Aurora Stage Phase 3) — title + meta ON THE ART.
+            This replaces the `.shelf` block that used to sit BELOW the
+            poster inside the card chrome. The art is now the card; the
+            text rides over a scrim at its foot.
+
+            The scrim is not decoration — it is what keeps this text
+            accessible. Its ramp is the one worked out for `.reason-scrim`
+            (dense, knee at 60%) precisely because that surface had the
+            same problem: near-white text over arbitrary poster art,
+            including snowy backdrops and white logos. See index.css.
+
+            NOT ported from the mockup: its faint uppercase title
+            watermark at the poster top (`.pt`). The mockup generates its
+            artwork from CSS gradients, so that watermark is standing in
+            for a poster's own title treatment. Real TMDB posters already
+            carry their title in the art — drawing a second one over it
+            would double up, and it would sit under the library badge. */}
+        <div className="card-overlay">
+          {/* title= for the truncated case; the CARD's aria-label already
+              carries title + year, so the accessible name never depends on
+              this overlay rendering. */}
+          <div className="co-title" title={item.title}>{item.title}</div>
+          {metaTokens.length > 0 && (
+            <div className="co-meta">
+              {metaTokens.map((t, i) => (
+                <Fragment key={`${t.kind}-${t.value}`}>
+                  {i > 0 && <span className="sep" aria-hidden="true">·</span>}
+                  {t.kind === 'rating' ? (
+                    <span className="star"><StarSvg /> {t.value}</span>
+                  ) : (
+                    <span>{t.value}</span>
+                  )}
+                </Fragment>
+              ))}
+            </div>
+          )}
+        </div>
+        {/* Progress bar — only when progress > 0. Sits above the overlay
+            so a partially-watched card still shows its state. */}
         {item.progress !== undefined && item.progress > 0 && (
           <div className="progress-bar">
             <div className="progress-fill" style={{ width: `${item.progress * 100}%` }} />
           </div>
         )}
-      </div>
-      <div className="shelf">
-        <div className="title" title={item.title}>{item.title}</div>
-        {subtitle ? (
-          // Custom subtitle (e.g. "S2E5" for Continue Watching) — keeps
-          // the shelf height consistent without the star/year/genre row.
-          <div className="meta"><span>{subtitle}</span></div>
-        ) : (
-          <div className="meta">
-            {/* Star only when we have a real rating. Continue Watching
-                items have rating=0 (the progress endpoint doesn't return
-                TMDB rating) — without this guard we'd show "★ 0", a
-                visible lie. */}
-            {item.rating !== undefined && item.rating > 0 && (
-              <>
-                <span className="star"><StarSvg /> {item.rating.toFixed(1)}</span>
-                {((item.year ?? 0) > 0 || item.genre) && <span className="sep">·</span>}
-              </>
-            )}
-            {item.year !== undefined && item.year > 0 && (
-              <>
-                <span>{item.year}</span>
-                {(item.genre || lengthText) && <span className="sep">·</span>}
-              </>
-            )}
-            {/* Runtime token (browse grid only). Placed before genre so
-                the row reads "★ 9.5 · 2008 · 2h 55m · Crime". Only
-                renders when showLength is set AND duration is non-empty
-                (shows with no per-episode runtime simply omit it). */}
-            {lengthText && (
-              <>
-                <span>{lengthText}</span>
-                {item.genre && <span className="sep">·</span>}
-              </>
-            )}
-            {item.genre && <span>{item.genre}</span>}
-          </div>
-        )}
-        {/* The reason is no longer an always-on truncated caption here —
-            it moved to the reveal-on-intent .reason-scrim over the poster
-            (above), so the shelf stays compact and rail heights uniform. */}
       </div>
     </div>
   )

@@ -85,7 +85,7 @@
     /* 2026-06-17 (a11y quick-win) — secondary text token for content
        that must clear WCAG AA (>=4.5:1). Formalizes the
        rgba(220, 220, 232, 0.65) color the media-card meta already uses
-       (.media-card-cinema .shelf .meta below) so table headers,
+       (.media-card-cinema .card-overlay .co-meta below) so table headers,
        timestamps, and hints share one source of truth instead of
        dropping to text-white/40 (~3.9:1, fails AA). */
     --text-secondary: rgba(220, 220, 232, 0.65);
@@ -1106,7 +1106,8 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 /* Rail scroll container */
 .rail-scroll {
   display: flex;
-  gap: 16px;
+  /* 18px to match the wider Phase 3 cards (mockup .rail-track). */
+  gap: 18px;
   overflow-x: auto;
   scroll-snap-type: x mandatory;
   padding: 8px 4px;
@@ -1293,24 +1294,36 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 }
 .media-card-cinema .poster-wrap {
   position: relative;
-  padding: 8px 8px 0;
-  /* 2026-05-27 (deep-debug Bug 22) — round all four corners of the
-     poster-wrap. Previously only the top corners were rounded; for
-     landscape (16:9) cards the image's bottom rounded edges (9px)
-     visibly clipped against the wrap's flat bottom corners producing
-     a stair-step look. Rounding the bottom too means the image's
-     rounding is always inside the wrap's rounding, no clash. The shelf
-     below has square top corners by default; the rail-container's
-     outer 18px radius hides the shelf-to-wrap seam. */
-  border-radius: 14px;
-  overflow: hidden;
+  /* 2026-07-25 (Aurora Stage Phase 3) — the 8px inset frame and this
+     element's own radius are gone: the art now fills the card edge to
+     edge, with metadata over it instead of on a shelf below.
+     
+     This RETIRES deep-debug Bug 22 rather than re-solving it. That bug was
+     a stair-step where the image's 9px corners clipped against the wrap's
+     flat bottom corners; with no padding and no radius on the image, the
+     card's own `border-radius: 14px; overflow: hidden` is the single
+     rounding authority and there are no two radii to disagree. Do not
+     reintroduce a radius on .poster-img without restoring one here. */
+}
+/* The no-poster placeholder shares .poster-img for its box (so grid
+   alignment doesn't shift when real art lands) but needs to CENTER its
+   glyph. It can't do that with Tailwind utilities at the call site:
+   `.media-card-cinema .poster-img` is (0,2,0) and `.flex` is (0,1,0), so
+   this rule wins regardless of order and `flex items-center` were silently
+   dead — the icon sat top-left on every item without a poster. Same
+   cascade trap the Phase 2 review found on the nav; here the fix is to own
+   the centering in CSS rather than fight it from the class list. */
+.media-card-cinema .poster-placeholder {
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.03);
 }
 .media-card-cinema .poster-img {
   display: block;
   width: 100%;
   aspect-ratio: 2 / 3;
   object-fit: cover;
-  border-radius: 9px;
+  /* No radius — the card clips. See the .poster-wrap note above. */
   transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
 }
 /* 2026-05-27 (deep-debug Bug 21) — reduced hover scale from 1.04 to
@@ -1476,40 +1489,76 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
   .media-card-cinema .reason-scrim { transform: none; transition: opacity 0.22s ease; }
 }
 
-/* Shelf: title + meta. The shelf is INSIDE the card chrome (not a
-   separate column under the poster) so the whole card reads as one
-   designed object. The reason moved out to the reveal-on-intent
-   .reason-scrim over the poster (above). */
-.media-card-cinema .shelf {
-  padding: 12px 14px 14px;
+/* ── Card overlay: title + meta ON the art (Aurora Stage Phase 3) ──
+   Replaces `.shelf`, which sat below the poster inside the card chrome.
+
+   THE SCRIM IS AN ACCESSIBILITY MECHANISM, NOT A GRADIENT. This text sits
+   over arbitrary poster art — snowy backdrops, white logos, blown-out
+   skies — so the ramp below is the one already proven for `.reason-scrim`
+   (dense, knee at 60%), which exists because that surface hit exactly this
+   problem. `.co-meta` keeps --text-secondary, the token introduced when
+   the old shelf meta measured ~4.47:1 and missed AA (deep-debug Bug 17);
+   over this scrim's ≥0.9 alpha floor it composites well clear of 4.5:1.
+   If you lighten the ramp, re-measure both lines first. */
+.media-card-cinema .card-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* z:1 — under the corner controls and the reason scrim (z:2/3), above
+     the art. */
+  z-index: 1;
+  padding: 34px 13px 12px;
+  background: linear-gradient(
+    to top,
+    rgba(6, 5, 12, 0.94) 0%,
+    rgba(6, 5, 12, 0.9) 60%,
+    rgba(6, 5, 12, 0) 100%
+  );
+  pointer-events: none;
+  transition: opacity 0.22s ease;
 }
-.media-card-cinema .shelf .title {
+.media-card-cinema .card-overlay .co-title {
   font-size: 0.9rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.96);
+  color: rgba(255, 255, 255, 0.97);
   line-height: 1.2;
-  margin-bottom: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
-.media-card-cinema .shelf .meta {
+.media-card-cinema .card-overlay .co-meta {
+  margin-top: 5px;
   font-size: 0.72rem;
-  /* 2026-05-27 (deep-debug Bug 17) — bumped from rgba(255,255,255,0.45)
-     to rgba(220,220,232,0.65). The previous color composited over the
-     card's bottom gradient gave an effective contrast ratio of ~4.47:1,
-     just below the WCAG AA threshold (4.5:1) for normal-size text. The
-     new color clears 5:1 while still reading as "secondary" against
-     the title (which stays at near-white). Star and reason keep their
-     accent colors; only the year/genre got dim. */
+  font-weight: 400;
+  /* See the AA note above — this is the same token the shelf used. */
   color: var(--text-secondary);
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-weight: 400;
+  gap: 5px;
+  flex-wrap: wrap;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
-.media-card-cinema .shelf .meta .star { color: #facc15; font-weight: 600; display: inline-flex; align-items: center; gap: 2px; }
-.media-card-cinema .shelf .meta .sep  { color: rgba(255, 255, 255, 0.2); }
+.media-card-cinema .card-overlay .co-meta .star {
+  color: #facc15;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.media-card-cinema .card-overlay .co-meta .sep { color: rgba(255, 255, 255, 0.3); }
+
+/* The reason scrim occupies the same corner. When it reveals, fade the
+   permanent title/meta out so the reason isn't printed over it — the same
+   swap already done for .card-badges just below. */
+.media-card-cinema:hover .card-overlay,
+.media-card-cinema:focus-within .card-overlay {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .media-card-cinema .card-overlay { transition: none; }
+}
 
 /* Progress bar — shared shape with the legacy card so existing CSS
    logic keeps working. Positioned in the poster wrap (above the
@@ -1517,11 +1566,15 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 .media-card-cinema .progress-bar {
   position: absolute;
   bottom: 0;
-  left: 8px;
-  right: 8px;
+  /* Full width, no radius: the 8px inset frame the left/right offsets used
+     to clear is gone (Phase 3), and the card's own overflow rounds it. */
+  left: 0;
+  right: 0;
+  /* Above .card-overlay (z:1) so a partly-watched card keeps showing
+     progress under the title block. */
+  z-index: 2;
   height: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 0 0 9px 9px;
+  background: rgba(255, 255, 255, 0.14);
   overflow: hidden;
 }
 .media-card-cinema .progress-bar .progress-fill {
@@ -1545,7 +1598,8 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
    users get a distinct ring on top of the dark indigo gradient. */
 .media-card-cinema .resume-pill {
   position: absolute;
-  bottom: 14px;
+  /* Same reason as .card-badges — sits above the on-art title block. */
+  bottom: 58px;
   right: 10px;
   z-index: 3;
   display: inline-flex;
@@ -1888,8 +1942,10 @@ textarea:focus-visible {
    above the hover scrim (z-2). */
 .media-card-cinema .card-badges {
   position: absolute;
-  left: 14px;
-  bottom: 14px;
+  left: 12px;
+  /* Clears the .card-overlay text block below it (Phase 3 moved title +
+     meta onto the art; at 14px the chips landed on top of the title). */
+  bottom: 62px;
   z-index: 3;
   display: flex;
   gap: 6px;
