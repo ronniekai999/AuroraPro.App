@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { collectionStrips } from './CollectionsView'
 import { groupDateParts } from './CalendarView'
+import { maturityLabel } from './ProfileSwitcher'
 
 // The suite runs under TZ=America/New_York, pinned in vitest.config.ts — see
 // that file for why a non-UTC zone is required and why the pin lives in config
@@ -242,5 +243,39 @@ describe('groupDateParts', () => {
     const late = groupDateParts('2026-05-28T23:30:00Z')
     expect(early).toEqual({ relative: 'Today', monthDay: 'May 28', isToday: true })
     expect(early).toEqual(late)
+  })
+})
+
+// ── Aurora Stage Phase 7a ────────────────────────────────────────────────────
+
+describe('maturityLabel', () => {
+  it('returns null rather than inventing text when unset', () => {
+    // The mockup gives every profile a taste blurb ("Sci-fi & docs"). Nothing on
+    // Profile stores one, so the switcher falls back to the maturity dial and
+    // must say NOTHING when even that is unset — the row then reads "Profile"
+    // rather than a fabricated preference.
+    expect(maturityLabel(undefined)).toBeNull()
+    // -1 is the server's explicit "no preference" sentinel, not an age.
+    expect(maturityLabel(-1)).toBeNull()
+  })
+
+  it('maps each band to its label at the boundaries', () => {
+    // Boundaries, not midpoints: an off-by-one in the <= chain would move a
+    // profile's visible rating band, and only the edges catch that.
+    expect(maturityLabel(0)).toBe('Kids-safe')
+    expect(maturityLabel(7)).toBe('Kids-safe')
+    expect(maturityLabel(8)).toBe('Family')
+    expect(maturityLabel(13)).toBe('Family')
+    expect(maturityLabel(14)).toBe('Teen')
+    expect(maturityLabel(16)).toBe('Teen')
+    expect(maturityLabel(17)).toBe('All ages allowed')
+    expect(maturityLabel(21)).toBe('All ages allowed')
+  })
+
+  it('never returns an empty string, which would render as a blank line', () => {
+    for (const p of [undefined, -1, 0, 5, 10, 15, 18, 99]) {
+      const l = maturityLabel(p)
+      expect(l === null || l.length > 0).toBe(true)
+    }
   })
 })

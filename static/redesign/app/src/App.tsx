@@ -335,12 +335,19 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   }, [isRegister, username, email, password, inviteCode, inviteRequired, onLogin])
 
   return (
-    <div className="min-h-screen flex items-center justify-center aurora-bg p-4">
-      <div className="w-full max-w-[420px]">
-        {/* Logo */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
-            <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
+    // Split layout (Aurora Stage Phase 7a): brand block BESIDE the card from lg
+    // up, stacked above it below. Previously the mark + wordmark + tagline sat
+    // in a 420px column above the form, which on a 1440x900 screen put a
+    // 14px logo and three lines of text in the middle of an otherwise empty
+    // page. The starfield and aurora wash are the backdrop the mockup's sign-in
+    // leans on, and a wide split is what lets them read.
+    <div className="min-h-screen flex items-center justify-center aurora-bg p-4 md:p-8">
+      <div className="w-full max-w-[980px] flex flex-col lg:flex-row lg:items-center gap-10 lg:gap-16">
+        {/* Brand block. lg:text-left / text-center so it reads as a heading
+            above the card on narrow screens and as a facing panel on wide. */}
+        <div className="flex-1 min-w-0 text-center lg:text-left">
+          <div className="inline-flex items-center justify-center w-[84px] h-[84px] rounded-[26px] bg-purple-600/20 border border-purple-500/30 mb-5">
+            <svg width="52" height="52" viewBox="0 0 36 36" fill="none">
               <defs>
                 <linearGradient id="auroraMarkA" x1="0" y1="0" x2="1" y2="1">
                   <stop offset="0" stopColor="#A855F7" />
@@ -352,12 +359,28 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
-          <h1 className="text-white text-2xl font-bold font-display tracking-wide">AURORA PRO</h1>
-          <p className="text-white/60 text-sm mt-1">Your personal media universe</p>
+          {/* 46px wordmark from lg. Stays an h1 — the sign-in screen's only
+              heading, and the card's own "Welcome Back" is an h2 under it. */}
+          <h1 className="text-white font-display font-extrabold tracking-tight text-3xl lg:text-[46px] lg:leading-[1.05]">
+            AURORA<span className="text-purple-400">PRO</span>
+          </h1>
+          <p className="text-white/60 text-sm lg:text-base mt-3 max-w-[38ch] mx-auto lg:mx-0">
+            Your personal media universe — every film and series you own, on any screen.
+          </p>
+          {/* Invite hint, only when the server actually requires a code. It was
+              previously discoverable only by switching to register mode and
+              finding a fourth input; saying so up front is the difference
+              between "why can't I sign up" and "I need to ask for a code". */}
+          {isRegister && inviteRequired && (
+            <p className="text-purple-200/70 text-xs mt-4 inline-flex items-center gap-2">
+              <Icon name="key" size={13} />
+              This server is invite-only — you'll need a code from its admin.
+            </p>
+          )}
         </div>
 
         {/* Card */}
-        <form onSubmit={handleSubmit} className="glass-panel rounded-2xl p-8">
+        <form onSubmit={handleSubmit} className="glass-panel rounded-2xl p-7 sm:p-8 w-full lg:w-[428px] lg:flex-none">
           <h2 className="text-white text-xl font-semibold mb-1">
             {isRegister ? (setupStatus && !setupStatus.has_users ? 'Welcome to Aurora' : 'Create Account') : 'Welcome Back'}
           </h2>
@@ -450,54 +473,39 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               invite code through the round-trip so register-mode
               sign-ins claim it atomically server-side. Each button
               renders only when its provider is enabled in setupStatus. */}
-          {(setupStatus?.oauth_google_enabled || setupStatus?.oauth_discord_enabled || setupStatus?.oauth_twitch_enabled || setupStatus?.oauth_facebook_enabled || setupStatus?.oauth_twitter_enabled) && (
+          {/* Derived from the same list the tiles map, so the guard and the
+              grid can never disagree about whether any provider is enabled.
+              This was a five-term `||` that had to be edited in lockstep with
+              five separate render blocks. */}
+          {OAUTH_PROVIDERS.some(p => setupStatus?.[p.flag]) && (
             <>
               <div className="flex items-center gap-3 my-6">
                 <div className="flex-1 h-px bg-white/[0.06]" />
                 <span className="text-white/30 text-xs uppercase tracking-wider">or</span>
                 <div className="flex-1 h-px bg-white/[0.06]" />
               </div>
-              <div className="space-y-2">
-                {setupStatus?.oauth_google_enabled && (
-                  <OAuthSignInButton
-                    provider="google"
-                    label="Continue with Google"
-                    inviteCode={isRegister ? inviteCode : ''}
-                    disabled={submitting}
-                  />
-                )}
-                {setupStatus?.oauth_discord_enabled && (
-                  <OAuthSignInButton
-                    provider="discord"
-                    label="Continue with Discord"
-                    inviteCode={isRegister ? inviteCode : ''}
-                    disabled={submitting}
-                  />
-                )}
-                {setupStatus?.oauth_twitch_enabled && (
-                  <OAuthSignInButton
-                    provider="twitch"
-                    label="Continue with Twitch"
-                    inviteCode={isRegister ? inviteCode : ''}
-                    disabled={submitting}
-                  />
-                )}
-                {setupStatus?.oauth_facebook_enabled && (
-                  <OAuthSignInButton
-                    provider="facebook"
-                    label="Continue with Facebook"
-                    inviteCode={isRegister ? inviteCode : ''}
-                    disabled={submitting}
-                  />
-                )}
-                {setupStatus?.oauth_twitter_enabled && (
-                  <OAuthSignInButton
-                    provider="twitter"
-                    label="Continue with X"
-                    inviteCode={isRegister ? inviteCode : ''}
-                    disabled={submitting}
-                  />
-                )}
+              {/* 2-up tile grid, from a list rather than five near-identical
+                  hand-written blocks. With all five providers enabled the
+                  stacked version was five full-width 44px rows plus the form
+                  above them — the card ran past the fold on a 900px screen.
+                  Two columns halves that.
+
+                  Odd counts: the last tile spans both columns so the grid never
+                  ends with a half-width orphan. That is the common case, since
+                  most servers enable one or three. */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {OAUTH_PROVIDERS
+                  .filter(p => setupStatus?.[p.flag])
+                  .map((p, i, list) => (
+                    <OAuthSignInButton
+                      key={p.provider}
+                      provider={p.provider}
+                      label={p.label}
+                      inviteCode={isRegister ? inviteCode : ''}
+                      disabled={submitting}
+                      className={list.length % 2 === 1 && i === list.length - 1 ? 'sm:col-span-2' : undefined}
+                    />
+                  ))}
               </div>
             </>
           )}
@@ -517,16 +525,36 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   )
 }
 
+type OAuthProvider = 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter'
+
+// The five providers, paired with the setupStatus flag that gates each one.
+// One list (Aurora Stage Phase 7a) instead of five hand-written
+// `{setupStatus?.oauth_X_enabled && <OAuthSignInButton provider="X" …/>}`
+// blocks plus a five-term `||` in the section guard — two places that had to be
+// edited together to add a provider, and the kind of pair that drifts.
+const OAUTH_PROVIDERS: readonly { provider: OAuthProvider; label: string; flag: 'oauth_google_enabled' | 'oauth_discord_enabled' | 'oauth_twitch_enabled' | 'oauth_facebook_enabled' | 'oauth_twitter_enabled' }[] = [
+  { provider: 'google', label: 'Google', flag: 'oauth_google_enabled' },
+  { provider: 'discord', label: 'Discord', flag: 'oauth_discord_enabled' },
+  { provider: 'twitch', label: 'Twitch', flag: 'oauth_twitch_enabled' },
+  { provider: 'facebook', label: 'Facebook', flag: 'oauth_facebook_enabled' },
+  // "X" rather than "Twitter" in the label; the provider key stays `twitter`
+  // because that is the server's route segment.
+  { provider: 'twitter', label: 'X', flag: 'oauth_twitter_enabled' },
+]
+
 // Phase B — OAuth sign-in button. Per-provider brand icon + colors.
 // Renders as an <a> rather than a button + window.location because
 // the browser handles the cross-site redirect natively (no JS state
 // to preserve at this point; the round-trip's success page sets
 // localStorage tokens before re-entering the SPA).
-function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
-  provider: 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter'
+function OAuthSignInButton({ provider, label, inviteCode, disabled, className }: {
+  provider: OAuthProvider
   label: string
   inviteCode: string
   disabled: boolean
+  // Grid-placement class from the caller (the odd-count tile spans both
+  // columns). Placement belongs to the grid, not to the button.
+  className?: string
 }) {
   // Build the start URL. inviteCode is forwarded as ?invite=CODE so
   // the server can atomically claim it pre-flight (see
@@ -592,7 +620,7 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled }: {
     <a
       href={disabled ? undefined : href}
       onClick={(e) => { if (disabled) e.preventDefault() }}
-      className={`w-full flex items-center justify-center gap-3 py-2.5 rounded-xl font-medium transition-all duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''}`}
+      className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-all duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >
       {config.icon}
       {label}
@@ -4306,6 +4334,11 @@ export default function App() {
             profiles={profiles}
             activeProfileId={activeProfileId}
             onSelectProfile={setActiveProfileId}
+            // The dashed Add-Profile row routes here rather than duplicating
+            // the create form in the menu — SettingsView's
+            // ProfilesAndWatchlistsCard already owns creation plus the taste
+            // onboarding it kicks off.
+            onAddProfile={() => handleNavigate('settings')}
             avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
             onSignOut={() => { void handleLogout() }}
           />
