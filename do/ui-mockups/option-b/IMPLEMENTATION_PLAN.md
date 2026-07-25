@@ -150,12 +150,32 @@ green · `npm run lint` unchanged from baseline (7 pre-existing errors, all in
 
 ---
 
-### Phase 1+2 — TopNav replaces Sidebar, and the shell goes full-bleed
+### Phase 1+2 — TopNav replaces Sidebar, and the shell goes full-bleed ✅ SHIPPED
 
 **Branch** `feat/stage-chrome` — **these ship as one PR.** Removing `md:ml-[240px]`
 (M1) and removing the global `p-8` (M2) are the same change to the same 6 lines of
 `App.tsx`'s render root; splitting them leaves `main` with a top nav over 240px-indented
 content.
+
+> **Landed 2026-07-25.** `App.tsx` is 235 lines lighter (`Sidebar` and `UserMenu`
+> deleted); `components/TopNav.tsx` is new, with `TopNav.test.ts` pinning the eight
+> destinations and the admin gate. Notes on what the mockup didn't answer:
+>
+> - **The green "OK" health pill is deliberately not built.** Nothing in the app can
+>   source it — `ServerPanel` fetches `/api/admin/dashboard` itself and only while open,
+>   and there is no `/api/health` helper. Rather than render a fabricated all-clear, the
+>   trigger is neutral. Wiring a real signal is the one backend-touching item this
+>   migration surfaced; it belongs with Phase 7a or its own small PR.
+> - **The server trigger is now admin-only**, matching the panel it opens. Pre-Stage the
+>   sidebar offered it to everyone and non-admins got "Server status is admin-only" — a
+>   dead affordance.
+> - **`MobileSheet` is a sibling of `<nav>`, not a child.** `.stage-topnav` sets
+>   `backdrop-filter`, which makes the bar a containing block for fixed descendants, so a
+>   nested sheet resolves against the 64px bar instead of the viewport — and only when
+>   glow ≠ "subtle", since that mode drops the blur. A bug that appears on one appearance
+>   setting and not another is the worst kind to debug later.
+> - **The drawers sit at z-45, deliberately below the nav stack (50).** That preserves
+>   QA BUG-005's actual intent: the panel must never bury the controls that opened it.
 
 **New file** `src/components/TopNav.tsx` — brand → home, centered tabs (with the `admin`
 pill), search pill with `⌘K` kbd, party button + live dot, server-status dot, bell +
@@ -415,7 +435,25 @@ go build ./...    # must be green
 go test ./...     # must be green
 ```
 
-Then adversarial diff review, then squash-merge, then delete the branch. The SPA is
+### Then a debug session — mandatory, every phase
+
+`docs/dev-workflow.md` stage 5 (multi-agent adversarial review of the diff) runs on
+**every** phase of this migration, not just the risky-looking ones. Decided 2026-07-25;
+a UI migration is exactly where "it builds and it looks right" hides second-order
+breakage, and the reviewers get their own angles so they don't converge on the same
+obvious surface.
+
+The angles that map onto this work:
+
+| Angle | Looks for |
+|---|---|
+| **Behavioral parity** | every control the replaced code had, still present and still wired — the failure mode of a chrome swap is silent loss, not a crash |
+| **Layout / CSS / stacking** | padding assumptions broken by the shell change, stacking-context and containing-block traps (`backdrop-filter`, `transform`), z-index pairs that now overlap wrongly |
+| **A11y + responsive** | what's unreachable at each breakpoint, focus/keyboard, aria semantics, contrast on the new on-art surfaces |
+| **State / lifecycle / data** | migration of persisted prefs, effect dependencies, listener leaks, and whether the phase's own tests are vacuous |
+
+A phase is not done until every high/critical finding is fixed and re-verified, per the
+FIX-FIRST rule. Lows are recorded in the phase's PR rather than silently dropped. The SPA is
 built on the box by `scripts/aurora-update.sh` (`npm ci` + `vite build` → `static/v2`),
 so a change only reaches `https://aurorapro.app` once it's on `main`:
 
@@ -439,8 +477,8 @@ per-episode version chips · Previously/recap modal · cast + companion flows.
 | Order | Branch | Screens visibly changed | Status |
 |---|---|---|---|
 | 1 | `feat/stage-tokens` | none (type + tokens only) | ✅ **shipped** |
-| 2 | `feat/stage-chrome` | all (nav + full-bleed shell) | next |
-| 3 | `feat/stage-cards` | 03, 04, 09, 11 | |
+| 2 | `feat/stage-chrome` | all (nav + full-bleed shell) | ✅ **shipped** |
+| 3 | `feat/stage-cards` | 03, 04, 09, 11 | next |
 | 4 | `feat/stage-home-browse` | 03, 04 | |
 | 5 | `feat/stage-detail` | 05, 06 | |
 | 6 | `feat/stage-content-views` | 09, 10, 11 | |
