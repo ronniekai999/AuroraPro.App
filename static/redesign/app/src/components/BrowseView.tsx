@@ -262,12 +262,13 @@ export default function BrowseView({
       {!heroMedia && (
         <div
           aria-hidden="true"
-          // Negative insets track --page-gutter so the glow still reaches
-          // the page edges. They were -8 (32px) to cancel the old global
-          // p-8 exactly; after the Phase 2 shell change the gutter is 48px
-          // and the glow silently stopped 16px short on each side, which is
-          // the one thing an "edgeless" glow must not do.
-          className="absolute -top-[var(--page-gutter)] -left-[var(--page-gutter)] -right-[var(--page-gutter)] h-[360px] pointer-events-none overflow-hidden"
+          // No negative insets. They existed to cancel a parent gutter —
+          // first the global p-8, then --page-gutter — but BrowseView is
+          // full-bleed as of Phase 4, so the cancellation target is now 0
+          // and the offsets overshot 48px past each edge and 48px up behind
+          // the sticky nav. Third time this box has been re-tuned; anchoring
+          // it to the edges directly ends that.
+          className="absolute inset-x-0 top-0 h-[360px] pointer-events-none overflow-hidden"
         >
           <div className="absolute -top-32 right-0 w-[600px] h-[600px] rounded-full bg-purple-500/[0.08] blur-3xl" />
           <div className="absolute top-20 -right-20 w-[400px] h-[400px] rounded-full bg-fuchsia-500/[0.05] blur-3xl" />
@@ -306,8 +307,14 @@ export default function BrowseView({
           guessing. It is a direct child of the full-bleed root, so its
           blurred backdrop already spans the viewport; it only needs the
           gutter as PADDING to line its contents up with the grid below.
-          (No negative margins — those would push it past the edge.) */}
-      <div className="stage-toolbar browse-toolbar relative mb-6 flex items-center gap-3 flex-wrap px-[var(--page-gutter)] max-md:px-[18px]">
+          (No negative margins — those would push it past the edge.)
+          
+          Deliberately NO `relative` in the class list: nothing inside is
+          absolutely positioned, and `.relative{position:relative}` ties
+          `.stage-toolbar{position:sticky}` at single-class specificity — so
+          sticky would win only by source order. Reordering the Stage block,
+          or moving it into a @layer, would silently un-stick this. */}
+      <div className="stage-toolbar browse-toolbar mb-6 flex items-center gap-3 flex-wrap px-[var(--page-gutter)] max-md:px-[18px]">
         {/* Genre chips — replaces the old <select>. Horizontally
             scrollable so a long genre list never wraps into a tall
             block. "All Genres" maps to the empty-string filter the
@@ -474,6 +481,10 @@ export default function BrowseView({
           </p>
         </div>
       )}
+      {/* .stage-page used to supply 70px of bottom padding; .stage-gutter is
+          left/right only, so browse needs the same trailing spacer Home has
+          or the last poster row touches the viewport bottom. */}
+      <div className="h-16" />
       </div>{/* /stage-gutter */}
     </div>
   )

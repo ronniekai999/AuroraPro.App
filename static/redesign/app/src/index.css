@@ -164,12 +164,33 @@
        tokens rather than per-component literals — one place to tune the
        editorial voice, and one place to check when a user switches to a
        typeface system with different metrics. */
-    --fs-hero: 84px;      /* home hero title */
-    --fs-detail: 64px;    /* title-detail hero */
-    --fs-browse: 52px;    /* movies / TV browse hero strip */
-    --fs-page: 38px;      /* requests / library / settings page heads */
-    --fs-section: 24px;   /* pane + section heads */
-    --fs-rail: 21px;      /* rail titles */
+    /* rem, not px: px tokens ignore the user's browser font-size preference,
+       and mixing them with Tailwind's rem sizes inverted the ladder — at a
+       24px root the greeting went 45px below md and 38px at md, i.e. it got
+       SMALLER on gaining room. These values are identical at a 16px root.
+
+       --fs-hero is additionally FLUID and vh-aware because the hero frame is
+       vh-driven (62vh, floor 480px). A fixed 84px produced a 550px content
+       stack inside a 480px frame on 1366x768 and 1440x900 — and since the
+       column is bottom-anchored inside overflow-hidden, the overflow was
+       clipped off the TOP, silently deleting the "Aurora picked this" pill
+       and the reason line. The 9vh term scales the type with the frame that
+       has to hold it. */
+    --fs-hero: clamp(2.5rem, min(6vw, 9vh), 5.25rem);  /* home hero title, ≤84px */
+    --fs-detail: 4rem;        /* title-detail hero, 64px */
+    --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
+    --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
+    --fs-section: 1.5rem;     /* pane + section heads, 24px */
+    --fs-rail: 1.3125rem;     /* rail titles, 21px */
+
+    /* Leading is PER TYPEFACE, not per size. 0.94 is tuned for Bricolage
+       (+2.9px ink clearance between stacked lines); measured against the real
+       font tables it gives Sora and Outfit NEGATIVE clearance (-0.9px), so a
+       descender on line 1 touches a capital on line 2. Phase 0's token
+       comment promised "one list to re-check when a user switches typeface
+       system" — this is that list, finally kept. Overrides live with the
+       html[data-font] blocks below. */
+    --lh-hero: 0.94;
 
     /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
        token and stays untouched.) */
@@ -231,6 +252,9 @@
   html[data-font="nova"] {
     --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Sora', 'Inter Tight', sans-serif;
+    /* Sora's content area is 1.26em vs Bricolage's 1.20em — 0.94 leaves
+       negative ink clearance on a wrapped title. */
+    --lh-hero: 1;
   }
 
   /* ECLIPSE is the attribute-less default (see :root). This block is kept
@@ -246,6 +270,8 @@
   html[data-font="halo"] {
     --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Outfit', 'Plus Jakarta Sans', sans-serif;
+    /* Same 1.26em content area as Sora — see the --lh-hero note in :root. */
+    --lh-hero: 1;
   }
 
   /* Cinematic watch-party overlay — reduce-transparency / blur budget.
@@ -410,7 +436,7 @@
      place — and so a typeface switch has one list of sizes to re-check
      rather than a dozen inline `text-[84px]`s. line-height/tracking are
      baked in: at 84px the browser default leading is unusable. */
-  .type-hero    { font-size: var(--fs-hero);    line-height: 0.94; letter-spacing: -0.03em; }
+  .type-hero    { font-size: var(--fs-hero);    line-height: var(--lh-hero); letter-spacing: -0.03em; }
   .type-detail  { font-size: var(--fs-detail);  line-height: 0.96; letter-spacing: -0.03em; }
   .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
   .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
@@ -777,6 +803,11 @@ html[data-glow="subtle"] .stage-pick-pill {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: rgba(59, 19, 90, 0.95);
+  /* Drop the 20px purple bloom too. Every other subtle-mode override in this
+     file kills the halo along with the blur (--glow-halo collapses to a
+     hairline); leaving it meant a user who chose Subtle to stop the glow
+     still got one on the hero pill. */
+  box-shadow: none;
 }
 
 /* Eyebrow above a page/browse title ("MOVIES"). */
@@ -786,6 +817,21 @@ html[data-glow="subtle"] .stage-pick-pill {
   text-transform: uppercase;
   color: var(--stage-purple-lt);
   font-weight: 700;
+}
+
+/* Focus must not land under the sticky chrome (WCAG 2.2 SC 2.4.11). The
+   document is the scroll container, so the browser parks a newly focused
+   element at viewport top — behind the nav, and on the browse pages behind
+   the sticky toolbar as well. `:has()` scopes the larger allowance to pages
+   that actually have a toolbar, so every other page scrolls only as far as
+   the chrome requires instead of over-scrolling by 80px. */
+html {
+  scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 12px);
+}
+html:has(.stage-toolbar) {
+  /* .stage-toolbar is ~67px: 14px padding top and bottom, a 38px chip row,
+     and its 1px border. 80 leaves slack for the wrapped two-line case. */
+  scroll-padding-top: calc(var(--chrome-h, var(--topnav-h)) + 80px);
 }
 
 /* ── Browse toolbar, now sticky ─────────────────────────────────────
@@ -814,6 +860,15 @@ html[data-glow="subtle"] .stage-toolbar {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   background: #050505;
+}
+/* Not sticky on phones. Below md the toolbar wraps to two rows (the sort
+   group's ~184px doesn't fit beside the density toggle in ~284px), so
+   pinning it under the 64px nav would hold ~186px — about 29% of a 640px
+   viewport — permanently. Scrolling it away is the right trade there. */
+@media (max-width: 767px) {
+  .stage-toolbar {
+    position: static;
+  }
 }
 
 /* NOTE — no .stage-band / .stage-band-live here on purpose. The mockup

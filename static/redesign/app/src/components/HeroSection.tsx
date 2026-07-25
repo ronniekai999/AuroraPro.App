@@ -217,21 +217,6 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         />
       ) : null}
 
-      {/* Phase 5.3 final QA — gradient stack rebuilt for a seamless
-          "futuristic" feel. Three layers, each with a job:
-          1. Bottom fade — covers the lower two-thirds of the hero,
-             ramping from solid #050505 at the bottom to transparent
-             at the top of the fade. The bottom matches the page
-             background EXACTLY (#050505) so there's no visible seam
-             where the hero ends and the rails begin.
-          2. Left fade — a softer, more gradual sweep so the
-             subtitle text reads cleanly without a hard "the
-             gradient starts here" line. Doesn't go fully solid at
-             the left edge — keeps a hint of the image visible.
-          3. Aurora-violet glow — subtle radial wash at the focal
-             point, mix-blend-screen so it tints the image rather
-             than overlaying it. Adds the brand's purple mood
-             without dominating the artwork. */}
       {/* Phase 4 — the two-layer sweep from the mockup, as one element:
           a left→right ramp for the text column plus a bottom fade that
           terminates on EXACTLY #050505 (same as the page) so there is no
@@ -305,6 +290,12 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         <div className="max-w-2xl">
           {/* Compact (browse) — eyebrow above the page title. */}
           {compact && eyebrow && <div className="stage-eyebrow mb-2">{eyebrow}</div>}
+          {/* Not in compact: this row is the featured title's provenance
+              badge + its genre/year, which on a browse page read as the
+              PAGE's metadata ("Movies … Drama • 2016"). The compact band
+              names the featured title on its own line below instead, and
+              dropping this reclaims 33px of a 250px frame. */}
+          {!compact && (
           <div className="flex items-center gap-3 mb-3">
             {/* 2026-06-05 (Home redesign B) — when a personalization
                 reason exists, lead with an "✨ Aurora picked this for
@@ -331,6 +322,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               {hero.genre}{hero.genre && hero.year ? ' • ' : ''}{hero.year || ''}
             </span>
           </div>
+          )}
           {/* Phase 5.3 — personalization reason ("Because you watched X").
               When the reason is empty AND we're in cold-start mode, show
               a hint about the watch-history threshold instead — same
@@ -353,10 +345,27 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             const Heading = titleAs
             return (
               <Heading
+                // line-clamp is load-bearing at this size, not tidiness.
+                // .type-hero is 84px at line-height .94 ≈ 79px per line, and
+                // this column is bottom-anchored inside the root's
+                // overflow-hidden — so extra lines are clipped off the TOP,
+                // taking the provenance pill and the reason with them. At the
+                // min-h-[480px] floor (any viewport under ~774px tall, i.e.
+                // most laptops) the title budget is ~262px = 3.3 lines, and
+                // ~15 chars/line at this size means a title like "Pirates of
+                // the Caribbean: The Curse of the Black Pearl" wants four.
+                // Clamping bounds it at every viewport instead of only the
+                // ones that happen to fit.
                 className={
                   compact
-                    ? 'text-white font-extrabold font-display mb-1.5 drop-shadow-2xl text-3xl md:type-browse'
-                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl lg:type-hero'
+                    // line-clamp-1: pageTitle is "Movies" / "TV Shows", never
+                    // long, and the 250px band has no room for a second line.
+                    ? 'text-white font-extrabold font-display mb-1.5 drop-shadow-2xl text-3xl md:type-browse line-clamp-1'
+                    // md:text-6xl closes a hierarchy inversion: without it the
+                    // home hero held 48px from 640px to 1023px while the browse
+                    // band went to 52px at 768px, so the browse page's title
+                    // was BIGGER than the hero's on every tablet-width screen.
+                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl md:text-6xl lg:type-hero line-clamp-3'
                 }
               >
                 {compact ? (pageTitle ?? hero.title) : hero.title}
@@ -373,6 +382,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               inside overflow-hidden). */}
           {compact && (
             <p className="text-white/70 text-sm mb-2.5 line-clamp-1">
+              <span className="text-white/50">Featured: </span>
               <span className="text-white font-semibold">{hero.title}</span>
               {countLabel ? <span className="text-white/50"> — {countLabel}</span> : null}
             </p>

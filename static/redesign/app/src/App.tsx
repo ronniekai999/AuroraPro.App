@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, lazy } from 'react'
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, lazy } from 'react'
 import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
@@ -844,7 +844,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           widget floating above the rails. relative + z-20 keeps it above
           the hero's scrim. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-7 mb-8 max-w-3xl">
+        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -887,7 +887,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           below it. */}
       <div className="stage-gutter">
       {convoLoading && (
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-3xl">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
           <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />
@@ -1709,12 +1709,24 @@ export default function App() {
   // because ScanProgressBar renders in flow above the nav, and an admin
   // mid-scan was the case where all five hardcoded offsets broke.
   const chromeRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: this runs BEFORE paint. With useEffect an
+  // admin whose scan was already running at mount painted one frame against
+  // the 64px :root fallback while the real stack was ~101px, putting the
+  // toolbar's chips under the scan bar before snapping into place.
+  useLayoutEffect(() => {
     const el = chromeRef.current
     if (!el) return
+    // Only write when the ROUNDED value actually changes. ScanProgressBar
+    // polls every 4s and its live counts ("1,234 / 12,345 · 89 new") can
+    // reflow the row by a pixel, which would otherwise republish --chrome-h
+    // and visibly step the pinned toolbar while an admin reads the grid.
+    let last = -1
     const publish = () => {
-      const h = el.getBoundingClientRect().height
-      if (h > 0) document.documentElement.style.setProperty('--chrome-h', `${Math.round(h)}px`)
+      const h = Math.round(el.getBoundingClientRect().height)
+      if (h > 0 && h !== last) {
+        last = h
+        document.documentElement.style.setProperty('--chrome-h', `${h}px`)
+      }
     }
     publish()
     // ResizeObserver rather than a resize listener: the height changes when

@@ -2,6 +2,17 @@
 module.exports = {
   darkMode: ["class"],
   content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  // Aurora Stage display type scale. These live in `@layer utilities` in
+  // index.css, which Tailwind tree-shakes against scanned content — so
+  // .type-detail / .type-section / .type-rail were emitting NOTHING (Phase 4
+  // only uses hero/browse/page), and the two that did ship only did so
+  // because their names appear in a code comment. Safelisting makes the whole
+  // scale available to later phases, including via a computed class name,
+  // instead of depending on whether some comment happens to mention it.
+  safelist: [
+    'type-hero', 'type-detail', 'type-browse',
+    'type-page', 'type-section', 'type-rail',
+  ],
   theme: {
     extend: {
       fontFamily: {
