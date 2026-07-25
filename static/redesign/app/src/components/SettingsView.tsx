@@ -9,6 +9,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Icon } from '@/components/Icon'
+import { PageHeader } from '@/components/PageHeader'
 import { type Toast } from '@/components/Toast'
 import {
   Select,
@@ -18,7 +19,20 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
-import { ATTRIBUTED_FONTS, type FontChoice } from '@/lib/appearance'
+import {
+  FONT_OPTIONS,
+  GLOW_OPTIONS,
+  applyFont,
+  applyGlow,
+  applyPreferredQuality,
+  currentFont,
+  currentGlow,
+  currentPreferredQuality,
+  readPrefsSnapshot,
+  type FontChoice,
+  type GlowChoice,
+  type QualityChoice,
+} from '@/lib/appearance'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { GamificationCard } from '@/components/GamificationCard'
 import {
@@ -55,58 +69,51 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   const [localAvatar, setLocalAvatar] = useState<string | null>(null)
   useEffect(() => { setLocalAvatar(null) }, [activeProfile?.id])
   const currentAvatar = localAvatar ?? activeProfile?.avatar_url ?? ''
-  // Persist to localStorage under `aurora_prefs`. We capture the raw
-  // parsed object in a ref and merge before each write so any keys
-  // this component doesn't know about (e.g. legacy `volume`, `muted`)
-  // round-trip untouched instead of being clobbered.
-  //
   // The first useEffect write is skipped so just opening Settings
   // doesn't rewrite the stored object.
-  const rawRef = useRef<Record<string, unknown>>({})
   const skipFirstWriteRef = useRef(true)
   const [settings, setSettings] = useState(() => {
-    try {
-      const raw = localStorage.getItem('aurora_prefs')
-      if (raw) {
-        // JSON.parse can return null/string/number if localStorage
-        // was tampered with. Guard before property access.
-        const parsedRaw: unknown = JSON.parse(raw)
-        if (!parsedRaw || typeof parsedRaw !== 'object') {
-          throw new Error('aurora_prefs is not an object')
-        }
-        const parsed = parsedRaw as Record<string, unknown>
-        rawRef.current = parsed
-        return {
-          autoplay: parsed.autoplay !== false,
-          hdr: parsed.hdr !== false,
-          notifications: parsed.notifications !== false,
-          hardwareDecoding: parsed.hardwareDecoding !== false,
-          subtitleLang: (parsed.subtitleLang as string) ?? 'en',
-          audioLang: (parsed.audioLang as string) ?? 'en',
-        }
-      }
-    } catch { /* ignore */ }
+    const parsed = readPrefsSnapshot()
     return {
-      autoplay: true,
-      hdr: true,
-      notifications: true,
-      hardwareDecoding: true,
-      subtitleLang: 'en',
-      audioLang: 'en',
+      autoplay: parsed.autoplay !== false,
+      hdr: parsed.hdr !== false,
+      notifications: parsed.notifications !== false,
+      hardwareDecoding: parsed.hardwareDecoding !== false,
+      subtitleLang: (parsed.subtitleLang as string) ?? 'en',
+      audioLang: (parsed.audioLang as string) ?? 'en',
     }
   })
 
-  // Persist on every change. Merges over the raw object so unknown
-  // V1 keys (volume, muted, etc.) round-trip unmodified.
+  // Appearance + quality dials are real React state now, sourced from the
+  // shared helpers rather than read out of a cached prefs blob (Aurora Stage
+  // Phase 7a). Previously each was read from `rawRef.current` and written with
+  // its own inline localStorage call, and a `setSettings(s => ({...s}))` was
+  // fired purely to force a re-render because ref mutations are invisible to
+  // React. Actual state makes the re-render automatic and the three encodings
+  // of the typeface default collapse to one.
+  const [fontChoice, setFontChoice] = useState<FontChoice>(currentFont)
+  const [glowChoice, setGlowChoice] = useState<GlowChoice>(currentGlow)
+  const [quality, setQuality] = useState<QualityChoice>(currentPreferredQuality)
+
+  // Persist on every change, merging over a FRESH read so unknown keys
+  // (volume, muted, legacy V1 values) round-trip unmodified.
+  //
+  // The fresh read is the fix for a real clobber. This used to merge over a
+  // `rawRef` snapshot captured at mount, and `aurora_prefs` has more than one
+  // writer — VideoPlayer persists volume/muted/autoplay into it during
+  // playback. So: open Settings, play something, change the volume, come back
+  // and toggle any switch → Settings wrote `{...mountTimeSnapshot, ...settings}`
+  // and silently reverted the volume. Reading at write time cannot lose a
+  // concurrent write, and it also makes applyFont/applyGlow (which do their own
+  // read-modify-write) safe to call from the handlers below.
   useEffect(() => {
     if (skipFirstWriteRef.current) {
       skipFirstWriteRef.current = false
       return
     }
     try {
-      const merged = { ...rawRef.current, ...settings }
+      const merged = { ...readPrefsSnapshot(), ...settings }
       localStorage.setItem('aurora_prefs', JSON.stringify(merged))
-      rawRef.current = merged
     } catch { /* ignore */ }
   }, [settings])
 
@@ -134,19 +141,26 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   ]
 
   return (
-    <div className="animate-fade-in max-w-3xl">
-      <div className="mb-8">
-        <h1 className="text-white text-3xl font-bold font-display">Settings</h1>
-        <p className="text-white/50 text-sm mt-1">Configure your preferences</p>
-      </div>
+    <div className="animate-fade-in">
+      <PageHeader title="Settings" sub="Configure your preferences" />
 
-      <div className="space-y-6">
+      {/* Two columns from md up, one below — the mockup's .set-grid. The page
+          was `max-w-3xl` and a single `space-y-6` stack, which on a 1440px
+          screen left roughly half the viewport empty while the user scrolled
+          past nine cards.
+          `items-start` matters: grid items stretch to the row's height by
+          default, so a short card (Quality) beside a tall one (Appearance)
+          would grow a panel of empty glass to match it. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
         {/* Appearance — Glow Style picker. Writes
             aurora_prefs.glow_intensity and live-updates <html data-glow>
             so panels/cards reflow their border + halo immediately.
             Default ("aurora") is the unprefixed :root token set in
             index.css; only "subtle" and "heavy" set the attribute. */}
-        <div className="glass-panel rounded-xl p-6">
+        {/* md:col-span-2 — the glow row is 3-up and the typeface row 2x2, so
+            this card needs the full width to avoid four chips of two words
+            each wrapping. */}
+        <div className="glass-panel rounded-2xl p-6 md:col-span-2">
           <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="eye" size={18} className="text-purple-400" />
             Appearance
@@ -156,106 +170,60 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
               <p className="text-white/80 text-sm font-medium">Glow Style</p>
               <p className="text-white/40 text-xs">Border and halo around panels, cards, and the hero.</p>
             </div>
+            {/* GLOW_OPTIONS from lib/appearance, not a literal list. The copy
+                is the shared copy; the only thing lost is the "(default)"
+                suffix, which the shared list omits because the onboarding
+                "Make it yours" step renders the same options and calling one
+                "default" there is meaningless. */}
             <div role="radiogroup" aria-label="Glow style" className="grid grid-cols-3 gap-3">
-              {([
-                { id: 'subtle', label: 'Subtle', desc: 'Faint white edge' },
-                { id: 'aurora', label: 'Aurora', desc: 'White + purple (default)' },
-                { id: 'heavy',  label: 'Heavy',  desc: 'Bright white + purple bloom' },
-              ] as const).map(opt => {
-                // Read via rawRef so an unrelated keys' update doesn't lose
-                // this value. The `setSettings(s => ({...s}))` below forces
-                // the chip to re-render after each click since rawRef
-                // mutations are invisible to React.
-                const stored = rawRef.current.glow_intensity
-                const current = typeof stored === 'string' ? stored : 'aurora'
-                const active = current === opt.id
+              {GLOW_OPTIONS.map(opt => {
+                const active = glowChoice === opt.id
                 return (
                   <button
                     key={opt.id}
                     type="button"
                     role="radio"
                     aria-checked={active}
-                    onClick={() => {
-                      rawRef.current = { ...rawRef.current, glow_intensity: opt.id }
-                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
-                      // "aurora" is the default — no attribute needed (and removing
-                      // it keeps a clean DOM for users who never touched the setting).
-                      if (opt.id === 'aurora') document.documentElement.removeAttribute('data-glow')
-                      else document.documentElement.setAttribute('data-glow', opt.id)
-                      // Force re-render so the active chip updates.
-                      setSettings(s => ({ ...s }))
-                    }}
-                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
-                      active
-                        ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
-                        : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
-                    }`}
+                    onClick={() => { applyGlow(opt.id); setGlowChoice(opt.id) }}
+                    className="stage-opt text-left"
                   >
                     <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
-                    <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                    <p className="text-white/55 text-xs mt-0.5">{opt.desc}</p>
                   </button>
                 )
               })}
             </div>
 
-            {/* Typeface — writes aurora_prefs.font_choice and live-updates
-                <html data-font> so all display + body text reflows into the
-                chosen system immediately (CSS vars --font-sans/--font-display
-                in index.css). Default ("eclipse": Bricolage Grotesque + Inter)
-                is the unprefixed :root token set; only the other three set the
-                attribute. Each chip previews its own display face.
+            {/* Typeface. FONT_OPTIONS + applyFont + currentFont from
+                lib/appearance — the consolidation deferred from Phase 0.
+                Previously this radiogroup carried its OWN copy of the four
+                options, its own default fallback, and its own
+                remove-attribute-when-default branch, duplicating applyFont()
+                exactly. That made three independent encodings of "which system
+                is the default" (here, appearance.ts, and the pre-paint shim in
+                main.tsx), of which only appearance.ts was under test — so a
+                drift between them would have been invisible. Two remain, and
+                main.tsx consumes ATTRIBUTED_FONTS from the same module.
 
-                2026-07-25 (Aurora Stage Phase 0) — default flipped 'nova' →
-                'eclipse'. The option list, the fallback below, and the
-                remove-attribute branch all moved together; keep them in sync
-                with applyFont() in lib/appearance.ts and the pre-paint shim in
-                main.tsx. (This radiogroup deliberately duplicates that logic
-                rather than importing it — consolidating is Phase 7 work, when
-                this card gets its Option B two-column treatment.) */}
+                Each chip still previews its own display face via opt.font. */}
             <div className="pt-1">
               <p className="text-white/80 text-sm font-medium">Typeface</p>
-              <p className="text-white/40 text-xs">Display and body fonts used across the app.</p>
+              <p className="text-white/55 text-xs">Display and body fonts used across the app.</p>
             </div>
             <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
-              {([
-                { id: 'eclipse', label: 'Eclipse', desc: 'Editorial · default', font: "'Bricolage Grotesque', sans-serif" },
-                { id: 'nova',    label: 'Nova',    desc: 'Futuristic',          font: "'Sora', sans-serif" },
-                { id: 'halo',    label: 'Halo',    desc: 'Polished',            font: "'Outfit', sans-serif" },
-                { id: 'current', label: 'Classic', desc: 'Original',            font: "'Space Grotesk', sans-serif" },
-              ] as const).map(opt => {
-                // Validate against the allowlist, not just `typeof string`:
-                // an unrecognized value (tampered or legacy) otherwise left
-                // EVERY chip unselected — aria-checked="false" across the
-                // radiogroup — while appearance.ts and the pre-paint shim
-                // both resolved it to the default. Three encodings, one
-                // answer.
-                const stored = rawRef.current.font_choice
-                const current = ATTRIBUTED_FONTS.includes(stored as FontChoice) ? (stored as FontChoice) : 'eclipse'
-                const active = current === opt.id
+              {FONT_OPTIONS.map(opt => {
+                const active = fontChoice === opt.id
                 return (
                   <button
                     key={opt.id}
                     type="button"
                     role="radio"
                     aria-checked={active}
-                    onClick={() => {
-                      rawRef.current = { ...rawRef.current, font_choice: opt.id }
-                      try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
-                      // "eclipse" is the default — no attribute (matches the unprefixed
-                      // :root tokens in index.css and keeps a clean DOM).
-                      if (opt.id === 'eclipse') document.documentElement.removeAttribute('data-font')
-                      else document.documentElement.setAttribute('data-font', opt.id)
-                      // Force re-render so the active chip updates.
-                      setSettings(s => ({ ...s }))
-                    }}
-                    className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
-                      active
-                        ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
-                        : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
-                    }`}
+                    onClick={() => { applyFont(opt.id); setFontChoice(opt.id) }}
+                    className="stage-opt text-left"
                   >
                     <p className={`text-base font-semibold ${active ? 'text-white' : 'text-white/80'}`} style={{ fontFamily: opt.font }}>{opt.label}</p>
-                    <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                    <p className="text-white/55 text-xs mt-0.5">{opt.desc}</p>
                   </button>
                 )
               })}
@@ -267,7 +235,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             selection instantly; onAvatarChange persists via PUT /api/profiles/:id
             and refreshes the profile list so the switcher + account menu update. */}
         {onAvatarChange && activeProfile && (
-          <div className="glass-panel rounded-xl p-6">
+          <div className="glass-panel rounded-2xl p-6">
             <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="user" size={18} className="text-purple-400" />
               Avatar
@@ -312,7 +280,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             profile's hard age limit. Writes maturity_pref via PUT /api/profiles/:id
             and invalidates the hero cache so it re-curates on the next Home visit. */}
         {onMaturityChange && activeProfile && (
-          <div className="glass-panel rounded-xl p-6">
+          <div className="glass-panel rounded-2xl p-6">
             <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="sparkle" size={18} className="text-purple-400" />
               Content Tone
@@ -362,7 +330,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         )}
 
         {sections.map(section => (
-          <div key={section.title} className="glass-panel rounded-xl p-6">
+          <div key={section.title} className="glass-panel rounded-2xl p-6">
             <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name={section.icon} size={18} className="text-purple-400" />
               {section.title}
@@ -391,7 +359,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         ))}
 
         {/* Language */}
-        <div className="glass-panel rounded-xl p-6">
+        <div className="glass-panel rounded-2xl p-6">
           <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="globe" size={18} className="text-purple-400" />
             Language
@@ -441,7 +409,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             (handlePlayContinue was removed 2028-05-28; see the tombstone
             comment in App near `handleRefreshMetadata`). Default 'auto' =
             prefer 1080p, fall back to whatever exists. */}
-        <div className="glass-panel rounded-xl p-6">
+        <div className="glass-panel rounded-2xl p-6">
           <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="play" size={18} className="text-purple-400" />
             Quality
@@ -452,12 +420,12 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
               <p className="text-white/40 text-xs">When a title has multiple files, pick this resolution if available.</p>
             </div>
             <select
-              value={(rawRef.current.preferred_quality as string) || 'auto'}
+              aria-label="Preferred resolution"
+              value={quality}
               onChange={e => {
-                rawRef.current = { ...rawRef.current, preferred_quality: e.target.value }
-                try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
-                // Force a re-render so the select reflects.
-                setSettings(s => ({ ...s }))
+                const q = e.target.value as QualityChoice
+                applyPreferredQuality(q)
+                setQuality(q)
               }}
               className="text-sm py-2 px-3"
             >
@@ -471,7 +439,7 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         {/* Account — M10 Phase 1. Only logout is functional today.
             Profile editing + password change land in Phase 3. */}
         {(settingsUser || onLogout) && (
-          <div className="glass-panel rounded-xl p-6">
+          <div className="glass-panel rounded-2xl p-6">
             <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="user" size={18} className="text-purple-400" />
               Account
@@ -503,14 +471,28 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
           </div>
         )}
 
-        {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
-        <ConnectedAccountsCard onToast={onToast} />
+        {/* These three span both columns. The first two render a glass panel as
+            their own root element, so they are direct grid items and take the
+            span class themselves; the third is a wrapper.
 
-        <ProfilesAndWatchlistsCard />
+            All three hold lists that grow — linked providers, profiles +
+            watchlists, an achievements grid — so a half-width column would
+            wrap every row. `contents` is deliberately NOT used to hoist the
+            helpers' internals into the grid: they would then be laid out as
+            individual grid items, splitting each card's header away from its
+            list. */}
+        <div className="md:col-span-2">
+          {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
+          <ConnectedAccountsCard onToast={onToast} />
+        </div>
+
+        <div className="md:col-span-2">
+          <ProfilesAndWatchlistsCard />
+        </div>
 
         {/* Gamification: XP card + achievements grid. */}
-        <div className="mt-6">
-          <h2 className="text-white text-xl font-semibold mb-4">Your Progress</h2>
+        <div className="md:col-span-2 mt-2">
+          <h2 className="text-white font-display font-bold type-section mb-4">Your Progress</h2>
           <GamificationCard />
         </div>
       </div>
@@ -576,7 +558,7 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
   const onlySignInMethod = !!links && !links.hasPassword && links.linked.length <= 1
 
   return (
-    <div className="glass-panel rounded-xl p-6">
+    <div className="glass-panel rounded-2xl p-6">
       <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
         <Icon name="key" size={18} className="text-purple-400" />
         Connected Accounts
@@ -665,7 +647,7 @@ function ProfilesAndWatchlistsCard() {
   }, [activeProfileId])
 
   return (
-    <div className="glass-panel rounded-xl p-6">
+    <div className="glass-panel rounded-2xl p-6">
       <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
         <Icon name="user" size={18} className="text-purple-400" />
         Profiles &amp; Watchlists

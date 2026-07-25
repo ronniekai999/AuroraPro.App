@@ -649,14 +649,23 @@ html[data-glow="subtle"] .stage-topnav {
   transition: color 0.15s ease, background-color 0.15s ease;
 }
 .stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
-.stage-tab[aria-current="page"] {
+/* Two active selectors, one treatment (Aurora Stage Phase 7a).
+   aria-current="page" is right for the TOP NAV, where a tab is a link to a
+   route. aria-selected is right for the ADMIN tab strip, where a tab switches
+   a panel in place — that is a genuine tabs widget, and `current page` would
+   claim thirteen of them are separate pages. Sharing the visual is the point:
+   the mockup draws both with the same gradient underline, so the two systems
+   read as one language even though their semantics differ. */
+.stage-tab[aria-current="page"],
+.stage-tab[aria-selected="true"] {
   color: #fff;
   font-weight: 600;
   background: rgba(168, 85, 247, 0.14);
 }
 /* Gradient underline on the active tab — the top-nav counterpart of the
    sidebar's 3px left bar (.nav-link-item.active::before). */
-.stage-tab[aria-current="page"]::after {
+.stage-tab[aria-current="page"]::after,
+.stage-tab[aria-selected="true"]::after {
   content: '';
   position: absolute;
   left: 13px;
@@ -1420,6 +1429,46 @@ html[data-glow="subtle"] .stage-toolbar {
   white-space: nowrap;
 }
 .stage-calchip-p { background: rgba(168, 85, 247, 0.42); color: #f3e8ff; }
+
+/* ══ Settings (Aurora Stage Phase 7a) ═════════════════════════════════
+   The mockup's .opt — the selected-state chip used by both Appearance
+   radiogroups (glow and typeface).
+
+   NOT a .stage-setcard / .stage-setgrid to go with it, deliberately:
+   - the card surface is already `.glass-panel` (border + halo + blur, and it
+     tracks --glow-border/--glow-halo so the Glow dial keeps working on it).
+     Adding a second near-identical panel class is the .stage-badge-vs-
+     .badge-glass mistake Phase 5 had to unpick.
+   - the two-column grid stays as Tailwind at the call site, because it has to
+     collapse to one column below md. Baking `grid-template-columns` into a
+     primitive would put it out of reach of `md:` variants entirely — see the
+     second correction in the CASCADE HAZARD note.
+
+   State is driven off [aria-checked="true"], the real accessible state for
+   role="radio", so the visual and the announced state cannot disagree. */
+.stage-opt {
+  padding: 13px 14px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.stage-opt:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.18); }
+/* Declared after :hover so hovering the selected chip keeps its purple — the
+   same (0,2,0)-vs-(0,2,0) order dependency .stage-fpill documents. The border
+   is 0.8 rather than the mockup's 1.0-on---primary for the 1.4.11 3:1 floor
+   (3.60:1), and the weight/fill pair is a second, non-colour cue. */
+.stage-opt[aria-checked="true"] {
+  background: rgba(168, 85, 247, 0.14);
+  border-color: rgba(168, 85, 247, 0.8);
+  box-shadow: 0 0 18px rgba(168, 85, 247, 0.15);
+}
+.stage-opt:focus-visible {
+  /* No `outline: none` — see the .stage-colcard note. The global 3.28:1 ring
+     stays; this only adds to it. */
+  border-color: rgba(216, 180, 254, 0.9);
+}
 
 /* ── Smart-search chip ────────────────────────────────────────────────
    Marks results that came back from the semantic/LLM path rather than a
