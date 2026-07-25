@@ -20,7 +20,7 @@
 //   user chip (footer) → the avatar + the dropdown's header
 //   mobile drawer      → the menu sheet below md (see MobileSheet)
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
@@ -120,6 +120,12 @@ function AvatarMenu({
   }
   // The drawers render as fixed-position panels of their own; close the
   // menu first so it isn't left floating over the thing it opened.
+  //
+  // These rows are OPENERS, not toggles. App passes explicit open handlers
+  // (not the nav icons' toggles): a row labelled "Notifications" that
+  // silently closes the panel when it happens to be open already is a
+  // trap, and below md this dropdown is the only surface for it — with no
+  // icon state to hint at what happened.
   const openPanel = (fn: () => void) => {
     setOpen(false)
     fn()
@@ -136,8 +142,15 @@ function AvatarMenu({
         title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Account menu for ${user.username}`}
-        className="rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
+        aria-label={
+          // Below md the labelled bell is hidden and the badge is
+          // aria-hidden, so without the count here a screen-reader user
+          // could never learn there are unread notifications on a phone.
+          notifCount > 0
+            ? `Account menu for ${user.username}, ${notifCount} unread notification${notifCount === 1 ? '' : 's'}`
+            : `Account menu for ${user.username}`
+        }
+        className="relative block rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
       >
         <ProfileAvatar avatarUrl={avatarUrl} name={user.username} size={38} />
         {/* Unread count doubles as the bell badge below md, where the
@@ -221,6 +234,8 @@ function MobileSheet({
   profiles,
   activeProfileId,
   onSelectProfile,
+  searchQuery,
+  onSearchQueryChange,
 }: {
   tabs: NavTab[]
   currentView: string
@@ -229,12 +244,60 @@ function MobileSheet({
   profiles: Profile[]
   activeProfileId: number | null
   onSelectProfile: (id: number) => void
+  searchQuery: string
+  onSearchQueryChange: (v: string) => void
 }) {
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const firstItemRef = useRef<HTMLButtonElement | null>(null)
+
+  // Focus in on open, and trap Tab inside the panel. This is the only
+  // navigation below md, so the drawer it replaced getting away with
+  // mouse-only dismissal is not a precedent worth keeping: without this a
+  // keyboard or switch user tabs straight past the menu into the page
+  // underneath, which the scrim only blocks for the mouse.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    firstItemRef.current?.focus()
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // Stop App's window-level Escape handler from ALSO firing: on a
+        // detail page it calls handleBack(), so dismissing the menu used to
+        // navigate the user off the page they were on.
+        e.stopPropagation()
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab' || !panelRef.current) return
+      const focusable = panelRef.current.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      }
+    }
+    // Capture phase so the stopPropagation above beats App's listener even
+    // though App's is on `window` (which is upstream of `document` on the
+    // bubble path but downstream on capture).
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
   }, [onClose])
+
+  // Lock the page behind the sheet — without this a drag over the scrim
+  // scrolls the content underneath on iOS.
+  useEffect(() => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [])
 
   return (
     <>
@@ -243,15 +306,36 @@ function MobileSheet({
           tappable, the way the old drawer kept its hamburger reachable. */}
       <div
         className="fixed left-0 right-0 bottom-0 bg-black/60 backdrop-blur-sm z-[48] md:hidden"
-        style={{ top: 'var(--topnav-h)' }}
+        style={{ top: 'var(--chrome-h, var(--topnav-h))' }}
         onClick={onClose}
         aria-hidden="true"
       />
       <div
+        ref={panelRef}
         id="stage-mobile-nav"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Menu"
         className="fixed left-2 right-2 z-[49] md:hidden rounded-2xl bg-[#0a0a0f]/97 backdrop-blur-xl border border-white/[0.08] shadow-2xl p-2 animate-fade-in max-h-[70vh] overflow-y-auto"
-        style={{ top: 'calc(var(--topnav-h) + 6px)' }}
+        style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 6px)' }}
       >
+        {/* Real search field, not a shortcut to the palette. The palette
+            only ever jumps to a title's detail page — it has no "see all
+            results" route — so with the nav's desktop input hidden below md
+            this is the ONLY way a phone user reaches the search RESULTS
+            page (SearchView, with its grid and library toggles). Pre-Stage
+            the header input rendered at every width; dropping it here would
+            have quietly deleted a whole destination on mobile. */}
+        <div className="stage-navsearch flex mx-1 mb-2">
+          <Icon name="search" size={16} className="text-white/35 flex-none" />
+          <input
+            type="text"
+            placeholder="Search titles…"
+            aria-label="Search titles"
+            value={searchQuery}
+            onChange={(e) => onSearchQueryChange(e.target.value)}
+          />
+        </div>
         {profiles.length > 0 && (
           <div className="px-2 pt-1 pb-2.5 mb-1 border-b border-white/[0.06]">
             {/* Profile switching lives here on phones — the nav's right
@@ -264,11 +348,12 @@ function MobileSheet({
           </div>
         )}
         <nav aria-label="Main">
-          {tabs.map(tab => {
+          {tabs.map((tab, i) => {
             const active = currentView === tab.id
             return (
               <button
                 key={tab.id}
+                ref={i === 0 ? firstItemRef : undefined}
                 type="button"
                 aria-current={active ? 'page' : undefined}
                 onClick={() => { onNavigate(tab.id); onClose() }}
@@ -306,10 +391,16 @@ export interface TopNavProps {
   partyActive: boolean
   partyLabel: string
   onPartyClick: () => void
+  /** Whether the party panel the button toggles is currently open. */
+  partyPanelOpen: boolean
   serverOpen: boolean
+  /** Toggles the panel — for the nav icon, which shows its own state. */
   onToggleServer: () => void
+  /** Force-opens it — for the avatar dropdown row (see AvatarMenu). */
+  onOpenServerPanel: () => void
   notifOpen: boolean
   onToggleNotifications: () => void
+  onOpenNotificationsPanel: () => void
   notifCount: number
   profiles: Profile[]
   activeProfileId: number | null
@@ -330,10 +421,13 @@ export function TopNav({
   partyActive,
   partyLabel,
   onPartyClick,
+  partyPanelOpen,
   serverOpen,
   onToggleServer,
+  onOpenServerPanel,
   notifOpen,
   onToggleNotifications,
+  onOpenNotificationsPanel,
   notifCount,
   profiles,
   activeProfileId,
@@ -342,9 +436,26 @@ export function TopNav({
   onSignOut,
 }: TopNavProps) {
   const isAdmin = user.role === 'admin'
-  const tabs = navTabsFor(user.role)
+  const tabs = useMemo(() => navTabsFor(user.role), [user.role])
   const [sheetOpen, setSheetOpen] = useState(false)
   const stripRef = useRef<HTMLDivElement | null>(null)
+  const menuBtnRef = useRef<HTMLButtonElement | null>(null)
+
+  // Stable identity: MobileSheet keys its document listeners on onClose, and
+  // TopNav re-renders on every notification poll / party tick / keystroke.
+  const closeSheet = useCallback(() => {
+    setSheetOpen(false)
+    menuBtnRef.current?.focus()
+  }, [])
+
+  // Navigating from anywhere in the nav dismisses the sheet. The brand and
+  // the avatar dropdown's rows are reachable while the sheet is open (its
+  // scrim starts below the bar on purpose), and without this they navigated
+  // out from under an open menu that stayed up over the new page.
+  const go = useCallback((v: string) => {
+    setSheetOpen(false)
+    onNavigate(v)
+  }, [onNavigate])
 
   // Between md and xl the strip scrolls; keep the active tab visible so
   // navigating (including via browser back/forward, which changes
@@ -357,7 +468,7 @@ export function TopNav({
     if (!el) return
     if (strip.scrollWidth <= strip.clientWidth) return
     el.scrollIntoView({ block: 'nearest', inline: 'center' })
-  }, [currentView])
+  }, [currentView, tabs.length])
 
   // Close the sheet when the viewport grows past md — otherwise a rotate
   // or resize leaves an orphaned panel over the desktop layout.
@@ -383,7 +494,7 @@ export function TopNav({
           logo always returns home) and every media-app convention. */}
       <button
         type="button"
-        onClick={() => onNavigate('home')}
+        onClick={() => go('home')}
         aria-label="Aurora Pro — go to home"
         className="flex items-center gap-2.5 flex-none rounded-lg px-1 py-1 -mx-1 hover:bg-white/[0.03] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60"
       >
@@ -398,7 +509,7 @@ export function TopNav({
 
       {/* Tabs. Hidden below md (the sheet takes over); a scrolling strip
           up to xl; fully inline from xl. */}
-      <div ref={stripRef} className="stage-tabstrip hidden md:flex flex-1 justify-start xl:justify-center min-w-0">
+      <div ref={stripRef} className="stage-tabstrip hidden md:flex flex-1 justify-start 2xl:justify-center min-w-0">
         {tabs.map(tab => {
           const active = currentView === tab.id
           return (
@@ -407,7 +518,7 @@ export function TopNav({
               type="button"
               className="stage-tab"
               aria-current={active ? 'page' : undefined}
-              onClick={() => onNavigate(tab.id)}
+              onClick={() => go(tab.id)}
             >
               {tab.label}
               {tab.admin && <span className="stage-tab-adm">admin</span>}
@@ -439,6 +550,7 @@ export function TopNav({
           className="stage-iconbtn md:hidden"
           onClick={onOpenPalette}
           aria-label="Search"
+          aria-haspopup="dialog"
         >
           <Icon name="search" size={17} />
         </button>
@@ -449,7 +561,10 @@ export function TopNav({
           className="stage-iconbtn"
           onClick={onPartyClick}
           title={partyLabel}
-          aria-label={partyLabel}
+          // partyLabel alone is a STATE ("In party AB12"); a screen reader
+          // would announce it with no hint that activating opens a panel.
+          aria-label={partyActive ? `${partyLabel} — open watch party panel` : partyLabel}
+          aria-expanded={partyActive ? partyPanelOpen : undefined}
         >
           <Icon name="users" size={17} />
           {partyActive && (
@@ -481,6 +596,7 @@ export function TopNav({
               className="stage-iconbtn"
               onClick={onToggleServer}
               aria-expanded={serverOpen}
+              aria-controls={serverOpen ? 'stage-server-panel' : undefined}
               aria-label="Server status"
               title="Server status"
             >
@@ -492,6 +608,7 @@ export function TopNav({
             className="stage-iconbtn"
             onClick={onToggleNotifications}
             aria-expanded={notifOpen}
+            aria-controls={notifOpen ? 'stage-notification-panel' : undefined}
             aria-label={notifCount > 0 ? `Notifications (${notifCount} unread)` : 'Notifications'}
             title="Notifications"
           >
@@ -507,8 +624,13 @@ export function TopNav({
           </button>
         </div>
 
+        {/* md, not lg: the sheet that carries the switcher on phones is
+            `md:hidden`, so gating this at lg left the 768–1023px band (iPad
+            portrait, small laptops, a 320px page reflowed at 400% zoom)
+            with no way to switch profile at all — which gates Continue
+            Watching, recommendations and maturity filtering. */}
         {profiles.length > 0 && (
-          <div className="hidden lg:block">
+          <div className="hidden md:block">
             <ProfileSwitcher
               profiles={profiles}
               activeProfileId={activeProfileId}
@@ -520,21 +642,27 @@ export function TopNav({
         <AvatarMenu
           user={user}
           avatarUrl={avatarUrl}
-          onNavigate={onNavigate}
+          // go(), not onNavigate: Settings/Admin from this dropdown must
+          // also dismiss the mobile sheet if it's open behind it.
+          onNavigate={go}
           onSignOut={onSignOut}
-          onOpenServer={isAdmin ? onToggleServer : undefined}
-          onOpenNotifications={onToggleNotifications}
+          onOpenServer={isAdmin ? onOpenServerPanel : undefined}
+          onOpenNotifications={onOpenNotificationsPanel}
           notifCount={notifCount}
         />
 
         {/* Menu button — below md only. */}
         <button
+          ref={menuBtnRef}
           type="button"
           className="stage-iconbtn md:hidden"
           onClick={() => setSheetOpen(o => !o)}
           aria-label={sheetOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={sheetOpen}
-          aria-controls="stage-mobile-nav"
+          aria-haspopup="dialog"
+          // Only reference the panel while it exists — a dangling IDREF is
+          // an axe violation and AT drops the relationship silently.
+          aria-controls={sheetOpen ? 'stage-mobile-nav' : undefined}
         >
           <Icon name={sheetOpen ? 'x' : 'menu'} size={18} />
         </button>
@@ -545,10 +673,12 @@ export function TopNav({
         tabs={tabs}
         currentView={currentView}
         onNavigate={onNavigate}
-        onClose={() => setSheetOpen(false)}
+        onClose={closeSheet}
         profiles={profiles}
         activeProfileId={activeProfileId}
         onSelectProfile={onSelectProfile}
+        searchQuery={searchQuery}
+        onSearchQueryChange={onSearchQueryChange}
       />
     )}
     </>

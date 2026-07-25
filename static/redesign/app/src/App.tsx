@@ -1255,8 +1255,12 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
   // own triggers stay clickable while the panel is open — that was the
   // whole point of BUG-005 — and below ContextMenu (100) / modals (60s).
   return (
-    <div className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
-      style={{ top: 'calc(var(--topnav-h) + 10px)' }}
+    <div
+      id="stage-server-panel"
+      role="dialog"
+      aria-label="Server status"
+      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
+      style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       {/* No "Server Status" heading — the nav trigger already shows that
           label and the panel opens directly under it. Matching the
@@ -1371,8 +1375,12 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
   //
   // z-[45] — same layering rationale as ServerPanel above.
   return (
-    <div className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
-      style={{ top: 'calc(var(--topnav-h) + 10px)' }}
+    <div
+      id="stage-notification-panel"
+      role="dialog"
+      aria-label="Notifications"
+      className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
+      style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
       <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
         <h3 className="text-white font-semibold">Notifications</h3>
@@ -1668,6 +1676,33 @@ export default function App() {
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
   // input stays for click-to-search flows).
   const [paletteOpen, setPaletteOpen] = useState(false)
+  // 2026-07-25 (Aurora Stage Phase 2, debug-review fix) — publish the
+  // measured height of the sticky chrome stack as --chrome-h so every
+  // overlay below it (both drawers, the mobile menu sheet + its scrim,
+  // DetailRail's sticky offset) anchors to reality instead of to the nav's
+  // nominal 64px. The stack grows by ~37px per actively-scanning library
+  // because ScanProgressBar renders in flow above the nav, and an admin
+  // mid-scan was the case where all five hardcoded offsets broke.
+  const chromeRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = chromeRef.current
+    if (!el) return
+    const publish = () => {
+      const h = el.getBoundingClientRect().height
+      if (h > 0) document.documentElement.style.setProperty('--chrome-h', `${Math.round(h)}px`)
+    }
+    publish()
+    // ResizeObserver rather than a resize listener: the height changes when
+    // a scan STARTS or STOPS, which is not a viewport event.
+    const ro = new ResizeObserver(publish)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      document.documentElement.style.removeProperty('--chrome-h')
+    }
+    // Re-attach when the login state flips — the chrome only exists once
+    // the shell renders, so the ref is null on the auth screen.
+  }, [user])
   const [serverOpen, setServerOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   // QA 2026-05-25 — popovers were sticking around after route
@@ -4182,9 +4217,12 @@ export default function App() {
         {/* Sticky stack: scan bar + nav in one sticky container so the
             scan bar contributes its height to flow and both pin together
             on scroll. The bar stays ABOVE the nav, as in the mockup. */}
-        <div className="sticky top-0 z-50">
+        <div ref={chromeRef} className="sticky top-0 z-50">
           {/* Global scan progress bar (admin-only). Returns null when
-              no scan is active. */}
+              no scan is active. NOTE: it renders IN FLOW above the nav, so
+              it changes the height of this whole sticky stack — which is
+              why chromeRef publishes the measured height as --chrome-h
+              (see the effect above) for everything anchored below it. */}
           <ScanProgressBar isAdmin={user.role === 'admin'} />
           <TopNav
             user={user}
@@ -4213,10 +4251,17 @@ export default function App() {
                 setPartyJoinPrompt(true)
               }
             }}
+            partyPanelOpen={partyPanelOpen}
             serverOpen={serverOpen}
             onToggleServer={() => { setServerOpen(!serverOpen); setNotifOpen(false) }}
             notifOpen={notifOpen}
             onToggleNotifications={() => { setNotifOpen(!notifOpen); setServerOpen(false) }}
+            // Force-open variants for the avatar dropdown's rows. A row
+            // labelled "Notifications" must never CLOSE the panel because it
+            // happened to already be open — below md that dropdown is the
+            // only surface for these, with no icon state to explain it.
+            onOpenServerPanel={() => { setServerOpen(true); setNotifOpen(false) }}
+            onOpenNotificationsPanel={() => { setNotifOpen(true); setServerOpen(false) }}
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}

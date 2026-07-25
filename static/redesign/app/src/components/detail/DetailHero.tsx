@@ -3,8 +3,12 @@
 // Tall cinematic backdrop with bottom/left gradients + a subtle purple
 // "aurora-floor" glow, badges, title, and a single meta row. No poster in
 // the hero (it lives in the rail) — the negative-margin overlap collides,
-// which is the bug we already fixed in the mockup. Bleed (-mx-8/-mt-8) is
-// applied by DetailView's root, so this is a plain full-width section.
+// which is the bug we already fixed in the mockup.
+//
+// 2026-07-25 (Aurora Stage Phase 2) — this used to note that DetailView's
+// root applied a -mx-8/-mt-8 bleed. It doesn't any more: App's content
+// wrapper no longer pads, and the `detail` view opts out of the page
+// gutter, so the section is genuinely full-bleed with nothing to escape.
 
 import { Fragment } from 'react'
 import { ArrowLeftIcon, StarIcon } from './icons'

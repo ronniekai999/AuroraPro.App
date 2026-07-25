@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { oauthProviderLabel } from '@/lib/oauth'
+import { ATTRIBUTED_FONTS, type FontChoice } from '@/lib/appearance'
 import { NebulaAvatar, NEBULAS, parseNebula, nebulaValue } from '@/components/NebulaAvatar'
 import { GamificationCard } from '@/components/GamificationCard'
 import {
@@ -222,8 +223,14 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 { id: 'halo',    label: 'Halo',    desc: 'Polished',            font: "'Outfit', sans-serif" },
                 { id: 'current', label: 'Classic', desc: 'Original',            font: "'Space Grotesk', sans-serif" },
               ] as const).map(opt => {
+                // Validate against the allowlist, not just `typeof string`:
+                // an unrecognized value (tampered or legacy) otherwise left
+                // EVERY chip unselected — aria-checked="false" across the
+                // radiogroup — while appearance.ts and the pre-paint shim
+                // both resolved it to the default. Three encodings, one
+                // answer.
                 const stored = rawRef.current.font_choice
-                const current = typeof stored === 'string' ? stored : 'eclipse'
+                const current = ATTRIBUTED_FONTS.includes(stored as FontChoice) ? (stored as FontChoice) : 'eclipse'
                 const active = current === opt.id
                 return (
                   <button

@@ -31,7 +31,15 @@ vi.stubGlobal('document', {
   },
 })
 
-const { FONT_OPTIONS, applyFont, applyGlow, currentFont, currentGlow } = await import('./appearance')
+const {
+  ATTRIBUTED_FONTS,
+  DEFAULT_FONT,
+  FONT_OPTIONS,
+  applyFont,
+  applyGlow,
+  currentFont,
+  currentGlow,
+} = await import('./appearance')
 
 const prefs = () => JSON.parse(store.get('aurora_prefs') ?? '{}') as Record<string, unknown>
 
@@ -54,6 +62,12 @@ describe('typeface default (Aurora Stage Phase 0)', () => {
   })
 
   it('leaves the DOM attribute-less for eclipse so :root tokens apply', () => {
+    // Seed a STALE attribute first. Asserting `!attrs.has(...)` from a clean
+    // slate was vacuous — it passed even with the removeAttribute() call
+    // deleted (proved by mutation in the Phase 2 debug review). Removal is
+    // the whole job of that branch: a user sitting on data-font="nova" who
+    // picks Eclipse must switch immediately, not on next reload.
+    attrs.set('data-font', 'nova')
     applyFont('eclipse')
     expect(attrs.has('data-font')).toBe(false)
   })
@@ -84,6 +98,33 @@ describe('typeface default (Aurora Stage Phase 0)', () => {
     expect(FONT_OPTIONS[0].desc).toContain('default')
     // Only one option may claim to be the default.
     expect(FONT_OPTIONS.filter(o => o.desc.includes('default'))).toHaveLength(1)
+  })
+
+  // The default is encoded in THREE places: applyFont/currentFont here, the
+  // pre-paint shim in main.tsx, and SettingsView's radiogroup. Only this file
+  // was under test, so flipping the shim's allowlist back to 'eclipse' would
+  // have re-broken every explicit-Nova user on first paint with a green
+  // suite. All three now consume ATTRIBUTED_FONTS, so pinning it here pins
+  // them.
+  it('exports an allowlist that is exactly the non-default systems', () => {
+    expect([...ATTRIBUTED_FONTS].sort()).toEqual(['current', 'halo', 'nova'])
+    expect(ATTRIBUTED_FONTS).not.toContain(DEFAULT_FONT)
+    // Every system is either the default or attributed — no orphans.
+    expect([...ATTRIBUTED_FONTS, DEFAULT_FONT].sort()).toEqual(
+      FONT_OPTIONS.map(o => o.id).sort(),
+    )
+  })
+
+  it('agrees with FONT_OPTIONS about which system is the default', () => {
+    const flagged = FONT_OPTIONS.filter(o => o.desc.includes('default'))
+    expect(flagged.map(o => o.id)).toEqual([DEFAULT_FONT])
+  })
+
+  it('round-trips every system through applyFont → currentFont', () => {
+    for (const id of [...ATTRIBUTED_FONTS, DEFAULT_FONT]) {
+      applyFont(id)
+      expect(currentFont(), `round-trip ${id}`).toBe(id)
+    }
   })
 
   it('does not clobber unrelated prefs', () => {

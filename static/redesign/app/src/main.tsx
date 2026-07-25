@@ -6,6 +6,10 @@ import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 import { installSyncDebug } from './lib/syncDebug'
+// The single source of truth for "which font values get an attribute".
+// Importing it here is what keeps the pre-paint shim from drifting out of
+// step with applyFont() — see appearance.ts.
+import { ATTRIBUTED_FONTS } from './lib/appearance'
 
 // 2026-05-27 — Install the diagnostic buffer as early as possible so
 // the bug-report flow can attach "what was happening before the user
@@ -76,7 +80,7 @@ try {
     const font = parsed && typeof parsed === 'object'
       ? (parsed as Record<string, unknown>).font_choice
       : null
-    if (font === 'current' || font === 'nova' || font === 'halo') {
+    if (typeof font === 'string' && (ATTRIBUTED_FONTS as readonly string[]).includes(font)) {
       document.documentElement.setAttribute('data-font', font)
     }
   }
