@@ -161,7 +161,10 @@ export function MediaRail({ title, items, onSelect, aspect = 'poster', onCardCon
               onCardContext={onCardContext ? (e) => onCardContext(e, item) : undefined}
               libraryIds={libraryIds}
               onToggleLib={onToggleLib ? () => onToggleLib(item) : undefined}
-              className={aspect === 'poster' ? 'w-[180px]' : 'w-[320px]'}
+              // 2026-07-25 (Aurora Stage Phase 3) — 180→206 / 320→336. The
+              // art is the card now (no text shelf below it), so the poster
+              // carries the whole design and gets the room back.
+              className={aspect === 'poster' ? 'w-[206px]' : 'w-[336px]'}
               aspect={aspect}
               onResume={resolveResume?.(item)}
               showBadges={showBadges}
