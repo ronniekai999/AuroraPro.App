@@ -73,7 +73,11 @@ export const FONT_OPTIONS: readonly FontOption[] = [
 
 export const GLOW_OPTIONS: readonly GlowOption[] = [
   { id: 'subtle', label: 'Subtle', desc: 'Faint white edge' },
-  { id: 'aurora', label: 'Aurora', desc: 'White + purple' },
+  // "(default)" is on Aurora for the same reason Eclipse carries it above: the
+  // Settings radiogroup is where a user asks "which one is stock?", and after
+  // this list replaced Settings' inline copy the Glow group briefly lost the
+  // marker while the Typeface group directly beneath it kept one.
+  { id: 'aurora', label: 'Aurora', desc: 'White + purple · default' },
   { id: 'heavy', label: 'Heavy', desc: 'Bright bloom' },
 ]
 

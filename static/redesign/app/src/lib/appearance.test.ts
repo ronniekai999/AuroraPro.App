@@ -273,10 +273,61 @@ describe('applyPreferredQuality', () => {
     expect(currentGlow()).toBe('heavy')
   })
 
-  it('preserves keys written by other components', () => {
+  it('preserves keys written by other components and adds nothing else', () => {
+    // toEqual, not toMatchObject. The subject of this test is "does not corrupt
+    // a blob with other writers", and toMatchObject is satisfied by a superset —
+    // it let a mutation that wrote an extra junk key straight through. Exact
+    // equality is the only assertion that actually pins the write surface.
     store.set('aurora_prefs', JSON.stringify({ volume: 0.42, muted: true, subtitleLang: 'fr' }))
     applyPreferredQuality('1080p')
     applyFont('halo')
-    expect(prefs()).toMatchObject({ volume: 0.42, muted: true, subtitleLang: 'fr', preferred_quality: '1080p', font_choice: 'halo' })
+    expect(prefs()).toEqual({
+      volume: 0.42,
+      muted: true,
+      subtitleLang: 'fr',
+      preferred_quality: '1080p',
+      font_choice: 'halo',
+    })
+  })
+})
+
+// ── OAuth provider list (Aurora Stage Phase 7a) ─────────────────────────────
+//
+// The sign-in tiles derive from one list, replacing five hand-written render
+// blocks plus a five-term `||` in the section guard. tsc proves each `flag` is a
+// VALID key of SetupStatus (it is used as `setupStatus?.[p.flag]`), but nothing
+// proved the list is COMPLETE — a sixth provider added server-side would simply
+// never render a tile, silently, with no type error and no test failure.
+describe('OAUTH_SIGN_IN_PROVIDERS', () => {
+  it('covers every oauth_*_enabled flag the server exposes', async () => {
+    const { OAUTH_SIGN_IN_PROVIDERS } = await import('./oauth')
+    // Sourced from the SetupStatus type in lib/api.ts, which mirrors
+    // auth_handlers.go's setup-status payload. If a provider is added there,
+    // this list has to grow with it.
+    const serverFlags = [
+      'oauth_google_enabled',
+      'oauth_discord_enabled',
+      'oauth_twitch_enabled',
+      'oauth_facebook_enabled',
+      'oauth_twitter_enabled',
+    ]
+    expect([...OAUTH_SIGN_IN_PROVIDERS.map(p => p.flag)].sort()).toEqual([...serverFlags].sort())
+  })
+
+  it('has one entry per provider, with no duplicate keys or labels', async () => {
+    const { OAUTH_SIGN_IN_PROVIDERS } = await import('./oauth')
+    const providers = OAUTH_SIGN_IN_PROVIDERS.map(p => p.provider)
+    expect(new Set(providers).size).toBe(providers.length)
+    const labels = OAUTH_SIGN_IN_PROVIDERS.map(p => p.label)
+    expect(new Set(labels).size).toBe(labels.length)
+    for (const p of OAUTH_SIGN_IN_PROVIDERS) expect(p.label.length).toBeGreaterThan(0)
+  })
+
+  it('keeps `twitter` as the provider key even though the label is X', async () => {
+    const { OAUTH_SIGN_IN_PROVIDERS } = await import('./oauth')
+    // The key is the server's route segment (/api/auth/oauth/twitter/start).
+    // Renaming it to match the rebrand would 404.
+    const x = OAUTH_SIGN_IN_PROVIDERS.find(p => p.label === 'X')
+    expect(x?.provider).toBe('twitter')
   })
 })

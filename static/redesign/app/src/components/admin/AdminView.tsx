@@ -150,7 +150,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
   return (
     <div className="space-y-6">
       <div className="glass-panel rounded-2xl p-6">
-        <h3 className="text-white font-semibold mb-2">Database Backup</h3>
+        <h2 className="text-white font-semibold mb-2">Database Backup</h2>
         <p className="text-white/50 text-sm mb-4 leading-relaxed">
           Download a binary snapshot of Aurora's database — users, libraries, media items, watch
           parties, progress, settings. Use this before a server migration or as a periodic safety net.
@@ -174,7 +174,7 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
       </div>
 
       <div className="glass-panel rounded-2xl p-6" style={{ border: '1px solid rgba(255, 175, 0, 0.25)' }}>
-        <h3 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h3>
+        <h2 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h2>
         <p className="text-white/50 text-sm mb-3 leading-relaxed">
           Upload a previously-downloaded <code>.dump</code> backup file to restore the database.
         </p>
@@ -248,13 +248,13 @@ function NowPlayingWidget() {
   }, [])
   if (items.length === 0) return (
     <div className="glass-panel rounded-2xl p-6">
-      <h3 className="text-white font-semibold mb-2">Now Playing</h3>
+      <h2 className="text-white font-semibold mb-2">Now Playing</h2>
       <p className="text-white/40 text-sm">No active streams.</p>
     </div>
   )
   return (
     <div className="glass-panel rounded-2xl p-6">
-      <h3 className="text-white font-semibold mb-4">Now Playing ({items.length})</h3>
+      <h2 className="text-white font-semibold mb-4">Now Playing ({items.length})</h2>
       <div className="space-y-3">
         {items.map(s => (
           <div key={s.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
@@ -415,7 +415,7 @@ function UpdatePanel() {
   if (!status) {
     return (
       <div className="glass-panel rounded-2xl p-6">
-        <h3 className="text-white font-semibold mb-2">Updates</h3>
+        <h2 className="text-white font-semibold mb-2">Updates</h2>
         <p className="text-white/40 text-sm">{error ?? 'Loading update status…'}</p>
       </div>
     )
@@ -429,7 +429,7 @@ function UpdatePanel() {
     <div className="glass-panel rounded-2xl p-6">
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3">
-          <h3 className="text-white font-semibold">Updates</h3>
+          <h2 className="text-white font-semibold">Updates</h2>
           <span className={`badge-glass text-xs ${meta.color}`}>
             {meta.spinning && (
               <span className="inline-block w-2 h-2 rounded-full bg-current mr-1.5 animate-pulse" />
@@ -492,7 +492,7 @@ function AdminLibrariesTab() {
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Add Library</h3>
+        <h2 className="text-white font-semibold mb-3">Add Library</h2>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
           <select value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
@@ -519,7 +519,7 @@ function AdminLibrariesTab() {
         </button>
       </div>
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Existing Libraries</h3>
+        <h2 className="text-white font-semibold mb-3">Existing Libraries</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
@@ -576,7 +576,7 @@ function AdminServerSettingsTab() {
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Server Settings</h3>
+        <h2 className="text-white font-semibold mb-3">Server Settings</h2>
         {settings === null ? <p className="text-white/40 text-sm">Loading…</p> : (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -648,7 +648,7 @@ function AdminServerSettingsTab() {
           See `tab === 'users'` block in AdminView. */}
 
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Image Cache</h3>
+        <h2 className="text-white font-semibold mb-3">Image Cache</h2>
         <p className="text-white/40 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
           onClick={async () => {
@@ -661,7 +661,7 @@ function AdminServerSettingsTab() {
       </div>
 
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Radarr / Sonarr (Requests)</h3>
+        <h2 className="text-white font-semibold mb-3">Radarr / Sonarr (Requests)</h2>
         {settings && (['radarr', 'radarr_4k', 'sonarr', 'sonarr_4k'] as const).map(svc => {
           const urlKey = `${svc}_url`, keyKey = `${svc}_api_key`
           const label = svc === 'radarr' ? 'Radarr' : svc === 'radarr_4k' ? 'Radarr 4K' : svc === 'sonarr' ? 'Sonarr' : 'Sonarr 4K'
@@ -728,7 +728,7 @@ function AdminRoomsTab() {
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Create Persistent Room</h3>
+        <h2 className="text-white font-semibold mb-3">Create Persistent Room</h2>
         <p className="text-white/40 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <input value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
@@ -741,7 +741,7 @@ function AdminRoomsTab() {
         >Create Room</button>
       </div>
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-3">Existing Rooms</h3>
+        <h2 className="text-white font-semibold mb-3">Existing Rooms</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No rooms yet.</p>}
@@ -803,7 +803,7 @@ function AdminRequestsTab() {
   return (
     <div className="space-y-4">
       <div className="glass-panel rounded-2xl p-5">
-        <h3 className="text-white font-semibold mb-1">Pending Approvals</h3>
+        <h2 className="text-white font-semibold mb-1">Pending Approvals</h2>
         <p className="text-white/40 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
@@ -893,7 +893,7 @@ function AdminSessionsTab() {
   return (
     <div className="glass-panel rounded-2xl p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-white font-semibold">Active Streams</h3>
+        <h2 className="text-white font-semibold">Active Streams</h2>
         <button onClick={() => void reload()} className="text-white/60 hover:text-white text-xs">Refresh</button>
       </div>
       {/* Active streams now span BOTH kinds (transcode + direct-play).
@@ -972,7 +972,7 @@ function AdminSessionsTab() {
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
           <div className="relative w-full max-w-3xl bg-[#0a0a0f] border border-white/[0.08] rounded-xl shadow-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-white font-semibold">Session diagnostic</h3>
+              <h2 className="text-white font-semibold">Session diagnostic</h2>
               <button onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }} className="text-white/40 hover:text-white" aria-label="Close">
                 <Icon name="x" size={16} />
               </button>
@@ -1149,7 +1149,7 @@ function AdminFlaggedTab() {
     <div className="glass-panel rounded-2xl p-5">
       <div className="flex items-start justify-between gap-4 mb-3">
         <div className="min-w-0">
-          <h3 className="text-white font-semibold">Flagged Items</h3>
+          <h2 className="text-white font-semibold">Flagged Items</h2>
           <p className="text-white/40 text-xs mt-1">
             Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
             The AI matcher auto-promotes high-confidence picks and suggests sub-threshold
@@ -1297,7 +1297,7 @@ function AdminLLMTab() {
   if (!s) return <p className="text-white/40 text-sm">Loading…</p>
   return (
     <div className="glass-panel rounded-2xl p-5 space-y-3">
-      <h3 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h3>
+      <h2 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h2>
       <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box (an API key is optional, for bearer-checking proxies); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
@@ -1529,10 +1529,10 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   return (
     <div className="glass-panel rounded-2xl p-5 space-y-3">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-white font-semibold">
+        <h2 className="text-white font-semibold">
           {label} OAuth (Sign-in)
           {enabled && <span className="ml-2 text-emerald-300 text-[10px] uppercase tracking-wider">Enabled</span>}
-        </h3>
+        </h2>
         <a
           href={consoleURL}
           target="_blank"
@@ -1820,9 +1820,13 @@ const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
 
 export default function AdminView({ currentAdminId }: { currentAdminId: number }) {
   const [tab, setTab] = useState<AdminTab>('dashboard')
+  // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
+  // MANUAL activation: arrows move focus without switching panels, so the
+  // focused tab and the selected tab diverge until Enter/Space.
+  const [focusedTab, setFocusedTab] = useState<AdminTab>('dashboard')
   const tabs = ADMIN_TABS
-  // Per-tab refs so arrow-key navigation can move real focus along with the
-  // selection (ARIA tabs pattern — the selected tab is the only tab stop).
+  // Per-tab refs so arrow-key navigation can move real focus with the roving
+  // index (ARIA tabs pattern — the set is one tab stop).
   const tabRefs = useRef<Partial<Record<AdminTab, HTMLButtonElement | null>>>({})
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
@@ -2025,16 +2029,31 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           same padding back on the inside.
           It has to be RESPONSIVE, matching .stage-page rather than the token:
           --page-gutter is 48px at every width, but .stage-page drops to 18px
-          below md. A flat -mx-[var(--page-gutter)] would therefore pull 48px
-          against 18px of padding on a phone and push 30px of the strip off each
-          edge — silently, because body sets overflow-x: hidden. */}
+          below md. A flat, unprefixed negative page-gutter margin would
+          therefore pull 48px against 18px of padding on a phone and push 30px of
+          the strip off each edge — silently, because body sets overflow-x:
+          hidden. (Deliberately not naming that class here: Tailwind's extractor
+          scans comments, so writing it out ships a dead top-level rule. Verified
+          by rebuild — the unprefixed selector is gone.) */}
       <div className="stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)] mb-6">
+        {/* MANUAL activation: arrows move focus, Enter/Space (native on a
+            <button>) selects. Not the automatic variant this started as.
+            APG recommends manual "when the tab panel's content is loaded
+            asynchronously", and every panel here is exactly that — switching
+            tabs fires listAdminUsers / listAdminActivity / listAdminLogs, and
+            the Transcodes and Now-Playing panels each start a 5-second polling
+            interval on mount. With automatic activation, holding ArrowRight
+            from `dashboard` to `backup` mounted and unmounted eleven panels,
+            firing their fetches and spinning two intervals up and down. That
+            cost was paid only by keyboard users. */}
         <div
           role="tablist"
           aria-label="Administration sections"
           className="stage-tabstrip flex"
           onKeyDown={e => {
-            const i = tabs.indexOf(tab)
+            // Arrows walk `focusedTab`, which is where the roving tabIndex sits;
+            // `tab` (the selected panel) only moves on click or Enter/Space.
+            const i = tabs.indexOf(focusedTab)
             let next = -1
             if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
             else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length
@@ -2042,10 +2061,9 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
             else if (e.key === 'End') next = tabs.length - 1
             if (next < 0) return
             e.preventDefault()
-            setTab(tabs[next])
-            // Move real focus with the selection — an "automatic activation"
-            // tablist keeps focus on the selected tab, and without this the
-            // focus ring would stay on the tab the user arrowed away from.
+            setFocusedTab(tabs[next])
+            // focus() scrolls the tab into view inside .stage-tabstrip by
+            // default (preventScroll is false), so no explicit scrollIntoView.
             tabRefs.current[tabs[next]]?.focus()
           }}
         >
@@ -2060,12 +2078,18 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                 role="tab"
                 id={`admin-tab-${t}`}
                 aria-selected={selected}
-                aria-controls={`admin-panel-${t}`}
-                // Only the selected tab is in the tab order; arrows move within
-                // the set. This is the half of the tabs pattern that a plain
-                // row of buttons gets wrong.
-                tabIndex={selected ? 0 : -1}
-                onClick={() => setTab(t)}
+                // Only the SELECTED tab's panel exists in the DOM, so pointing
+                // the other twelve at `admin-panel-<t>` was a dangling IDREF.
+                // ARIA requires IDREFs to resolve; omit rather than dangle.
+                aria-controls={selected ? `admin-panel-${t}` : undefined}
+                // Roving tabIndex on the FOCUSED tab, which under manual
+                // activation is not always the selected one. One tab stop for
+                // the set either way.
+                tabIndex={focusedTab === t ? 0 : -1}
+                onClick={() => { setTab(t); setFocusedTab(t) }}
+                // Keeps the roving index honest when focus arrives by click or
+                // by Tab rather than by arrow key.
+                onFocus={() => setFocusedTab(t)}
                 className={`stage-tab ${display ? '' : 'capitalize'}`}
               >
                 {display ?? t}
@@ -2078,15 +2102,22 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       {/* One tabpanel wrapper, not thirteen. Only one section is mounted at a
           time, so a single element whose id and aria-labelledby track the active
           tab is both correct and the only version that cannot drift out of sync
-          with the strip above. tabIndex={0} makes the panel itself focusable,
-          which is what lets a keyboard user Tab once from the selected tab
-          straight into its content instead of into the first control inside it. */}
+          with the strip above.
+          NO tabIndex and NO focus-visible:outline-none. The first version had
+          both, and the comment justifying them had the behaviour backwards: APG
+          gives a tabpanel tabindex="0" only when it holds NOTHING focusable, and
+          all thirteen of these are full of buttons and inputs — so it ADDED a
+          stop before the content rather than skipping to it. Worse,
+          `focus-visible:outline-none` then hid that stop: Tailwind 3 emits
+          `outline: 2px solid transparent`, and at (0,2,0) it beat index.css's
+          (0,1,0) `:focus-visible` outline floor on both specificity and source
+          order. Focus landed on an invisible full-height container — the third
+          time this exact cascade has shipped here, and index.css documents it
+          twice. */}
       <div
         role="tabpanel"
         id={`admin-panel-${tab}`}
         aria-labelledby={`admin-tab-${tab}`}
-        tabIndex={0}
-        className="focus-visible:outline-none"
       >
       {tab === 'dashboard' && (
         <div>
@@ -2134,7 +2165,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
               </div>
 
               <div className="glass-panel rounded-2xl p-6 mb-6">
-                <h3 className="text-white font-semibold mb-4">Server</h3>
+                <h2 className="text-white font-semibold mb-4">Server</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                   <div>
                     <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Version</p>
@@ -2200,7 +2231,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           <div className="glass-panel rounded-2xl p-5">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
-                <h3 className="text-white font-semibold mb-1">Invite a user</h3>
+                <h2 className="text-white font-semibold mb-1">Invite a user</h2>
                 <p className="text-white/40 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
               </div>
               <button
@@ -2302,7 +2333,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
 
       {tab === 'activity' && (
         <div className="glass-panel rounded-2xl p-6">
-          <h3 className="text-white font-semibold mb-4">Recent Activity</h3>
+          <h2 className="text-white font-semibold mb-4">Recent Activity</h2>
           {activityLoading && !activity && <p className="text-white/40 text-sm">Loading activity…</p>}
           {activityErr && <p className="text-red-300 text-sm">{activityErr}</p>}
           {activity && (
@@ -2327,7 +2358,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
 
       {tab === 'logs' && (
         <div className="glass-panel rounded-2xl p-6 font-mono text-xs">
-          <h3 className="text-white font-semibold mb-4 font-sans">System Logs</h3>
+          <h2 className="text-white font-semibold mb-4 font-sans">System Logs</h2>
           {logsLoading && !logs && <p className="text-white/40 text-sm font-sans">Loading logs…</p>}
           {logsErr && <p className="text-red-300 text-sm font-sans">{logsErr}</p>}
           {logs && (

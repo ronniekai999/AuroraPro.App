@@ -96,7 +96,7 @@ import { useRealtime } from '@/hooks/useRealtime'
 import { Icon } from '@/components/Icon'
 import { ToastContainer, type Toast } from '@/components/Toast'
 import { Spinner } from '@/components/ui/spinner'
-import { oauthProviderLabel } from '@/lib/oauth'
+import { oauthProviderLabel, OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from '@/lib/oauth'
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
 import { currentPreferredQuality } from '@/lib/appearance'
@@ -362,7 +362,12 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
           {/* 46px wordmark from lg. Stays an h1 — the sign-in screen's only
               heading, and the card's own "Welcome Back" is an h2 under it. */}
           <h1 className="text-white font-display font-extrabold tracking-tight text-3xl lg:text-[46px] lg:leading-[1.05]">
-            AURORA<span className="text-purple-400">PRO</span>
+            {/* The space is inside the span, not between the text nodes:
+                accessible-name computation concatenates without inserting one,
+                so `AURORA<span>PRO</span>` announced as a single word
+                "AURORAPRO". A leading space in the span keeps the name
+                "AURORA PRO" while `-ml-[0.06em]` cancels it visually. */}
+            AURORA<span className="text-purple-400 -ml-[0.06em]">&nbsp;PRO</span>
           </h1>
           <p className="text-white/60 text-sm lg:text-base mt-3 max-w-[38ch] mx-auto lg:mx-0">
             Your personal media universe — every film and series you own, on any screen.
@@ -372,9 +377,17 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               finding a fourth input; saying so up front is the difference
               between "why can't I sign up" and "I need to ask for a code". */}
           {isRegister && inviteRequired && (
-            <p className="text-purple-200/70 text-xs mt-4 inline-flex items-center gap-2">
-              <Icon name="key" size={13} />
-              This server is invite-only — you'll need a code from its admin.
+            <p className="text-purple-200/80 text-xs mt-4 inline-flex items-start gap-2 max-w-[42ch] mx-auto lg:mx-0">
+              <Icon name="key" size={13} className="mt-0.5 shrink-0" />
+              {/* "Signing up with a password needs a code", not a flat "this
+                  server is invite-only". An admin can set
+                  oauth_<provider>_bypass_invite, in which case the tiles forty
+                  pixels below this sentence work without one — and a
+                  categorical claim would send that user away. The backend
+                  exposes those flags on setup-status; reading them to say
+                  precisely which route is open is a follow-up, but the wording
+                  must not assert more than we check. */}
+              <span>Signing up with a password needs an invite code from this server&rsquo;s admin.</span>
             </p>
           )}
         </div>
@@ -402,7 +415,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
                 className="w-full"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                autoComplete={isRegister ? 'new-username' : 'username'}
+                autoComplete="username"
                 disabled={submitting}
               />
             </div>
@@ -477,7 +490,7 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               grid can never disagree about whether any provider is enabled.
               This was a five-term `||` that had to be edited in lockstep with
               five separate render blocks. */}
-          {OAUTH_PROVIDERS.some(p => setupStatus?.[p.flag]) && (
+          {OAUTH_SIGN_IN_PROVIDERS.some(p => setupStatus?.[p.flag]) && (
             <>
               <div className="flex items-center gap-3 my-6">
                 <div className="flex-1 h-px bg-white/[0.06]" />
@@ -494,13 +507,19 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
                   ends with a half-width orphan. That is the common case, since
                   most servers enable one or three. */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {OAUTH_PROVIDERS
+                {OAUTH_SIGN_IN_PROVIDERS
                   .filter(p => setupStatus?.[p.flag])
                   .map((p, i, list) => (
                     <OAuthSignInButton
                       key={p.provider}
                       provider={p.provider}
                       label={p.label}
+                      // Visible label is short so a 178px tile fits it; the
+                      // accessible name keeps the verb. Without this a tile
+                      // announced as "X, link" — which everywhere else on the
+                      // web is a close button — and the "or" divider that
+                      // supplies context does not travel to a links list.
+                      ariaLabel={`Continue with ${p.label}`}
                       inviteCode={isRegister ? inviteCode : ''}
                       disabled={submitting}
                       className={list.length % 2 === 1 && i === list.length - 1 ? 'sm:col-span-2' : undefined}
@@ -525,31 +544,16 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
   )
 }
 
-type OAuthProvider = 'google' | 'discord' | 'twitch' | 'facebook' | 'twitter'
-
-// The five providers, paired with the setupStatus flag that gates each one.
-// One list (Aurora Stage Phase 7a) instead of five hand-written
-// `{setupStatus?.oauth_X_enabled && <OAuthSignInButton provider="X" …/>}`
-// blocks plus a five-term `||` in the section guard — two places that had to be
-// edited together to add a provider, and the kind of pair that drifts.
-const OAUTH_PROVIDERS: readonly { provider: OAuthProvider; label: string; flag: 'oauth_google_enabled' | 'oauth_discord_enabled' | 'oauth_twitch_enabled' | 'oauth_facebook_enabled' | 'oauth_twitter_enabled' }[] = [
-  { provider: 'google', label: 'Google', flag: 'oauth_google_enabled' },
-  { provider: 'discord', label: 'Discord', flag: 'oauth_discord_enabled' },
-  { provider: 'twitch', label: 'Twitch', flag: 'oauth_twitch_enabled' },
-  { provider: 'facebook', label: 'Facebook', flag: 'oauth_facebook_enabled' },
-  // "X" rather than "Twitter" in the label; the provider key stays `twitter`
-  // because that is the server's route segment.
-  { provider: 'twitter', label: 'X', flag: 'oauth_twitter_enabled' },
-]
-
 // Phase B — OAuth sign-in button. Per-provider brand icon + colors.
 // Renders as an <a> rather than a button + window.location because
 // the browser handles the cross-site redirect natively (no JS state
 // to preserve at this point; the round-trip's success page sets
 // localStorage tokens before re-entering the SPA).
-function OAuthSignInButton({ provider, label, inviteCode, disabled, className }: {
+function OAuthSignInButton({ provider, label, ariaLabel, inviteCode, disabled, className }: {
   provider: OAuthProvider
   label: string
+  // Full-sentence accessible name; the visible `label` stays short.
+  ariaLabel?: string
   inviteCode: string
   disabled: boolean
   // Grid-placement class from the caller (the odd-count tile spans both
@@ -619,6 +623,11 @@ function OAuthSignInButton({ provider, label, inviteCode, disabled, className }:
   return (
     <a
       href={disabled ? undefined : href}
+      aria-label={ariaLabel}
+      // aria-disabled rather than only dropping href: without it the element
+      // loses its `link` role entirely while submitting, so the tiles vanish
+      // from the accessibility tree instead of announcing as unavailable.
+      aria-disabled={disabled || undefined}
       onClick={(e) => { if (disabled) e.preventDefault() }}
       className={`w-full flex items-center justify-center gap-2.5 py-2.5 px-3 rounded-xl font-medium text-sm transition-all duration-200 hover:scale-[1.01] disabled:opacity-50 ${config.bg} ${disabled ? 'pointer-events-none opacity-50' : ''} ${className ?? ''}`}
     >

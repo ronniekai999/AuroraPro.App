@@ -14,7 +14,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { collectionStrips } from './CollectionsView'
 import { groupDateParts } from './CalendarView'
-import { maturityLabel } from './ProfileSwitcher'
+import { maturityLeanLabel, MATURITY_OPTIONS, MATURITY_AUTO } from '@/lib/maturity'
+import { nextRadioIndex } from '@/lib/radiogroup'
 
 // The suite runs under TZ=America/New_York, pinned in vitest.config.ts — see
 // that file for why a non-UTC zone is required and why the pin lives in config
@@ -248,34 +249,129 @@ describe('groupDateParts', () => {
 
 // ── Aurora Stage Phase 7a ────────────────────────────────────────────────────
 
-describe('maturityLabel', () => {
-  it('returns null rather than inventing text when unset', () => {
-    // The mockup gives every profile a taste blurb ("Sci-fi & docs"). Nothing on
-    // Profile stores one, so the switcher falls back to the maturity dial and
-    // must say NOTHING when even that is unset — the row then reads "Profile"
-    // rather than a fabricated preference.
-    expect(maturityLabel(undefined)).toBeNull()
-    // -1 is the server's explicit "no preference" sentinel, not an age.
-    expect(maturityLabel(-1)).toBeNull()
+describe('maturityLeanLabel', () => {
+  // These tests replace a set that asserted an INVENTED domain. The first
+  // version read maturity_pref as an AGE and checked boundaries at 0/7/8/13/
+  // 14/16/17/21 — none of which the column can hold. It is
+  // `CHECK (maturity_pref BETWEEN -1 AND 2)`, so the only reachable values are
+  // -1/0/1/2, and the old mapping returned "Kids-safe" for every one of them
+  // while its other three labels were unreachable. A profile set to Mature
+  // displayed as Kids-safe, and the tests passed — they were exercising a
+  // fiction, and mutation-testing the fiction proved nothing.
+  //
+  // Lesson encoded below: iterate the DOMAIN, don't pick boundaries.
+
+  it('covers the whole domain the database permits, and nothing else', () => {
+    expect(MATURITY_OPTIONS.map(o => o.v)).toEqual([-1, 0, 1, 2])
   })
 
-  it('maps each band to its label at the boundaries', () => {
-    // Boundaries, not midpoints: an off-by-one in the <= chain would move a
-    // profile's visible rating band, and only the edges catch that.
-    expect(maturityLabel(0)).toBe('Kids-safe')
-    expect(maturityLabel(7)).toBe('Kids-safe')
-    expect(maturityLabel(8)).toBe('Family')
-    expect(maturityLabel(13)).toBe('Family')
-    expect(maturityLabel(14)).toBe('Teen')
-    expect(maturityLabel(16)).toBe('Teen')
-    expect(maturityLabel(17)).toBe('All ages allowed')
-    expect(maturityLabel(21)).toBe('All ages allowed')
+  it('labels each explicit lean with the same word the Settings dial uses', () => {
+    // Settings → Content Tone WRITES this field; the switcher only reports it.
+    // If these drifted, one surface would call a value Teen and the other
+    // something else — which is exactly what happened.
+    expect(maturityLeanLabel(0)).toBe('Family lean')
+    expect(maturityLeanLabel(1)).toBe('Teen lean')
+    expect(maturityLeanLabel(2)).toBe('Mature lean')
+  })
+
+  it('says nothing for Auto rather than reporting a lean nobody picked', () => {
+    // -1 is Auto: the recommender infers the lean server-side. Naming a tier
+    // here would attribute a preference the user never expressed.
+    expect(maturityLeanLabel(MATURITY_AUTO)).toBeNull()
+    expect(maturityLeanLabel(-1)).toBeNull()
+    expect(maturityLeanLabel(undefined)).toBeNull()
+  })
+
+  it('says nothing for values outside the CHECK constraint', () => {
+    // Tampered or migrated-badly data must not fall through to a label.
+    for (const v of [-2, 3, 7, 13, 16, 99, 0.5, NaN]) {
+      expect(maturityLeanLabel(v)).toBeNull()
+    }
+  })
+
+  it('never describes the lean as a restriction', () => {
+    // The field is a SOFT recall bias; the hard ceiling is max_age_rating.
+    // "Kids-safe" / "safe" / "only" would all misreport what the dial does —
+    // and "Kids-safe" is precisely what the broken version rendered.
+    for (const o of MATURITY_OPTIONS) {
+      const l = maturityLeanLabel(o.v)
+      if (l === null) continue
+      expect(l.toLowerCase()).not.toContain('safe')
+      expect(l.toLowerCase()).not.toContain('only')
+      expect(l).toContain('lean')
+    }
   })
 
   it('never returns an empty string, which would render as a blank line', () => {
-    for (const p of [undefined, -1, 0, 5, 10, 15, 18, 99]) {
-      const l = maturityLabel(p)
+    for (const v of [undefined, -1, 0, 1, 2, 99]) {
+      const l = maturityLeanLabel(v)
       expect(l === null || l.length > 0).toBe(true)
     }
+  })
+})
+
+describe('nextRadioIndex', () => {
+  // The APG radiogroup movement arithmetic, extracted so it is testable at all.
+  // Four radiogroups in Settings share it; four hand-written copies would have
+  // been four chances to get a wrap wrong, and none of them was testable inside
+  // a component (the project has no jsdom).
+
+  it('moves forward on both Right and Down, wrapping at the end', () => {
+    expect(nextRadioIndex('ArrowRight', 0, 3)).toBe(1)
+    expect(nextRadioIndex('ArrowDown', 0, 3)).toBe(1)
+    expect(nextRadioIndex('ArrowRight', 2, 3)).toBe(0)
+    expect(nextRadioIndex('ArrowDown', 2, 3)).toBe(0)
+  })
+
+  it('moves backward on both Left and Up, wrapping at the start', () => {
+    // The `+ length` in the modulo is what stops this being -1: JS's % keeps
+    // the sign of the dividend, so `(0 - 1) % 3` is -1, not 2.
+    expect(nextRadioIndex('ArrowLeft', 0, 3)).toBe(2)
+    expect(nextRadioIndex('ArrowUp', 0, 3)).toBe(2)
+    expect(nextRadioIndex('ArrowLeft', 2, 3)).toBe(1)
+  })
+
+  it('handles Home and End', () => {
+    expect(nextRadioIndex('Home', 2, 4)).toBe(0)
+    expect(nextRadioIndex('End', 0, 4)).toBe(3)
+  })
+
+  it('returns null for keys it does not own, so the caller leaves them alone', () => {
+    // Critically includes Tab and Enter: swallowing Tab would trap focus in the
+    // group, and swallowing Enter/Space would break native button activation.
+    for (const k of ['Tab', 'Enter', ' ', 'Escape', 'a', 'PageDown', 'ArrowRightt']) {
+      expect(nextRadioIndex(k, 0, 3)).toBeNull()
+    }
+  })
+
+  it('never returns an out-of-range index for any key or position', () => {
+    for (const len of [1, 2, 3, 4, 10]) {
+      for (let i = 0; i < len; i++) {
+        for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'Home', 'End']) {
+          const n = nextRadioIndex(k, i, len)
+          expect(n).not.toBeNull()
+          expect(n!).toBeGreaterThanOrEqual(0)
+          expect(n!).toBeLessThan(len)
+        }
+      }
+    }
+  })
+
+  it('is a no-op for an empty group rather than returning NaN', () => {
+    // A radiogroup can legitimately render zero options (the avatar picker
+    // before profiles load). `% 0` is NaN, which would then be passed to an
+    // array index and focus nothing while claiming to have moved.
+    for (const k of ['ArrowRight', 'ArrowLeft', 'Home', 'End']) {
+      expect(nextRadioIndex(k, 0, 0)).toBeNull()
+    }
+  })
+
+  it('stays in range when the current index is out of range', () => {
+    // `values.indexOf(value)` returns -1 when the stored value is not in the
+    // list — a tampered pref, or a value from a newer build. The caller clamps
+    // to 0, but the helper must not produce a negative index if it does not.
+    expect(nextRadioIndex('ArrowRight', 0, 3)).toBe(1)
+    const n = nextRadioIndex('ArrowLeft', 0, 3)
+    expect(n).toBe(2)
   })
 })

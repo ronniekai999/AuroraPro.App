@@ -10,6 +10,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
+import { MATURITY_OPTIONS, type MaturityPref } from '@/lib/maturity'
+import { nextRadioIndex } from '@/lib/radiogroup'
 import { type Toast } from '@/components/Toast'
 import {
   Select,
@@ -91,6 +93,13 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   // fired purely to force a re-render because ref mutations are invisible to
   // React. Actual state makes the re-render automatic and the three encodings
   // of the typeface default collapse to one.
+  // Radio refs, so arrow-key movement can put real focus on the newly checked
+  // option — the roving tabIndex alone changes which button is REACHABLE, not
+  // which one is focused.
+  const glowRefs = useRef<Partial<Record<GlowChoice, HTMLButtonElement | null>>>({})
+  const fontRefs = useRef<Partial<Record<FontChoice, HTMLButtonElement | null>>>({})
+  const toneRefs = useRef<Record<number, HTMLButtonElement | null>>({})
+
   const [fontChoice, setFontChoice] = useState<FontChoice>(currentFont)
   const [glowChoice, setGlowChoice] = useState<GlowChoice>(currentGlow)
   const [quality, setQuality] = useState<QualityChoice>(currentPreferredQuality)
@@ -99,13 +108,21 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
   // (volume, muted, legacy V1 values) round-trip unmodified.
   //
   // The fresh read is the fix for a real clobber. This used to merge over a
-  // `rawRef` snapshot captured at mount, and `aurora_prefs` has more than one
-  // writer — VideoPlayer persists volume/muted/autoplay into it during
-  // playback. So: open Settings, play something, change the volume, come back
-  // and toggle any switch → Settings wrote `{...mountTimeSnapshot, ...settings}`
-  // and silently reverted the volume. Reading at write time cannot lose a
-  // concurrent write, and it also makes applyFont/applyGlow (which do their own
-  // read-modify-write) safe to call from the handlers below.
+  // `rawRef` snapshot captured at mount, and `aurora_prefs` has three writers:
+  // this effect, appearance.ts's writePref, and VideoPlayer's writeVolumePref —
+  // which persists `player_volume` (and only that; `muted` is deliberately never
+  // stored, and `autoplay` is read-only there). SettingsView stays mounted
+  // beneath the player, so: open Settings, play something, change the volume,
+  // come back and toggle any switch → Settings wrote
+  // `{...mountTimeSnapshot, ...settings}` and silently reverted the volume.
+  //
+  // Reading at write time fixes that for every key OUTSIDE `settings`, and makes
+  // applyFont/applyGlow (which do their own read-modify-write) safe to call from
+  // the handlers below. It does NOT protect the six keys `settings` itself owns:
+  // those come from a mount-time snapshot, so a future second writer of
+  // `autoplay`/`hdr`/`subtitleLang`/… would still be clobbered by the next
+  // toggle. No live bug — the three writers' key sets are disjoint today — but
+  // that is the invariant to preserve, not "reads fresh so nothing can be lost".
   useEffect(() => {
     if (skipFirstWriteRef.current) {
       skipFirstWriteRef.current = false
@@ -161,29 +178,51 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             this card needs the full width to avoid four chips of two words
             each wrapping. */}
         <div className="glass-panel rounded-2xl p-6 md:col-span-2">
-          <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="eye" size={18} className="text-purple-400" />
             Appearance
-          </h3>
+          </h2>
           <div className="space-y-3">
             <div>
               <p className="text-white/80 text-sm font-medium">Glow Style</p>
-              <p className="text-white/40 text-xs">Border and halo around panels, cards, and the hero.</p>
+              <p className="text-white/55 text-xs">Border and halo around panels, cards, and the hero.</p>
             </div>
             {/* GLOW_OPTIONS from lib/appearance, not a literal list. The copy
                 is the shared copy; the only thing lost is the "(default)"
                 suffix, which the shared list omits because the onboarding
                 "Make it yours" step renders the same options and calling one
                 "default" there is meaningless. */}
-            <div role="radiogroup" aria-label="Glow style" className="grid grid-cols-3 gap-3">
+            {/* Arrow keys + one tab stop, via the shared radiogroup helper.
+                All four radiogroups on this page previously left every option a
+                separate tab stop with the arrows dead — see lib/radiogroup. */}
+            <div
+              role="radiogroup"
+              aria-label="Glow style"
+              className="grid grid-cols-3 gap-3"
+              // Inline event handler rather than a factory that takes a focus
+              // callback: react-hooks/refs flags PASSING a ref-reading function
+              // as an argument during render, while a ref read inside an event
+              // handler is exactly what the rule permits. The movement
+              // arithmetic still lives in the tested nextRadioIndex.
+              onKeyDown={e => {
+                const ids = GLOW_OPTIONS.map(o => o.id)
+                const n = nextRadioIndex(e.key, Math.max(0, ids.indexOf(glowChoice)), ids.length)
+                if (n === null) return
+                e.preventDefault()
+                applyGlow(ids[n]); setGlowChoice(ids[n])
+                glowRefs.current[ids[n]]?.focus()
+              }}
+            >
               {GLOW_OPTIONS.map(opt => {
                 const active = glowChoice === opt.id
                 return (
                   <button
                     key={opt.id}
+                    ref={el => { glowRefs.current[opt.id] = el }}
                     type="button"
                     role="radio"
                     aria-checked={active}
+                    tabIndex={active ? 0 : -1}
                     onClick={() => { applyGlow(opt.id); setGlowChoice(opt.id) }}
                     className="stage-opt text-left"
                   >
@@ -210,15 +249,29 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
               <p className="text-white/80 text-sm font-medium">Typeface</p>
               <p className="text-white/55 text-xs">Display and body fonts used across the app.</p>
             </div>
-            <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
+            <div
+              role="radiogroup"
+              aria-label="Typeface"
+              className="grid grid-cols-2 gap-3"
+              onKeyDown={e => {
+                const ids = FONT_OPTIONS.map(o => o.id)
+                const n = nextRadioIndex(e.key, Math.max(0, ids.indexOf(fontChoice)), ids.length)
+                if (n === null) return
+                e.preventDefault()
+                applyFont(ids[n]); setFontChoice(ids[n])
+                fontRefs.current[ids[n]]?.focus()
+              }}
+            >
               {FONT_OPTIONS.map(opt => {
                 const active = fontChoice === opt.id
                 return (
                   <button
                     key={opt.id}
+                    ref={el => { fontRefs.current[opt.id] = el }}
                     type="button"
                     role="radio"
                     aria-checked={active}
+                    tabIndex={active ? 0 : -1}
                     onClick={() => { applyFont(opt.id); setFontChoice(opt.id) }}
                     className="stage-opt text-left"
                   >
@@ -234,12 +287,19 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         {/* Avatar — per-profile animated nebula. Optimistic localAvatar flips the
             selection instantly; onAvatarChange persists via PUT /api/profiles/:id
             and refreshes the profile list so the switcher + account menu update. */}
+        {/* md:col-span-2 — the 10-up nebula grid inside is keyed on `sm:`
+            (a VIEWPORT query) but is sized by its grid COLUMN. At 768px a
+            half-width column gave (280-108)/10 = 17px swatches, with the
+            selected one's ring about a fifth of its diameter. Spanning the full
+            width restores ~50px. No viewport breakpoint can express "my column
+            is narrow", which is the general trap in moving a full-width page
+            into columns. */}
         {onAvatarChange && activeProfile && (
-          <div className="glass-panel rounded-2xl p-6">
-            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+          <div className="glass-panel rounded-2xl p-6 md:col-span-2">
+            <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="user" size={18} className="text-purple-400" />
               Avatar
-            </h3>
+            </h2>
             <div className="space-y-3">
               <div>
                 <p className="text-white/80 text-sm font-medium">Nebula for {activeProfile.name}</p>
@@ -281,46 +341,60 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             and invalidates the hero cache so it re-curates on the next Home visit. */}
         {onMaturityChange && activeProfile && (
           <div className="glass-panel rounded-2xl p-6">
-            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="sparkle" size={18} className="text-purple-400" />
               Content Tone
-            </h3>
+            </h2>
             <div className="space-y-3">
               <div>
                 <p className="text-white/80 text-sm font-medium">Recommendation lean for {activeProfile.name}</p>
                 <p className="text-white/40 text-xs">Nudges what surfaces first toward a maturity tier — it doesn't hide anything (that's the age limit). Applies on your next Home visit.</p>
               </div>
-              <div role="radiogroup" aria-label="Content tone" className="grid grid-cols-2 gap-3">
-                {([
-                  // -1 is AUTO, not off: the recommender derives the lean from
-                  // the profile's watched rating tiers (server-side, Phase E2c
-                  // auto mode). Explicit picks (0/1/2) always override it.
-                  { v: -1, label: 'Auto', desc: 'Follows what you watch (default)' },
-                  { v: 0, label: 'Family', desc: 'Gentle · G–PG / TV-G' },
-                  { v: 1, label: 'Teen', desc: 'PG-13 · TV-14' },
-                  { v: 2, label: 'Mature', desc: 'Intense · R · TV-MA' },
-                ] as const).map(opt => {
+              <div
+                role="radiogroup"
+                aria-label="Content tone"
+                className="grid grid-cols-2 gap-3"
+                onKeyDown={e => {
+                  const vals = MATURITY_OPTIONS.map(o => o.v)
+                  const n = nextRadioIndex(e.key, Math.max(0, vals.indexOf(currentMaturity as MaturityPref)), vals.length)
+                  if (n === null) return
+                  e.preventDefault()
+                  const prev = currentMaturity
+                  setLocalMaturity(vals[n])
+                  Promise.resolve(onMaturityChange(vals[n])).catch(() => setLocalMaturity(prev))
+                  toneRefs.current[vals[n]]?.focus()
+                }}
+              >
+                {/* MATURITY_OPTIONS from lib/maturity, not a literal list. -1 is
+                    AUTO, not off: the recommender derives the lean from the
+                    profile's watched rating tiers (server-side, Phase E2c auto
+                    mode) and explicit picks (0/1/2) always override it. The
+                    profile switcher's subtitle reads the same list, so the
+                    surface that writes this field and the surface that reports
+                    it cannot describe its four values differently. */}
+                {MATURITY_OPTIONS.map(opt => {
                   const active = currentMaturity === opt.v
                   return (
                     <button
                       key={opt.v}
+                      ref={el => { toneRefs.current[opt.v] = el }}
                       type="button"
                       role="radio"
                       aria-checked={active}
+                      tabIndex={active ? 0 : -1}
                       onClick={() => {
                         const prev = currentMaturity
                         setLocalMaturity(opt.v)
                         // Roll back the optimistic selection if the save rejects.
                         Promise.resolve(onMaturityChange(opt.v)).catch(() => setLocalMaturity(prev))
                       }}
-                      className={`text-left p-3 rounded-lg border transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-purple-400/60 ${
-                        active
-                          ? 'border-purple-400/60 bg-purple-500/10 shadow-[0_0_20px_rgba(168,85,247,0.25)]'
-                          : 'border-white/10 bg-white/[0.02] hover:border-white/20 hover:bg-white/[0.04]'
-                      }`}
+                      // .stage-opt like its two siblings — this was the last
+                      // radiogroup on the page still hand-rolling the selected
+                      // fill/border/shadow triple inline.
+                      className="stage-opt text-left"
                     >
                       <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>{opt.label}</p>
-                      <p className="text-white/40 text-xs mt-0.5">{opt.desc}</p>
+                      <p className="text-white/55 text-xs mt-0.5">{opt.desc}</p>
                     </button>
                   )
                 })}
@@ -331,10 +405,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         {sections.map(section => (
           <div key={section.title} className="glass-panel rounded-2xl p-6">
-            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name={section.icon} size={18} className="text-purple-400" />
               {section.title}
-            </h3>
+            </h2>
             <div className="space-y-4">
               {section.items.map(item => (
                 <div key={item.key} className="flex items-center justify-between py-2">
@@ -360,10 +434,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
         {/* Language */}
         <div className="glass-panel rounded-2xl p-6">
-          <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="globe" size={18} className="text-purple-400" />
             Language
-          </h3>
+          </h2>
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -410,10 +484,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             comment in App near `handleRefreshMetadata`). Default 'auto' =
             prefer 1080p, fall back to whatever exists. */}
         <div className="glass-panel rounded-2xl p-6">
-          <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
             <Icon name="play" size={18} className="text-purple-400" />
             Quality
-          </h3>
+          </h2>
           <div className="flex items-center justify-between">
             <div>
               <p className="text-white/80 text-sm font-medium">Preferred resolution</p>
@@ -440,10 +514,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             Profile editing + password change land in Phase 3. */}
         {(settingsUser || onLogout) && (
           <div className="glass-panel rounded-2xl p-6">
-            <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
               <Icon name="user" size={18} className="text-purple-400" />
               Account
-            </h3>
+            </h2>
             <div className="space-y-4">
               {settingsUser && (
                 <div className="flex items-center justify-between py-2">
@@ -471,9 +545,8 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
           </div>
         )}
 
-        {/* These three span both columns. The first two render a glass panel as
-            their own root element, so they are direct grid items and take the
-            span class themselves; the third is a wrapper.
+        {/* These three span both columns, each via a wrapper div that is the
+            grid item (the two helper cards render their own glass panel inside).
 
             All three hold lists that grow — linked providers, profiles +
             watchlists, an achievements grid — so a half-width column would
@@ -559,10 +632,10 @@ function ConnectedAccountsCard({ onToast }: { onToast?: (message: string, type?:
 
   return (
     <div className="glass-panel rounded-2xl p-6">
-      <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+      <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
         <Icon name="key" size={18} className="text-purple-400" />
         Connected Accounts
-      </h3>
+      </h2>
       <p className="text-white/40 text-xs mb-4">
         Link OAuth providers to sign in to Aurora without a password.
       </p>
@@ -648,10 +721,10 @@ function ProfilesAndWatchlistsCard() {
 
   return (
     <div className="glass-panel rounded-2xl p-6">
-      <h3 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+      <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
         <Icon name="user" size={18} className="text-purple-400" />
         Profiles &amp; Watchlists
-      </h3>
+      </h2>
       {err && <p className="text-red-300 text-sm mb-3">{err}</p>}
       {profiles === null && <p className="text-white/40 text-sm">Loading…</p>}
       {profiles && (

@@ -348,7 +348,14 @@ function MobileSheet({
               profiles={profiles}
               activeProfileId={activeProfileId}
               onSelect={onSelectProfile}
-              onAddProfile={onAddProfile}
+              // Closes the sheet FIRST. Every other navigation out of this
+              // sheet goes through go(), which does the same — without it,
+              // Add-Profile rendered Settings underneath while the sheet stayed
+              // mounted with role="dialog" aria-modal="true", body scroll locked
+              // and its Tab trap live. Combined with the switcher unmounting the
+              // focused row, the trap's first/last checks matched neither branch,
+              // so Tab escaped into a page that aria-modal had hidden from AT.
+              onAddProfile={onAddProfile && (() => { onClose(); onAddProfile() })}
             />
           </div>
         )}
