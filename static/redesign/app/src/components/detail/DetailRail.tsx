@@ -141,7 +141,11 @@ export function DetailRail({
     // is the same one BrowseView's toolbar comment calls out.
     <div className={cn('lg:sticky lg:z-20 lg:top-[calc(var(--chrome-h,var(--topnav-h))+12px)] self-start space-y-5', className)}>
       {/* Poster + resume overlay */}
-      <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl">
+      {/* bg matters now that the poster overlaps the hero: posterURL() returns
+          '' for an unmatched title, so this box renders the alt text and a
+          broken-image glyph — previously against flat #050505 below the hero,
+          now against backdrop artwork at ~17% scrim alpha. */}
+      <div className="relative rounded-2xl overflow-hidden ring-1 ring-white/15 shadow-2xl bg-[#0b0b12]">
         <img src={poster} alt={title} className="w-full aspect-[2/3] object-cover" />
         {hasProgress && (
           <>

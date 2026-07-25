@@ -177,7 +177,13 @@
        and the reason line. The 9vh term scales the type with the frame that
        has to hold it. */
     --fs-hero: clamp(2.5rem, min(6vw, 9vh), 5.25rem);  /* home hero title, ≤84px */
-    --fs-detail: clamp(2rem, min(4.6vw, 7.4vh), 4rem);  /* title-detail hero, ≤64px */
+    /* Floor is 3rem ON PURPOSE: it equals the sm:text-5xl step this title
+       uses below lg, so crossing the lg breakpoint can never make the
+       headline smaller. At 4.6vw the lg value was 47.1px at 1024px wide
+       against 48px at 1023px — widening the window shrank the title, which is
+       exactly the non-monotonic failure the note above records having already
+       been burned by, just keyed on viewport size instead of root font-size. */
+    --fs-detail: clamp(3rem, min(5vw, 8.4vh), 4rem);  /* title-detail hero, 48–64px */
     --fs-browse: 3.25rem;     /* movies / TV browse hero strip, 52px */
     --fs-page: 2.375rem;      /* requests / library / settings page heads, 38px */
     --fs-section: 1.5rem;     /* pane + section heads, 24px */
@@ -249,6 +255,12 @@
   html[data-font="current"] {
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Space Grotesk', 'Inter', sans-serif;
+    /* Space Grotesk's content area is 1.276em — the LARGEST of the four faces,
+       larger than Sora's and Outfit's 1.26em. It was the one face left without
+       an override while being the one that needed it most (an omission
+       inherited from Phase 4's --lh-hero). */
+    --lh-hero: 1;
+    --lh-detail: 1;
   }
 
   /* NOVA — the pre-Aurora-Stage default. Now an attributed system so the
