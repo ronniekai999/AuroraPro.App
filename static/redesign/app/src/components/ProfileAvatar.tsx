@@ -23,7 +23,16 @@ export function ProfileAvatar({ avatarUrl, name, size = 40, className = '' }: Pr
   const isUrl = !!avatarUrl && (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://'))
   const initial = (name?.trim()?.[0] ?? 'U').toUpperCase()
   return (
+    // aria-hidden on the whole box. The avatar is decorative in every call site
+    // — the name it stands for is always rendered as real text beside it (the
+    // switcher rows, the account menu) or carried by the control's own label.
+    //
+    // It matters because of the initial-letter branch: unlike the <img> (alt="")
+    // and NebulaAvatar (already aria-hidden), a bare text node IS announced. A
+    // profile called Alice with no nebula read as "A, Alice, Default" — the
+    // initial spoken as a word before the name it abbreviates.
     <span
+      aria-hidden="true"
       className={`inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-purple-500 to-purple-700 font-bold text-white ${className}`}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}
     >

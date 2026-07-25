@@ -549,10 +549,17 @@
       That makes every property set by a descendant or attribute selector
       here permanently unreachable from a call site except via `!important`.
       Currently that applies to `.stage-seg > button` (0,1,1),
-      `.stage-fpill .c` (0,2,0) and `.stage-caldate .today` (0,2,0). Nothing
-      collides today because those call sites carry no competing utilities,
-      but if you need per-breakpoint control over anything in that list, the
-      fix is to flatten the selector, not to reach for `!`.
+      `.stage-fpill .c` (0,2,0), `.stage-caldate .today` (0,2,0),
+      `.stage-opt:hover` / `[aria-checked="true"]` / `:focus-visible` (0,2,0),
+      and `.stage-tab[aria-selected="true"]` plus its `::after` (0,2,0 / 0,2,1).
+      Nothing collides today because those call sites carry no competing
+      utilities — and note that variant utilities DO still reach them, since
+      `hover:`, `focus-visible:` and `aria-*:` all land after this block; it is
+      only the plain unprefixed utility that loses. If you need per-breakpoint
+      control over anything in that list, flatten the selector rather than
+      reaching for `!`. (A live example of the plain-utility case:
+      ProfileSwitcher writes `!text-[10px]` on `.stage-eyebrow`, and the `!` is
+      load-bearing — a plain `text-[10px]` there silently does nothing.)
    ==================================================================== */
 
 /* Backdrop tint — the per-page wash that makes each page "a stage lit
@@ -649,14 +656,23 @@ html[data-glow="subtle"] .stage-topnav {
   transition: color 0.15s ease, background-color 0.15s ease;
 }
 .stage-tab:hover { color: rgba(255, 255, 255, 0.9); }
-.stage-tab[aria-current="page"] {
+/* Two active selectors, one treatment (Aurora Stage Phase 7a).
+   aria-current="page" is right for the TOP NAV, where a tab is a link to a
+   route. aria-selected is right for the ADMIN tab strip, where a tab switches
+   a panel in place — that is a genuine tabs widget, and `current page` would
+   claim thirteen of them are separate pages. Sharing the visual is the point:
+   the mockup draws both with the same gradient underline, so the two systems
+   read as one language even though their semantics differ. */
+.stage-tab[aria-current="page"],
+.stage-tab[aria-selected="true"] {
   color: #fff;
   font-weight: 600;
   background: rgba(168, 85, 247, 0.14);
 }
 /* Gradient underline on the active tab — the top-nav counterpart of the
    sidebar's 3px left bar (.nav-link-item.active::before). */
-.stage-tab[aria-current="page"]::after {
+.stage-tab[aria-current="page"]::after,
+.stage-tab[aria-selected="true"]::after {
   content: '';
   position: absolute;
   left: 13px;
@@ -844,7 +860,16 @@ html[data-glow="subtle"] .stage-topnav {
 .stage-page {
   padding: 28px var(--page-gutter) 70px;
 }
-@media (max-width: 767px) {
+/* `not all and (min-width: 768px)`, not `max-width: 767px`.
+   Tailwind's `md:` is `min-width: 768px`, so a `max-width: 767px` companion
+   leaves a gap: at a fractional viewport width like 767.5 — reachable via
+   browser zoom, fractional DPR, or some scrollbar widths — NEITHER query
+   matches. The admin tab strip cancels this padding with a `-mx-[18px]
+   md:-mx-[…]` pair, and in that band it took the 48px padding with the 18px
+   margin, leaving the sticky bar's fill 30px short of both viewport edges.
+   The negated form is the exact complement of `md:`, so no width falls
+   between them. */
+@media not all and (min-width: 768px) {
   .stage-page { padding: 20px 18px 56px; }
 }
 
@@ -857,7 +882,8 @@ html[data-glow="subtle"] .stage-topnav {
   padding-left: var(--page-gutter);
   padding-right: var(--page-gutter);
 }
-@media (max-width: 767px) {
+/* Same negated form as .stage-page above, for the same reason. */
+@media not all and (min-width: 768px) {
   .stage-gutter {
     padding-left: 18px;
     padding-right: 18px;
@@ -1420,6 +1446,58 @@ html[data-glow="subtle"] .stage-toolbar {
   white-space: nowrap;
 }
 .stage-calchip-p { background: rgba(168, 85, 247, 0.42); color: #f3e8ff; }
+
+/* ══ Settings (Aurora Stage Phase 7a) ═════════════════════════════════
+   The mockup's .opt — the selected-state chip used by both Appearance
+   radiogroups (glow and typeface).
+
+   NOT a .stage-setcard / .stage-setgrid to go with it, deliberately:
+   - the card surface is already `.glass-panel` (border + halo + blur, and it
+     tracks --glow-border/--glow-halo so the Glow dial keeps working on it).
+     Adding a second near-identical panel class is the .stage-badge-vs-
+     .badge-glass mistake Phase 5 had to unpick.
+   - the two-column grid stays as Tailwind at the call site, because it has to
+     collapse to one column below md. Baking `grid-template-columns` into a
+     primitive would put it out of reach of `md:` variants entirely — see the
+     second correction in the CASCADE HAZARD note.
+
+   State is driven off [aria-checked="true"], the real accessible state for
+   role="radio", so the visual and the announced state cannot disagree. */
+.stage-opt {
+  padding: 13px 14px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.stage-opt:hover { background: rgba(255, 255, 255, 0.07); border-color: rgba(255, 255, 255, 0.18); }
+/* Declared after :hover so hovering the selected chip keeps its purple — the
+   same (0,2,0)-vs-(0,2,0) order dependency .stage-fpill documents. The border
+   is 0.8 rather than the mockup's 1.0-on---primary for the 1.4.11 3:1 floor
+   (3.60:1), and the weight/fill pair is a second, non-colour cue. */
+.stage-opt[aria-checked="true"] {
+  background: rgba(168, 85, 247, 0.14);
+  /* Full alpha, NOT the 0.8 this shipped with. The comment there claimed 0.8 was
+     chosen "for the 1.4.11 3:1 floor" — the arithmetic is the other way round.
+     The border is border-box clipped over the chip's OWN selected fill, so the
+     adjacency that matters is border-vs-fill, and the two fills are only 1.07:1
+     apart, which means this 1px border is the entire state cue. At 0.8 it
+     measured 3.23:1 against the fill (3.01:1 over the page's purple radial —
+     half a percent of margin); at full alpha it is 4.31:1. Reducing the alpha
+     LOWERED contrast. */
+  border-color: rgb(168, 85, 247);
+  box-shadow: 0 0 18px rgba(168, 85, 247, 0.15);
+}
+/* Focus ADDS a ring, it does not repaint the border.
+   This used to set `border-color`, which at (0,2,0) after the [aria-checked]
+   rule meant a chip that was both selected and focused lost its selected purple
+   border for the duration of focus — removing the one cue the state rests on.
+   A box-shadow ring stacks with the border instead of replacing it, and the
+   global :focus-visible outline (deliberately not suppressed) still applies. */
+.stage-opt:focus-visible {
+  box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.9), 0 0 18px rgba(168, 85, 247, 0.15);
+}
 
 /* ── Smart-search chip ────────────────────────────────────────────────
    Marks results that came back from the semantic/LLM path rather than a

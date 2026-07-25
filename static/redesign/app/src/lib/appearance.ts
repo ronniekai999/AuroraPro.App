@@ -36,6 +36,19 @@ export type GlowChoice = 'subtle' | 'aurora' | 'heavy'
 export const ATTRIBUTED_FONTS: readonly FontChoice[] = ['nova', 'current', 'halo']
 /** The attribute-less default — the system the :root tokens in index.css hold. */
 export const DEFAULT_FONT: FontChoice = 'eclipse'
+/**
+ * Every valid stored value, attributed or not. Distinct from ATTRIBUTED_FONTS
+ * on purpose: that list answers "does this get written to `<html data-font>`",
+ * this one answers "is this a value we recognise at all".
+ *
+ * currentFont() validates against THIS. It used to validate against
+ * ATTRIBUTED_FONTS, which happened to produce the right answer only because
+ * 'eclipse' is the sole attribute-less system — an explicitly-stored 'eclipse'
+ * failed the check and then fell back to DEFAULT_FONT, which is 'eclipse'. Same
+ * result, wrong reason, and it would have broken silently the moment a second
+ * attribute-less system existed.
+ */
+export const FONT_CHOICES: readonly FontChoice[] = ['eclipse', 'nova', 'current', 'halo']
 
 export interface FontOption {
   id: FontChoice
@@ -60,13 +73,31 @@ export const FONT_OPTIONS: readonly FontOption[] = [
 
 export const GLOW_OPTIONS: readonly GlowOption[] = [
   { id: 'subtle', label: 'Subtle', desc: 'Faint white edge' },
-  { id: 'aurora', label: 'Aurora', desc: 'White + purple' },
+  // "(default)" is on Aurora for the same reason Eclipse carries it above: the
+  // Settings radiogroup is where a user asks "which one is stock?", and after
+  // this list replaced Settings' inline copy the Glow group briefly lost the
+  // marker while the Typeface group directly beneath it kept one.
+  { id: 'aurora', label: 'Aurora', desc: 'White + purple · default' },
   { id: 'heavy', label: 'Heavy', desc: 'Bright bloom' },
 ]
 
 const PREFS_KEY = 'aurora_prefs'
 
-function readPrefs(): Record<string, unknown> {
+/**
+ * A guarded snapshot of the whole `aurora_prefs` blob.
+ *
+ * Exported (Aurora Stage Phase 7a) because SettingsView needs the SAME guarded
+ * parse as its merge base, and because it must read FRESH rather than from a
+ * cached ref. `aurora_prefs` has more than one writer: VideoPlayer persists
+ * volume/muted/autoplay into it during playback, and applyFont/applyGlow below
+ * write it too. Any component that caches the blob at mount and later writes
+ * `{...cached, ...mine}` silently reverts every key another writer touched in
+ * between — which is what SettingsView was doing.
+ *
+ * Returns `{}` for missing, non-object, or corrupt values, so callers can
+ * always spread it.
+ */
+export function readPrefsSnapshot(): Record<string, unknown> {
   try {
     const raw = localStorage.getItem(PREFS_KEY)
     if (raw) {
@@ -78,6 +109,9 @@ function readPrefs(): Record<string, unknown> {
   }
   return {}
 }
+
+// Internal alias kept so the call sites below read as they did before.
+const readPrefs = readPrefsSnapshot
 
 // writePref reads the full prefs object, sets one key, and writes it back — so a
 // single appearance change never clobbers the other persisted prefs (autoplay,
@@ -95,7 +129,7 @@ function writePref(key: string, value: string): void {
 /** The stored typeface choice, defaulting to 'eclipse' when unset/invalid. */
 export function currentFont(): FontChoice {
   const v = readPrefs().font_choice
-  return ATTRIBUTED_FONTS.includes(v as FontChoice) ? (v as FontChoice) : DEFAULT_FONT
+  return FONT_CHOICES.includes(v as FontChoice) ? (v as FontChoice) : DEFAULT_FONT
 }
 
 /** The stored glow choice, defaulting to 'aurora' when unset/invalid. */
@@ -133,4 +167,14 @@ export function applyGlow(id: GlowChoice): void {
   writePref('glow_intensity', id)
   if (id === 'aurora') document.documentElement.removeAttribute('data-glow')
   else document.documentElement.setAttribute('data-glow', id)
+}
+
+/**
+ * Persist the playback-quality preference. No attribute to apply — the value is
+ * read at play time by currentPreferredQuality() — but it goes through the same
+ * read-modify-write as the appearance dials so Settings does not need its own
+ * localStorage call (and its own chance to clobber a concurrent writer).
+ */
+export function applyPreferredQuality(q: QualityChoice): void {
+  writePref('preferred_quality', q)
 }

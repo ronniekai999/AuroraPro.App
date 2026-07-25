@@ -234,6 +234,7 @@ function MobileSheet({
   profiles,
   activeProfileId,
   onSelectProfile,
+  onAddProfile,
   searchQuery,
   onSearchQueryChange,
 }: {
@@ -244,6 +245,9 @@ function MobileSheet({
   profiles: Profile[]
   activeProfileId: number | null
   onSelectProfile: (id: number) => void
+  // Routes to Settings, where profile creation lives. Threaded through to
+  // ProfileSwitcher's dashed Add-Profile row.
+  onAddProfile?: () => void
   searchQuery: string
   onSearchQueryChange: (v: string) => void
 }) {
@@ -344,6 +348,14 @@ function MobileSheet({
               profiles={profiles}
               activeProfileId={activeProfileId}
               onSelect={onSelectProfile}
+              // Closes the sheet FIRST. Every other navigation out of this
+              // sheet goes through go(), which does the same — without it,
+              // Add-Profile rendered Settings underneath while the sheet stayed
+              // mounted with role="dialog" aria-modal="true", body scroll locked
+              // and its Tab trap live. Combined with the switcher unmounting the
+              // focused row, the trap's first/last checks matched neither branch,
+              // so Tab escaped into a page that aria-modal had hidden from AT.
+              onAddProfile={onAddProfile && (() => { onClose(); onAddProfile() })}
             />
           </div>
         )}
@@ -405,6 +417,9 @@ export interface TopNavProps {
   profiles: Profile[]
   activeProfileId: number | null
   onSelectProfile: (id: number) => void
+  // Routes to Settings, where profile creation lives. Threaded through to
+  // ProfileSwitcher's dashed Add-Profile row.
+  onAddProfile?: () => void
   avatarUrl?: string
   onSignOut: () => void
 }
@@ -432,6 +447,7 @@ export function TopNav({
   profiles,
   activeProfileId,
   onSelectProfile,
+  onAddProfile,
   avatarUrl,
   onSignOut,
 }: TopNavProps) {
@@ -635,6 +651,7 @@ export function TopNav({
               profiles={profiles}
               activeProfileId={activeProfileId}
               onSelect={onSelectProfile}
+              onAddProfile={onAddProfile}
             />
           </div>
         )}
@@ -677,6 +694,7 @@ export function TopNav({
         profiles={profiles}
         activeProfileId={activeProfileId}
         onSelectProfile={onSelectProfile}
+        onAddProfile={onAddProfile}
         searchQuery={searchQuery}
         onSearchQueryChange={onSearchQueryChange}
       />

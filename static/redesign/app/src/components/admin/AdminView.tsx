@@ -11,6 +11,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from '@/components/Icon'
+import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import ManualMatchModal from './ManualMatchModal'
 import {
@@ -148,8 +149,8 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
 
   return (
     <div className="space-y-6">
-      <div className="glass-panel rounded-xl p-6">
-        <h3 className="text-white font-semibold mb-2">Database Backup</h3>
+      <div className="glass-panel rounded-2xl p-6">
+        <h2 className="text-white font-semibold mb-2">Database Backup</h2>
         <p className="text-white/50 text-sm mb-4 leading-relaxed">
           Download a binary snapshot of Aurora's database — users, libraries, media items, watch
           parties, progress, settings. Use this before a server migration or as a periodic safety net.
@@ -172,8 +173,8 @@ function AdminBackupRestore({ downloadBackup }: { downloadBackup: () => void }) 
         </button>
       </div>
 
-      <div className="glass-panel rounded-xl p-6" style={{ border: '1px solid rgba(255, 175, 0, 0.25)' }}>
-        <h3 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h3>
+      <div className="glass-panel rounded-2xl p-6" style={{ border: '1px solid rgba(255, 175, 0, 0.25)' }}>
+        <h2 className="font-semibold mb-2" style={{ color: '#ffd685' }}>Database Restore</h2>
         <p className="text-white/50 text-sm mb-3 leading-relaxed">
           Upload a previously-downloaded <code>.dump</code> backup file to restore the database.
         </p>
@@ -246,14 +247,14 @@ function NowPlayingWidget() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   if (items.length === 0) return (
-    <div className="glass-panel rounded-xl p-6">
-      <h3 className="text-white font-semibold mb-2">Now Playing</h3>
+    <div className="glass-panel rounded-2xl p-6">
+      <h2 className="text-white font-semibold mb-2">Now Playing</h2>
       <p className="text-white/40 text-sm">No active streams.</p>
     </div>
   )
   return (
-    <div className="glass-panel rounded-xl p-6">
-      <h3 className="text-white font-semibold mb-4">Now Playing ({items.length})</h3>
+    <div className="glass-panel rounded-2xl p-6">
+      <h2 className="text-white font-semibold mb-4">Now Playing ({items.length})</h2>
       <div className="space-y-3">
         {items.map(s => (
           <div key={s.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
@@ -413,8 +414,8 @@ function UpdatePanel() {
 
   if (!status) {
     return (
-      <div className="glass-panel rounded-xl p-6">
-        <h3 className="text-white font-semibold mb-2">Updates</h3>
+      <div className="glass-panel rounded-2xl p-6">
+        <h2 className="text-white font-semibold mb-2">Updates</h2>
         <p className="text-white/40 text-sm">{error ?? 'Loading update status…'}</p>
       </div>
     )
@@ -425,10 +426,10 @@ function UpdatePanel() {
   const shortSha = (s?: string | null) => (s ? s.slice(0, 7) : null)
 
   return (
-    <div className="glass-panel rounded-xl p-6">
+    <div className="glass-panel rounded-2xl p-6">
       <div className="flex items-start justify-between gap-4 mb-4">
         <div className="flex items-center gap-3">
-          <h3 className="text-white font-semibold">Updates</h3>
+          <h2 className="text-white font-semibold">Updates</h2>
           <span className={`badge-glass text-xs ${meta.color}`}>
             {meta.spinning && (
               <span className="inline-block w-2 h-2 rounded-full bg-current mr-1.5 animate-pulse" />
@@ -490,8 +491,8 @@ function AdminLibrariesTab() {
   useEffect(() => { void reload() }, [reload])
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Add Library</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Add Library</h2>
         <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
           <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
           <select value={newType} onChange={e => setNewType(e.target.value as 'movie' | 'show')} className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
@@ -517,8 +518,8 @@ function AdminLibrariesTab() {
           {creating ? 'Adding…' : 'Add'}
         </button>
       </div>
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Existing Libraries</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Existing Libraries</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No libraries yet.</p>}
@@ -574,8 +575,8 @@ function AdminServerSettingsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Server Settings</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Server Settings</h2>
         {settings === null ? <p className="text-white/40 text-sm">Loading…</p> : (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -646,8 +647,8 @@ function AdminServerSettingsTab() {
       {/* Invite Codes section moved to Admin → Users tab (its natural home).
           See `tab === 'users'` block in AdminView. */}
 
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Image Cache</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Image Cache</h2>
         <p className="text-white/40 text-xs mb-3">Delete cached TMDB poster/backdrop images. The cache repopulates on demand; useful after rescanning a large library or running out of disk.</p>
         <button
           onClick={async () => {
@@ -659,8 +660,8 @@ function AdminServerSettingsTab() {
         >Purge Image Cache</button>
       </div>
 
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Radarr / Sonarr (Requests)</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Radarr / Sonarr (Requests)</h2>
         {settings && (['radarr', 'radarr_4k', 'sonarr', 'sonarr_4k'] as const).map(svc => {
           const urlKey = `${svc}_url`, keyKey = `${svc}_api_key`
           const label = svc === 'radarr' ? 'Radarr' : svc === 'radarr_4k' ? 'Radarr 4K' : svc === 'sonarr' ? 'Sonarr' : 'Sonarr 4K'
@@ -726,8 +727,8 @@ function AdminRoomsTab() {
   useEffect(() => { void reload() }, [reload])
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Create Persistent Room</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Create Persistent Room</h2>
         <p className="text-white/40 text-xs mb-3">Rooms have a stable code that survives across watch parties. Share the code once; friends can rejoin even after the host leaves.</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <input value={name} onChange={e => setName(e.target.value)} placeholder="Room name" className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
@@ -739,8 +740,8 @@ function AdminRoomsTab() {
           className="mt-3 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
         >Create Room</button>
       </div>
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-3">Existing Rooms</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-3">Existing Rooms</h2>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
         {items && items.length === 0 && <p className="text-white/40 text-sm">No rooms yet.</p>}
@@ -801,8 +802,8 @@ function AdminRequestsTab() {
 
   return (
     <div className="space-y-4">
-      <div className="glass-panel rounded-xl p-5">
-        <h3 className="text-white font-semibold mb-1">Pending Approvals</h3>
+      <div className="glass-panel rounded-2xl p-5">
+        <h2 className="text-white font-semibold mb-1">Pending Approvals</h2>
         <p className="text-white/40 text-xs mb-3">Requests that hit a user's quota are held here. Approve to dispatch to Radarr/Sonarr, or deny to reject.</p>
         {err && <p className="text-red-300 text-sm">{err}</p>}
         {items === null && <p className="text-white/40 text-sm">Loading…</p>}
@@ -890,9 +891,9 @@ function AdminSessionsTab() {
     }
   }, [])
   return (
-    <div className="glass-panel rounded-xl p-5">
+    <div className="glass-panel rounded-2xl p-5">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-white font-semibold">Active Streams</h3>
+        <h2 className="text-white font-semibold">Active Streams</h2>
         <button onClick={() => void reload()} className="text-white/60 hover:text-white text-xs">Refresh</button>
       </div>
       {/* Active streams now span BOTH kinds (transcode + direct-play).
@@ -971,7 +972,7 @@ function AdminSessionsTab() {
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
           <div className="relative w-full max-w-3xl bg-[#0a0a0f] border border-white/[0.08] rounded-xl shadow-2xl p-5 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-white font-semibold">Session diagnostic</h3>
+              <h2 className="text-white font-semibold">Session diagnostic</h2>
               <button onClick={() => { setDiag(null); setDiagErr(null); setDiagLoading(false) }} className="text-white/40 hover:text-white" aria-label="Close">
                 <Icon name="x" size={16} />
               </button>
@@ -1145,10 +1146,10 @@ function AdminFlaggedTab() {
   const inRetryPhase = jobActive && aiJob && aiJob.total > 0 && aiJob.processed >= aiJob.total
 
   return (
-    <div className="glass-panel rounded-xl p-5">
+    <div className="glass-panel rounded-2xl p-5">
       <div className="flex items-start justify-between gap-4 mb-3">
         <div className="min-w-0">
-          <h3 className="text-white font-semibold">Flagged Items</h3>
+          <h2 className="text-white font-semibold">Flagged Items</h2>
           <p className="text-white/40 text-xs mt-1">
             Media files that the scanner couldn't auto-match against a TMDB/TVDB record.
             The AI matcher auto-promotes high-confidence picks and suggests sub-threshold
@@ -1295,8 +1296,8 @@ function AdminLLMTab() {
   if (err) return <p className="text-red-300 text-sm">{err}</p>
   if (!s) return <p className="text-white/40 text-sm">Loading…</p>
   return (
-    <div className="glass-panel rounded-xl p-5 space-y-3">
-      <h3 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h3>
+    <div className="glass-panel rounded-2xl p-5 space-y-3">
+      <h2 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h2>
       <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box (an API key is optional, for bearer-checking proxies); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
@@ -1526,12 +1527,12 @@ function OAuthProviderSection({ provider, label, consoleURL, settings, onUpdate 
   const callbackHint = `https://your-aurora/api/auth/oauth/${provider}/callback`
 
   return (
-    <div className="glass-panel rounded-xl p-5 space-y-3">
+    <div className="glass-panel rounded-2xl p-5 space-y-3">
       <div className="flex items-center justify-between mb-2">
-        <h3 className="text-white font-semibold">
+        <h2 className="text-white font-semibold">
           {label} OAuth (Sign-in)
           {enabled && <span className="ml-2 text-emerald-300 text-[10px] uppercase tracking-wider">Enabled</span>}
-        </h3>
+        </h2>
         <a
           href={consoleURL}
           target="_blank"
@@ -1768,10 +1769,65 @@ function UserRowMenu({
 
 // AdminView wired to /api/admin/* endpoints. Each tab lazy-fetches
 // on first visit and caches for the session.
+// Dashboard stat tile (Aurora Stage Phase 7a).
+//
+// The mockup's .stat-tile leads with the VALUE at display size and puts the
+// label under it; the previous markup did the reverse — a 14px label row with an
+// icon, then the number. On a four-up row of numbers the number is what you
+// scan, so it goes first and gets the display face.
+//
+// Extracted because the dashboard rendered this same block twice, verbatim, for
+// the two stat rows (core stats, and the optional embedding/skip-marker pair).
+function StatTile({ label, value, icon, color }: { label: string; value: string; icon: string; color: string }) {
+  return (
+    <div className="glass-panel rounded-2xl px-[18px] py-4">
+      {/* tabular-nums so a row of tiles does not jitter its digits as the
+          numbers tick — several of these poll. */}
+      <p className="text-white font-display font-extrabold text-[26px] leading-none tracking-tight tabular-nums">
+        {value}
+      </p>
+      <div className="text-white/60 text-[11px] mt-1.5 flex items-center gap-[7px]">
+        <Icon name={icon} size={13} className={color} />
+        {label}
+      </div>
+    </div>
+  )
+}
+
+// The thirteen admin sections, in strip order. Hoisted out of the component
+// (Aurora Stage Phase 7a) so the arrow-key handler, the label map and the type
+// can all be derived from ONE list — the type and the array were previously two
+// hand-maintained copies of the same thirteen strings, which is the kind of
+// pair that drifts when a tab is added.
+export const ADMIN_TABS = [
+  'dashboard', 'users', 'libraries', 'rooms', 'requests', 'activity',
+  'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup',
+] as const
+export type AdminTab = typeof ADMIN_TABS[number]
+
+// Tab labels that `capitalize` gets wrong, or that read better renamed.
+// Module scope: this is a constant, and it used to be rebuilt inside the
+// tabs.map callback — thirteen object literals per render.
+//
+// QA BUG-010 follow-up — the Transcodes tab heading inside reads "Active
+// Transcode Streams" but the nav label was just "Sessions", which read as
+// generic and made direct-play streams' absence more confusing.
+const ADMIN_TAB_LABELS: Partial<Record<AdminTab, string>> = {
+  llm: 'LLM',
+  oauth: 'OAuth',
+  sessions: 'Transcodes',
+}
+
 export default function AdminView({ currentAdminId }: { currentAdminId: number }) {
-  type AdminTab = 'dashboard' | 'users' | 'libraries' | 'rooms' | 'requests' | 'activity' | 'sessions' | 'flagged' | 'logs' | 'server' | 'llm' | 'oauth' | 'backup'
   const [tab, setTab] = useState<AdminTab>('dashboard')
-  const tabs: readonly AdminTab[] = ['dashboard', 'users', 'libraries', 'rooms', 'requests', 'activity', 'sessions', 'flagged', 'logs', 'server', 'llm', 'oauth', 'backup'] as const
+  // Where the roving tabIndex sits. Distinct from `tab` because the strip uses
+  // MANUAL activation: arrows move focus without switching panels, so the
+  // focused tab and the selected tab diverge until Enter/Space.
+  const [focusedTab, setFocusedTab] = useState<AdminTab>('dashboard')
+  const tabs = ADMIN_TABS
+  // Per-tab refs so arrow-key navigation can move real focus with the roving
+  // index (ARIA tabs pattern — the set is one tab stop).
+  const tabRefs = useRef<Partial<Record<AdminTab, HTMLButtonElement | null>>>({})
 
   // /api/admin/backup streams a pg_dump archive. We fetch with the
   // Authorization header (rather than a tokenized anchor) so the
@@ -1939,44 +1995,130 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
 
   return (
     <div className="animate-fade-in">
-      <div className="mb-6">
-        <h1 className="text-white text-3xl font-bold font-display">Administration</h1>
-        <p className="text-white/50 text-sm mt-1">Server management dashboard</p>
-      </div>
+      <PageHeader title="Administration" sub="Server management dashboard" />
 
-      {/* Tabs.
+      {/* Tab strip — a REAL tablist, sticky under the chrome.
+          .stage-toolbar + .stage-tabstrip + .stage-tab, all three already
+          existing primitives, rather than a new .stage-admintabs:
+            - .stage-toolbar is exactly this job (sticky at the MEASURED
+              --chrome-h so it tracks the admin scan bar appearing above the
+              nav, blurred fill, bottom border, and static below md where
+              pinning a wrapped strip would eat a third of the viewport).
+              BrowseView's filter bar is the same pattern.
+            - .stage-tabstrip is the horizontally-scrolling strip TopNav uses,
+              with the padding/margin trick that stops the active tab's
+              underline glow and focus ring being clipped by the scroll box.
+              Thirteen tabs overflow at every width, so this matters more here
+              than in the nav.
+          The old strip was a non-scrolling `flex` of thirteen buttons, which
+          simply overflowed its container.
+
+          role="tablist" + arrow-key navigation, not aria-current: these switch
+          a panel in place, so they are tabs, and ARIA's tabs pattern requires
+          the whole set to be ONE tab stop with Left/Right (plus Home/End)
+          moving between them. Phase 6 rejected role="tab" for the filter pills
+          precisely because that keyboard contract was not implemented; here it
+          is, so the role is honest.
+
           QA BUG-006 — `capitalize` only uppercases the first letter
           per word, so "llm" → "Llm" and "oauth" → "Oauth". Override
           for the acronyms; everything else still falls through to
           the existing capitalize rule. */}
-      <div className="flex items-center gap-2 mb-6 border-b border-white/[0.06] pb-1">
-        {tabs.map(t => {
-          const labelOverride: Partial<Record<AdminTab, string>> = {
-            llm: 'LLM',
-            oauth: 'OAuth',
-            // QA BUG-010 follow-up — tab heading inside reads
-            // "Active Transcode Streams" but the nav label was
-            // just "Sessions", which read as generic and made
-            // direct-play streams' absence more confusing.
-            sessions: 'Transcodes',
-          }
-          const display = labelOverride[t]
-          return (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-4 py-2 text-sm font-medium ${display ? '' : 'capitalize'} transition-all border-b-2 -mb-0.5 ${
-                tab === t
-                  ? 'text-purple-400 border-purple-500'
-                  : 'text-white/40 border-transparent hover:text-white/70'
-              }`}
-            >
-              {display ?? t}
-            </button>
-          )
-        })}
+      {/* The negative margin cancels .stage-page's side padding so the sticky
+          strip's fill reaches the viewport edges, and .stage-gutter puts the
+          same padding back on the inside.
+          It has to be RESPONSIVE, matching .stage-page rather than the token:
+          --page-gutter is 48px at every width, but .stage-page drops to 18px
+          below md. A flat, unprefixed negative page-gutter margin would
+          therefore pull 48px against 18px of padding on a phone and push 30px of
+          the strip off each edge — silently, because body sets overflow-x:
+          hidden. (Deliberately not naming that class here: Tailwind's extractor
+          scans comments, so writing it out ships a dead top-level rule. Verified
+          by rebuild — the unprefixed selector is gone.) */}
+      <div className="stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)] mb-6">
+        {/* MANUAL activation: arrows move focus, Enter/Space (native on a
+            <button>) selects. Not the automatic variant this started as.
+            APG recommends manual "when the tab panel's content is loaded
+            asynchronously", and every panel here is exactly that — switching
+            tabs fires listAdminUsers / listAdminActivity / listAdminLogs, and
+            the Transcodes and Now-Playing panels each start a 5-second polling
+            interval on mount. With automatic activation, holding ArrowRight
+            from `dashboard` to `backup` mounted and unmounted eleven panels,
+            firing their fetches and spinning two intervals up and down. That
+            cost was paid only by keyboard users. */}
+        <div
+          role="tablist"
+          aria-label="Administration sections"
+          className="stage-tabstrip flex"
+          onKeyDown={e => {
+            // Arrows walk `focusedTab`, which is where the roving tabIndex sits;
+            // `tab` (the selected panel) only moves on click or Enter/Space.
+            const i = tabs.indexOf(focusedTab)
+            let next = -1
+            if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
+            else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length
+            else if (e.key === 'Home') next = 0
+            else if (e.key === 'End') next = tabs.length - 1
+            if (next < 0) return
+            e.preventDefault()
+            setFocusedTab(tabs[next])
+            // focus() scrolls the tab into view inside .stage-tabstrip by
+            // default (preventScroll is false), so no explicit scrollIntoView.
+            tabRefs.current[tabs[next]]?.focus()
+          }}
+        >
+          {tabs.map(t => {
+            const display = ADMIN_TAB_LABELS[t]
+            const selected = tab === t
+            return (
+              <button
+                key={t}
+                ref={el => { tabRefs.current[t] = el }}
+                type="button"
+                role="tab"
+                id={`admin-tab-${t}`}
+                aria-selected={selected}
+                // Only the SELECTED tab's panel exists in the DOM, so pointing
+                // the other twelve at `admin-panel-<t>` was a dangling IDREF.
+                // ARIA requires IDREFs to resolve; omit rather than dangle.
+                aria-controls={selected ? `admin-panel-${t}` : undefined}
+                // Roving tabIndex on the FOCUSED tab, which under manual
+                // activation is not always the selected one. One tab stop for
+                // the set either way.
+                tabIndex={focusedTab === t ? 0 : -1}
+                onClick={() => { setTab(t); setFocusedTab(t) }}
+                // Keeps the roving index honest when focus arrives by click or
+                // by Tab rather than by arrow key.
+                onFocus={() => setFocusedTab(t)}
+                className={`stage-tab ${display ? '' : 'capitalize'}`}
+              >
+                {display ?? t}
+              </button>
+            )
+          })}
+        </div>
       </div>
 
+      {/* One tabpanel wrapper, not thirteen. Only one section is mounted at a
+          time, so a single element whose id and aria-labelledby track the active
+          tab is both correct and the only version that cannot drift out of sync
+          with the strip above.
+          NO tabIndex and NO focus-visible:outline-none. The first version had
+          both, and the comment justifying them had the behaviour backwards: APG
+          gives a tabpanel tabindex="0" only when it holds NOTHING focusable, and
+          all thirteen of these are full of buttons and inputs — so it ADDED a
+          stop before the content rather than skipping to it. Worse,
+          `focus-visible:outline-none` then hid that stop: Tailwind 3 emits
+          `outline: 2px solid transparent`, and at (0,2,0) it beat index.css's
+          (0,1,0) `:focus-visible` outline floor on both specificity and source
+          order. Focus landed on an invisible full-height container — the third
+          time this exact cascade has shipped here, and index.css documents it
+          twice. */}
+      <div
+        role="tabpanel"
+        id={`admin-panel-${tab}`}
+        aria-labelledby={`admin-tab-${tab}`}
+      >
       {tab === 'dashboard' && (
         <div>
           {statsErr && (
@@ -2000,15 +2142,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     })()
                   : []),
               ].map(s => (
-                <div key={s.label} className="glass-panel rounded-xl p-5">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className={`${s.color}`}>
-                      <Icon name={s.icon} size={20} />
-                    </div>
-                    <span className="text-white/50 text-sm">{s.label}</span>
-                  </div>
-                  <p className="text-white text-2xl font-bold">{s.value}</p>
-                </div>
+                <StatTile key={s.label} {...s} />
               ))}
             </div>
           )}
@@ -2026,20 +2160,12 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
                 ].map(s => (
-                  <div key={s.label} className="glass-panel rounded-xl p-5">
-                    <div className="flex items-center gap-3 mb-3">
-                      <div className={`${s.color}`}>
-                        <Icon name={s.icon} size={20} />
-                      </div>
-                      <span className="text-white/50 text-sm">{s.label}</span>
-                    </div>
-                    <p className="text-white text-2xl font-bold">{s.value}</p>
-                  </div>
+                  <StatTile key={s.label} {...s} />
                 ))}
               </div>
 
-              <div className="glass-panel rounded-xl p-6 mb-6">
-                <h3 className="text-white font-semibold mb-4">Server</h3>
+              <div className="glass-panel rounded-2xl p-6 mb-6">
+                <h2 className="text-white font-semibold mb-4">Server</h2>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
                   <div>
                     <p className="text-white/40 text-xs uppercase tracking-wide mb-1">Version</p>
@@ -2102,10 +2228,10 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           {/* Invite section — primary entry point for adding new users.
               Lives here (next to the user list) rather than under
               Server settings because that's where admins look. */}
-          <div className="glass-panel rounded-xl p-5">
+          <div className="glass-panel rounded-2xl p-5">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
-                <h3 className="text-white font-semibold mb-1">Invite a user</h3>
+                <h2 className="text-white font-semibold mb-1">Invite a user</h2>
                 <p className="text-white/40 text-xs">Generate a one-time code. Share it with the person you want to invite — they'll enter it on the Register screen.</p>
               </div>
               <button
@@ -2139,7 +2265,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
             )}
           </div>
 
-          <div className="glass-panel rounded-xl overflow-hidden">
+          <div className="glass-panel rounded-2xl overflow-hidden">
           {usersLoading && !users && <p className="p-6 text-white/40 text-sm">Loading users…</p>}
           {usersErr && <p className="p-6 text-red-300 text-sm">{usersErr}</p>}
           {users && (
@@ -2206,8 +2332,8 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       )}
 
       {tab === 'activity' && (
-        <div className="glass-panel rounded-xl p-6">
-          <h3 className="text-white font-semibold mb-4">Recent Activity</h3>
+        <div className="glass-panel rounded-2xl p-6">
+          <h2 className="text-white font-semibold mb-4">Recent Activity</h2>
           {activityLoading && !activity && <p className="text-white/40 text-sm">Loading activity…</p>}
           {activityErr && <p className="text-red-300 text-sm">{activityErr}</p>}
           {activity && (
@@ -2231,8 +2357,8 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       )}
 
       {tab === 'logs' && (
-        <div className="glass-panel rounded-xl p-6 font-mono text-xs">
-          <h3 className="text-white font-semibold mb-4 font-sans">System Logs</h3>
+        <div className="glass-panel rounded-2xl p-6 font-mono text-xs">
+          <h2 className="text-white font-semibold mb-4 font-sans">System Logs</h2>
           {logsLoading && !logs && <p className="text-white/40 text-sm font-sans">Loading logs…</p>}
           {logsErr && <p className="text-red-300 text-sm font-sans">{logsErr}</p>}
           {logs && (
@@ -2303,6 +2429,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       {tab === 'llm' && <AdminLLMTab />}
       {tab === 'oauth' && <AdminOAuthTab />}
       {tab === 'backup' && <AdminBackupRestore downloadBackup={downloadBackup} />}
+      </div>
     </div>
   )
 }
