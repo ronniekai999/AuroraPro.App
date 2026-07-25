@@ -67,16 +67,14 @@ export function DetailHero({
       {/* Phase 5 — the mockup's two-layer ramp as one element, replacing two
           inline-styled gradient divs.
 
-          Correction to what an earlier version of this comment claimed: the
-          new bottom fade is WEAKER than the pair it replaced, not stronger.
-          Measured, at 46% of hero height (where the poster's top edge lands)
-          it is 0.13 alpha against the old 0.49. It happens not to matter
-          behind the poster because the strengthened LEFT ramp compensates
-          there — combined alpha at x=150 is 0.855 new vs 0.851 old — but the
-          poster's top now sits against noticeably lighter artwork, and the
-          meta row at x=800 gets slightly less backing than before (0.770 vs
-          0.817). Recorded accurately so the next person tuning these stops
-          isn't working from a wrong premise. */}
+          The first cut of this made the bottom fade WEAKER than the pair it
+          replaced (0.13 alpha where the old pair gave 0.49, at 46% of hero
+          height where the poster's top edge lands) while a comment here
+          claimed the opposite. The alpha figures were then corrected but the
+          gradient was left thin — and it turned out to matter, not just
+          aesthetically: the badge row sits in that thin band and its
+          content-rating chip fell below WCAG AA. The stops now restore the
+          old weight low down; see .stage-detail-scrim for the arithmetic. */}
       <div className="stage-detail-scrim" />
       <div className="aurora-floor" />
 
@@ -115,8 +113,23 @@ export function DetailHero({
           <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/25 uppercase tracking-wide">
             {kindLabel}
           </span>
+          {/* bg-black/60 + text-white/85, NOT the bg-white/5 + text-white/55
+              this used to carry. .badge-glass is 11.2px/600 — normal text for
+              WCAG 1.4.3, so 4.5:1 — and a 0.05-alpha white fill lets the
+              backdrop through, so the chip's contrast was a function of the
+              artwork behind it. Worst case (a bright frame) it measured
+              3.83:1: a real AA failure introduced in this phase, because the
+              chip sits higher up the scrim than the meta row does. Note the
+              strengthened scrim alone only got it to 4.41 — still short, so
+              the fill had to change too.
+
+              A near-opaque dark fill makes the ratio artwork-INDEPENDENT.
+              Even with the scrim removed entirely and pure-white artwork
+              beneath, black/60 composites to #666 and white/85 text on it is
+              4.69:1; against the real scrim it is 13.27:1. Opacity alone could
+              not fix this — no white-alpha fill passes over a white frame. */}
           {contentRating && (
-            <span className="badge-glass bg-white/5 text-white/55 border border-white/10">{contentRating}</span>
+            <span className="badge-glass bg-black/60 text-white/85 border border-white/10">{contentRating}</span>
           )}
         </div>
         {/* .type-detail is --fs-detail (fluid, ≤64px) with per-typeface
@@ -131,9 +144,11 @@ export function DetailHero({
           // anywhere in the UI. Works only because of the z-10 above.
           title={title}
           // py-[0.14em]: the clamp's overflow:hidden clips at the padding box,
-          // and --lh-detail is below 1.0 — so descenders and accented capitals
-          // were being shaved. Padding, not a bigger line-height, so the token
-          // keeps meaning what it says for unclamped uses of .type-detail.
+          // and --lh-detail (0.98–1.02 depending on typeface) is far below the
+          // ~1.14em ink span of a line containing accented capitals — so those
+          // and descenders were being shaved. Padding, not a bigger
+          // line-height, so the token keeps meaning what it says for unclamped
+          // uses of .type-detail. 0.14em covers the gap at every face.
           className="font-display font-extrabold text-4xl sm:text-5xl lg:type-detail mb-3 line-clamp-2 py-[0.14em] drop-shadow-[0_2px_24px_rgba(0,0,0,0.6)]"
         >
           {title}
