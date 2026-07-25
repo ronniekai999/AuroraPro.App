@@ -92,11 +92,22 @@
 
     /* Typeface system tokens — drive body + display type everywhere
        (body, .font-display, .holo-text all read these vars). Default
-       (no data-font attribute) is "NOVA": Sora display + Inter Tight
-       body. Users override via Settings → Appearance → Typeface, which
-       writes data-font="current" | "eclipse" | "halo" on <html>. */
-    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-display: 'Sora', 'Inter Tight', sans-serif;
+       (no data-font attribute) is "ECLIPSE": Bricolage Grotesque display
+       + Inter body. Users override via Settings → Appearance → Typeface,
+       which writes data-font="nova" | "current" | "halo" on <html>.
+
+       2026-07-25 (Aurora Stage Phase 0) — the attribute-less default
+       moved from NOVA (Sora + Inter Tight) to ECLIPSE. Option B's
+       editorial art direction is built on the Bricolage/Inter pairing,
+       and Bricolage is what carries the oversized display sizes below.
+       NOVA is unchanged and still selectable — it just became an
+       ATTRIBUTED system (html[data-font="nova"]) instead of the bare
+       :root set. Users who explicitly picked Nova keep it: the choice is
+       persisted as aurora_prefs.font_choice regardless of whether an
+       attribute was written, so applyFont()/the main.tsx pre-paint shim
+       can still tell "explicitly chose Nova" from "never chose". */
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
 
     /* Glow theme tokens — drive the white/purple edge + halo on
        .glass-panel, .glass-card, and .media-card. Default is
@@ -113,6 +124,57 @@
       0 0 0 1px rgba(220, 200, 255, 0.25),
       0 0 34px rgba(168, 85, 247, 0.20),
       0 0 72px rgba(255, 255, 255, 0.08);
+
+    /* ============================================================
+       Aurora Stage (Option B) — Phase 0 tokens
+       do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md
+       ============================================================
+       The mockup's :root is otherwise identical to the tokens above
+       (#050505 bg, --glow-border, --glow-halo == the mockup's --halo);
+       these are the genuinely new ones. Palette tokens are prefixed
+       `--stage-` because the bare names the mockup uses (--primary,
+       --cyan) are ALREADY TAKEN here by the shadcn/Tailwind HSL
+       triplets (`--primary: 270 91% 65%`, consumed as
+       hsl(var(--primary))). Redefining those to hex would break every
+       Tailwind color utility in the app. */
+
+    /* Chrome metrics. --topnav-h is the height of the Phase 1 TopNav and
+       the anchor for every sticky offset below it (browse toolbar, admin
+       tab strip). The mockup hard-codes `top: 64px` in both places; read
+       this token instead so nav height stays changeable in one edit. */
+    --topnav-h: 64px;
+    --page-gutter: 48px;
+
+    /* Display type scale. Option B's whole "content is the UI" read
+       comes from oversized Bricolage display type, so the sizes are
+       tokens rather than per-component literals — one place to tune the
+       editorial voice, and one place to check when a user switches to a
+       typeface system with different metrics. */
+    --fs-hero: 84px;      /* home hero title */
+    --fs-detail: 64px;    /* title-detail hero */
+    --fs-browse: 52px;    /* movies / TV browse hero strip */
+    --fs-page: 38px;      /* requests / library / settings page heads */
+    --fs-section: 24px;   /* pane + section heads */
+    --fs-rail: 21px;      /* rail titles */
+
+    /* Card surface — the mockup's --card-bg. (`--card` is the shadcn
+       token and stays untouched.) */
+    --card-bg: linear-gradient(180deg, rgba(28, 25, 42, 0.55) 0%, rgba(14, 12, 22, 0.85) 100%);
+
+    /* Palette, for the Stage primitives further down. Same hexes the app
+       already uses inline; named so the primitives don't re-litter them. */
+    --stage-purple: #A855F7;
+    --stage-purple-2: #7C3AED;
+    --stage-purple-lt: #d8b4fe;
+    --stage-cyan: #22D3EE;
+    --stage-star: #facc15;
+
+    /* Backdrop tint — the three radial washes .page-tint composites. Each
+       page overrides them (Phase 2 drives them off the current backdrop's
+       dominant color); these defaults are the mockup's home screen. */
+    --tint-1: radial-gradient(1100px 700px at 70% -8%, rgba(124, 58, 237, 0.22), transparent 62%);
+    --tint-2: radial-gradient(800px 600px at -5% 40%, rgba(30, 27, 75, 0.50), transparent 60%);
+    --tint-3: radial-gradient(900px 700px at 105% 85%, rgba(14, 116, 144, 0.10), transparent 55%);
   }
 
   html[data-glow="subtle"] {
@@ -140,14 +202,28 @@
   }
 
   /* Typeface systems — see Settings → Appearance → Typeface. The
-     default (NOVA: Sora + Inter Tight) lives in the :root tokens above;
-     these blocks override per the user's choice. "current" is the
-     original Space Grotesk + Inter pairing (labelled "Classic" in UI). */
+     default (ECLIPSE: Bricolage Grotesque + Inter) lives in the :root
+     tokens above; these blocks override per the user's choice. "current"
+     is the original Space Grotesk + Inter pairing (labelled "Classic" in
+     UI). */
   html[data-font="current"] {
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Space Grotesk', 'Inter', sans-serif;
   }
 
+  /* NOVA — the pre-Aurora-Stage default. Now an attributed system so the
+     :root set can carry Eclipse; values are byte-for-byte what :root held
+     before, so an explicit Nova user sees no change. */
+  html[data-font="nova"] {
+    --font-sans: 'Inter Tight', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-display: 'Sora', 'Inter Tight', sans-serif;
+  }
+
+  /* ECLIPSE is the attribute-less default (see :root). This block is kept
+     so an explicit data-font="eclipse" — a stale attribute from before
+     the default flip, or a deliberate write — still resolves to the same
+     pairing instead of silently falling through to whatever :root holds
+     next. It is intentionally redundant, not dead. */
   html[data-font="eclipse"] {
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-display: 'Bricolage Grotesque', 'Inter', sans-serif;
@@ -314,7 +390,201 @@
     filter: blur(46px);
     pointer-events: none;
   }
+
+  /* Display type scale utilities. Every Option B headline reads its size
+     from a token (see :root) so the editorial voice is tunable in one
+     place — and so a typeface switch has one list of sizes to re-check
+     rather than a dozen inline `text-[84px]`s. line-height/tracking are
+     baked in: at 84px the browser default leading is unusable. */
+  .type-hero    { font-size: var(--fs-hero);    line-height: 0.94; letter-spacing: -0.03em; }
+  .type-detail  { font-size: var(--fs-detail);  line-height: 0.96; letter-spacing: -0.03em; }
+  .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
+  .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
+  .type-section { font-size: var(--fs-section); line-height: 1.1;  letter-spacing: -0.01em; }
+  .type-rail    { font-size: var(--fs-rail);    line-height: 1.15; letter-spacing: -0.01em; }
 }
+
+/* ====================================================================
+   AURORA STAGE (Option B) — shared primitives
+   do/ui-mockups/option-b/IMPLEMENTATION_PLAN.md · Phase 0
+
+   Ported 1:1 from the mockup so Phases 1–8 consume them instead of
+   re-deriving the same chrome per screen. Nothing here is wired up yet
+   — Phase 0 ships the vocabulary, later phases apply it.
+
+   All classes are `stage-`/`type-` prefixed. The mockup uses bare names
+   (.btn-primary, .pill, .qb); during a nine-phase migration a prefix is
+   what lets you tell new chrome from old at a glance in the DOM, and it
+   guarantees no collision with the 85 existing *-pill class names or a
+   future shadcn button variant.
+   ==================================================================== */
+
+/* Backdrop tint — the per-page wash that makes each page "a stage lit
+   for its content". Sits behind content (z-0) inside a positioned
+   ancestor; the three gradients come from --tint-1/2/3 so a page (or,
+   from Phase 2, the current backdrop's dominant color) can retint by
+   setting three custom properties instead of restyling the element. */
+.page-tint {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--tint-1), var(--tint-2), var(--tint-3);
+}
+
+/* Starfield — the faint sparkle over auth / hero backdrops. Pure
+   gradients (no image request), and cheap: eight 1–1.5px radials on a
+   non-animated layer. */
+.stage-stars {
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1.5px 1.5px at 12% 22%, #fff, transparent),
+    radial-gradient(1px 1px at 34% 8%, #e9d5ff, transparent),
+    radial-gradient(1.5px 1.5px at 58% 18%, #fff, transparent),
+    radial-gradient(1px 1px at 76% 34%, #a5f3fc, transparent),
+    radial-gradient(1.5px 1.5px at 88% 12%, #fff, transparent),
+    radial-gradient(1px 1px at 46% 30%, #fff, transparent),
+    radial-gradient(1px 1px at 24% 42%, #c4b5fd, transparent),
+    radial-gradient(1.5px 1.5px at 68% 44%, #fff, transparent);
+}
+
+/* ── Buttons ───────────────────────────────────────────────────────── */
+.stage-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  height: 46px;
+  padding: 0 24px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  font-weight: 600;
+  font-size: 14.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+.stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.stage-btn:not(:disabled):hover { transform: translateY(-1px); }
+.stage-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px #050505, 0 0 0 4px rgba(216, 180, 254, 0.7);
+}
+.stage-btn-primary {
+  background: linear-gradient(135deg, var(--stage-purple), var(--stage-purple-2));
+  color: #fff;
+  box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
+}
+.stage-btn-white { background: #fff; color: #0a0a0a; }
+.stage-btn-ghost {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+}
+.stage-btn-quiet {
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 500;
+}
+.stage-btn-quiet:hover { color: #fff; }
+
+/* ── Filter / toggle pills ─────────────────────────────────────────── */
+.stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 15px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+.stage-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.stage-pill.is-on,
+.stage-pill[aria-pressed="true"],
+.stage-pill[aria-selected="true"] {
+  background: rgba(168, 85, 247, 0.16);
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+  font-weight: 600;
+}
+.stage-pill:focus-visible {
+  outline: none;
+  border-color: rgba(216, 180, 254, 0.8);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
+}
+
+/* ── Badges ───────────────────────────────────────────────────────────
+   .stage-badge is the glass chip that sits ON artwork (detail hero
+   "MOVIE" / "PG-13"). The 0.18 white border + blurred dark fill is what
+   keeps it legible over an arbitrary backdrop. */
+.stage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  background: rgba(10, 8, 18, 0.55);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Quality badges. These go on card art in Phase 3, so each variant
+   carries its own opaque-enough fill — they must not rely on the poster
+   underneath for contrast. */
+.stage-qb {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  color: #fff;
+}
+.stage-qb-4k {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.9), rgba(126, 34, 206, 0.9));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
+}
+.stage-qb-hdr {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.9), rgba(180, 83, 9, 0.9));
+}
+.stage-qb-hd {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(6px);
+}
+
+/* Reduced motion — the lift on hover is decorative. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-btn { transition: none; }
+  .stage-btn:not(:disabled):hover { transform: none; }
+}
+
+/* Glow = Subtle honours the blur budget the same way .aurora-glass-overlay
+   does (see the html[data-glow="subtle"] note above): the Stage primitives
+   that layer backdrop-blur drop it for a flat fill. */
+html[data-glow="subtle"] .stage-btn-ghost,
+html[data-glow="subtle"] .stage-badge,
+html[data-glow="subtle"] .stage-qb-hd {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 
 @keyframes chromaticShift {
   0% { background-position: 0% 50%; }

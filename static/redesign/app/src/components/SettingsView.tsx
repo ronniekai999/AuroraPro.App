@@ -200,22 +200,30 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             {/* Typeface — writes aurora_prefs.font_choice and live-updates
                 <html data-font> so all display + body text reflows into the
                 chosen system immediately (CSS vars --font-sans/--font-display
-                in index.css). Default ("nova": Sora + Inter Tight) is the
-                unprefixed :root token set; only the other three set the
-                attribute. Each chip previews its own display face. */}
+                in index.css). Default ("eclipse": Bricolage Grotesque + Inter)
+                is the unprefixed :root token set; only the other three set the
+                attribute. Each chip previews its own display face.
+
+                2026-07-25 (Aurora Stage Phase 0) — default flipped 'nova' →
+                'eclipse'. The option list, the fallback below, and the
+                remove-attribute branch all moved together; keep them in sync
+                with applyFont() in lib/appearance.ts and the pre-paint shim in
+                main.tsx. (This radiogroup deliberately duplicates that logic
+                rather than importing it — consolidating is Phase 7 work, when
+                this card gets its Option B two-column treatment.) */}
             <div className="pt-1">
               <p className="text-white/80 text-sm font-medium">Typeface</p>
               <p className="text-white/40 text-xs">Display and body fonts used across the app.</p>
             </div>
             <div role="radiogroup" aria-label="Typeface" className="grid grid-cols-2 gap-3">
               {([
-                { id: 'nova',    label: 'Nova',    desc: 'Futuristic · default', font: "'Sora', sans-serif" },
-                { id: 'eclipse', label: 'Eclipse', desc: 'Editorial',            font: "'Bricolage Grotesque', sans-serif" },
-                { id: 'halo',    label: 'Halo',    desc: 'Polished',             font: "'Outfit', sans-serif" },
-                { id: 'current', label: 'Classic', desc: 'Original',             font: "'Space Grotesk', sans-serif" },
+                { id: 'eclipse', label: 'Eclipse', desc: 'Editorial · default', font: "'Bricolage Grotesque', sans-serif" },
+                { id: 'nova',    label: 'Nova',    desc: 'Futuristic',          font: "'Sora', sans-serif" },
+                { id: 'halo',    label: 'Halo',    desc: 'Polished',            font: "'Outfit', sans-serif" },
+                { id: 'current', label: 'Classic', desc: 'Original',            font: "'Space Grotesk', sans-serif" },
               ] as const).map(opt => {
                 const stored = rawRef.current.font_choice
-                const current = typeof stored === 'string' ? stored : 'nova'
+                const current = typeof stored === 'string' ? stored : 'eclipse'
                 const active = current === opt.id
                 return (
                   <button
@@ -226,9 +234,9 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                     onClick={() => {
                       rawRef.current = { ...rawRef.current, font_choice: opt.id }
                       try { localStorage.setItem('aurora_prefs', JSON.stringify(rawRef.current)) } catch { /* ignore */ }
-                      // "nova" is the default — no attribute (matches the unprefixed
+                      // "eclipse" is the default — no attribute (matches the unprefixed
                       // :root tokens in index.css and keeps a clean DOM).
-                      if (opt.id === 'nova') document.documentElement.removeAttribute('data-font')
+                      if (opt.id === 'eclipse') document.documentElement.removeAttribute('data-font')
                       else document.documentElement.setAttribute('data-font', opt.id)
                       // Force re-render so the active chip updates.
                       setSettings(s => ({ ...s }))

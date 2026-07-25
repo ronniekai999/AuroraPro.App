@@ -7,10 +7,18 @@
 // "Make it yours" step reuses these helpers so a choice made there persists and
 // renders identically to one made in Settings.
 //
-// The two defaults — font 'nova' and glow 'aurora' — are intentionally
+// The two defaults — font 'eclipse' and glow 'aurora' — are intentionally
 // ATTRIBUTE-LESS: they map to the unprefixed :root tokens, so we REMOVE the
 // attribute rather than set it (keeps a clean DOM for users who never changed
 // the setting, and matches main.tsx which only honors the non-default values).
+//
+// 2026-07-25 (Aurora Stage Phase 0) — the default font flipped 'nova' →
+// 'eclipse' (Bricolage + Inter), so 'nova' became an attributed system. An
+// explicit Nova choice SURVIVES the flip because the choice is persisted to
+// aurora_prefs.font_choice whether or not an attribute was written, and
+// currentFont() below only falls back to the default when nothing valid is
+// stored. Three places encode the default and must agree: this file, the
+// pre-paint shim in main.tsx, and the inline radiogroup in SettingsView.
 
 export type FontChoice = 'nova' | 'current' | 'eclipse' | 'halo'
 export type GlowChoice = 'subtle' | 'aurora' | 'heavy'
@@ -30,8 +38,8 @@ export interface GlowOption {
 
 // Order + copy intentionally match Settings → Appearance.
 export const FONT_OPTIONS: readonly FontOption[] = [
-  { id: 'nova', label: 'Nova', desc: 'Futuristic · default', font: "'Sora', sans-serif" },
-  { id: 'eclipse', label: 'Eclipse', desc: 'Editorial', font: "'Bricolage Grotesque', sans-serif" },
+  { id: 'eclipse', label: 'Eclipse', desc: 'Editorial · default', font: "'Bricolage Grotesque', sans-serif" },
+  { id: 'nova', label: 'Nova', desc: 'Futuristic', font: "'Sora', sans-serif" },
   { id: 'halo', label: 'Halo', desc: 'Polished', font: "'Outfit', sans-serif" },
   { id: 'current', label: 'Classic', desc: 'Original', font: "'Space Grotesk', sans-serif" },
 ]
@@ -70,10 +78,10 @@ function writePref(key: string, value: string): void {
   }
 }
 
-/** The stored typeface choice, defaulting to 'nova' when unset/invalid. */
+/** The stored typeface choice, defaulting to 'eclipse' when unset/invalid. */
 export function currentFont(): FontChoice {
   const v = readPrefs().font_choice
-  return v === 'current' || v === 'eclipse' || v === 'halo' ? v : 'nova'
+  return v === 'current' || v === 'nova' || v === 'halo' ? v : 'eclipse'
 }
 
 /** The stored glow choice, defaulting to 'aurora' when unset/invalid. */
@@ -95,10 +103,10 @@ export function currentPreferredQuality(): QualityChoice {
   return v === '4k' || v === '1080p' ? v : 'auto'
 }
 
-/** Persist + live-apply a typeface choice ('nova' is the attribute-less default). */
+/** Persist + live-apply a typeface choice ('eclipse' is the attribute-less default). */
 export function applyFont(id: FontChoice): void {
   writePref('font_choice', id)
-  if (id === 'nova') document.documentElement.removeAttribute('data-font')
+  if (id === 'eclipse') document.documentElement.removeAttribute('data-font')
   else document.documentElement.setAttribute('data-font', id)
 }
 

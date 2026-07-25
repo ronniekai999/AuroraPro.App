@@ -47,17 +47,38 @@ So the whole plan is **frontend-only**, inside `static/redesign/app/src/`.
 
 ---
 
-## 2. Open decisions (need your call before Phase 5+)
+## 2. Decisions — RESOLVED 2026-07-25
 
-These four are genuinely ambiguous in the mockup. Phases 0–4 don't depend on them, so
-they can be answered while that work is in flight.
+| # | Question | Decision |
+|---|----------|----------|
+| **D1** | **Screen 07 shows the player as a *windowed theater*** — rounded 20px inset with the dimmed app behind it (`.theater`, `.dim-app`, `.dim-veil`). Today `VideoPlayer` is `fixed inset-0 z-[60] bg-black` (`VideoPlayer.tsx:3200`) | ✅ **Real feature.** Windowed theater mode is in scope — a genuine playback-surface change, not a re-skin. Scoped out of the styling PR into its own branch; see Phase 7b |
+| **D2** | **Screen 11 shows My Library + Collections + Calendar as a 3-pane grid** (`.tri`). Merge into one page, or three routed views? | ✅ **Keep three separate routed pages**, unchanged nav — but adopt the mockup's pane UI on each (`.saved-grid`, `.col-card`, `.cal-month`, the `.lm-seg` List⇄Month segment). Styling adopted in full; routing untouched |
+| **D3** | **Make Bricolage the default typeface for everyone?** | ✅ **Yes.** `:root` default flipped to the Eclipse pairing; all four systems stay selectable. Shipped in Phase 0 |
+| **D4** | **Land phases straight on `main`, or stage on an integration branch?** | ✅ **Straight on `main`**, in order. Phases 1+2 still ship as one PR (see below) |
 
-| # | Question | My recommendation |
-|---|----------|-------------------|
-| **D1** | **Screen 07 shows the player as a *windowed theater*** — rounded 20px inset with the dimmed app behind it (`.theater`, `.dim-app`, `.dim-veil`). Today `VideoPlayer` is `fixed inset-0 z-[60] bg-black` (`VideoPlayer.tsx:3200`). Is windowed mode a real feature request, or a mockup device to show page context? | **Mockup device.** Keep fullscreen; adopt only the mockup's control styling (buffered fill, hover timestamp, transport chrome, Up Next card, Smart Skip pill). A windowed/PiP mode is a separate feature, not part of a re-skin |
-| **D2** | **Screen 11 shows My Library + Collections + Calendar as a 3-pane grid** (`.tri`). Merge into one page, or is that the mockup fitting three routed views in one frame? | **Three routed views**, unchanged nav. The mockup's own footnote lists them as "LibraryView / CollectionsView / CalendarView" — three views. Adopt the pane *styling*, not the merge |
-| **D3** | **Make Bricolage the default typeface for everyone?** | **Yes** — flip the `:root` default to the Eclipse pairing and re-label, but keep all four systems selectable in Settings → Appearance. Anyone who explicitly picked Nova/Halo/Classic keeps it (their `aurora_prefs` already writes an attribute) |
-| **D4** | **Land phases straight on `main`, or stage on an integration branch?** | **Straight on `main`**, in order — each phase leaves the app coherent and deployable. The one exception is Phases 1+2, which must ship together (see below) |
+### D1 follow-through — windowed theater is real scope
+
+Treating it as a feature rather than a restyle changes Phase 7. What the mockup implies:
+
+- A **mode toggle** with persistence (`aurora_prefs`, alongside the existing quality /
+  typeface / glow prefs) — fullscreen ⇄ windowed, plus the native-fullscreen path.
+- **The app stays mounted and visible behind the player** (`.dim-app` at
+  `opacity: 0.5; filter: saturate(0.7)`, `.dim-veil` blur on top). Today the player is an
+  opaque `fixed inset-0 bg-black` overlay; the tree behind it keeps rendering but is
+  never seen. Windowed mode makes what's behind it *visible*, which means the page
+  underneath now has to look right while video plays — scroll lock, the TopNav's z-order,
+  and paused-background cost all become real considerations.
+- **Per-frame cost**: `.dim-veil` is `backdrop-filter: blur(6px)` over a compositing
+  layer that contains playing video. That is exactly the blur budget flagged in
+  deep-debug Bug 25 and mitigated by `html[data-glow="subtle"] .aurora-glass-overlay`.
+  The veil must respect the same escape hatch — Phase 0 already extends that pattern to
+  the Stage primitives.
+- Keyboard/focus: Esc, click-outside, and focus trapping all differ between a windowed
+  panel and a fullscreen surface.
+
+So Phase 7 splits: **7a** restyles the existing controls (low risk, ships with admin /
+settings / auth), **7b** adds windowed mode as its own PR with its own review. Sequencing
+it last also means the Stage chrome it composites over is already final.
 
 ---
 
@@ -65,9 +86,18 @@ they can be answered while that work is in flight.
 
 Seven phases. Ordering is by blast radius and by dependency, not by screen number.
 
-### Phase 0 — Design tokens + type scale (no layout change)
+### Phase 0 — Design tokens + type scale (no layout change) ✅ SHIPPED
 
 **Branch** `feat/stage-tokens`
+
+> **Landed 2026-07-25.** `index.css` carries the token block, the `.stage-*` primitives
+> and the `.type-*` scale utilities; the typeface default is flipped; a new
+> `lib/appearance.test.ts` (13 tests) pins the flip's non-destructive invariant. All
+> new classes are `stage-`/`type-` prefixed — the mockup's bare `.pill` / `.btn-primary`
+> / `.qb` names would be indistinguishable from pre-migration chrome in the DOM across a
+> nine-phase migration, and `--primary` / `--cyan` are already taken by the
+> shadcn/Tailwind HSL triplets (redefining them to hex would break every Tailwind color
+> utility). Details in §3.0 below.
 
 - `index.css` — add the Option B token set alongside the existing ones. The mockup's
   `:root` is already 95% identical to ours (`#050505`, `#A855F7`, `#22D3EE`,
@@ -87,6 +117,36 @@ Seven phases. Ordering is by blast radius and by dependency, not by screen numbe
 **Why first:** it is the only phase with zero layout risk, and every later phase depends
 on the tokens. **Test:** all four typeface systems × three glow systems render — Bricolage
 has different vertical metrics than Sora, so the 84px hero must be checked in each.
+
+#### 3.0 What actually landed
+
+| File | Change |
+|---|---|
+| `index.css` | `--topnav-h` / `--page-gutter`; `--fs-hero` … `--fs-rail` scale; `--card-bg`; `--stage-*` palette; `--tint-1/2/3`. `.type-*` utilities bake in line-height + tracking (browser default leading is unusable at 84px). `.page-tint` + `.stage-stars` washes. `.stage-btn` (+`-primary`/`-white`/`-ghost`/`-quiet`), `.stage-pill`, `.stage-badge`, `.stage-qb` (+`-4k`/`-hdr`/`-hd`) with focus-visible rings, `prefers-reduced-motion`, and the `data-glow="subtle"` blur opt-out |
+| `index.css` | `:root` = Eclipse; **new** `html[data-font="nova"]` block holding the exact values `:root` had before; `html[data-font="eclipse"]` kept deliberately redundant so a stale attribute still resolves correctly |
+| `lib/appearance.ts` | `currentFont()` default → `'eclipse'`; `applyFont()` removes the attribute for `'eclipse'`; `FONT_OPTIONS` reordered, Eclipse labelled `Editorial · default` |
+| `main.tsx` | pre-paint shim allowlist `'current'｜'eclipse'｜'halo'` → `'current'｜'nova'｜'halo'` |
+| `SettingsView.tsx` | inline radiogroup list, `'eclipse'` fallback, remove-attribute branch |
+| `lib/appearance.test.ts` | **new**, 13 tests |
+
+**The one non-obvious risk, and how it's handled.** Making Eclipse attribute-less means
+Nova had to become *attributed*. That's only non-destructive because `applyFont()`
+persists `aurora_prefs.font_choice` **even for the attribute-less default** — so
+"explicitly chose Nova" is distinguishable from "never chose", and only the latter picks
+up Bricolage. `appearance.test.ts` pins exactly that (`persists eclipse even though it
+writes no attribute`, `keeps Nova for a user who explicitly chose it before the flip`),
+because the natural "cleanup" of skipping the write for the default would silently
+re-typeface every Nova user.
+
+**Three files encode the default** — `lib/appearance.ts`, the `main.tsx` pre-paint shim,
+and `SettingsView`'s inline radiogroup (which duplicates rather than imports the helper).
+All three are updated and cross-referenced in comments. Consolidating them onto
+`FONT_OPTIONS` / `applyFont` is Phase 7a work, when that settings card gets its two-column
+treatment.
+
+**Gate:** `npm run build` clean · `npm test` 34/34 · `go build ./...` + `go test ./...`
+green · `npm run lint` unchanged from baseline (7 pre-existing errors, all in
+`hooks/useCompanion.ts` + `hooks/useRealtime.ts`, neither touched here).
 
 ---
 
@@ -226,11 +286,15 @@ currently one file (`lib/prewarm.test.ts`).
   with episode chips.
 - `SearchView.tsx` + `SearchPalette.tsx` — 760px palette, 26px display query, poster
   result rows with ⏎ hints, footer key legend; results page gets the `.smart-chip`.
-- Per **D2**, these stay three separate routed views.
+
+Per **D2** these stay three separate routed pages — the `.tri` 3-column grid is the
+mockup's framing device, not the target layout. Each page adopts its pane's UI in full
+(`.saved-grid`, `.col-card` + badges, `.cal-month` + `.lm-seg`) at full page width rather
+than in a third of the viewport, so the column counts scale up accordingly.
 
 ---
 
-### Phase 7 — Admin · Settings · Auth · Profiles · Player/Party polish
+### Phase 7a — Admin · Settings · Auth · Profiles · Player/Party restyle
 
 **Branch** `feat/stage-admin-settings` and `feat/stage-auth-player` (two PRs — admin +
 settings are dense but low-risk; auth/player touch the login path and the playback
@@ -246,10 +310,36 @@ overlay, which deserve their own review)
 - `ProfileSwitcher.tsx` / `NebulaAvatar.tsx` — "Who's watching?" stage, 118px orbs,
   dashed Add Profile, onboarding note.
 - `PlayerControls.tsx` / `VideoPlayer.tsx` — scrub with buffered fill + hover timestamp,
-  transport chrome, `.skip-pill`, `.upnext` card, `.cast-pill`. Per **D1**, fullscreen
-  stays.
+  transport chrome, `.skip-pill`, `.upnext` card, `.cast-pill`. **Styling only** — the
+  surface stays `fixed inset-0` here; windowed mode is 7b.
 - `PartyPanel.tsx` + `CinematicChatTicker` / `VoicePill` / `MiniDock` / `PartyInvite` —
   restyle only; the mockup's minimal/cinematic variants already exist as components.
+- Consolidate the triple-encoded typeface default onto `FONT_OPTIONS` / `applyFont`
+  (deferred from Phase 0) while this card is being rebuilt anyway.
+
+---
+
+### Phase 7b — Windowed theater mode (per D1)
+
+**Branch** `feat/stage-windowed-theater` — its own PR, last in the sequence, because it
+changes playback behavior rather than appearance and it composites over the Stage chrome
+from every earlier phase.
+
+- Mode state + persistence in `aurora_prefs` (fullscreen ⇄ windowed), a toggle in the
+  player chrome, and a decision on how it interacts with native fullscreen.
+- `VideoPlayer.tsx:3200` — the `fixed inset-0 z-[60] bg-black` surface becomes the
+  windowed `.theater` inset (90px sides / 58px top-bottom, radius 20px, `--glow-halo-strong`)
+  when the mode is on, with `.dim-app` + `.dim-veil` over the still-mounted app.
+- Because the app behind the player becomes **visible** for the first time: scroll lock,
+  TopNav z-order, and pointer-events on the dimmed tree all need explicit answers.
+- `.dim-veil`'s `backdrop-filter: blur(6px)` sits over playing video — the deep-debug
+  Bug 25 blur budget. It must honor the `html[data-glow="subtle"]` opt-out, same as the
+  Phase 0 primitives.
+- Keyboard + focus: Esc, click-outside, focus trap, and tab order all differ from the
+  fullscreen surface.
+- Watch party overlays (`PartyPanel`, `MiniDock`, `VoicePill`, `ReactionOverlay`) are
+  positioned against the viewport today; in windowed mode they need to anchor to the
+  theater box instead.
 
 ---
 
@@ -346,19 +436,21 @@ per-episode version chips · Previously/recap modal · cast + companion flows.
 
 ## 7. Suggested sequencing
 
-| Order | Branch | Screens visibly changed |
-|---|---|---|
-| 1 | `feat/stage-tokens` | none (type + tokens only) |
-| 2 | `feat/stage-chrome` | all (nav + full-bleed shell) |
-| 3 | `feat/stage-cards` | 03, 04, 09, 11 |
-| 4 | `feat/stage-home-browse` | 03, 04 |
-| 5 | `feat/stage-detail` | 05, 06 |
-| 6 | `feat/stage-content-views` | 09, 10, 11 |
-| 7 | `feat/stage-admin-settings` | 12, 13 |
-| 8 | `feat/stage-auth-player` | 01, 02, 07, 08 |
-| 9 | `feat/stage-polish` | all (responsive + a11y) |
+| Order | Branch | Screens visibly changed | Status |
+|---|---|---|---|
+| 1 | `feat/stage-tokens` | none (type + tokens only) | ✅ **shipped** |
+| 2 | `feat/stage-chrome` | all (nav + full-bleed shell) | next |
+| 3 | `feat/stage-cards` | 03, 04, 09, 11 | |
+| 4 | `feat/stage-home-browse` | 03, 04 | |
+| 5 | `feat/stage-detail` | 05, 06 | |
+| 6 | `feat/stage-content-views` | 09, 10, 11 | |
+| 7 | `feat/stage-admin-settings` | 12, 13 | |
+| 8 | `feat/stage-auth-player` | 01, 02, 07, 08 | |
+| 9 | `feat/stage-polish` | all (responsive + a11y) | |
+| 10 | `feat/stage-windowed-theater` | 07, 08 | per D1 |
 
-Nine PRs, frontend-only, no backend or schema work. Phases 3–8 are independent of each
+Ten PRs, frontend-only, no backend or schema work. Phases 3–8 are independent of each
 other once 1–2 have landed, so they can be parallelized across branches if you want to
 compress the calendar — with the caveat that 3 and 4 both touch rail/grid sizing and
-should not be in flight simultaneously.
+should not be in flight simultaneously. Phase 10 stays last by design: it's the only one
+that changes behavior rather than appearance.
