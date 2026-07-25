@@ -42,7 +42,10 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
           >
             {t.label}
             {on && (
-              <span className="absolute left-0 right-0 -bottom-px h-0.5 rounded-full bg-gradient-to-r from-purple-500 to-purple-300 shadow-[0_0_12px_rgba(168,85,247,0.7)]" />
+              // Purple → cyan, the mockup's active-tab gradient and the same
+              // pair .stage-tab uses in the top nav, so the two tab systems
+              // read as one language.
+              <span className="absolute left-0 right-0 -bottom-px h-[3px] rounded-t-full bg-gradient-to-r from-purple-500 to-cyan-400 shadow-[0_0_12px_rgba(168,85,247,0.7)]" />
             )}
           </button>
         )

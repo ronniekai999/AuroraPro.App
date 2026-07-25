@@ -352,7 +352,19 @@ export default function DetailView({
           page. It was px-8 (32px) to match the old global p-8; after the
           Phase 2 shell change every other page moved to 48px and detail
           alone stayed behind, shifting content 16px on navigation. */}
-      <div className="px-[var(--page-gutter)] pt-9 pb-12 max-w-[1400px]">
+      {/* lg:-mt-[238px] pulls this column up so the poster rail overlaps the
+          hero's lower third (the mockup's composition). Gated to lg — below
+          it the grid is one column and the same negative margin would drag
+          the poster onto the hero's title.
+
+          Deliberately NOT `relative`: the overlap needs no positioning here
+          (the rail's own lg:sticky + lg:z-20 lifts the poster), and making
+          this div positioned put its main column's transparent 252px of
+          padding over the hero's title block — killing text selection there.
+
+          px-[18px] md:… matches home and browse, which drop to an 18px gutter
+          on phones; detail was keeping 48px, a 30px jump on navigation. */}
+      <div className="px-[18px] md:px-[var(--page-gutter)] pt-9 pb-12 max-w-[1400px] lg:-mt-[238px]">
         <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
           <DetailRail
             poster={realPoster}
@@ -411,7 +423,10 @@ export default function DetailView({
             />
           )}
 
-          <div className="min-w-0 pt-1">
+          {/* stage-detail-main adds the compensating padding-top from lg, so
+              the tabs start below the hero even though the shared parent was
+              pulled up. */}
+          <div className="min-w-0 pt-1 lg:pt-[252px]">
             <DetailTabs tabs={tabs} active={activeTab} onChange={setActiveTab} className="mb-6" />
 
             {/* Multi-file version chooser (actionable — plays a specific

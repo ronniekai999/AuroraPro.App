@@ -57,21 +57,25 @@ export function DetailHero({
   if (tagline) metaParts.push(<span className="italic text-purple-200/70">&ldquo;{tagline}&rdquo;</span>)
 
   return (
-    <section className="relative h-[58vh] min-h-[480px] overflow-hidden">
+    <section className="relative h-[58vh] min-h-[440px] max-h-[560px] overflow-hidden">
       <img
         src={backdrop}
         alt=""
         className="w-full h-full object-cover scale-105"
         style={{ objectPosition }}
       />
-      <div
-        className="absolute inset-0"
-        style={{ background: 'linear-gradient(to top,#050505 3%,rgba(5,5,5,.42) 52%,rgba(5,5,5,.05) 100%)' }}
-      />
-      <div
-        className="absolute inset-0"
-        style={{ background: 'linear-gradient(to right,rgba(5,5,5,.85),transparent 62%)' }}
-      />
+      {/* Phase 5 — the mockup's two-layer ramp as one element, replacing two
+          inline-styled gradient divs.
+
+          The first cut of this made the bottom fade WEAKER than the pair it
+          replaced (0.13 alpha where the old pair gave 0.49, at 46% of hero
+          height where the poster's top edge lands) while a comment here
+          claimed the opposite. The alpha figures were then corrected but the
+          gradient was left thin — and it turned out to matter, not just
+          aesthetically: the badge row sits in that thin band and its
+          content-rating chip fell below WCAG AA. The stops now restore the
+          old weight low down; see .stage-detail-scrim for the arithmetic. */}
+      <div className="stage-detail-scrim" />
       <div className="aurora-floor" />
 
       <button
@@ -82,16 +86,71 @@ export function DetailHero({
         <ArrowLeftIcon size={16} /> Back
       </button>
 
-      <div className="absolute bottom-7 left-8 right-8 md:left-10 md:right-10">
+      {/* From lg the poster rail rides up into this hero (the body below
+          carries lg:-mt-[238px]), so the text column shifts right by the rail's
+          width + gap — 216 + 40 + the 48px gutter = 304px. That offset is
+          what makes the overlap safe: it is the collision this file's header
+          comment warns about, avoided by geometry rather than by dropping the
+          overlap. Below lg the grid is single-column, there is no overlap, and
+          the text keeps the full width. */}
+      {/* z-10 (on the already-absolute box — NOT `relative`, which would have
+          fought `absolute` and won) keeps this column above the main column's
+          252px of transparent-but-hit-testable padding, so the title, meta and
+          error line stay selectable and the title's tooltip can fire. Below
+          the rail's lg:z-20, so the poster still overlaps the artwork.
+
+          Insets read --page-gutter rather than hard-coding it: the right edge
+          already did, and a left edge baked at 304px would silently desync the
+          moment the token changes. 256px = 216 rail + 40 gap.
+
+          lg:max-w-[1048px] = the body's 1400px cap minus the 304px offset and
+          the 48px gutter. Without it the title kept measuring 48px from the
+          VIEWPORT while the column beneath it stopped at 1352px, so above
+          1400px wide the headline cantilevered up to 1160px past the tabs and
+          storyline it is supposed to align with. */}
+      <div className="absolute bottom-7 z-10 left-[18px] right-[18px] md:left-[var(--page-gutter)] md:right-[var(--page-gutter)] lg:left-[calc(var(--page-gutter)+256px)] lg:right-[var(--page-gutter)] lg:max-w-[1048px]">
         <div className="flex items-center gap-2.5 mb-3">
           <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/25 uppercase tracking-wide">
             {kindLabel}
           </span>
+          {/* bg-black/60 + text-white/85, NOT the bg-white/5 + text-white/55
+              this used to carry. .badge-glass is 11.2px/600 — normal text for
+              WCAG 1.4.3, so 4.5:1 — and a 0.05-alpha white fill lets the
+              backdrop through, so the chip's contrast was a function of the
+              artwork behind it. Worst case (a bright frame) it measured
+              3.83:1: a real AA failure introduced in this phase, because the
+              chip sits higher up the scrim than the meta row does. Note the
+              strengthened scrim alone only got it to 4.41 — still short, so
+              the fill had to change too.
+
+              A near-opaque dark fill makes the ratio artwork-INDEPENDENT.
+              Even with the scrim removed entirely and pure-white artwork
+              beneath, black/60 composites to #666 and white/85 text on it is
+              4.69:1; against the real scrim it is 13.27:1. Opacity alone could
+              not fix this — no white-alpha fill passes over a white frame. */}
           {contentRating && (
-            <span className="badge-glass bg-white/5 text-white/55 border border-white/10">{contentRating}</span>
+            <span className="badge-glass bg-black/60 text-white/85 border border-white/10">{contentRating}</span>
           )}
         </div>
-        <h1 className="font-display font-bold text-4xl md:text-[3.5rem] leading-none mb-3 drop-shadow-[0_2px_24px_rgba(0,0,0,0.6)]">
+        {/* .type-detail is --fs-detail (fluid, ≤64px) with per-typeface
+            leading — same mechanism Phase 4 introduced for the home hero
+            after a fixed size overflowed its frame and clipped content off
+            the top. line-clamp-2 bounds the pathological title; this column
+            is narrower than home's, so it wraps sooner. */}
+        <h1
+          // title=: line-clamp-2 truncates real catalogue entries ("Dr.
+          // Strangelove or: How I Learned…" is 68 chars, ~57 fit) and the app
+          // sets no document.title, so without this the rest is unrecoverable
+          // anywhere in the UI. Works only because of the z-10 above.
+          title={title}
+          // py-[0.14em]: the clamp's overflow:hidden clips at the padding box,
+          // and --lh-detail (0.98–1.02 depending on typeface) is far below the
+          // ~1.14em ink span of a line containing accented capitals — so those
+          // and descenders were being shaved. Padding, not a bigger
+          // line-height, so the token keeps meaning what it says for unclamped
+          // uses of .type-detail. 0.14em covers the gap at every face.
+          className="font-display font-extrabold text-4xl sm:text-5xl lg:type-detail mb-3 line-clamp-2 py-[0.14em] drop-shadow-[0_2px_24px_rgba(0,0,0,0.6)]"
+        >
           {title}
         </h1>
         <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-[15px]">
