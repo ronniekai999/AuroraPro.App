@@ -84,6 +84,7 @@ import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
+import { ProfilesGate } from '@/components/ProfilesGate'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -1754,6 +1755,8 @@ export default function App() {
   // Fullscreen and minimized cover or hide the viewport, so nothing behind them
   // needs doing.
   const [playerSurface, setPlayerSurface] = useState<'theater' | 'fullscreen' | 'minimized' | null>(null)
+  // Set by the switcher's "Who's watching?" item; the gate self-gates otherwise.
+  const [profilesGateForced, setProfilesGateForced] = useState(false)
   const theaterActive = playerSurface === 'theater'
 
   // Scroll lock while the theater is up. The app behind is inert (D6), so a
@@ -4381,6 +4384,7 @@ export default function App() {
             // ProfilesAndWatchlistsCard already owns creation plus the taste
             // onboarding it kicks off.
             onAddProfile={() => handleNavigate('settings')}
+            onOpenProfilesGate={() => setProfilesGateForced(true)}
             avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
             onSignOut={() => { void handleLogout() }}
           />
@@ -5013,6 +5017,23 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* "Who's watching?" (D7) — self-gating on the per-device flag and on
+          there being more than one profile to choose between. Rendered BEFORE
+          the taste gate so it composites under it: pick who you are, then
+          onboard that profile, never the other way round. */}
+      <ProfilesGate
+        profiles={profiles}
+        activeProfileId={activeProfileId}
+        onSelect={setActiveProfileId}
+        onAddProfile={() => handleNavigate('settings')}
+        // `ready` gates on the profile list having actually loaded — without it
+        // the gate would evaluate `profiles.length < 2` against an empty array
+        // on first paint, mark itself unnecessary, and never appear.
+        ready={profiles.length > 0}
+        forced={profilesGateForced}
+        onDismiss={() => setProfilesGateForced(false)}
+      />
 
       {/* Taste onboarding ("Pick What You Love") — self-gating: renders only
           when the active/default profile is eligible and hasn't completed it.

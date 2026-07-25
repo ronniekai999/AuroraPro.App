@@ -113,18 +113,29 @@ export function readPrefsSnapshot(): Record<string, unknown> {
 // Internal alias kept so the call sites below read as they did before.
 const readPrefs = readPrefsSnapshot
 
-// writePref reads the full prefs object, sets one key, and writes it back — so a
-// single appearance change never clobbers the other persisted prefs (autoplay,
-// hdr, subtitle langs, …) the way a naive overwrite would.
-function writePref(key: string, value: string): void {
+/**
+ * Reads the full prefs object, sets one key, and writes it back — so a single
+ * change never clobbers the other persisted prefs (autoplay, hdr, subtitle
+ * langs, player_volume, …) the way a naive overwrite would.
+ *
+ * Exported (Aurora Stage Phase 7b) because `aurora_prefs` should have exactly
+ * ONE read-modify-write implementation. Every caller that rolled its own was a
+ * chance to clobber a concurrent writer, which is precisely the bug Phase 7a
+ * found in SettingsView. Not appearance-specific despite living here; this
+ * module is the blob's owner.
+ */
+export function writePrefKey(key: string, value: string | number | boolean): void {
   const prefs = readPrefs()
   prefs[key] = value
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs))
   } catch {
-    /* quota / denied — the live attribute still applied below, just not persisted */
+    /* quota / denied — any live attribute still applied, just not persisted */
   }
 }
+
+// Internal alias, kept so the appearance call sites below read as they did.
+const writePref = writePrefKey
 
 /** The stored typeface choice, defaulting to 'eclipse' when unset/invalid. */
 export function currentFont(): FontChoice {

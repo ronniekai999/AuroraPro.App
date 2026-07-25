@@ -235,6 +235,7 @@ function MobileSheet({
   activeProfileId,
   onSelectProfile,
   onAddProfile,
+  onOpenProfilesGate,
   searchQuery,
   onSearchQueryChange,
 }: {
@@ -248,6 +249,9 @@ function MobileSheet({
   // Routes to Settings, where profile creation lives. Threaded through to
   // ProfileSwitcher's dashed Add-Profile row.
   onAddProfile?: () => void
+  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
+  // otherwise first-visit-only, so this is the way back to it.
+  onOpenProfilesGate?: () => void
   searchQuery: string
   onSearchQueryChange: (v: string) => void
 }) {
@@ -356,6 +360,7 @@ function MobileSheet({
               // focused row, the trap's first/last checks matched neither branch,
               // so Tab escaped into a page that aria-modal had hidden from AT.
               onAddProfile={onAddProfile && (() => { onClose(); onAddProfile() })}
+              onOpenProfilesGate={onOpenProfilesGate && (() => { onClose(); onOpenProfilesGate() })}
             />
           </div>
         )}
@@ -420,6 +425,9 @@ export interface TopNavProps {
   // Routes to Settings, where profile creation lives. Threaded through to
   // ProfileSwitcher's dashed Add-Profile row.
   onAddProfile?: () => void
+  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
+  // otherwise first-visit-only, so this is the way back to it.
+  onOpenProfilesGate?: () => void
   avatarUrl?: string
   onSignOut: () => void
 }
@@ -448,6 +456,7 @@ export function TopNav({
   activeProfileId,
   onSelectProfile,
   onAddProfile,
+  onOpenProfilesGate,
   avatarUrl,
   onSignOut,
 }: TopNavProps) {
@@ -652,6 +661,7 @@ export function TopNav({
               activeProfileId={activeProfileId}
               onSelect={onSelectProfile}
               onAddProfile={onAddProfile}
+              onOpenProfilesGate={onOpenProfilesGate}
             />
           </div>
         )}
@@ -695,6 +705,7 @@ export function TopNav({
         activeProfileId={activeProfileId}
         onSelectProfile={onSelectProfile}
         onAddProfile={onAddProfile}
+        onOpenProfilesGate={onOpenProfilesGate}
         searchQuery={searchQuery}
         onSearchQueryChange={onSearchQueryChange}
       />

@@ -10,6 +10,9 @@ interface ProfileSwitcherProps {
   // Navigates to where profiles are created (Settings). Optional so the
   // component renders without it; the Add-Profile row is simply absent.
   onAddProfile?: () => void
+  // Opens the full-page "Who's watching?" gate (D7). The gate shows itself once
+  // per device; this is the deliberate way back to it.
+  onOpenProfilesGate?: () => void
 }
 
 /**
@@ -18,7 +21,7 @@ interface ProfileSwitcherProps {
  * static chip; with several it opens a menu of avatar + name rows. Mirrors the
  * UserMenu dropdown behavior (outside-click + Escape to close).
  */
-export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProfile }: ProfileSwitcherProps) {
+export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProfile, onOpenProfilesGate }: ProfileSwitcherProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
@@ -193,9 +196,27 @@ export function ProfileSwitcher({ profiles, activeProfileId, onSelect, onAddProf
               the taste-onboarding flow already live, rather than duplicating
               the form here. Rendered only when the host wires onAddProfile, so
               the component stays usable without it. */}
-          {onAddProfile && (
+          {onOpenProfilesGate && (
             <button
               ref={el => { itemRefs.current[profiles.length] = el }}
+              role="menuitem"
+              onClick={() => { close(false); onOpenProfilesGate() }}
+              className="flex w-full items-center gap-3 border-t border-white/[0.06] px-3.5 py-2.5 text-left text-white/70 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              <span className="grid h-11 w-11 flex-none place-items-center rounded-full bg-white/[0.06] text-white/70">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" />
+                </svg>
+              </span>
+              <span className="min-w-0">
+                <span className="block text-sm font-semibold">See all profiles</span>
+                <span className="block text-[11px] text-white/55">The full picker</span>
+              </span>
+            </button>
+          )}
+          {onAddProfile && (
+            <button
+              ref={el => { itemRefs.current[profiles.length + (onOpenProfilesGate ? 1 : 0)] = el }}
               role="menuitem"
               onClick={() => { close(false); onAddProfile() }}
               className="mt-1 flex w-full items-center gap-3 border-t border-white/[0.06] px-3.5 py-3 text-left text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white/85"

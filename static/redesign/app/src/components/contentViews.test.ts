@@ -16,6 +16,7 @@ import { collectionStrips } from './CollectionsView'
 import { groupDateParts } from './CalendarView'
 import { maturityLeanLabel, MATURITY_OPTIONS, MATURITY_AUTO } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
+import { shouldShowProfileGate } from '@/lib/profileGate'
 
 // The suite runs under TZ=America/New_York, pinned in vitest.config.ts — see
 // that file for why a non-UTC zone is required and why the pin lives in config
@@ -373,5 +374,57 @@ describe('nextRadioIndex', () => {
     expect(nextRadioIndex('ArrowRight', 0, 3)).toBe(1)
     const n = nextRadioIndex('ArrowLeft', 0, 3)
     expect(n).toBe(2)
+  })
+})
+
+describe('shouldShowProfileGate', () => {
+  // D7's policy, as a pure function — a component that only reveals its policy
+  // by being rendered is untestable here (no jsdom), and this policy has four
+  // inputs of which two are easy to get backwards.
+
+  it('shows on a first visit when there is a choice to make', () => {
+    expect(shouldShowProfileGate({ profileCount: 3, seen: false, forced: false, ready: true })).toBe(true)
+  })
+
+  it('stays away once seen on this device', () => {
+    expect(shouldShowProfileGate({ profileCount: 3, seen: true, forced: false, ready: true })).toBe(false)
+  })
+
+  it('never shows for a solo server, seen or not', () => {
+    // The whole point of D7 choosing "first visit per device" over "every
+    // login": a one-profile server has nothing to pick and must never be nagged.
+    for (const seen of [true, false]) {
+      expect(shouldShowProfileGate({ profileCount: 1, seen, forced: false, ready: true })).toBe(false)
+      expect(shouldShowProfileGate({ profileCount: 0, seen, forced: false, ready: true })).toBe(false)
+    }
+  })
+
+  it('opens on demand even after being seen', () => {
+    // The switcher's "See all profiles" entry point has to work forever, not
+    // only until the flag is set.
+    expect(shouldShowProfileGate({ profileCount: 2, seen: true, forced: true, ready: true })).toBe(true)
+  })
+
+  it('refuses to open on demand when there is still nothing to choose', () => {
+    // `forced` outranks `seen`, but not the count — an empty picker is a dead
+    // end with no way to make progress.
+    expect(shouldShowProfileGate({ profileCount: 1, seen: true, forced: true, ready: true })).toBe(false)
+  })
+
+  it('waits until the profile list has loaded', () => {
+    // Without this the gate evaluates `profileCount < 2` against an empty array
+    // on first paint, decides it is unnecessary, and never appears — the flag
+    // is not even involved. `ready` outranks `forced` for the same reason.
+    expect(shouldShowProfileGate({ profileCount: 0, seen: false, forced: false, ready: false })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 3, seen: false, forced: false, ready: false })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 3, seen: true, forced: true, ready: false })).toBe(false)
+  })
+
+  it('asks again if a server grows a second profile after the flag was set', () => {
+    // The count check short-circuits ahead of `seen`, so a flag set during the
+    // solo era does not permanently suppress the gate. Adding a second profile
+    // makes the question meaningful for the first time.
+    expect(shouldShowProfileGate({ profileCount: 1, seen: false, forced: false, ready: true })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 2, seen: false, forced: false, ready: true })).toBe(true)
   })
 })
