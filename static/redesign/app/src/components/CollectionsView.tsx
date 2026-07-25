@@ -163,12 +163,36 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
               e.preventDefault()
               try {
                 if (confirm.kind === 'remove') {
+                  // Capture the removed member's poster BEFORE dropping it from
+                  // `items`, so the cached list's mosaic can be patched too.
+                  const removedPoster = items.find((x) => x.id === confirm.mediaId)?.poster_path
                   await removeFromCollection(confirm.collectionId, confirm.mediaId)
                   setItems((prev) => prev.filter((x) => x.id !== confirm.mediaId))
                   setCollections((prev) =>
                     prev?.map((c) =>
                       c.id === confirm.collectionId
-                        ? { ...c, item_count: Math.max(0, (c.item_count ?? 1) - 1) }
+                        ? {
+                            ...c,
+                            item_count: Math.max(0, (c.item_count ?? 1) - 1),
+                            // poster_paths has to be patched alongside
+                            // item_count. The list is fetched once on mount and
+                            // the back-to-index path just clears `selected`, so
+                            // without this the card kept rendering the removed
+                            // title's poster as strip 1 while its caption read
+                            // one fewer title. A stale cover_path was
+                            // defensible — it's a server-sticky value by design
+                            // — but poster_paths claims to BE the collection's
+                            // first four members, so a stale entry is a wrong
+                            // claim, not just an old picture.
+                            //
+                            // This does not backfill a 5th member into the
+                            // vacated slot; the next list fetch does that. Four
+                            // real members shown as three beats three real
+                            // members shown as four.
+                            poster_paths: removedPoster
+                              ? c.poster_paths?.filter((p) => p !== removedPoster)
+                              : c.poster_paths,
+                          }
                         : c,
                     ) ?? null,
                   )
@@ -203,26 +227,39 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
     return (
       <>
       <div className="animate-fade-in">
+        {/* autoFocus: drilling in swaps the whole return path, so the focused
+            card unmounts and focus falls to <body>. A keyboard user then had to
+            tab from the top of the document to get back. Landing focus on Back
+            keeps them where the interaction left them (WCAG 2.4.3). */}
         <button
+          type="button"
+          autoFocus
           onClick={() => setSelected(null)}
-          className="flex items-center gap-2 text-white/60 hover:text-white text-sm mb-6"
+          className="inline-flex items-center gap-2 text-white/60 hover:text-white text-sm mb-6"
         >
-          ← Back to collections
+          <Icon name="arrowLeft" size={14} />
+          Back to collections
         </button>
-        <h1 className="text-white text-4xl font-bold font-display mb-1">
-          {c?.name || 'Collection'}
-        </h1>
-        {c?.description && (
-          <p className="text-white/60 text-sm mb-2">{c.description}</p>
-        )}
-        {c?.kind === 'ai' && c.prompt && (
-          <p className="text-purple-300/80 text-xs italic mb-6">
-            ✨ AI-curated from: "{c.prompt}"
-          </p>
-        )}
-        <p className="text-white/60 text-sm mb-8">
-          {items.length} title{items.length === 1 ? '' : 's'}
-        </p>
+        {/* PageHeader, like the index — this was the sixth header surface in the
+            app with a seventh title treatment (a hand-rolled text-4xl h1), which
+            is exactly the divergence PageHeader exists to stop, one level
+            deeper than the five screens Phase 6 set out to cover. */}
+        <PageHeader
+          eyebrow={c?.kind === 'ai' ? 'AI-curated' : 'Curated'}
+          title={c?.name || 'Collection'}
+          sub={
+            <>
+              {items.length} title{items.length === 1 ? '' : 's'}
+              {c?.description && <span className="block mt-1">{c.description}</span>}
+              {c?.kind === 'ai' && c.prompt && (
+                <span className="block mt-1 text-purple-300/80 text-xs italic">
+                  ✨ AI-curated from: "{c.prompt}"
+                </span>
+              )}
+            </>
+          }
+          className="mb-8"
+        />
 
         {loadingItems ? (
           <p className="text-white/60 text-sm">Loading…</p>
@@ -308,36 +345,40 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
         </div>
       ) : (
         // Audit MED — collection cards were bare <div onClick> with no
-        // keyboard/AT affordance. Each card is now keyboard-operable
-        // (role=button + tabIndex), announced via aria-label, activates on
-        // Enter/Space, and shows a visible focus ring. We keep a
-        // <div role="button"> rather than a real <button> because the admin
-        // delete control below is itself a <button> — nesting <button>
-        // inside <button> is invalid HTML, whereas role="button" avoids
-        // that. The delete button stops propagation on BOTH click and keydown,
-        // so its activation never bubbles up to this card handler.
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5">
+        // keyboard/AT affordance. Each card is now operable by keyboard and
+        // announced via aria-label.
+        //
+        // The mechanism changed in Phase 6. It used to be `role="button"` on
+        // the card container, chosen specifically because the admin delete
+        // control is a <button> and nesting <button> in <button> is invalid.
+        // That traded one problem for a worse one: role="button" is Children
+        // Presentational, so it pruned the card's own subtree AND still held a
+        // focusable descendant. Two real sibling <button>s — one stretched over
+        // the card, one for delete — has neither problem, and needs no
+        // stopPropagation at all.
+        //
+        // <ul>/<li> so the grid announces as "list, N items".
+        <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3.5 list-none p-0 m-0">
           {collections.map((c) => {
             const strips = collectionStrips(c)
             return (
-              <div
-                key={c.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`Open collection ${c.name}, ${c.item_count || 0} titles`}
-                onClick={() => setSelected(c.id)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setSelected(c.id)
-                  }
-                }}
-                className="stage-colcard group"
-              >
-                {/* aria-hidden: the strips are decorative here — the card's
-                    aria-label already names the collection and its size, and
-                    announcing four member posters as unlabelled images would
-                    add noise without information. */}
+              // The CARD is a plain container; the whole-surface click target is
+              // a real <button> stretched over it with position:absolute inset-0
+              // (see below), and the admin delete <button> is a SIBLING of that
+              // rather than a descendant.
+              //
+              // This replaces `role="button" tabIndex={0}` on the container. That
+              // pattern avoided invalid button-in-button nesting, which the old
+              // comment here claimed settled the matter — but role="button" is
+              // Children Presentational (ARIA 1.2 §5.2.8), so it pruned the
+              // subtree from the accessibility tree AND held a focusable
+              // descendant, which the spec forbids and Chrome half-honours
+              // (pruned from the a11y tree, still in the tab order). Two real
+              // buttons side by side has neither problem.
+              <li key={c.id} className="stage-colcard group list-none">
+                {/* aria-hidden: the strips are decorative — the button's label
+                    names the collection and its size, and announcing four
+                    unlabelled member posters would add noise, not information. */}
                 <div className="absolute inset-0 flex" aria-hidden="true">
                   {strips.map((src, i) => (
                     <img
@@ -354,17 +395,23 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                   ))}
                 </div>
                 <div className="stage-colcard-scrim" />
-                {/* items-end + h-full so the text sits on the floor of the
-                    118px band regardless of how many lines it takes. */}
-                <div className="relative z-[2] h-full flex flex-col justify-end px-[17px] pb-[14px]">
-                  <h3 className="font-display text-[16.5px] font-bold text-white truncate">{c.name}</h3>
-                  <p className="text-[11.5px] text-white/60 mt-0.5">
+                {/* The click target: a real button covering the card, under the
+                    badge row's z-[3] so the delete control stays clickable.
+                    z-[2] also puts it above the strips and scrim. */}
+                <button
+                  type="button"
+                  onClick={() => setSelected(c.id)}
+                  aria-label={`Open collection ${c.name}, ${c.item_count || 0} ${c.item_count === 1 ? 'title' : 'titles'}`}
+                  className="absolute inset-0 z-[2] w-full h-full flex flex-col justify-end items-start text-left px-[17px] pb-[14px] rounded-[15px]"
+                >
+                  <span className="font-display text-[16.5px] font-bold text-white truncate max-w-full">{c.name}</span>
+                  <span className="text-[11.5px] text-white/65 mt-0.5">
                     {c.item_count || 0} title{c.item_count === 1 ? '' : 's'}
-                  </p>
-                </div>
+                  </span>
+                </button>
                 {/* Badges top-right. The admin delete control also wants that
                     corner, so it is offset LEFT of the badges rather than
-                    stacked on top of them — the previous version put both at
+                    stacked on top of them — an earlier version put both at
                     top-3 right-3 and the × landed on the "Public" chip. */}
                 <div className="absolute top-3 right-3.5 z-[3] flex items-center gap-1.5">
                   {c.kind === 'ai' && <span className="stage-cbadge stage-cbadge-ai">✨ AI</span>}
@@ -372,16 +419,13 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                   {isAdmin && (
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })
-                      }}
-                      onKeyDown={(e) => e.stopPropagation()}
+                      onClick={() => setConfirm({ kind: 'delete', collectionId: c.id, title: c.name })}
                       // focus-visible:opacity-100 alongside the hover reveal:
                       // opacity-0 alone left this focusable but invisible, so
                       // a keyboard user tabbing the grid hit an unseen control
-                      // (WCAG 2.4.7).
-                      className="w-6 h-6 rounded-md grid place-items-center bg-black/60 hover:bg-red-500/80 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      // (WCAG 2.4.7). No stopPropagation needed now that the
+                      // card's handler lives on a sibling, not an ancestor.
+                      className="w-7 h-7 rounded-md grid place-items-center bg-black/60 hover:bg-red-500/80 text-white/80 hover:text-white opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
                       title="Delete collection"
                       aria-label={`Delete collection ${c.name}`}
                     >
@@ -389,10 +433,10 @@ export default function CollectionsView({ isAdmin, onOpenCreate, onOpenMedia, li
                     </button>
                   )}
                 </div>
-              </div>
+              </li>
             )
           })}
-        </div>
+        </ul>
       )}
     </div>
     {confirmDialog}

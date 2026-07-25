@@ -99,6 +99,31 @@ function humanizeRequestError(raw: string, mediaType: 'movie' | 'tv'): string {
   return 'Something went wrong on the download server. Hover for technical details.'
 }
 
+// Status → .stage-stb variant. The five colours are UNCHANGED from the Tailwind
+// map this replaces (amber pending / orange pending-approval / blue processing /
+// emerald available / red failed) — they moved into index.css because each is a
+// coordinated fill+border+text triple, and the mockup's own badge palette
+// happens to agree with all five. The semantics are the server's, so this is a
+// relocation of the colours, not a recolour. (The badge TYPOGRAPHY did change:
+// .stage-stb is uppercase where the old Tailwind badge was `capitalize`.)
+//
+// Module scope, not rebuilt per render: both maps are constants that close over
+// nothing.
+const STATUS_BADGE: Record<string, string> = {
+  pending: 'stage-stb-pending',
+  // Held for admin approval (carve-out C) — distinct orange so it reads
+  // apart from the amber "pending" (admitted, awaiting dispatch).
+  pending_approval: 'stage-stb-approval',
+  processing: 'stage-stb-processing',
+  available: 'stage-stb-available',
+  failed: 'stage-stb-failed',
+}
+// Status display labels. snake_case statuses (pending_approval) need an
+// explicit human label since the badge otherwise renders the raw value.
+const STATUS_LABELS: Record<string, string> = {
+  pending_approval: 'Pending approval',
+}
+
 /* ─────────────────────── REQUESTS VIEW ─────────────────────── */
 // RequestsView — submitted requests with status. Includes an inline
 // TMDB search + create dialog.
@@ -132,27 +157,6 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
     }, 300)
     return () => { window.clearTimeout(id); ac.abort() }
   }, [searchQ, createOpen])
-
-  // Status → .stage-stb variant. The five colours are UNCHANGED from the
-  // Tailwind map this replaces (amber pending / orange pending-approval / blue
-  // processing / emerald available / red failed) — they moved into index.css
-  // because each is a coordinated fill+border+text triple, and the mockup's
-  // own badge palette happens to agree with all five. The semantics are the
-  // server's, so this is a relocation, not a recolour.
-  const statusBadge: Record<string, string> = {
-    pending: 'stage-stb-pending',
-    // Held for admin approval (carve-out C) — distinct orange so it reads
-    // apart from the amber "pending" (admitted, awaiting dispatch).
-    pending_approval: 'stage-stb-approval',
-    processing: 'stage-stb-processing',
-    available: 'stage-stb-available',
-    failed: 'stage-stb-failed',
-  }
-  // Status display labels. snake_case statuses (pending_approval) need an
-  // explicit human label since the badge otherwise renders the raw value.
-  const statusLabels: Record<string, string> = {
-    pending_approval: 'Pending approval',
-  }
 
   // Counts for the filter pills. Computed in one pass over the list rather
   // than a .filter() per pill inside the render (which is what the previous
@@ -329,9 +333,9 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
       {filtered.length === 0 ? (
         <div className="text-center py-20">
           <Icon name="download" size={48} className="mx-auto text-white/20 mb-4" />
-          <h3 className="text-white/60 text-lg mb-2">
-            No requests {filter !== 'all' ? `in "${statusLabels[filter] ?? filter}"` : 'yet'}
-          </h3>
+          <h2 className="text-white/60 text-lg mb-2">
+            No requests {filter !== 'all' ? `in "${STATUS_LABELS[filter] ?? filter}"` : 'yet'}
+          </h2>
           <p className="text-white/40 text-sm">Use the "Request New" button above to submit one.</p>
         </div>
       ) : (
@@ -339,9 +343,20 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
         // is wide (70×105 poster, a title line that carries year + kind + 4K +
         // status, a meta line, and a right-hand date/delete stack), and half a
         // page cannot hold that without the title line wrapping on almost
-        // every entry. xl:grid-cols-2 is deliberately NOT restored — at 1400px
-        // the row still wants ~700px.
-        <div className="flex flex-col gap-3">
+        // every entry. A two-up variant is deliberately not restored even at
+        // 1400px, where the row still wants ~700px.
+        //
+        // (That sentence used to name the Tailwind class for the two-up grid.
+        // Tailwind's extractor scans comments, so naming it SHIPPED it as a dead
+        // rule — a comment explaining that a class is unused is what caused the
+        // class to exist. Same trap as the md:left-[252px] one Phase 5 found.)
+        // <ul>/<li>, not divs: this is a list of N requests and announcing it
+        // as one ("list, 14 items") is how a screen-reader user knows how many
+        // there are and where they are in it. The row titles were <h3> under an
+        // <h1> — a skipped level (WCAG 1.3.1) that also made heading navigation
+        // the only way to move between rows. List semantics are the honest
+        // structure; the titles are no longer headings.
+        <ul className="flex flex-col gap-3 list-none p-0 m-0">
           {filtered.map(req => {
             const poster = tmdbPosterURL(req.poster_path)
             const isExpanded = expanded.has(req.id)
@@ -356,22 +371,26 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
               })
             }
             return (
-              <div key={req.id} className={`stage-req flex gap-4 sm:gap-[18px] p-3 sm:pr-[18px] ${hasOverview ? 'cursor-pointer' : 'cursor-default'}`}
-                onClick={toggle}
-                role={hasOverview ? 'button' : undefined}
-                tabIndex={hasOverview ? 0 : undefined}
-                // A div with role="button" is not keyboard-operable on its own.
-                // The row has been clickable-to-expand since QA 2026-05-25 and
-                // reachable only by mouse ever since; Enter/Space now activate
-                // it. The nested delete <button> already stops propagation on
-                // click, and stops keydown too so its own Enter can't also
-                // toggle the overview.
-                onKeyDown={hasOverview ? (e) => {
-                  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() }
-                } : undefined}
-                aria-expanded={hasOverview ? isExpanded : undefined}
-                aria-label={hasOverview ? `${req.title}, ${isExpanded ? 'hide' : 'show'} overview` : undefined}
-              >
+              // The ROW is a plain container. It used to carry role="button" +
+              // tabIndex + aria-label, and that was wrong in a way that got
+              // worse when this phase made it keyboard-operable:
+              // role="button" is Children Presentational (ARIA 1.2 §5.2.8), so
+              // the whole subtree stops being exposed and the row's aria-label
+              // replaces it for name computation. A screen-reader user heard
+              // "Aliens, show overview, button" and NOTHING else — not the
+              // PENDING/FAILED status, not the humanized error ("Radarr
+              // rejected this request…"), and not the overview that pressing
+              // Enter reveals. It also put a focusable <button> (delete) inside
+              // a presentational subtree, which the spec forbids and Chrome
+              // prunes from the a11y tree while leaving it in the tab order.
+              //
+              // The expand affordance is now a real <button> around the title
+              // and the hint only (see below), so status, meta, error, the
+              // revealed overview, and delete are all siblings OUTSIDE it and
+              // stay in the accessibility tree. That also removes the
+              // button-in-button problem for good, rather than dodging it with
+              // role="button" the way the Collections card did.
+              <li key={req.id} className="stage-req flex gap-4 sm:gap-[18px] p-3 sm:pr-[18px]">
                 <div className="stage-req-poster flex-shrink-0 flex items-center justify-center">
                   {/* Layout invariant: the img and the fallback div
                       are mutually-exclusive flex siblings — only one
@@ -425,19 +444,27 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     the card. */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-x-[9px] gap-y-1.5 flex-wrap">
-                    <h3 className="text-[15px] font-semibold text-white min-w-0 truncate max-w-full">{req.title}</h3>
+                    <span className="text-[15px] font-semibold text-white min-w-0 truncate max-w-full">{req.title}</span>
                     {req.year > 0 && <span className="text-white/55 text-[13px]">({req.year})</span>}
                     <span className="stage-typetag">{req.media_type === 'tv' ? 'TV' : 'Movie'}</span>
-                    {req.quality_4k && <span className="stage-typetag !text-purple-200 !border-purple-400/40 !bg-purple-500/15">4K</span>}
+                    {req.quality_4k && <span className="stage-typetag stage-typetag-4k">4K</span>}
                     {req.quality_1080p && <span className="stage-typetag">1080p</span>}
-                    <span className={`stage-stb ${statusBadge[req.status] ?? 'stage-stb-pending'}`}>
-                      {statusLabels[req.status] ?? req.status}
+                    {/* No `?? 'stage-stb-pending'` fallback. An unknown status
+                        would then be REPORTED AS PENDING in amber — a fallback
+                        that lies. Bare .stage-stb renders an uncoloured badge
+                        showing the raw value, which is what the old
+                        `statusColors[req.status]` lookup did by accident when it
+                        produced undefined. Degrading beats misreporting. */}
+                    <span className={`stage-stb ${STATUS_BADGE[req.status] ?? ''}`}>
+                      {STATUS_LABELS[req.status] ?? req.status}
                     </span>
                   </div>
-                  {/* Meta line. `username` is optional on MediaRequest (the
-                      server omits it for requests whose user was deleted), so
-                      the "requested by" clause is conditional rather than
-                      rendering "requested by undefined". */}
+                  {/* Meta line. `username` is populated only on the ADMIN branch
+                      of the requests handler (request_handlers.go), so an
+                      ordinary user's row shows just the date — the conditional
+                      is load-bearing for every non-admin, not an edge case for
+                      deleted users as an earlier version of this comment
+                      claimed. */}
                   <div className="mt-1.5 flex items-center gap-x-[9px] gap-y-1 flex-wrap text-xs text-white/55">
                     {req.username && <span>requested by {req.username}</span>}
                     {req.username && <span className="text-white/25">·</span>}
@@ -453,33 +480,54 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     </p>
                   )}
                   {hasOverview && (
-                    isExpanded ? (
-                      <p className="text-white/65 text-xs mt-2 leading-relaxed">{req.overview}</p>
-                    ) : (
-                      // The mockup's .expand-hint. The row has been
-                      // expandable since QA 2026-05-25 with nothing to say so
-                      // — "cursor: pointer" was the only affordance, which
-                      // touch users and keyboard users never see.
-                      <div className="mt-1.5 text-[11px] text-white/40 inline-flex items-center gap-1.5">
-                        <Icon name="chevronDown" size={12} />
-                        Click to expand overview
-                      </div>
-                    )
+                    <>
+                      {/* A real <button>, scoped to the affordance itself. The
+                          mockup's .expand-hint — the row has been expandable
+                          since QA 2026-05-25 with nothing to say so, since
+                          `cursor: pointer` was the only signal and touch and
+                          keyboard users never see it.
+
+                          aria-controls + a stable id point at the revealed
+                          paragraph, which is a SIBLING of this button rather
+                          than a descendant, so it stays in the accessibility
+                          tree (a role="button" wrapper would have made it
+                          presentational). "Show"/"Hide", not "Click to" — the
+                          control is operable by keyboard and touch too. */}
+                      <button
+                        type="button"
+                        onClick={toggle}
+                        aria-expanded={isExpanded}
+                        aria-controls={`req-overview-${req.id}`}
+                        className="mt-1.5 text-[11px] text-white/60 hover:text-white/90 inline-flex items-center gap-1.5 rounded transition-colors"
+                      >
+                        <Icon
+                          name="chevronDown"
+                          size={12}
+                          className={isExpanded ? 'rotate-180 transition-transform' : 'transition-transform'}
+                        />
+                        {isExpanded ? 'Hide overview' : 'Show overview'}
+                      </button>
+                      {isExpanded && (
+                        <p id={`req-overview-${req.id}`} className="text-white/65 text-xs mt-2 leading-relaxed">
+                          {req.overview}
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
                 {/* Right stack — delete above, nothing below. Kept as a
                     column so a future second control lands in the mockup's
                     intended place; the requested-at date moved to the meta
-                    line, where it reads with "requested by". */}
+                    line, where it reads with "requested by".
+
+                    No stopPropagation needed any more: the row is a plain <li>
+                    and the only click/key handler is on the expand button, which
+                    is a sibling of this one rather than an ancestor. */}
                 {(req.status === 'pending' || req.status === 'failed') && (
                   <div className="flex-none flex flex-col items-end gap-2.5">
                     <button
                       type="button"
-                      onClick={async (e) => {
-                        // Stops propagation to the clickable row wrapper —
-                        // without this, clicking delete also toggles the
-                        // overview expand.
-                        e.stopPropagation()
+                      onClick={async () => {
                         if (!window.confirm(`Delete request for "${req.title}"?`)) return
                         try {
                           await deleteRequest(req.id)
@@ -488,10 +536,6 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                           window.alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'))
                         }
                       }}
-                      // Enter on this button would otherwise bubble to the
-                      // row's new onKeyDown and expand the overview behind
-                      // the confirm dialog.
-                      onKeyDown={(e) => e.stopPropagation()}
                       className="w-9 h-9 rounded-[10px] grid place-items-center text-white/45 bg-white/[0.04] border border-white/[0.08] hover:text-red-300 hover:border-red-500/40 transition-colors"
                       title="Delete request"
                       aria-label={`Delete request for ${req.title}`}
@@ -500,10 +544,10 @@ export default function RequestsView({ requests, onRequestSubmitted, onRequestDe
                     </button>
                   </div>
                 )}
-              </div>
+              </li>
             )
           })}
-        </div>
+        </ul>
       )}
     </div>
   )

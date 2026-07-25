@@ -301,7 +301,7 @@ function ListView({
               {isToday
                 ? <><span className="today">Today</span>{monthDay}</>
                 : <>{relative} · {monthDay}</>}
-              <small className="text-white/40 font-medium">
+              <small className="text-white/55 font-medium">
                 · {eps.length} episode{eps.length === 1 ? '' : 's'}
               </small>
             </h2>
@@ -506,7 +506,7 @@ function GridView({
           >
             <Icon name="chevronLeft" size={16} />
           </button>
-          <h2 className="text-white font-display font-bold type-section min-w-[9.5ch] text-center">{monthLabel}</h2>
+          <h2 className="text-white font-display font-bold type-section min-w-[9.5ch] text-center whitespace-nowrap">{monthLabel}</h2>
           <button
             type="button"
             onClick={goNext}
@@ -517,7 +517,7 @@ function GridView({
             <Icon name="chevronRight" size={16} />
           </button>
         </div>
-        <button type="button" onClick={goToday} className="stage-btn stage-btn-ghost !h-9 !px-4 !text-[13px]">
+        <button type="button" onClick={goToday} className="stage-btn stage-btn-sm stage-btn-ghost">
           Today
         </button>
       </div>
@@ -527,7 +527,7 @@ function GridView({
           ISO/Europe). Audit L2. */}
       <div className="stage-calmonth grid text-center">
         {WEEKDAY_LABELS_ROTATED.map((label) => (
-          <div key={label} className="text-white/45 text-[9.5px] font-bold uppercase tracking-wider py-1">
+          <div key={label} className="text-white/60 text-[9.5px] font-bold uppercase tracking-wider py-1">
             {label}
           </div>
         ))}
@@ -554,14 +554,24 @@ function GridView({
               // selection ring rather than the (identically-specific) today
               // ring. Both are single classes at 0,1,0, so this is source
               // order in index.css doing the work — -sel is declared after
-              // -today there for exactly this reason.
+              // -today there for exactly this reason. (Hover is a separate
+              // axis: `.stage-calcell:hover` at 0,2,0 would have beaten BOTH
+              // regardless of order, which is why that rule now excludes the
+              // two state classes.)
               className={[
                 'stage-calcell text-left',
                 isToday && 'stage-calcell-today',
                 isSelected && 'stage-calcell-sel',
                 !inMonth && 'stage-calcell-dim',
               ].filter(Boolean).join(' ')}
-              aria-pressed={isSelected}
+              // aria-expanded + aria-controls, NOT aria-pressed. Activating a
+              // cell reveals the day's episode panel below the grid, so this is
+              // a disclosure, not a toggle button — and `pressed` on 42 cells
+              // told a screen reader it was looking at 42 independent toggles.
+              // aria-controls also gives a way to reach the panel, which
+              // otherwise appears below all 42 cells with nothing announced.
+              aria-expanded={isSelected}
+              aria-controls={isSelected ? 'cal-day-panel' : undefined}
               aria-label={`${cell.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })}${hasEpisodes ? `, ${cellEpisodes.length} episode${cellEpisodes.length === 1 ? '' : 's'}` : ''}`}
             >
               <div className="flex items-center justify-between mb-1">
@@ -570,8 +580,16 @@ function GridView({
                   <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length}</span>
                 )}
               </div>
-              {/* Episode chips — up to 3, then "+N more". */}
-              <div className="space-y-1">
+              {/* Episode chips — up to 3, then "+N more".
+                  Hidden below sm. Seven columns in a 339px content box (375px
+                  viewport minus .stage-page's 18px gutters) is a 45px column,
+                  which after the cell's border+padding and the chip's own
+                  padding leaves a 21px text box — about three glyphs at 9px, so
+                  every chip rendered as "S1E…" and carried no information at
+                  all. The count badge above stays visible at every width and is
+                  the honest signal there; tapping the day opens the panel with
+                  the full titles. */}
+              <div className="space-y-1 hidden sm:block">
                 {cellEpisodes.slice(0, 3).map((ep, i) => (
                   <div
                     key={`${ep.media_item_id}-${ep.episode_id}`}
@@ -596,9 +614,16 @@ function GridView({
         })}
       </div>
 
-      {/* Selected-day expand panel */}
+      {/* Selected-day expand panel. The id is the target of the selected
+          cell's aria-controls; role="region" + aria-label so it is reachable as
+          a landmark rather than only by tabbing past every remaining cell. */}
       {selectedDay && selectedEpisodes.length > 0 && (
-        <section className="pt-4 border-t border-white/[0.06]">
+        <section
+          id="cal-day-panel"
+          role="region"
+          aria-label={`Episodes on ${formatGroupDate(`${selectedDay}T00:00:00Z`)}`}
+          className="pt-4 border-t border-white/[0.06]"
+        >
           <h3 className="text-white/85 text-lg font-semibold mb-4">
             {formatGroupDate(`${selectedDay}T00:00:00Z`)}
           </h3>

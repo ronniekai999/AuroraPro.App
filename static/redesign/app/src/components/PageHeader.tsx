@@ -31,14 +31,15 @@ interface PageHeaderProps {
   // Right-aligned action ("Request New", "+ New Collection"). Wrapped in a
   // shrink-0 box here so a long title can never squeeze the button.
   action?: ReactNode
-  // Set on pages whose title is the page's H1. Search Results renders inside
-  // a page that already has one, so it passes 'h2'.
-  as?: 'h1' | 'h2'
   className?: string
 }
 
-export function PageHeader({ eyebrow, title, sub, action, as = 'h1', className }: PageHeaderProps) {
-  const Title = as
+// No `as` escape hatch. An earlier version had `as?: 'h1' | 'h2'` documented as
+// "Search Results renders inside a page that already has one, so it passes
+// 'h2'" — no call site ever passed it, and Search Results has no competing h1.
+// A prop that exists for a case that doesn't exist is one more thing that can
+// drift; every page reached through App's router owns its own h1.
+export function PageHeader({ eyebrow, title, sub, action, className }: PageHeaderProps) {
   return (
     // items-end so the action's baseline settles with the title's rather than
     // floating at the top of a two-line header. flex-wrap + gap so a narrow
@@ -51,9 +52,9 @@ export function PageHeader({ eyebrow, title, sub, action, as = 'h1', className }
             leading-tight rather than the display tokens' sub-1.0 leading:
             these titles are one line and short, so there is no line-to-line
             ink collision to tune for and no clipping risk to pad against. */}
-        <Title className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">
+        <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight text-white">
           {title}
-        </Title>
+        </h1>
         {sub && <div className="text-white/60 text-sm mt-1.5">{sub}</div>}
       </div>
       {action && <div className="shrink-0">{action}</div>}
@@ -97,20 +98,33 @@ export function FilterPills<T extends string>({
   label: string
   className?: string
 }) {
+  const active = options.find(o => o.value === value)
   return (
-    <div role="group" aria-label={label} className={cn('flex items-center gap-2 flex-wrap', className)}>
-      {options.map(o => (
-        <button
-          key={o.value}
-          type="button"
-          aria-pressed={value === o.value}
-          onClick={() => onChange(o.value)}
-          className="stage-fpill inline-flex"
-        >
-          {o.label}
-          {o.count !== undefined && <span className="c">{o.count}</span>}
-        </button>
-      ))}
-    </div>
+    <>
+      <div role="group" aria-label={label} className={cn('flex items-center gap-2 flex-wrap', className)}>
+        {options.map(o => (
+          <button
+            key={o.value}
+            type="button"
+            aria-pressed={value === o.value}
+            onClick={() => onChange(o.value)}
+            className="stage-fpill inline-flex"
+          >
+            {o.label}
+            {o.count !== undefined && <span className="c">{o.count}</span>}
+          </button>
+        ))}
+      </div>
+      {/* Changing a pill silently rewrites the list below it. Nothing moves
+          focus and nothing is announced, so a screen-reader user pressing
+          "Failed" gets no confirmation that anything happened — the pill's own
+          aria-pressed flip is only heard if they happen to still be on it.
+          sr-only live region carries the outcome. */}
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {active
+          ? `${label}: ${active.label}${active.count !== undefined ? `, ${active.count} shown` : ''}`
+          : ''}
+      </span>
+    </>
   )
 }

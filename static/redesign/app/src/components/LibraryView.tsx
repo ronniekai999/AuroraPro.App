@@ -91,7 +91,7 @@ export default function LibraryView({ library, continueItems, onSelect, onToggle
       {library.length === 0 ? (
         <div className="text-center py-16">
           <Icon name="library" size={48} className="mx-auto text-purple-400/30 mb-4" />
-          <h3 className="text-white/70 text-lg mb-2">No saved titles yet</h3>
+          <h2 className="text-white/70 text-lg mb-2">No saved titles yet</h2>
           <p className="text-white/40 text-sm max-w-md mx-auto">
             Hover any title and click the <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-purple-500/40 border border-purple-300/40 text-white text-[10px] font-bold align-middle mx-0.5">+</span> in the top-left to bookmark it here.{continueItems.length > 0 ? ' Your in-progress watches still appear in the Continue Watching rail below.' : ''}
           </p>

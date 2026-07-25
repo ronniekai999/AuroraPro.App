@@ -184,7 +184,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             // title would. font-display + min-w-0 so the flex child can still
             // shrink — without min-w-0 a long query pushed the Esc key legend
             // off the panel's right edge, because an <input>'s default
-            // min-width is `auto` and it refuses to shrink below its size
+            // min-width is `auto`, so it will not contract below its size
             // attribute's intrinsic width.
             className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/30 focus:ring-0"
             spellCheck={false}

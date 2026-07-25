@@ -98,21 +98,30 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
           </span>
         }
         sub={
-          <>
+          // role="status" (implicit aria-live="polite"): the result count is
+          // the entire feedback for a search, and without it a screen-reader
+          // user types a query and hears nothing at all — no way to know
+          // whether the search ran, found nothing, or is still going. The app
+          // already uses this pattern in Toast and the player; the five content
+          // views had none.
+          //
+          // aria-atomic so the whole sentence is re-read rather than just the
+          // changed number, which otherwise announces as a bare "12".
+          <span role="status" aria-live="polite" aria-atomic="true">
             {loading
               ? `Searching for "${query}"…`
               : query
                 ? `${results.length} result${results.length === 1 ? '' : 's'} for "${query}"`
                 : 'Type in the search box above to find titles'}
             {error && <span className="block text-red-400 mt-1">{error}</span>}
-          </>
+          </span>
         }
       />
 
       {!loading && query && results.length === 0 && !error ? (
         <div className="text-center py-20">
           <Icon name="search" size={48} className="mx-auto text-white/20 mb-4" />
-          <h3 className="text-white/60 text-lg">No results found</h3>
+          <h2 className="text-white/60 text-lg">No results found</h2>
           <p className="text-white/40 text-sm mt-1">Try a different search term</p>
         </div>
       ) : (

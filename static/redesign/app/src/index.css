@@ -532,6 +532,27 @@
    `display`. Set display at the call site with Tailwind utilities, where
    the responsive variants can do their job. Same caution applies to any
    other property you intend to override per-breakpoint.
+
+   TWO CORRECTIONS from the Phase 6 review, both of which change how you
+   should reason about this:
+
+   1. It is not just MEDIA variants that land after this block — ALL variant
+      utilities do. Measured in the built CSS: this custom block ends at rule
+      1630, the first `hover:*` utility is at 1684, and `sm:/md:/lg:` start at
+      2082. So a call-site `hover:bg-white/[0.08]` DOES beat a
+      `.stage-x:hover` here (both 0,2,0, later wins). Convenient, but the
+      model "only media variants win" is wrong.
+
+   2. The escape hatch only exists for primitives that stay at (0,1,0).
+      `@media` adds no specificity, so a `md:` utility is still (0,1,0) and
+      CANNOT override a rule that is more specific — no matter where it sits.
+      That makes every property set by a descendant or attribute selector
+      here permanently unreachable from a call site except via `!important`.
+      Currently that applies to `.stage-seg > button` (0,1,1),
+      `.stage-fpill .c` (0,2,0) and `.stage-caldate .today` (0,2,0). Nothing
+      collides today because those call sites carry no competing utilities,
+      but if you need per-breakpoint control over anything in that list, the
+      fix is to flatten the selector, not to reach for `!`.
    ==================================================================== */
 
 /* Backdrop tint — the per-page wash that makes each page "a stage lit
@@ -1012,6 +1033,11 @@ html[data-glow="subtle"] .stage-toolbar {
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
+/* Declared BEFORE the [aria-pressed="true"] rule below, and that order matters.
+   Both are (0,2,0) and both set `background` and `color`, so source order
+   decides — and it needs to resolve this way round, or hovering the selected
+   pill would strip its purple. Same hazard class as .stage-calcell's; recorded
+   here too because it happens to be correct by accident of writing order. */
 .stage-fpill:hover { background: rgba(255, 255, 255, 0.09); color: rgba(255, 255, 255, 0.9); }
 /* aria-pressed, not a class: these are toggle buttons, so the selected
    state has to be in the accessibility tree anyway. Driving the style off
@@ -1020,7 +1046,11 @@ html[data-glow="subtle"] .stage-toolbar {
    screen reader is structurally impossible here. */
 .stage-fpill[aria-pressed="true"] {
   background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.5);
+  /* 0.8, not the mockup's 0.5. The selected border is the load-bearing state
+     indicator here (the two fills are only 1.08:1 apart), so WCAG 1.4.11 wants
+     3:1 against the page: 0.5 gives 2.02:1, 0.8 gives 3.60:1. The 500→600
+     weight step below is the non-colour cue that keeps 1.4.1 satisfied. */
+  border-color: rgba(168, 85, 247, 0.8);
   color: #e9d5ff;
   font-weight: 600;
 }
@@ -1097,6 +1127,19 @@ html[data-glow="subtle"] .stage-toolbar {
   color: rgba(255, 255, 255, 0.75);
   text-transform: uppercase;
 }
+/* 4K variant. This started life at the call site as
+   `stage-typetag !text-purple-200 !border-purple-400/40 !bg-purple-500/15` —
+   three `!important`s, because .stage-typetag sets colour, border and
+   background at (0,1,0) in this unlayered block and plain utilities lose. By
+   the same rule this phase applied to .stage-calchip, three `!` at a call site
+   means the primitive is missing a variant, not that the call site needs
+   escaping. Every other colour family here (.stage-stb-*, .stage-cbadge-*,
+   .stage-calchip-p) already works this way. */
+.stage-typetag-4k {
+  background: rgba(168, 85, 247, 0.15);
+  border-color: rgba(192, 132, 252, 0.4);
+  color: #e9d5ff;
+}
 
 /* ── Collection cards ─────────────────────────────────────────────────
    118px band with up to four member posters behind a left-to-right scrim.
@@ -1111,22 +1154,40 @@ html[data-glow="subtle"] .stage-toolbar {
   border: 1px solid rgba(220, 200, 255, 0.16);
   background: #0b0b12;
   cursor: pointer;
-  transition: border-color 0.18s ease, transform 0.18s ease;
+  /* `transform` deliberately NOT transitioned: nothing sets it, so it was a
+     dead declaration — and a latent trap, since a future `hover:scale-*` would
+     make this card a stacking context and change how its z-[2] click target
+     and z-[3] badge row resolve against each other. */
+  transition: border-color 0.18s ease;
 }
 .stage-colcard:hover { border-color: rgba(168, 85, 247, 0.5); }
+/* NO `outline: none` here — this rule used to have it, and that made focus
+   WORSE than not writing the rule at all. The app has an unlayered
+   `:focus-visible { outline: 2px solid rgba(168,85,247,.75) }` floor further
+   down this file which measures 3.28:1 against the page; this selector is
+   (0,2,0) against its (0,1,0), so `outline: none` won and left a 1px border
+   recolour plus a 3px glow at 1.40:1 as the only indicator on a 118px card.
+   Keeping the floor and adding the border/glow as a SUPPLEMENTARY cue is the
+   whole intent. Same correction applied to .stage-calcell below. */
 .stage-colcard:focus-visible {
-  outline: none;
   border-color: rgba(216, 180, 254, 0.9);
   box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.3);
 }
-/* Two stops on the right so the badge corner keeps a floor. 0.55 at the
-   far edge, not the mockup's 0.1: the badges are text on artwork and the
-   mockup's ramp left them at 2.4:1 over a bright poster. */
+/* The mockup's ramp, restored.
+   An earlier version raised the far-edge stop from 0.1 to 0.55 and justified it
+   with "the badges are text on artwork and the mockup's ramp left them at 2.4:1
+   over a bright poster." That number is reproducible for NEITHER badge: at the
+   mockup's 0.1, -pub measures 7.63:1 over a white poster (its own fill is 85%
+   opaque teal, which does all the work) and -ai measures 1.74:1 — a real
+   failure, but one the scrim moved by 0.10, because -ai's fill is 95% opaque
+   too. So 0.55 was darkening the card's right third, costing exactly the
+   artwork this card exists to show, in exchange for nothing measurable. The
+   fix for -ai belongs in -ai's fill, and is below. */
 .stage-colcard-scrim {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  background: linear-gradient(90deg, rgba(5, 5, 5, 0.93) 0%, rgba(5, 5, 5, 0.72) 55%, rgba(5, 5, 5, 0.55) 100%);
+  background: linear-gradient(90deg, rgba(5, 5, 5, 0.9) 0%, rgba(5, 5, 5, 0.35) 70%, rgba(5, 5, 5, 0.1) 100%);
 }
 .stage-cbadge {
   font-size: 9.5px;
@@ -1135,14 +1196,26 @@ html[data-glow="subtle"] .stage-toolbar {
   padding: 3px 8px;
   border-radius: 6px;
   white-space: nowrap;
+  /* Transparent border so -ai and -pub are the same height. -pub carries a 1px
+     border and -ai did not, which made the AI chip 2px shorter than the Public
+     chip sitting next to it in the same flex row. */
+  border: 1px solid transparent;
 }
+/* Darkened both stops. The gradient runs 135deg across a ~48x19px chip, so its
+   line spans the whole badge and white text sits across the entire ramp — with
+   the old rgba(216,180,254,.95) light end, the first two-thirds of the badge
+   was 1.84:1 to 3.10:1 and only the last third cleared AA at 9.5px/800. These
+   stops keep the violet→purple direction while holding white above 4.5:1 for
+   the full length, over any artwork: measured 5.16:1 at the light end and
+   10.08:1 at the dark against the worst case (a white poster). */
 .stage-cbadge-ai {
-  background: linear-gradient(135deg, rgba(216, 180, 254, 0.95), rgba(147, 51, 234, 0.95));
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.96), rgba(88, 28, 135, 0.96));
+  border-color: rgba(216, 180, 254, 0.45);
   color: #fff;
 }
 .stage-cbadge-pub {
   background: rgba(8, 47, 54, 0.85);
-  border: 1px solid rgba(34, 211, 238, 0.5);
+  border-color: rgba(34, 211, 238, 0.5);
   color: #a5f3fc;
 }
 /* Dashed "New Collection" tile. */
@@ -1177,16 +1250,25 @@ html[data-glow="subtle"] .stage-toolbar {
 .stage-seg > button {
   padding: 6px 12px;
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 500;
   color: rgba(255, 255, 255, 0.62);
   background: rgba(255, 255, 255, 0.04);
   transition: background-color 0.15s ease, color 0.15s ease;
 }
 .stage-seg > button:hover { color: rgba(255, 255, 255, 0.9); }
-/* Same aria-pressed-drives-style argument as .stage-fpill. */
+/* Same aria-pressed-drives-style argument as .stage-fpill.
+   Three cues, not one. The first draft distinguished the selected segment by
+   COLOUR ALONE — both states were font-weight 600 with no border, shape or
+   weight change, and the two fills were 1.16:1 apart, which is WCAG 1.4.1 (Use
+   of Color) plus a 1.4.11 failure on state identification. A solid #7C3AED
+   raises fill separation to 3.36:1, the 500→700 weight step is a non-colour
+   cue that survives a monochrome display, and the inset top rule gives a third
+   that survives both. */
 .stage-seg > button[aria-pressed="true"] {
-  background: rgba(168, 85, 247, 0.22);
-  color: #e9d5ff;
+  background: var(--stage-purple-2);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: inset 0 2px 0 0 rgba(216, 180, 254, 0.9);
 }
 .stage-seg > button:focus-visible {
   outline: none;
@@ -1260,16 +1342,46 @@ html[data-glow="subtle"] .stage-toolbar {
   font-variant-numeric: tabular-nums;
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
-.stage-calcell:hover { background: rgba(255, 255, 255, 0.055); border-color: rgba(255, 255, 255, 0.1); }
+/* The :not() pair is load-bearing, and its absence was a real bug.
+   `:hover` alone is (0,2,0); .stage-calcell-today and -sel are single classes
+   at (0,1,0). Specificity is decided BEFORE source order, so a bare
+   `.stage-calcell:hover` won on `background` and `border-color` against both
+   state classes — the cell you were pointing at was the one cell that never
+   showed its own state. Click a day, move the mouse back over it, and the
+   purple dropped to plain grey.
+   Note this is a DIFFERENT failure from the -sel/-today source-order one
+   documented below, and the order assertion that caught that one is blind to
+   it: order and specificity are separate axes. Excluding the states here keeps
+   hover as a pure affordance for neutral cells. */
+.stage-calcell:not(.stage-calcell-today):not(.stage-calcell-sel):hover {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+/* Hover on a cell that HAS state deepens it rather than replacing it. Both are
+   (0,2,0) and both follow the base states, so these win on order. */
+.stage-calcell-today:hover { background: rgba(168, 85, 247, 0.22); }
+.stage-calcell-sel:hover { background: rgba(168, 85, 247, 0.32); }
+/* No `outline: none` — see the .stage-colcard note above. */
 .stage-calcell:focus-visible {
-  outline: none;
   border-color: rgba(216, 180, 254, 0.9);
   box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.3);
 }
-/* Leading/trailing days from the adjacent months. 0.45 not the mockup's
-   0.3: at 0.3 the numerals fell to 2.1:1, and these are still real dates a
-   user reads. Dimmed enough to recede, legible enough to be a date. */
-.stage-calcell-dim { opacity: 0.45; }
+/* Leading/trailing days from the adjacent months.
+   NOT `opacity`, which is what this started as. Two problems with dimming the
+   whole cell: the numerals are 11px text inside a focusable button, so WCAG
+   1.4.3 wants 4.5:1 and no usable opacity delivers it (the mockup's 0.3 gives
+   1.90:1; 0.45 gives 2.96:1 — an earlier version of this comment claimed 0.45
+   was "legible enough to be a date", which the arithmetic does not support;
+   reaching 4.5:1 needs 0.62+, by which point nothing looks dim). And opacity
+   composites the CHIPS too, which are already 9px.
+   Recolouring the text instead gets the numeral to 5.33:1 while leaving the
+   episode chips at full strength, so a lead/trail day that HAS an airing still
+   shows it clearly. The cell recedes on fill, not on legibility. */
+.stage-calcell-dim {
+  color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.012);
+  border-color: rgba(255, 255, 255, 0.035);
+}
 .stage-calcell-today {
   border-color: rgba(168, 85, 247, 0.6);
   background: rgba(168, 85, 247, 0.14);
@@ -1349,6 +1461,16 @@ html[data-glow="subtle"] .stage-toolbar {
   white-space: nowrap;
   cursor: pointer;
   transition: transform 0.18s ease, background-color 0.18s ease, border-color 0.18s ease;
+}
+/* Size step (Aurora Stage Phase 6). .stage-btn had colour variants but no size
+   scale, so a 36px button meant `!h-9 !px-4 !text-[13px]` at the call site —
+   three `!important`s to undo three hard-coded values. Same argument as
+   .stage-typetag-4k. */
+.stage-btn-sm {
+  height: 36px;
+  padding: 0 16px;
+  font-size: 13px;
+  border-radius: 10px;
 }
 .stage-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .stage-btn:not(:disabled):hover { transform: translateY(-1px); }
