@@ -242,7 +242,17 @@ export default function BrowseView({
           compact
           eyebrow={pillLabel}
           pageTitle={title}
-          countLabel={`${subtitle} · ${countLabel}`}
+          // h1: with a hero present BrowseView's own <h1> is gated off, so
+          // without this the browse pages had NO h1 at all and an
+          // h2-without-h1 outline. The app never sets document.title
+          // either, so this heading is the page's only identity signal.
+          titleAs="h1"
+          // A FRAGMENT, not a template literal. `countLabel` above is JSX
+          // (it bolds the number), so `${...}`-ing it rendered the literal
+          // text "[object Object]" under the title on both browse pages.
+          // TypeScript accepted it because template literals stringify any
+          // non-symbol, and nothing in the suite renders this component.
+          countLabel={<>{subtitle} · {countLabel}</>}
         />
       )}
 

@@ -876,6 +876,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           </div>
         </div>
       )}
+      {/* Everything below the hero + conversational search opts back into
+          the page gutter. HomeView is full-bleed (FULL_BLEED_VIEWS) so the
+          hero can reach the viewport edge; the rest lines up with the
+          hero's text column because both read --page-gutter.
+
+          The wrapper opens HERE, above every status banner — convoLoading
+          included. It was left outside on the first pass, and `max-w-2xl
+          mx-auto` hid that above 672px while going flush to both edges
+          below it. */}
+      <div className="stage-gutter">
       {convoLoading && (
         <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl mx-auto">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
@@ -887,15 +897,6 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           </div>
         </div>
       )}
-      {/* Everything below the hero + conversational search opts back into
-          the page gutter. HomeView is full-bleed (FULL_BLEED_VIEWS) so the
-          hero can reach the viewport edge; the rest lines up with the
-          hero's text column because both read --page-gutter.
-          
-          The wrapper opens HERE, above the status banners — not at the
-          rails — because those banners are page content too and would
-          otherwise sit flush against the viewport edge. */}
-      <div className="stage-gutter">
       {error && (
         <div className="mb-6 px-5 py-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-4">
           <div>
@@ -1470,7 +1471,11 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 // Quiet placeholder while a browse list is in flight.
 function BrowseLoadingState({ title }: { title: string }) {
   return (
-    <div className="animate-fade-in">
+    // stage-gutter: movies/shows are in FULL_BLEED_VIEWS, so this no longer
+    // inherits .stage-page's padding. It renders on every sort and genre
+    // change (the parent resets the list to null), so without the gutter the
+    // skeleton flashed edge-to-edge and then snapped in by 48px.
+    <div className="animate-fade-in stage-gutter pt-8">
       <div className="mb-8">
         <h1 className="text-white text-4xl font-bold font-display">{title}</h1>
         <p className="text-white/60 text-sm mt-2">Loading your library…</p>

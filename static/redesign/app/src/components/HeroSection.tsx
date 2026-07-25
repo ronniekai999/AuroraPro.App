@@ -31,7 +31,7 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle }: {
+export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2' }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -67,10 +67,18 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   // hero keeps them at a smaller size. Flagged in the PR as a deliberate
   // deviation rather than silently either way.
   compact?: boolean
-  /** Eyebrow + count for the compact variant ("MOVIES" · "847 titles"). */
+  /** Eyebrow + count for the compact variant ("MOVIES" · "847 titles").
+   * countLabel is a ReactNode: callers pass JSX so the number can be
+   * emphasised. It was typed `string`, which silently accepted a fragment
+   * stringified into a template literal. */
   eyebrow?: string
-  countLabel?: string
+  countLabel?: React.ReactNode
   pageTitle?: string
+  /** Heading level for the title. Browse passes 'h1' — it IS the page
+   * heading there, and gating BrowseView's own <h1> behind `!heroMedia`
+   * otherwise left those pages with no h1 at all and an h2-without-h1 gap.
+   * Home stays 'h2' (its greeting owns the h1). */
+  titleAs?: 'h1' | 'h2'
   // "Not tonight" — advance to the next pick in the loaded hero pool
   // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
   // the button doesn't render.
@@ -97,7 +105,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   if (!heroProp) {
     return (
-      <section className="relative w-full h-[55vh] min-h-[420px] max-h-[600px] rounded-2xl overflow-hidden mb-8 bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] border border-white/[0.04] flex items-center justify-center">
+      // 2026-07-25 (Aurora Stage Phase 4, review fix) — matches the real
+      // hero's frame. It kept `rounded-2xl border mb-8` and a different
+      // height from the inset-card era; once `home` went full-bleed those
+      // rounded corners landed on the viewport edges on every cold load,
+      // and the frame then SNAPPED when the real hero arrived.
+      <section className={`relative w-full overflow-hidden bg-gradient-to-br from-purple-950/40 via-[#0a0a0f] to-[#050505] flex items-center justify-center ${
+        compact ? 'h-[250px]' : 'h-[62vh] min-h-[480px] max-h-[680px]'
+      }`}>
         <div className="text-center px-8">
           <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 mb-4">
             <svg width="28" height="28" viewBox="0 0 36 36" fill="none">
@@ -334,17 +349,33 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
               One place to tune, and one list to re-check when a user
               switches typeface system. Both step down below md, where 84px
               would be roughly six characters per line. */}
-          <h2
-            className={
-              compact
-                ? 'text-white font-extrabold font-display mb-2 drop-shadow-2xl text-3xl md:type-browse'
-                : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl lg:type-hero'
-            }
-          >
-            {compact ? (pageTitle ?? hero.title) : hero.title}
-          </h2>
-          {compact && countLabel && (
-            <p className="text-white/60 text-sm mb-3">{countLabel}</p>
+          {(() => {
+            const Heading = titleAs
+            return (
+              <Heading
+                className={
+                  compact
+                    ? 'text-white font-extrabold font-display mb-1.5 drop-shadow-2xl text-3xl md:type-browse'
+                    : 'text-white font-extrabold font-display mb-3 drop-shadow-2xl text-4xl sm:text-5xl lg:type-hero'
+                }
+              >
+                {compact ? (pageTitle ?? hero.title) : hero.title}
+              </Heading>
+            )
+          })()}
+          {/* Compact only: NAME the featured title. In compact the heading is
+              the PAGE name, the description is suppressed, and the backdrop
+              rotates every 9s — so before this line the Play and More Info
+              buttons retargeted silently and the user could play a title
+              whose name was never on screen. line-clamp-1 keeps the count on
+              one line: the compact frame has ~15px of slack, and a wrap
+              clips the eyebrow off the top (the column is bottom-anchored
+              inside overflow-hidden). */}
+          {compact && (
+            <p className="text-white/70 text-sm mb-2.5 line-clamp-1">
+              <span className="text-white font-semibold">{hero.title}</span>
+              {countLabel ? <span className="text-white/50"> — {countLabel}</span> : null}
+            </p>
           )}
           {!compact && hero.description && (
             <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
@@ -416,9 +447,14 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             ) : (
               <button
                 onClick={() => onPlay(hero)}
-                className="flex items-center gap-2 px-6 py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple"
+                // Names the target: in compact the heading is the page name,
+                // so "Play" alone had no referent for a screen reader.
+                aria-label={`Play ${hero.title}`}
+                className={`flex items-center gap-2 rounded-full font-medium transition-all duration-200 hover:scale-105 glow-purple bg-purple-600 hover:bg-purple-500 text-white ${
+                  compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
+                }`}
               >
-                <Icon name="play" size={18} /> Play
+                <Icon name="play" size={compact ? 15 : 18} /> Play
               </button>
             )}
             {/* 2026-06-05 (Home redesign B) — "My List" toggle. Adds /
@@ -444,9 +480,12 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             })()}
             <button
               onClick={() => onInfo(hero)}
-              className="flex items-center gap-2 px-6 py-3 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20"
+              aria-label={`More info about ${hero.title}`}
+              className={`flex items-center gap-2 bg-white/10 hover:bg-white/15 backdrop-blur-md text-white rounded-full font-medium transition-all duration-200 border border-white/10 hover:border-white/20 ${
+                compact ? 'px-4 py-2 text-sm' : 'px-6 py-3'
+              }`}
             >
-              <Icon name="info" size={18} /> More Info
+              <Icon name="info" size={compact ? 15 : 18} /> More Info
             </button>
           </div>
         </div>
