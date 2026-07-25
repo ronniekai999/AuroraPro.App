@@ -201,6 +201,12 @@ interface VideoPlayerProps {
   // Reports whether the player has collapsed to the cast/AirPlay control
   // widget, so the parent can suppress Escape/back-to-close while casting.
   onMinimizedChange?: (minimized: boolean) => void
+  // Aurora Stage Phase 7b (D5). Reports which surface the player is presenting
+  // so the parent can dim + inert the app behind the theater box. 'theater' is
+  // the only value that needs anything from the parent — fullscreen covers the
+  // viewport and minimized is off-screen, so in both cases what's behind is
+  // invisible anyway and dimming it would be wasted compositing.
+  onSurfaceChange?: (surface: 'theater' | 'fullscreen' | 'minimized' | null) => void
   // Smart Skip — gates the in-player marker editor (manual correction
   // writes through admin-only endpoints, so the UI only mounts for
   // admins).
@@ -389,7 +395,8 @@ async function attemptPlay(
   }
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange, isAdmin }: VideoPlayerProps) {
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange,
+  onSurfaceChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
@@ -773,6 +780,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // Report minimized-widget state up so the parent's global Escape/back
   // handlers don't unmount the player while casting (which would tear down the
   // streaming session feeding the receiver). See App's Escape gate.
+  // Aurora Stage Phase 7b — report the presented surface so App can dim and
+  // inert the tree behind the theater. Derived, not stored: `target` decides
+  // whether the player is up at all, and minimized/fullscreen are already
+  // state, so a separate mode variable would be a fourth source of truth able
+  // to disagree with the other three.
+  useEffect(() => {
+    if (!target) { onSurfaceChange?.(null); return }
+    onSurfaceChange?.(minimizedActive ? 'minimized' : fullscreen ? 'fullscreen' : 'theater')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, minimizedActive, fullscreen])
+
+  // Tell the parent the player has gone for good on unmount, so a stale
+  // 'theater' can't leave <main> dimmed and inert with no player on screen.
+  useEffect(() => () => onSurfaceChange?.(null), [onSurfaceChange])
+
   useEffect(() => {
     onMinimizedChange?.(minimizedActive)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3197,25 +3219,40 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // stay alive (closing the laptop view must not kill the cast). The
           // floating widget below is the visible surface.
           ? 'fixed inset-0 -z-10 opacity-0 pointer-events-none'
-          : 'fixed inset-0 z-[60] bg-black flex items-center justify-center'
+          // No `bg-black` and no flex centring any more (D5). The surface is
+          // transparent; what fills it is the veil over the dimmed app plus the
+          // theater box, both absolutely positioned. In fullscreen the box
+          // covers the viewport and the veil is skipped entirely — there is
+          // nothing to see behind it, so compositing a blur there would be pure
+          // cost. See the .stage-dim-veil note in index.css about that budget.
+          : 'fixed inset-0 z-[60]'
       }
     >
-      {/* 2026-05-28 — Player shell. WINDOWED (not browser-fullscreen):
-          a centered card capped below the viewport so there's a clear
-          black margin all around (the `bg-black` backdrop shows
-          through), with rounded corners + a soft ring so it reads as
-          an intentional theater surface rather than a chrome-less
-          takeover. FULLSCREEN: fills the viewport edge-to-edge (the
-          card chrome would look wrong against the screen bezel).
-          The backdrop's `items-center justify-center` centers the
-          capped card automatically. The <video> inside still uses
-          object-contain, so the picture letterboxes within the card —
-          margins you see are (card inset) + (aspect letterbox). */}
+      {/* The veil. Theater only — see above. */}
+      {!fullscreen && !minimizedActive && <div className="stage-dim-veil" aria-hidden="true" />}
+      {/* Player shell.
+          THEATER (Aurora Stage Phase 7b, D5): the mockup's inset box — 90px
+          sides, 58px top/bottom, 20px radius — with the dimmed app visible
+          behind it. This REPLACES the previous treatment, which was a card
+          capped at 94vw/88vh centred inside an opaque black backdrop. The
+          asymmetric inset is why it is absolute edge offsets rather than a
+          max-width card: a centred `max-w` cannot express 90/58, and the black
+          backdrop it used to sit on is now the app.
+          It falls back to full-bleed below lg — 90px per side leaves 195px of
+          picture on a phone; see .stage-theater's media query.
+          FULLSCREEN: fills the viewport edge-to-edge (box chrome looks wrong
+          against the screen bezel).
+          The <video> inside still uses object-contain, so the picture
+          letterboxes within the box — margins are (inset) + (aspect letterbox).
+
+          NOTE the word "windowed" is deliberately gone from this file. It used
+          to mean "not browser-fullscreen", which collided with 7b's windowed
+          theater; the two states are now `theater` and `fullscreen`. */}
       <div
         className={
           fullscreen
             ? 'relative w-full h-full flex flex-col'
-            : 'relative w-full h-full max-w-[94vw] max-h-[88vh] flex flex-col rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10'
+            : 'stage-theater flex flex-col'
         }
       >
         {/* Top bar. WINDOWED: a chrome strip above the video (part of the
@@ -3234,10 +3271,29 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               : 'flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent z-10'
           }
         >
-          <div>
-            <h2 className="text-white text-lg font-semibold">{target.title}</h2>
-            {target.subtitle && <p className="text-white/60 text-sm">{target.subtitle}</p>}
-            <p className="text-white/40 text-xs mt-0.5">{status}</p>
+          {/* Title block — the mockup's .t-title: one 17px display line with the
+              episode and the stream status stacked under it as one small line,
+              rather than three stacked paragraphs at three sizes. */}
+          <div className="min-w-0 flex items-center gap-3">
+            <div className="min-w-0">
+              <h2 className="text-white font-display text-[17px] font-bold truncate">{target.title}</h2>
+              <p className="text-white/60 text-[11.5px] font-medium mt-0.5 truncate">
+                {[target.subtitle, status].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            {/* Casting status pill. Net-new chrome for state that already
+                existed but was only inferable from the Cast button's colour:
+                while a remote session is live, the local surface is a REMOTE
+                CONTROL, not the thing playing, and nothing said so. Cyan
+                rather than purple because it is a different kind of state from
+                an Aurora control. Only when a session is actually connected —
+                never as decoration. */}
+            {remoteActive && (
+              <span className="stage-cast-pill inline-flex flex-none" role="status">
+                <i className="stage-cast-dot" aria-hidden="true" />
+                {cast.status.connected ? 'Casting' : 'AirPlay'}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 relative">
             {/* M10 Phase 4.5 — Audio track picker. Only shown when
@@ -3666,10 +3722,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 <button
                   type="button"
                   onClick={handleSkip}
-                  className="absolute bottom-28 right-6 z-[55] inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black/75 hover:bg-black/90 ring-1 ring-white/25 text-white text-sm font-medium shadow-xl backdrop-blur-sm transition-colors"
+                  // .stage-skip-pill: white-on-dark, not the previous
+                  // dark-on-video. This appears over an arbitrary frame for a
+                  // few seconds and is the one control that has to be
+                  // unmissable in that window — a translucent black pill on a
+                  // night-time scene was close to invisible, which defeats the
+                  // feature. Position stays where it was.
+                  className="stage-skip-pill absolute bottom-28 right-[26px] z-[55] inline-flex"
                 >
                   {skipLabel}
-                  <SkipForward size={16} />
+                  <SkipForward size={15} />
                 </button>
               )}
               {/* Smart Skip next-up card — appears when an episode
@@ -3678,31 +3740,44 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   (the click then forces the advance past the pref —
                   an explicit click outranks a passive setting). */}
               {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (
-                <div className="absolute bottom-28 right-6 z-[55] w-72 rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl p-4">
-                  <p className="text-white/50 text-[11px] uppercase tracking-wide">Up next</p>
-                  <p className="text-white text-sm font-medium mt-1">
-                    {nextUpPhase === 'countdown'
-                      ? `Next episode in ${Math.max(0, nextUpSecs)}s`
-                      : 'Next episode'}
-                  </p>
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { void fireAdvance(true) }}
-                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors"
-                    >
-                      <Play size={14} />
-                      Play now
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setNextUpPhase('spent')}
-                      aria-label="Dismiss next-episode card"
-                      title="Keep watching the credits"
-                      className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/80 text-sm transition-colors"
-                    >
-                      <X size={14} />
-                    </button>
+                // .stage-upnext. The mockup's card leads with a purple
+                // "UP NEXT" eyebrow and puts the countdown in the corner rather
+                // than in the body line, so the card reads the same whether the
+                // autoplay pref is on or off — only the counter appears.
+                // No thumbnail: the mockup shows one, but nothing here knows the
+                // next episode's still until the advance resolves it, and
+                // rendering a placeholder frame would imply we do.
+                <div
+                  role="status"
+                  className="stage-upnext absolute bottom-28 right-[26px] z-[55]"
+                >
+                  <div className="p-[15px] pb-3.5">
+                    <p className="stage-upnext-eyebrow">Up next</p>
+                    <p className="text-white text-[13.5px] font-semibold mt-1">Next episode</p>
+                    <div className="mt-2.5 flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => { void fireAdvance(true) }}
+                        className="inline-flex items-center gap-1.5 h-[30px] px-3.5 rounded-lg bg-white hover:bg-white/90 text-[#0a0a0a] text-[11.5px] font-bold transition-colors"
+                      >
+                        <Play size={12} />
+                        Play now
+                      </button>
+                      {nextUpPhase === 'countdown' && (
+                        <span className="text-white/60 text-[11px] tabular-nums">
+                          in {Math.max(0, nextUpSecs)}s
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setNextUpPhase('spent')}
+                        aria-label="Dismiss next-episode card"
+                        title="Keep watching the credits"
+                        className="ml-auto w-[26px] h-[26px] rounded-full grid place-items-center bg-black/60 hover:bg-black/80 border border-white/20 text-white/85 transition-colors"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}

@@ -1499,6 +1499,246 @@ html[data-glow="subtle"] .stage-toolbar {
   box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.9), 0 0 18px rgba(168, 85, 247, 0.15);
 }
 
+/* ══ Player + theater (Aurora Stage Phase 7) ══════════════════════════
+   D5: the theater inset REPLACES the old black backdrop, so non-fullscreen
+   playback is a rounded box with the dimmed app behind it. D6: that app is
+   inert — see .stage-dim-app.
+
+   None of these sets `display`; the call sites do. */
+
+/* The still-mounted app, seen through the theater for the first time.
+   Kept as a sibling that the player dims rather than something the player
+   contains, so nothing about the app tree changes when playback starts.
+   D6 says inert: `pointer-events: none` here is the styling half, and the
+   call site adds `aria-hidden` + a scroll lock so it is inert to keyboards
+   and screen readers too, not just to the mouse. */
+.stage-dim-app {
+  opacity: 0.5;
+  filter: saturate(0.7);
+  pointer-events: none;
+}
+/* The veil over it. `backdrop-filter: blur(6px)` composites over a layer that
+   contains PLAYING VIDEO — the per-frame cost flagged as deep-debug Bug 25 and
+   the reason every blurred Stage primitive honours the reduced-blur opt-out.
+   This one has to as well; the fallback below raises the flat alpha so the
+   veil still reads as a veil without the blur. */
+.stage-dim-veil {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 3, 5, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+html[data-glow="subtle"] .stage-dim-veil {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(3, 3, 5, 0.92);
+}
+/* prefers-reduced-transparency is the accessibility counterpart of the blur
+   budget: a user asking for less transparency gets an opaque veil, which also
+   removes the compositing cost. Progressive — no support means no change. */
+@media (prefers-reduced-transparency: reduce) {
+  .stage-dim-veil {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #030305;
+  }
+}
+
+/* The theater box itself. Inset via `position: absolute` + edge offsets rather
+   than a max-width card, because the mockup's proportions are asymmetric
+   (90px sides, 58px top/bottom) and a centred card cannot express that. */
+.stage-theater {
+  position: absolute;
+  left: 90px;
+  right: 90px;
+  top: 58px;
+  bottom: 58px;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid rgba(220, 200, 255, 0.2);
+  box-shadow: var(--glow-halo-strong), 0 40px 100px rgba(0, 0, 0, 0.8);
+  background: #000;
+}
+/* Full-bleed below lg. 90px of inset per side leaves 195px of picture on a
+   375px screen — the theater framing is a desktop affordance, and on a phone
+   the honest answer is to use the whole viewport. Keeping the radius/border at
+   0 here too, since a rounded box flush to the bezel reads as a rendering bug.
+   1024px because at 768px the inset would still eat 23% of the width. */
+@media (max-width: 1023px) {
+  .stage-theater {
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: 0;
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+
+/* Scrub bar. The track is the hit target; buffered fill, played fill, knob and
+   the hover readout all position against it. */
+.stage-scrub-track {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.28);
+}
+/* 0.28 not the mockup's 0.18, and buffered 0.45 not 0.30: these two greys are
+   the only thing distinguishing "downloaded" from "not yet" on a dark video
+   frame, and at the mockup's values they were 1.6:1 apart. */
+.stage-scrub-buf {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.45);
+}
+.stage-scrub-pos {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--stage-purple), var(--stage-purple-lt));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+}
+.stage-scrub-knob {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.4), 0 2px 8px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+/* Hover readout. `pointer-events: none` is load-bearing — the label sits over
+   the track, and without it the pointer would enter the label, leave the
+   track, and the readout would flicker itself out of existence. */
+.stage-scrub-ts {
+  position: absolute;
+  bottom: 18px;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgba(10, 8, 18, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  padding: 4px 9px;
+  border-radius: 7px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Transport buttons. */
+.stage-tr-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* The primary play/pause: white on dark, the one control that should be
+   findable without looking. */
+.stage-tr-btn-primary {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #fff;
+  color: #0a0a0a;
+  border-color: transparent;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.stage-tr-btn-primary:hover { background: #f1f1f1; }
+/* The "10" on the skip buttons. */
+.stage-tr-secs {
+  position: absolute;
+  bottom: 3px;
+  font-size: 7.5px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.02em;
+}
+
+/* Cast / AirPlay pill — cyan so it never reads as a purple Aurora control;
+   an active remote session is a different kind of state. */
+.stage-cast-pill {
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(8, 47, 54, 0.8);
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  color: #a5f3fc;
+  white-space: nowrap;
+}
+/* Near-opaque teal fill, not the mockup's rgba(34,211,238,0.14) over video:
+   that put 12px text on whatever frame happened to be playing. This is the
+   same fix .stage-cbadge-pub needed. */
+.stage-cast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--stage-cyan);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.8);
+  flex: none;
+}
+
+/* Skip-intro / skip-credits pill. White-on-dark because it appears over
+   arbitrary video and has to be unmissable for the few seconds it exists. */
+.stage-skip-pill {
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #0a0a0a;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+.stage-skip-pill:hover { background: #fff; }
+
+/* Up-next card, shown over the credits. */
+.stage-upnext {
+  width: 252px;
+  border-radius: 15px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(30, 26, 46, 0.94), rgba(12, 10, 20, 0.97));
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong), 0 24px 60px rgba(0, 0, 0, 0.65);
+}
+html[data-glow="subtle"] .stage-upnext {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #0c0a14;
+}
+.stage-upnext-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--stage-purple-lt);
+  font-weight: 700;
+}
+
 /* ── Smart-search chip ────────────────────────────────────────────────
    Marks results that came back from the semantic/LLM path rather than a
    literal title match. */

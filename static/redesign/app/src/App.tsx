@@ -1748,6 +1748,28 @@ export default function App() {
   // nominal 64px. The stack grows by ~37px per actively-scanning library
   // because ScanProgressBar renders in flow above the nav, and an admin
   // mid-scan was the case where all five hardcoded offsets broke.
+  // Aurora Stage Phase 7b (D5/D6) — which surface the player is presenting.
+  // 'theater' is the only one that changes anything out here: the app behind the
+  // theater box is VISIBLE for the first time, so it gets dimmed and made inert.
+  // Fullscreen and minimized cover or hide the viewport, so nothing behind them
+  // needs doing.
+  const [playerSurface, setPlayerSurface] = useState<'theater' | 'fullscreen' | 'minimized' | null>(null)
+  const theaterActive = playerSurface === 'theater'
+
+  // Scroll lock while the theater is up. The app behind is inert (D6), so a
+  // wheel or a swipe must not scroll it — otherwise the backdrop drifts under a
+  // stationary player, which reads as the page having come unglued.
+  //
+  // Restores the PREVIOUS value rather than clearing to '': TopNav's mobile
+  // sheet locks the same property, and a hard clear on theater exit would
+  // unlock a sheet that is still open behind it.
+  useEffect(() => {
+    if (!theaterActive) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [theaterActive])
+
   const chromeRef = useRef<HTMLDivElement | null>(null)
   // useLayoutEffect, not useEffect: this runs BEFORE paint. With useEffect an
   // admin whose scan was already running at mount painted one frame against
@@ -4289,8 +4311,19 @@ export default function App() {
       />
 
       {/* Main Content. No left offset any more — the sidebar is gone, so
-          pages run the full width of the viewport (Aurora Stage M2). */}
-      <main className="min-h-screen">
+          pages run the full width of the viewport (Aurora Stage M2).
+
+          Aurora Stage Phase 7b — dimmed and inert behind the theater (D6).
+          `inert` is doing the load-bearing work: it blocks pointer events,
+          removes every descendant from the tab order, AND hides the subtree from
+          assistive tech, which is all three halves of "inert" in one attribute.
+          React 19 supports it as a real prop (PlayerControls already relies on
+          that). `.stage-dim-app` carries the opacity/saturate and repeats
+          pointer-events: none, which is redundant where inert is supported and
+          the only protection where it isn't (Safari < 15.5).
+          `inert={x || undefined}` rather than `inert={x}` so the attribute is
+          absent, not `inert="false"` — the HTML attribute is presence-based. */}
+      <main className={`min-h-screen ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
         {/* Sticky stack: scan bar + nav in one sticky container so the
             scan bar contributes its height to flow and both pin together
             on scroll. The bar stays ABOVE the nav, as in the mockup. */}
@@ -4798,6 +4831,7 @@ export default function App() {
         onEnded={handlePlaybackEnded}
         isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
+        onSurfaceChange={setPlayerSurface}
         onClose={() => {
           setPlayerTarget(null)
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after
