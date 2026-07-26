@@ -19,6 +19,64 @@
 // Text shadows and drop-shadows are NOT credited: WCAG has no provision for
 // them, and this project has consistently declined to count them.
 
+import fs from 'node:fs'
+
+// ⚠️ F1, the reason this file was rewritten. The first version imported nothing
+// and read nothing: the scrim stops and every colour/alpha/px/coordinate were
+// hand-transcribed literals. Blanking the entire hero scrim in index.css AND
+// dropping the description to `text-white/15` produced BYTE-IDENTICAL output and
+// exit 0. It was a passing test that could not fail — worse than no test, because
+// `npm run audit:contrast` reported PASS and the commit claimed it was
+// mutation-tested. It was: its own literals were mutated, which proves nothing
+// about the code. Everything below now derives from the source, and the run fails
+// if a value it depends on has moved.
+
+const SRC_CSS = 'src/index.css'
+const SRC_HERO = 'src/components/HeroSection.tsx'
+
+const css = fs.readFileSync(SRC_CSS, 'utf8')
+const hero = fs.readFileSync(SRC_HERO, 'utf8')
+
+/** Pull a declaration's value out of a named rule, or die loudly. */
+function cssValue(selector, prop) {
+  const rule = css.match(new RegExp(String.raw`\n${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\s*\{([\s\S]*?)\n\}`))
+  if (!rule) throw new Error(`audit: rule ${selector} not found in ${SRC_CSS} — the audit is out of date, not passing`)
+  const m = rule[1].match(new RegExp(String.raw`(?:^|;|\{)\s*${prop}:\s*([\s\S]*?);`))
+  if (!m) throw new Error(`audit: ${selector} no longer sets ${prop} — the audit is out of date, not passing`)
+  return m[1].replace(/\s+/g, ' ').trim()
+}
+
+/** Every `rgba(...) P%` / `#hex P%` pair in a linear-gradient, as [pos, alpha]. */
+function parseLinearStops(value, which) {
+  const layers = value.split(/,(?![^(]*\))/)
+  void layers
+  const g = value.match(/linear-gradient\(([^;]*?)\)(?=\s*[,;]|\s*$)/g) ?? []
+  const chosen = g[which]
+  if (!chosen) throw new Error('audit: expected two linear-gradient layers in the hero scrim')
+  const stops = []
+  for (const m of chosen.matchAll(/(rgba?\([^)]*\)|#[0-9a-fA-F]{3,8}|transparent)\s*([\d.]+)%/g)) {
+    const col = m[1]
+    let a
+    if (col === 'transparent') a = 0
+    else if (col.startsWith('rgba')) a = Number(col.match(/[\d.]+/g)[3] ?? 1)
+    else a = 1
+    stops.push([Number(m[2]) / 100, a])
+  }
+  if (stops.length < 3) throw new Error('audit: could not parse the hero scrim stops')
+  return stops
+}
+
+/** A Tailwind text alpha at a source line, e.g. text-white/70 -> 0.70. */
+function twAlpha(needle, cls) {
+  const i = hero.indexOf(needle)
+  if (i < 0) throw new Error(`audit: anchor not found in ${SRC_HERO}: ${needle}`)
+  // The WHOLE line — the className usually precedes the anchor expression on it.
+  const line = hero.slice(hero.lastIndexOf('\n', i) + 1, hero.indexOf('\n', i))
+  const m = line.match(new RegExp(String.raw`${cls}\/(\d+)`))
+  if (!m) throw new Error(`audit: ${cls}/N not found on the line anchored by ${needle}`)
+  return Number(m[1]) / 100
+}
+
 const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
 const Y = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 const over = (fg, a, bg) => fg.map((c, i) => a * c + (1 - a) * bg[i])
@@ -40,20 +98,55 @@ const rampA = (stops, t) => {
   return stops[stops.length - 1][1]
 }
 
-// ── the two scrims, transcribed from index.css ────────────────────────────
-// .stage-hero-scrim — first layer listed paints ON TOP.
+// ── the hero's THREE scrim layers, transcribed from source ────────────────
+// The first version of this file modelled only two and therefore reported a
+// failure that did not exist (the match numeral at "2.16:1" — really 6.01:1).
+// A partial layer model is worse than none: it produces confident wrong numbers.
+// .stage-hero-scrim, in index.css — first layer listed paints ON TOP.
+const scrim = cssValue('.stage-hero-scrim', 'background')
 const HERO = {
-  // linear-gradient(90deg, ...) → 0% is the LEFT edge.
-  horiz: [[0, 0.95], [0.40, 0.72], [0.72, 0.15], [1, 0.35]],
+  // linear-gradient(90deg, ...) → 0% is the LEFT edge. Layer 0 = painted on top.
+  horiz: parseLinearStops(scrim, 0),
   // linear-gradient(0deg, ...) → 0% is the BOTTOM edge.
-  vert: [[0.02, 1.0], [0.30, 0.25], [0.55, 0]],
+  vert: parseLinearStops(scrim, 1),
+}
+// The third layer is an INLINE style on its own div, HeroSection.tsx:239-244 —
+// which is why a grep of index.css never found it:
+//   radial-gradient(ellipse 42% 48% at 100% 0%, rgba(5,5,5,0.72), transparent 70%)
+// It predates Phase 8 and exists for exactly this widget; its own comment says
+// so ("on a backdrop that's bright in this corner … the white score number +
+// ring vanished"). Radii are 42% of width and 48% of height, centred on the
+// TOP-RIGHT corner, ramping to transparent at 70% along the ray.
+const cornerDecl = hero.match(/radial-gradient\(ellipse ([\d.]+)% ([\d.]+)% at 100% 0%,\s*rgba\(([^)]*)\),\s*transparent ([\d.]+)%\)/)
+if (!cornerDecl) throw new Error(`audit: the top-right corner vignette is no longer in ${SRC_HERO} in the expected form`)
+const CORNER = {
+  rx: Number(cornerDecl[1]) / 100,
+  ry: Number(cornerDecl[2]) / 100,
+  a0: Number(cornerDecl[3].split(',')[3]),
+  end: Number(cornerDecl[4]) / 100,
+}
+function cornerAlpha(x, yFromBottom) {
+  const dx = (1 - x) / CORNER.rx
+  const dy = (1 - yFromBottom) / CORNER.ry
+  const d = Math.hypot(dx, dy)
+  if (d >= CORNER.end) return 0
+  return CORNER.a0 * (1 - d / CORNER.end)
 }
 
-/** Composite both scrim layers at (x from left, y from bottom) over `frame`. */
+/** Composite all three scrim layers at (x from left, y from bottom) over `frame`,
+ *  in paint order: artwork, vertical ramp, horizontal ramp, corner vignette. */
 function heroBackdrop(x, yFromBottom, frame) {
-  const afterVert = over(INK, rampA(HERO.vert, yFromBottom), frame)
-  return over(INK, rampA(HERO.horiz, x), afterVert)
+  let bg = over(INK, rampA(HERO.vert, yFromBottom), frame)
+  bg = over(INK, rampA(HERO.horiz, x), bg)
+  return over(INK, cornerAlpha(x, yFromBottom), bg)
 }
+
+const VEIL = (() => {
+  const v = cssValue('.stage-hero-match-veil', 'background')
+  const m = v.match(/rgba\(([^)]*)\)/)
+  if (!m) throw new Error('audit: .stage-hero-match-veil no longer uses an rgba plateau')
+  return Number(m[1].split(',')[3])
+})()
 
 // ── the surfaces, with where they actually sit ────────────────────────────
 // x/y are fractions (x from the left edge, y from the BOTTOM edge), read off the
@@ -65,7 +158,7 @@ const SURFACES = [
   // :363 — the browse variant, md:type-browse 52px extrabold → large text
   { file: 'HeroSection.tsx:363', what: 'browse hero title', color: W, alpha: 1, px: 52, bold: true, x: 0.03, y: 0.40 },
   // :391 — description, 16px at md+ → normal text, 4.5:1
-  { file: 'HeroSection.tsx:391', what: 'hero description', color: W, alpha: 0.70, px: 16, x: 0.03, y: 0.27 },
+  { file: 'HeroSection.tsx:391', what: 'hero description', color: W, alpha: twAlpha('{hero.description}', 'text-white'), px: 16, x: 0.03, y: 0.27 },
   // :384 — "Featured: X — N titles", 14px
   { file: 'HeroSection.tsx:384', what: 'meta line', color: W, alpha: 0.70, px: 14, x: 0.03, y: 0.33 },
   // :385/:387 — the dimmer spans INSIDE that same line
@@ -81,9 +174,14 @@ const SURFACES = [
   // (0.15 at 72%, 0.35 at 100%). Both sit over .stage-hero-match-veil, the local
   // backing Phase 8 added precisely because this corner has no scrim worth the
   // name — without it the eyebrow measured 1.22:1 and the numeral 2.16:1.
-  { file: 'HeroSection.tsx:282', what: 'MATCH/SCORE eyebrow', color: hex('#d8b4fe'), alpha: 1, px: 10, bold: true, x: 0.95, y: 0.72, veil: 0.72 },
-  { file: 'HeroSection.tsx:278', what: 'match numeral "NN%"', color: W, alpha: 1, px: 20, bold: true, x: 0.95, y: 0.72, veil: 0.72 },
-  { file: 'HeroSection.tsx:272', what: 'ring track vs backdrop', color: W, alpha: 0.28, px: 0, nonText: true, x: 0.95, y: 0.72, veil: 0.72,
+  // Geometry derived from `absolute top-11 right-[52px]` + an 84px ring + a
+  // gap-1.5 + a 10px caption at 1440x900, not estimated: the earlier x:0.95,
+  // y:0.72 was off by 0.12-0.18 on y. It happened not to change any verdict
+  // (the vertical ramp is already 0 above y=0.55) but a sample point that is
+  // wrong for a reason you have not checked is a coin flip, not a measurement.
+  { file: 'HeroSection.tsx:282', what: 'MATCH/SCORE eyebrow', color: hex('#d8b4fe'), alpha: 1, px: 10, bold: true, x: 0.935, y: 0.844, veil: VEIL },
+  { file: 'HeroSection.tsx:278', what: 'match numeral "NN%"', color: W, alpha: 1, px: 20, bold: true, x: 0.935, y: 0.904, veil: VEIL },
+  { file: 'HeroSection.tsx:272', what: 'ring track vs backdrop', color: W, alpha: 0.28, px: 0, nonText: true, x: 0.935, y: 0.904, veil: VEIL,
     // Redundant encoding — see the note at the call site. The arc's purple end
     // cannot clear 3:1 against any track that itself clears 3:1 above the
     // backdrop; the value is carried by the numeral above and by the wrapper's
@@ -92,7 +190,12 @@ const SURFACES = [
   // :513 — "Not tonight" control, bottom-right. Its 0.06 border is deliberately
   // NOT audited as a 1.4.11 surface: the control is identified by a permanent
   // visible text label, so the border is decoration. See the call site.
-  { file: 'HeroSection.tsx:513', what: '"Not tonight" label', color: W, alpha: 0.75, px: 14, x: 0.93, y: 0.15, fillOver: 0.04 },
+  // y from the pb-9 bottom bar's real centre (~57px up), not the 0.15 first
+  // guessed — at which this measured 4.42:1 and looked like a failure. It was
+  // not one: at its actual position `text-white/60` was already 6.56:1. The
+  // /60 -> /75 change is harmless and mildly beneficial, but it was made on a
+  // bad number and this comment says so rather than keeping the credit.
+  { file: 'HeroSection.tsx:513', what: '"Not tonight" label', color: W, alpha: 0.75, px: 14, x: 0.93, y: 0.063, fillOver: 0.04 },
 ]
 
 const need = s => (s.nonText ? 3.0 : (s.px >= 24 || (s.px >= 18.66 && s.bold)) ? 3.0 : 4.5)
@@ -101,6 +204,11 @@ const need = s => (s.nonText ? 3.0 : (s.px >= 24 || (s.px >= 18.66 && s.bold)) ?
  *  translucent control fill of its own. */
 function backdropFor(s, frame) {
   let bg = heroBackdrop(s.x, s.y, frame)
+  // The veil sits UNDER these surfaces — which is only true since the eyebrow
+  // was given `relative`. Before that the veil painted over it (CSS 2.1 App. E
+  // step 6 vs step 5) and the honest figure for the eyebrow was 1.35:1, not the
+  // 6.94:1 this function reported. Modelling a layer on the wrong side of the
+  // text is the same class of error as omitting one.
   if (s.veil) bg = over(INK, s.veil, bg)
   if (s.fillOver) bg = over(W, s.fillOver, bg)
   return bg

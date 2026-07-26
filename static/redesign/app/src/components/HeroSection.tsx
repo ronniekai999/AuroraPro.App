@@ -261,8 +261,18 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
       >
         {/* The backing that makes this cluster legible over arbitrary artwork —
-            see .stage-hero-match-veil. First child so it paints under the ring
-            and the numeral; both are later siblings at z-index auto. */}
+            see .stage-hero-match-veil.
+            Being the first child is NOT sufficient to put it behind everything,
+            and the first version of this comment claimed it was. Per CSS 2.1
+            Appendix E the veil is `position: absolute`, so it paints in step 6
+            (positioned descendants, z-index:auto); the ring wrapper below is
+            `relative` and later in tree order, so that one does land above it —
+            but the eyebrow was a STATIC flex item, which paints in step 5
+            (Flexbox §5.4: flex items paint as inline blocks). Step 6 beats step
+            5, so the 0.72 near-black veil composited OVER the one string this
+            whole primitive was added to rescue, dropping it from 11.7:1 to
+            1.8:1 on a dark frame. The eyebrow now carries `relative` for the
+            same reason the ring wrapper does. */}
         <div className="stage-hero-match-veil" aria-hidden="true" />
         <div className="relative w-[84px] h-[84px]">
           <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
@@ -299,7 +309,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             {matchScore}%
           </span>
         </div>
-        <span className="text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
+        {/* `relative` is load-bearing, not cosmetic — it lifts this out of the
+            static flex-item paint step and above .stage-hero-match-veil. See the
+            note on the veil above. */}
+        <span className="relative text-[10px] tracking-[0.14em] uppercase text-purple-300 font-semibold [text-shadow:0_1px_3px_rgba(0,0,0,0.55)]" aria-hidden="true">{showingPersonal ? 'Match' : 'Score'}</span>
       </div>
       )}
 

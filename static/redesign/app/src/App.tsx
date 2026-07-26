@@ -882,22 +882,37 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           reads as one composition with the hero rather than a separate widget
           floating above the rails. relative + z-20 keeps it above the hero's scrim.
 
-          Phase 8 — `max-w-2xl`, matching HeroSection's own text column, NOT the
-          `max-w-3xl` it shipped at. Home has three meaningful right edges (the
-          hero description at max-w-xl/576px, the hero text column at
-          max-w-2xl/672px, and the viewport) and at 768px this bar landed on none
-          of them: 96px past the column it is supposed to belong to and ~1200px
-          short of the edge. That unjustified edge is what made it read as a
-          mistake — being "too narrow" was never the problem, and widening it to
-          full-bleed would be worse (it would slice the artwork's focal point,
-          strand the pinned ↵ Search chip ~1800px from the caret, and size a
-          62-character field like it wants an essay). Now the whole left column
-          shares one edge: eyebrow → title → description → buttons → this.
+          `max-w-3xl` — and it is important to record WHY, because Phase 8 briefly
+          changed it to `max-w-2xl` on a misreading and had to change it back.
+
+          This wrapper carries BOTH `.stage-gutter` (which is
+          `padding-left/right: var(--page-gutter)`, 48px at md+) AND the
+          max-width, and Tailwind's preflight sets `box-sizing: border-box`. So
+          the max-width INCLUDES the gutter padding. Measured at 1440px:
+
+            max-w-3xl (768) + 48px padding each side  ->  content 48..720
+            max-w-2xl (672) + 48px padding each side  ->  content 48..624
+            hero text column (max-w-2xl, NO padding)  ->  content 48..720
+            hero description (max-w-xl,  NO padding)  ->  content 48..624
+
+          The bar at `max-w-3xl` is therefore ALREADY flush with the hero's text
+          column — the two differ by one Tailwind step precisely because one of
+          them pays for the gutter out of its own max-width and the other does
+          not. Changing it to `max-w-2xl` moved it to the DESCRIPTION's edge,
+          96px short of the column, which is the opposite of the intent. The
+          reasoning that produced that change ("96px past the column") was
+          computed as 768 − 672 without accounting for the padding, and a
+          measurement of the rendered box disproved it.
+
+          The genuine misalignment on this row was the LOADING SHIMMER below,
+          which was `max-w-3xl` inside a `.stage-gutter` PARENT — so no padding
+          of its own, 48..816, a real 96px overhang past the bar it stands in
+          for. That is fixed there, not here.
 
           An earlier version of this comment said "Centered under the hero".
           There is no `mx-auto` here and never was — it is gutter-aligned. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-2xl">
+        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -948,8 +963,13 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           below it. */}
       <div className="stage-gutter">
       {convoLoading && (
-        // max-w-2xl, tracking the search bar above — this stands in for it while
-        // a query is in flight, so a different width reads as the layout jumping.
+        // max-w-2xl here equals max-w-3xl on the bar above, and that is not a
+        // typo: this element sits INSIDE a `.stage-gutter` parent so it pays no
+        // padding out of its own max-width, while the bar's `.stage-gutter` is on
+        // the same element as its max-width and does. Both resolve to 48..720 at
+        // 1440px. It was `max-w-3xl` (48..816), overhanging the bar it stands in
+        // for by 96px, so the layout visibly jumped on every query — the one real
+        // misalignment on this row.
         <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
