@@ -178,6 +178,12 @@ export function PlayerControls(props: PlayerControlsProps) {
         visible ? 'opacity-100' : 'opacity-0'
       }`}
       aria-hidden={!visible}
+      // Marks this as an auto-hiding region. VideoPlayer's hide timer refuses
+      // to fire while focus is inside one — going `inert` under a focused
+      // element triggers the HTML focus-fixup rule and dumps activeElement to
+      // <body>, so a keyboard user parked on the scrub bar used to lose their
+      // place after three idle seconds.
+      data-player-chrome=""
       // 2026-05-20 — React 19 supports `inert` as a proper boolean
       // prop. The previous code used `{inert: '' | undefined}` as a
       // React-18-era hack; React 19's native form is cleaner and
@@ -191,10 +197,19 @@ export function PlayerControls(props: PlayerControlsProps) {
       inert={!visible || undefined}
     >
       {/* Gradient backdrop to lift legibility off bright frames. */}
-      <div className="bg-gradient-to-t from-black via-black/70 to-transparent pt-12 pb-4 px-6 pointer-events-auto">
+      {/* `.stage-controls-scrim`, not `from-black via-black/70 to-transparent`:
+          the utility resolved to 0.533 alpha at the scrub row's y, where the
+          12.5px readouts measured 3.04:1 over a white frame and no text alpha
+          could reach 4.5. The primitive also pins the scrub track's backdrop, so
+          the track/buffered ratios stop depending on the video. */}
+      <div className="stage-controls-scrim pt-12 pb-4 px-6 pointer-events-auto">
         {/* Scrub bar row */}
-        <div className="flex items-center gap-3 mb-3">
-          <span className="text-white/85 text-xs font-mono tabular-nums w-[68px] text-right">
+        <div className="flex items-center gap-3.5 mb-4">
+          {/* tabular-nums, not font-mono: the mockup's readout is the body face
+              with figures locked to one advance width, which reads as part of
+              the chrome rather than as code. Both stop the row twitching as
+              digits change. */}
+          <span className="text-white/85 text-[12.5px] font-medium tabular-nums min-w-[52px] text-right">
             {formatTime(displaySec)}
           </span>
           <div
@@ -216,52 +231,113 @@ export function PlayerControls(props: PlayerControlsProps) {
             aria-valuemin={0}
             aria-valuemax={Math.max(1, Math.floor(durationSec))}
             aria-valuenow={Math.floor(displaySec)}
+            // Without this a screen reader reads aria-valuenow raw and
+            // announces "2704" for 45:04 — a number with no unit, on the one
+            // control where the value IS a duration (WCAG 4.1.2, APG Slider:
+            // supply aria-valuetext whenever the numeric value is not what a
+            // user would say out loud).
+            aria-valuetext={hasDuration ? `${formatTime(displaySec)} of ${formatTime(durationSec)}` : 'Duration unknown'}
             tabIndex={0}
-            className={`relative flex-1 h-2 rounded-full bg-white/[0.12] ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} group`}
+            // Keyboard contract. ArrowUp/ArrowDown are deliberately NOT handled
+            // here — they bubble to the player's window-level handler, which
+            // maps them to volume, and that shortcut predates the slider.
+            // Everything this DOES handle is stopped so the window handler
+            // can't apply the same seek twice.
+            onKeyDown={e => {
+              if (!hasDuration) return
+              const abs = (sec: number) => {
+                e.preventDefault()
+                e.stopPropagation()
+                onSeek(Math.min(durationSec, Math.max(0, sec)))
+              }
+              switch (e.key) {
+                case 'ArrowLeft': abs(displaySec - 10); break
+                case 'ArrowRight': abs(displaySec + 10); break
+                // PageUp/PageDown are the APG "large step". A minute matches
+                // the ±10s arrows' ratio to a typical 45-90 minute runtime.
+                case 'PageDown': abs(displaySec - 60); break
+                case 'PageUp': abs(displaySec + 60); break
+                case 'Home': abs(0); break
+                case 'End': abs(durationSec); break
+              }
+            }}
+            // h-3.5 on the hit target, 5px on the visible track: the mockup's
+            // .scrub wraps a thin bar in a taller row so the pointer has 14px
+            // to find rather than 5. Fitts's law — the bar this thin is
+            // otherwise genuinely hard to grab.
+            // `.stage-scrub` is the hook the knob's hover/focus growth hangs
+            // off in index.css. It used to be `group` + `group-hover:scale-110`
+            // on the knob itself, and at (0,3,0) that variant beat the knob's
+            // own (0,1,0) `transform: translate(-50%, -50%)` and REPLACED it —
+            // Tailwind v3 emits the whole transform chain with
+            // `--tw-translate-x/y` defaulting to 0 — so hovering the bar kicked
+            // the knob 7px down and 7px right, out of a 5px track, and left it
+            // there for the whole drag. `group` stays for the ring on the
+            // avatar-style children; the transform is CSS's now.
+            className={`stage-scrub relative flex-1 h-3.5 flex items-center ${hasDuration ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} group`}
           >
-            {/* Buffered fill — shows transcoder progress. Sits
-                below the position fill but above the track. */}
-            <div
-              className="absolute inset-y-0 left-0 bg-white/[0.18] rounded-full"
-              style={{ width: `${bufferedPct}%` }}
-            />
-            {/* Position fill — the real "you've watched up to here"
-                indicator. */}
-            <div
-              className="absolute inset-y-0 left-0 bg-purple-500 rounded-full"
-              style={{ width: `${pct}%` }}
-            />
-            {/* Scrubber handle — slightly larger on hover. */}
-            <div
-              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-white shadow-lg ring-2 ring-purple-500 transition-transform group-hover:scale-110"
-              style={{ left: `${pct}%` }}
-            />
-            {/* Hover preview timestamp — shows what time the user
-                would seek to. Only when not dragging (drag has its
-                own visible position above). */}
-            {hoverSec !== null && !dragging && hasDuration && (
+            <div className="stage-scrub-track">
+              {/* Buffered fill — the transcoder's progress. Sits below the
+                  position fill but above the track. */}
+              <div className="stage-scrub-buf" style={{ width: `${bufferedPct}%` }} />
+              {/* Position fill — "you've watched up to here". */}
+              <div className="stage-scrub-pos" style={{ width: `${pct}%` }} />
+              {/* Handle. */}
               <div
-                className="absolute -top-9 -translate-x-1/2 px-2 py-1 bg-black/85 text-white text-xs font-mono rounded pointer-events-none whitespace-nowrap"
-                style={{ left: `${(hoverSec / durationSec) * 100}%` }}
-              >
-                {formatTime(hoverSec)}
-              </div>
-            )}
+                className="stage-scrub-knob"
+                style={{ left: `${pct}%` }}
+              />
+              {/* Hover readout — what time a click would seek to. Suppressed
+                  while dragging, since the knob already shows that position and
+                  two competing indicators read as a bug.
+
+                  clamp() keeps the label roughly inside the TRACK at the
+                  extremes. It does not, as previously claimed, save it from the
+                  theater's overflow:hidden — the track's left edge already sits
+                  ~90px inside that box (px-6 + the 52px readout + gap-3.5) and
+                  the widest h:mm:ss label is ~66px, so slicing was never
+                  geometrically possible. The real (small) cost of the clamp is
+                  that the readout stops tracking the pointer in the outer 28px
+                  of the track, which is the lesser of the two evils against a
+                  label half-hanging off the end of the bar. */}
+              {hoverSec !== null && !dragging && hasDuration && (
+                <div
+                  className="stage-scrub-ts"
+                  style={{ left: `clamp(28px, ${(hoverSec / durationSec) * 100}%, calc(100% - 28px))` }}
+                >
+                  {formatTime(hoverSec)}
+                </div>
+              )}
+            </div>
           </div>
-          <span className="text-white/85 text-xs font-mono tabular-nums w-[68px]">
+          {/* The remaining/total readout is dimmer than the elapsed one — the
+              mockup's `.tm.r`. 0.7, not its 0.55: at 12.5px over a bright frame
+              0.55 measured 3.4:1. */}
+          <span className="text-white/70 text-[12.5px] font-medium tabular-nums min-w-[52px]">
             {hasDuration ? formatTime(durationSec) : '—'}
           </span>
         </div>
 
-        {/* Button row */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        {/* Transport row. The mockup squares these off (12px radius on a 42px
+            box, 14px on the 52px primary) rather than the round pills this had
+            — it reads as equipment rather than as web buttons, which is the
+            whole point of the theater framing.
+
+            The skip buttons carry their interval as a subscript. They were
+            asymmetric (-10 / +30) with the amount only in the tooltip, so on
+            touch there was no way to know either number. Both are 10s now:
+            asymmetric skip is a YouTube-ism that assumes you only ever skip
+            forward past something, and this player is used to re-hear a line
+            as often as to jump an intro. */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5">
             <ControlButton
               onClick={() => onSeekRelative(-10)}
               aria-label="Skip back 10 seconds"
-              title="Skip back 10s"
+              title="Skip back 10s (←)"
             >
-              <PlayerIcon name="skipBack" size={18} />
+              <PlayerIcon name="skipBack" size={19} />
+              <span className="stage-tr-secs" aria-hidden="true">10</span>
             </ControlButton>
             <ControlButton
               onClick={onPlayPause}
@@ -269,24 +345,25 @@ export function PlayerControls(props: PlayerControlsProps) {
               title={playing ? 'Pause (Space)' : 'Play (Space)'}
               size="large"
             >
-              <PlayerIcon name={playing ? 'pause' : 'play'} size={22} />
+              <PlayerIcon name={playing ? 'pause' : 'play'} size={23} />
             </ControlButton>
             <ControlButton
-              onClick={() => onSeekRelative(30)}
-              aria-label="Skip forward 30 seconds"
-              title="Skip forward 30s"
+              onClick={() => onSeekRelative(10)}
+              aria-label="Skip forward 10 seconds"
+              title="Skip forward 10s (→)"
             >
-              <PlayerIcon name="skipForward" size={18} />
+              <PlayerIcon name="skipForward" size={19} />
+              <span className="stage-tr-secs" aria-hidden="true">10</span>
             </ControlButton>
 
             {/* Volume cluster */}
-            <div className="flex items-center gap-2 ml-2">
+            <div className="flex items-center gap-2.5 ml-1.5">
               <ControlButton
                 onClick={onMuteToggle}
                 aria-label={muted ? 'Unmute' : 'Mute'}
                 title={muted ? 'Unmute (M)' : 'Mute (M)'}
               >
-                <PlayerIcon name={muted || volume === 0 ? 'volumeX' : 'volume'} size={18} />
+                <PlayerIcon name={muted || volume === 0 ? 'volumeX' : 'volume'} size={19} />
               </ControlButton>
               <input
                 type="range"
@@ -295,19 +372,19 @@ export function PlayerControls(props: PlayerControlsProps) {
                 step={0.01}
                 value={muted ? 0 : volume}
                 onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
-                className="w-24 accent-purple-500"
+                className="w-[78px] accent-purple-400"
                 aria-label="Volume"
               />
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
             <ControlButton
               onClick={onFullscreenToggle}
               aria-label={fullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
               title={fullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
             >
-              <PlayerIcon name="maximize" size={18} />
+              <PlayerIcon name="maximize" size={19} />
             </ControlButton>
           </div>
         </div>
@@ -325,13 +402,11 @@ function ControlButton({
   onClick: () => void
   size?: 'normal' | 'large'
 } & React.AriaAttributes & { title?: string }) {
-  const cls = size === 'large'
-    ? 'w-12 h-12 rounded-full bg-white/10 hover:bg-white/20'
-    : 'w-9 h-9 rounded-full hover:bg-white/10'
   return (
     <button
       onClick={onClick}
-      className={`inline-flex items-center justify-center text-white transition-colors ${cls}`}
+      // `grid` at the call site, not in the primitive — the CASCADE HAZARD rule.
+      className={`stage-tr-btn grid ${size === 'large' ? 'stage-tr-btn-primary' : ''}`}
       {...rest}
     >
       {children}

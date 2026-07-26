@@ -25,6 +25,7 @@ import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
 import type { Profile, User as ApiUser } from '@/lib/api'
+import { lockBodyScroll } from '@/lib/scrollLock'
 
 export interface NavTab {
   id: string
@@ -235,6 +236,7 @@ function MobileSheet({
   activeProfileId,
   onSelectProfile,
   onAddProfile,
+  onOpenProfilesGate,
   searchQuery,
   onSearchQueryChange,
 }: {
@@ -248,6 +250,9 @@ function MobileSheet({
   // Routes to Settings, where profile creation lives. Threaded through to
   // ProfileSwitcher's dashed Add-Profile row.
   onAddProfile?: () => void
+  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
+  // otherwise first-visit-only, so this is the way back to it.
+  onOpenProfilesGate?: () => void
   searchQuery: string
   onSearchQueryChange: (v: string) => void
 }) {
@@ -296,12 +301,9 @@ function MobileSheet({
   }, [onClose])
 
   // Lock the page behind the sheet — without this a drag over the scrim
-  // scrolls the content underneath on iOS.
-  useEffect(() => {
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = prev }
-  }, [])
+  // scrolls the content underneath on iOS. Shared ref-counted lock, so the
+  // theater and the profile gate can hold it at the same time in any order.
+  useEffect(() => lockBodyScroll(), [])
 
   return (
     <>
@@ -356,6 +358,7 @@ function MobileSheet({
               // focused row, the trap's first/last checks matched neither branch,
               // so Tab escaped into a page that aria-modal had hidden from AT.
               onAddProfile={onAddProfile && (() => { onClose(); onAddProfile() })}
+              onOpenProfilesGate={onOpenProfilesGate && (() => { onClose(); onOpenProfilesGate() })}
             />
           </div>
         )}
@@ -420,6 +423,9 @@ export interface TopNavProps {
   // Routes to Settings, where profile creation lives. Threaded through to
   // ProfileSwitcher's dashed Add-Profile row.
   onAddProfile?: () => void
+  // Opens the full-page "Who's watching?" gate on demand (D7). The gate is
+  // otherwise first-visit-only, so this is the way back to it.
+  onOpenProfilesGate?: () => void
   avatarUrl?: string
   onSignOut: () => void
 }
@@ -448,6 +454,7 @@ export function TopNav({
   activeProfileId,
   onSelectProfile,
   onAddProfile,
+  onOpenProfilesGate,
   avatarUrl,
   onSignOut,
 }: TopNavProps) {
@@ -652,6 +659,7 @@ export function TopNav({
               activeProfileId={activeProfileId}
               onSelect={onSelectProfile}
               onAddProfile={onAddProfile}
+              onOpenProfilesGate={onOpenProfilesGate}
             />
           </div>
         )}
@@ -695,6 +703,7 @@ export function TopNav({
         activeProfileId={activeProfileId}
         onSelectProfile={onSelectProfile}
         onAddProfile={onAddProfile}
+        onOpenProfilesGate={onOpenProfilesGate}
         searchQuery={searchQuery}
         onSearchQueryChange={onSearchQueryChange}
       />

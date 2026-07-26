@@ -353,6 +353,18 @@
     @apply bg-background text-foreground;
     font-family: var(--font-sans);
     overflow-x: hidden;
+    /* Reserve the classic scrollbar's width whether or not it is showing.
+       `overflow-x: hidden` above computes `overflow-y: auto`, which the UA
+       propagates to the viewport — so every surface that scroll-locks by setting
+       `overflow: hidden` (the theater, the profile gate, TopNav's mobile sheet)
+       removed the scrollbar and reflowed the page ~15px wider on open and back
+       on close. That was harmless while the locking overlay was opaque; the
+       theater made the app VISIBLE behind it, so the jump became a visible
+       shudder of the whole page — and of the theater box itself, since its
+       `position: fixed` parent widens too. Invisible on macOS overlay
+       scrollbars, obvious on Windows/Linux Chrome and Firefox, which is why it
+       took a review to find. Progressive: no support means the old behaviour. */
+    scrollbar-gutter: stable;
   }
 
   * {
@@ -533,8 +545,8 @@
    the responsive variants can do their job. Same caution applies to any
    other property you intend to override per-breakpoint.
 
-   TWO CORRECTIONS from the Phase 6 review, both of which change how you
-   should reason about this:
+   THREE CORRECTIONS, all of which change how you should reason about this.
+   The first two came out of the Phase 6 review, the third out of Phase 7b:
 
    1. It is not just MEDIA variants that land after this block — ALL variant
       utilities do. Measured in the built CSS: this custom block ends at rule
@@ -560,6 +572,28 @@
       reaching for `!`. (A live example of the plain-utility case:
       ProfileSwitcher writes `!text-[10px]` on `.stage-eyebrow`, and the `!` is
       load-bearing — a plain `text-[10px]` there silently does nothing.)
+
+   3. Correction 1 cuts the other way too, and this one is a BUG SHAPE rather
+      than a convenience. A call-site VARIANT utility at (0,2,0) or higher also
+      beats a primitive's BASE declaration at (0,1,0) — so it does not merely
+      extend the primitive on hover, it can REPLACE part of it. Phase 7b shipped
+      exactly that: `.stage-scrub-knob` centred itself with
+      `transform: translate(-50%, -50%)` at (0,1,0) while the call site added
+      `group-hover:scale-110`, which resolves to
+      `.group:hover .group-hover\:scale-110` at (0,3,0) and emits the WHOLE
+      transform chain — `translate(var(--tw-translate-x), var(--tw-translate-y))
+      … scaleX(1.1) scaleY(1.1)` — with `--tw-translate-x/y` defaulting to 0 in
+      preflight. Specificity resolves before order, so hovering the scrub bar
+      dropped the centring and kicked the 14px knob 7px down and 7px right, out
+      of a 5px track, for the duration of the drag. The pre-7b markup was immune
+      by accident: it centred with Tailwind's own `-translate-x-1/2
+      -translate-y-1/2`, which SETS those custom properties instead of competing
+      for `transform`.
+      The rule: if a primitive sets `transform`, `background`, `box-shadow` or
+      anything else a variant utility might also set, own BOTH states in the
+      primitive (`.stage-x` and `.stage-x:hover`) rather than leaving the hover
+      half to the call site. Two of the four Phase 7b reviewers found this
+      independently, from opposite directions.
    ==================================================================== */
 
 /* Backdrop tint — the per-page wash that makes each page "a stage lit
@@ -1020,7 +1054,10 @@ html[data-glow="subtle"] .stage-toolbar {
    group's ~184px doesn't fit beside the density toggle in ~284px), so
    pinning it under the 64px nav would hold ~186px — about 29% of a 640px
    viewport — permanently. Scrolling it away is the right trade there. */
-@media (max-width: 767px) {
+/* Negated form, not `max-width: 767px` — see the md-boundary note above:
+   Tailwind's `md:` is `min-width: 768px`, so the max-width form leaves 767.5px
+   matching neither rule. */
+@media not all and (min-width: 768px) {
   .stage-toolbar {
     position: static;
   }
@@ -1497,6 +1534,448 @@ html[data-glow="subtle"] .stage-toolbar {
    global :focus-visible outline (deliberately not suppressed) still applies. */
 .stage-opt:focus-visible {
   box-shadow: 0 0 0 2px rgba(216, 180, 254, 0.9), 0 0 18px rgba(168, 85, 247, 0.15);
+}
+
+/* ══ Player + theater (Aurora Stage Phase 7) ══════════════════════════
+   D5: the theater inset REPLACES the old black backdrop, so non-fullscreen
+   playback is a rounded box with the dimmed app behind it. D6: that app is
+   inert — see .stage-dim-app.
+
+   None of these sets `display`; the call sites do. */
+
+/* The still-mounted app, seen through the theater for the first time.
+   Kept as a sibling that the player dims rather than something the player
+   contains, so nothing about the app tree changes when playback starts.
+   D6 says inert: `pointer-events: none` here is the styling half, and the call
+   site adds the real `inert` attribute (plus a scroll lock) — which is what
+   actually removes the app from the tab order and the a11y tree. The
+   `pointer-events` here covers the MOUSE only; on its own it would leave every
+   control behind the veil tabbable and screen-reader reachable.
+
+   NOTE `filter` is not free here: per Filter Effects §4 it makes this element a
+   containing block for `position: fixed` AND `position: absolute` descendants,
+   as well as a stacking context. `<main>` is `min-h-screen`, i.e.
+   document-height, so a `fixed inset-0` modal rendered INSIDE `<main>` would
+   resolve against the document rather than the viewport and centre its card at
+   the document's midpoint — off-screen. Nothing hits that today: `inert` stops
+   a new one from opening, and every app overlay (toasts, SearchPalette, the
+   party surfaces, both gates, the portal-based modals) is a sibling AFTER
+   `</main>`. It is a live trap for anything added inside.
+   `opacity` does NOT compound it — opacity creates a stacking context but not a
+   containing block for fixed, and the filter already created the former.
+   `position: sticky` is unaffected either way: its offsets resolve against the
+   scrollport, not the containing block, so the sticky chrome inside `<main>`
+   still behaves. */
+.stage-dim-app {
+  opacity: 0.5;
+  filter: saturate(0.7);
+  pointer-events: none;
+}
+/* The veil over it. `backdrop-filter: blur(6px)` composites over a layer that
+   contains PLAYING VIDEO — the per-frame cost flagged as deep-debug Bug 25 and
+   the reason every blurred Stage primitive honours the reduced-blur opt-out.
+   This one has to as well; the fallback below raises the flat alpha so the
+   veil still reads as a veil without the blur. */
+.stage-dim-veil {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 3, 5, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+html[data-glow="subtle"] .stage-dim-veil {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: rgba(3, 3, 5, 0.92);
+}
+/* prefers-reduced-transparency is the accessibility counterpart of the blur
+   budget: a user asking for less transparency gets an opaque veil, which also
+   removes the compositing cost. Progressive — no support means no change. */
+@media (prefers-reduced-transparency: reduce) {
+  .stage-dim-veil {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: #030305;
+  }
+}
+
+/* The theater box itself. Inset via `position: absolute` + edge offsets rather
+   than a max-width card, because the mockup's proportions are asymmetric
+   (90px sides, 58px top/bottom) and a centred card cannot express that. */
+/* The inset lives in custom properties so the theater box and the watch-party
+   surfaces that anchor to it read the same two numbers. Declared unlayered and
+   immediately before the rules that consume them, so the responsive `:root`
+   overrides further down win on source order (all three are (0,1,0)). */
+:root {
+  --theater-inset-x: 90px;
+  --theater-inset-y: 58px;
+}
+.stage-theater {
+  position: absolute;
+  left: var(--theater-inset-x);
+  right: var(--theater-inset-x);
+  top: var(--theater-inset-y);
+  bottom: var(--theater-inset-y);
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid rgba(220, 200, 255, 0.2);
+  box-shadow: var(--glow-halo-strong), 0 40px 100px rgba(0, 0, 0, 0.8);
+  background: #000;
+}
+/* Full-bleed below lg. 90px of inset per side leaves 195px of picture on a
+   375px screen — the theater framing is a desktop affordance, and on a phone
+   the honest answer is to use the whole viewport. Keeping the radius/border at
+   0 here too, since a rounded box flush to the bezel reads as a rendering bug.
+   1024px because at 768px the inset would still eat 23% of the width.
+
+   `not all and (min-width: 1024px)`, NOT `max-width: 1023px`: Tailwind's `lg:`
+   is `min-width: 1024px`, so the max-width form leaves (1023, 1024) exclusive
+   matching neither — reachable at 1023.5px via browser zoom, a fractional DPR
+   or a scrollbar-affected width, where the theater rendered inset (844px of
+   picture in a 1023.5px viewport) instead of full-bleed. Same correction the
+   md-boundary note above records; the negated form is the exact complement. */
+@media not all and (min-width: 1024px) {
+  :root {
+    --theater-inset-x: 0px;
+    --theater-inset-y: 0px;
+  }
+  .stage-theater {
+    border-radius: 0;
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+/* Short viewports go full-bleed too, keyed on HEIGHT — the width query alone
+   can't see this case. The insets are absolute where the old card's were
+   proportional (`max-h-[88vh]`), so 116px of vertical inset is 8% of a 1440px
+   viewport but 19% of a 600px one, and it lands on top of a controls band that
+   already covers 36% of the picture there. 88vh gave this for free; an absolute
+   inset has to ask. 720px is the point below which the inset costs more than
+   the framing is worth (at 700px: 84px of inset over a 465px picture). */
+@media (max-height: 720px) {
+  :root {
+    --theater-inset-y: 0px;
+  }
+  .stage-theater {
+    border-radius: 0;
+    border-color: transparent;
+    box-shadow: none;
+  }
+}
+
+/* ── Watch-party surfaces, anchored to the theater box ─────────────────
+   IMPLEMENTATION_PLAN §D5 called for this and Phase 7b's first pass missed it:
+   these four are viewport-anchored, which was invisible while the player filled
+   the screen behind an opaque backdrop and is not any more. With the theater
+   inset 90px/58px, MiniDock at `top-4 left-4` landed entirely OUTSIDE the
+   picture — floating on the dimmed, desaturated app — and the party rail
+   straddled the boundary, ~250px over video and ~90px over the app.
+
+   Gated on `html[data-player-surface="theater"]`, which App stamps from the
+   surface the player reports: fullscreen and minimized must keep their viewport
+   offsets. The offsets are `calc()` over the same two custom properties
+   `.stage-theater` uses, so the responsive blocks above move the box and its
+   overlays together — there is no second copy of 90/58 to drift.
+
+   These beat the call sites' `top-4`/`right-3` utilities on specificity
+   ((0,2,1) vs (0,1,0)), which is the intent: the attribute is only present while
+   the theater is up. */
+html[data-player-surface="theater"] .stage-party-dock {
+  top: calc(var(--theater-inset-y) + 16px);
+  left: calc(var(--theater-inset-x) + 16px);
+}
+html[data-player-surface="theater"] .stage-party-rail {
+  top: calc(var(--theater-inset-y) + 12px);
+  right: calc(var(--theater-inset-x) + 12px);
+  bottom: calc(var(--theater-inset-y) + 12px);
+}
+html[data-player-surface="theater"] .stage-party-reactions {
+  inset: var(--theater-inset-y) var(--theater-inset-x);
+}
+
+/* Scrub bar. The track is the hit target; buffered fill, played fill, knob and
+   the hover readout all position against it. */
+.stage-scrub-track {
+  position: relative;
+  width: 100%;
+  height: 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.36);
+}
+/* Track 0.36 and buffered 0.75, against the mockup's 0.18/0.30.
+
+   The earlier justification for 0.28/0.45 measured a single sample point over a
+   BLACK frame and stopped there, which is the easy case. These sit over
+   arbitrary video, so the honest test is both extremes, and it only became
+   winnable once `.stage-controls-scrim` deepened the band underneath: with the
+   scrim at ~0.79 black at the scrub row, the backdrop's luminance is pinned to
+   0.000–0.035 whatever the frame is doing, so these ratios stop depending on
+   the content.
+     track vs backdrop      3.13:1 (black frame) · 3.01:1 (white frame)
+     buffered vs track      4.62:1 (black frame) · 3.05:1 (white frame)
+   Both clear the 1.4.11 3:1 floor at both extremes — that is what locates the
+   control and how far it has loaded.
+     played vs buffered     2.73:1 (black frame) · 2.96:1 (white frame)
+   That third boundary does NOT clear 3:1, and no set of alphas in one channel
+   can make three states mutually 3:1 apart over a range this wide. It is
+   carried by hue and by `.stage-scrub-pos`'s purple glow instead, which WCAG
+   credits for neither — stated rather than papered over. */
+.stage-scrub-buf {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.75);
+}
+.stage-scrub-pos {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 5px;
+  background: linear-gradient(90deg, var(--stage-purple), var(--stage-purple-lt));
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.7);
+}
+.stage-scrub-knob {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(168, 85, 247, 0.4), 0 2px 8px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  transition: transform 120ms ease;
+}
+/* The knob's grow-on-hover lives HERE rather than as `group-hover:scale-110` on
+   the call site, and that is a correctness requirement, not tidiness: Tailwind
+   v3's scale utilities emit the whole transform chain —
+   `translate(var(--tw-translate-x), var(--tw-translate-y)) … scaleX(…) scaleY(…)`
+   — and `--tw-translate-x/y` default to 0 in preflight. At (0,2,0) the variant
+   beat this rule's (0,1,0) `translate(-50%, -50%)`, so hovering the scrub bar
+   REPLACED the knob's centring with translate(0,0) and kicked it 7px down and
+   7px right, mid-grab. Writing both parts in one declaration keeps them
+   composed. `.stage-scrub` is the marker the call site puts on the slider. */
+.stage-scrub:hover .stage-scrub-knob,
+.stage-scrub:focus-visible .stage-scrub-knob {
+  transform: translate(-50%, -50%) scale(1.14);
+}
+/* Reduced motion — the grow is a decorative affordance; the knob is already
+   4px-ringed and unmissable. Declared after the rule it overrides, since both
+   are unlayered and at (0,2,0) source order is what decides. */
+@media (prefers-reduced-motion: reduce) {
+  .stage-scrub-knob { transition: none; }
+  .stage-scrub:hover .stage-scrub-knob,
+  .stage-scrub:focus-visible .stage-scrub-knob {
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* Profile orb tile in the "Who's watching?" gate (D7). The lift is the only
+   hover feedback on a 118px circular target, and it is mirrored on
+   :focus-visible so a keyboard user gets the same signal — Tailwind's
+   `hover:scale-[1.04] focus-visible:scale-[1.04]` did that part correctly but
+   sat outside every prefers-reduced-motion block in the file. */
+.stage-orb {
+  transition: transform 140ms ease;
+}
+.stage-orb:hover,
+.stage-orb:focus-visible {
+  transform: scale(1.04);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-orb { transition: none; }
+  .stage-orb:hover,
+  .stage-orb:focus-visible { transform: none; }
+}
+/* Hover readout. `pointer-events: none` is load-bearing — the label sits over
+   the track, and without it the pointer would enter the label, leave the
+   track, and the readout would flicker itself out of existence. */
+.stage-scrub-ts {
+  position: absolute;
+  bottom: 18px;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  background: rgba(10, 8, 18, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  padding: 4px 9px;
+  border-radius: 7px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Transport buttons. */
+.stage-tr-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  place-items: center;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.stage-tr-btn:hover { background: rgba(255, 255, 255, 0.18); }
+.stage-tr-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* The primary play/pause: white on dark, the one control that should be
+   findable without looking. */
+.stage-tr-btn-primary {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  background: #fff;
+  color: #0a0a0a;
+  border-color: transparent;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.stage-tr-btn-primary:hover { background: #f1f1f1; }
+/* The "10" on the skip buttons. */
+/* The "10" subscript inside the skip-back/skip-forward glyphs. It is the ONLY
+   thing distinguishing a 10-second skip from any other interval, so it has to
+   be readable — the mockup draws it at 7.5px, which is below the floor at which
+   a two-digit numeral is legible over moving video even at 800 weight. 9.5px is
+   the smallest size where both digits hold together; `bottom` drops a hair to
+   keep it clear of the arrow's baseline at the larger size. */
+.stage-tr-secs {
+  position: absolute;
+  bottom: 2px;
+  font-size: 9.5px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.85);
+  letter-spacing: 0.01em;
+}
+
+/* Cast / AirPlay pill — cyan so it never reads as a purple Aurora control;
+   an active remote session is a different kind of state. */
+.stage-cast-pill {
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(8, 47, 54, 0.8);
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  color: #a5f3fc;
+  white-space: nowrap;
+}
+/* Near-opaque teal fill, not the mockup's rgba(34,211,238,0.14) over video:
+   that put 12px text on whatever frame happened to be playing. This is the
+   same fix .stage-cbadge-pub needed. */
+.stage-cast-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--stage-cyan);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.8);
+  flex: none;
+}
+
+/* Skip-intro / skip-credits pill. White-on-dark because it appears over
+   arbitrary video and has to be unmissable for the few seconds it exists. */
+.stage-skip-pill {
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #0a0a0a;
+  font-weight: 700;
+  font-size: 13px;
+  /* The pill's TEXT is fine either way (19.8:1 on white, 17.7:1 on black). Its
+     BOUNDARY is the problem: a 0.95-white fill against a white frame measures
+     1.00:1 — literally invisible — the exact mirror of the
+     translucent-black-pill-on-a-night-scene failure this pill replaced. 1.4.11
+     applies to the boundary of a control, not only to its label, and the drop
+     shadow separates downward only.
+     0.42, not the 0.25 this was first written at: 0.25 measures 1.83:1 against
+     the fill, which is better than 1.00:1 and still not the 3:1 the criterion
+     asks for. 0.42 is the alpha at which the border clears 3:1 at BOTH frame
+     extremes (2.99:1 on black, 3.04:1 on white) — deriving it rather than
+     eyeballing it is the whole point, since the first pass got the direction
+     right and the magnitude wrong. */
+  border: 1px solid rgba(0, 0, 0, 0.42);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+.stage-skip-pill:hover { background: #fff; }
+
+/* ── The two player scrims ──────────────────────────────────────────────
+   Both were Tailwind gradient utilities at the call sites
+   (`from-black/80 to-transparent`, `from-black via-black/70 to-transparent`),
+   and both were too shallow by a wide margin, because the alpha that matters is
+   the one at the TEXT's y — not the one at the stop.
+
+   The top bar's far stop was 0, so the alpha where the text actually sits was
+   nowhere near 0.8. Measured at the SUBTITLE's y (~70% down the 68.75px bar,
+   the worst case of the two lines — the title sits higher on the same ramp and
+   is therefore strictly better off), the old gradient resolved to 0.242, and
+   over a white frame — a daylight exterior, a title card — the 11.5px
+   `text-white/60` subtitle measured 1.44:1. No text alpha fixes that: `white`
+   itself was only 1.78:1 at that point. The gradient is the only lever, which is
+   exactly what `.stage-topnav` records having learned when Phase 4 made the hero
+   full-bleed — and this bar sits over arbitrary video, a strictly harsher case
+   than one hero image. Same remedy, same 0.72 far stop. At the subtitle's y:
+     subtitle  7.37:1 (black frame) · 4.53:1 (white frame)  [white/60 @ 11.5px]
+     title     21.0:1 (black frame) · 9.23:1 (white frame)  [white @ 17px/700,
+               evaluated at the same y — the true figure is better still, and
+               17px is NOT large text: the threshold is 18.66px, so it needs 4.5]
+   Both figures are reproducible with contrast.mjs; the earlier draft of this
+   comment quoted 4.53:1 for the title, which was the subtitle's number. */
+.stage-player-topbar {
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.92) 0%,
+    rgba(0, 0, 0, 0.72) 70%,
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+/* The controls band, 150.75px tall. The scrub row sits 62% up it, where the old
+   `via-black/70` resolved to 0.533 — enough on a night scene, not enough on
+   anything bright: the 12.5px readouts measured 3.67:1 and 3.04:1 against a
+   white frame, and `white` at that y topped out at 4.47:1. At 0.79 they reach
+   9.4:1 and 6.9:1, and — the reason this matters beyond the text — the scrub
+   track's own backdrop stops being the video at all, which is what makes the
+   track/buffered ratios above frame-independent. */
+.stage-controls-scrim {
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0.94) 0%,
+    rgba(0, 0, 0, 0.86) 55%,
+    rgba(0, 0, 0, 0.62) 80%,
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+
+/* Up-next card, shown over the credits. */
+.stage-upnext {
+  width: 252px;
+  border-radius: 15px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(30, 26, 46, 0.94), rgba(12, 10, 20, 0.97));
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glow-border-strong);
+  box-shadow: var(--glow-halo-strong), 0 24px 60px rgba(0, 0, 0, 0.65);
+}
+html[data-glow="subtle"] .stage-upnext {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: #0c0a14;
+}
+.stage-upnext-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--stage-purple-lt);
+  font-weight: 700;
 }
 
 /* ── Smart-search chip ────────────────────────────────────────────────

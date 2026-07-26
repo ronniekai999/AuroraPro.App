@@ -31,6 +31,7 @@ import {
   currentGlow,
   currentPreferredQuality,
   readPrefsSnapshot,
+  writePrefs,
   type FontChoice,
   type GlowChoice,
   type QualityChoice,
@@ -128,10 +129,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
       skipFirstWriteRef.current = false
       return
     }
-    try {
-      const merged = { ...readPrefsSnapshot(), ...settings }
-      localStorage.setItem('aurora_prefs', JSON.stringify(merged))
-    } catch { /* ignore */ }
+    // Via the shared writer — this used to be a third hand-rolled
+    // read-modify-write of `aurora_prefs`, with the same shape as the two the
+    // blob's owner already implements.
+    writePrefs(settings)
   }, [settings])
 
   const toggle = (key: keyof typeof settings) => {

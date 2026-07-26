@@ -84,6 +84,7 @@ import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
 import { CollectionsModal } from '@/components/CollectionsModal'
 import { TasteOnboardingGate } from '@/components/TasteOnboarding'
+import { ProfilesGate } from '@/components/ProfilesGate'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
@@ -100,6 +101,7 @@ import { oauthProviderLabel, OAUTH_SIGN_IN_PROVIDERS, type OAuthProvider } from 
 import { type Media } from '@/lib/types'
 import { isResumable } from '@/lib/format'
 import { currentPreferredQuality } from '@/lib/appearance'
+import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
@@ -1648,6 +1650,11 @@ export default function App() {
   // the user pick one or create a new list inline.
   // Phase 5 — active profile (moved up so all effects below can use it).
   const [profiles, setProfiles] = useState<Profile[]>([])
+  // Distinguishes "not fetched yet" from "fetched, and there are none" — the
+  // empty array can't. ProfilesGate's `ready` needs the difference; passing
+  // `profiles.length > 0` made `ready` a tautology, since the policy's own
+  // `profileCount < 2` check already subsumes it.
+  const [profilesLoaded, setProfilesLoaded] = useState(false)
   const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
     try {
       const raw = localStorage.getItem('aurora_active_profile_id')
@@ -1748,6 +1755,45 @@ export default function App() {
   // nominal 64px. The stack grows by ~37px per actively-scanning library
   // because ScanProgressBar renders in flow above the nav, and an admin
   // mid-scan was the case where all five hardcoded offsets broke.
+  // Aurora Stage Phase 7b (D5/D6) — which surface the player is presenting.
+  // 'theater' is the only one that changes anything out here: the app behind the
+  // theater box is VISIBLE for the first time, so it gets dimmed and made inert.
+  // Fullscreen and minimized cover or hide the viewport, so nothing behind them
+  // needs doing.
+  const [playerSurface, setPlayerSurface] = useState<'theater' | 'fullscreen' | 'minimized' | null>(null)
+  // Set by the switcher's "Who's watching?" item; the gate self-gates otherwise.
+  const [profilesGateForced, setProfilesGateForced] = useState(false)
+  // Reported UP by the gate, which owns the policy. App needs it only to keep
+  // Cmd+K from opening the palette (z-200) on top of the gate (z-85).
+  const [profilesGateOpen, setProfilesGateOpen] = useState(false)
+  const theaterActive = playerSurface === 'theater'
+
+  // Stamp the surface on <html> so CSS can react to it. This is what gates the
+  // watch-party surfaces' theater anchoring (IMPLEMENTATION_PLAN §D5) — they are
+  // rendered outside <main>, so they stay live and visible during playback, and
+  // until now they stayed viewport-anchored too: MiniDock floated on the dimmed
+  // app entirely outside the picture. An attribute rather than a class because
+  // three different overlays key off it and `html[data-player-surface="theater"]`
+  // reads as the state it is.
+  useEffect(() => {
+    const el = document.documentElement
+    if (!playerSurface) { el.removeAttribute('data-player-surface'); return }
+    el.dataset.playerSurface = playerSurface
+    return () => { el.removeAttribute('data-player-surface') }
+  }, [playerSurface])
+
+  // Scroll lock while the theater is up. The app behind is inert (D6), so a
+  // wheel or a swipe must not scroll it — otherwise the backdrop drifts under a
+  // stationary player, which reads as the page having come unglued.
+  //
+  // Via the shared ref-counted lock, not a local save/restore of
+  // body.style.overflow: two other surfaces lock the same property and
+  // save-prev only composes under LIFO release. See lib/scrollLock.
+  useEffect(() => {
+    if (!theaterActive) return
+    return lockBodyScroll()
+  }, [theaterActive])
+
   const chromeRef = useRef<HTMLDivElement | null>(null)
   // useLayoutEffect, not useEffect: this runs BEFORE paint. With useEffect an
   // admin whose scan was already running at mount painted one frame against
@@ -1945,7 +1991,7 @@ export default function App() {
 
   // Load profiles once the user is logged in.
   useEffect(() => {
-    if (!user) { setProfiles([]); return }
+    if (!user) { setProfiles([]); setProfilesLoaded(false); return }
     const ac = new AbortController()
     listProfiles(ac.signal).then(ps => {
       setProfiles(ps)
@@ -1959,6 +2005,7 @@ export default function App() {
       } else if (ps.length === 0 && activeProfileId !== null) {
         setActiveProfileId(null)
       }
+      setProfilesLoaded(true)
     }).catch(() => { /* non-fatal — profile features just stay disabled */ })
     return () => ac.abort()
   // activeProfileId intentionally excluded — we set it inside the
@@ -2477,6 +2524,10 @@ export default function App() {
         // (acts as "upgrade to palette" affordance).
         if (inEditable && target !== searchInputRef.current) return
         if (playerTarget || partyJoinPrompt || contextMenu || addToListMedia) return
+        // The profile gate belongs in this list too. SearchPalette is z-200 and
+        // the gate is z-85, so Cmd+K opened the palette over it, and picking a
+        // result navigated the app behind a gate that stayed up.
+        if (profilesGateOpen) return
         e.preventDefault()
         setPaletteOpen(true)
       }
@@ -2486,7 +2537,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen])
+  }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen])
 
   // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
   // so a cached user is our auth signal: optimistically render with it while
@@ -4289,8 +4340,42 @@ export default function App() {
       />
 
       {/* Main Content. No left offset any more — the sidebar is gone, so
-          pages run the full width of the viewport (Aurora Stage M2). */}
-      <main className="min-h-screen">
+          pages run the full width of the viewport (Aurora Stage M2).
+
+          Aurora Stage Phase 7b — dimmed and inert behind the theater (D6).
+          `inert` is doing the load-bearing work: it blocks pointer events,
+          removes every descendant from the tab order, AND hides the subtree from
+          assistive tech, which is all three halves of "inert" in one attribute.
+          React 19 supports it as a real prop (PlayerControls already relies on
+          that). `.stage-dim-app` carries the opacity/saturate and repeats
+          pointer-events: none — redundant where inert is supported, and a
+          PARTIAL fallback where it isn't (Safari < 15.5): it stops the mouse and
+          nothing else. On those browsers the app behind stays tabbable and
+          screen-reader reachable. An earlier version of this comment called it
+          "the only protection where it isn't", which overstated what
+          pointer-events does.
+
+          TWO KNOWN GAPS, both deliberate, both worth knowing about:
+
+          1. `<main>` is not the whole app. ServerPanel, NotificationPanel,
+             SearchPalette, the toasts, both gates and the party surfaces all
+             render as siblings AFTER it, so none of them goes inert — they stay
+             tabbable behind the veil. That is right for the party surfaces
+             (a watch-party host has to keep using them mid-playback) and it is
+             why D6's "focus stays in the theater" is true only modulo an open
+             party panel. Cmd+K is now guarded separately; the panels are opened
+             from TopNav, which IS inside <main>, so they cannot be opened while
+             the theater is up — only left open across the transition.
+          2. In browser fullscreen `theaterActive` is false, so <main> un-inerts.
+             The app is invisible (the fullscreen element covers it) but Tab still
+             walks it. The fullscreen element's own top-layer rendering is what
+             hides it, and inerting the page behind a fullscreen element is the
+             UA's job, not ours — but a user who tabs while fullscreen does move
+             focus into things they cannot see.
+
+          `inert={x || undefined}` rather than `inert={x}` so the attribute is
+          absent, not `inert="false"` — the HTML attribute is presence-based. */}
+      <main className={`min-h-screen ${theaterActive ? 'stage-dim-app' : ''}`} inert={theaterActive || undefined}>
         {/* Sticky stack: scan bar + nav in one sticky container so the
             scan bar contributes its height to flow and both pin together
             on scroll. The bar stays ABOVE the nav, as in the mockup. */}
@@ -4348,6 +4433,7 @@ export default function App() {
             // ProfilesAndWatchlistsCard already owns creation plus the taste
             // onboarding it kicks off.
             onAddProfile={() => handleNavigate('settings')}
+            onOpenProfilesGate={() => setProfilesGateForced(true)}
             avatarUrl={(profiles.find(p => p.id === activeProfileId) ?? profiles.find(p => p.is_default) ?? profiles[0])?.avatar_url}
             onSignOut={() => { void handleLogout() }}
           />
@@ -4798,6 +4884,7 @@ export default function App() {
         onEnded={handlePlaybackEnded}
         isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
+        onSurfaceChange={setPlayerSurface}
         onClose={() => {
           setPlayerTarget(null)
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after
@@ -4979,6 +5066,27 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* "Who's watching?" (D7) — self-gating on the per-device flag and on
+          there being more than one profile to choose between. It composites
+          ABOVE the taste gate (z-85 over OnboardingFlow's z-80): pick who you
+          are, then onboard that profile, never the other way round. Render order
+          alone did NOT achieve that — both gates self-gate independently, and
+          when both were up the opaque z-80 taste flow covered the picker. */}
+      <ProfilesGate
+        profiles={profiles}
+        activeProfileId={activeProfileId}
+        onSelect={setActiveProfileId}
+        onAddProfile={() => handleNavigate('settings')}
+        // `ready` = the list has actually been fetched. It must NOT be
+        // `profiles.length > 0`: the policy's own `profileCount < 2` check
+        // already covers that, so as wired it was a tautology and the test
+        // asserting the gate is suppressed pre-load was proving nothing.
+        ready={profilesLoaded}
+        forced={profilesGateForced}
+        onDismiss={() => setProfilesGateForced(false)}
+        onOpenChange={setProfilesGateOpen}
+      />
 
       {/* Taste onboarding ("Pick What You Love") — self-gating: renders only
           when the active/default profile is eligible and hasn't completed it.

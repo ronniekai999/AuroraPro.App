@@ -16,6 +16,7 @@ import { collectionStrips } from './CollectionsView'
 import { groupDateParts } from './CalendarView'
 import { maturityLeanLabel, MATURITY_OPTIONS, MATURITY_AUTO } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
+import { shouldShowProfileGate } from '@/lib/profileGate'
 
 // The suite runs under TZ=America/New_York, pinned in vitest.config.ts — see
 // that file for why a non-UTC zone is required and why the pin lives in config
@@ -373,5 +374,85 @@ describe('nextRadioIndex', () => {
     expect(nextRadioIndex('ArrowRight', 0, 3)).toBe(1)
     const n = nextRadioIndex('ArrowLeft', 0, 3)
     expect(n).toBe(2)
+  })
+})
+
+describe('shouldShowProfileGate', () => {
+  // D7's policy, as a pure function — a component that only reveals its policy
+  // by being rendered is untestable here (no jsdom), and this policy has four
+  // inputs of which two are easy to get backwards.
+
+  it('shows on a first visit when there is a choice to make', () => {
+    expect(shouldShowProfileGate({ profileCount: 3, seen: false, forced: false, ready: true })).toBe(true)
+  })
+
+  it('stays away once seen on this device', () => {
+    expect(shouldShowProfileGate({ profileCount: 3, seen: true, forced: false, ready: true })).toBe(false)
+  })
+
+  it('never shows for a solo server, seen or not', () => {
+    // The whole point of D7 choosing "first visit per device" over "every
+    // login": a one-profile server has nothing to pick and must never be nagged.
+    for (const seen of [true, false]) {
+      expect(shouldShowProfileGate({ profileCount: 1, seen, forced: false, ready: true })).toBe(false)
+      expect(shouldShowProfileGate({ profileCount: 0, seen, forced: false, ready: true })).toBe(false)
+    }
+  })
+
+  it('opens on demand even after being seen', () => {
+    // The switcher's "See all profiles" entry point has to work forever, not
+    // only until the flag is set.
+    expect(shouldShowProfileGate({ profileCount: 2, seen: true, forced: true, ready: true })).toBe(true)
+  })
+
+  it('refuses to open on demand when there is still nothing to choose', () => {
+    // `forced` outranks `seen`, but not the count — an empty picker is a dead
+    // end with no way to make progress.
+    expect(shouldShowProfileGate({ profileCount: 1, seen: true, forced: true, ready: true })).toBe(false)
+  })
+
+  it('waits until the profile list has loaded', () => {
+    // `ready` outranks everything, INCLUDING `forced`: a gate that pops up
+    // mid-fetch and then re-decides is worse than one that waits a beat.
+    //
+    // These rows used to be unreachable, and that is worth recording. App wired
+    // `ready={profiles.length > 0}` while passing `profileCount={profiles.length}`
+    // — both derived from the same array — so `!ready` implied `profileCount === 0`
+    // implied `profileCount < 2`, and the `ready` guard could not change the
+    // result for ANY input the app could construct. Every `ready` mutant died
+    // here, in impossible space: mutation-adequate over a domain that cannot
+    // occur, which is the exact mistake the maturity-scale bug taught one phase
+    // earlier. App now passes a real `profilesLoaded` flag, which distinguishes
+    // "not fetched" from "fetched, and there are none", so `profileCount >= 2`
+    // with `ready: false` is a state the app genuinely produces — between the
+    // listProfiles() resolution and its setState, and on every re-login.
+    expect(shouldShowProfileGate({ profileCount: 0, seen: false, forced: false, ready: false })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 3, seen: false, forced: false, ready: false })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 3, seen: true, forced: true, ready: false })).toBe(false)
+  })
+
+  it('does NOT re-ask once seen, even after the server grows a second profile', () => {
+    // This test used to be titled "asks again if a server grows a second profile
+    // after the flag was set" and then passed `seen: false` in both assertions —
+    // so the flag was never set, and it asserted nothing about the scenario it
+    // named. The real behaviour is the opposite of the old title: `seen` is a
+    // per-device "you have answered this question" flag, not a per-count one, so
+    // growing the server does not re-nag. The switcher's "See all profiles" entry
+    // point is how you revisit the choice.
+    expect(shouldShowProfileGate({ profileCount: 2, seen: true, forced: false, ready: true })).toBe(false)
+    expect(shouldShowProfileGate({ profileCount: 5, seen: true, forced: false, ready: true })).toBe(false)
+  })
+
+  it('asks a device that has never answered, at every count above one', () => {
+    // What the count guard short-circuiting ahead of `seen` actually buys: a
+    // device that never saw the gate (because there was nothing to choose) still
+    // gets asked the first time there is. Iterated rather than sampled at the
+    // boundary, so a guard rewritten as `=== 2` or `<= 2` cannot survive.
+    for (const profileCount of [2, 3, 4, 9]) {
+      expect(shouldShowProfileGate({ profileCount, seen: false, forced: false, ready: true })).toBe(true)
+    }
+    for (const profileCount of [0, 1]) {
+      expect(shouldShowProfileGate({ profileCount, seen: false, forced: false, ready: true })).toBe(false)
+    }
   })
 })

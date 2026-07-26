@@ -25,7 +25,7 @@
 // browser-native via the <video controls> attribute. V1 has a
 // custom controls overlay; that's a polish item, deferred.
 
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import Hls from 'hls.js'
 import { Airplay, Cast, Maximize2, Pause, Play, SkipForward, StopCircle, VolumeX, X } from 'lucide-react'
 import {
@@ -41,6 +41,8 @@ import {
 } from '@/lib/api'
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
+import { playerSurface } from '@/lib/playerSurface'
+import { writePrefKey } from '@/lib/appearance'
 import {
   buildSessionRequest,
   createCastToken,
@@ -201,6 +203,12 @@ interface VideoPlayerProps {
   // Reports whether the player has collapsed to the cast/AirPlay control
   // widget, so the parent can suppress Escape/back-to-close while casting.
   onMinimizedChange?: (minimized: boolean) => void
+  // Aurora Stage Phase 7b (D5). Reports which surface the player is presenting
+  // so the parent can dim + inert the app behind the theater box. 'theater' is
+  // the only value that needs anything from the parent — fullscreen covers the
+  // viewport and minimized is off-screen, so in both cases what's behind is
+  // invisible anyway and dimming it would be wasted compositing.
+  onSurfaceChange?: (surface: 'theater' | 'fullscreen' | 'minimized' | null) => void
   // Smart Skip — gates the in-player marker editor (manual correction
   // writes through admin-only endpoints, so the UI only mounts for
   // admins).
@@ -287,12 +295,9 @@ function readVolumePref(): number | null {
 }
 
 function writeVolumePref(volume: number): void {
-  try {
-    const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
-    const prefs = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
-    prefs.player_volume = Math.min(1, Math.max(0, volume))
-    localStorage.setItem('aurora_prefs', JSON.stringify(prefs))
-  } catch { /* storage unavailable — the volume just won't stick */ }
+  // Through the blob's owner rather than a local read-modify-write. The clamp
+  // stays here: it is this key's contract, not the writer's.
+  writePrefKey('player_volume', Math.min(1, Math.max(0, volume)))
 }
 
 // 2026-05-28 — Lift subtitle cues clear of the bottom control bar.
@@ -389,7 +394,19 @@ async function attemptPlay(
   }
 }
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange, isAdmin }: VideoPlayerProps) {
+/**
+ * True when focus currently sits inside a region that auto-hides with the
+ * controls. Module scope so showControlsTemporarily can stay a zero-dep
+ * useCallback — the DOM is the state here, not React's.
+ */
+function focusInChrome(): boolean {
+  const el = document.activeElement
+  if (!el || el === document.body) return false
+  return !!(el as Element).closest?.('[data-player-chrome]')
+}
+
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange,
+  onSurfaceChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
@@ -773,6 +790,68 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // Report minimized-widget state up so the parent's global Escape/back
   // handlers don't unmount the player while casting (which would tear down the
   // streaming session feeding the receiver). See App's Escape gate.
+  // Focus management for the theater (Aurora Stage Phase 7b).
+  //
+  // This is not optional politeness — it repairs damage the inert app causes.
+  // The moment App marks <main> inert, the HTML focus-fixup rule unfocuses
+  // whatever was focused inside it (the card or Play button the user just
+  // activated) and document.activeElement becomes <body>. So without this the
+  // act of starting playback DESTROYED focus: a keyboard user was left at the
+  // top of the document, and a screen-reader user's virtual cursor sat on
+  // <body> with no announcement of what had happened.
+  //
+  // Captures the opener before moving focus and restores it on unmount, so
+  // closing after a 45-minute episode returns you to the card you launched
+  // from rather than to the top of the page (WCAG 2.4.3, APG Dialog).
+  const openerRef = useRef<HTMLElement | null>(null)
+  useEffect(() => {
+    if (!target) return
+    openerRef.current = document.activeElement as HTMLElement | null
+    // rAF, not a bare call: <main> goes inert in the same commit, and focusing
+    // before that lands means the fixup rule takes the focus straight back off.
+    const raf = requestAnimationFrame(() => overlayRootRef.current?.focus({ preventScroll: true }))
+    return () => {
+      cancelAnimationFrame(raf)
+      const opener = openerRef.current
+      openerRef.current = null
+      if (opener && opener.isConnected) opener.focus({ preventScroll: true })
+    }
+  }, [target])
+
+  // Aurora Stage Phase 7b — report the presented surface so App can dim and
+  // inert the tree behind the theater. Derived, not stored: `target` decides
+  // whether the player is up at all, and minimized/fullscreen are already
+  // state, so a separate mode variable would be a fourth source of truth able
+  // to disagree with the other three.
+  //
+  // useLayoutEffect, not useEffect: this runs BEFORE paint. As a passive effect
+  // it always trailed the player's own mount/unmount by one commit, so closing
+  // painted one frame of the app at `opacity: .5, saturate(.7)` with no player
+  // on screen, and opening painted the mirror image. The precedence itself lives
+  // in lib/playerSurface so all eight (target, minimized, fullscreen)
+  // combinations can be asserted without a DOM.
+  useLayoutEffect(() => {
+    onSurfaceChange?.(playerSurface(!!target, minimizedActive, fullscreen))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, minimizedActive, fullscreen])
+
+  // Fullscreen is only ever cleared by the `fullscreenchange` listener, and that
+  // listener lives in an effect keyed on [target] — so closing the player while
+  // browser-fullscreen races: the UA queues fullscreenchange when the fullscreen
+  // element unmounts, but the passive cleanup may have removed the listener
+  // first. Lose that race and `fullscreen` stayed true, so the NEXT open
+  // rendered fullscreen chrome (auto-hiding bar, no theater box) in a window
+  // that isn't fullscreen, with <main> neither dimmed nor inert. Pre-existing,
+  // and it fails safe with respect to `inert`, but the visual delta is much
+  // larger now that the non-fullscreen surface is a framed box.
+  useEffect(() => {
+    if (!target) setFullscreen(false)
+  }, [target])
+
+  // Tell the parent the player has gone for good on unmount, so a stale
+  // 'theater' can't leave <main> dimmed and inert with no player on screen.
+  useEffect(() => () => onSurfaceChange?.(null), [onSurfaceChange])
+
   useEffect(() => {
     onMinimizedChange?.(minimizedActive)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2652,8 +2731,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     //     is NOT in the seek-bar/buttons region; pinning visible
     //     when they're clearly aiming at controls matches
     //     Netflix / YouTube / Plex behavior
-    if (playingRef.current && !lastInBottomZoneRef.current) {
+    if (playingRef.current && !lastInBottomZoneRef.current && !focusInChrome()) {
       hideTimerRef.current = window.setTimeout(() => {
+        // Re-check at FIRE time, not only at schedule time. Focus can move into
+        // the controls during the 3s window (Tab from the video surface onto the
+        // scrub bar is one keystroke), and hiding then is destructive rather
+        // than merely rude: the chrome goes `inert`, which triggers the HTML
+        // focus-fixup rule — the focused element is unfocused and
+        // document.activeElement becomes <body>. So a keyboard user who paused
+        // on the seek bar to read the timestamp lost their place entirely
+        // (WCAG 2.4.3). Reschedule instead; the pointer path is unaffected
+        // because a mouse user has nothing focused inside the chrome.
+        if (focusInChrome()) {
+          hideTimerRef.current = null
+          return
+        }
         setControlsVisible(false)
         hideTimerRef.current = null
       }, 3000)
@@ -2902,6 +2994,27 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           e.preventDefault()
           vid.muted = !vid.muted
           break
+        // Smart Skip. The pill was pointer-only: no shortcut and no focus of its
+        // own, so the one control the player deliberately keeps visible through
+        // the auto-hide was the one a keyboard user could not reach without
+        // tabbing into chrome that may already have faded. `s` sits beside the
+        // existing single-letter transport keys; the handler is a no-op outside
+        // a skip window, so it can't misfire.
+        case 's':
+        case 'S': {
+          e.preventDefault()
+          // Dispatched at the DOM rather than through a callback ref, because
+          // `handleSkip` and `activeSkipMarker` are both computed BELOW this
+          // component's `if (!target) return null`, so no hook here can close
+          // over them and no ref can be assigned to them without writing to a
+          // ref during render (which react-hooks/refs correctly forbids).
+          // Clicking the button also keeps one implementation of "what skipping
+          // does" instead of two that can drift. No pill rendered → no-op.
+          overlayRootRef.current
+            ?.querySelector<HTMLButtonElement>('[data-skip-pill]')
+            ?.click()
+          break
+        }
         case 'f':
         case 'F':
           e.preventDefault()
@@ -3189,7 +3302,30 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // mousemove (which also un-hides the controls via the handler
       // above). Matches Plex/Netflix/YouTube behavior.
       style={{ cursor: controlsVisible ? 'auto' : 'none' }}
+      // `inert` alongside aria-hidden: the minimized surface is
+      // `opacity-0 pointer-events-none`, which hides it from the mouse and from
+      // AT but leaves every button inside it TABBABLE — the exact 4.1.2 failure
+      // PlayerControls cites inert to avoid, in the same file. The .blur() on
+      // entering minimized mode handles the moment of transition, not subsequent
+      // Tab presses.
+      inert={minimizedActive || undefined}
       aria-hidden={minimizedActive || undefined}
+      // role="dialog" + aria-modal are TRUTHFUL now, and weren't before.
+      // Phase 7b makes App mark <main> inert while the theater plays, so the
+      // rest of the app really is unavailable — which is exactly the condition
+      // aria-modal asserts. When the backdrop was just `bg-black` the app behind
+      // stayed interactive and claiming modality would have been a lie.
+      //
+      // Naming it also fixes the announcement gap: without a role the surface
+      // was a bare div, so a screen-reader user got NOTHING when playback
+      // started — their whole browse buffer silently swapped (main having become
+      // AT-hidden) with no event to explain it.
+      role={minimizedActive ? undefined : 'dialog'}
+      aria-modal={minimizedActive ? undefined : true}
+      aria-label={minimizedActive ? undefined : `Playing ${target?.title ?? 'video'}`}
+      // Focusable so the surface can take focus on open. -1: reachable
+      // programmatically, never a tab stop of its own.
+      tabIndex={minimizedActive ? undefined : -1}
       className={
         minimizedActive
           // Keep the full player MOUNTED but off-screen while minimized: the
@@ -3197,25 +3333,40 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // stay alive (closing the laptop view must not kill the cast). The
           // floating widget below is the visible surface.
           ? 'fixed inset-0 -z-10 opacity-0 pointer-events-none'
-          : 'fixed inset-0 z-[60] bg-black flex items-center justify-center'
+          // No `bg-black` and no flex centring any more (D5). The surface is
+          // transparent; what fills it is the veil over the dimmed app plus the
+          // theater box, both absolutely positioned. In fullscreen the box
+          // covers the viewport and the veil is skipped entirely — there is
+          // nothing to see behind it, so compositing a blur there would be pure
+          // cost. See the .stage-dim-veil note in index.css about that budget.
+          : 'fixed inset-0 z-[60]'
       }
     >
-      {/* 2026-05-28 — Player shell. WINDOWED (not browser-fullscreen):
-          a centered card capped below the viewport so there's a clear
-          black margin all around (the `bg-black` backdrop shows
-          through), with rounded corners + a soft ring so it reads as
-          an intentional theater surface rather than a chrome-less
-          takeover. FULLSCREEN: fills the viewport edge-to-edge (the
-          card chrome would look wrong against the screen bezel).
-          The backdrop's `items-center justify-center` centers the
-          capped card automatically. The <video> inside still uses
-          object-contain, so the picture letterboxes within the card —
-          margins you see are (card inset) + (aspect letterbox). */}
+      {/* The veil. Theater only — see above. */}
+      {!fullscreen && !minimizedActive && <div className="stage-dim-veil" aria-hidden="true" />}
+      {/* Player shell.
+          THEATER (Aurora Stage Phase 7b, D5): the mockup's inset box — 90px
+          sides, 58px top/bottom, 20px radius — with the dimmed app visible
+          behind it. This REPLACES the previous treatment, which was a card
+          capped at 94vw/88vh centred inside an opaque black backdrop. The
+          asymmetric inset is why it is absolute edge offsets rather than a
+          max-width card: a centred `max-w` cannot express 90/58, and the black
+          backdrop it used to sit on is now the app.
+          It falls back to full-bleed below lg — 90px per side leaves 195px of
+          picture on a phone; see .stage-theater's media query.
+          FULLSCREEN: fills the viewport edge-to-edge (box chrome looks wrong
+          against the screen bezel).
+          The <video> inside still uses object-contain, so the picture
+          letterboxes within the box — margins are (inset) + (aspect letterbox).
+
+          NOTE the word "windowed" is deliberately gone from this file. It used
+          to mean "not browser-fullscreen", which collided with 7b's windowed
+          theater; the two states are now `theater` and `fullscreen`. */}
       <div
         className={
           fullscreen
             ? 'relative w-full h-full flex flex-col'
-            : 'relative w-full h-full max-w-[94vw] max-h-[88vh] flex flex-col rounded-xl overflow-hidden shadow-2xl ring-1 ring-white/10'
+            : 'stage-theater flex flex-col'
         }
       >
         {/* Top bar. WINDOWED: a chrome strip above the video (part of the
@@ -3226,18 +3377,55 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             controls when the pointer is idle, leaving a clean full-screen
             picture. A mouse-move / touch reveals it again with the controls. */}
         <div
+          // data-player-chrome marks every auto-hiding region, so the hide
+          // timer can refuse to fire while focus is inside one. See
+          // showControlsTemporarily.
+          data-player-chrome=""
+          // `pointer-events-none` alone hid this from the MOUSE and left it in
+          // the tab ring: in fullscreen, three seconds of idle made the title
+          // bar's Close and track pickers invisible-but-focusable, so Tab
+          // painted a focus ring on nothing (WCAG 2.4.7, 2.4.11). `inert`
+          // removes them from the tab order and the a11y tree too — the same
+          // treatment PlayerControls already applies to its own row.
+          inert={(fullscreen && !controlsVisible) || undefined}
           className={
             fullscreen
-              ? `absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-200 ${
+              ? `stage-player-topbar absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6 py-3 transition-opacity duration-200 ${
                   controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
                 }`
-              : 'flex items-center justify-between px-6 py-3 bg-gradient-to-b from-black/80 to-transparent z-10'
+              : 'stage-player-topbar flex items-center justify-between px-6 py-3 z-10'
           }
         >
-          <div>
-            <h2 className="text-white text-lg font-semibold">{target.title}</h2>
-            {target.subtitle && <p className="text-white/60 text-sm">{target.subtitle}</p>}
-            <p className="text-white/40 text-xs mt-0.5">{status}</p>
+          {/* Title block — the mockup's .t-title: one 17px display line with the
+              episode and the stream status stacked under it as one small line,
+              rather than three stacked paragraphs at three sizes. */}
+          <div className="min-w-0 flex items-center gap-3">
+            <div className="min-w-0">
+              <h2 className="text-white font-display text-[17px] font-bold truncate">{target.title}</h2>
+              <p className="text-white/60 text-[11.5px] font-medium mt-0.5 truncate">
+                {[target.subtitle, status].filter(Boolean).join(' · ')}
+              </p>
+            </div>
+            {/* Casting status pill. Net-new chrome for state that already
+                existed but was only inferable from the Cast button's colour:
+                while a remote session is live, the local surface is a REMOTE
+                CONTROL, not the thing playing, and nothing said so. Cyan
+                rather than purple because it is a different kind of state from
+                an Aurora control. Only when a session is actually connected —
+                never as decoration. */}
+            {remoteActive && (
+              // No role="status". Once connected the text never changes, so it
+              // would be a live region that can never fire again — and the
+              // announcement it was meant to make is unreliable anyway, since the
+              // region and its content are inserted in the SAME mutation, which
+              // many screen readers do not announce (a live region generally has
+              // to pre-exist to be watched). Plain labelled text is honest; the
+              // state also reaches AT through the Cast button's own name.
+              <span className="stage-cast-pill inline-flex flex-none">
+                <i className="stage-cast-dot" aria-hidden="true" />
+                {cast.status.connected ? 'Casting' : 'AirPlay'}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 relative">
             {/* M10 Phase 4.5 — Audio track picker. Only shown when
@@ -3566,6 +3754,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   so it stays hidden there). */}
               {!party && airplayAvailable && !cast.status.connected && (
                 <div
+                  data-player-chrome=""
+                  inert={!controlsVisible || undefined}
                   className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
                     controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
                   }`}
@@ -3583,6 +3773,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               )}
               {!party && cast.status.supported && (
                 <div
+                  data-player-chrome=""
+                  inert={!controlsVisible || undefined}
                   className={`absolute ${fullscreen ? 'top-24' : 'top-4'} right-4 flex items-center gap-2 transition-opacity duration-200 ${
                     controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
                   }`}
@@ -3662,14 +3854,37 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   nothing ever auto-seeks. z-[55] floats it above the
                   controls overlay (z-50) so it stays clickable over
                   the gradient. */}
+              {/* One-shot announcement. The pill is a transient, time-boxed
+                  offer — it appears for a few seconds and then it's gone — so a
+                  screen-reader user who never tabs into the video surface had no
+                  way to learn it existed (WCAG 4.1.3 Status Messages). The live
+                  line is separate from the button so the button's own label
+                  isn't re-read, and it is keyed on the marker so re-entering a
+                  window announces again while a re-render does not. */}
+              {activeSkipMarker && (
+                <p key={`${activeSkipMarker.kind}:${activeSkipMarker.start_ms}`} role="status" className="sr-only">
+                  {skipLabel} available — press S
+                </p>
+              )}
               {activeSkipMarker && (
                 <button
                   type="button"
                   onClick={handleSkip}
-                  className="absolute bottom-28 right-6 z-[55] inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black/75 hover:bg-black/90 ring-1 ring-white/25 text-white text-sm font-medium shadow-xl backdrop-blur-sm transition-colors"
+                  // The shortcut is in the accessible name, not only in a
+                  // `title`: a tooltip is neither keyboard- nor AT-discoverable.
+                  aria-keyshortcuts="S"
+                  title={`${skipLabel} (S)`}
+                  data-skip-pill=""
+                  // .stage-skip-pill: white-on-dark, not the previous
+                  // dark-on-video. This appears over an arbitrary frame for a
+                  // few seconds and is the one control that has to be
+                  // unmissable in that window — a translucent black pill on a
+                  // night-time scene was close to invisible, which defeats the
+                  // feature. Position stays where it was.
+                  className="stage-skip-pill absolute bottom-28 right-[26px] z-[55] inline-flex"
                 >
                   {skipLabel}
-                  <SkipForward size={16} />
+                  <SkipForward size={15} />
                 </button>
               )}
               {/* Smart Skip next-up card — appears when an episode
@@ -3678,31 +3893,54 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   (the click then forces the advance past the pref —
                   an explicit click outranks a passive setting). */}
               {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (
-                <div className="absolute bottom-28 right-6 z-[55] w-72 rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl p-4">
-                  <p className="text-white/50 text-[11px] uppercase tracking-wide">Up next</p>
-                  <p className="text-white text-sm font-medium mt-1">
-                    {nextUpPhase === 'countdown'
-                      ? `Next episode in ${Math.max(0, nextUpSecs)}s`
-                      : 'Next episode'}
-                  </p>
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => { void fireAdvance(true) }}
-                      className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium transition-colors"
-                    >
-                      <Play size={14} />
-                      Play now
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setNextUpPhase('spent')}
-                      aria-label="Dismiss next-episode card"
-                      title="Keep watching the credits"
-                      className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/80 text-sm transition-colors"
-                    >
-                      <X size={14} />
-                    </button>
+                // .stage-upnext. The mockup's card leads with a purple
+                // "UP NEXT" eyebrow and puts the countdown in the corner rather
+                // than in the body line, so the card reads the same whether the
+                // autoplay pref is on or off — only the counter appears.
+                // No thumbnail: the mockup shows one, but nothing here knows the
+                // next episode's still until the advance resolves it, and
+                // rendering a placeholder frame would imply we do.
+                // NO role="status" on this wrapper. Adding one (which the first
+                // version of this restyle did) turned the card into a live region
+                // that CONTAINS the countdown, so every tick re-announced —
+                // "in 5s… in 4s… in 3s…" queued over whatever the user was
+                // doing. The classic countdown-in-a-live-region anti-pattern.
+                // The card's appearance is announced once by the sr-only line
+                // below; the ticking counter is aria-hidden.
+                <div className="stage-upnext absolute bottom-28 right-[26px] z-[55]">
+                  <div className="p-[15px] pb-3.5">
+                    {/* One polite announcement when the card appears, with no
+                        number in it, so it never re-fires. */}
+                    <span className="sr-only" role="status">Next episode available</span>
+                    <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
+                    <p className="text-white text-[13.5px] font-semibold mt-1">Next episode</p>
+                    <div className="mt-2.5 flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => { void fireAdvance(true) }}
+                        className="inline-flex items-center gap-1.5 h-[30px] px-3.5 rounded-lg bg-white hover:bg-white/90 text-[#0a0a0a] text-[11.5px] font-bold transition-colors"
+                      >
+                        <Play size={12} />
+                        Play now
+                      </button>
+                      {nextUpPhase === 'countdown' && (
+                        // aria-hidden: a per-second counter is information for
+                        // the eye. The "Play now" button says what the action is,
+                        // and re-announcing a number every second is noise.
+                        <span className="text-white/70 text-[11px] tabular-nums" aria-hidden="true">
+                          in {Math.max(0, nextUpSecs)}s
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setNextUpPhase('spent')}
+                        aria-label="Dismiss next-episode card"
+                        title="Keep watching the credits"
+                        className="ml-auto w-[26px] h-[26px] rounded-full grid place-items-center bg-black/60 hover:bg-black/80 border border-white/20 text-white/85 transition-colors"
+                      >
+                        <X size={12} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
@@ -3739,7 +3977,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 onSeekRelative={(delta) => {
                   // Med-fix (2026-05-29) — was a raw
                   // `vid.currentTime = max(0, currentTime + delta)`,
-                  // so the +30s skip button seeked past the FFmpeg
+                  // so the forward skip button (then +30s, now +10s)
+                  // seeked past the FFmpeg
                   // output head and stalled hls.js. Convert the
                   // relative delta to a REAL-FILE absolute target
                   // (local currentTime + startSec offset + delta) and
