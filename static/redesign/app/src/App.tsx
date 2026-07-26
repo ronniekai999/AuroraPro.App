@@ -874,24 +874,46 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         libraryIds={libraryIds}
         onToggleLib={onToggleLib}
       />
-      {/* Phase D — conversational discovery. Centered under the hero as a
-          deliberate "now describe your own vibe" moment between the one curated
-          pick and the browsable rails. Fires the semantic search on Enter (not
-          per-keystroke) to bound LLM cost. */}
-      {/* Phase 4 — pulled UP into the hero's foot (the mockup's -26px) so
-          it reads as one composition with the hero rather than a separate
-          widget floating above the rails. relative + z-20 keeps it above
-          the hero's scrim. */}
+      {/* Phase D — conversational discovery: a deliberate "now describe your own
+          vibe" moment between the one curated pick and the browsable rails.
+          Fires the semantic search on Enter (not per-keystroke) to bound LLM cost.
+
+          Phase 4 pulled it UP into the hero's foot (the mockup's -26px) so it
+          reads as one composition with the hero rather than a separate widget
+          floating above the rails. relative + z-20 keeps it above the hero's scrim.
+
+          Phase 8 — `max-w-2xl`, matching HeroSection's own text column, NOT the
+          `max-w-3xl` it shipped at. Home has three meaningful right edges (the
+          hero description at max-w-xl/576px, the hero text column at
+          max-w-2xl/672px, and the viewport) and at 768px this bar landed on none
+          of them: 96px past the column it is supposed to belong to and ~1200px
+          short of the edge. That unjustified edge is what made it read as a
+          mistake — being "too narrow" was never the problem, and widening it to
+          full-bleed would be worse (it would slice the artwork's focal point,
+          strand the pinned ↵ Search chip ~1800px from the caret, and size a
+          62-character field like it wants an essay). Now the whole left column
+          shares one edge: eyebrow → title → description → buttons → this.
+
+          An earlier version of this comment said "Centered under the hero".
+          There is no `mx-auto` here and never was — it is gutter-aligned. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
+        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-2xl">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
               value={convoText}
               onChange={e => setConvoText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
-              aria-label="Describe what you're in the mood for"
+              // "Describe a vibe", not "Describe what you're in the mood for…":
+              // two search affordances are visible at once on Home — TopNav's
+              // "Search titles…" (lexical, by name) and this one (semantic, by
+              // description) — and nothing told a user which was which. Leading
+              // with the verb that distinguishes them does. Also 50 characters
+              // instead of 62, which matters now the field is 672px rather than
+              // 768px: the example is the part that teaches what this accepts,
+              // so it is the part that must survive.
+              placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
+              aria-label="Describe a vibe to search by"
               className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
             />
             {convoText && (
@@ -926,7 +948,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           below it. */}
       <div className="stage-gutter">
       {convoLoading && (
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-3xl">
+        // max-w-2xl, tracking the search bar above — this stands in for it while
+        // a query is in flight, so a different width reads as the layout jumping.
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
           <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />

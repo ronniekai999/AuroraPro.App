@@ -8,7 +8,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "audit:a11y": "node scripts/audit-focus-indicators.mjs",
+    "audit:contrast": "node scripts/audit-onart-contrast.mjs",
+    "audit:breakpoints": "node scripts/audit-breakpoints.mjs",
+    "audit": "npm run audit:a11y && npm run audit:contrast && npm run audit:breakpoints"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

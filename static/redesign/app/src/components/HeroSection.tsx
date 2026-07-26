@@ -260,6 +260,10 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         role="img"
         aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
       >
+        {/* The backing that makes this cluster legible over arbitrary artwork —
+            see .stage-hero-match-veil. First child so it paints under the ring
+            and the numeral; both are later siblings at z-index auto. */}
+        <div className="stage-hero-match-veil" aria-hidden="true" />
         <div className="relative w-[84px] h-[84px]">
           <svg className="w-[84px] h-[84px] -rotate-90" viewBox="0 0 84 84" aria-hidden="true">
             <defs>
@@ -268,7 +272,23 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
                 <stop offset="1" stopColor="#22d3ee" />
               </linearGradient>
             </defs>
-            <circle cx="42" cy="42" r="36" fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="6" />
+            {/* Track at 0.28, not 0.1. At 0.1 over a bright frame the unfilled
+                arc measured 1.09:1 against its backdrop — the ring read as a
+                floating fragment rather than a gauge.
+
+                NOTE what this deliberately does NOT achieve. The filled arc's
+                purple end (#a855f7) lands at 1.30:1 against this track on a
+                bright frame, and no (backing, track) pair fixes that: the track
+                has to be light to clear its own backdrop, and a light track
+                converges with a mid-luminance purple. I searched the grid — 49
+                combinations — and none satisfies eyebrow, numeral,
+                track-vs-backdrop AND both gradient ends at once.
+                That is acceptable here because the arc is a REDUNDANT encoding:
+                the exact value is stated as text in the centre at 12.3:1, and
+                the wrapper is role="img" with the value in its aria-label. So
+                1.4.11 is met by the text, not by the arc, and the arc is a
+                decorative reinforcement. Said plainly rather than chased. */}
+            <circle cx="42" cy="42" r="36" fill="none" stroke="rgba(255,255,255,0.28)" strokeWidth="6" />
             <circle
               cx="42" cy="42" r="36" fill="none" stroke="url(#heroMatchGradient)"
               strokeWidth="6" strokeLinecap="round"
@@ -510,7 +530,19 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
             onClick={onNextPick}
             title="Not tonight — show the next pick"
             aria-label="Not tonight — show the next pick"
-            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/60 hover:text-white text-sm transition-colors whitespace-nowrap"
+            // text-white/75, not /60: at 14px over this corner of the scrim /60
+            // measured 4.42:1 against a bright frame — under the 4.5 floor, and
+            // close enough that it read as passing without being measured. /75
+            // gives 5.89:1.
+            //
+            // The 0.06 BORDER measures 1.19:1 and is left alone on purpose. 1.4.11
+            // covers visual information required to IDENTIFY a control, and this
+            // one is identified by a permanent visible text label plus an icon —
+            // the border is decoration. Reaching 3:1 would need white/0.43, which
+            // would make a deliberately quiet tertiary control the loudest thing
+            // in the hero's bottom-right. Recorded so the next audit doesn't
+            // "fix" it.
+            className="flex items-center gap-2 px-4 py-2.5 rounded-full bg-white/[0.04] hover:bg-purple-500/10 border border-white/[0.06] hover:border-purple-500/40 text-white/75 hover:text-white text-sm transition-colors whitespace-nowrap"
           >
             Not tonight <Icon name="refresh" size={15} />
           </button>

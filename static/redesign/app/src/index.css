@@ -938,6 +938,34 @@ html[data-glow="subtle"] .stage-topnav {
     linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
 }
 
+/* Local backing for the match/score ring (Phase 8 contrast audit).
+   .stage-hero-scrim ramps its horizontal layer DOWN to 0.15 at 72% and 0.35 at
+   the right edge, on purpose: that is where the artwork is meant to be visible.
+   The consequence, which nobody had measured until Phase 8, is that the one
+   widget living out there had no scrim to speak of — 0.314 effective alpha. Over
+   a bright frame (a daylight exterior, a snow scene, a title card) the "MATCH"
+   eyebrow measured 1.22:1 and the percentage numeral 2.16:1. The eyebrow is the
+   only thing that says what the number MEANS, and it was invisible.
+   Fixing the scrim was the wrong lever — darkening the right side would spend
+   exactly the artwork the ramp exists to preserve. So the widget carries its own
+   backing, sized to itself.
+   Plateau out to 72% of each radius, then ramp: the eyebrow sits at the bottom
+   of the cluster, so a plain centre-weighted radial would have left the very
+   text this exists to rescue in the falloff. inset:-28px puts all content inside
+   the plateau. */
+.stage-hero-match-veil {
+  position: absolute;
+  inset: -28px;
+  pointer-events: none;
+  border-radius: 50%;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(5, 5, 5, 0.72) 0%,
+    rgba(5, 5, 5, 0.72) 72%,
+    rgba(5, 5, 5, 0) 100%
+  );
+}
+
 /* "Aurora picked this for you" — the AI provenance pill above the title. */
 .stage-pick-pill {
   align-self: flex-start;
@@ -3060,11 +3088,40 @@ input:not([type="range"]), select, textarea {
   transition: all 0.2s ease;
 }
 
+/* Focus treatment for EVERY input/select/textarea in the app. Phase 8 rewrote
+   the three values, because this rule is load-bearing in a way its previous
+   form did not survive contact with a measurement.
+
+   The rule below it exempts inputs from the global :focus-visible outline, on
+   the stated grounds that "their own border + box-shadow focus treatment already
+   provides the indicator". That makes THIS the only focus indicator any input in
+   the app has — and resolved against the built stylesheet (scripts/resolve-focus.mjs)
+   it wins for background/border-color/box-shadow at (0,3,1) over every
+   call-site `focus:bg-*` / `focus:border-*` Tailwind utility at (0,2,0), so it is
+   also the only one that MATTERS. Measured at the old values:
+       focus border rgba(168,85,247,.5) vs the field's fill   1.99:1
+       background shift .05 -> .08                            1.07:1
+       3px ring rgba(168,85,247,.1) vs the panel              1.09:1
+   Against SC 1.4.11's 3:1 that is not a focus indicator, it is a tint. Every
+   text field in Aurora — search, admin forms, bug report, party chat, join code —
+   was keyboard-focusable with no perceivable focus state.
+
+   The new values are not invented: they are exactly what
+   `.stage-navsearch:focus-within` already uses, and that rule's own comment
+   explains why ("this is the ONLY focus indicator for the field — so it has to
+   clear SC 1.4.11's 3:1, not just look tinted"). One author got this right for
+   one field; the global rule never got the same treatment. Now measured:
+       focus border rgba(216,180,254,.9) vs field fill   7.07–8.27:1
+       vs the resting border (i.e. the CHANGE)           5.70–6.82:1
+   across the three panel darks the app actually uses.
+   The 3px halo is raised .1 -> .28 to match, but it is NOT the indicator and is
+   not relied on — at 1.35–1.42:1 against the panel it is a glow, and the border
+   is what carries the requirement. */
 input:not([type="range"]):focus, select:focus, textarea:focus {
   outline: none;
-  border-color: rgba(168, 85, 247, 0.5);
+  border-color: rgba(216, 180, 254, 0.9);
   background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.1);
+  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.28);
 }
 
 input::placeholder, textarea::placeholder {
@@ -3078,25 +3135,51 @@ input::placeholder, textarea::placeholder {
    anything with tabindex (the cards). :focus-visible = keyboard focus
    only, so mouse clicks stay ring-free.
 
-   Deliberately UNLAYERED: unlayered CSS beats @layer rules in the
-   cascade, so this outline renders even where a Tailwind
-   `focus:outline-none` utility (in @layer utilities) would otherwise
-   suppress it. That makes it a true a11y floor — focus is ALWAYS
-   visibly indicated, including on controls that have no other focus
-   style (e.g. MiniDock's border-0 input). Tradeoff: elements that
-   already have a designed focus ring (`focus-visible:ring-*`) show
-   this outline AS WELL as their ring — a slightly bolder double
-   indicator, still accessible. Preferred over moving to @layer base,
-   which would let `focus:outline-none` utilities win and HIDE focus on
-   the ~13 controls that use outline-none with no ring. Inputs are
-   exempted below — their own higher-specificity `:focus` rule
-   (border + box-shadow) already provides the indicator. */
+   ⚠️ CORRECTED in Phase 8. This rule is genuinely useful but it is NOT the
+   guaranteed floor its previous comment claimed. That comment read: "unlayered
+   CSS beats @layer rules in the cascade, so this outline renders even where a
+   Tailwind `focus:outline-none` utility (in @layer utilities) would otherwise
+   suppress it. That makes it a true a11y floor — focus is ALWAYS visibly
+   indicated". Both sentences are false, for one reason:
+
+   TAILWIND 3 EMITS NO NATIVE CASCADE LAYERS. Its `@layer utilities` is a
+   build-time grouping directive that PostCSS expands and discards; the built
+   stylesheet contains zero `@layer` at-rules (asserted by
+   scripts/resolve-focus.mjs on every run). Layer precedence therefore never
+   enters the cascade at all, and the comparison falls through to specificity —
+   where `.focus\:outline-none:focus` at (0,2,0) beats this rule's (0,1,0), and
+   is later in source order as well. Resolved against the real output, a focused
+   `<button class="focus:outline-none">` with no ring gets
+   `outline: 2px solid transparent`: no visible focus indicator.
+   (Tailwind 4 does use native layers, so this reasoning would need revisiting
+   with that upgrade — it would then be true.)
+
+   This is the fourth instance of the same shape in this project, and the reason
+   the other three survived review: a comment asserting the floor was
+   unconditional made `focus:outline-none` look free to write anywhere.
+
+   What is actually true:
+   - For controls with NO opt-out utility, this rule is the indicator, and it
+     measures 3.02:1 against a field fill and 3.24:1 against the page — it
+     clears 1.4.11.
+   - Elements with a designed ring (`focus-visible:ring-*`) show that ring AND
+     this outline: a bolder double indicator, still accessible.
+   - Anything carrying `focus:outline-none` or `focus-visible:outline-none`
+     SUPPRESSES this, and must supply its own indicator meeting 3:1. That is now
+     enforced by scripts/audit-focus-indicators.mjs rather than assumed.
+   - Inputs are exempted below and rely on the `:focus` rule above, whose values
+     Phase 8 had to rewrite — see the note there. */
 :focus-visible {
   outline: 2px solid rgba(168, 85, 247, 0.75);
   outline-offset: 2px;
 }
-/* Inputs/selects/textareas keep their own border + box-shadow focus
-   treatment (above) — don't stack a ring on top of it. */
+/* Inputs/selects/textareas keep their own border + box-shadow focus treatment
+   (above) — don't stack a ring on top of it.
+   This exemption is why that rule's values are load-bearing: at (0,3,1) it wins
+   over the (0,1,0) floor for every input in the app, so if the treatment above
+   is weak, NOTHING indicates focus on a text field. It was weak (1.99:1) until
+   Phase 8 measured it. Do not soften those values without re-running
+   scripts/audit-focus-indicators.mjs. */
 input:not([type="range"]):focus-visible,
 select:focus-visible,
 textarea:focus-visible {
@@ -3560,8 +3643,16 @@ textarea:focus-visible {
 }
 
 /* Narrow viewports: drop the genre + length columns so the list stays
-   readable on tablet/phone (title + year + rating + add remain). */
-@media (max-width: 768px) {
+   readable on tablet/phone (title + year + rating + add remain).
+
+   Phase 8 — negated form, not `max-width: 768px`. That form OVERLAPPED `md:`
+   (min-width: 768px) at exactly 768px, so at that one width the list rendered
+   its narrow five-column grid with the genre and length columns hidden while
+   every other `md:` decision on the page had already switched to desktop. Not a
+   gap like the two the file records elsewhere — an off-by-one on the wrong side
+   of the same boundary — but the fix and the reasoning are identical, and the
+   negated form makes this agree with `md:` by construction. */
+@media not all and (min-width: 768px) {
   .media-list-head,
   .media-list-row {
     grid-template-columns: 52px 1fr 64px 84px 44px;
