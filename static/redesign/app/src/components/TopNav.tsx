@@ -93,16 +93,34 @@ function AvatarMenu({
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
-  // Phase 9 — this declared role="menu" and implemented only Escape. That is the
-  // worse-than-nothing case: role="menu" puts NVDA/JAWS into forms mode and hands
-  // the arrow keys to the app, so a menu without them has taken the reader's own
-  // navigation away and given nothing back. Focus also never entered the menu,
-  // and every activation path (`go`, `openPanel`, Sign out) unmounts the focused
-  // row — so all of them left focus on <body> (WCAG 2.4.3).
-  // ProfileSwitcher, ~400 lines down this same file, already did all of this
-  // correctly; this is the same contract.
+  // NOT a `role="menu"`. Phase 9 first implemented the full APG Menu contract
+  // here, and a review established that the correct fix was to delete the role
+  // instead — the argument "a role without its keyboard contract is worse than no
+  // role" cuts both ways, and I had only run it in one direction.
+  //
+  // These rows are predominantly NAVIGATION (Settings, Admin) plus two panel
+  // openers plus Sign out. MDN is explicit: "When including a 'menu' for site
+  // navigation, do not use the `menu` role. Rather … simply a list of links. The
+  // `menu` role should be reserved for composite widgets requiring focus
+  // management" — and APG's Disclosure Navigation example says the same. The role
+  // buys nothing here and costs the user their virtual cursor, H/K/B quick-nav and
+  // the ability to read non-interactive text, because `menu` forces NVDA/JAWS out
+  // of browse mode into forms mode.
+  //
+  // Implementing it also caused a measured REGRESSION. `menu` may own only
+  // menuitem/group/separator, so the username + "Admin" badge header was an
+  // invalid owned element. Chromium exposes it anyway — but as a `paragraph`
+  // inside a `menu`, which the menu's own arrow navigation cannot reach. Before,
+  // focus never entered the menu, the reader stayed in browse mode, and the
+  // virtual cursor could read it. Forcing focus in made that text present in the
+  // tree and reachable by nothing.
+  //
+  // What was worth keeping from that pass is orthogonal to the role and is still
+  // here: focus into the panel on open, Escape, and `closeTo` returning focus to
+  // the trigger on every activation path instead of dropping it to <body>.
+  // ContextMenu keeps `role="menu"` — its items are all genuine commands, which is
+  // exactly the case the role exists for.
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
-  const focusedRef = useRef(0)
 
   useEffect(() => {
     if (!open) return
@@ -117,11 +135,14 @@ function AvatarMenu({
         triggerRef.current?.focus()
       }
     }
-    // Focus the first row on open, so the arrow keys below have somewhere to
-    // start and a screen-reader user is actually inside the menu they were just
-    // told about.
+    // Focus the first RENDERED row on open. `.filter(Boolean)` rather than
+    // `itemRefs.current[0]`, because the row set is conditional — the Server
+    // Status row is admin-only, so slot 0 is empty for everyone else. The earlier
+    // version of this pass pinned `tabIndex={0}` to that same slot, which meant a
+    // non-admin's open panel had ZERO tab stops; the rows are ordinary tab stops
+    // now, so that particular hazard is gone, but the focus call still has to
+    // skip the holes.
     const raf = requestAnimationFrame(() => {
-      focusedRef.current = 0
       itemRefs.current.filter(Boolean)[0]?.focus()
     })
     document.addEventListener('mousedown', onDocClick)
@@ -133,32 +154,21 @@ function AvatarMenu({
     }
   }, [open])
 
-  /** Arrow/Home/End over the rendered rows. The row set is conditional (the
-   *  Server row is admin-only), so this walks the LIVE refs rather than an index
-   *  range — the same `.filter(Boolean)` approach ProfileSwitcher uses, which is
-   *  what makes it immune to an item being added or gated later. */
-  const onMenuKeyDown = (e: React.KeyboardEvent) => {
+  /** Every row is an ordinary tab stop now (no roving index, no arrow keys — this
+   *  is a disclosure, not a menu widget). The only key this needs to own is Tab
+   *  off the LAST row: without that, Tab walks out of an open dropdown and puts
+   *  focus on page content behind it. Shift+Tab off the first row does the same
+   *  in reverse. */
+  const onPanelKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Tab') return
     const live = itemRefs.current.filter(Boolean) as HTMLButtonElement[]
     if (!live.length) return
-    const at = Math.max(0, live.indexOf(document.activeElement as HTMLButtonElement))
-    let next: number | null = null
-    if (e.key === 'ArrowDown') next = (at + 1) % live.length
-    else if (e.key === 'ArrowUp') next = (at - 1 + live.length) % live.length
-    else if (e.key === 'Home') next = 0
-    else if (e.key === 'End') next = live.length - 1
-    else if (e.key === 'Tab') {
-      // A menu is not part of the tab ring — Tab closes it and returns focus to
-      // the trigger, so the next Tab continues from the avatar rather than from
-      // somewhere behind an overlay that is no longer there.
-      e.preventDefault()
-      setOpen(false)
-      triggerRef.current?.focus()
-      return
-    }
-    if (next === null) return
+    const at = live.indexOf(document.activeElement as HTMLButtonElement)
+    const leaving = e.shiftKey ? at === 0 : at === live.length - 1
+    if (!leaving) return   // let Tab move between rows normally
     e.preventDefault()
-    focusedRef.current = next
-    live[next].focus()
+    setOpen(false)
+    triggerRef.current?.focus()
   }
 
   /** Every dismissal returns focus to the trigger. Without this the row that was
@@ -187,7 +197,15 @@ function AvatarMenu({
     closeTo(fn)
   }
 
-  const itemCls = 'w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2.5'
+  // The negative outline-offset is not cosmetic. The global :focus-visible floor
+  // paints its 2px ring at `outline-offset: 2px` — i.e. OUTSIDE the border box —
+  // and these rows are `w-full` inside a panel with `overflow-hidden` and no
+  // padding, so the entire left and right runs of the ring fell outside the clip
+  // rect and never painted. Measured: 3px clipped per side, and the destructive
+  // Sign out row (last child) lost its bottom edge too. Pulling the offset inward
+  // puts the whole ring inside the clip. This only started mattering when Phase 9
+  // made these rows focusable.
+  const itemCls = 'w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2.5 focus-visible:[outline-offset:-2px]'
 
   return (
     <div ref={rootRef} className="relative flex-none">
@@ -196,7 +214,9 @@ function AvatarMenu({
         type="button"
         onClick={() => setOpen(o => !o)}
         title={`Signed in as ${user.username}${user.role === 'admin' ? ' (admin)' : ''}`}
-        aria-haspopup="menu"
+        // "true", not "menu" — see the note above `itemRefs`: this opens a
+        // disclosure panel of links and buttons, not a menu widget.
+        aria-haspopup="true"
         aria-expanded={open}
         aria-label={
           // Below md the labelled bell is hidden and the badge is
@@ -222,12 +242,14 @@ function AvatarMenu({
       </button>
       {open && (
         <div
-          role="menu"
-          aria-label={`Account menu for ${user.username}`}
-          onKeyDown={onMenuKeyDown}
+          // No role. `aria-labelledby` points at the username header below, which
+          // is now ordinary readable content rather than an invalid owned element
+          // of a `menu`.
+          aria-labelledby="avatar-menu-heading"
+          onKeyDown={onPanelKeyDown}
           className="absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-fade-in"
         >
-          <div className="px-4 py-3 border-b border-white/[0.06]">
+          <div id="avatar-menu-heading" className="px-4 py-3 border-b border-white/[0.06]">
             <p className="text-white text-sm font-medium truncate">{user.username}</p>
             <p className="text-white/40 text-xs mt-0.5 flex items-center gap-1.5">
               {user.role === 'admin' ? (
@@ -242,8 +264,6 @@ function AvatarMenu({
             <button
               ref={el => { itemRefs.current[0] = el }}
               type="button"
-              role="menuitem"
-              tabIndex={0}
               onClick={() => openPanel(onOpenServer)}
               className={itemCls}
             >
@@ -254,8 +274,6 @@ function AvatarMenu({
           <button
               ref={el => { itemRefs.current[1] = el }}
               type="button"
-              role="menuitem"
-              tabIndex={-1}
               onClick={() => openPanel(onOpenNotifications)}
               className={itemCls}
             >
@@ -271,8 +289,6 @@ function AvatarMenu({
           <button
               ref={el => { itemRefs.current[2] = el }}
               type="button"
-              role="menuitem"
-              tabIndex={-1}
               onClick={() => go('settings')}
               className={itemCls}
             >
@@ -283,8 +299,6 @@ function AvatarMenu({
             <button
               ref={el => { itemRefs.current[3] = el }}
               type="button"
-              role="menuitem"
-              tabIndex={-1}
               onClick={() => go('admin')}
               className={itemCls}
             >
@@ -296,13 +310,11 @@ function AvatarMenu({
           <button
             ref={el => { itemRefs.current[4] = el }}
             type="button"
-            role="menuitem"
-            tabIndex={-1}
             // closeTo, not a bare setOpen(false): signing out unmounts this row
             // under the user's focus, and returning focus to the trigger first
             // means it lands on a real control rather than on <body>.
             onClick={() => closeTo(onSignOut)}
-            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2.5"
+            className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2.5 focus-visible:[outline-offset:-2px]"
           >
             <Icon name="log-out" size={14} className="text-red-400/60" />
             Sign out

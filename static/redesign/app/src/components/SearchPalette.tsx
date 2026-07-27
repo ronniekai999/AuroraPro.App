@@ -293,7 +293,9 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               data-row={i}
               onMouseEnter={() => setHighlighted(i)}
               onClick={() => { onSelect(m); onClose() }}
-              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors ${
+              // focus-visible:[outline-offset:-2px] — the scroller clips the
+              // floor's outward 2px ring; see the same note on TopNav's itemCls.
+              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors focus-visible:[outline-offset:-2px] ${
                 i === highlighted
                   ? 'bg-purple-500/15 border-l-2 border-purple-400'
                   : 'border-l-2 border-transparent hover:bg-white/[0.03]'

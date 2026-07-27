@@ -1713,7 +1713,7 @@ export default function App() {
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[] } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string } | null>(null)
   const openCardContextMenu = useCallback((e: React.MouseEvent, m: Media) => {
     e.preventDefault()
     const items: MediaContextItem[] = [
@@ -1771,7 +1771,9 @@ export default function App() {
     // (Shift+F10 or the Menu key, both of which fire a real `contextmenu` event
     // on the focused card) reports 0/0, so this used to pin the menu to the
     // viewport's top-left corner — open, but detached from the card it acts on.
-    setContextMenu({ ...anchorFor(e), items })
+    // `title` feeds the menu's accessible name — every item label is a bare verb
+    // ("Mark as Watched"), and the menu opens from a grid of dozens of cards.
+    setContextMenu({ ...anchorFor(e), items, title: m.title })
   // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profiles, user, activeProfileId])
@@ -5227,6 +5229,7 @@ export default function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           items={contextMenu.items}
+          title={contextMenu.title}
           onClose={() => setContextMenu(null)}
         />
       )}

@@ -40,6 +40,16 @@ interface Props {
   y: number
   items: MediaContextItem[]
   onClose: () => void
+  /**
+   * The title this menu acts on, for the accessible name.
+   *
+   * Without it a screen reader announced "Media actions, menu. Mark as Watched."
+   * — Mark WHAT as watched? Every item label is a bare verb, and the menu opens
+   * from a grid of dozens of cards, so the one piece of context the user lacks is
+   * the only piece the name didn't carry. "Media actions" meanwhile duplicated
+   * what they already knew: they just pressed the Menu key on a card.
+   */
+  title?: string
 }
 
 /**
@@ -77,7 +87,7 @@ export function anchorFor(e: {
   return { x: e.clientX, y: e.clientY }
 }
 
-export function ContextMenu({ x, y, items, onClose }: Props) {
+export function ContextMenu({ x, y, items, onClose, title }: Props) {
   const ref = useRef<HTMLDivElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   // Which item holds the single tab stop. The set is ONE tab stop (APG Menu), so
@@ -137,7 +147,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     <div
       ref={ref}
       role="menu"
-      aria-label="Media actions"
+      aria-label={title ? `Actions for ${title}` : 'Media actions'}
       className="fixed z-[100] min-w-[200px] bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-2xl py-1"
       style={{ left: clampedX, top: clampedY }}
       onKeyDown={e => {

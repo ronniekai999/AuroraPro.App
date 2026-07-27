@@ -56,9 +56,17 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
           if (t) { e.preventDefault(); onChange(t.id) }
           return
         }
-        // Left/Right/Home/End over a horizontal set. `nextRadioIndex` is the
-        // shared APG movement arithmetic the Settings dials and the profile gate
-        // already use — same wrap behaviour, one implementation.
+        // Left/Right/Home/End ONLY. `nextRadioIndex` also maps ArrowUp/ArrowDown
+        // (a radiogroup is orientation-agnostic), and calling it unfiltered here
+        // meant this HORIZONTAL tablist swallowed the vertical arrows and
+        // preventDefault'ed them — so a keyboard user parked on a tab could no
+        // longer scroll a long detail page with Up/Down; the arrows silently moved
+        // tab focus sideways instead. `radiogroup.ts`'s own header says it is
+        // "deliberately NOT generalised to tabs"; this generalised it anyway and
+        // inherited the vertical bindings along with the horizontal ones.
+        // APG's Tabs pattern specifies Left/Right for aria-orientation=horizontal,
+        // and Up/Down only for a vertical set, which this is not.
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
         const n = nextRadioIndex(e.key, focusedRef.current, tabs.length)
         if (n === null) return
         e.preventDefault()
@@ -76,11 +84,24 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
             role="tab"
             id={`detail-tab-${t.id}`}
             aria-selected={on}
-            // Only the SELECTED tab's panel exists — DetailView renders one panel
-            // at a time — so pointing every tab at a `detail-panel-*` id was a
-            // dangling reference on all the inactive ones, which AT reports as a
-            // broken relationship. Only claim it when the panel is really there.
-            aria-controls={on ? `detail-panel-${t.id}` : undefined}
+            // Every tab keeps `aria-controls`, pointing at ONE stable id.
+            //
+            // Phase 9 first dropped it from inactive tabs, arguing a dangling
+            // reference was worse. Measured against a real Chromium AX tree that was
+            // wrong twice over: Chromium simply omits an unresolvable IDREF, so the
+            // before/after tree for an inactive tab was IDENTICAL — the change was
+            // neutral, not an improvement — and it left three of four tabs
+            // off-pattern, since APG states "Each element with role `tab` has the
+            // property `aria-controls` referring to its associated `tabpanel`".
+            // JAWS' and NVDA's move-to-controlled-element command needs it.
+            //
+            // The real fix is the one neither version took: DetailView renders a
+            // single panel whose id used to change identity on every tab switch
+            // (`detail-panel-${activeTab}`), odd for AT caching on its own. It is
+            // now the constant `detail-panel`, so all tabs resolve and nothing
+            // dangles, while the panel's reciprocal `aria-labelledby` still names
+            // the active tab.
+            aria-controls="detail-panel"
             tabIndex={i === selectedIndex ? 0 : -1}
             onFocus={() => { focusedRef.current = i }}
             onClick={() => { focusedRef.current = i; onChange(t.id) }}
