@@ -1,0 +1,218 @@
+// Guard against the project's most-repeated bug: a control that suppresses the
+// global :focus-visible outline and supplies nothing visible in its place.
+//
+// It has happened four times (the admin tabpanel in Phase 6, twice more in 7a,
+// and the whole input population found in Phase 8). It keeps happening because
+// the suppression is one innocuous-looking utility, and because a comment on the
+// floor rule asserted — wrongly — that the floor could not be suppressed. See the
+// corrected note above `:focus-visible` in index.css.
+//
+// ⚠️ CHECK 1 REWRITTEN after review. Its first version had four independent
+// surviving mutations, including the exact defect class it exists to catch:
+//   - Its `REPLACEMENT` regex accepted `focus:bg-*` and `focus:border-*`. The SAME
+//     COMMIT measured those at 1.047:1 and 2.42:1 and called them "a tint, not an
+//     indicator". 11 of 18 sites passed on nothing else. Swapping a real ring on
+//     ProfileSwitcher (a <button>) for `focus:bg-white/[0.06]` — 1.024:1, total
+//     loss of focus indication — reported 0 problems.
+//   - It searched a ±4-LINE window with no tie to the element, so a replacement
+//     belonging to a different element four lines away counted.
+//   - `stripComments` blanked the rest of any line containing a regex literal
+//     with `//` in it (live in six files today), and a regex containing `/*`
+//     opened a fake block comment swallowing everything to the next `*/`.
+//   - It skipped all of `src/components/ui/`, three of which ARE imported by
+//     first-party code, and which carry bare unprefixed `outline-none` too.
+//
+// Two checks:
+//   1. Every first-party outline suppression must be on an element whose own
+//      opening tag supplies a real indicator (ring / shadow / explicit outline),
+//      or be an input-family element covered by check 2, or be listed in ALLOWED.
+//   2. The global input :focus treatment — which the input exemption makes the
+//      only indicator for text fields that don't reset it — must clear 3:1.
+//
+// Run: node scripts/audit-focus-indicators.mjs
+
+import fs from 'node:fs'
+import path from 'node:path'
+
+const SRC = 'src'
+const CSS = 'src/index.css'
+
+// A real indicator PAINTS something: a ring, a shadow, or an explicit outline.
+// `focus:bg-*` and `focus:border-*` are deliberately NOT accepted — see the note
+// above. If a control genuinely relies on one, measure it and put it in ALLOWED
+// with the figure, which is what "deliberate" should cost.
+const REAL_INDICATOR = /focus(-visible)?:(ring(-|\b)|shadow-|outline-(?!none))/
+const INPUT_FAMILY = new Set(['input', 'textarea', 'select'])
+
+const ALLOWED = new Map([
+  ['src/companion/JoinScreen.tsx:176',
+    'Invisible (opacity-0) overlay input for OTP-style entry. NOTE: the box ' +
+    'treatment it delegates to is gated on `isCursor && !filled`, so once all ' +
+    'six characters are entered NOTHING indicates focus — tracked as a real ' +
+    'defect, fixed separately; this entry documents the delegation, not that it works.'],
+])
+
+let problems = 0
+
+/** Blank every comment while preserving line numbers. Handles regex literals and
+ *  division, which the first version did not: a `/^https?:\/\//` blanked the rest
+ *  of its line, and a regex containing `/*` opened a fake block comment. */
+function stripComments(src) {
+  const out = src.split('')
+  let i = 0, inS = null, inLine = false, inBlock = false, inRe = false
+  // Tokens after which a `/` starts a REGEX rather than a division.
+  const reAllowedBefore = /[=(,:[!&|?{};+\-*%~^<>]|\breturn\b|\btypeof\b|\bcase\b/
+  while (i < src.length) {
+    const c = src[i], n = src[i + 1]
+    if (inLine) { if (c === '\n') inLine = false; else out[i] = ' '; i++; continue }
+    if (inBlock) {
+      if (c === '*' && n === '/') { out[i] = out[i + 1] = ' '; inBlock = false; i += 2; continue }
+      if (c !== '\n') out[i] = ' '
+      i++; continue
+    }
+    if (inRe) {
+      if (c === '\\') { i += 2; continue }
+      if (c === '[') { while (i < src.length && src[i] !== ']') { if (src[i] === '\\') i++; i++ } i++; continue }
+      if (c === '/') inRe = false
+      if (c === '\n') inRe = false   // unterminated; bail rather than run away
+      i++; continue
+    }
+    if (inS) {
+      if (c === '\\') { i += 2; continue }
+      if (c === inS) inS = null
+      i++; continue
+    }
+    if (c === '"' || c === "'" || c === '`') { inS = c; i++; continue }
+    if (c === '/') {
+      // Regex or comment? Look back at the last non-space character.
+      let j = i - 1
+      while (j >= 0 && /\s/.test(src[j])) j--
+      const prev = src.slice(Math.max(0, j - 6), j + 1)
+      if (n === '/' ) { out[i] = out[i + 1] = ' '; inLine = true; i += 2; continue }
+      if (n === '*') { out[i] = out[i + 1] = ' '; inBlock = true; i += 2; continue }
+      if (j < 0 || reAllowedBefore.test(prev.slice(-1)) || /\b(return|typeof|case)$/.test(prev)) {
+        inRe = true; i++; continue
+      }
+      i++; continue   // division
+    }
+    i++
+  }
+  return out.join('')
+}
+
+/** The full JSX opening tag containing `pos`, and its tag name. Scoping to the
+ *  real element is what kills the ±4-line-window false negative. */
+function enclosingTag(src, pos) {
+  // Collect candidate tag starts before `pos`, nearest first, and return the
+  // first whose own closing '>' lies at or after `pos`. Scanning backward and
+  // stopping at the first '>' does NOT work: attribute values routinely contain
+  // one (`onChange={e => …}`), which made every site report "cannot judge".
+  const starts = []
+  for (let i = pos; i >= 0; i--) {
+    if (src[i] === '<' && /[A-Za-z]/.test(src[i + 1] ?? '')) starts.push(i)
+    if (starts.length > 40) break
+  }
+  const tagEnd = start => {
+    let depth = 0, q = null
+    for (let i = start; i < src.length; i++) {
+      const c = src[i]
+      if (q) { if (c === '\\') { i++; continue } if (c === q) q = null; continue }
+      if (c === '"' || c === "'" || c === '`') { q = c; continue }
+      if (c === '{') depth++
+      else if (c === '}') depth--
+      else if (c === '>' && depth === 0) return i
+    }
+    return -1
+  }
+  let start = -1, end = -1
+  for (const cand of starts) {
+    const e = tagEnd(cand)
+    if (e >= pos) { start = cand; end = e; break }
+  }
+  if (start < 0) return null
+  const text = src.slice(start, end + 1)
+  const name = (text.match(/^<([A-Za-z][\w.]*)/) ?? [])[1] ?? ''
+  return { text, name }
+}
+
+function walk(dir, out = []) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) walk(full, out)
+    else if (/\.tsx?$/.test(e.name)) out.push(full)
+  }
+  return out
+}
+
+console.log('## Check 1 — outline suppression without a real indicator')
+let checked = 0
+for (const file of walk(SRC)) {
+  const stripped = stripComments(fs.readFileSync(file, 'utf8'))
+  // Bare `outline-none` counts too: at (0,1,0) it loses to the floor, but inside
+  // a rule that also carries a focus variant it is a second suppression, and in
+  // vendored components it is often the only one.
+  for (const m of stripped.matchAll(/focus(-visible)?:outline-none/g)) {
+    checked++
+    const line = stripped.slice(0, m.index).split('\n').length
+    const ref = `${file}:${line}`
+    const tag = enclosingTag(stripped, m.index)
+    if (!tag) { console.log(`  *** ${ref} suppression not inside a JSX tag — cannot judge`); problems++; continue }
+    if (REAL_INDICATOR.test(tag.text)) continue
+    if (INPUT_FAMILY.has(tag.name)) continue          // covered by check 2
+    if (ALLOWED.has(ref)) { console.log(`  allowed  ${ref}\n           ${ALLOWED.get(ref)}`); continue }
+    console.log(`  *** ${ref} <${tag.name}> suppresses the focus outline with no ring/shadow/outline`)
+    problems++
+  }
+}
+console.log(`  (${checked} suppression site(s) examined)`)
+if (!problems) console.log('  no unguarded suppressions.')
+
+console.log('\n## Check 2 — the global input :focus treatment still clears 3:1')
+const css = fs.readFileSync(CSS, 'utf8')
+// Located by its select/textarea branches rather than by the full selector text.
+// Pinning the exact string made this check fail the moment checkbox/radio
+// exclusions were added to the input branch — a guard that breaks when the rule
+// it guards is legitimately edited trains people to delete the guard.
+const m = css.match(/select:not\(\[hidden\]\):focus,\s*\n?\s*textarea:not\(\[hidden\]\):focus\s*\{([^}]*)\}/)
+if (!m) {
+  console.log('  *** the global select/textarea :focus branches are not in the expected form.')
+  console.log('      NOTE the `:not([hidden])` on the select/textarea branches is required:')
+  console.log('      bare `select:focus, textarea:focus` scores (0,1,1) and LOSES to a')
+  console.log('      call-site focus:border-* at (0,2,0), which is how two textareas kept')
+  console.log('      a 2.19:1 indicator while the input branch at (0,2,1) overrode its call sites.')
+  problems++
+} else {
+  const body = m[1]
+  const bc = body.match(/border-color:\s*(rgba?\([^)]*\))/)
+  const bg = body.match(/background:\s*(rgba?\([^)]*\))/)
+  if (!bc || !bg) { console.log('  *** rule no longer sets border-color + background'); problems++ }
+  else {
+    const lin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
+    const Y = ([r, g, b]) => 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    const over = (f, a, b) => f.map((c, i) => a * c + (1 - a) * b[i])
+    const ratio = (a, b) => { const [l1, l2] = [Y(a), Y(b)].sort((x, y) => y - x); return (l1 + 0.05) / (l2 + 0.05) }
+    const parse = str => { const n = str.match(/[\d.]+/g).map(Number); return { rgb: n.slice(0, 3).map(v => v / 255), a: n[3] ?? 1 } }
+    const B = parse(bc[1]), G = parse(bg[1])
+    const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+    for (const [name, panel] of [['#0a0a0f', hex('#0a0a0f')], ['#050505', hex('#050505')], ['#141420', hex('#141420')]]) {
+      const fill = over(G.rgb, G.a, panel)
+      const border = over(B.rgb, B.a, fill)
+      const r = ratio(border, fill)
+      const ok = r >= 3
+      if (!ok) problems++
+      console.log(`  on ${name}: focus border vs field fill ${r.toFixed(2)}:1  ${ok ? 'PASS' : '*** FAIL (need 3.0)'}`)
+    }
+    // Containers that RESET this treatment take on the duty themselves. Check 2's
+    // premise used to be "this is the ONLY indicator for every text field", which
+    // is false wherever a `.x input:...:focus` descendant rule nulls it — those
+    // are (0,3,1) and win. List them so the claim stays honest.
+    const resetters = [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
+    if (resetters.length) {
+      console.log(`  note: ${resetters.length} container(s) reset this treatment at (0,3,1) and must`)
+      console.log(`        supply their own :focus-within indicator — ${[...new Set(resetters)].join(', ')}`)
+    }
+  }
+}
+
+console.log(`\n${problems} problem(s).`)
+process.exit(problems ? 1 : 0)

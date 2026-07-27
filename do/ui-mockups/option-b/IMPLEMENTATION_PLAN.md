@@ -379,10 +379,66 @@ The mockup is authored at exactly 1440×900 with hard-coded pixel positions; not
 it says what happens at 1280, 768, or 390. This phase is not optional cleanup — it's
 where the mockup stops being a spec.
 
-- Breakpoint pass on every screen: nav overflow, hero type scale, grid columns, the
-  detail `-238px` overlap, admin tab wrap, settings 2-col → 1-col.
-- Contrast audit on every on-art text surface introduced in Phase 3–5.
-- Keyboard pass: tabs, avatar dropdown, palette, context menu, card focus rings.
+- ~~Breakpoint pass on every screen~~ **done.** Nav overflow, admin tab wrap and
+  the detail `-238px` overlap were already correct (the tabstrip is a scroll
+  container at every width with a contrast-checked mask; the overlap is `lg:`-gated).
+  Hero type scale is clean: every fixed display token (`--fs-browse` 52px,
+  `--fs-page` 38px) is behind `md:`/`lg:` with a smaller Tailwind size below it,
+  and `--fs-hero`/`--fs-detail` are fluid `clamp()`s. Settings' 2-col is Tailwind
+  at the call site, deliberately, so `md:` can collapse it. One real fix: the
+  media-list rule at `max-width: 768px` OVERLAPPED `md:` at exactly 768px.
+  Automated as `npm run audit:breakpoints` — it resolves every `max-width` query
+  against the Tailwind breakpoints actually emitted in the build.
+- ~~Contrast audit on every on-art text surface~~ **done**, as
+  `npm run audit:contrast`. It composites the multi-layer scrims at each string's
+  own x AND y over both a black and a white frame, because a single "the scrim is
+  0.72" figure is meaningless for a two-layer gradient. The left text column
+  passes comfortably (5.3–20.4:1). Two failures, both on the RIGHT, where the
+  horizontal ramp thins to 0.15 on purpose to show artwork: the MATCH/SCORE
+  eyebrow at **1.22:1** and the percentage numeral at 2.16:1. Fixed with a local
+  `.stage-hero-match-veil` rather than by darkening the scrim, which would spend
+  the artwork the ramp exists to preserve.
+- Keyboard pass — **PARTLY done, and the "done" claim was wrong.** The input-focus
+  half below is finished and verified. The FIVE WIDGETS the plan actually names
+  ("tabs, avatar dropdown, palette, context menu, card focus rings") were not
+  swept; I checked the admin tabstrip and the input population and generalised from
+  them. A reviewer refuted 4 of the 5, and none of these is subtle:
+    - **`ContextMenu.tsx` — WCAG 2.1.1, Level A.** Its only trigger is
+      `onContextMenu`. No `role="menu"`, no focus moved into it, no arrow keys.
+      Four actions — Mark as Watched, Clear Progress, More like this, Not
+      interested — have **no other route anywhere in the app**, so they are
+      unreachable by keyboard entirely.
+    - **`detail/DetailTabs.tsx`** declares `role="tablist"`/`role="tab"` with ZERO
+      `onKeyDown` and no roving `tabIndex`: every tab is its own tab stop, no
+      Arrow/Home/End, and `aria-controls` dangles on inactive tabs.
+      `AdminView.tsx` is the correct implementation and was not ported.
+    - **`TopNav.tsx` AvatarMenu** — Escape only; no arrows, and every activation
+      path unmounts the focused button leaving focus on `<body>`.
+      `ProfileSwitcher.tsx`, ten lines away in the same file, does it correctly.
+    - **`SearchPalette.tsx`** — `aria-modal="true"` with no focus trap, no opener
+      capture, no scroll lock; plus a real functional bug where its window-level
+      Enter handler opens the HIGHLIGHTED row rather than a Tab-focused one.
+    - Card focus rings: grid cards pass; `.media-list-row:focus-visible` overrode
+      the floor at a lower alpha (2.45:1 vs 3.19:1) — **fixed**.
+  Tracked as the top of Phase 9. What IS done, and was the largest single a11y
+  defect of the whole redesign: **no `<input>`, `<select>` or `<textarea>` in the app had an adequate
+  focus indicator.** The global exemption strips the `:focus-visible` outline from
+  every input at (0,2,1), deferring to a `:focus` treatment that measured
+  **1.99:1** (border), 1.07:1 (background shift) and 1.09:1 (halo). Also corrected
+  a comment on the `:focus-visible` floor which claimed layer precedence made it
+  unsuppressable — Tailwind 3 emits **no native `@layer`**, so a
+  `focus:outline-none` at (0,2,0) beats it, which is why the same bug had already
+  shipped three times. `npm run audit:a11y` now checks it, and the cascade question
+  is answerable by `scripts/resolve-focus.mjs` instead of by reading source order.
+
+  **"Checked", not "guarded"** — the honest word. This repo has no `.github/`, no
+  CI and no git hooks, so `npm run audit` runs only when a human types it; it is
+  listed in `CLAUDE.md`'s gate for that reason. Reviewers also established that the
+  FIRST versions of three of these four scripts would have reported clean on their
+  own target bugs — the contrast one read no files at all and was structurally
+  incapable of failing. All four were rewritten, and each is now mutation-tested
+  against the specific defect it exists to catch, with the surviving-mutation list
+  recorded in its header.
 - Then: merge to `main` → `bash scripts/server-test-loop.sh --trigger-update` →
   verify against `https://aurorapro.app` per `docs/server-testing.md`.
 

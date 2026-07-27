@@ -874,14 +874,43 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         libraryIds={libraryIds}
         onToggleLib={onToggleLib}
       />
-      {/* Phase D — conversational discovery. Centered under the hero as a
-          deliberate "now describe your own vibe" moment between the one curated
-          pick and the browsable rails. Fires the semantic search on Enter (not
-          per-keystroke) to bound LLM cost. */}
-      {/* Phase 4 — pulled UP into the hero's foot (the mockup's -26px) so
-          it reads as one composition with the hero rather than a separate
-          widget floating above the rails. relative + z-20 keeps it above
-          the hero's scrim. */}
+      {/* Phase D — conversational discovery: a deliberate "now describe your own
+          vibe" moment between the one curated pick and the browsable rails.
+          Fires the semantic search on Enter (not per-keystroke) to bound LLM cost.
+
+          Phase 4 pulled it UP into the hero's foot (the mockup's -26px) so it
+          reads as one composition with the hero rather than a separate widget
+          floating above the rails. relative + z-20 keeps it above the hero's scrim.
+
+          `max-w-3xl` — and it is important to record WHY, because Phase 8 briefly
+          changed it to `max-w-2xl` on a misreading and had to change it back.
+
+          This wrapper carries BOTH `.stage-gutter` (which is
+          `padding-left/right: var(--page-gutter)`, 48px at md+) AND the
+          max-width, and Tailwind's preflight sets `box-sizing: border-box`. So
+          the max-width INCLUDES the gutter padding. Measured at 1440px:
+
+            max-w-3xl (768) + 48px padding each side  ->  content 48..720
+            max-w-2xl (672) + 48px padding each side  ->  content 48..624
+            hero text column (max-w-2xl, NO padding)  ->  content 48..720
+            hero description (max-w-xl,  NO padding)  ->  content 48..624
+
+          The bar at `max-w-3xl` is therefore ALREADY flush with the hero's text
+          column — the two differ by one Tailwind step precisely because one of
+          them pays for the gutter out of its own max-width and the other does
+          not. Changing it to `max-w-2xl` moved it to the DESCRIPTION's edge,
+          96px short of the column, which is the opposite of the intent. The
+          reasoning that produced that change ("96px past the column") was
+          computed as 768 − 672 without accounting for the padding, and a
+          measurement of the rendered box disproved it.
+
+          The genuine misalignment on this row was the LOADING SHIMMER below,
+          which was `max-w-3xl` inside a `.stage-gutter` PARENT — so no padding
+          of its own, 48..816, a real 96px overhang past the bar it stands in
+          for. That is fixed there, not here.
+
+          An earlier version of this comment said "Centered under the hero".
+          There is no `mx-auto` here and never was — it is gutter-aligned. */}
       {onConversationalSearch && (
         <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
           <div className="convo-search flex items-center">
@@ -890,8 +919,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               value={convoText}
               onChange={e => setConvoText(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); onConversationalSearch(convoText) } }}
-              placeholder="Describe what you're in the mood for… e.g. a cozy mystery, nothing too dark"
-              aria-label="Describe what you're in the mood for"
+              // "Describe a vibe", not "Describe what you're in the mood for…":
+              // two search affordances are visible at once on Home — TopNav's
+              // "Search titles…" (lexical, by name) and this one (semantic, by
+              // description) — and nothing told a user which was which. Leading
+              // with the verb that distinguishes them does. Also 50 characters
+              // instead of 62, which matters now the field is 672px rather than
+              // 768px: the example is the part that teaches what this accepts,
+              // so it is the part that must survive.
+              placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
+              aria-label="Describe a vibe to search by"
               className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
             />
             {convoText && (
@@ -926,7 +963,14 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           below it. */}
       <div className="stage-gutter">
       {convoLoading && (
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-3xl">
+        // max-w-2xl here equals max-w-3xl on the bar above, and that is not a
+        // typo: this element sits INSIDE a `.stage-gutter` parent so it pays no
+        // padding out of its own max-width, while the bar's `.stage-gutter` is on
+        // the same element as its max-width and does. Both resolve to 48..720 at
+        // 1440px. It was `max-w-3xl` (48..816), overhanging the bar it stands in
+        // for by 96px, so the layout visibly jumped on every query — the one real
+        // misalignment on this row.
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
           <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />

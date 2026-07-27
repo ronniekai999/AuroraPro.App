@@ -143,7 +143,16 @@ export function JoinScreen({ initialCode, user, signInSlot, onJoin, externalErro
                     filled
                       ? 'border-purple-500/60 bg-purple-500/10 text-white shadow-[0_0_0_3px_rgba(168,85,247,0.12)]'
                       : 'border-[var(--glow-border)] bg-white/[0.04] text-white/30',
-                    isCursor && !filled
+                    // `isCursor`, WITHOUT the `&& !filled` this shipped with.
+                    // The real input is opacity-0, so these boxes are the only
+                    // focus indication there is — and `focusedIndex` is
+                    // `min(code.length, CODE_LEN - 1)`, so with all six characters
+                    // entered it points at the LAST box, which is filled. The
+                    // branch could therefore never fire in exactly the state a
+                    // user is in when they tab away to check the code and tab back:
+                    // filled boxes rendered identically focused and unfocused, with
+                    // Enter as the submit action (WCAG 2.4.7).
+                    isCursor
                       ? 'border-purple-400/80 shadow-[0_0_0_3px_rgba(168,85,247,0.18),0_0_18px_rgba(168,85,247,0.3)]'
                       : '',
                   ].join(' ')}

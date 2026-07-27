@@ -156,7 +156,20 @@ export function DetailHero({
         <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-[15px]">
           {metaParts.map((p, i) => (
             <Fragment key={i}>
-              {i > 0 && <span className="text-white/30">·</span>}
+              {/* text-white/45, not /30, and aria-hidden.
+                  At /30 this separator measured 2.60:1 over .stage-detail-scrim
+                  plus .aurora-floor on a dark poster — failing 4.5:1 for 15px
+                  text and failing even the 3:1 non-text floor. The card's
+                  equivalent `.sep` already records the identical finding and the
+                  identical fix (index.css: "0.45, not 0.3: at 0.3 the dots
+                  measured 2.71:1 over the scrim on a bright poster — under even
+                  the 3:1 non-text floor"); this component was simply never
+                  brought along. /45 gives 4.51:1.
+                  aria-hidden because it is punctuation between meta values and a
+                  screen reader announcing "middle dot" between every pair is
+                  noise — the card's `.sep` is aria-hidden for the same reason and
+                  this one was not. */}
+              {i > 0 && <span className="text-white/45" aria-hidden="true">·</span>}
               {p}
             </Fragment>
           ))}
