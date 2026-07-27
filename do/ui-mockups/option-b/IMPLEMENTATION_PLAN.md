@@ -420,8 +420,8 @@ where the mockup stops being a spec.
       Enter handler opens the HIGHLIGHTED row rather than a Tab-focused one.
     - Card focus rings: grid cards pass; `.media-list-row:focus-visible` overrode
       the floor at a lower alpha (2.45:1 vs 3.19:1) — **fixed**.
-  Tracked as the top of Phase 9. What IS done, and was the largest single a11y
-  defect of the whole redesign: **no `<input>`, `<select>` or `<textarea>` in the app had an adequate
+  **All four fixed in Phase 9** (see below). What was done in Phase 8, and was the
+  largest single a11y defect of the whole redesign: **no `<input>`, `<select>` or `<textarea>` in the app had an adequate
   focus indicator.** The global exemption strips the `:focus-visible` outline from
   every input at (0,2,1), deferring to a `:focus` treatment that measured
   **1.99:1** (border), 1.07:1 (background shift) and 1.09:1 (halo). Also corrected
@@ -441,6 +441,46 @@ where the mockup stops being a spec.
   recorded in its header.
 - Then: merge to `main` → `bash scripts/server-test-loop.sh --trigger-update` →
   verify against `https://aurorapro.app` per `docs/server-testing.md`.
+
+---
+
+### Phase 9 — the four hand-rolled keyboard widgets
+
+**Branch** `feat/stage-polish` (same)
+
+Phase 8 claimed a keyboard pass and delivered half of one: the input-focus
+population was fixed, and the five widgets the plan names were not swept. This is
+the other half. None of these use a Radix primitive — `ui/dropdown-menu`,
+`ui/context-menu` and `ui/tabs` have zero importers — so all four are hand-rolled
+and all four were incomplete in the same way: a role that promises a keyboard
+contract, without the contract.
+
+- **`ContextMenu` — was a WCAG 2.1.1 (Level A) failure.** Four items had no other
+  route in the app. The trigger was never the problem: cards are
+  `role="button" tabIndex={0}` and browsers fire a real `contextmenu` for Shift+F10
+  and the Menu key, so it opened — but a keyboard-generated event reports
+  clientX/clientY of 0, so it pinned itself to the viewport corner, and once open
+  there was no `role="menu"`, no roving tabIndex and no arrow keys. Now has the
+  full APG Menu contract plus `anchorFor()`, which is extracted and unit-tested
+  because the keyboard/pointer distinction is invisible to a mouse-driven pass.
+- **`detail/DetailTabs`** declared `role="tablist"`/`role="tab"` with zero key
+  handling. Now the same manual-activation contract `AdminView` already used
+  (arrows move, Enter/Space selects, one tab stop), via the shared
+  `nextRadioIndex`. Also stopped pointing `aria-controls` at panels that don't
+  exist — only one panel is rendered at a time, so it dangled on every inactive tab.
+- **`TopNav`'s AvatarMenu** — `role="menu"` with Escape only. Arrows/Home/End over
+  the live row set, focus into the menu on open, Tab dismisses, and every
+  activation path returns focus to the trigger instead of dropping it to `<body>`.
+- **`SearchPalette`** — `aria-modal="true"` with no trap, no opener capture and no
+  scroll lock, plus a real functional bug: its window-level Enter handler opened
+  `results[highlighted]` even when the user had Tab-focused a *different* row, so
+  Enter opened the wrong title.
+
+Worth recording as the lesson: in all four cases the ARIA role was the liability.
+`role="menu"` and `role="tablist"` put NVDA and JAWS into forms mode and hand the
+arrow keys to the application — so a role without its keyboard contract is worse
+than no role at all, because the screen reader has stopped offering its own
+navigation in exchange for nothing.
 
 ---
 

@@ -78,7 +78,7 @@ import { HeroSection } from '@/components/HeroSection'
 import { MediaRail } from '@/components/MediaRail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
-import { ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
+import { anchorFor, ContextMenu, type MediaContextItem } from '@/components/ContextMenu'
 import { ScanProgressBar } from '@/components/ScanProgressBar'
 import { SearchPalette } from '@/components/SearchPalette'
 // Phase 6 — Collections, Calendar, Gamification UI components.
@@ -1767,7 +1767,11 @@ export default function App() {
     if (user && user.role === 'admin') {
       items.push({ label: 'Refresh Metadata', onClick: () => { void handleRefreshMetadata(m) } })
     }
-    setContextMenu({ x: e.clientX, y: e.clientY, items })
+    // anchorFor, not raw clientX/clientY. A keyboard-opened context menu
+    // (Shift+F10 or the Menu key, both of which fire a real `contextmenu` event
+    // on the focused card) reports 0/0, so this used to pin the menu to the
+    // viewport's top-left corner — open, but detached from the card it acts on.
+    setContextMenu({ ...anchorFor(e), items })
   // user is a discriminated union; the casts above narrow it. setToasts etc. are stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profiles, user, activeProfileId])

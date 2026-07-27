@@ -22,6 +22,7 @@
 //     decides whether to open detail, play, etc.
 
 import { useEffect, useRef, useState } from 'react'
+import { lockBodyScroll } from '@/lib/scrollLock'
 import { searchMedia, type UIMedia } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 
@@ -37,6 +38,10 @@ interface Props {
 
 export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
+  // Phase 9 — the panel needs a ref for the Tab trap below. It declared
+  // aria-modal="true" with no trap, no opener capture and no scroll lock.
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const openerRef = useRef<HTMLElement | null>(null)
   const [query, setQuery] = useState(initialQuery)
   const [results, setResults] = useState<UIMedia[]>([])
   const [mode, setMode] = useState<'literal' | 'semantic'>('literal')
@@ -97,6 +102,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // user doesn't have to keep focus on the input to navigate.
   useEffect(() => {
     if (!open) return
+    // Capture the opener and lock the page. `aria-modal` does neither, and the
+    // palette is reachable from anywhere via Cmd+K, so closing it used to drop
+    // focus to <body> from wherever the user had been (WCAG 2.4.3) and the page
+    // behind stayed scrollable under a full-viewport overlay.
+    openerRef.current = document.activeElement as HTMLElement | null
+    const releaseLock = lockBodyScroll()
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose(); return }
       if (e.key === 'ArrowDown') {
@@ -110,6 +121,14 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         return
       }
       if (e.key === 'Enter') {
+        // Only act when focus is NOT on a result row. This handler is bound at
+        // the WINDOW, so it used to fire for a row the user had reached with Tab
+        // and open `results[highlighted]` — a DIFFERENT title from the one they
+        // were on. The row's own onClick is the correct handler in that case, and
+        // letting the event reach it is the fix; `preventDefault` here was what
+        // stopped it.
+        const onRow = (document.activeElement as HTMLElement | null)?.closest?.('[data-row]')
+        if (onRow) return
         if (results[highlighted]) {
           e.preventDefault()
           onSelect(results[highlighted])
@@ -118,7 +137,15 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
       }
     }
     window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    return () => {
+      window.removeEventListener('keydown', handler)
+      releaseLock()
+      const o = openerRef.current
+      openerRef.current = null
+      // Only if it is still in the document — selecting a result navigates, which
+      // can unmount the card the palette was opened from.
+      if (o && o.isConnected) o.focus({ preventScroll: true })
+    }
   }, [open, results, highlighted, onClose, onSelect])
 
   // Scroll the highlighted row into view after arrow-key nav.
@@ -156,10 +183,29 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         // 760px, up from max-w-2xl (672). The result rows carry a poster, a
         // title, a meta line and a ⏎ hint; at 672 the meta line was the first
         // thing to truncate on ordinary titles.
+        ref={panelRef}
         className="relative w-full max-w-[760px] rounded-2xl border border-purple-500/20 bg-[#0a0a0f]/90 backdrop-blur-2xl shadow-[0_20px_80px_-10px_rgba(168,85,247,0.35)] overflow-hidden"
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
+        onKeyDown={e => {
+          // Tab trap. `aria-modal` is a hint to AT's virtual cursor and does
+          // nothing whatsoever to the browser's tab ring, so without this Tab
+          // walked out of a full-viewport overlay into TopNav and the page behind
+          // it, painting a focus ring on content the user cannot see
+          // (WCAG 2.4.3, and 2.4.11 Focus Not Obscured). Same first/last wrap
+          // TopNav's mobile sheet and the profile gate use.
+          if (e.key !== 'Tab') return
+          const root = panelRef.current
+          if (!root) return
+          const f = root.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])',
+          )
+          if (!f.length) return
+          const first = f[0], last = f[f.length - 1]
+          if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+          else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+        }}
       >
         {/* Glow rim accent */}
         <div
