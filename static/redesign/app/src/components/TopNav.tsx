@@ -93,6 +93,16 @@ function AvatarMenu({
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
+  // Phase 9 — this declared role="menu" and implemented only Escape. That is the
+  // worse-than-nothing case: role="menu" puts NVDA/JAWS into forms mode and hands
+  // the arrow keys to the app, so a menu without them has taken the reader's own
+  // navigation away and given nothing back. Focus also never entered the menu,
+  // and every activation path (`go`, `openPanel`, Sign out) unmounts the focused
+  // row — so all of them left focus on <body> (WCAG 2.4.3).
+  // ProfileSwitcher, ~400 lines down this same file, already did all of this
+  // correctly; this is the same contract.
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const focusedRef = useRef(0)
 
   useEffect(() => {
     if (!open) return
@@ -107,17 +117,60 @@ function AvatarMenu({
         triggerRef.current?.focus()
       }
     }
+    // Focus the first row on open, so the arrow keys below have somewhere to
+    // start and a screen-reader user is actually inside the menu they were just
+    // told about.
+    const raf = requestAnimationFrame(() => {
+      focusedRef.current = 0
+      itemRefs.current.filter(Boolean)[0]?.focus()
+    })
     document.addEventListener('mousedown', onDocClick)
     document.addEventListener('keydown', onKey)
     return () => {
+      cancelAnimationFrame(raf)
       document.removeEventListener('mousedown', onDocClick)
       document.removeEventListener('keydown', onKey)
     }
   }, [open])
 
-  const go = (view: string) => {
+  /** Arrow/Home/End over the rendered rows. The row set is conditional (the
+   *  Server row is admin-only), so this walks the LIVE refs rather than an index
+   *  range — the same `.filter(Boolean)` approach ProfileSwitcher uses, which is
+   *  what makes it immune to an item being added or gated later. */
+  const onMenuKeyDown = (e: React.KeyboardEvent) => {
+    const live = itemRefs.current.filter(Boolean) as HTMLButtonElement[]
+    if (!live.length) return
+    const at = Math.max(0, live.indexOf(document.activeElement as HTMLButtonElement))
+    let next: number | null = null
+    if (e.key === 'ArrowDown') next = (at + 1) % live.length
+    else if (e.key === 'ArrowUp') next = (at - 1 + live.length) % live.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = live.length - 1
+    else if (e.key === 'Tab') {
+      // A menu is not part of the tab ring — Tab closes it and returns focus to
+      // the trigger, so the next Tab continues from the avatar rather than from
+      // somewhere behind an overlay that is no longer there.
+      e.preventDefault()
+      setOpen(false)
+      triggerRef.current?.focus()
+      return
+    }
+    if (next === null) return
+    e.preventDefault()
+    focusedRef.current = next
+    live[next].focus()
+  }
+
+  /** Every dismissal returns focus to the trigger. Without this the row that was
+   *  activated unmounts under the user's focus and it falls to <body>. */
+  const closeTo = (fn?: () => void) => {
     setOpen(false)
-    onNavigate(view)
+    triggerRef.current?.focus()
+    fn?.()
+  }
+
+  const go = (view: string) => {
+    closeTo(() => onNavigate(view))
   }
   // The drawers render as fixed-position panels of their own; close the
   // menu first so it isn't left floating over the thing it opened.
@@ -128,8 +181,10 @@ function AvatarMenu({
   // trap, and below md this dropdown is the only surface for it — with no
   // icon state to hint at what happened.
   const openPanel = (fn: () => void) => {
-    setOpen(false)
-    fn()
+    // NOTE the panels this opens (ServerPanel / NotificationPanel) manage their
+    // own focus; returning focus to the trigger first means that if one of them
+    // does not, focus is at least on a real control rather than on <body>.
+    closeTo(fn)
   }
 
   const itemCls = 'w-full text-left px-4 py-2.5 text-sm text-white/85 hover:bg-white/[0.06] flex items-center gap-2.5'
@@ -168,6 +223,8 @@ function AvatarMenu({
       {open && (
         <div
           role="menu"
+          aria-label={`Account menu for ${user.username}`}
+          onKeyDown={onMenuKeyDown}
           className="absolute right-0 mt-2 w-60 rounded-xl bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] shadow-2xl z-[55] overflow-hidden animate-fade-in"
         >
           <div className="px-4 py-3 border-b border-white/[0.06]">
@@ -182,12 +239,26 @@ function AvatarMenu({
             </p>
           </div>
           {onOpenServer && (
-            <button role="menuitem" onClick={() => openPanel(onOpenServer)} className={itemCls}>
+            <button
+              ref={el => { itemRefs.current[0] = el }}
+              type="button"
+              role="menuitem"
+              tabIndex={0}
+              onClick={() => openPanel(onOpenServer)}
+              className={itemCls}
+            >
               <Icon name="server" size={14} className="text-white/50" />
               Server Status
             </button>
           )}
-          <button role="menuitem" onClick={() => openPanel(onOpenNotifications)} className={itemCls}>
+          <button
+              ref={el => { itemRefs.current[1] = el }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => openPanel(onOpenNotifications)}
+              className={itemCls}
+            >
             <Icon name="bell" size={14} className="text-white/50" />
             Notifications
             {notifCount > 0 && (
@@ -197,20 +268,40 @@ function AvatarMenu({
             )}
           </button>
           <div className="border-t border-white/[0.06] my-1" />
-          <button role="menuitem" onClick={() => go('settings')} className={itemCls}>
+          <button
+              ref={el => { itemRefs.current[2] = el }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => go('settings')}
+              className={itemCls}
+            >
             <Icon name="settings" size={14} className="text-white/50" />
             Settings
           </button>
           {user.role === 'admin' && (
-            <button role="menuitem" onClick={() => go('admin')} className={itemCls}>
+            <button
+              ref={el => { itemRefs.current[3] = el }}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => go('admin')}
+              className={itemCls}
+            >
               <Icon name="shield" size={14} className="text-white/50" />
               Admin
             </button>
           )}
           <div className="border-t border-white/[0.06] my-1" />
           <button
+            ref={el => { itemRefs.current[4] = el }}
+            type="button"
             role="menuitem"
-            onClick={() => { setOpen(false); onSignOut() }}
+            tabIndex={-1}
+            // closeTo, not a bare setOpen(false): signing out unmounts this row
+            // under the user's focus, and returning focus to the trigger first
+            // means it lands on a real control rather than on <body>.
+            onClick={() => closeTo(onSignOut)}
             className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2.5"
           >
             <Icon name="log-out" size={14} className="text-red-400/60" />
