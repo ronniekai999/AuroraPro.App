@@ -102,12 +102,6 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // user doesn't have to keep focus on the input to navigate.
   useEffect(() => {
     if (!open) return
-    // Capture the opener and lock the page. `aria-modal` does neither, and the
-    // palette is reachable from anywhere via Cmd+K, so closing it used to drop
-    // focus to <body> from wherever the user had been (WCAG 2.4.3) and the page
-    // behind stayed scrollable under a full-viewport overlay.
-    openerRef.current = document.activeElement as HTMLElement | null
-    const releaseLock = lockBodyScroll()
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') { e.preventDefault(); onClose(); return }
       if (e.key === 'ArrowDown') {
@@ -137,8 +131,39 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
       }
     }
     window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [open, results, highlighted, onClose, onSelect])
+
+  // Opener capture + scroll lock, keyed on `open` ALONE — and that separation is
+  // the entire point of this being its own effect.
+  //
+  // Phase 9 put both of these inside the keyboard effect above, whose deps are
+  // `[open, results, highlighted, onClose, onSelect]`. Every one of those changes
+  // constantly: `results` gets a new array identity on each fetch AND on each
+  // query-clear, `highlighted` changes on every arrow press, and `onClose`/
+  // `onSelect` are inline arrows at App's call site so they change on every App
+  // render. The cleanup therefore ran continuously, and it called
+  // `o.focus()` — dragging focus to an element OUTSIDE the modal.
+  //
+  // That made the palette unusable, and it fired before the user could type a
+  // single character: opening it calls setResults([]), which re-renders, which
+  // re-runs the effect, whose cleanup rips focus back to the opener. Measured in
+  // Chromium — opened from the nav's search button, focus ended on that button and
+  // the palette input stayed empty. Worse in the flow App deliberately whitelists
+  // ("Allow Cmd+K from inside our own top-bar search input"): the user's typing
+  // went into the input BEHIND a full-viewport modal. The only path that worked
+  // was Cmd+K with nothing focused, and only because body.focus() is a no-op.
+  //
+  // The correct pattern was already in this repo, twice, with a comment saying
+  // exactly why: ProfilesGate keys its identical opener-capture effect on `[open]`
+  // alone — "Deliberately keyed on `open` only: re-running when activeProfileId
+  // changes would yank focus mid-interaction" — and VideoPlayer does the same with
+  // `[target]`. Phase 9 reintroduced the failure Phase 7b had documented.
+  useEffect(() => {
+    if (!open) return
+    openerRef.current = document.activeElement as HTMLElement | null
+    const releaseLock = lockBodyScroll()
     return () => {
-      window.removeEventListener('keydown', handler)
       releaseLock()
       const o = openerRef.current
       openerRef.current = null
@@ -146,7 +171,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
       // can unmount the card the palette was opened from.
       if (o && o.isConnected) o.focus({ preventScroll: true })
     }
-  }, [open, results, highlighted, onClose, onSelect])
+  }, [open])
 
   // Scroll the highlighted row into view after arrow-key nav.
   useEffect(() => {

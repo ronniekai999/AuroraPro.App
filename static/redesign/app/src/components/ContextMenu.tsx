@@ -25,7 +25,7 @@
 // a `role="menu"` without arrow-key support is a WORSE widget than a plain div,
 // because the screen reader stops offering its own navigation in exchange.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export interface MediaContextItem {
   label: string
@@ -59,22 +59,49 @@ interface Props {
  * behavioural difference that is invisible in a mouse-driven manual pass, which
  * is exactly how it shipped.
  *
- * A pointer-driven contextmenu carries real viewport coordinates; a
- * keyboard-driven one (Shift+F10, or the Menu key) reports 0/0. Anchoring to the
- * focused element's box in that case is both correct and what every native menu
- * does.
+ * ⚠️ CORRECTED. This was introduced on a stated browser fact that is FALSE, and
+ * the header here, the commit message and the whole test file asserted it: "a
+ * keyboard-generated `contextmenu` carries clientX/clientY of 0". Measured in
+ * Chromium 141 on a card at left:240 top:300 right:440 bottom:420 — Shift+F10 and
+ * the Menu key BOTH report clientX:340 clientY:360, the element's CENTRE:
  *
- * ⚠️ The coordinates are the ONLY signal used, deliberately. The first version of
- * this also treated `detail === 0` as keyboard-driven, which is wrong: unlike
- * `click`, a `contextmenu` event fired by a real right-click ALSO reports
- * `detail: 0`, so that check misclassified every mouse open and anchored the menu
- * to the card instead of the cursor. The test written for the pointer case caught
- * it immediately — which is the argument for extracting this at all, since a
- * mouse-driven manual pass is exactly what missed the original bug.
+ *     Shift+F10    clientX=340 clientY=360  detail=0  button=-1  buttons=0
+ *     Menu key     clientX=340 clientY=360  detail=0  button=-1  buttons=0
+ *     right-click  clientX=300 clientY=350  detail=0  button=2   buttons=2
+ *
+ * So Chromium never reports 0/0, the fallback below is unreachable there, and the
+ * keyboard menu was ALREADY anchored on the card before any of this — arguably
+ * better placed than the bottom-left drop this would have given it. Two reviewers
+ * measured it independently. The tests are green over a branch production never
+ * takes, which is exactly the failure mode this project has now hit three times.
+ *
+ * It is kept, deliberately narrowed to what it actually is: a defensive fallback
+ * for an engine that reports unusable 0/0 coordinates (plausible for WebKit, which
+ * I could not measure — only Chromium is installed here). Because it triggers on
+ * the coordinates being unusable rather than on the event being keyboard-driven,
+ * Chromium's correct centre anchoring is left untouched.
+ *
+ * Note for anyone extending this: `button`/`buttons` ARE a clean keyboard
+ * discriminator per UI Events (-1/0 for a non-pointer event vs 2/2 for a
+ * right-click), and `detail` is NOT — a real right-click also reports `detail: 0`,
+ * unlike `click`. An earlier draft used `detail` and mis-anchored every mouse open;
+ * the test written for the ordinary pointer case caught that on its first run.
  */
 export function anchorFor(e: {
   clientX: number
   clientY: number
+  /**
+   * ACCEPTED AND DELIBERATELY IGNORED. It is in the signature purely so a test can
+   * pass it and assert that it changes nothing.
+   *
+   * A reviewer showed the previous test file could not catch reintroducing
+   * `detail === 0`: no fixture set `detail`, so `undefined === 0` was false and the
+   * mutant was behaviourally identical — it passed all five tests AND `tsc`. The
+   * commit's story that "the test caught this on its first run" was therefore
+   * unverifiable from the shipped artifact, whatever happened while writing it.
+   * Naming the property here makes the trap a typed, asserted one instead.
+   */
+  detail?: number
   currentTarget?: { getBoundingClientRect?: () => { left: number; bottom: number } } | null
 }): { x: number; y: number } {
   // A genuine right-click at exactly (0, 0) is not reachable in practice, and if
@@ -90,9 +117,12 @@ export function anchorFor(e: {
 export function ContextMenu({ x, y, items, onClose, title }: Props) {
   const ref = useRef<HTMLDivElement | null>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
-  // Which item holds the single tab stop. The set is ONE tab stop (APG Menu), so
-  // this is a roving index rather than every item being tabbable.
-  const activeRef = useRef(0)
+  // STATE, not a ref: `tabIndex` has to re-render to move, and the previous
+  // version rendered `tabIndex={i === 0 ? 0 : -1}` off a ref, so the tab stop sat
+  // on item 0 for ever while focus was elsewhere. APG: "set tabindex='-1' on the
+  // element that has tabindex='0'. Set tabindex='0' on the element that will
+  // become focused as a result of the key event."
+  const [active, setActive] = useState(0)
 
   // Focus the first item on open and restore the opener on close. Without the
   // restore, activating an item unmounts the focused element and focus falls to
@@ -101,7 +131,7 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null
     const raf = requestAnimationFrame(() => {
-      activeRef.current = 0
+      setActive(0)
       itemRefs.current[0]?.focus()
     })
     return () => {
@@ -138,8 +168,8 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
     const n = items.length
     if (!n) return
     // Wraps, per APG: Down from the last item goes to the first.
-    const next = (activeRef.current + delta + n) % n
-    activeRef.current = next
+    const next = (active + delta + n) % n
+    setActive(next)
     itemRefs.current[next]?.focus()
   }
 
@@ -151,26 +181,44 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
       className="fixed z-[100] min-w-[200px] bg-[#1a1a22] border border-white/[0.08] rounded-lg shadow-2xl py-1"
       style={{ left: clampedX, top: clampedY }}
       onKeyDown={e => {
-        // Handled here rather than per item so the contract lives in one place,
-        // and stopped so the card underneath — which has its own Enter/Space
-        // handler — cannot also act on the same key.
+        // Handled here rather than per item so the contract lives in one place.
+        //
+        // The `stopPropagation` calls are NOT for the card: this menu renders at
+        // App level as a sibling of the grid, so the card's onKeyDown is never in
+        // the propagation path (and it guards on `e.target !== e.currentTarget`
+        // anyway) — an earlier comment here claimed otherwise. What they do stop is
+        // App's WINDOW-level handlers: React 18's createRoot attaches at the
+        // container, so a synthetic stopPropagation does block them. Measured: a
+        // window keydown spy saw nothing for arrow presses inside the menu.
         switch (e.key) {
           case 'ArrowDown': e.preventDefault(); e.stopPropagation(); move(1); break
           case 'ArrowUp': e.preventDefault(); e.stopPropagation(); move(-1); break
           case 'Home':
             e.preventDefault(); e.stopPropagation()
-            activeRef.current = 0
+            setActive(0)
             itemRefs.current[0]?.focus()
             break
           case 'End':
             e.preventDefault(); e.stopPropagation()
-            activeRef.current = items.length - 1
+            setActive(items.length - 1)
             itemRefs.current[items.length - 1]?.focus()
             break
+          case 'Escape':
+            // Stopped HERE as well as handled by the window listener. App's
+            // Escape handler guards only on `paletteOpen`, so with a context menu
+            // open on a detail page the fall-through reached
+            // `else if (view === 'detail') handleBack()` — pressing Escape to
+            // dismiss the menu dismissed it AND navigated back off the title.
+            // Measured: the window spy saw "Escape" while the menu was open.
+            e.stopPropagation()
+            onClose()
+            break
           case 'Tab':
-            // A menu is not part of the tab ring — Tab dismisses it. That is what
-            // APG specifies, and it is what stops focus landing on something
-            // behind an open overlay.
+            // A menu is not part of the tab ring, so Tab dismisses it rather than
+            // walking into content behind the overlay. APG's Tab row actually says
+            // to move focus OUT of the menu and advance the tab ring; returning to
+            // the opener is a defensible variation, not the letter of the pattern,
+            // and the earlier comment here overstated it as "what APG specifies".
             e.preventDefault()
             onClose()
             break
@@ -183,8 +231,8 @@ export function ContextMenu({ x, y, items, onClose, title }: Props) {
           ref={el => { itemRefs.current[i] = el }}
           type="button"
           role="menuitem"
-          tabIndex={i === 0 ? 0 : -1}
-          onFocus={() => { activeRef.current = i }}
+          tabIndex={i === active ? 0 : -1}
+          onFocus={() => setActive(i)}
           onClick={() => { it.onClick(); onClose() }}
           className={`w-full text-left px-3 py-2 text-sm transition-colors ${
             it.tone === 'danger'

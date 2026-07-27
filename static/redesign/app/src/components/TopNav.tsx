@@ -127,7 +127,13 @@ function AvatarMenu({
     const onDocClick = (e: MouseEvent) => {
       if (!rootRef.current) return
       if (rootRef.current.contains(e.target as Node)) return
+      // Focus back to the trigger here too. This was the one dismissal path that
+      // still dropped focus to <body> while a comment claimed "every dismissal
+      // returns focus to the trigger" — measured as a focusout with no focusin
+      // after it. Low impact, since outside-click is a pointer gesture, but the
+      // claim was false.
       setOpen(false)
+      triggerRef.current?.focus()
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -191,9 +197,18 @@ function AvatarMenu({
   // trap, and below md this dropdown is the only surface for it — with no
   // icon state to hint at what happened.
   const openPanel = (fn: () => void) => {
-    // NOTE the panels this opens (ServerPanel / NotificationPanel) manage their
-    // own focus; returning focus to the trigger first means that if one of them
-    // does not, focus is at least on a real control rather than on <body>.
+    // An earlier comment here said "the panels this opens (ServerPanel /
+    // NotificationPanel) manage their own focus". They do not — a reviewer grepped
+    // both: each renders `role="dialog"` with ZERO focus() calls, no autoFocus, no
+    // aria-modal, no Escape handler and no focus trap. So the ordering below fights
+    // nothing, but the reasoning it rested on was invented.
+    //
+    // Returning focus to the trigger is still right: it lands on a real control
+    // rather than on <body>. The remaining defect is the panels', not this menu's —
+    // activating a row opens a role="dialog" while focus sits on a trigger whose
+    // aria-expanded just went false, so a screen-reader user gets no announcement
+    // and no route in. Pre-existing, out of scope here, recorded rather than
+    // papered over.
     closeTo(fn)
   }
 
@@ -310,9 +325,14 @@ function AvatarMenu({
           <button
             ref={el => { itemRefs.current[4] = el }}
             type="button"
-            // closeTo, not a bare setOpen(false): signing out unmounts this row
-            // under the user's focus, and returning focus to the trigger first
-            // means it lands on a real control rather than on <body>.
+            // closeTo focuses the trigger before calling onSignOut, which is the
+            // best that can be done from here — but it does NOT save this path, and
+            // the Phase 9 claim that "all of them now return it to the trigger" was
+            // wrong about this row specifically. App renders
+            // `if (user === false) return <AuthView/>`, so signing out unmounts
+            // TopNav and the trigger with it; measured end state is <body>. Fixing
+            // it properly means AuthView taking focus on mount, which is AuthView's
+            // job, not this menu's.
             onClick={() => closeTo(onSignOut)}
             className="w-full text-left px-4 py-2.5 text-sm text-red-300/85 hover:bg-red-500/10 flex items-center gap-2.5 focus-visible:[outline-offset:-2px]"
           >

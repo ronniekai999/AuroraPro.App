@@ -13,11 +13,23 @@
 // also its own tab stop, so Tab walked through all of them instead of past the set.
 //
 // `AdminView`'s tab strip already implemented this correctly a phase earlier;
-// this is the same contract, ported. MANUAL activation (arrows move focus, Enter
-// or Space selects) rather than automatic, per APG's recommendation for panels
-// whose content is loaded or expensive — the detail panels swap real content.
+// this is the same contract, ported — though the first port got two things wrong
+// and a review measured both.
+//
+// AUTOMATIC activation, not the manual activation this shipped with. APG's
+// criterion is LATENCY, verbatim: "It is recommended that tabs activate
+// automatically when they receive focus as long as their associated tab panels are
+// displayed without noticeable latency." I quoted that rule to justify manual and
+// then applied a different test — "the detail panels swap real content" — which is
+// not what it says. DetailView builds episodesNode, castNode and mediaNode
+// unconditionally on every render and already renders all of them; switching tabs
+// re-parents JSX that is
+// ALREADY THERE. Zero fetch, zero latency, so automatic is what APG asks for.
+// AdminView is manual for a reason it spells out — its tabs fire listAdminUsers /
+// listAdminActivity / listAdminLogs and spin intervals up and down — and that
+// justification does not transfer. I copied its conclusion without its premise.
 
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '../../lib/utils'
 import { nextRadioIndex } from '../../lib/radiogroup'
 
@@ -35,14 +47,25 @@ interface DetailTabsProps {
 
 export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProps) {
   const refs = useRef<(HTMLButtonElement | null)[]>([])
-  // Where the roving tabIndex sits. It follows arrow keys independently of
-  // `active`, which is what makes activation MANUAL: you can move across the set
-  // and look before committing, and only Enter/Space swaps the panel.
-  const focusedRef = useRef<number>(Math.max(0, tabs.findIndex(t => t.id === active)))
-
-  // The single tab stop is the selected tab when focus is outside the set (so Tab
-  // lands somewhere meaningful), and follows the arrow keys once inside.
   const selectedIndex = Math.max(0, tabs.findIndex(t => t.id === active))
+
+  // STATE, not a ref. The previous version kept this in a `useRef` and rendered
+  // `tabIndex={i === selectedIndex ? 0 : -1}`, so the tab stop tracked SELECTION
+  // and never moved with focus — the roving tabIndex did not rove, while a comment
+  // here claimed it "follows the arrow keys once inside". A ref cannot drive
+  // `tabIndex`, because writing it does not re-render.
+  //
+  // APG is explicit about what has to happen: "set tabindex='-1' on the element
+  // that has tabindex='0'. Set tabindex='0' on the element that will become
+  // focused as a result of the key event." Measured failure without it: arrow to
+  // "Media Info", Tab out to the panel, Shift+Tab back — focus lands on
+  // "Overview", losing your place. AdminView gets this right because it uses
+  // useState; this used a ref.
+  const [focused, setFocused] = useState(selectedIndex)
+
+  // Resync when the selection changes from outside the set — a deep link, or a
+  // parent swapping tabs. Harmless when they already agree.
+  useEffect(() => { setFocused(selectedIndex) }, [selectedIndex])
 
   return (
     <div
@@ -50,9 +73,11 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
       aria-label="Title sections"
       className={cn('flex items-center gap-7 border-b border-white/[0.08]', className)}
       onKeyDown={e => {
+        // Enter/Space still activate explicitly — harmless under automatic
+        // activation, and it keeps the control usable if a future change makes a
+        // panel expensive enough to want manual back.
         if (e.key === 'Enter' || e.key === ' ') {
-          // Manual activation. The focused tab, not the selected one.
-          const t = tabs[focusedRef.current]
+          const t = tabs[focused]
           if (t) { e.preventDefault(); onChange(t.id) }
           return
         }
@@ -67,11 +92,13 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
         // APG's Tabs pattern specifies Left/Right for aria-orientation=horizontal,
         // and Up/Down only for a vertical set, which this is not.
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return
-        const n = nextRadioIndex(e.key, focusedRef.current, tabs.length)
+        const n = nextRadioIndex(e.key, focused, tabs.length)
         if (n === null) return
         e.preventDefault()
-        focusedRef.current = n
+        setFocused(n)
         refs.current[n]?.focus()
+        // Automatic activation — see the note at the top of this file.
+        onChange(tabs[n].id)
       }}
     >
       {tabs.map((t, i) => {
@@ -102,9 +129,9 @@ export function DetailTabs({ tabs, active, onChange, className }: DetailTabsProp
             // dangles, while the panel's reciprocal `aria-labelledby` still names
             // the active tab.
             aria-controls="detail-panel"
-            tabIndex={i === selectedIndex ? 0 : -1}
-            onFocus={() => { focusedRef.current = i }}
-            onClick={() => { focusedRef.current = i; onChange(t.id) }}
+            tabIndex={i === focused ? 0 : -1}
+            onFocus={() => setFocused(i)}
+            onClick={() => { setFocused(i); onChange(t.id) }}
             className={cn(
               'relative py-2.5 text-[0.95rem] font-semibold transition-colors',
               on ? 'text-white' : 'text-white/45 hover:text-white/80',

@@ -1,12 +1,25 @@
 // Where a context menu anchors (Aurora Stage Phase 9).
 //
-// This exists because the bug it pins is INVISIBLE to a mouse-driven manual pass,
-// which is exactly how it shipped and survived several reviews. Browsers fire a
-// real `contextmenu` event for Shift+F10 and the Menu key on a focused element —
-// so the menu opened for keyboard users all along — but a keyboard-generated
-// event carries clientX/clientY of 0, so it appeared pinned to the viewport's
-// top-left corner instead of on the card it acts on. Every pointer test passes
-// either way; only the keyboard case distinguishes them.
+// ⚠️ READ THIS BEFORE TRUSTING THE COVERAGE. The premise these tests were written
+// to prove is FALSE in Chromium. Two reviewers measured it independently
+// (Chromium 141, real Shift+F10 and Menu-key events on a focused card):
+//
+//     Shift+F10    clientX=340 clientY=360  detail=0  button=-1  buttons=0
+//     Menu key     clientX=340 clientY=360  detail=0  button=-1  buttons=0
+//     right-click  clientX=300 clientY=350  detail=0  button=2   buttons=2
+//
+// 340/360 is the element's CENTRE. Chromium never reports 0/0, so the fallback
+// branch is unreachable there and the keyboard menu was already anchored on the
+// card before any of this. The "falls back to the element box" case below
+// therefore exercises a branch production does not take in the app's target
+// browser — green tests over an impossible domain, which is the third time this
+// project has hit that exact failure mode.
+//
+// The tests are kept because the function is kept: it is a defensive fallback for
+// an engine that reports unusable 0/0 (plausibly WebKit, unmeasured — only
+// Chromium is installed here), and because the pointer case below is genuinely
+// load-bearing. It caught a real bug on its first run, described there.
+// What is NOT claimed any more is that this fixes something in Chromium.
 
 import { describe, expect, it } from 'vitest'
 import { anchorFor } from './ContextMenu'
@@ -26,19 +39,50 @@ describe('anchorFor', () => {
       .toEqual({ x: 412, y: 300 })
   })
 
-  it('falls back to the element box when the event reports 0/0 (Shift+F10, Menu key)', () => {
-    // The regression case. Without the fallback this returned {x:0, y:0} and the
-    // menu rendered in the corner of the screen, detached from the card.
+  it('falls back to the element box when an engine reports unusable 0/0 coords', () => {
+    // NOT reachable in Chromium — see the header. This pins the defensive branch's
+    // behaviour, not a browser fact.
     expect(anchorFor({ clientX: 0, clientY: 0, currentTarget: rect(240, 560) }))
       .toEqual({ x: 240, y: 560 })
   })
 
-  it('does not treat a near-origin pointer click as keyboard-driven', () => {
-    // Only exactly 0/0 counts. A click one pixel in is still a click.
+  it('ignores `detail` entirely — the trap that the first test suite could not see', () => {
+    // A reviewer proved the previous suite could not catch reintroducing
+    // `detail === 0` as a keyboard signal: no fixture set `detail`, so
+    // `undefined === 0` was false and the mutant passed all five tests AND tsc.
+    // These two rows kill it. A real right-click reports `detail: 0` just as
+    // Shift+F10 does — that is the whole reason it cannot be the discriminator —
+    // so a pointer event carrying detail:0 must still anchor at the cursor.
+    expect(anchorFor({ clientX: 412, clientY: 300, detail: 0, currentTarget: rect(10, 99) }))
+      .toEqual({ x: 412, y: 300 })
+    // And detail must not force the fallback off either: coords still decide.
+    expect(anchorFor({ clientX: 0, clientY: 0, detail: 1, currentTarget: rect(240, 560) }))
+      .toEqual({ x: 240, y: 560 })
+  })
+
+  it('leaves Chromium\'s real keyboard coordinates alone', () => {
+    // The measured Chromium case: Shift+F10 on a card at left:240 top:300
+    // right:440 bottom:420 reports the element's centre. Those coordinates are
+    // usable, so they must pass straight through — anchoring to the box instead
+    // would MOVE the menu from the card's centre to its bottom-left, which is a
+    // change for the worse, not a fix. This is the assertion that stops someone
+    // "simplifying" the guard to a keyboard test like `button === -1`.
+    expect(anchorFor({ clientX: 340, clientY: 360, currentTarget: rect(240, 420) }))
+      .toEqual({ x: 340, y: 360 })
+  })
+
+  it('treats ONLY exactly 0/0 as unusable — above and below', () => {
+    // A click one pixel in is still a click.
     expect(anchorFor({ clientX: 1, clientY: 0, currentTarget: rect(64, 200) }))
       .toEqual({ x: 1, y: 0 })
     expect(anchorFor({ clientX: 0, clientY: 1, currentTarget: rect(64, 200) }))
       .toEqual({ x: 0, y: 1 })
+    // And the boundary is pinned from BELOW too, which it was not: the comment
+    // here used to claim "only exactly 0/0 counts" while a `<= 0` mutant survived,
+    // because no fixture went negative. Negative viewport coords are reachable for
+    // a dispatched event, and they are still coordinates.
+    expect(anchorFor({ clientX: -5, clientY: -5, currentTarget: rect(64, 200) }))
+      .toEqual({ x: -5, y: -5 })
   })
 
   it('degrades to the raw coordinates when there is no element to measure', () => {

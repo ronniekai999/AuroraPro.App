@@ -954,6 +954,24 @@ html[data-glow="subtle"] .stage-topnav {
     linear-gradient(0deg, #050505 2%, rgba(5, 5, 5, 0.25) 30%, transparent 55%);
 }
 
+/* Transient-overlay menu items get a ring on plain :focus, not only on
+   :focus-visible.
+   Phase 9 focuses an item programmatically when a menu opens. After a POINTER
+   interaction `:focus-visible` does not match, so the focused item had no visible
+   indicator at all — measured `outline: 0px none` on a mouse-opened context menu,
+   with Enter about to fire an unindicated command and the destructive "Clear
+   Progress" one ArrowDown away (WCAG 2.4.7).
+   Using plain `:focus` here is the right call rather than a blanket exception: the
+   reason `:focus-visible` exists is to keep rings off controls a mouse user just
+   clicked and is done with, and these items are the opposite — they live in an
+   overlay that only exists while it has focus, and the ring IS the cursor. Scoped
+   to `[role="menuitem"]` so nothing else in the app inherits the behaviour.
+   The offset is negative for the same clipping reason the TopNav rows use one. */
+[role="menuitem"]:focus {
+  outline: 2px solid rgba(168, 85, 247, 0.75);
+  outline-offset: -2px;
+}
+
 /* Local backing for the match/score ring (Phase 8 contrast audit).
    .stage-hero-scrim ramps its horizontal layer DOWN to 0.15 at 72% and 0.35 at
    the right edge, on purpose: that is where the artwork is meant to be visible.

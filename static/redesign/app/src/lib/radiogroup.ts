@@ -28,6 +28,20 @@
  * Given the current index and a key, returns the index to move to — or null if
  * the key is not one this pattern handles (so the caller leaves it alone).
  */
+// UPDATE (Phase 9) — this IS now used by a tablist, `detail/DetailTabs`, so the
+// "deliberately NOT generalised to tabs" note above is out of date and was left
+// unedited when that happened. The generalisation is only safe under two
+// conditions, both of which DetailTabs had to be corrected to meet:
+//   1. The CALLER filters the keys. This helper maps ArrowUp/ArrowDown as well as
+//      Left/Right, because a radiogroup is orientation-agnostic. A horizontal
+//      tablist must not consume the vertical arrows — APG: "If the tab list is
+//      horizontal, it does not listen for Down Arrow or Up Arrow so those keys can
+//      provide their normal browser scrolling functions." DetailTabs passed the raw
+//      key through and preventDefault'ed the result, which broke page scrolling.
+//   2. The caller owns the aria-selected / activation choice, which differs between
+//      the two patterns. This helper only does the index arithmetic.
+// AdminView still implements its own inline, and that remains fine.
+
 export function nextRadioIndex(key: string, current: number, length: number): number | null {
   if (length === 0) return null
   switch (key) {
