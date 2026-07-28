@@ -8,6 +8,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import postcss from 'postcss'
 import selparser from 'postcss-selector-parser'
 
@@ -91,6 +92,13 @@ function specificityOne(sel) {
 function specificity(sel) {
   return specificityOne(sel)
 }
+
+// Exported so audit-focus-indicators.mjs Check 4 can compare a container's focus
+// reset against the global rule it is supposed to outrank, rather than growing a
+// THIRD copy of this arithmetic. The two copies that already existed disagreed —
+// this file's self-tests are the reason the (0,3,1)-vs-(0,2,1) error was caught —
+// and a third would have been the same bug waiting to happen.
+export { specificityOne as selectorSpecificity, cmp as compareSpecificity }
 const cmp = (a, b) => (a[0] - b[0]) || (a[1] - b[1]) || (a[2] - b[2])
 
 /** Does `sel` match this element?
@@ -196,6 +204,14 @@ function resolve(el, props) {
 const PROPS = ['outline', 'outline-color', 'outline-width', 'border', 'border-color',
   'border-width', 'border-style', 'background', 'background-color', 'box-shadow', 'all', 'opacity']
 
+// Everything below is this script's own REPORT. It is guarded because
+// audit-focus-indicators.mjs now imports `selectorSpecificity` from here, and an
+// ES module import executes the whole module body — without this the audit run
+// printed the resolver's entire report, including its 347-selector "NOT
+// EVALUATED" warning, in the middle of its own output.
+const RUN_DIRECTLY = import.meta.url === pathToFileURL(process.argv[1] ?? '').href
+if (RUN_DIRECTLY) {
+
 const CASES = [
   { name: 'MiniDock chat input, focused (MiniDock.tsx:74)',
     el: { tag: 'input', classes: ['focus:outline-none', 'border-0'], attrs: { type: 'text' }, states: [':focus', ':focus-visible'], ancestors: [] } },
@@ -266,3 +282,5 @@ for (const [sel, want] of SPEC_TESTS) {
 }
 console.log(specFails ? `\n${specFails} specificity self-test failure(s).` : '\nspecificity self-tests: all pass.')
 process.exit(specFails ? 1 : 0)
+
+}

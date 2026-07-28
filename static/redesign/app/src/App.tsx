@@ -878,9 +878,44 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           vibe" moment between the one curated pick and the browsable rails.
           Fires the semantic search on Enter (not per-keystroke) to bound LLM cost.
 
-          Phase 4 pulled it UP into the hero's foot (the mockup's -26px) so it
-          reads as one composition with the hero rather than a separate widget
-          floating above the rails. relative + z-20 keeps it above the hero's scrim.
+          Phase 4 pulled it UP into the hero's foot (the mockup's -26px, shipped as
+          `-mt-5`) so it read as one composition with the hero rather than a separate
+          widget floating above the rails. Phase 10b UNDID that — see the spacing
+          note below.
+
+          `relative z-20` is KEPT, and not for the reason this comment gave for three
+          phases. The old claim was that it lifts the bar above the hero's scrim.
+          That is false and always was: `.stage-hero-scrim` is `position:absolute;
+          inset:0` INSIDE the hero <section>, which is `overflow-hidden`, so it is
+          clipped to the hero and cannot paint under the bar at all — and it carries
+          no z-index, so tree order alone already put the bar in front. Phase 10b
+          then made the false reason actively dangerous by adding "the bar no longer
+          overlaps the hero" beside it: a reader who checks the stated premise finds
+          it irrelevant and deletes the class.
+
+          What `z-20` actually does is make this wrapper a STACKING CONTEXT, which is
+          the only thing containing `.convo-search::before` — the breathing halo,
+          which is `z-index: -1`. `.convo-search` itself is `position: relative` with
+          `z-index: auto` and no transform/filter/opacity/isolation, so it is not a
+          stacking context and cannot contain it. Remove `z-20` and the halo
+          re-parents to the nearest ancestor that is one, and negative-z descendants
+          paint BEFORE in-flow block backgrounds: the halo goes behind the app
+          shell's opaque `bg-[#050505]` and disappears. Worse under
+          `prefers-reduced-motion`, where `.animate-fade-in { animation: none
+          !important }` stops the HomeView root being a stacking context at all, so
+          the halo lands behind the root div's `.aurora-bg` — invisible, for exactly
+          the users least likely to report a missing animation.
+
+          How far the halo actually reaches, since a draft of this comment asserted
+          16px and that number is wrong by ~35: `.convo-search::before` is
+          `inset: -3px` with `filter: blur(16px)`, and CSS blur takes the Gaussian
+          STANDARD DEVIATION, whose visible extent is ~3σ. So ~3 + 48 = ~51px in
+          every direction, not 16px upward. Which means the bar's decoration still
+          reaches hero-bottom − 43, i.e. ~7px past the CTA row's content bottom, and
+          "at `mt-2` none of it sits on the artwork" is true of the border box and
+          false of the halo. Not a regression — under `-mt-5` the halo reached
+          hero-bottom − 71, a full 35px past the buttons, so this strictly reduces
+          the intrusion — but 51 is the number a future edit has to reason from.
 
           FULL WIDTH, gutter to gutter — third and final answer on this bar, and the
           first two were wrong for the same reason: I kept measuring it against the
@@ -905,16 +940,19 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
 
           The three objections I raised to full width earlier, re-examined against
           the rendered page instead of in the abstract:
-            - "it would slice the artwork's focal point" — it does not, and this is
-              the one that was actually measured rather than argued. Sampling the
-              rendered pixels over a pure-white backdrop, the composited scrim alpha
-              is 0.973 at the bar's top edge against 0.761 mid-hero: 2.7% of a white
-              frame's luminance survives where the bar sits, versus 24% where the
-              artwork reads. Only the bar's top 20px of 48 overlap the hero at all —
-              the rest is over page background — so "sits at the very bottom of the
-              hero" was itself a mild overstatement. ("the subjects are ~400px above
-              it" was in an earlier draft and is not checkable: subject position
-              depends entirely on the artwork. Dropped rather than kept as decoration.)
+            - "it would slice the artwork's focal point" — MOOT as of Phase 10b, and
+              now by geometry rather than by argument: at `mt-2` the bar's box does
+              not touch the hero at all, so there is no artwork under it to slice.
+              (This paragraph was written in the present tense against the `-mt-5`
+              revision — "the composited scrim alpha is 0.973 at the bar's top edge
+              against 0.761 mid-hero … only the bar's top 20px of 48 overlap the
+              hero" — and Phase 10b falsified every verb in it while leaving it
+              standing, in the same commit whose other half deletes an eighteen-line
+              block for exactly that. Recorded rather than quietly rewritten: this is
+              the third time this comment has kept a paragraph the code had moved out
+              from under. The 0.761 figure was also never reproducible from the
+              gradient stops under any reading of "mid-hero" — it was presented as a
+              pixel sample, so it was never statically checkable either.)
             - "it strands the ↵ Search chip from the caret" — a pinned submit
               affordance on a full-width search field is what every search bar does,
               and this field takes short phrases, so the caret never travels.
@@ -929,26 +967,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           That asymmetry was the Phase 8 correction. It no longer applies to this
           element, which now has `max-width: none`; the paragraphs above used to
           state it in the present tense alongside the past-tense version, so the same
-          fact was asserted twice, once about code that no longer exists.
-
-          This wrapper carries BOTH `.stage-gutter` (which is
-          `padding-left/right: var(--page-gutter)`, 48px at md+) AND the
-          max-width, and Tailwind's preflight sets `box-sizing: border-box`. So
-          the max-width INCLUDES the gutter padding. Measured at 1440px:
-
-            max-w-3xl (768) + 48px padding each side  ->  content 48..720
-            max-w-2xl (672) + 48px padding each side  ->  content 48..624
-            hero text column (max-w-2xl, NO padding)  ->  content 48..720
-            hero description (max-w-xl,  NO padding)  ->  content 48..624
-
-          The bar at `max-w-3xl` is therefore ALREADY flush with the hero's text
-          column — the two differ by one Tailwind step precisely because one of
-          them pays for the gutter out of its own max-width and the other does
-          not. Changing it to `max-w-2xl` moved it to the DESCRIPTION's edge,
-          96px short of the column, which is the opposite of the intent. The
-          reasoning that produced that change ("96px past the column") was
-          computed as 768 − 672 without accounting for the padding, and a
-          measurement of the rendered box disproved it.
+          fact was asserted twice, once about code that no longer exists. (That
+          correction described a deletion it did not actually perform: the
+          present-tense copy — an eighteen-line block opening "This wrapper carries
+          BOTH `.stage-gutter` … AND the max-width" — was still sitting right here,
+          asserting a max-width this element has not had since the previous commit.
+          Deleted now.)
 
           The genuine misalignment on this row was the LOADING SHIMMER below,
           which was `max-w-3xl` inside a `.stage-gutter` PARENT — so no padding
@@ -956,9 +980,126 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           for. That is fixed there, not here.
 
           An earlier version of this comment said "Centered under the hero".
-          There is no `mx-auto` here and never was — it is gutter-aligned. */}
+          There is no `mx-auto` here and never was — it is gutter-aligned.
+
+          ── Phase 10b: the vertical gap, which is what full width broke ──
+
+          Going full width made the bar look wrong against the hero's CTA row, and
+          the instinct was that the BUTTONS were now misaligned. They are not. The
+          hero's bottom row is `absolute bottom-0 left-0 right-0 …
+          px-[var(--page-gutter)] max-md:px-[18px]` (HeroSection.tsx:322) and this
+          wrapper is `.stage-gutter`. At md+ both resolve to `--page-gutter`, 48px,
+          and Play's left edge and this bar's left edge are both at 48 while "Not
+          tonight"'s right edge and this bar's right edge are both at viewport−48.
+          The button row and the bar span EXACTLY the same measure. Nothing overhangs
+          anything.
+
+          Below 768px they still agree, but NOT because of a shared token — an
+          earlier draft of this paragraph said "which is the same token" and got
+          there by quoting the hero row without its `max-md:px-[18px]`, which is the
+          one class that makes the claim true. `--page-gutter` is 48px at every
+          width; there is no override anywhere, including at runtime. Below md the
+          hero hard-codes 18px via `max-md:` and `.stage-gutter` separately
+          hard-codes 18px in its own `@media not all and (min-width: 768px)` block.
+          Two coincident literals, not one token. The conclusion survives — Tailwind
+          3.4 compiles `max-md:` to that identical negated form, so there is no
+          fractional-width band where one drops to 18 and the other does not — but
+          the reason is a coincidence somebody could break by editing one of them.
+
+          What was wrong is density plus proximity. The row above is two small
+          clusters with the width of the page between them; the bar below is a
+          continuously filled surface across that same span, so the bar is what
+          makes the void above it legible — the gap was always there, nothing solid
+          had ever sat under it. And at `-mt-5` the two were close enough to read as
+          ONE row, at which point the eye tries to reconcile a four-pill row in which
+          one pill is the width of the viewport.
+
+          The arithmetic, which is plain block layout — no border-box trap this time,
+          the parent is a bare `<div className="animate-fade-in">` with no
+          `space-y-*`, and the hero <section> carries no bottom margin to collapse
+          with:
+
+            button bottoms       = hero bottom − 36px   (the row's `pb-9`)
+            bar top              = hero bottom + M      (M = this margin-top)
+            gap                  = M + 36
+
+          — which holds only when `hero` is TRUTHY. HeroSection returns early on
+          `!heroProp` and that branch renders a vertically-centred "Welcome to
+          Aurora" placeholder with no bottom row at all: no `pb-9`, and no scrim
+          either. This bar renders unconditionally on `onConversationalSearch`,
+          independent of `hero`, so on a cold Home load and permanently whenever
+          `homeHero` stays null (empty library, failed hero fetch) the real figures
+          are 8px above and 32px below. That is still an improvement on `-mt-5`,
+          which had the bar OVERLAPPING the placeholder — and the placeholder's
+          content is centred, so there is nothing at its bottom edge to crowd — but
+          the formula above is not unconditional and was written as if it were.
+
+          The px figures are also rem-derived: `pb-9`, `mt-2` and `mb-8` are all
+          rem, `--page-gutter` is a px literal. At a 24px root the gap is 66 and the
+          margin below is 48 while the gutter stays 48. The design argument rests on
+          the RATIO, which survives because all three verticals scale together; the
+          absolute numbers do not, and this file has been burned by exactly that
+          before — see the token comment in index.css about the greeting getting
+          SMALLER on gaining room.
+
+          So `-mt-5` gave 16px and `mt-2` gives 44px, against `mb-8`'s 32px below.
+
+          That inequality is the point, but state it precisely, because the obvious
+          phrasing ("the bar is now nearer the rails than the hero") does not
+          survive: 44px above is measured to rendered CONTENT — the buttons — while
+          32px below is measured to a BOX EDGE. Like for like, content to content, it
+          is 44px above against 51px below (the rail panel's 1px border plus its 18px
+          padding-top), which reverses the claim. This same comment scolds an earlier
+          draft for exactly that substitution twelve lines up, and then made it.
+
+          The defensible version is nearest VISIBLE boundary, and it needs the
+          hero's bottom edge to be invisible — see the next paragraph, where it is
+          nearly but not entirely true. On that reading it is 44px to the buttons
+          against 32px to the rail panel's visible top border, and the bar groups
+          with the rails: the correct grouping, since it is the control that REPLACES
+          the rails with results, and full width already made it read as a page-level
+          band rather than the last line of the hero's text stack.
+
+          The cost is the overlap. At `-mt-5` the bar's top 20px of ~49 sat on the
+          artwork; at `mt-2` none of its BORDER BOX does. (~49, not the ~48 an
+          earlier draft said: the unlayered global `input:not([type="range"])` rule
+          at (0,1,1) beats the call site's `border-0` at (0,1,0) and restores a 1px
+          border. The CASCADE HAZARD again, in the one element this file has spent
+          four phases on. It does not change any conclusion here.)
+
+          That is deliberate rather than collateral — the overlap was the mechanism
+          that welded it to the hero. But the reason first given for it being SAFE
+          was wrong, and it is the one thing in this block that was: "Phase 4 made
+          the hero's bottom scrim land on #050505, so there is no visible edge."
+          True of the INSIDE of the hero, and it is not what the bar pulled away
+          from. The app root is `bg-[#050505] aurora-bg`, and `.aurora-bg` composites
+          three purple radials at α 0.05–0.08 OVER that base; the hero paints its own
+          opaque #050505 on top of them. So the hero's bottom edge is a step from
+          flat #050505 to #050505-plus-tint — computed at roughly 6–10 sRGB levels,
+          full viewport width, with no ramp across it because the hero's fill is
+          opaque.
+
+          That step is pre-existing. What the negative margin was doing, beyond
+          aesthetics, is straddling it: the bar's own fill attenuated it from x=48 to
+          x=V−48, leaving it bare only in the two gutters. At `mt-2` it is bare edge
+          to edge. Small — an OLED-in-a-dark-room band, not a contrast defect, and
+          computed rather than sampled — but it is a real consequence of this change
+          and the original justification asserted the opposite. Left as is rather
+          than chased here: the honest fix is in the hero/page background system, not
+          in a margin, and this element has been broken three times already by
+          fixing it from the wrong reference. Recorded as a follow-up.
+
+          Rejected, and why, so this is not relitigated a fourth time:
+            - Moving "Not tonight" into the Play / My List / More Info cluster. It
+              would close the void, but that control is deliberately quiet —
+              `bg-white/[0.04]`, a 1.19:1 border, documented in HeroSection as
+              tertiary — and seating it beside the primary CTA promotes it to Play's
+              peer, which is the opposite of what it is for.
+            - Re-capping the bar to the hero's text column. That is where this
+              started, twice, and it stair-steps against the Continue Watching panel
+              32px below. See above. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-5 mb-8">
+        <div className="stage-gutter relative z-20 mt-2 mb-8">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -988,7 +1129,15 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               // catch it.
               placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
               aria-label="Describe a vibe to search by"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/70 outline-none"
+              // `bg-transparent border-0 py-3 pl-1 pr-2 text-sm text-white` used to
+              // be here and NONE of it applied: they are (0,1,0) utilities and the
+              // unlayered global `input:not([type="range"])` is (0,1,1), declared
+              // later. The bar was drawing a 10px-radius box with its own fill and
+              // border inside its gradient border, text 13px right of intent.
+              // Those values now live on `.convo-search input` in index.css at
+              // (0,2,1), which actually wins. Do not re-add them here — two sources
+              // of truth for this box is why it went unnoticed for four phases.
+              className="flex-1 min-w-0 placeholder:text-white/70 outline-none"
             />
             {convoText && (
               <button

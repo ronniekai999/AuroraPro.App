@@ -627,18 +627,75 @@ and both were deliberately deferred rather than half-done.
   true for SC 2.1.1 (operability) and beside the point for discoverability. Four of
   that menu's items have no other route anywhere in the app, and being reachable by
   a shortcut you have no way to learn about is not much better than unreachable.
-  `aria-haspopup="menu"` on the card and the list row. Deliberately no
-  `aria-expanded`: that is for a trigger that owns its popup, and the menu is
-  App-level state shared across the whole grid, so a per-card flag would be false on
-  every card but one.
+  Shipped as `aria-keyshortcuts="Shift+F10"` on the card and the list row, NOT the
+  `aria-haspopup="menu"` this section originally specified — the fix pass showed
+  haspopup is the attribute ARIA's own authoring note argues against when there is
+  no visual indicator, that it describes what ACTIVATION opens (the detail view, not
+  the menu), and that NVDA renders the state as the literal string "subMenu".
+  Deliberately no `aria-expanded` either: that is for a trigger that owns its popup,
+  and the menu is App-level state shared across the whole grid, so a per-card flag
+  would be false on every card but one.
+- **The vibe search bar is full width**, third and final answer on its WIDTH. Phase
+  8 and the 8 fix pass both measured it against the hero's TEXT COLUMN; the thing it
+  actually sits next to is the Continue Watching rail panel 32px below (`mb-8`),
+  which runs the full gutter width. Capped at any value it stair-stepped against
+  that panel. Full width also settles what the element is — the first page-level
+  band rather than the last line of the hero stack, which is how it behaves, since
+  using it replaces the rails with results.
+
+### Phase 10b — the vibe bar's vertical gap
+
+Going full width made the bar look wrong against the hero's Play / My List / More
+Info row, and the obvious reading — the one the user's question started from — was
+that the BUTTONS were now misaligned. They are not, and this is the fourth time on
+this element that the instinct was to move the wrong thing.
+
+The hero's bottom row is `absolute bottom-0 left-0 right-0 … px-[var(--page-gutter)]
+max-md:px-[18px]`; the bar's wrapper is `.stage-gutter`, whose own mobile override is
+also 18px below 768. Both edges match at every width. The button row and the bar span
+exactly the same measure.
+
+What was wrong is density plus proximity. The row above is two small clusters with
+the width of the page between them; the bar below is a continuously filled surface
+across that same span, so **the bar is what made the void above it legible** — the
+gap was always there, nothing solid had ever sat under it. And at `-mt-5` the two
+were 16px apart, close enough to read as one row, at which point the eye tries to
+reconcile a four-pill row in which one pill is the width of the viewport.
+
+`-mt-5` → `mt-2`. Gap is `margin-top + 36px` (the hero row's `pb-9`), so 16px → 44px,
+against `mb-8`'s 32px below.
+
+**This is a deliberate divergence from the mockup, not a port of it.** `index.html`
+specifies `.hero-inner{padding:0 48px 42px}`, `.conv-search{margin:-26px 48px 0}`,
+`.home-rails{padding:36px 48px 0}` — **16px above the bar, 36px below**, i.e. the bar
+grouped with the HERO. Production matched that intent exactly until now (16/32).
+Phase 10b inverts it to 44/32, grouping the bar with the RAILS, which is the right
+call once the bar is full width — it is the control that replaces the rails with
+results — but Phase 0's "ported 1:1 from the mockup" doctrine does not cover it, and
+the first version of this section recorded the change as a spec-consistent fix. It
+is not. Recorded here so the next person diffing against the mockup finds the reason
+instead of the discrepancy.
+
+The cost is the overlap — 20px of the bar's ~49 used to sit on the artwork and now
+none of its border box does — which is deliberate, since the overlap was the
+mechanism welding it to the hero.
+
+One consequence was justified wrongly and is worth carrying forward. "Safe because
+Phase 4 made the hero's bottom scrim land on exactly `#050505`" is true of the inside
+of the hero and is not what the bar pulled away from: the app root is `bg-[#050505]
+aurora-bg`, and `.aurora-bg` composites three purple radials at α 0.05–0.08 over that
+base, which the hero's own opaque `#050505` masks. So the hero's bottom edge is a
+~6–10 sRGB-level step, full width, no ramp. It is pre-existing, but the negative
+margin had been straddling and attenuating it across everything but the two gutters;
+at `mt-2` it is bare edge to edge. Small — an OLED-in-a-dark-room band, not a contrast
+defect — and **left as a follow-up**, because the honest fix is in the hero/page
+background system and this element has already been broken three times by fixing it
+from the wrong reference.
+
+Rejected, recorded so it is not relitigated a fifth time: moving "Not tonight" into
+the CTA cluster closes the void but promotes a deliberately quiet tertiary control
+(`bg-white/[0.04]`, a 1.19:1 border) to Play's peer; re-capping the bar to the hero
+text column is where this started, twice.
 
 Then the deploy: merge to `main` → `bash scripts/server-test-loop.sh --trigger-update`
 → verify against `https://aurorapro.app` per `docs/server-testing.md`.
-
-- **The vibe search bar is full width**, third and final answer on it. Phases 8 and
-  the 8 fix pass both measured it against the hero's TEXT COLUMN; the thing it
-  actually sits next to is the Continue Watching rail panel ~50px below, which runs
-  the full gutter width. Capped at any value it stair-stepped against that panel.
-  Full width also settles what the element is — the first page-level band rather
-  than the last line of the hero stack, which is how it behaves, since using it
-  replaces the rails with results.
