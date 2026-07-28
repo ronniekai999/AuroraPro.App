@@ -179,6 +179,15 @@
        what makes it correct on page-level children and is why `.stage-bleed` below
        yields the capped-content edge rather than the viewport edge. */
     --page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
+    /* The same value in VIEWPORT space, for elements that have escaped their
+       parent's padding — i.e. `.stage-bleed`. `--page-pad-x`'s `100%` is the
+       using element's containing block, which is exactly right for a page child
+       and exactly wrong for one that spans the viewport: it resolved the cap term
+       to zero and left a bled band's content at 48 while every page sat at 320.
+       Kept as a separate token rather than switching both to `vw`, because `100%`
+       excludes a classic scrollbar and `100vw` does not — the percentage form is
+       the correct one everywhere it applies, and this is the exception. */
+    --page-pad-vw: max(var(--page-gutter), (100vw - var(--page-max)) / 2);
 
     /* Display type scale. Option B's whole "content is the UI" read
        comes from oversized Bricolage display type, so the sizes are
@@ -1005,7 +1014,7 @@ html[data-glow="subtle"] .stage-topnav {
    The cap term is omitted deliberately: below 768px `(100% - 1920px)/2` cannot be
    positive, so `max()` would always pick the gutter anyway. */
 @media not all and (min-width: 768px) {
-  :root { --page-pad-x: 18px; }
+  :root { --page-pad-x: 18px; --page-pad-vw: 18px; }
 }
 
 .stage-gutter {
@@ -1032,7 +1041,28 @@ html[data-glow="subtle"] .stage-topnav {
    the cap they are identical. Either both should be viewport-relative or both
    capped; picking one is a design call. */
 .stage-bleed {
-  margin-inline: calc(var(--page-pad-x) * -1);
+  /* SURFACES SPAN, CONTENT CAPS — the same rule .stage-topnav follows, now the
+     one principle for all chrome.
+     `50% - 50vw` reaches the true viewport edge from inside ANY padded parent,
+     which `calc(var(--page-pad-x) * -1)` could not: that value resolves against
+     the parent's already-padded content box, so above the cap it only pulled back
+     one gutter and left the band stopping 272px short at 2560 — while
+     BrowseView's identical `.stage-toolbar`, sitting in a full-bleed view, still
+     ran edge to edge. Two siblings of one class rendering differently, with a
+     hard seam and a border hairline ending in mid-air.
+     `vw` includes the classic scrollbar where one exists, so this can overrun by
+     half a scrollbar each side; `body { overflow-x: hidden }` clips it and
+     `scrollbar-gutter: stable` keeps it from shifting when a modal locks scroll.
+     Measured rather than assumed — see verify:layout. */
+  margin-inline: calc(50% - 50vw);
+  /* …and the content caps against the VIEWPORT, not the parent. Once the box
+     spans the viewport, `.stage-gutter`'s `100%` — still the padded parent's
+     content box — resolved the cap term to zero and left the band's own content
+     at x=48 while every page sat at 320. Surfaces span AND content caps needs
+     both halves stated in the same coordinate space.
+     Same (0,1,0) as `.stage-gutter`, declared after it, so it wins on order —
+     which is why this rule must stay below it in the file. */
+  padding-inline: var(--page-pad-vw);
 }
 
 /* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────

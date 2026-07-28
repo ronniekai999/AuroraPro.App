@@ -108,7 +108,7 @@ export function DetailHero({
           VIEWPORT while the column beneath it stopped at 1352px, so above
           1400px wide the headline cantilevered up to 1160px past the tabs and
           storyline it is supposed to align with. */}
-      <div className="absolute bottom-7 z-10 left-[18px] right-[18px] md:left-[var(--page-gutter)] md:right-[var(--page-gutter)] lg:left-[calc(var(--page-gutter)+256px)] lg:right-[var(--page-gutter)] lg:max-w-[1048px]">
+      <div className="absolute bottom-7 z-10 left-[var(--page-pad-x)] right-[var(--page-pad-x)] lg:left-[calc(var(--page-pad-x)+256px)] lg:max-w-[1048px]">
         <div className="flex items-center gap-2.5 mb-3">
           <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/25 uppercase tracking-wide">
             {kindLabel}

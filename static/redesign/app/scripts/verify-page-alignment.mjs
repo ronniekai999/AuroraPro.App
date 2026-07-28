@@ -65,6 +65,8 @@ function classesOf(file, marker) {
 const BROWSE_TB = classesOf('src/components/BrowseView.tsx', 'browse-toolbar')
 const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar')
 const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0 left-0 right-0 z-20')
+const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-9 pb-12')
+const DETAIL_GRID = classesOf('src/components/DetailView.tsx', 'lg:grid-cols-[216px_minmax(0,1fr)]')
 
 const html = `<!doctype html><html><head><style>${css}</style>
 <style>body{margin:0}.probe{outline:0}</style></head><body>
@@ -74,6 +76,7 @@ const html = `<!doctype html><html><head><style>${css}</style>
     <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
   </div>
   <div id="rail" class="stage-gutter">rail</div>
+  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_GRID}">detail</div></div>
   <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
   <section style="position:relative;height:200px;overflow:hidden">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
@@ -92,7 +95,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
                boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
     }
-    return { nav: box('nav'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
+    return { nav: box('nav'), detail: box('detail'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
              admintb: box('admintb'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
@@ -128,6 +131,7 @@ for (const r of out) {
   }
   console.log(`   admintb   BOX     ${String(r.admintb.boxLeft).padStart(6)} .. ${String(r.admintb.boxRight).padStart(6)}`)
   console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
+  console.log(`   detail    box     ${String(r.detail.boxLeft).padStart(6)} .. ${String(r.detail.boxRight).padStart(6)}`)
 
   // 1. Every page system shares both content edges. This is the stair-step check.
   const ref = r[keys[0]]
@@ -196,7 +200,25 @@ for (const r of out) {
     problems++
   }
 
-  const expectedBoxLeft = inset - bleed
+  // 6. THE DETAIL VIEW shares the page's LEFT EDGE at every width, and only its
+  //    right edge differs — a narrower reading measure, not a different origin.
+  //    Before the fix pass it hugged the left while the pages centred (272px apart
+  //    at 2560); centring its box instead would have made that 308px. The two
+  //    properties are independent and this asserts the one that matters.
+  const DETAIL_MEASURE = 1304
+  if (Math.abs(r.detail.boxLeft - ref.left) > 0.5) {
+    console.log(`   *** detail starts at ${r.detail.boxLeft}, page at ${ref.left}`)
+    problems++
+  }
+  const expectedDetailW = Math.min(DETAIL_MEASURE, ref.right - ref.left)
+  if (Math.abs((r.detail.boxRight - r.detail.boxLeft) - expectedDetailW) > 0.5) {
+    console.log(`   *** detail is ${(r.detail.boxRight - r.detail.boxLeft).toFixed(0)}px, expected ${expectedDetailW}`)
+    problems++
+  }
+
+  // The bleed now reaches the VIEWPORT, not the capped page.
+  const expectedBoxLeft = 0
+  void bleed
   if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
     console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
     problems++
