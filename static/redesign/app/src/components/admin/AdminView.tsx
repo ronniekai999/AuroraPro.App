@@ -2025,7 +2025,12 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           for the acronyms; everything else still falls through to
           the existing capitalize rule. */}
       {/* The negative margin cancels .stage-page's side padding so the sticky
-          strip's fill reaches the viewport edges, and .stage-gutter puts the
+          strip's fill reaches the page edges — the VIEWPORT edges below 2016px, and one
+          gutter outside the capped content above it (Phase 12; this used to say
+          "viewport edges" unqualified, and that stopped being true when the cap
+          landed). NOTE the unresolved inconsistency recorded on .stage-bleed in
+          index.css: BrowseView's identical band still runs full-bleed at 2560.
+          .stage-gutter puts the
           same padding back on the inside.
           It has to be RESPONSIVE, matching .stage-page rather than the token:
           --page-gutter is 48px at every width, but .stage-page drops to 18px

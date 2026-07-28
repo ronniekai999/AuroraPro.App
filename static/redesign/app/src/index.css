@@ -1018,11 +1018,19 @@ html[data-glow="subtle"] .stage-topnav {
 /* Cancel the page padding to bleed a band to the page's edge.
    Reads the SAME token as the padding, so the two can never drift — replacing an
    `-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
-   At ultra-wide this bleeds to the CAPPED content edge, not the raw viewport:
-   `100%` inside a padded parent resolves against that parent's content box, so
-   the cap term is zero there and the value is the plain gutter. That is the
-   intended reading — once the page is capped, a sticky band that ran to the
-   viewport edge would be the thing out of alignment. */
+   Above the cap it lands one GUTTER outside the capped content edge — not at the
+   content edge, and not at the viewport. `100%` inside a padded parent resolves
+   against that parent's content box, so the cap term is zero there and the value
+   is the plain gutter. (An earlier version of this comment said "bleeds to the
+   CAPPED content edge". The mechanism was right and the geometry was wrong by
+   48px each side: at 2560 the content is 320..2240 and this box is 272..2288.)
+
+   KNOWN INCONSISTENCY, not yet decided. BrowseView's toolbar carries the same
+   `.stage-toolbar` but sits in a full-bleed view, so its band still runs 0..2560
+   while this one stops at 272 — two siblings of one class rendering differently
+   above 2016px, with a hard seam and a hairline border that ends mid-air. Below
+   the cap they are identical. Either both should be viewport-relative or both
+   capped; picking one is a design call. */
 .stage-bleed {
   margin-inline: calc(var(--page-pad-x) * -1);
 }
