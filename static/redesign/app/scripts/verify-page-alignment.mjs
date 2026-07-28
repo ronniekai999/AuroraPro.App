@@ -83,11 +83,29 @@ const html = `<!doctype html><html><head><style>${css}</style>
   </section>
 </div></body></html>`
 
+// TWO passes: this environment's headless Chromium has ZERO-WIDTH overlay
+// scrollbars, and a whole class of bug is invisible under them. `.stage-bleed`
+// shipped a half-scrollbar content misalignment at every width below the cap —
+// on Chrome and Firefox defaults for Windows and Linux — and this check reported
+// 0 problems while a reviewer running the SAME script headed found 28.
+// This file's own header warned about exactly that landmine and then an
+// assertion was added that is true only at zero scrollbar width.
+// `--disable-features=OverlayScrollbar` does not reliably give classic scrollbars
+// headless, so the second pass SIMULATES one: a fixed 15px strip stealing width
+// from the layout viewport reproduces the same `100vw` vs `100%` divergence that
+// a real scrollbar creates, which is the property under test.
 const browser = await chromium.launch({ executablePath: EXE })
 const out = []
+const SCROLLBAR = 15
+for (const scrollbar of [0, SCROLLBAR]) {
 for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
   const page = await browser.newPage({ viewport: { width, height: 900 } })
-  await page.setContent(html)
+  // Simulated classic scrollbar: narrow the layout viewport the way a
+  // space-taking scrollbar does, so `100vw` and `100%` diverge exactly as they
+  // would on a real one.
+  await page.setContent(scrollbar
+    ? html.replace('<body>', `<body style="width:calc(100vw - ${scrollbar}px);overflow-x:hidden">`)
+    : html)
   const r = await page.evaluate(() => {
     const box = id => { const e = document.getElementById(id); if (!e) return null
       const b = e.getBoundingClientRect(); const cs = getComputedStyle(e)
@@ -104,11 +122,26 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
              // deriving the expectation from the window parameter passes here and
              // would fail on anyone else's machine. A portability landmine, not a
              // visible bug, which is exactly the kind that survives review.
-             clientWidth: document.documentElement.clientWidth,
+             // The width the PAGE SYSTEMS are laid out in — body's content box.
+             // `documentElement.clientWidth` is the wrong anchor once anything
+             // narrows the layout: the expectations would be computed in one
+             // coordinate space and the measurements taken in another.
+             clientWidth: document.body.clientWidth,
+             // Media queries evaluate against the LAYOUT VIEWPORT, not the
+             // containing block. Keeping these separate matters: at 768 with a
+             // scrollbar the `md:` query fires (viewport 768) while the cap
+             // arithmetic must use body's 753. Conflating them reported a correct
+             // 48px inset as "expected 18".
+             mqWidth: document.documentElement.clientWidth,
+             // What `100vw` sees, which is the layout width PLUS any classic
+             // scrollbar. The gap between these two is the entire subject of the
+             // scrollbar pass.
+             vwWidth: window.innerWidth,
              docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth }
   })
-  out.push({ width, ...r })
+  out.push({ width, scrollbar, ...r })
   await page.close()
+}
 }
 await browser.close()
 // Read from the stylesheet the script already has in memory, not restated. As
@@ -125,7 +158,7 @@ const MOBILE = num(/min-width:\s*768px\)\s*\{\s*:root\s*\{\s*--page-pad-x:\s*(\d
 let problems = 0
 for (const r of out) {
   const keys = ['rail', 'browsetb', 'herofoot', 'page']
-  console.log(`\n── ${r.width}px`)
+  console.log(`\n── ${r.width}px${r.scrollbar ? `  (with a ${r.scrollbar}px classic scrollbar)` : ''}`)
   for (const k of keys) {
     console.log(`   ${k.padEnd(9)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
   }
@@ -150,7 +183,7 @@ for (const r of out) {
   //    and a check that fails on good code gets deleted. 2000 is now in the list.
   const w = ref.right - ref.left
   const vw = r.clientWidth
-  const inset = vw < 768 ? MOBILE : Math.max(GUTTER, (vw - CAP) / 2)
+  const inset = r.mqWidth < 768 ? MOBILE : Math.max(GUTTER, (vw - CAP) / 2)
   const expectedContent = vw - 2 * inset
   if (Math.abs(w - expectedContent) > 0.5) {
     console.log(`   *** content is ${w.toFixed(1)}px, expected ${expectedContent.toFixed(1)}`)
@@ -184,13 +217,13 @@ for (const r of out) {
   //    at 2560 the page inset is 320 and the bleed 48, so the box starts at 272.
   //    My first expectation used the gutter at every width and reported the three
   //    mobile widths as "not bleeding" when they were bleeding correctly.
-  const bleed = vw < 768 ? MOBILE : GUTTER
+  const bleed = r.mqWidth < 768 ? MOBILE : GUTTER
   // 5. The TOP NAV, which is a fifth page system and was missed entirely by the
   //    first version of this phase. Its inset is deliberately 18px tighter than
   //    the page gutter below the cap, and must converge with it above — otherwise
   //    the tabs sit at x=30 while every page they navigate to starts at x=320.
   const NAV_INSET = 30, NAV_MOBILE = 18
-  const navExpected = vw < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
+  const navExpected = r.mqWidth < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
   if (Math.abs(r.nav.left - navExpected) > 0.5) {
     console.log(`   *** nav inset is ${r.nav.left}, expected ${navExpected}`)
     problems++
@@ -217,7 +250,13 @@ for (const r of out) {
   }
 
   // The bleed now reaches the VIEWPORT, not the capped page.
-  const expectedBoxLeft = 0
+  // The bled box legitimately overruns the layout box by half a scrollbar,
+  // because `50vw` measures the viewport including it. That is the accepted cost
+  // of a true full-bleed band and is clipped by `body { overflow-x: hidden }`.
+  // What must NOT drift is the CONTENT, asserted above — and it no longer does,
+  // now that the padding is the margin's exact inverse rather than a
+  // viewport-space recomputation of the page inset.
+  const expectedBoxLeft = -(r.vwWidth - vw) / 2
   void bleed
   if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
     console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)

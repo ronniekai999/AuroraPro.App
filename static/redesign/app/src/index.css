@@ -179,15 +179,6 @@
        what makes it correct on page-level children and is why `.stage-bleed` below
        yields the capped-content edge rather than the viewport edge. */
     --page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
-    /* The same value in VIEWPORT space, for elements that have escaped their
-       parent's padding — i.e. `.stage-bleed`. `--page-pad-x`'s `100%` is the
-       using element's containing block, which is exactly right for a page child
-       and exactly wrong for one that spans the viewport: it resolved the cap term
-       to zero and left a bled band's content at 48 while every page sat at 320.
-       Kept as a separate token rather than switching both to `vw`, because `100%`
-       excludes a classic scrollbar and `100vw` does not — the percentage form is
-       the correct one everywhere it applies, and this is the exception. */
-    --page-pad-vw: max(var(--page-gutter), (100vw - var(--page-max)) / 2);
 
     /* Display type scale. Option B's whole "content is the UI" read
        comes from oversized Bricolage display type, so the sizes are
@@ -1014,7 +1005,7 @@ html[data-glow="subtle"] .stage-topnav {
    The cap term is omitted deliberately: below 768px `(100% - 1920px)/2` cannot be
    positive, so `max()` would always pick the gutter anyway. */
 @media not all and (min-width: 768px) {
-  :root { --page-pad-x: 18px; --page-pad-vw: 18px; }
+  :root { --page-pad-x: 18px; }
 }
 
 .stage-gutter {
@@ -1027,19 +1018,20 @@ html[data-glow="subtle"] .stage-topnav {
 /* Cancel the page padding to bleed a band to the page's edge.
    Reads the SAME token as the padding, so the two can never drift — replacing an
    `-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
-   Above the cap it lands one GUTTER outside the capped content edge — not at the
-   content edge, and not at the viewport. `100%` inside a padded parent resolves
+   The box reaches the true viewport edge at every width; its CONTENT lines up
+   with every other page system. `100%` inside a padded parent resolves
    against that parent's content box, so the cap term is zero there and the value
    is the plain gutter. (An earlier version of this comment said "bleeds to the
    CAPPED content edge". The mechanism was right and the geometry was wrong by
    48px each side: at 2560 the content is 320..2240 and this box is 272..2288.)
 
-   KNOWN INCONSISTENCY, not yet decided. BrowseView's toolbar carries the same
-   `.stage-toolbar` but sits in a full-bleed view, so its band still runs 0..2560
-   while this one stops at 272 — two siblings of one class rendering differently
-   above 2016px, with a hard seam and a hairline border that ends mid-air. Below
-   the cap they are identical. Either both should be viewport-relative or both
-   capped; picking one is a design call. */
+   RESOLVED, and the resolution is the rule: surfaces span, content caps —
+   the same one `.stage-topnav` follows. BrowseView's identical `.stage-toolbar`
+   sits in a full-bleed view and already ran edge to edge; this one now matches it
+   at every width. (An earlier version of this comment recorded the disagreement
+   as an open design call. It was settled one commit later and the note was left
+   standing — the sixth time in this file that has happened.)
+   */
 .stage-bleed {
   /* SURFACES SPAN, CONTENT CAPS — the same rule .stage-topnav follows, now the
      one principle for all chrome.
@@ -1050,19 +1042,34 @@ html[data-glow="subtle"] .stage-topnav {
      BrowseView's identical `.stage-toolbar`, sitting in a full-bleed view, still
      ran edge to edge. Two siblings of one class rendering differently, with a
      hard seam and a border hairline ending in mid-air.
-     `vw` includes the classic scrollbar where one exists, so this can overrun by
-     half a scrollbar each side; `body { overflow-x: hidden }` clips it and
-     `scrollbar-gutter: stable` keeps it from shifting when a modal locks scroll.
+     The box still overruns the layout viewport by half a scrollbar, which
+     `body { overflow-x: hidden }` clips. Note what that does NOT do: it hides the
+     scrollbar without preventing the scroll, so `documentElement.scrollLeft` can
+     reach 5px. Accepted as the cost of a true full-bleed band; the CONTENT is
+     unaffected now that the padding is the margin's inverse. And do not claim
+     `scrollbar-gutter: stable` protects this — the app locks scroll with
+     `body.style.overflow = 'hidden'` (lib/scrollLock.ts), and the gutter is not
+     reserved on an overflow:hidden box, so the band shifts when a modal opens.
      Measured rather than assumed — see verify:layout. */
   margin-inline: calc(50% - 50vw);
-  /* …and the content caps against the VIEWPORT, not the parent. Once the box
-     spans the viewport, `.stage-gutter`'s `100%` — still the padded parent's
-     content box — resolved the cap term to zero and left the band's own content
-     at x=48 while every page sat at 320. Surfaces span AND content caps needs
-     both halves stated in the same coordinate space.
+  /* The EXACT INVERSE of the margin, so the content lands back in the parent's
+     content box unconditionally. Not a viewport-space recomputation of the page
+     padding — that was the first attempt and it is wrong on any browser with
+     classic, space-taking scrollbars, i.e. Chrome and Firefox on Windows and
+     Linux by default.
+     `100vw` INCLUDES the scrollbar; the layout viewport the page systems are laid
+     out in EXCLUDES it. So a `max(gutter, (100vw - cap)/2)` padding is measured
+     from the wrong origin and lands the band's content half a scrollbar off at
+     every width below the cap — measured -5px with a 10px scrollbar, ~-7.5px on
+     Windows. It cancels only above the cap, where the vw/% error happens to
+     appear on both sides. That is the same stair-step class this phase exists to
+     remove, one order of magnitude smaller, on a majority of desktop browsers.
+     `calc(50vw - 50%)` has no such dependency: whatever the margin pulled out, it
+     puts back. Verified headed under Xvfb with real scrollbars — delta 0.0 at
+     390 / 1440 / 2016 / 2560.
      Same (0,1,0) as `.stage-gutter`, declared after it, so it wins on order —
      which is why this rule must stay below it in the file. */
-  padding-inline: var(--page-pad-vw);
+  padding-inline: calc(50vw - 50%);
 }
 
 /* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────
