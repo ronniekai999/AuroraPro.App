@@ -952,10 +952,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               // two search affordances are visible at once on Home — TopNav's
               // "Search titles…" (lexical, by name) and this one (semantic, by
               // description) — and nothing told a user which was which. Leading
-              // with the verb that distinguishes them does. Also 50 characters
-              // instead of 62, which matters now the field is 672px rather than
-              // 768px: the example is the part that teaches what this accepts,
-              // so it is the part that must survive.
+              // with the verb that distinguishes them does. Also shorter — 52
+              // characters against the original 75 — because the example is the
+              // part that teaches what this field accepts, so it is the part that
+              // has to survive truncation.
+              // (An earlier version justified the length with "the field is 672px
+              // rather than 768px". That stopped being true when the bar went full
+              // width, and both figures were wrong anyway — the strings are 52 and
+              // 75, not 50 and 62. The reason to keep it short is the 390px case,
+              // where it truncates regardless; on desktop there is now room to
+              // spare.)
               placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
               aria-label="Describe a vibe to search by"
               className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
