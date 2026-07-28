@@ -16,7 +16,7 @@
     "audit:cascade": "node scripts/resolve-focus.mjs",
     "audit:glass": "node scripts/audit-glass-contrast.mjs",
     "audit:motion": "node scripts/audit-reduced-motion.mjs",
-    "verify:layout": "node scripts/verify-page-alignment.mjs"
+    "verify:layout": "npm run build && node scripts/verify-page-alignment.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

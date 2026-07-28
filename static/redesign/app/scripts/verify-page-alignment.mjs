@@ -75,7 +75,7 @@ const html = `<!doctype html><html><head><style>${css}</style>
 
 const browser = await chromium.launch({ executablePath: EXE })
 const out = []
-for (const width of [390, 767, 768, 1440, 1920, 2560]) {
+for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
   const page = await browser.newPage({ viewport: { width, height: 900 } })
   await page.setContent(html)
   const r = await page.evaluate(() => {
@@ -87,13 +87,31 @@ for (const width of [390, 767, 768, 1440, 1920, 2560]) {
     }
     return { rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
              admintb: box('admintb'), page: box('page'),
+             // The LAYOUT viewport, not the window width. `100%` resolves against
+             // this, and on a Chromium with classic 15px scrollbars they differ —
+             // at 2560 the real inset would be 312.5 while the window width says
+             // 320. This environment's headless build has zero-width scrollbars, so
+             // deriving the expectation from the window parameter passes here and
+             // would fail on anyone else's machine. A portability landmine, not a
+             // visible bug, which is exactly the kind that survives review.
+             clientWidth: document.documentElement.clientWidth,
              docOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth }
   })
   out.push({ width, ...r })
   await page.close()
 }
 await browser.close()
-const CAP = 1920
+// Read from the stylesheet the script already has in memory, not restated. As
+// literals, changing `--page-max` legitimately produced "content is 1400px above
+// the 1920px cap" — a message blaming the CSS when the SCRIPT was the stale side.
+const num = (re, what) => {
+  const m = css.match(re)
+  if (!m) throw new Error(`verify: could not read ${what} from the built CSS — this check is out of date, not passing`)
+  return Number(m[1])
+}
+const CAP = num(/--page-max:\s*(\d+)px/, '--page-max')
+const GUTTER = num(/--page-gutter:\s*(\d+)px/, '--page-gutter')
+const MOBILE = num(/min-width:\s*768px\)\s*\{\s*:root\s*\{\s*--page-pad-x:\s*(\d+)px/, 'the mobile --page-pad-x')
 let problems = 0
 for (const r of out) {
   const keys = ['rail', 'browsetb', 'herofoot', 'page']
@@ -111,19 +129,53 @@ for (const r of out) {
       problems++
     }
   }
-  // 2. The cap actually binds, and only above it.
+  // 2. The cap binds where it should. ONE expectation covering every width, which
+  //    also removes the previous version's arithmetic bug: it demanded exactly CAP
+  //    the moment `width > CAP`, but `max()` keeps picking the gutter until the cap
+  //    term exceeds it — so between 1920 and 1920+2*48 the content is `width - 96`,
+  //    not 1920. On correct CSS at 2000px it reported "content is 1904px above the
+  //    1920px cap". A width in that band is exactly what someone would add next,
+  //    and a check that fails on good code gets deleted. 2000 is now in the list.
   const w = ref.right - ref.left
-  if (r.width > CAP && Math.round(w) !== CAP) {
-    console.log(`   *** content is ${w.toFixed(0)}px above the ${CAP}px cap`)
+  const vw = r.clientWidth
+  const inset = vw < 768 ? MOBILE : Math.max(GUTTER, (vw - CAP) / 2)
+  const expectedContent = vw - 2 * inset
+  if (Math.abs(w - expectedContent) > 0.5) {
+    console.log(`   *** content is ${w.toFixed(1)}px, expected ${expectedContent.toFixed(1)}`)
     problems++
   }
-  // Absolute expectation, not one derived from the measurement itself. The first
-  // version asserted `w === r.width - 2 * ref.left`, which is true by definition
-  // — deleting the mobile token override (pushing 390px from an 18px inset to
-  // 48px) sailed through it.
-  const expectedInset = r.width < 768 ? 18 : Math.max(48, (r.width - CAP) / 2)
-  if (Math.round(ref.left) !== Math.round(expectedInset)) {
-    console.log(`   *** inset is ${ref.left}, expected ${expectedInset}`)
+  // Absolute expectation, not one derived from the measurement itself. An earlier
+  // version asserted `w === r.width - 2 * ref.left`, true by definition — deleting
+  // the mobile token override (pushing 390px from an 18px inset to 48px) sailed
+  // through it.
+  if (Math.abs(ref.left - inset) > 0.5) {
+    console.log(`   *** inset is ${ref.left}, expected ${inset}`)
+    problems++
+  }
+
+  // 4. THE BLEED. `.stage-bleed` is what this phase adds, and it was measured,
+  //    printed, and never asserted — so removing it, or removing `.stage-gutter`
+  //    beside it, left four distinct 48px stair-steps between the admin toolbar
+  //    and every other page system, all green. The thing a commit introduces is
+  //    the last thing that should be uncovered.
+  //    Its CONTENT must line up with everything else, and its BOX must reach the
+  //    page edge: 0 while the gutter is the whole padding, and `inset - GUTTER`
+  //    once the cap is contributing (it bleeds to the capped page, not the viewport).
+  if (Math.abs(r.admintb.left - ref.left) > 0.5 || Math.abs(r.admintb.right - ref.right) > 0.5) {
+    console.log(`   *** admintb content ${r.admintb.left}..${r.admintb.right} != ${ref.left}..${ref.right}`)
+    problems++
+  }
+  //    The bleed amount is NOT the page inset. `.stage-bleed`'s own `100%`
+  //    resolves against its parent's ALREADY-PADDED content box, so the cap term
+  //    is zero inside a capped page and the margin is just the gutter. Below md
+  //    the token is a flat MOBILE px, so it cancels exactly and the box sits at 0;
+  //    at 2560 the page inset is 320 and the bleed 48, so the box starts at 272.
+  //    My first expectation used the gutter at every width and reported the three
+  //    mobile widths as "not bleeding" when they were bleeding correctly.
+  const bleed = vw < 768 ? MOBILE : GUTTER
+  const expectedBoxLeft = inset - bleed
+  if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
+    console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
     problems++
   }
   // 3. Nothing overflows horizontally at any width — the 390px case that a whole
