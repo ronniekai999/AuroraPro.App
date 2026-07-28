@@ -144,17 +144,47 @@ function walk(dir, out = []) {
   return out
 }
 
+// Vendored shadcn/ui primitives that NOTHING outside src/components/ui/ imports.
+// They are scaffolding: present in the tree, mounted nowhere, so their focus
+// behaviour is unreachable and reporting it is noise.
+//
+// Computed rather than hard-coded, because a hard-coded allowlist for this would
+// be a lie the moment someone actually used one. If a single file outside ui/
+// imports the module, the exemption evaporates and the suppression is reported
+// like any other. The allowlist decays loudly instead of silently.
+const UI_DIR = path.join(SRC, 'components', 'ui')
+const importedFromOutsideUi = (() => {
+  const importers = new Set()
+  for (const file of walk(SRC)) {
+    if (file.startsWith(UI_DIR)) continue
+    const text = fs.readFileSync(file, 'utf8')
+    for (const m of text.matchAll(/from\s+['"](?:@\/components\/ui|\.\/ui|\.\.\/ui)\/([\w-]+)['"]/g)) {
+      importers.add(m[1])
+    }
+  }
+  return importers
+})()
+
 console.log('## Check 1 — outline suppression without a real indicator')
 let checked = 0
+let dormant = 0
 for (const file of walk(SRC)) {
   const stripped = stripComments(fs.readFileSync(file, 'utf8'))
   // Bare `outline-none` counts too: at (0,1,0) it loses to the floor, but inside
   // a rule that also carries a focus variant it is a second suppression, and in
   // vendored components it is often the only one.
-  for (const m of stripped.matchAll(/focus(-visible)?:outline-none/g)) {
+  //
+  // The regex used to be /focus(-visible)?:outline-none/, which cannot match bare
+  // `outline-none` at all — so for three phases this comment described a behaviour
+  // the code did not have, and the vendored case it calls out ("often the only
+  // one") was the exact case being missed: every one of the nine sites the widened
+  // pattern finds is in src/components/ui/.
+  for (const m of stripped.matchAll(/(?:focus(?:-visible)?:)?outline-none/g)) {
     checked++
     const line = stripped.slice(0, m.index).split('\n').length
     const ref = `${file}:${line}`
+    const mod = file.startsWith(UI_DIR) ? path.basename(file).replace(/\.tsx?$/, '') : null
+    if (mod && !importedFromOutsideUi.has(mod)) { dormant++; continue }
     const tag = enclosingTag(stripped, m.index)
     if (!tag) { console.log(`  *** ${ref} suppression not inside a JSX tag — cannot judge`); problems++; continue }
     if (REAL_INDICATOR.test(tag.text)) continue
@@ -163,6 +193,10 @@ for (const file of walk(SRC)) {
     console.log(`  *** ${ref} <${tag.name}> suppresses the focus outline with no ring/shadow/outline`)
     problems++
   }
+}
+if (dormant) {
+  console.log(`  (${dormant} site(s) skipped in unmounted vendored ui/ primitives —`)
+  console.log('   reported as soon as anything outside components/ui/ imports them)')
 }
 console.log(`  (${checked} suppression site(s) examined)`)
 if (!problems) console.log('  no unguarded suppressions.')
@@ -206,11 +240,84 @@ if (!m) {
     // premise used to be "this is the ONLY indicator for every text field", which
     // is false wherever a `.x input:...:focus` descendant rule nulls it — those
     // are (0,3,1) and win. List them so the claim stays honest.
-    const resetters = [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
+    const resetters = [...new Set(
+      [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
+    )]
     if (resetters.length) {
-      console.log(`  note: ${resetters.length} container(s) reset this treatment at (0,3,1) and must`)
-      console.log(`        supply their own :focus-within indicator — ${[...new Set(resetters)].join(', ')}`)
+      console.log(`  note: ${resetters.length} container(s) reset this treatment at (0,3,1) and`)
+      console.log(`        must supply their own indicator — ${resetters.join(', ')}`)
+      console.log('        (checked below)')
     }
+  }
+}
+
+// ── Check 3 — the resetters actually DO supply one ────────────────────────────
+//
+// Check 2 used to end at the `note:` above: it named the containers that null the
+// global treatment, stated in so many words that they "must supply their own
+// :focus-within indicator", and then never looked. The block only console.log'd —
+// it never touched `problems`. So deleting `.convo-search:focus-within` outright,
+// which is the vibe search bar's ONLY focus indicator once the global rule is
+// nulled at (0,3,1), left the gate at exit 0 with the words "must supply their own
+// :focus-within indicator" still printed in its own passing output.
+//
+// That is precisely the defect class this file's header says it exists to catch,
+// and it is worse than having no check: a guard that names a duty and does not
+// enforce it reads, to anyone skimming the output, as evidence the duty is met.
+console.log('\n## Check 3 — every container that resets it supplies its own indicator')
+{
+  const resetters = [...new Set(
+    [...css.matchAll(/^(\.[\w-]+) input:not\(\[type="range"\]\):focus/gm)].map(x => x[1])
+  )]
+  if (!resetters.length) {
+    console.log('  no containers reset the global treatment — nothing to check.')
+  }
+  for (const name of resetters) {
+    // `:focus-within`, not `:focus`: the container is a wrapper, the focus lands on
+    // a descendant input, so `.x:focus` would never match. Matched inside a selector
+    // LIST so a rule shared with a sibling container still counts.
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // `:focus-within` must be followed by whitespace and then `{` or `,` — nothing
+    // else. Written loosely first (`[^{,]*` before the brace) it also matched
+    // `.convo-search:focus-within::before`, the halo's opacity bump at
+    // index.css:476, and reported "exists but sets no indicator" for a rule that
+    // had been DELETED. Right verdict, wrong reason — and a pseudo-element or a
+    // descendant rule is not the container's own indicator in any case.
+    const rule = css.match(new RegExp(`(^|,)\\s*${esc}:focus-within\\s*(,[^{]*)?\\{([^}]*)\\}`, 'm'))
+    if (!rule) {
+      console.log(`  *** ${name} nulls the global :focus treatment and defines no`)
+      console.log(`      ${name}:focus-within rule — the field has NO focus indicator.`)
+      problems++
+      continue
+    }
+    const body = rule[3]
+    // What counts as visible. `border-color` alone counts because that is exactly
+    // what `.stage-navsearch:focus-within` leads with, and its 7.07–8.27:1 is
+    // measured in Check 2's own comment. A `box-shadow: none` does not count.
+    // Read the VALUE out and compare it, rather than trying to express "not none"
+    // as a lookahead. The first version was `/box-shadow:\s*(?!none)[^;]+/`, and it
+    // passed `box-shadow: none` — `\s*` backtracks to zero width, so the lookahead
+    // ran against " none" (leading space) and succeeded. A mutation caught it; the
+    // regex would have declared a gutted indicator healthy.
+    const value = prop => {
+      const d = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:([^;]*)`))
+      return d ? d[1].trim().replace(/\s+/g, ' ') : null
+    }
+    const shadow = value('box-shadow')
+    const outline = value('outline')
+    const border = value('border-color')
+    const hasShadow = !!shadow && shadow !== 'none'
+    const hasOutline = !!outline && outline !== 'none' && outline !== '0'
+    const hasBorder = !!border
+    if (!hasShadow && !hasOutline && !hasBorder) {
+      console.log(`  *** ${name}:focus-within exists but sets no box-shadow, outline`)
+      console.log('      or border-color — nothing visible marks the focused field.')
+      problems++
+      continue
+    }
+    const via = [hasShadow && 'box-shadow', hasOutline && 'outline', hasBorder && 'border-color']
+      .filter(Boolean).join(' + ')
+    console.log(`  ${name}:focus-within supplies an indicator (${via})  PASS`)
   }
 }
 
