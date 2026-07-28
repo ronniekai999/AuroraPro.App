@@ -2035,7 +2035,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           hidden. (Deliberately not naming that class here: Tailwind's extractor
           scans comments, so writing it out ships a dead top-level rule. Verified
           by rebuild — the unprefixed selector is gone.) */}
-      <div className="stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)] mb-6">
+      <div className="stage-toolbar stage-gutter stage-bleed mb-6">
         {/* MANUAL activation: arrows move focus, Enter/Space (native on a
             <button>) selects. Not the automatic variant this started as.
             APG recommends manual "when the tab panel's content is loaded

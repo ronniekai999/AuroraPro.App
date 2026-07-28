@@ -801,3 +801,68 @@ hashes against what `https://aurorapro.app/v2/` serves. That works, but it check
 that the right bytes shipped, not that the app behaves. Either configure the secrets
 or document the hash-match as the supported fallback.
 
+
+
+---
+
+### Phase 12 — the ultra-wide cap, done across every page system at once
+
+**Branch** `feat/stage-ultrawide`
+
+Phase 11.4 tried this and it was reverted. Worth recording why, because both
+failures were in the mechanism rather than the intent.
+
+1. **`margin-inline: auto` clobbers deliberate negative margins.** AdminView's
+   full-bleed sticky toolbar was `.stage-gutter -mx-[18px] md:-mx-[…]`, and the
+   capped `.stage-gutter` rule was emitted later at the same (0,1,0), so it won —
+   below 768px that band silently stopped bleeding, the exact failure its own
+   call-site comment exists to prevent. At md+ the max-width still bound while the
+   `-48px` won, over-constraining the box so `margin-right` solved to 592px at 2560.
+2. **A partial cap is worse than none.** It landed on `.stage-gutter` only, while
+   BrowseView's toolbar restated `--page-gutter` itself — so at 2560 the genre chips
+   sat at x=48 and the grid they filter started at x=368. A 320px stair-step between
+   a control and the thing it controls, which is the defect the change claimed to
+   prevent.
+
+Phase 12 uses **padding, not margin**, and one token everything reads:
+
+```css
+--page-max: 1920px;
+--page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
+```
+
+Below the cap the second term is negative and `max()` picks the gutter, so every
+width measured in Phases 8–11 is byte-identical. Above it the padding grows and
+content stops at 1920. No margin is involved, so nothing is clobbered. `.stage-page`,
+`.stage-gutter`, BrowseView's toolbar and the hero footer row all read it, and
+`.stage-bleed` cancels it with `calc(var(--page-pad-x) * -1)` — replacing the
+`-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
+
+**Measured in Chromium, not derived.** That is the actual lesson of 11.4: every
+claim in that commit was arithmetic and every one was plausible. `npm run verify:layout`
+drives a real layout engine at 390 / 767 / 768 / 1440 / 1920 / 2560 and asserts that
+all four page systems share both content edges, that the cap binds only above 1920,
+that the inset matches an absolute expectation, and that nothing overflows.
+
+| width | inset | content |
+|---|---|---|
+| 390 | 18 | 354 |
+| 767 | 18 | 731 |
+| 768 | 48 | 672 |
+| 1440 | 48 | 1344 |
+| 1920 | 48 | 1824 |
+| **2560** | **320** | **1920** |
+
+The check reads the class lists **from the JSX** rather than restating them, because
+a hardcoded probe cannot catch a call site drifting — which is exactly bug 2 above.
+Verified by mutation: reverting BrowseView's toolbar to the raw token fails it.
+
+**Deliberately out of scope: the detail view.** `DetailView` caps at `max-w-[1400px]`
+and `DetailHero` derives `lg:max-w-[1048px]` from it (1400 minus a 304px poster
+offset). That is a reading-measure system with its own internal arithmetic, not the
+rail grid, and folding it into `--page-max` would silently change the poster offset.
+Left alone, and named here so the next person finds a decision rather than an
+oversight.
+
+**Not in `npm run audit`.** `verify:layout` launches a browser; the gate stays fast.
+Run it when touching anything that reads `--page-pad-x`.

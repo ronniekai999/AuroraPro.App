@@ -158,6 +158,27 @@
        Phase 2 walked into it. --topnav-h remains the nav's OWN height. */
     --chrome-h: 64px;
     --page-gutter: 48px;
+    /* Ultra-wide cap (Phase 12). Above this the gutter alone stops being a layout:
+       at 2560 the content box was 2464px, so a rail ran nine posters wide and the
+       vibe bar's placeholder floated in the middle of two metres of glass. */
+    --page-max: 1920px;
+    /* The horizontal page padding, and the ONLY thing any page-level rule should
+       read. `max()` with a percentage, NOT a max-width plus auto margins.
+       Phase 11.4 tried `max-width: var(--page-max); margin-inline: auto` on
+       .stage-gutter and it had to be reverted: `margin-inline` CLOBBERS deliberate
+       negative margins, and AdminView's full-bleed sticky toolbar is
+       `.stage-gutter -mx-[...]`. Emitted later at the same (0,1,0), it silently
+       won, and below 768px that band stopped bleeding — the exact failure its own
+       call-site comment exists to prevent. It also over-constrained the box at md+,
+       solving margin-right to 592px at 2560.
+       Padding has no such conflict. Below the cap `(100% - 1920px)/2` is negative
+       and `max()` picks the gutter, so every width measured in Phases 8-11 is
+       byte-identical; above it, the padding grows and the content stops at 1920.
+       NOTE the `100%`: a custom property is substituted as tokens, so the
+       percentage resolves against the USING element's containing block. That is
+       what makes it correct on page-level children and is why `.stage-bleed` below
+       yields the capped-content edge rather than the viewport edge. */
+    --page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
 
     /* Display type scale. Option B's whole "content is the UI" read
        comes from oversized Bricolage display type, so the sizes are
@@ -948,7 +969,7 @@ html[data-glow="subtle"] .stage-topnav {
    wrapper used to apply to every view: pages are full-bleed now and opt
    IN to the gutter, so a hero can reach the viewport edge. */
 .stage-page {
-  padding: 28px var(--page-gutter) 70px;
+  padding: 28px var(--page-pad-x) 70px;
 }
 /* `not all and (min-width: 768px)`, not `max-width: 767px`.
    Tailwind's `md:` is `min-width: 768px`, so a `max-width: 767px` companion
@@ -960,7 +981,7 @@ html[data-glow="subtle"] .stage-topnav {
    The negated form is the exact complement of `md:`, so no width falls
    between them. */
 @media not all and (min-width: 768px) {
-  .stage-page { padding: 20px 18px 56px; }
+  .stage-page { padding: 20px var(--page-pad-x) 56px; }
 }
 
 /* ── Full-bleed page sections (Aurora Stage Phase 4) ───────────────
@@ -968,34 +989,33 @@ html[data-glow="subtle"] .stage-topnav {
    heroes reach the viewport edge; their non-hero content opts back IN to
    the same gutter with this class. Keeping the gutter in ONE token means a
    hero and the rails beneath it can never drift apart. */
-.stage-gutter {
-  padding-left: var(--page-gutter);
-  padding-right: var(--page-gutter);
-}
-/* NO ultra-wide cap here, and the reasoning is worth keeping because the obvious
-   fix is the one that was tried and reverted.
-   Phase 11.4 added `max-width: var(--page-max); margin-inline: auto` to this rule.
-   A review measured two problems that made it net-negative:
-   1. `margin-inline` CLOBBERS deliberate negative margins. AdminView's mobile
-      toolbar is `stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)]`,
-      and this rule is emitted AFTER `.-mx-\[18px\]` in the bundle — same (0,1,0),
-      later wins — so below 768px the full-bleed sticky band silently stopped
-      bleeding, which is the exact failure the twelve-line comment at that call site
-      exists to prevent. At md+ the `-48px` margin won but the max-width still bound,
-      over-constraining the box so `margin-right` solved to 592px at 2560.
-   2. The cap was half-applied. `.stage-page` was uncapped, and BrowseView's sticky
-      toolbar reads `--page-gutter` directly rather than using this class, so at 2560
-      its genre chips sat at x=48 while the grid it filters started at x=368 — a
-      320px stair-step, precisely the defect the change claimed to prevent.
-   A real ultra-wide cap has to cover .stage-page, BrowseView's toolbar, DetailHero
-   and DetailView's own max-w-[1400px] together. That is a layout-system change, not
-   a one-line token, and it belongs in its own phase. Recorded, not attempted. */
-/* Same negated form as .stage-page above, for the same reason. */
+/* The mobile value of the token, matching what `.stage-page` and `.stage-gutter`
+   each used to hard-code separately. The negated form is the exact complement of
+   Tailwind's `md:`, so no width — including a fractional 767.5 reachable via zoom
+   or DPR — falls between them and takes neither.
+   The cap term is omitted deliberately: below 768px `(100% - 1920px)/2` cannot be
+   positive, so `max()` would always pick the gutter anyway. */
 @media not all and (min-width: 768px) {
-  .stage-gutter {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
+  :root { --page-pad-x: 18px; }
+}
+
+.stage-gutter {
+  /* One declaration, and it carries the ultra-wide cap for free — see
+     --page-pad-x. The mobile override that used to live here is gone: the token
+     already resolves to 18px below md, so the two hard-coded 18px literals that
+     a Phase 10b review found agreeing only by coincidence are now one value. */
+  padding-inline: var(--page-pad-x);
+}
+/* Cancel the page padding to bleed a band to the page's edge.
+   Reads the SAME token as the padding, so the two can never drift — replacing an
+   `-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
+   At ultra-wide this bleeds to the CAPPED content edge, not the raw viewport:
+   `100%` inside a padded parent resolves against that parent's content box, so
+   the cap term is zero there and the value is the plain gutter. That is the
+   intended reading — once the page is capped, a sticky band that ran to the
+   viewport edge would be the thing out of alignment. */
+.stage-bleed {
+  margin-inline: calc(var(--page-pad-x) * -1);
 }
 
 /* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────
