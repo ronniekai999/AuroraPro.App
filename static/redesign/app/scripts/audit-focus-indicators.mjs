@@ -33,6 +33,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
+import { selectorSpecificity, compareSpecificity } from './resolve-focus.mjs'
 
 const SRC = 'src'
 const CSS = 'src/index.css'
@@ -318,6 +319,52 @@ console.log('\n## Check 3 — every container that resets it supplies its own in
     const via = [hasShadow && 'box-shadow', hasOutline && 'outline', hasBorder && 'border-color']
       .filter(Boolean).join(' + ')
     console.log(`  ${name}:focus-within supplies an indicator (${via})  PASS`)
+  }
+}
+
+// ── Check 4 — the resets actually OUTRANK the rule they reset ─────────────────
+//
+// Check 3 asks whether the container supplies its own indicator. This asks the
+// prior question: does its reset of the inner <input> still win?
+//
+// It did not. Both `.stage-navsearch input…:focus` and `.convo-search input…:focus`
+// were written as (0,3,1) against a global focus rule that was (0,2,1) at the
+// time. The global later gained `:not([type="checkbox"]):not([type="radio"])` —
+// two more class units, taking it to (0,4,1) — and silently overtook both. From
+// then on the global treatment (lavender border, a fill, and a 3px purple ring)
+// painted a nested ring inside each wrapper's own focus indicator, which is the
+// precise thing both reset rules exist to prevent, and every comment involved
+// still quoted the pre-regression figure.
+//
+// Nothing caught it because nothing re-derived the comparison when the global
+// rule changed. Check 2's guard is deliberately loose about that rule's exact
+// text — see its comment — which is right for Check 2 and is exactly what let
+// this through. So compare the numbers, every run.
+console.log('\n## Check 4 — those resets still outrank the global focus rule')
+{
+  const selectorsOf = re => [...css.matchAll(re)].map(m => m[0].trim())
+  const globalFocus = selectorsOf(/^input:not\([^{]*?:focus(?:-visible)?(?=[,\s{])/gm)
+  if (!globalFocus.length) {
+    console.log('  *** could not find the global input :focus rule to compare against.')
+    problems++
+  } else {
+    // The strongest global variant is what a container has to beat.
+    let worst = globalFocus[0]
+    for (const g of globalFocus) if (compareSpecificity(selectorSpecificity(g), selectorSpecificity(worst)) > 0) worst = g
+    const gs = selectorSpecificity(worst)
+    console.log(`  global: (${gs}) ${worst}`)
+    const resets = [...new Set(
+      [...css.matchAll(/^\.[\w-]+ input:not\([^{]*?:focus(?=[,\s{])/gm)].map(x => x[0].trim())
+    )]
+    if (!resets.length) { console.log('  no container :focus resets found — nothing to compare.') }
+    for (const r of resets) {
+      const rs = selectorSpecificity(r)
+      const wins = compareSpecificity(rs, gs) > 0
+      if (!wins) problems++
+      console.log(`  (${rs}) ${r}`)
+      console.log(`         ${wins ? 'PASS — outranks the global rule'
+        : '*** FAIL — LOSES to the global rule, which will paint its own ring inside this container'}`)
+    }
   }
 }
 

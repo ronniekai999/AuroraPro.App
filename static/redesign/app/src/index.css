@@ -862,14 +862,27 @@ html[data-glow="subtle"] .stage-topnav {
 @media (min-width: 1024px) {
   .stage-navsearch input:not([type="range"]) { font-size: 12.5px; }
 }
-/* `all: unset` above only resets the BASE state. The global
-   `input:not([type="range"]):focus` rule is (0,2,1) — tied with the rule
-   above and declared later — so on focus it re-applied its own background
-   and a 3px ring, drawing a second ring nested inside the pill's
-   :focus-within treatment. (0,2,2) here settles it. The pill is the focus
-   indicator; the input inside it must stay invisible. */
-.stage-navsearch input:not([type="range"]):focus,
-.stage-navsearch input:not([type="range"]):focus-visible {
+/* `all: unset` above only resets the BASE state, so on focus the global rule
+   re-applied its own background and a 3px ring, drawing a second ring nested
+   inside the pill's :focus-within treatment. The pill is the focus indicator;
+   the input inside it must stay invisible.
+
+   This comment used to say the global focus rule "is (0,2,1) — tied with the
+   rule above" and that "(0,2,2) here settles it". Both figures were wrong, and
+   the conclusion stopped being true at some point without anyone noticing. The
+   global rule is now
+     input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus
+   at (0,4,1) — the checkbox/radio exclusions each add a class unit — while this
+   selector, before the three `:not()`s were added to match, scored (0,3,1) and
+   LOST. Machine-checked with the same resolver scripts/resolve-focus.mjs uses,
+   whose own self-tests pin `input:not([type="range"]):focus` at (0,2,1); that
+   is the figure this comment was quoting, from before the rule grew.
+
+   (0,5,1) now. audit-focus-indicators.mjs Check 4 compares these two rules and
+   fails if this one does not outrank the global — the regression was invisible
+   precisely because nothing re-derived the comparison when the global changed. */
+.stage-navsearch input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
+.stage-navsearch input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
   outline: none;
   background: transparent;
   box-shadow: none;
@@ -1024,8 +1037,59 @@ html[data-glow="subtle"] .stage-topnav {
    class more than the global rule — which is what lets it null the treatment.
    (This is the selector whose (0,3,1) is genuinely correct, and is probably why
    the wrong (0,3,1) for the global rule went unquestioned for a while.) */
-.convo-search input:not([type="range"]):focus,
-.convo-search input:not([type="range"]):focus-visible {
+/* BASE state. This rule did not exist until Phase 10b, and its absence meant the
+   call site's own `bg-transparent border-0 py-3 pl-1 pr-2 text-sm` — all (0,1,0)
+   utilities — lost every one of its declarations to the unlayered global
+   `input:not([type="range"])` at (0,1,1), which also sits later in the emitted
+   sheet. Six declarations won that nobody intended:
+
+     background     transparent  ->  rgba(255,255,255,0.05)
+     border         0            ->  1px solid rgba(255,255,255,0.1)
+     border-radius  —            ->  10px
+     padding        12/4/12/8    ->  12px 16px
+     font-size      0.875rem     ->  0.9rem
+
+   So the bar has been drawing a second rounded box INSIDE its own gradient
+   border this whole time, with its text starting 13px right of where the call
+   site put it and a 24px icon-to-text gap against the designed 12px.
+
+   `.stage-navsearch` above solved this on day one with `all: unset`; this bar
+   never got the same treatment, and four phases of polish on this element missed
+   it because the vertical padding coincides at 12px — which is why the height
+   came out at the expected ~49px and nothing looked obviously wrong.
+
+   (0,2,1) beats the global's (0,1,1). The call site's utilities are removed
+   rather than left as decoration: two sources of truth for the same box is how
+   this went unnoticed. */
+.convo-search input:not([type="range"]) {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 0.75rem 0.5rem 0.75rem 0.25rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+/* FOCUS state, and the three `:not()`s are load-bearing arithmetic, not noise.
+   The global focus rule is
+     input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus
+   which is (0,4,1). This rule was `.convo-search input:not([type="range"]):focus`
+   at (0,3,1) and therefore LOST — so the global treatment (lavender border,
+   rgba(255,255,255,0.08) fill, and a 3px purple box-shadow) has been painting a
+   nested ring inside the wrapper's gradient border on every focus, which is the
+   exact thing the comment on `.convo-search:focus-within` claims this rule
+   prevents.
+
+   It did once win: the global rule was (0,2,1) when both container resets were
+   written, and the comments here and on `.stage-navsearch` still quote that
+   figure. Adding the checkbox/radio exclusions to the global rule raised it two
+   class units and silently overtook both, and nothing re-derived the comparison
+   — audit-focus-indicators.mjs even printed these two containers as the ones
+   that "reset this treatment", while they had stopped doing so. Check 4 there
+   now compares the two specificities and fails if the container does not win.
+
+   Matching the global's shape takes this to (0,5,1). */
+.convo-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus,
+.convo-search input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):focus-visible {
   outline: none;
   background: transparent;
   border-color: transparent;

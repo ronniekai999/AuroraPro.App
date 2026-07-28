@@ -1023,6 +1023,25 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
             bar top              = hero bottom + M      (M = this margin-top)
             gap                  = M + 36
 
+          — which holds only when `hero` is TRUTHY. HeroSection returns early on
+          `!heroProp` and that branch renders a vertically-centred "Welcome to
+          Aurora" placeholder with no bottom row at all: no `pb-9`, and no scrim
+          either. This bar renders unconditionally on `onConversationalSearch`,
+          independent of `hero`, so on a cold Home load and permanently whenever
+          `homeHero` stays null (empty library, failed hero fetch) the real figures
+          are 8px above and 32px below. That is still an improvement on `-mt-5`,
+          which had the bar OVERLAPPING the placeholder — and the placeholder's
+          content is centred, so there is nothing at its bottom edge to crowd — but
+          the formula above is not unconditional and was written as if it were.
+
+          The px figures are also rem-derived: `pb-9`, `mt-2` and `mb-8` are all
+          rem, `--page-gutter` is a px literal. At a 24px root the gap is 66 and the
+          margin below is 48 while the gutter stays 48. The design argument rests on
+          the RATIO, which survives because all three verticals scale together; the
+          absolute numbers do not, and this file has been burned by exactly that
+          before — see the token comment in index.css about the greeting getting
+          SMALLER on gaining room.
+
           So `-mt-5` gave 16px and `mt-2` gives 44px, against `mb-8`'s 32px below.
 
           That inequality is the point, but state it precisely, because the obvious
@@ -1110,7 +1129,15 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               // catch it.
               placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
               aria-label="Describe a vibe to search by"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/70 outline-none"
+              // `bg-transparent border-0 py-3 pl-1 pr-2 text-sm text-white` used to
+              // be here and NONE of it applied: they are (0,1,0) utilities and the
+              // unlayered global `input:not([type="range"])` is (0,1,1), declared
+              // later. The bar was drawing a 10px-radius box with its own fill and
+              // border inside its gradient border, text 13px right of intent.
+              // Those values now live on `.convo-search input` in index.css at
+              // (0,2,1), which actually wins. Do not re-add them here — two sources
+              // of truth for this box is why it went unnoticed for four phases.
+              className="flex-1 min-w-0 placeholder:text-white/70 outline-none"
             />
             {convoText && (
               <button
