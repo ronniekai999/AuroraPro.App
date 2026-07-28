@@ -878,9 +878,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           vibe" moment between the one curated pick and the browsable rails.
           Fires the semantic search on Enter (not per-keystroke) to bound LLM cost.
 
-          Phase 4 pulled it UP into the hero's foot (the mockup's -26px) so it
-          reads as one composition with the hero rather than a separate widget
-          floating above the rails. relative + z-20 keeps it above the hero's scrim.
+          Phase 4 pulled it UP into the hero's foot (the mockup's -26px, shipped as
+          `-mt-5`) so it read as one composition with the hero rather than a separate
+          widget floating above the rails. Phase 10b UNDID that — see the spacing
+          note below. relative + z-20 is kept: the bar no longer overlaps the hero,
+          but the hero's scrim is a full-height stacking neighbour and the glow on
+          `.convo-search::before` bleeds 16px upward past the bar's own box.
 
           FULL WIDTH, gutter to gutter — third and final answer on this bar, and the
           first two were wrong for the same reason: I kept measuring it against the
@@ -929,26 +932,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           That asymmetry was the Phase 8 correction. It no longer applies to this
           element, which now has `max-width: none`; the paragraphs above used to
           state it in the present tense alongside the past-tense version, so the same
-          fact was asserted twice, once about code that no longer exists.
-
-          This wrapper carries BOTH `.stage-gutter` (which is
-          `padding-left/right: var(--page-gutter)`, 48px at md+) AND the
-          max-width, and Tailwind's preflight sets `box-sizing: border-box`. So
-          the max-width INCLUDES the gutter padding. Measured at 1440px:
-
-            max-w-3xl (768) + 48px padding each side  ->  content 48..720
-            max-w-2xl (672) + 48px padding each side  ->  content 48..624
-            hero text column (max-w-2xl, NO padding)  ->  content 48..720
-            hero description (max-w-xl,  NO padding)  ->  content 48..624
-
-          The bar at `max-w-3xl` is therefore ALREADY flush with the hero's text
-          column — the two differ by one Tailwind step precisely because one of
-          them pays for the gutter out of its own max-width and the other does
-          not. Changing it to `max-w-2xl` moved it to the DESCRIPTION's edge,
-          96px short of the column, which is the opposite of the intent. The
-          reasoning that produced that change ("96px past the column") was
-          computed as 768 − 672 without accounting for the padding, and a
-          measurement of the rendered box disproved it.
+          fact was asserted twice, once about code that no longer exists. (That
+          correction described a deletion it did not actually perform: the
+          present-tense copy — an eighteen-line block opening "This wrapper carries
+          BOTH `.stage-gutter` … AND the max-width" — was still sitting right here,
+          asserting a max-width this element has not had since the previous commit.
+          Deleted now.)
 
           The genuine misalignment on this row was the LOADING SHIMMER below,
           which was `max-w-3xl` inside a `.stage-gutter` PARENT — so no padding
@@ -956,9 +945,59 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           for. That is fixed there, not here.
 
           An earlier version of this comment said "Centered under the hero".
-          There is no `mx-auto` here and never was — it is gutter-aligned. */}
+          There is no `mx-auto` here and never was — it is gutter-aligned.
+
+          ── Phase 10b: the vertical gap, which is what full width broke ──
+
+          Going full width made the bar look wrong against the hero's CTA row, and
+          the instinct was that the BUTTONS were now misaligned. They are not. The
+          hero's bottom row is `absolute bottom-0 left-0 right-0 …
+          px-[var(--page-gutter)]` (HeroSection.tsx) and this wrapper is
+          `.stage-gutter`, which is the same token: Play's left edge and this bar's
+          left edge are both at 48, and "Not tonight"'s right edge and this bar's
+          right edge are both at viewport−48. The button row and the bar span
+          EXACTLY the same measure. Nothing overhangs anything.
+
+          What was wrong is density plus proximity. The row above is two small
+          clusters with the width of the page between them; the bar below is a
+          continuously filled surface across that same span, so the bar is what
+          makes the void above it legible — the gap was always there, nothing solid
+          had ever sat under it. And at `-mt-5` the two were close enough to read as
+          ONE row, at which point the eye tries to reconcile a four-pill row in which
+          one pill is the width of the viewport.
+
+          The arithmetic, which is plain block layout — no border-box trap this time,
+          the parent is a bare `<div className="animate-fade-in">` with no
+          `space-y-*`, and the hero <section> carries no bottom margin to collapse
+          with:
+
+            button bottoms       = hero bottom − 36px   (the row's `pb-9`)
+            bar top              = hero bottom + M      (M = this margin-top)
+            gap                  = M + 36
+
+          So `-mt-5` gave 16px and `mt-2` gives 44px, against `mb-8`'s 32px below.
+          That inequality is the point: the bar is now nearer the rails than the
+          hero, which is the correct grouping — it is the control that REPLACES the
+          rails with results, and full width already made it read as a page-level
+          band rather than the last line of the hero's text stack.
+
+          The cost is the overlap. At `-mt-5` the bar's top 20px of ~48 sat on the
+          artwork; at `mt-2` none of it does. That is deliberate rather than
+          collateral — the overlap was the mechanism that welded it to the hero — and
+          it is safe here because Phase 4 made the hero's bottom scrim land on
+          #050505, so there is no visible edge for the bar to pull away from.
+
+          Rejected, and why, so this is not relitigated a fourth time:
+            - Moving "Not tonight" into the Play / My List / More Info cluster. It
+              would close the void, but that control is deliberately quiet —
+              `bg-white/[0.04]`, a 1.19:1 border, documented in HeroSection as
+              tertiary — and seating it beside the primary CTA promotes it to Play's
+              peer, which is the opposite of what it is for.
+            - Re-capping the bar to the hero's text column. That is where this
+              started, twice, and it stair-steps against the Continue Watching panel
+              32px below. See above. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-5 mb-8">
+        <div className="stage-gutter relative z-20 mt-2 mb-8">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
