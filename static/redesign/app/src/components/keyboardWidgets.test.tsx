@@ -145,6 +145,38 @@ describe('DetailTabs — APG tabs contract', () => {
     for (const t of list) expect(t).toHaveAttribute('aria-controls', 'detail-panel')
   })
 
+  it('derives selection from `active`, not from position', () => {
+    // Every other test in this block renders with active='episodes', which is
+    // tabs[0] — so `selectedIndex` is always 0 and `aria-selected` is true only at
+    // index 0. That makes the DERIVATION unpinned even though the TRANSITIONS are
+    // covered: a reviewer replaced `const on = t.id === active` with `i === 0`, and
+    // `selectedIndex` with the literal `0`, and both mutations left 10/10 green.
+    // The component would have been permanently stuck on the first tab in the app
+    // while the suite reported it healthy.
+    //
+    // One render at a non-zero tab is all it takes.
+    open('cast')
+    const list = screen.getAllByRole('tab')
+    expect(list[1]).toHaveAttribute('aria-selected', 'true')
+    expect(list[0]).toHaveAttribute('aria-selected', 'false')
+    expect(list[2]).toHaveAttribute('aria-selected', 'false')
+    // The roving tab stop initialises FROM the selection, so it moves too.
+    const stops = list.filter(t => t.getAttribute('tabindex') === '0')
+    expect(stops).toHaveLength(1)
+    expect(stops[0]).toBe(list[1])
+  })
+
+  it('resyncs the tab stop when `active` changes underneath it', () => {
+    // The deep-link / parent-swap case: `active` changes without the user touching
+    // the strip. Deleting the effect that resyncs `focused` also survived.
+    const { rerender } = open('episodes')
+    rerender(<DetailTabs tabs={tabs} active="files" onChange={vi.fn()} />)
+    const list = screen.getAllByRole('tab')
+    expect(list[2]).toHaveAttribute('aria-selected', 'true')
+    const stops = list.filter(t => t.getAttribute('tabindex') === '0')
+    expect(stops[0]).toBe(list[2])
+  })
+
   it('roves the tab stop with Left/Right and activates automatically', async () => {
     const user = userEvent.setup()
     const { onChange } = open()
