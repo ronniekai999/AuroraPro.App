@@ -158,6 +158,11 @@
        Phase 2 walked into it. --topnav-h remains the nav's OWN height. */
     --chrome-h: 64px;
     --page-gutter: 48px;
+    /* The widest the page content is allowed to get, gutters included. Paired
+       with --page-gutter rather than left to each view, for the same reason the
+       gutter became a token in Phase 0: a hero and the rails beneath it can never
+       drift apart if there is only one number. */
+    --page-max: 1920px;
 
     /* Display type scale. Option B's whole "content is the UI" read
        comes from oversized Bricolage display type, so the sizes are
@@ -971,6 +976,16 @@ html[data-glow="subtle"] .stage-topnav {
 .stage-gutter {
   padding-left: var(--page-gutter);
   padding-right: var(--page-gutter);
+  /* Ultra-wide cap (Phase 11.4). Above --page-max the gutter alone stops being a
+     layout: at 2560 the content box was 2464px, so a rail ran nine posters wide
+     and the vibe bar's placeholder floated in the middle of two metres of glass.
+     Binds ONLY above the cap — at 1440 the max-width is not reached, so every
+     measurement taken in Phases 8-10b is untouched.
+     `margin-inline: auto` centres it, and it works on the hero's absolutely
+     positioned footer row too: that element is `left-0 right-0`, which makes auto
+     margins resolvable exactly as they are for a normal block. */
+  max-width: var(--page-max);
+  margin-inline: auto;
 }
 /* Same negated form as .stage-page above, for the same reason. */
 @media not all and (min-width: 768px) {
@@ -1081,8 +1096,20 @@ html[data-glow="subtle"] .stage-topnav {
   border: 0;
   border-radius: 0;
   padding: 0.75rem 0.5rem 0.75rem 0.25rem;
-  font-size: 0.875rem;
+  /* 16px below lg so iOS/iPadOS Safari doesn't zoom the viewport on focus — it
+     zooms any focused input under 16px, and the designed size here is 14px. Same
+     guard `.stage-navsearch` has carried since it was written; this bar never got
+     it, so tapping the one field the home page is built around punched the layout
+     to ~1.14x on every iPhone. The designed 0.875rem applies from lg, where a
+     touch keyboard is not the primary input.
+     rem at lg, px below it, deliberately: the guard is about a fixed CSS-pixel
+     threshold in Safari, so it must not scale with the root font-size, while the
+     design size should. */
+  font-size: 16px;
   line-height: 1.25rem;
+}
+@media (min-width: 1024px) {
+  .convo-search input:not([type="range"]) { font-size: 0.875rem; }
 }
 /* FOCUS state, and the three `:not()`s are load-bearing arithmetic, not noise.
    The global focus rule is
@@ -1109,6 +1136,17 @@ html[data-glow="subtle"] .stage-topnav {
   background: transparent;
   border-color: transparent;
   box-shadow: none;
+}
+/* See the note at its call site in HeroSection. Starts at the hero's own opaque
+   ink so there is no step at the boundary, and fades out over its own height so
+   `.aurora-bg`'s radials arrive gradually.
+   The top stop is #050505 because that is what BOTH the hero section's own
+   background and the vertical scrim's final stop resolve to — if either of those
+   changes, this has to change with them, which is why all three say #050505
+   literally rather than one of them reading a token the others do not. */
+.stage-hero-seam {
+  pointer-events: none;
+  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0) 100%);
 }
 .stage-hero-match-veil {
   position: absolute;

@@ -54,3 +54,30 @@ describe('searchStatusMessage', () => {
     expect(at('dune ', false, 'dune', 4)).toBe('4 results for dune')
   })
 })
+
+describe('searchStatusMessage — the Smart chip (Phase 11.4)', () => {
+  it('says how the match was made when the answer is semantic', () => {
+    // The chip conveyed this by colour and position alone. Same word as the chip,
+    // trailing the count so the number is still heard first.
+    expect(searchStatusMessage({ query: 'cozy', loading: false, settled: 'cozy', count: 3, smart: true }))
+      .toBe('3 results for cozy, matched by description')
+    expect(searchStatusMessage({ query: 'cozy', loading: false, settled: 'cozy', count: 1, smart: true }))
+      .toBe('1 result for cozy, matched by description')
+  })
+
+  it('stays silent about mode for a literal answer', () => {
+    expect(searchStatusMessage({ query: 'dune', loading: false, settled: 'dune', count: 2, smart: false }))
+      .toBe('2 results for dune')
+    // Absent is the same as false — the flag is optional and every existing
+    // caller predates it.
+    expect(searchStatusMessage({ query: 'dune', loading: false, settled: 'dune', count: 2 }))
+      .toBe('2 results for dune')
+  })
+
+  it('does not qualify a zero-result message', () => {
+    // "No matches, matched by description" is nonsense; the chip does not render
+    // at zero either (`mode === 'semantic' && results.length > 0`).
+    expect(searchStatusMessage({ query: 'zzz', loading: false, settled: 'zzz', count: 0, smart: true }))
+      .toBe('No matches for zzz')
+  })
+})

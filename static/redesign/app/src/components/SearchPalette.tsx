@@ -204,7 +204,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // simultaneous mutations to everything this phase added left the whole gate
   // green; this is the one piece that is pure enough to actually pin, and it is
   // also the piece that already went wrong once.
-  const searchStatus = searchStatusMessage({ query, loading, settled, count: results.length })
+  const searchStatus = searchStatusMessage({ query, loading, settled, count: results.length, smart: mode === 'semantic' })
 
   return (
     <div

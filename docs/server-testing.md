@@ -27,6 +27,35 @@ admin-path smoke checks are admin-gated. If you only want read-only smoke tests
 (no remote update trigger), a non-admin account works — see
 [Update without admin](#update-without-an-admin-account).
 
+### When the secrets are not configured (Phase 11.5)
+
+If `AURORA_TEST_USER` / `AURORA_TEST_PASS` are unset, **none of this runbook can
+run** — the loop's first step is a login. That is the state a Claude Code web
+session is in by default, so it is worth saying plainly rather than leaving the
+loop to fail at step one.
+
+The supported fallback is a **build-hash match**, which verifies that the bytes
+now being served are the bytes built from the merged commit:
+
+```bash
+# From the merge commit, with a clean tree:
+cd static/redesign/app && npm run build
+ls ../../v2/assets/index-*.{js,css} | xargs -n1 basename
+
+# What the live server is actually serving:
+curl -s https://aurorapro.app/v2/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' | sort -u
+```
+
+Vite's hashes are content-derived, so identical filenames mean identical bundles.
+Phase 10b was verified this way: local `index-CX54ZUNm.js` / `index-DbuA9Ri5.css`
+matched the live page exactly.
+
+**Know what this does and does not prove.** It proves the deploy landed and the
+right build is live. It proves nothing about behaviour — no login, no API smoke
+test, no admin path. It is a deployment check, not a functional one, and it
+cannot replace the loop for anything that touches the backend. Configure the
+secrets if you need the real thing.
+
 ## The deploy → test loop
 
 ```

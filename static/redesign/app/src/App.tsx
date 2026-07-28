@@ -88,6 +88,7 @@ import { ProfilesGate } from '@/components/ProfilesGate'
 import { TopNav } from '@/components/TopNav'
 // Phase 6 — Dynamic theming: extract a dominant color from a poster
 // to tint the detail view's accent buttons.
+import { usePanelDismiss } from '@/hooks/usePanelDismiss'
 import { useParty } from '@/hooks/useParty'
 import { useRealtime } from '@/hooks/useRealtime'
 // 2026-06-17 (app split) — leaves extracted to shared modules so the
@@ -1505,6 +1506,9 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
 // ServerPanel fetches /api/admin/dashboard and polls every 5s while
 // open. Non-admins see a "admin-only" message.
 function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boolean; onClose: () => void }) {
+  // Phase 11.4 — this rendered role="dialog" with no focus management at all.
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  usePanelDismiss(open, onClose, panelRef)
   const [stats, setStats] = useState<ServerStats | null>(null)
   useEffect(() => {
     if (!open || !isAdmin) return
@@ -1567,8 +1571,16 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
   return (
     <div
       id="stage-server-panel"
+      ref={panelRef}
       role="dialog"
       aria-label="Server status"
+      // tabIndex={-1} so the CONTAINER can take focus. Focusing the first control
+      // instead would announce "Close" as the panel's opening word; the element
+      // carrying the accessible name is what a reader should meet first.
+      // No `aria-modal`: this panel is non-modal by design (z-45, below the nav,
+      // so the nav's own triggers stay clickable — BUG-005), and declaring modal
+      // would tell AT the rest of the page is inert when it is not.
+      tabIndex={-1}
       className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[480px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl p-5 z-[45] animate-fade-in overflow-y-auto"
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
@@ -1641,6 +1653,9 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
 }) {
   const [entries, setEntries] = useState<ActivityEntry[]>([])
   const [loading, setLoading] = useState(false)
+  // Phase 11.4 — same gap as ServerPanel: role="dialog" with no focus management.
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  usePanelDismiss(open, onClose, panelRef)
   // Mark the user's notifications read when the panel opens (clears the badge).
   // Via a ref so this open→true effect doesn't depend on the parent's inline
   // callback identity, which changes every render.
@@ -1687,8 +1702,10 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
   return (
     <div
       id="stage-notification-panel"
+      ref={panelRef}
       role="dialog"
       aria-label="Notifications"
+      tabIndex={-1}
       className="fixed left-2 right-2 md:left-auto md:right-6 md:w-[360px] max-h-[70vh] bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/[0.06] rounded-xl shadow-2xl z-[45] animate-fade-in overflow-y-auto"
       style={{ top: 'calc(var(--chrome-h, var(--topnav-h)) + 10px)' }}
     >
