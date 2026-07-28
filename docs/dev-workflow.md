@@ -31,7 +31,20 @@ flowchart TD
    `fix/<short-descriptor>` (or `feat/…`, `docs/…`).
 3. **Implement + tests** — make the change and add/adjust regression tests that
    would have caught the bug.
-4. **Build & test gate** — `go build ./...` and `go test ./...` must be green
+4. **Build & test gate** — `go build ./...` and `go test ./...` must be green.
+   For frontend work also run `npm run audit` in `static/redesign/app/`: it builds,
+   then runs six checks (focus indicators, on-art contrast, on-glass contrast,
+   reduced motion, breakpoints, cascade) and a browser-driven page-alignment check.
+
+   **That last one needs Chromium, and `npm ci` does not install it** — modern
+   Playwright has no postinstall step. On a fresh machine, once:
+
+   ```bash
+   cd static/redesign/app && npx playwright install chromium
+   ```
+
+   Without it the gate fails at the final step with Playwright's own message
+   telling you to run exactly that. Set `CHROMIUM_PATH` to override the binary
    before review. Loop back on failure.
 5. **Deep-debug agent review** — a multi-agent adversarial review of *the diff*:
    does each change actually close its issue, and did it introduce any regression

@@ -1023,11 +1023,12 @@ html[data-glow="subtle"] .stage-topnav {
    literals. (This line claimed "reads the SAME token" through five commits after
    it stopped reading one.)
    The box reaches the true viewport edge at every width; its CONTENT lines up
-   with every other page system. `100%` inside a padded parent resolves
-   against that parent's content box, so the cap term is zero there and the value
-   is the plain gutter. (An earlier version of this comment said "bleeds to the
-   CAPPED content edge". The mechanism was right and the geometry was wrong by
-   48px each side: at 2560 the content is 320..2240 and this box is 272..2288.)
+   with every other page system.
+   (Two earlier versions of this paragraph were wrong in opposite directions. One
+   said "bleeds to the CAPPED content edge" — off by 48px each side. The other
+   explained a `100%`-based padding whose "cap term is zero there", describing an
+   implementation that no longer exists, two lines above the sentence contradicting
+   it. There is no `100%`, no cap term and no gutter in this rule.)
 
    RESOLVED, and the resolution is the rule: surfaces span, content caps —
    the same one `.stage-topnav` follows. BrowseView's identical `.stage-toolbar`

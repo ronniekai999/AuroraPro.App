@@ -225,7 +225,12 @@ for (const r of out) {
   //    first version of this phase. Its inset is deliberately 18px tighter than
   //    the page gutter below the cap, and must converge with it above — otherwise
   //    the tabs sit at x=30 while every page they navigate to starts at x=320.
-  const NAV_INSET = 30, NAV_MOBILE = 18
+  // Read, not restated — the same reason CAP/GUTTER/MOBILE are. This was left as a
+  // literal in the commit that removed the others, and it is the value this phase
+  // actually changed, so editing the CSS produced "expected 30" blaming the
+  // stylesheet when the script was the stale side.
+  const NAV_INSET = num(/\.stage-topnav\s*\{\s*padding:\s*0\s*max\((\d+)px/, "the nav's inset")
+  const NAV_MOBILE = MOBILE
   const navExpected = r.mqWidth < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
   if (Math.abs(r.nav.left - navExpected) > 0.5) {
     console.log(`   *** nav inset is ${r.nav.left}, expected ${navExpected}`)
