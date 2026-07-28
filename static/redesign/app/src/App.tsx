@@ -995,17 +995,23 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           The button row and the bar span EXACTLY the same measure. Nothing overhangs
           anything.
 
-          Below 768px they still agree, but NOT because of a shared token — an
-          earlier draft of this paragraph said "which is the same token" and got
-          there by quoting the hero row without its `max-md:px-[18px]`, which is the
-          one class that makes the claim true. `--page-gutter` is 48px at every
-          width; there is no override anywhere, including at runtime. Below md the
-          hero hard-codes 18px via `max-md:` and `.stage-gutter` separately
-          hard-codes 18px in its own `@media not all and (min-width: 768px)` block.
-          Two coincident literals, not one token. The conclusion survives — Tailwind
-          3.4 compiles `max-md:` to that identical negated form, so there is no
-          fractional-width band where one drops to 18 and the other does not — but
-          the reason is a coincidence somebody could break by editing one of them.
+          It IS one source now, as of Phase 11.4 — the hero footer row carries
+          `.stage-gutter` itself rather than restating its padding.
+
+          The paragraph this replaces is worth keeping in outline, because it is
+          why the change was made. The row used to read
+          `px-[var(--page-gutter)] max-md:px-[18px]`, and it agreed with the rails
+          below 768px only because TWO separate 18px literals happened to match:
+          the hero's `max-md:` utility and `.stage-gutter`'s own
+          `@media not all and (min-width: 768px)` block. Editing either would have
+          broken the alignment silently. (`--page-gutter` is 48px at every width and
+          has no override anywhere, so the token was never doing that work.)
+
+          Recorded because this comment has now had a paragraph invalidated by its
+          own commit FOUR times, and this is the fourth: the version above was left
+          standing by the commit that made it false, still arguing at length that
+          the agreement is "NOT because of a shared token" while that same commit's
+          message says "Now structural".
 
           What was wrong is density plus proximity. The row above is two small
           clusters with the width of the page between them; the bar below is a

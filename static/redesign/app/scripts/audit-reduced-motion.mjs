@@ -1,7 +1,11 @@
 // Phase 11.3 — is every animation actually disabled under prefers-reduced-motion?
 //
-// WHY. `index.css` carries reduced-motion blocks and NOTHING verified any of
-// them. A bug that only exists under a media query is invisible to every check
+// WHY. `index.css` carries nine `prefers-reduced-motion` blocks and NOTHING
+// verified any of them. (Nine, not the "11 rules" the first version of this
+// comment and the plan both claimed — that figure was written before the work and
+// never measured. The script itself printed 10 for a while, because its `@media`
+// scan matched a PROSE mention of the query and brace-matched a live rule's body
+// in as a tenth block; comments are stripped before scanning now.) A bug that only exists under a media query is invisible to every check
 // that renders one state, and this codebase has already shipped two:
 //
 //   - `.stage-orb` had a transform-on-hover that "sat outside every
@@ -30,7 +34,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 const CSS = 'src/index.css'
-const css = fs.readFileSync(CSS, 'utf8')
+// Comments blanked, offsets preserved. The `@media … prefers-reduced-motion` scan
+// matched PROSE: a comment mentioning the query (index.css does, above
+// `.convo-search::before`) matched, then the body-extractor consumed forward to the
+// next `{` and swallowed a LIVE rule into the "covered" set. It reported 10 blocks
+// where there are 9, injected `animation: convo-breathe …` into that set, and let
+// the class harvester read gradient numbers as class names (`.2rem`, `.45`, `.18s`).
+// It is also an injection vector: naming the media query in a comment above any
+// rule marked that rule covered.
+const cssRaw = fs.readFileSync(CSS, 'utf8')
+const css = cssRaw.replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
 
 /** Every className string in the app, so a base/variant pair can be resolved.
  *
@@ -63,12 +76,20 @@ function classSiblings(cls) {
 
 // Animations that legitimately have no reduced-motion counterpart, each with the
 // reason. An empty allowlist would be a lie; a silent skip would be worse.
-const EXEMPT = new Map([
-  ['fadeIn', 'A 0.4s opacity ramp with no movement. WCAG 2.3.3 targets motion, and ' +
-             'this element is ALSO a stacking context by virtue of its animation — ' +
-             'nulling it is what broke the vibe bar halo in Phase 10b. Left running ' +
-             'deliberately; see check 2.'],
-])
+// EMPTY, and it must stay empty until something genuinely needs it.
+//
+// It shipped with one entry, for `fadeIn`, and BOTH stated grounds were false — a
+// review checked them against the CSS:
+//   "a 0.4s opacity ramp with no movement"  — `@keyframes fadeIn` is
+//        `from { opacity: 0; transform: translateY(10px) }`. That is real motion,
+//        and index.css says so in its own words two thousand lines later.
+//   "left running deliberately"             — it is nulled, at
+//        `.animate-fade-in, .animate-slide-in { animation: none !important }`.
+// So the check's "0 problems" was obtained by exempting the one animation whose
+// nulling is the documented hazard, on a rationale the stylesheet contradicts.
+// An allowlist entry is a claim; this one was two false claims, and the check
+// passes without it.
+const EXEMPT = new Map([])
 
 let problems = 0
 
@@ -123,15 +144,32 @@ for (const name of [...declared].sort()) {
   const owners = [...css.matchAll(
     new RegExp(String.raw`([^{}]+)\{[^{}]*animation:\s*${name}\b[^;]*;`, 'g'),
   )].map(x => x[1].trim().split('\n').pop().trim())
+  // Per-RULE, not per-file. The first version tested `/animation:\s*none/` against
+  // every reduced-motion body joined together, so once ANY block anywhere
+  // contained `animation: none` the test was permanently true for EVERY animation
+  // and the only remaining check was "does a class name appear somewhere in the
+  // reduced-motion text". A review proved it: changing the real block's
+  // `animation: none !important` to `opacity: 1 !important` let NINE animations run
+  // at full speed under prefers-reduced-motion and the script still reported 0
+  // problems. That was the entire premise of this check, and it did not hold.
+  //
+  // Now: find the rules inside reduced-motion blocks that actually null an
+  // animation, and require one of THOSE rules' selectors to match the declaring
+  // element.
+  const nullingSelectors = new Set()
+  for (const body of rmBodies) {
+    for (const m of body.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/animation:\s*none/.test(m[2])) continue
+      for (const c of m[1].matchAll(/\.[\w-]+/g)) nullingSelectors.add(c[0])
+    }
+  }
   const covered = owners.some(sel => {
-    if (!/animation:\s*none/.test(rmText)) return false
     // EVERY class in the declaring selector, not just the first: `onbShine` is
     // declared on `.onb-mosaic-shimmer .onb-shine` and nulled on `.onb-shine`.
     const classes = [...sel.matchAll(/\.[\w-]+/g)].map(m => m[0])
-    const rmClasses = new Set([...rmText.matchAll(/\.[\w-]+/g)].map(m => m[0]))
-    if (classes.some(c => rmClasses.has(c))) return true
+    if (classes.some(c => nullingSelectors.has(c))) return true
     // …and any class that shares an element with one of them in the markup.
-    return classes.some(c => [...classSiblings(c)].some(sib => rmClasses.has(sib)))
+    return classes.some(c => [...classSiblings(c)].some(sib => nullingSelectors.has(sib)))
   })
   if (covered) {
     console.log(`  ok      ${name} (${owners.join(', ')})`)
@@ -149,6 +187,37 @@ console.log('\n## Check 2 — negative z-index needs a MOTION-INDEPENDENT stacki
 // element behind an opaque background — visible ONLY under reduced motion.
 const negZ = [...css.matchAll(/([^{}]+)\{[^{}]*z-index:\s*-\d+[^{}]*\}/g)]
   .map(m => m[1].trim().split('\n').pop().trim())
+
+// …AND Tailwind's `-z-*` utilities in the markup. Scanning only the stylesheet was
+// this check's own blind spot, and it was caught the hard way: Phase 11.4 added a
+// `-z-10` band in HeroSection whose stacking context came from an animation, i.e.
+// precisely the defect this check exists for, and the check reported the run
+// clean because the class was in TSX. Its comment even anticipated
+// utility-expressed contexts ("the vibe bar's comes from a `z-20` utility in
+// App.tsx") while the scan never left the CSS.
+const walkTsx = (dir, out = []) => {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) walkTsx(full, out)
+    else if (/\.tsx$/.test(e.name)) out.push(full)
+  }
+  return out
+}
+const negZJsx = []
+for (const file of walkTsx('src')) {
+  const raw = fs.readFileSync(file, 'utf8')
+  // Comments blanked, offsets preserved — same discipline as the CSS side, and for
+  // the same reason it was needed there: the first version counted `-z-10` where it
+  // appeared in PROSE, so the very comment explaining a usage was reported as a
+  // second unannotated usage. These files are ~60% comment by volume.
+  const text = raw
+    .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '))
+    .replace(/\/\/[^\n]*/g, m => ' '.repeat(m.length))
+  for (const m of text.matchAll(/-z-\d+/g)) {
+    const line = text.slice(0, m.index).split('\n').length
+    negZJsx.push({ file, line, cls: m[0], raw, at: m.index })
+  }
+}
 if (!negZ.length) console.log('  no negative z-index rules.')
 for (const sel of negZ) {
   // The owner must be annotated with where its stacking context comes from. This
@@ -156,8 +225,14 @@ for (const sel of negZ) {
   // stacking context is not decidable from the stylesheet alone (the vibe bar's
   // comes from a `z-20` utility in App.tsx), so the check requires the author to
   // have said, and fails when nobody has.
-  const at = css.indexOf(sel)
-  const before = css.slice(Math.max(0, at - 1400), at)
+  // The comment block IMMEDIATELY above the rule, not "somewhere in the previous
+  // 1400 characters". The wide window auto-approved any negative-z rule authored
+  // near an existing annotation — a review inserted `.brand-new-halo { z-index: -3 }`
+  // and it passed on a token 1278 chars away belonging to a different rule.
+  const at = cssRaw.indexOf(sel)
+  const upto = cssRaw.slice(0, at)
+  const lastClose = upto.lastIndexOf('}')
+  const before = upto.slice(lastClose + 1)
   // An explicit `STACKING CONTEXT:` token, not the phrase "stacking context"
   // occurring anywhere nearby. A mutation caught the difference: deleting the
   // actual declaration still passed, because the surrounding prose discusses
@@ -172,6 +247,20 @@ for (const sel of negZ) {
     console.log('          which ancestor contains it. If that ancestor is a stacking')
     console.log('          context only because it animates, this element disappears')
     console.log('          under prefers-reduced-motion. Say where it comes from.')
+    problems++
+  }
+}
+
+for (const hit of negZJsx) {
+  // Same rule as the CSS side: an explicit token, near the usage.
+  // Look in the RAW source (comments intact) immediately before the usage.
+  const before = hit.raw.slice(Math.max(0, hit.at - 2500), hit.at)
+  if (/STACKING CONTEXT:/.test(before)) {
+    console.log(`  ok      ${hit.file}:${hit.line} ${hit.cls} — stacking context documented`)
+  } else {
+    console.log(`  ***     ${hit.file}:${hit.line} uses ${hit.cls} with no STACKING CONTEXT: note.`)
+    console.log('          If the containing context comes from an animation, this')
+    console.log('          element disappears under prefers-reduced-motion.')
     problems++
   }
 }

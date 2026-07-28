@@ -331,7 +331,24 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           without that, capping the rails while the hero row stayed full-bleed
           would reintroduce the stair-step Phase 10b existed to remove.
 
-          `flex-wrap` + `min-w-0`, both for the 390px case.
+          `min-w-0` on the text column is what fixes the 390px case, and it is the
+          ONLY thing that had to change on this row.
+          The column had no `min-w-0`, so its flex-basis floored at its widest
+          unbreakable child (~450px) and it could not shrink into the 354px between
+          the gutters; "Not tonight" is `whitespace-nowrap` and could not shrink
+          either, so the row overflowed by ~48px. Removing the floor lets the column
+          take 202px and the row fits.
+          NO `flex-wrap` here — that was tried and reverted. Flexbox breaks lines on
+          each item's HYPOTHETICAL main size, before any shrinking, and this column's
+          hypothetical is its `max-w-2xl` 672px. So `flex-wrap` engaged below
+          672+16+136 = 824px of content box, i.e. a ~920px VIEWPORT — not 390px.
+          Through the whole 768-920 band it put "Not tonight" alone on a second line,
+          where a `justify-between` line sends a single item to main-START: the
+          bottom-LEFT corner, directly under Play / My List / More Info. That is the
+          arrangement App.tsx explicitly rejects, in writing, as promoting a
+          deliberately quiet tertiary control to Play's peer. It also grew the row
+          upward inside an `overflow-hidden` hero, eating ~58px of a ~262px title
+          budget and clipping the provenance pill off the top.
           This row is `justify-between` with a text column on the left and "Not
           tonight" on the right, and neither could shrink: the column had no
           `min-w-0`, so its flex-basis floor was its widest unbreakable child, and
@@ -343,7 +360,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           CLIPPED rather than scrollable — which is why a whole breakpoint pass
           walked past it. Clipped overflow is worse than visible overflow, not
           better; it silently removes content instead of announcing itself. */}
-      <div className="stage-gutter absolute bottom-0 left-0 right-0 z-20 flex flex-wrap items-end justify-between gap-4 pb-9">
+      <div className="stage-gutter absolute bottom-0 left-0 right-0 z-20 flex items-end justify-between gap-4 pb-9">
         <div className="min-w-0 max-w-2xl">
           {/* Compact (browse) — eyebrow above the page title. */}
           {compact && eyebrow && <div className="stage-eyebrow mb-2">{eyebrow}</div>}
@@ -447,9 +464,11 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           {!compact && hero.description && (
             <p className="text-white/70 text-sm md:text-base max-w-xl mb-4 line-clamp-2 drop-shadow-lg">{hero.description}</p>
           )}
-          {/* Wraps too. Three pills at `px-6 py-3` plus two 12px gaps need ~430px
-              and get 354 at 390px wide, so without this the CTA row was the
-              single biggest contributor to the clipped overflow above. */}
+          {/* This row DOES keep `flex-wrap`, and unlike the row above it cannot
+              misfire at tablet widths: it lives inside the `max-w-2xl` column, and
+              three pills at `px-6 py-3` plus two 12px gaps need ~430px, so it only
+              wraps once the column itself is under ~430px — which happens on phones
+              and nowhere else. */}
           <div className="flex flex-wrap items-center gap-3">
             {/* 2026-05-27 — Resume-aware primary CTA. When the hero
                 has a CW match, click resumes at the saved position via
@@ -604,11 +623,24 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
         decoration and sits BEHIND everything: `-z-10` rather than a positive index,
         because the vibe bar's wrapper is `z-20` and its halo `z-index: -1` inside
         that — a positive value here would paint over the bar.
+
+        STACKING CONTEXT: `isolate` on this wrapper, and it is load-bearing rather
+        than tidy. Without it the `-z-10` child escapes to the nearest ancestor
+        stacking context, which on both consumers is the view root — a stacking
+        context ONLY because `.animate-fade-in` leaves a transform applied. Under
+        `prefers-reduced-motion` that animation is nulled with `!important`, the
+        root stops being a context, `<main>` and the app root above it are plain
+        unpositioned blocks, and the band lands in the root context where negative-z
+        paints BEFORE in-flow block backgrounds — i.e. behind the app root's opaque
+        #050505. Invisible, for exactly the users least likely to report it.
+        That is verbatim the hazard index.css documents for `.convo-search::before`,
+        reintroduced eight lines after citing it. `isolate` makes this wrapper its
+        own context so the band cannot escape, whatever the ancestors do.
         `h-0` + an absolutely positioned child so it contributes NO layout: the gap
         arithmetic in App.tsx (`gap = margin-top + 36`) assumes the hero's next
         sibling is the bar, and an element with height here would silently add to
         every figure in that comment. */}
-    <div className="relative h-0 -z-10" aria-hidden="true">
+    <div className="relative isolate h-0 -z-10" aria-hidden="true">
       <div className="stage-hero-seam absolute inset-x-0 top-0 h-24" />
     </div>
     </>

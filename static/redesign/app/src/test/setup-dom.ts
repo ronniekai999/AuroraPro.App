@@ -22,10 +22,24 @@ if (hasDom) {
   // test's document and `getByRole` starts matching elements from a previous test.
   afterEach(() => { cleanup() })
 
-  // jsdom implements neither of these, and both are called on mount by code under
-  // test: `scrollIntoView` by SearchPalette's highlight-follow effect and
-  // DetailTabs' tab strip, `matchMedia` by the reduced-motion checks. Unstubbed
-  // they throw and the failure looks like a component bug rather than a jsdom gap.
+  // `scrollIntoView` IS required. A reviewer measured `Element.prototype
+  // .scrollIntoView` as a native function under jsdom 30 and concluded this block
+  // was dead code with a false rationale. Removing it fails four tests with
+  // "row?.scrollIntoView is not a function" — SearchPalette's highlight-follow
+  // effect calls it on every arrow press. Whatever the prototype reports in
+  // isolation, it is not callable on the elements under test here, so the guard
+  // fires and the stub is what keeps the keyboard tests running.
+  //
+  // The reviewer WAS right about the rest of the original comment, which claimed
+  // `matchMedia` was also missing and that DetailTabs calls `scrollIntoView`.
+  // Neither is true: DetailTabs contains no such call, and nothing under test
+  // calls matchMedia. The matchMedia stub is kept only because the next component
+  // to be tested here will need it, and it is now labelled as forward-looking
+  // rather than as a fix for a problem that exists.
+  //
+  // Known hole either way: jsdom's scrollIntoView is a NO-OP, so the effect is
+  // exercised but its EFFECT is not asserted. Deleting the call from the component
+  // survives this suite. Accepted, not papered over.
   if (!Element.prototype.scrollIntoView) {
     Element.prototype.scrollIntoView = function scrollIntoView() {}
   }

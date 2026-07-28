@@ -51,9 +51,27 @@ beforeEach(() => {
   searchMedia.mockResolvedValue({ items: RESULTS, mode: 'literal' })
 })
 
-const open = () => render(
-  <SearchPalette open onClose={() => {}} onSelect={() => {}} />,
-)
+/** Render the palette with a REAL focused opener, the way App does.
+ *
+ *  Load-bearing, and its absence made four assertions decorative. With nothing
+ *  focused, `document.activeElement` is `<body>`, so the component's
+ *  `openerRef.current` captures body — and jsdom's `body.focus()` is a NO-OP while
+ *  a real element holds focus. Every "focus stayed in the combobox" assertion was
+ *  therefore satisfied by an opener physically incapable of stealing focus.
+ *
+ *  Proved by mutation: re-widening the opener-capture effect's deps back to the
+ *  Phase 9 shape — the shipped P0 that made Cmd+K unusable, which the test below is
+ *  named after — left all 16 tests green. With a real button it is caught. */
+const open = () => {
+  const opener = document.createElement('button')
+  opener.textContent = 'Open search'
+  document.body.appendChild(opener)
+  opener.focus()
+  return {
+    opener,
+    ...render(<SearchPalette open onClose={() => {}} onSelect={() => {}} />),
+  }
+}
 
 describe('SearchPalette — APG combobox contract', () => {
   it('exposes the input as a combobox with a listbox popup', async () => {

@@ -702,7 +702,7 @@ Then the deploy: merge to `main` → `bash scripts/server-test-loop.sh --trigger
 
 ---
 
-### Phase 11 — close the loop the reviews have been closing by hand
+### Phase 11 — close the loop the reviews have been closing by hand ✅ SHIPPED
 
 **Branch** `feat/stage-hardening`
 
@@ -737,8 +737,12 @@ Minimum worth doing:
 - Assertions on the APG contracts already written: `SearchPalette`'s combobox
   (`aria-expanded` tracks the listbox's presence, `aria-activedescendant` follows
   the highlight, the listbox owns only `option` children), `ContextMenu`'s roving
-  tabIndex and type-ahead, `DetailTabs`' Left/Right/Home/End, `TopNav`'s
-  focus-restore-on-every-dismissal.
+  tabIndex, `DetailTabs`' Left/Right/Home/End.
+
+  **Delivered, minus two items this list got wrong.** `ContextMenu` type-ahead was
+  specified here and is NOT tested, because the feature does not exist — there is
+  no printable-key handler to test. `TopNav`'s focus-restore is also untested and
+  remains open. Both were written into the plan before anyone looked at the code.
 - The focus-trap regressions specifically, because they have already shipped twice:
   the ⌘K opener-capture race, and mousedown-drag on a `<div>` row escaping the modal
   to `<body>`.

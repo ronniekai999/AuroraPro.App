@@ -3328,6 +3328,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       tabIndex={minimizedActive ? undefined : -1}
       className={
         minimizedActive
+          // STACKING CONTEXT: irrelevant here, and that is the point. This element
+          // carries `opacity-0`, which makes it a stacking context in its own right,
+          // and it is `fixed inset-0 pointer-events-none` — fully transparent and
+          // non-interactive. The `-z-10` is belt-and-braces to keep a mounted-but-
+          // invisible player out of the paint order; wherever it lands it is
+          // invisible by construction, so no ancestor's motion-dependence can
+          // change what the user sees. Annotated rather than removed because
+          // audit-reduced-motion.mjs Check 2 rightly asks about every negative z.
           // Keep the full player MOUNTED but off-screen while minimized: the
           // Chromecast streaming session and the AirPlay <video> source must
           // stay alive (closing the laptop view must not kill the cast). The

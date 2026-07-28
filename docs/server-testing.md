@@ -40,7 +40,10 @@ now being served are the bytes built from the merged commit:
 ```bash
 # From the merge commit, with a clean tree:
 cd static/redesign/app && npm run build
-ls ../../v2/assets/index-*.{js,css} | xargs -n1 basename
+# Grep the BUILT index.html, not `ls assets/` — that directory also holds lazy
+# chunks which happen to be named index-*, so `ls` returns four names against the
+# live page's two and the comparison reads as a mismatch when it is not.
+grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' ../../v2/index.html | sort -u
 
 # What the live server is actually serving:
 curl -s https://aurorapro.app/v2/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' | sort -u
