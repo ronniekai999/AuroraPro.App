@@ -596,3 +596,49 @@ other once 1–2 have landed, so they can be parallelized across branches if you
 compress the calendar — with the caveat that 3 and 4 both touch rail/grid sizing and
 should not be in flight simultaneously. Phase 10 stays last by design: it's the only one
 that changes behavior rather than appearance.
+
+
+---
+
+### Phase 10 — the two defects the Phase 9 review found but did not fix
+
+**Branch** `feat/stage-polish` (same)
+
+Both were raised by the AT reviewer as bigger than what Phase 9 had actually fixed,
+and both were deliberately deferred rather than half-done.
+
+- **`SearchPalette` had no combobox semantics at all** — no `role="combobox"`, no
+  listbox, no `aria-activedescendant`, no `aria-selected`, no live region. A
+  screen-reader user got an input that silently changed a list they could not
+  perceive: typing produced silence, and arrowing produced silence, because the only
+  difference between the highlighted row and its neighbours was a background colour
+  and a `⏎` glyph appended to one label. Now the APG Combobox-with-listbox pattern.
+  `aria-activedescendant` is the load-bearing piece and it fits this widget without
+  changing how it behaves — arrows already moved a highlight while focus stayed in
+  the input, which is exactly what the pattern describes.
+  It also removes a real bug rather than only a semantic one. As tabbable
+  `<button>`s the rows created THREE competing cursors — Tab moved DOM focus, arrows
+  moved `highlighted`, hover moved it again — so the `⏎` affordance could advertise
+  on a row Enter would not act on. Phase 9 patched that symptom by making Enter
+  defer to a Tab-focused row; `role="option"` on non-focusable rows removes the
+  second cursor entirely.
+- **The media card never announced that a context menu exists.** Phase 9 showed the
+  menu IS keyboard-reachable and concluded "the trigger was never the problem" —
+  true for SC 2.1.1 (operability) and beside the point for discoverability. Four of
+  that menu's items have no other route anywhere in the app, and being reachable by
+  a shortcut you have no way to learn about is not much better than unreachable.
+  `aria-haspopup="menu"` on the card and the list row. Deliberately no
+  `aria-expanded`: that is for a trigger that owns its popup, and the menu is
+  App-level state shared across the whole grid, so a per-card flag would be false on
+  every card but one.
+
+Then the deploy: merge to `main` → `bash scripts/server-test-loop.sh --trigger-update`
+→ verify against `https://aurorapro.app` per `docs/server-testing.md`.
+
+- **The vibe search bar is full width**, third and final answer on it. Phases 8 and
+  the 8 fix pass both measured it against the hero's TEXT COLUMN; the thing it
+  actually sits next to is the Continue Watching rail panel ~50px below, which runs
+  the full gutter width. Capped at any value it stair-stepped against that panel.
+  Full width also settles what the element is — the first page-level band rather
+  than the last line of the hero stack, which is how it behaves, since using it
+  replaces the rails with results.

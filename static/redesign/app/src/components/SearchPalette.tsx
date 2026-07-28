@@ -36,6 +36,9 @@ interface Props {
   initialQuery?: string
 }
 
+const LISTBOX_ID = 'palette-results'
+const optionId = (mediaId: number | string) => `palette-opt-${mediaId}`
+
 export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   // Phase 9 — the panel needs a ref for the Tab trap below. It declared
@@ -250,6 +253,27 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search Aurora — titles, vibes, anything…"
+            // APG Combobox with a listbox popup (Phase 10). Before this the
+            // palette was a combobox wearing no combobox semantics: no
+            // `role="combobox"`, no listbox, no `aria-activedescendant`, no
+            // `aria-selected`, no live region. A screen-reader user got an input
+            // that silently changed a list they could not perceive — typing
+            // produced silence, and arrowing produced silence, because the ONLY
+            // difference between a highlighted row and its neighbours was a
+            // background colour and a `⏎` glyph appended to its label.
+            //
+            // `aria-activedescendant` is the load-bearing piece. APG: "When a
+            // descendant of a listbox … popup is focused, DOM focus remains on the
+            // combobox and the combobox has `aria-activedescendant` set to a value
+            // that refers to the focused element within the popup." That is exactly
+            // this widget's existing behaviour — arrows move `highlighted` while
+            // focus stays in the input — so the pattern fits without changing how
+            // it works, only what it reports.
+            role="combobox"
+            aria-expanded={results.length > 0}
+            aria-controls={LISTBOX_ID}
+            aria-autocomplete="list"
+            aria-activedescendant={results[highlighted] ? optionId(results[highlighted].id) : undefined}
             // 22px display type on the query, not 18px body. The query is the
             // subject of this overlay, so it gets the same treatment a page
             // title would. font-display + min-w-0 so the flex child can still
@@ -274,8 +298,26 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         </div>
 
         {/* Results */}
+        {/* Result count, announced politely. Nothing told a screen-reader user
+            that the list had populated or how big it was — the visible "Searching…"
+            spinner being replaced by rows is a purely visual event. Keyed on the
+            query so re-announcing happens per search rather than per keystroke,
+            and `sr-only` because the count is already obvious on screen. */}
+        <p role="status" aria-live="polite" className="sr-only">
+          {query.trim() === ''
+            ? ''
+            : loading
+              ? 'Searching'
+              : results.length === 0
+                ? `No matches for ${query}`
+                : `${results.length} result${results.length === 1 ? '' : 's'} for ${query}`}
+        </p>
+
         <div
           ref={listRef}
+          id={LISTBOX_ID}
+          role="listbox"
+          aria-label={`Search results for ${query || 'your query'}`}
           className="max-h-[55vh] overflow-y-auto"
         >
           {!query.trim() && (
@@ -313,8 +355,21 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
           )}
 
           {results.map((m, i) => (
-            <button
+            // `role="option"` on a div, not a <button>. Options are not buttons in
+            // ARIA, and the change fixes a real behavioural problem as well as a
+            // semantic one: as tabbable buttons these rows created THREE competing
+            // cursors — Tab moved DOM focus, the arrows moved `highlighted`, and
+            // hover moved it again — so the `⏎` affordance could advertise on a row
+            // that Enter would not act on. Phase 9 patched the symptom by making
+            // Enter defer to a Tab-focused row; the combobox pattern removes the
+            // second cursor entirely, because focus never leaves the input. The
+            // `data-row` attribute and that Enter guard stay as belt-and-braces,
+            // but the branch is now unreachable.
+            <div
               key={m.id}
+              id={optionId(m.id)}
+              role="option"
+              aria-selected={i === highlighted}
               data-row={i}
               onMouseEnter={() => setHighlighted(i)}
               onClick={() => { onSelect(m); onClose() }}
@@ -345,9 +400,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
                 </div>
               </div>
               {i === highlighted && (
-                <kbd className="text-[10px] uppercase tracking-wider text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
+                // aria-hidden: this glyph is a visual echo of aria-selected, and
+                // without it the option's accessible name gained a trailing "⏎"
+                // that a reader announced as "return" on exactly one row.
+                <kbd aria-hidden="true" className="text-[10px] uppercase tracking-wider text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
               )}
-            </button>
+            </div>
           ))}
         </div>
       </div>

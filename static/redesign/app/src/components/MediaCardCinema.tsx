@@ -249,6 +249,23 @@ export function MediaCardCinema({
       // MediaListRow was missing (added there too).
       role="button"
       tabIndex={0}
+      // Phase 10 — announce that a context menu exists.
+      //
+      // Phase 9 established that the menu IS keyboard-reachable (browsers fire a
+      // real `contextmenu` for Shift+F10 and the Menu key on a focused element) and
+      // concluded "the trigger was never the problem". True for SC 2.1.1 —
+      // operability — and beside the point for discoverability: four of that menu's
+      // items have NO other route anywhere in the app, and nothing told a
+      // screen-reader user they were there. Being reachable by a shortcut you have
+      // no way to learn about is not much better than being unreachable.
+      //
+      // `aria-haspopup="menu"` is what a reader announces ("has pop up menu"), and
+      // it is honest here: the popup really is a `role="menu"` of commands. No
+      // `aria-expanded` — that is for a trigger that OWNS its popup, and this card
+      // does not: the menu is App-level state rendered as a sibling, one instance
+      // shared across the whole grid, so a per-card expanded flag would be a lie on
+      // every card but one.
+      aria-haspopup="menu"
       // role="button" makes descendants presentational, so EVERYTHING inside
       // the card is pruned from the a11y tree and this label is the only
       // thing a screen reader gets. Title + year alone left rating, runtime,
