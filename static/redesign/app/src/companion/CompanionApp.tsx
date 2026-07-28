@@ -124,7 +124,16 @@ export function CompanionApp() {
     // scrolls under the composer / safe-area). 100dvh tracks mobile
     // browser chrome better than 100vh.
     <div className="aurora-companion-shell flex h-[100dvh] flex-col overflow-hidden bg-[#050505] text-white">
-      {/* Radial Aurora glow background, matching the mockup's screen bg. */}
+      {/* Radial Aurora glow background, matching the mockup's screen bg.
+          STACKING CONTEXT: the document root. This is `fixed`, so its containing
+          block is the viewport and its parent chain is irrelevant — and no ancestor
+          here creates a context anyway (`.aurora-companion-shell` is a plain flex
+          block with no transform/filter/opacity/isolation, and the companion tree
+          has no `.animate-fade-in` root). At the root, `z-index: -1` paints after
+          the root element's own background and before in-flow content, which is
+          exactly where a full-bleed glow belongs. Motion-independent: nothing in
+          this chain is a stacking context by virtue of an animation, so
+          prefers-reduced-motion cannot relocate it. */}
       <div
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 -z-10"

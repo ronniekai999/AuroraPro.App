@@ -28,11 +28,21 @@
 import { mergeConfig, defineConfig } from 'vitest/config'
 import viteConfig from './vite.config'
 
+// ── Phase 11.1 — the DOM layer ────────────────────────────────────────────────
+//
+// `environment: 'jsdom'` is set PER FILE via `// @vitest-environment jsdom`, not
+// globally. Deliberate: the 140 pure-function tests are the fast path and there is
+// no reason to pay jsdom's setup cost on every one of them. Vitest reads the
+// docblock pragma at collection time, so a file opts in by declaring it.
+//
+// `setupFiles` runs for every test file regardless of environment, so it has to
+// guard on whether a DOM actually exists — see setup-dom.ts.
 export default mergeConfig(
   viteConfig,
   defineConfig({
     test: {
       env: { TZ: 'America/New_York' },
+      setupFiles: ['./src/test/setup-dom.ts'],
     },
   }),
 )

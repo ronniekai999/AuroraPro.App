@@ -435,6 +435,21 @@
       0 0 20px -6px rgba(34, 211, 238, 0.25);
     transition: box-shadow 0.35s ease;
   }
+  /* The breathing halo. `z-index: -1` means this paints BEHIND its own parent's
+     background, which only works while something contains it.
+     STACKING CONTEXT: the wrapper in App.tsx, via `relative z-20`. NOT
+     `.convo-search` — that is `position: relative; z-index: auto` with no
+     transform/filter/opacity/isolation, so it is not a stacking context and
+     cannot contain a negative-z child.
+     This matters under prefers-reduced-motion specifically. If the containing
+     context were the HomeView root, that element is a stacking context only
+     because `.animate-fade-in` is animating, and `@media (prefers-reduced-motion:
+     reduce)` nulls that animation with `!important` — at which point this halo
+     escapes to the document root and paints behind `.aurora-bg`, invisible, for
+     exactly the users least likely to report a missing animation. The `z-20` on
+     the wrapper is what makes it motion-independent, and it must stay for that
+     reason rather than the scrim reason this file used to give.
+     audit-reduced-motion.mjs Check 2 requires this note to exist. */
   .convo-search::before {
     content: '';
     position: absolute;
@@ -957,6 +972,24 @@ html[data-glow="subtle"] .stage-topnav {
   padding-left: var(--page-gutter);
   padding-right: var(--page-gutter);
 }
+/* NO ultra-wide cap here, and the reasoning is worth keeping because the obvious
+   fix is the one that was tried and reverted.
+   Phase 11.4 added `max-width: var(--page-max); margin-inline: auto` to this rule.
+   A review measured two problems that made it net-negative:
+   1. `margin-inline` CLOBBERS deliberate negative margins. AdminView's mobile
+      toolbar is `stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)]`,
+      and this rule is emitted AFTER `.-mx-\[18px\]` in the bundle — same (0,1,0),
+      later wins — so below 768px the full-bleed sticky band silently stopped
+      bleeding, which is the exact failure the twelve-line comment at that call site
+      exists to prevent. At md+ the `-48px` margin won but the max-width still bound,
+      over-constraining the box so `margin-right` solved to 592px at 2560.
+   2. The cap was half-applied. `.stage-page` was uncapped, and BrowseView's sticky
+      toolbar reads `--page-gutter` directly rather than using this class, so at 2560
+      its genre chips sat at x=48 while the grid it filters started at x=368 — a
+      320px stair-step, precisely the defect the change claimed to prevent.
+   A real ultra-wide cap has to cover .stage-page, BrowseView's toolbar, DetailHero
+   and DetailView's own max-w-[1400px] together. That is a layout-system change, not
+   a one-line token, and it belongs in its own phase. Recorded, not attempted. */
 /* Same negated form as .stage-page above, for the same reason. */
 @media not all and (min-width: 768px) {
   .stage-gutter {
@@ -1066,8 +1099,20 @@ html[data-glow="subtle"] .stage-topnav {
   border: 0;
   border-radius: 0;
   padding: 0.75rem 0.5rem 0.75rem 0.25rem;
-  font-size: 0.875rem;
+  /* 16px below lg so iOS/iPadOS Safari doesn't zoom the viewport on focus — it
+     zooms any focused input under 16px, and the designed size here is 14px. Same
+     guard `.stage-navsearch` has carried since it was written; this bar never got
+     it, so tapping the one field the home page is built around punched the layout
+     to ~1.14x on every iPhone. The designed 0.875rem applies from lg, where a
+     touch keyboard is not the primary input.
+     rem at lg, px below it, deliberately: the guard is about a fixed CSS-pixel
+     threshold in Safari, so it must not scale with the root font-size, while the
+     design size should. */
+  font-size: 16px;
   line-height: 1.25rem;
+}
+@media (min-width: 1024px) {
+  .convo-search input:not([type="range"]) { font-size: 0.875rem; }
 }
 /* FOCUS state, and the three `:not()`s are load-bearing arithmetic, not noise.
    The global focus rule is
@@ -1094,6 +1139,17 @@ html[data-glow="subtle"] .stage-topnav {
   background: transparent;
   border-color: transparent;
   box-shadow: none;
+}
+/* See the note at its call site in HeroSection. Starts at the hero's own opaque
+   ink so there is no step at the boundary, and fades out over its own height so
+   `.aurora-bg`'s radials arrive gradually.
+   The top stop is #050505 because that is what BOTH the hero section's own
+   background and the vertical scrim's final stop resolve to — if either of those
+   changes, this has to change with them, which is why all three say #050505
+   literally rather than one of them reading a token the others do not. */
+.stage-hero-seam {
+  pointer-events: none;
+  background: linear-gradient(180deg, #050505 0%, rgba(5, 5, 5, 0) 100%);
 }
 .stage-hero-match-veil {
   position: absolute;

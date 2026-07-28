@@ -22,6 +22,18 @@ export interface SearchStatusInput {
   settled: string
   /** How many results are being displayed. */
   count: number
+  /**
+   * Whether the server answered semantically rather than literally.
+   *
+   * Phase 11.4. The palette shows this as a "Smart" chip beside the input and
+   * nothing else — a `<span>` with an icon and a word, appearing only after a
+   * semantic result lands. It is the one piece of state that changes what the
+   * results MEAN (matched by description, not by title), and it was conveyed by
+   * colour and position alone. Folded into this message rather than given its own
+   * live region: two polite regions updating on the same commit race, and a
+   * screen reader may drop one.
+   */
+  smart?: boolean
 }
 
 /**
@@ -35,7 +47,7 @@ export interface SearchStatusInput {
  * is the honest test, and it also covers the `initialQuery` path, where the region
  * was inserted into the DOM already containing the wrong string.
  */
-export function searchStatusMessage({ query, loading, settled, count }: SearchStatusInput): string {
+export function searchStatusMessage({ query, loading, settled, count, smart }: SearchStatusInput): string {
   const trimmed = query.trim()
   // Whitespace-only is silence, not a search. The first version tested `query.trim()`
   // for emptiness but then interpolated the RAW query into the message, so a query of
@@ -43,5 +55,10 @@ export function searchStatusMessage({ query, loading, settled, count }: SearchSt
   if (trimmed === '') return ''
   if (loading || settled !== trimmed) return 'Searching'
   if (count === 0) return `No matches for ${trimmed}`
-  return `${count} result${count === 1 ? '' : 's'} for ${trimmed}`
+  // "Smart" is what the chip says, so the announcement uses the same word — a
+  // reader and a sighted user describing the same screen to each other should be
+  // using the same vocabulary. The qualifier trails the count so the number, which
+  // is what the user is waiting for, is still the first thing heard.
+  const how = smart ? ', matched by description' : ''
+  return `${count} result${count === 1 ? '' : 's'} for ${trimmed}${how}`
 }

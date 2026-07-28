@@ -12,8 +12,10 @@
     "audit:a11y": "node scripts/audit-focus-indicators.mjs",
     "audit:contrast": "node scripts/audit-onart-contrast.mjs",
     "audit:breakpoints": "node scripts/audit-breakpoints.mjs",
-    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:breakpoints && npm run audit:cascade",
-    "audit:cascade": "node scripts/resolve-focus.mjs"
+    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:glass && npm run audit:motion && npm run audit:breakpoints && npm run audit:cascade",
+    "audit:cascade": "node scripts/resolve-focus.mjs",
+    "audit:glass": "node scripts/audit-glass-contrast.mjs",
+    "audit:motion": "node scripts/audit-reduced-motion.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -66,6 +68,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@testing-library/jest-dom": "^7.0.0",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
@@ -75,6 +80,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "jsdom": "^30.0.0",
     "kimi-plugin-inspect-react": "^1.0.3",
     "postcss": "^8.5.6",
     "postcss-selector-parser": "^6.1.2",
