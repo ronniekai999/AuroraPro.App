@@ -462,7 +462,11 @@ export default function DetailView({
 
             <QualityChips chips={qualityChips} className="mb-7" />
 
-            <div role="tabpanel" id={`detail-panel-${activeTab}`} aria-labelledby={`detail-tab-${activeTab}`}>
+            {/* A CONSTANT id, not `detail-panel-${activeTab}`. Only one panel is
+                ever rendered, so an id that changed identity on every tab switch
+                bought nothing and forced the tabs to either dangle their
+                `aria-controls` or drop it. See the note in DetailTabs. */}
+            <div role="tabpanel" id="detail-panel" aria-labelledby={`detail-tab-${activeTab}`}>
               {activeTab === 'overview' ? (
                 <div className="space-y-10">
                   {storylineNode}
