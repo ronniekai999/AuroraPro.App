@@ -81,7 +81,18 @@ export function DetailHero({
       <button
         type="button"
         onClick={onBack}
-        className="absolute top-6 left-6 z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-all border border-white/10"
+        // `left-[var(--page-pad-x)]`, not `left-6`. Phase 12 fix pass: this was the
+        // one piece of detail chrome that stayed pinned to the viewport while the
+        // rest of the page gained an ultra-wide cap, so it sat at x=24 while
+        // everything it belongs to moved to 320 at 2560 and 960 at 3840 — 936px
+        // adrift, measured in the running app.
+        // Pre-existing (24 vs 48 was a 24px offset before), but the cap turns a
+        // rounding difference into a page-width one. Same defect class as the top
+        // nav, one element over.
+        // 24px at md+ vs the page's 48 was never deliberate the way the nav's 30px
+        // is; there is no comment claiming it and no measurement behind it, so this
+        // adopts the page inset outright rather than preserving an accident.
+        className="absolute top-6 left-[var(--page-pad-x)] z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-all border border-white/10"
       >
         <ArrowLeftIcon size={16} /> Back
       </button>
