@@ -1016,8 +1016,12 @@ html[data-glow="subtle"] .stage-topnav {
   padding-inline: var(--page-pad-x);
 }
 /* Cancel the page padding to bleed a band to the page's edge.
-   Reads the SAME token as the padding, so the two can never drift — replacing an
-   `-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
+   Reads NO token: margin and padding are exact inverses of each other
+   (`50% - 50vw` and `50vw - 50%`), so they cannot drift by construction. That is
+   stronger than the shared-token version this replaced, and stronger than the
+   `-mx-[18px] md:-mx-[var(--page-gutter)]` pair before that, which restated two
+   literals. (This line claimed "reads the SAME token" through five commits after
+   it stopped reading one.)
    The box reaches the true viewport edge at every width; its CONTENT lines up
    with every other page system. `100%` inside a padded parent resolves
    against that parent's content box, so the cap term is zero there and the value

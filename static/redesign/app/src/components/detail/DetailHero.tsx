@@ -99,11 +99,11 @@ export function DetailHero({
           error line stay selectable and the title's tooltip can fire. Below
           the rail's lg:z-20, so the poster still overlaps the artwork.
 
-          Insets read --page-gutter rather than hard-coding it: the right edge
+          Insets read --page-pad-x (the page token, capped) rather than hard-coding them: the right edge
           already did, and a left edge baked at 304px would silently desync the
           moment the token changes. 256px = 216 rail + 40 gap.
 
-          lg:max-w-[1048px] = the body's 1400px cap minus the 304px offset and
+          lg:max-w-[1048px] = the body's 1304px measure minus the 304px offset and
           the 48px gutter. Without it the title kept measuring 48px from the
           VIEWPORT while the column beneath it stopped at 1352px, so above
           1400px wide the headline cantilevered up to 1160px past the tabs and

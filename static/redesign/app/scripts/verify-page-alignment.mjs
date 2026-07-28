@@ -12,10 +12,12 @@
 // box solving margin-right to something absurd, or a `max()` that never binds.
 // All four were live in the reverted attempt. So this asserts, rather than argues.
 //
-// NOT wired into `npm run audit`: it launches a browser and the gate is meant to
-// stay fast. Run it when touching anything that reads --page-pad-x.
+// RUNS IN `npm run audit`. It was excluded at first "to keep the gate fast"; that
+// was measured and the reasoning did not survive — the check is ~2.6s against the
+// gate's ~44s, most of which is a build it already does. (This paragraph said
+// "NOT wired into" for five commits after the one that wired it in.)
 //
-//   npm run verify:layout
+//   npm run verify:layout      # standalone; audit calls the script directly
 //
 // Chromium resolution: this environment ships a build the npm `playwright` package
 // does not expect (1194 vs 1234), so an unpinned launch fails HERE. The pin is a
@@ -67,6 +69,12 @@ const ADMIN_TB = classesOf('src/components/admin/AdminView.tsx', 'stage-toolbar'
 const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0 left-0 right-0 z-20')
 const DETAIL_BODY = classesOf('src/components/DetailView.tsx', 'stage-gutter pt-9 pb-12')
 const DETAIL_GRID = classesOf('src/components/DetailView.tsx', 'lg:grid-cols-[216px_minmax(0,1fr)]')
+// DetailHero's text column. Added after a reviewer showed its token swap was
+// entirely uncovered: reverting `--page-pad-x` back to `--page-gutter` left a
+// 272px stair-step at 2560 and 912px at 3840 against the detail body it is
+// supposed to align with, and this check reported zero problems — in the very
+// commit whose message claims "both are asserted now".
+const HERO_TEXT = classesOf('src/components/detail/DetailHero.tsx', 'absolute bottom-7 z-10')
 
 const html = `<!doctype html><html><head><style>${css}</style>
 <style>body{margin:0}.probe{outline:0}</style></head><body>
@@ -76,7 +84,8 @@ const html = `<!doctype html><html><head><style>${css}</style>
     <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
   </div>
   <div id="rail" class="stage-gutter">rail</div>
-  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_GRID}">detail</div></div>
+  <div class="${DETAIL_BODY}"><div id="detail" class="${DETAIL_GRID}"><div>poster</div><div id="detailmain">main</div></div></div>
+  <section style="position:relative;height:200px"><div id="herotext" class="${HERO_TEXT}">hero text</div></section>
   <div id="browsetb" class="${BROWSE_TB}">browse toolbar</div>
   <section style="position:relative;height:200px;overflow:hidden">
     <div id="herofoot" class="${HERO_FOOT}">hero footer</div>
@@ -113,7 +122,8 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
                boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
     }
-    return { nav: box('nav'), detail: box('detail'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
+    return { nav: box('nav'), detail: box('detail'), detailmain: box('detailmain'),
+             herotext: box('herotext'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
              admintb: box('admintb'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
@@ -165,6 +175,7 @@ for (const r of out) {
   console.log(`   admintb   BOX     ${String(r.admintb.boxLeft).padStart(6)} .. ${String(r.admintb.boxRight).padStart(6)}`)
   console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
   console.log(`   detail    box     ${String(r.detail.boxLeft).padStart(6)} .. ${String(r.detail.boxRight).padStart(6)}`)
+  console.log(`   herotext  box     ${String(r.herotext.boxLeft).padStart(6)} .. ${String(r.herotext.boxRight).padStart(6)}`)
 
   // 1. Every page system shares both content edges. This is the stair-step check.
   const ref = r[keys[0]]
@@ -210,14 +221,6 @@ for (const r of out) {
     console.log(`   *** admintb content ${r.admintb.left}..${r.admintb.right} != ${ref.left}..${ref.right}`)
     problems++
   }
-  //    The bleed amount is NOT the page inset. `.stage-bleed`'s own `100%`
-  //    resolves against its parent's ALREADY-PADDED content box, so the cap term
-  //    is zero inside a capped page and the margin is just the gutter. Below md
-  //    the token is a flat MOBILE px, so it cancels exactly and the box sits at 0;
-  //    at 2560 the page inset is 320 and the bleed 48, so the box starts at 272.
-  //    My first expectation used the gutter at every width and reported the three
-  //    mobile widths as "not bleeding" when they were bleeding correctly.
-  const bleed = r.mqWidth < 768 ? MOBILE : GUTTER
   // 5. The TOP NAV, which is a fifth page system and was missed entirely by the
   //    first version of this phase. Its inset is deliberately 18px tighter than
   //    the page gutter below the cap, and must converge with it above — otherwise
@@ -250,6 +253,14 @@ for (const r of out) {
   }
 
   // The bleed now reaches the VIEWPORT, not the capped page.
+  // 7. THE DETAIL HERO's text column must sit on the body's MAIN column, which is
+  //    the whole reason it reads the page token. Only meaningful at lg+, where the
+  //    poster column exists and the offset applies.
+  if (vw >= 1024 && Math.abs(r.herotext.boxLeft - r.detailmain.boxLeft) > 0.5) {
+    console.log(`   *** hero text starts at ${r.herotext.boxLeft}, detail's main column at ${r.detailmain.boxLeft}`)
+    problems++
+  }
+
   // The bled box legitimately overruns the layout box by half a scrollbar,
   // because `50vw` measures the viewport including it. That is the accepted cost
   // of a true full-bleed band and is clipped by `body { overflow-x: hidden }`.
@@ -257,7 +268,6 @@ for (const r of out) {
   // now that the padding is the margin's exact inverse rather than a
   // viewport-space recomputation of the page inset.
   const expectedBoxLeft = -(r.vwWidth - vw) / 2
-  void bleed
   if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
     console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
     problems++

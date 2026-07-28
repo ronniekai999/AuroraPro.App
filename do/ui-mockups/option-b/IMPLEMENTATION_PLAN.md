@@ -835,34 +835,38 @@ Below the cap the second term is negative and `max()` picks the gutter, so every
 width measured in Phases 8–11 is byte-identical. Above it the padding grows and
 content stops at 1920. No margin is involved, so nothing is clobbered. `.stage-page`,
 `.stage-gutter`, BrowseView's toolbar and the hero footer row all read it, and
-`.stage-bleed` cancels it with `calc(var(--page-pad-x) * -1)` — replacing the
-`-mx-[18px] md:-mx-[var(--page-gutter)]` pair that restated both literals.
+`.stage-bleed` cancels it with `calc(50% - 50vw)` and puts the content back with
+`calc(50vw - 50%)` — exact inverses, so they cannot drift. An earlier form used a
+viewport-space recomputation of the page inset and was wrong on every browser with
+classic scrollbars: `100vw` includes the scrollbar and the layout viewport does
+not, which put the band's content half a scrollbar off at every width below the
+cap. Found by running the check headed under Xvfb, where it reported 28 problems
+against 0 headless.
 
-**Measured in Chromium, not derived.** That is the actual lesson of 11.4: every
-claim in that commit was arithmetic and every one was plausible. `npm run verify:layout`
-drives a real layout engine at 390 / 767 / 768 / 1440 / 1920 / 2560 and asserts that
-all four page systems share both content edges, that the cap binds only above 1920,
-that the inset matches an absolute expectation, and that nothing overflows.
+**Measured in Chromium, not derived**, at 320 / 390 / 767 / 768 / 1440 / 1920 /
+2000 / 2560 / 3840, in TWO passes — once with zero-width overlay scrollbars and
+once with a simulated 15px classic scrollbar, because the whole bug above is
+invisible under the first. It asserts that all page systems share both content
+edges, that the cap binds where it should (at ≥2016, not >1920 — `max()` keeps
+picking the gutter until the cap term exceeds it), that the bleed band spans the
+viewport while its content aligns, that the nav converges past the cap, and that
+detail's left edge and its hero's text column track the page.
 
 | width | inset | content |
 |---|---|---|
 | 390 | 18 | 354 |
-| 767 | 18 | 731 |
 | 768 | 48 | 672 |
 | 1440 | 48 | 1344 |
 | 1920 | 48 | 1824 |
 | **2560** | **320** | **1920** |
 
-The check reads the class lists **from the JSX** rather than restating them, because
-a hardcoded probe cannot catch a call site drifting — which is exactly bug 2 above.
-Verified by mutation: reverting BrowseView's toolbar to the raw token fails it.
+**The detail view is IN scope after all.** It was excluded on the grounds that its
+1400/1048 arithmetic is self-consistent — true, and beside the point: the exclusion
+covered its internal measure and not its left edge, which regressed from 0px to
+272px at 2560 and 912px at 3840 once the other pages capped. It now takes the page
+padding on the outside and caps the measure at 1304 on the inside (1304 = the
+content width `max-w-[1400px]` already yielded at md+, which also makes
+DetailHero's 1048 derivable: 1304 − 216 poster − 40 gap).
 
-**Deliberately out of scope: the detail view.** `DetailView` caps at `max-w-[1400px]`
-and `DetailHero` derives `lg:max-w-[1048px]` from it (1400 minus a 304px poster
-offset). That is a reading-measure system with its own internal arithmetic, not the
-rail grid, and folding it into `--page-max` would silently change the poster offset.
-Left alone, and named here so the next person finds a decision rather than an
-oversight.
-
-**Not in `npm run audit`.** `verify:layout` launches a browser; the gate stays fast.
-Run it when touching anything that reads `--page-pad-x`.
+**In `npm run audit`.** It was excluded at first "to keep the gate fast"; measured,
+it is ~2.6s against the gate's ~44s, most of which is a build it already runs.
