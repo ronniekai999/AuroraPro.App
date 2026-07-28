@@ -71,11 +71,25 @@ export function usePanelDismiss(
     return () => {
       cancelAnimationFrame(raf)
       document.removeEventListener('keydown', onKey)
-      // Restore only if the opener is still in the document AND focus is still
-      // inside the panel we are tearing down. Without the second test, closing
-      // the panel by clicking something else would yank focus off whatever the
-      // user just clicked.
-      if (opener?.isConnected && node?.contains(document.activeElement)) {
+      // Restore when the opener is still around AND focus either is still inside
+      // the panel, or has been LOST — `<body>` or nothing.
+      //
+      // The second half is what makes this work on the close path, and capturing
+      // `node` was not enough on its own. On unmount React removes the panel's DOM
+      // before this passive cleanup runs, so the element that had focus (the Close
+      // button the user just pressed) is already detached and `document
+      // .activeElement` has already fallen back to `<body>`. Testing only
+      // `node.contains(activeElement)` is therefore false at exactly the moment the
+      // restore is needed. A test written for this hook caught that the first fix
+      // was still inverted.
+      //
+      // The `focusLost` half is also what keeps the guard honest in the other
+      // direction: if the user closed the panel by clicking some other control,
+      // focus is on THAT control — neither inside the panel nor lost — so we leave
+      // it alone rather than yanking it back to the trigger.
+      const active = document.activeElement
+      const focusLost = !active || active === document.body
+      if (opener?.isConnected && (node?.contains(active) || focusLost)) {
         opener.focus({ preventScroll: true })
       }
     }

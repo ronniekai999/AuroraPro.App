@@ -204,6 +204,74 @@ describe('SearchPalette — keyboard', () => {
   })
 })
 
+describe('SearchPalette — the Tab trap', () => {
+  // Eighteen lines of WCAG rationale sat above this trap with ZERO assertions.
+  // A reviewer disabled it outright — `if (e.key !== 'Tab') return` made
+  // unreachable — and all 16 tests stayed green.
+  //
+  // `aria-modal` is a hint to AT's virtual cursor and does nothing whatsoever to
+  // the browser's tab ring, so without the trap Tab walked out of a full-viewport
+  // overlay into TopNav and painted a focus ring on content the user cannot see.
+
+  /** A focusable standing in for the chrome behind the overlay. */
+  const behind = () => {
+    const b = document.createElement('button')
+    b.textContent = 'TopNav Home tab'
+    document.body.appendChild(b)
+    return b
+  }
+
+  it('does not let Tab reach content behind the overlay', async () => {
+    const user = userEvent.setup()
+    const { opener } = open()
+    const outside = behind()
+    const panel = screen.getByRole('dialog')
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toHaveFocus())
+    // Several presses: one Tab could stop somewhere harmless by luck, and the
+    // shipped bug took two to reach the nav.
+    await user.tab()
+    await user.tab()
+    await user.tab()
+
+    expect(outside).not.toHaveFocus()
+    expect(opener).not.toHaveFocus()
+    expect(document.activeElement).not.toBe(document.body)
+    expect(panel.contains(document.activeElement)).toBe(true)
+  })
+
+  it('does not let Shift+Tab reach it either', async () => {
+    const user = userEvent.setup()
+    const { opener } = open()
+    const outside = behind()
+    const panel = screen.getByRole('dialog')
+
+    await waitFor(() => expect(screen.getByRole('combobox')).toHaveFocus())
+    await user.tab({ shift: true })
+    await user.tab({ shift: true })
+
+    expect(outside).not.toHaveFocus()
+    expect(opener).not.toHaveFocus()
+    expect(panel.contains(document.activeElement)).toBe(true)
+  })
+
+  it('keeps Tab inside once the results have added controls to the ring', async () => {
+    const user = userEvent.setup()
+    open()
+    const outside = behind()
+    const panel = screen.getByRole('dialog')
+
+    // With a query there are more focusables (Clear, the Search chip), so the
+    // first/last pair the trap wraps between is a different pair entirely.
+    await user.type(screen.getByRole('combobox'), 'b')
+    await screen.findAllByRole('option', {}, SETTLE)
+    for (let i = 0; i < 5; i++) await user.tab()
+
+    expect(outside).not.toHaveFocus()
+    expect(panel.contains(document.activeElement)).toBe(true)
+  })
+})
+
 describe('SearchPalette — the focus bugs that shipped', () => {
   it('focuses the input on open — the ⌘K race', async () => {
     open()
