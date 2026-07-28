@@ -887,11 +887,17 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           hero's TEXT COLUMN and never against the thing it actually sits next to.
 
           Look at what is directly beneath it: the Continue Watching rail panel, and
-          every rail after it, run the full gutter width, and the bar sits ~50px
-          above that panel's top edge. A bar ending at 720px against a panel ending
-          at the gutter reads as a stair-step, and agreeing with a hero column 400px
-          higher up does not fix that — the nearest neighbour wins, and the nearest
-          neighbour is full width.
+          every rail after it, run the full gutter width, and the bar's bottom edge
+          sits exactly 32px above that panel's top edge (mb-8; 51px to the panel's
+          header CONTENT, which is what an earlier version of this comment reported
+          as "~50px above the panel" — the right number for the wrong edge).
+          Measured: the bar and the first rail panel now share both edges at every
+          width from 414 to 1920 — 48..1392 at 1440 — and so does every other
+          page-level child below them. On the previous revision the bar at 48..720
+          was the only misaligned element on the page. A bar ending mid-viewport
+          against a panel ending at the gutter reads as a stair-step, and agreeing
+          with a hero column 400px higher up does not fix that: the nearest
+          neighbour wins.
 
           It also settles what this element IS. Capped, it read as the last item in
           the hero's text stack; full width it reads as the first PAGE-level band,
@@ -899,20 +905,31 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
 
           The three objections I raised to full width earlier, re-examined against
           the rendered page instead of in the abstract:
-            - "it would slice the artwork's focal point" — it does not. The bar sits
-              at the very bottom of the hero where the vertical scrim is heaviest and
-              little art is left; the subjects are ~400px above it.
+            - "it would slice the artwork's focal point" — it does not, and this is
+              the one that was actually measured rather than argued. Sampling the
+              rendered pixels over a pure-white backdrop, the composited scrim alpha
+              is 0.973 at the bar's top edge against 0.761 mid-hero: 2.7% of a white
+              frame's luminance survives where the bar sits, versus 24% where the
+              artwork reads. Only the bar's top 20px of 48 overlap the hero at all —
+              the rest is over page background — so "sits at the very bottom of the
+              hero" was itself a mild overstatement. ("the subjects are ~400px above
+              it" was in an earlier draft and is not checkable: subject position
+              depends entirely on the artwork. Dropped rather than kept as decoration.)
             - "it strands the ↵ Search chip from the caret" — a pinned submit
               affordance on a full-width search field is what every search bar does,
               and this field takes short phrases, so the caret never travels.
             - "a 62-character placeholder looks lost" — that was an argument about
               the placeholder, and the placeholder was shortened.
 
-          For the record, since the arithmetic is still worth knowing: `max-w-3xl`
-          resolved to content 48..720 — exactly the hero text column — because
-          `.stage-gutter` and the max-width sit on the SAME element under
-          border-box, so the max-width pays for the 48px padding. That was the
-          Phase 8 correction; it is just no longer the relevant question.
+          For the record, since the arithmetic is still worth knowing and was
+          independently re-verified in a live build: when a max-width sat on THIS
+          element, `.stage-gutter`'s 48px padding came out of it under border-box, so
+          `max-w-3xl` (768) resolved to content 48..720 — exactly the hero text
+          column — while `max-w-2xl` (672) gave 48..624, the hero DESCRIPTION's edge.
+          That asymmetry was the Phase 8 correction. It no longer applies to this
+          element, which now has `max-width: none`; the paragraphs above used to
+          state it in the present tense alongside the past-tense version, so the same
+          fact was asserted twice, once about code that no longer exists.
 
           This wrapper carries BOTH `.stage-gutter` (which is
           `padding-left/right: var(--page-gutter)`, 48px at md+) AND the

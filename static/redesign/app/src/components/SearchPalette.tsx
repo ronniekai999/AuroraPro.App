@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { lockBodyScroll } from '@/lib/scrollLock'
+import { searchStatusMessage } from '@/lib/searchStatus'
 import { searchMedia, type UIMedia } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 
@@ -199,16 +200,11 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   // `aria-expanded` tracks exactly that — see the note at the combobox.
   const expanded = results.length > 0
 
-  const trimmed = query.trim()
-  const searchStatus = trimmed === ''
-    ? ''
-    // "still working" covers both the explicit loading flag AND the window where
-    // the query has changed but the debounce has not yet flipped it.
-    : (loading || settled !== trimmed)
-      ? 'Searching'
-      : results.length === 0
-        ? `No matches for ${query}`
-        : `${results.length} result${results.length === 1 ? '' : 's'} for ${query}`
+  // Extracted to lib/searchStatus and unit-tested. A reviewer showed six
+  // simultaneous mutations to everything this phase added left the whole gate
+  // green; this is the one piece that is pure enough to actually pin, and it is
+  // also the piece that already went wrong once.
+  const searchStatus = searchStatusMessage({ query, loading, settled, count: results.length })
 
   return (
     <div
@@ -336,11 +332,23 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         </div>
 
         {/* Results */}
-        {/* Result count, announced politely. Nothing told a screen-reader user
-            that the list had populated or how big it was — the visible "Searching…"
-            spinner being replaced by rows is a purely visual event. Keyed on the
-            query so re-announcing happens per search rather than per keystroke,
-            and `sr-only` because the count is already obvious on screen. */}
+        {/* Result count, announced politely. Nothing told a screen-reader user that
+            the list had populated or how big it was — the visible "Searching…"
+            spinner being replaced by rows is a purely visual event.
+
+            An earlier version of this comment claimed it was "keyed on the query so
+            re-announcing happens per search rather than per keystroke". There is no
+            `key` prop and never was. The behaviour is roughly right for a different
+            reason — React diffs the identical "Searching" string across intermediate
+            keystrokes, so no mutation and no re-announcement — but that is a
+            measured accident of the string, not a mechanism I built.
+
+            `aria-atomic` because this repo already documents needing it for the same
+            message shape (SearchView: "so the whole sentence is re-read rather than
+            just the changed number, which otherwise announces as a bare '12'"). The
+            first version made the opposite choice here with no note explaining why,
+            which is the kind of inconsistency that reads as a decision when it was
+            an omission. */}
         {/* `settled`, not `loading`. `loading` lags the render by one commit —
             onChange re-renders with the new query while loading is still false and
             results is still the PREVIOUS array — so the first keystroke of every
@@ -349,7 +357,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             actually belong to is the honest test, and it also covers the
             `initialQuery` case, where the region was INSERTED into the DOM already
             containing the false string. */}
-        <p role="status" aria-live="polite" className="sr-only">
+        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
           {searchStatus}
         </p>
 
