@@ -699,3 +699,101 @@ text column is where this started, twice.
 
 Then the deploy: merge to `main` → `bash scripts/server-test-loop.sh --trigger-update`
 → verify against `https://aurorapro.app` per `docs/server-testing.md`.
+
+---
+
+### Phase 11 — close the loop the reviews have been closing by hand
+
+**Branch** `feat/stage-hardening`
+
+Phases 8–10b were each gated by a four-angle adversarial review, and those reviews
+found real defects every time. That is the problem this phase exists for: **they
+found them by reading, and a human read is not repeatable.** The pattern that
+actually paid off was converting a review finding into a permanent machine check —
+`audit-focus-indicators.mjs` Checks 3 and 4 both came from findings that would
+otherwise have had to be re-found. Phase 11 does that deliberately, then clears the
+recorded follow-ups.
+
+Ordered by value, and the first item is worth more than everything below it.
+
+#### 11.1 — A DOM test layer (the one real gap)
+
+There is none. No `jsdom`, no `@testing-library/react`, and **zero tests that render
+anything**: all 140 tests are pure functions over extracted helpers. Meanwhile `src`
+carries 380+ `aria-*` attributes, and every keyboard widget in Phases 9 and 10 is
+hand-rolled.
+
+This is proven, not projected. The Phase 10 reviewer applied SIX simultaneous
+mutations to everything that phase added — `role="option"` to `listitem`,
+`role="listbox"` to `list`, `aria-expanded` to `false`, `aria-activedescendant` to
+`undefined`, `aria-selected` to `false`, and the zero-result message to a wrong
+string — and the entire gate stayed green. 132/132, `tsc` 0, lint unchanged. Every
+semantic that phase existed to add could have been deleted without one check
+noticing. `searchStatus.ts` was extracted specifically because it was the only piece
+testable without a DOM; the rest still is not.
+
+Minimum worth doing:
+- `jsdom` + `@testing-library/react` + `@testing-library/user-event`.
+- Assertions on the APG contracts already written: `SearchPalette`'s combobox
+  (`aria-expanded` tracks the listbox's presence, `aria-activedescendant` follows
+  the highlight, the listbox owns only `option` children), `ContextMenu`'s roving
+  tabIndex and type-ahead, `DetailTabs`' Left/Right/Home/End, `TopNav`'s
+  focus-restore-on-every-dismissal.
+- The focus-trap regressions specifically, because they have already shipped twice:
+  the ⌘K opener-capture race, and mousedown-drag on a `<div>` row escaping the modal
+  to `<body>`.
+
+#### 11.2 — Widen the contrast audit past HeroSection
+
+`audit-onart-contrast.mjs` reads exactly two files — `src/index.css` and
+`src/components/HeroSection.tsx` — against a hardcoded surface list. Every other
+view's on-art and on-glass text is unmeasured.
+
+That is not hypothetical either: the vibe bar's own placeholder sat at 3.18–3.53:1
+for three phases, under the 4.5 floor, and the audit was structurally incapable of
+seeing it. A reviewer found it by hand. The `↵ Search` chip, the "Clear" button, the
+rail headers, the card overlays and every glass panel are in the same position now.
+
+#### 11.3 — Audit reduced-motion, don't just write it
+
+`index.css` has 11 `prefers-reduced-motion` rules and nothing verifies any of them.
+The Phase 10b review found a genuine reduced-motion-ONLY defect — `.animate-fade-in
+{ animation: none !important }` stops that element being a stacking context, which
+would have sent `.convo-search::before`'s `z-index: -1` halo behind `.aurora-bg` and
+made it invisible for exactly the users least likely to report a missing animation.
+Bugs that exist only under a media query are invisible to every check that renders
+one state.
+
+#### 11.4 — The recorded follow-ups
+
+Carried forward from Phases 8–10b, none urgent, all real:
+
+- **The `.aurora-bg` seam.** The app root is `bg-[#050505] aurora-bg`; `.aurora-bg`
+  composites three radials at α 0.05–0.08 over that base, and the hero paints its own
+  opaque `#050505` on top, so the hero's bottom edge is a ~6–10 sRGB-level step at
+  full width with no ramp. Phase 10b unmasked it by removing the overlap that had
+  been attenuating it. The fix belongs in the background system.
+- **iOS Safari zooms the vibe input on focus.** Its font-size is under 16px, which is
+  the trigger. `.stage-navsearch` already guards this with a 16px-below-lg rule and a
+  comment explaining why; `.convo-search` does not.
+- **`ServerPanel` / `NotificationPanel`** render `role="dialog"` with no focus
+  management — no trap, no restore, no initial focus.
+- **`SearchPalette`'s "Smart" chip** (`mode === 'semantic'`) is unannounced.
+- **Ultra-wide.** No page-level max-width on the rail stack; at 2560+ everything sits
+  at a 48px gutter.
+- **390px horizontal overflow**, ~48px, from HeroSection's bottom flex row. Clipped
+  rather than scrollable (`overflow-hidden` on the hero, `overflow-x: hidden` on
+  body), so it hides content rather than breaking layout — which is why it survived
+  the Phase 8 breakpoint pass.
+
+#### 11.5 — Make the deploy verification runnable
+
+`docs/server-testing.md` documents `scripts/server-test-loop.sh` as the way to verify
+a change against the live instance, and it needs `AURORA_TEST_USER` /
+`AURORA_TEST_PASS` from the environment. Those are not present in the Claude Code web
+environment, so the documented path cannot actually be run from there — Phase 10b was
+verified instead by building the merged tree locally and matching both emitted asset
+hashes against what `https://aurorapro.app/v2/` serves. That works, but it checks
+that the right bytes shipped, not that the app behaves. Either configure the secrets
+or document the hash-match as the supported fallback.
+
