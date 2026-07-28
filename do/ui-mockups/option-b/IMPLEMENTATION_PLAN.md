@@ -663,11 +663,34 @@ were 16px apart, close enough to read as one row, at which point the eye tries t
 reconcile a four-pill row in which one pill is the width of the viewport.
 
 `-mt-5` → `mt-2`. Gap is `margin-top + 36px` (the hero row's `pb-9`), so 16px → 44px,
-against `mb-8`'s 32px below: the bar is now nearer the rails than the hero, which is
-the correct grouping. The cost is the overlap — 20px of the bar's ~48 used to sit on
-the artwork and now none does — which is deliberate, since the overlap was the
-mechanism welding it to the hero, and safe because Phase 4 made the hero's bottom
-scrim land on exactly `#050505`.
+against `mb-8`'s 32px below.
+
+**This is a deliberate divergence from the mockup, not a port of it.** `index.html`
+specifies `.hero-inner{padding:0 48px 42px}`, `.conv-search{margin:-26px 48px 0}`,
+`.home-rails{padding:36px 48px 0}` — **16px above the bar, 36px below**, i.e. the bar
+grouped with the HERO. Production matched that intent exactly until now (16/32).
+Phase 10b inverts it to 44/32, grouping the bar with the RAILS, which is the right
+call once the bar is full width — it is the control that replaces the rails with
+results — but Phase 0's "ported 1:1 from the mockup" doctrine does not cover it, and
+the first version of this section recorded the change as a spec-consistent fix. It
+is not. Recorded here so the next person diffing against the mockup finds the reason
+instead of the discrepancy.
+
+The cost is the overlap — 20px of the bar's ~49 used to sit on the artwork and now
+none of its border box does — which is deliberate, since the overlap was the
+mechanism welding it to the hero.
+
+One consequence was justified wrongly and is worth carrying forward. "Safe because
+Phase 4 made the hero's bottom scrim land on exactly `#050505`" is true of the inside
+of the hero and is not what the bar pulled away from: the app root is `bg-[#050505]
+aurora-bg`, and `.aurora-bg` composites three purple radials at α 0.05–0.08 over that
+base, which the hero's own opaque `#050505` masks. So the hero's bottom edge is a
+~6–10 sRGB-level step, full width, no ramp. It is pre-existing, but the negative
+margin had been straddling and attenuating it across everything but the two gutters;
+at `mt-2` it is bare edge to edge. Small — an OLED-in-a-dark-room band, not a contrast
+defect — and **left as a follow-up**, because the honest fix is in the hero/page
+background system and this element has already been broken three times by fixing it
+from the wrong reference.
 
 Rejected, recorded so it is not relitigated a fifth time: moving "Not tonight" into
 the CTA cluster closes the void but promotes a deliberately quiet tertiary control

@@ -457,15 +457,27 @@
      because the global input treatment would otherwise draw a second indicator
      inside the wrapper's own gradient border.
      It shipped as a 1px `rgba(168,85,247,.3)` ring, which measures 1.12–1.45:1
-     against the bar: a glow, not an indicator. A single light ring is not enough
-     either — this bar sits ON HERO ARTWORK, so the surface OUTSIDE the ring is
-     arbitrary, and a lavender ring over a bright frame is only 1.97:1 against
-     what's beyond it. The dark outer ring is what makes the indicator
-     frame-independent:
+     against the bar: a glow, not an indicator. A single light ring was not enough
+     either, BECAUSE AT THE TIME the bar sat on hero artwork, so the surface
+     outside the ring was arbitrary and a lavender ring over a bright frame is
+     only 1.97:1 against what's beyond it. The dark outer ring is what made the
+     indicator frame-independent:
        inner vs the bar inside     9.99:1 (dark) · 3.39:1 (bright)
        inner vs the outer ring    10.42:1 (dark) · 8.94:1 (bright)
-     Both sides clear 3:1 on any artwork. The glow layers are kept — they are
-     decoration and are not relied on. */
+
+     Phase 10b moved the bar off the artwork (`-mt-5` -> `mt-2` in App.tsx), so
+     the premise of that paragraph no longer holds: the surface outside the ring
+     is now `.aurora-bg`, not arbitrary, and the "(bright)" column above does not
+     describe any reachable state — the real figures are the "(dark)" ones, 9.99:1
+     and 10.42:1. The two-tone ring is therefore over-engineered for its current
+     situation and is KEPT anyway: it costs nothing, it is measured, and the
+     element has moved four times in four phases. Do not "simplify" it back to a
+     single ring on the strength of the dark column alone.
+
+     The glow layers are kept too — they are decoration and are not relied on.
+     NOTE this rule is what audit-focus-indicators.mjs Check 3 verifies: the
+     wrapper nulls the global input treatment at (0,3,1), so deleting this rule
+     leaves the field with no focus indicator at all. */
   .convo-search:focus-within {
     box-shadow:
       0 0 0 2px rgba(216, 180, 254, 0.95),
