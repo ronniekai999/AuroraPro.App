@@ -259,13 +259,26 @@ export function MediaCardCinema({
       // screen-reader user they were there. Being reachable by a shortcut you have
       // no way to learn about is not much better than being unreachable.
       //
-      // `aria-haspopup="menu"` is what a reader announces ("has pop up menu"), and
-      // it is honest here: the popup really is a `role="menu"` of commands. No
-      // `aria-expanded` — that is for a trigger that OWNS its popup, and this card
-      // does not: the menu is App-level state rendered as a sibling, one instance
-      // shared across the whole grid, so a per-card expanded flag would be a lie on
-      // every card but one.
-      aria-haspopup="menu"
+      // `aria-keyshortcuts`, and NOT `aria-haspopup`. The first version used
+      // haspopup alone, and a review showed that is the attribute ARIA's own
+      // authoring note argues against in exactly this situation: "If there is no
+      // visual indication that an element will trigger a popup, authors are advised
+      // to consider whether use of aria-haspopup is necessary, and avoid using it
+      // when it's not." This card has no chevron, no ellipsis, no affordance — that
+      // absence is the whole premise.
+      //
+      // It was also misleading in practice. `aria-haspopup` describes what the
+      // element's ACTIVATION opens, and activating a card opens the detail view,
+      // not the menu; the menu comes from `contextmenu` (Shift+F10 / Menu key /
+      // right-click). And NVDA maps the state to the literal string "subMenu", so
+      // the announcement read "…, button, subMenu" — "this is inside a menu and
+      // opens a submenu", which is not what is true.
+      //
+      // `aria-keyshortcuts` names the mechanism instead of gesturing at it, is
+      // announced by both NVDA and JAWS, and is precisely what closes the gap:
+      // four of that menu's items have no other route in the app, and the problem
+      // was never operability, it was that nobody could learn the shortcut.
+      aria-keyshortcuts="Shift+F10"
       // role="button" makes descendants presentational, so EVERYTHING inside
       // the card is pruned from the a11y tree and this label is the only
       // thing a screen reader gets. Title + year alone left rating, runtime,

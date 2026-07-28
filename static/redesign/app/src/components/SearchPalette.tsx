@@ -50,6 +50,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   const [mode, setMode] = useState<'literal' | 'semantic'>('literal')
   const [loading, setLoading] = useState(false)
   const [highlighted, setHighlighted] = useState(0)
+  // The query the CURRENT `results` actually belong to. `loading` cannot answer
+  // that: it lags the render by one commit, so on the first keystroke of a search
+  // the component renders with the new query, `loading` still false and `results`
+  // still the previous array — which is how the live region came to announce
+  // "No matches" as the opening line of every search. See searchStatus below.
+  const [settled, setSettled] = useState('')
   // Ref into the scrollable results list so we can keyboard-scroll
   // the highlighted row into view if the user arrow-keys past the
   // visible window.
@@ -88,9 +94,11 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         setResults(res.items)
         setMode(res.mode)
         setHighlighted(0)
+        setSettled(query.trim())
       } catch (err) {
         if ((err as Error)?.name === 'AbortError') return
         setResults([])
+        setSettled(query.trim())
       } finally {
         setLoading(false)
       }
@@ -187,6 +195,21 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   if (!open) return null
 
+  // The listbox element is rendered iff there are options to put in it, and
+  // `aria-expanded` tracks exactly that — see the note at the combobox.
+  const expanded = results.length > 0
+
+  const trimmed = query.trim()
+  const searchStatus = trimmed === ''
+    ? ''
+    // "still working" covers both the explicit loading flag AND the window where
+    // the query has changed but the debounce has not yet flipped it.
+    : (loading || settled !== trimmed)
+      ? 'Searching'
+      : results.length === 0
+        ? `No matches for ${query}`
+        : `${results.length} result${results.length === 1 ? '' : 's'} for ${query}`
+
   return (
     <div
       className="fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in"
@@ -270,8 +293,23 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             // focus stays in the input — so the pattern fits without changing how
             // it works, only what it reports.
             role="combobox"
-            aria-expanded={results.length > 0}
-            aria-controls={LISTBOX_ID}
+            // Both of these now track whether the LISTBOX ELEMENT is rendered,
+            // which is what APG actually specifies — "When the popup element is
+            // visible, aria-expanded is set to true" — not whether options exist.
+            // The first version wired `expanded` to `results.length > 0` while the
+            // listbox container was rendered unconditionally, so with an empty
+            // query the combobox declared itself collapsed while pointing
+            // `aria-controls` at a visible, laid-out 171px panel. JAWS suppresses a
+            // collapsed combobox's controlled list from list navigation, so it
+            // hid a panel the sighted user was looking at.
+            // `aria-controls` is dropped rather than left dangling when collapsed.
+            aria-expanded={expanded}
+            aria-controls={expanded ? LISTBOX_ID : undefined}
+            // The placeholder was the only accessible name this had. Placeholder-
+            // as-label is the classic anti-pattern and APG's own combobox example
+            // wires a real label; Phase 10 promoted this to a combobox and left it
+            // unlabelled.
+            aria-label="Search Aurora"
             aria-autocomplete="list"
             aria-activedescendant={results[highlighted] ? optionId(results[highlighted].id) : undefined}
             // 22px display type on the query, not 18px body. The query is the
@@ -303,21 +341,23 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             spinner being replaced by rows is a purely visual event. Keyed on the
             query so re-announcing happens per search rather than per keystroke,
             and `sr-only` because the count is already obvious on screen. */}
+        {/* `settled`, not `loading`. `loading` lags the render by one commit —
+            onChange re-renders with the new query while loading is still false and
+            results is still the PREVIOUS array — so the first keystroke of every
+            search announced "No matches for b" before "Searching", and flashed the
+            empty state visually for a frame. Comparing the query the results
+            actually belong to is the honest test, and it also covers the
+            `initialQuery` case, where the region was INSERTED into the DOM already
+            containing the false string. */}
         <p role="status" aria-live="polite" className="sr-only">
-          {query.trim() === ''
-            ? ''
-            : loading
-              ? 'Searching'
-              : results.length === 0
-                ? `No matches for ${query}`
-                : `${results.length} result${results.length === 1 ? '' : 's'} for ${query}`}
+          {searchStatus}
         </p>
 
+        {/* The SCROLLER is not the listbox. Keeping `listRef` here (the
+            scroll-into-view effect measures against it) and putting the listbox
+            inside is what lets the listbox exist only when it has options. */}
         <div
           ref={listRef}
-          id={LISTBOX_ID}
-          role="listbox"
-          aria-label={`Search results for ${query || 'your query'}`}
           className="max-h-[55vh] overflow-y-auto"
         >
           {!query.trim() && (
@@ -354,6 +394,21 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             </div>
           )}
 
+          {/* `role="listbox"` wraps ONLY the options. It previously wrapped the
+              hint block, the "Searching…" line and the "No matches" block too —
+              ARIA requires a listbox to own `option` or `group` and nothing else,
+              and Chromium does not repair it: it hung fourteen orphaned text nodes
+              straight off the listbox.
+              That was not merely untidy. A combobox with `aria-activedescendant`
+              inside an `aria-modal` dialog puts NVDA and JAWS into focus mode,
+              where the virtual cursor is off — so everything in that container
+              became unreachable, including the app's ONLY documentation of its own
+              keyboard model (↑↓ navigate / ⏎ select / Esc close) and the only
+              recovery advice on a failed search. Before Phase 10 those sat in a
+              plain div a browse-mode user could arrow through. The commit whose
+              thesis was discoverability made them undiscoverable. */}
+          {expanded && (
+          <div id={LISTBOX_ID} role="listbox" aria-label="Search results" aria-busy={loading || undefined}>
           {results.map((m, i) => (
             // `role="option"` on a div, not a <button>. Options are not buttons in
             // ARIA, and the change fixes a real behavioural problem as well as a
@@ -373,9 +428,11 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               data-row={i}
               onMouseEnter={() => setHighlighted(i)}
               onClick={() => { onSelect(m); onClose() }}
-              // focus-visible:[outline-offset:-2px] — the scroller clips the
-              // floor's outward 2px ring; see the same note on TopNav's itemCls.
-              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors focus-visible:[outline-offset:-2px] ${
+              // No focus utility: these are `role="option"` and deliberately not
+              // focusable — DOM focus stays in the combobox. The
+              // `focus-visible:[outline-offset:-2px]` that was here became dead the
+              // moment they stopped being buttons.
+              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors cursor-pointer ${
                 i === highlighted
                   ? 'bg-purple-500/15 border-l-2 border-purple-400'
                   : 'border-l-2 border-transparent hover:bg-white/[0.03]'
@@ -407,6 +464,8 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               )}
             </div>
           ))}
+          </div>
+          )}
         </div>
       </div>
     </div>
