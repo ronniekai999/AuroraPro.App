@@ -277,9 +277,34 @@ for (const r of out) {
     console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)
     problems++
   }
-  // 3. Nothing overflows horizontally at any width — the 390px case that a whole
-  //    breakpoint pass missed, because the hero clips rather than scrolls.
+  // 3. Horizontal overflow, stated as what it actually covers.
+  //
+  //    `documentElement.scrollWidth > clientWidth` is kept for gross overflow, but
+  //    it CANNOT see the bleed's overrun and never could: `50vw` includes a classic
+  //    scrollbar, so the band spills half a scrollbar past BOTH page edges, and the
+  //    simulated pass narrows `body` — which makes that a LEFT-side spill, and
+  //    left overflow is not scrollable in LTR. A real Chrome measures
+  //    scrollWidth 1275 vs clientWidth 1270 on /admin where this reported clean.
+  //
+  //    So assert the thing that is actually true and worth guarding: the overrun
+  //    exists, it is BOUNDED at half a scrollbar, and nothing else exceeds it. An
+  //    unbounded version would be a real defect; the bounded one is the documented
+  //    cost of a full-bleed band, and a reviewer confirmed nothing is clipped and
+  //    60 Tab presses never move scrollLeft off 0.
   if (r.docOverflow) { console.log('   *** HORIZONTAL OVERFLOW'); problems++ }
+  const halfBar = (r.vwWidth - vw) / 2
+  const overrunL = -r.admintb.boxLeft
+  const overrunR = r.admintb.boxRight - vw
+  if (overrunL > halfBar + 0.5 || overrunR > halfBar + 0.5) {
+    console.log(`   *** the bled band overruns by ${overrunL}/${overrunR}, more than the ${halfBar} half-scrollbar it is allowed`)
+    problems++
+  }
+  for (const [k, b] of [['rail', ref], ['detail', r.detail], ['nav', r.nav]]) {
+    if (b.boxRight > vw + 0.5 || b.boxLeft < -0.5) {
+      console.log(`   *** ${k} escapes the layout box: ${b.boxLeft}..${b.boxRight} vs 0..${vw}`)
+      problems++
+    }
+  }
 }
 console.log(`\n${problems} alignment problem(s).`)
 process.exit(problems ? 1 : 0)
