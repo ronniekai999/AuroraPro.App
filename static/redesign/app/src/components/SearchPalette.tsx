@@ -23,6 +23,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { lockBodyScroll } from '@/lib/scrollLock'
+import { searchStatusMessage } from '@/lib/searchStatus'
 import { searchMedia, type UIMedia } from '@/lib/api'
 import { Icon } from '@/components/Icon'
 
@@ -36,6 +37,9 @@ interface Props {
   initialQuery?: string
 }
 
+const LISTBOX_ID = 'palette-results'
+const optionId = (mediaId: number | string) => `palette-opt-${mediaId}`
+
 export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Props) {
   const inputRef = useRef<HTMLInputElement | null>(null)
   // Phase 9 — the panel needs a ref for the Tab trap below. It declared
@@ -47,6 +51,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
   const [mode, setMode] = useState<'literal' | 'semantic'>('literal')
   const [loading, setLoading] = useState(false)
   const [highlighted, setHighlighted] = useState(0)
+  // The query the CURRENT `results` actually belong to. `loading` cannot answer
+  // that: it lags the render by one commit, so on the first keystroke of a search
+  // the component renders with the new query, `loading` still false and `results`
+  // still the previous array — which is how the live region came to announce
+  // "No matches" as the opening line of every search. See searchStatus below.
+  const [settled, setSettled] = useState('')
   // Ref into the scrollable results list so we can keyboard-scroll
   // the highlighted row into view if the user arrow-keys past the
   // visible window.
@@ -85,9 +95,11 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         setResults(res.items)
         setMode(res.mode)
         setHighlighted(0)
+        setSettled(query.trim())
       } catch (err) {
         if ((err as Error)?.name === 'AbortError') return
         setResults([])
+        setSettled(query.trim())
       } finally {
         setLoading(false)
       }
@@ -184,6 +196,16 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
 
   if (!open) return null
 
+  // The listbox element is rendered iff there are options to put in it, and
+  // `aria-expanded` tracks exactly that — see the note at the combobox.
+  const expanded = results.length > 0
+
+  // Extracted to lib/searchStatus and unit-tested. A reviewer showed six
+  // simultaneous mutations to everything this phase added left the whole gate
+  // green; this is the one piece that is pure enough to actually pin, and it is
+  // also the piece that already went wrong once.
+  const searchStatus = searchStatusMessage({ query, loading, settled, count: results.length })
+
   return (
     <div
       className="fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in"
@@ -213,6 +235,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
+        // onKeyDownCapture on the panel is not enough on its own if focus has
+        // escaped the panel entirely, which is what the mousedown fix above
+        // prevents. Kept here rather than moved to the document because with the
+        // mousedown fix focus cannot leave the combobox by pointer, and a
+        // document-level trap would have to re-derive whether the palette owns the
+        // event — more moving parts for the same result.
         onKeyDown={e => {
           // Tab trap. `aria-modal` is a hint to AT's virtual cursor and does
           // nothing whatsoever to the browser's tab ring, so without this Tab
@@ -250,6 +278,42 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search Aurora — titles, vibes, anything…"
+            // APG Combobox with a listbox popup (Phase 10). Before this the
+            // palette was a combobox wearing no combobox semantics: no
+            // `role="combobox"`, no listbox, no `aria-activedescendant`, no
+            // `aria-selected`, no live region. A screen-reader user got an input
+            // that silently changed a list they could not perceive — typing
+            // produced silence, and arrowing produced silence, because the ONLY
+            // difference between a highlighted row and its neighbours was a
+            // background colour and a `⏎` glyph appended to its label.
+            //
+            // `aria-activedescendant` is the load-bearing piece. APG: "When a
+            // descendant of a listbox … popup is focused, DOM focus remains on the
+            // combobox and the combobox has `aria-activedescendant` set to a value
+            // that refers to the focused element within the popup." That is exactly
+            // this widget's existing behaviour — arrows move `highlighted` while
+            // focus stays in the input — so the pattern fits without changing how
+            // it works, only what it reports.
+            role="combobox"
+            // Both of these now track whether the LISTBOX ELEMENT is rendered,
+            // which is what APG actually specifies — "When the popup element is
+            // visible, aria-expanded is set to true" — not whether options exist.
+            // The first version wired `expanded` to `results.length > 0` while the
+            // listbox container was rendered unconditionally, so with an empty
+            // query the combobox declared itself collapsed while pointing
+            // `aria-controls` at a visible, laid-out 171px panel. JAWS suppresses a
+            // collapsed combobox's controlled list from list navigation, so it
+            // hid a panel the sighted user was looking at.
+            // `aria-controls` is dropped rather than left dangling when collapsed.
+            aria-expanded={expanded}
+            aria-controls={expanded ? LISTBOX_ID : undefined}
+            // The placeholder was the only accessible name this had. Placeholder-
+            // as-label is the classic anti-pattern and APG's own combobox example
+            // wires a real label; Phase 10 promoted this to a combobox and left it
+            // unlabelled.
+            aria-label="Search Aurora"
+            aria-autocomplete="list"
+            aria-activedescendant={results[highlighted] ? optionId(results[highlighted].id) : undefined}
             // 22px display type on the query, not 18px body. The query is the
             // subject of this overlay, so it gets the same treatment a page
             // title would. font-display + min-w-0 so the flex child can still
@@ -257,7 +321,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             // off the panel's right edge, because an <input>'s default
             // min-width is `auto`, so it will not contract below its size
             // attribute's intrinsic width.
-            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/30 focus:ring-0"
+            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/60 focus:ring-0"
             spellCheck={false}
             autoComplete="off"
           />
@@ -274,6 +338,38 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         </div>
 
         {/* Results */}
+        {/* Result count, announced politely. Nothing told a screen-reader user that
+            the list had populated or how big it was — the visible "Searching…"
+            spinner being replaced by rows is a purely visual event.
+
+            An earlier version of this comment claimed it was "keyed on the query so
+            re-announcing happens per search rather than per keystroke". There is no
+            `key` prop and never was. The behaviour is roughly right for a different
+            reason — React diffs the identical "Searching" string across intermediate
+            keystrokes, so no mutation and no re-announcement — but that is a
+            measured accident of the string, not a mechanism I built.
+
+            `aria-atomic` because this repo already documents needing it for the same
+            message shape (SearchView: "so the whole sentence is re-read rather than
+            just the changed number, which otherwise announces as a bare '12'"). The
+            first version made the opposite choice here with no note explaining why,
+            which is the kind of inconsistency that reads as a decision when it was
+            an omission. */}
+        {/* `settled`, not `loading`. `loading` lags the render by one commit —
+            onChange re-renders with the new query while loading is still false and
+            results is still the PREVIOUS array — so the first keystroke of every
+            search announced "No matches for b" before "Searching", and flashed the
+            empty state visually for a frame. Comparing the query the results
+            actually belong to is the honest test, and it also covers the
+            `initialQuery` case, where the region was INSERTED into the DOM already
+            containing the false string. */}
+        <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {searchStatus}
+        </p>
+
+        {/* The SCROLLER is not the listbox. Keeping `listRef` here (the
+            scroll-into-view effect measures against it) and putting the listbox
+            inside is what lets the listbox exist only when it has options. */}
         <div
           ref={listRef}
           className="max-h-[55vh] overflow-y-auto"
@@ -312,15 +408,61 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             </div>
           )}
 
+          {/* `role="listbox"` wraps ONLY the options. It previously wrapped the
+              hint block, the "Searching…" line and the "No matches" block too —
+              ARIA requires a listbox to own `option` or `group` and nothing else,
+              and Chromium does not repair it: it hung fourteen orphaned text nodes
+              straight off the listbox.
+              That was not merely untidy. A combobox with `aria-activedescendant`
+              inside an `aria-modal` dialog puts NVDA and JAWS into focus mode,
+              where the virtual cursor is off — so everything in that container
+              became unreachable, including the app's ONLY documentation of its own
+              keyboard model (↑↓ navigate / ⏎ select / Esc close) and the only
+              recovery advice on a failed search. Before Phase 10 those sat in a
+              plain div a browse-mode user could arrow through. The commit whose
+              thesis was discoverability made them undiscoverable. */}
+          {expanded && (
+          <div id={LISTBOX_ID} role="listbox" aria-label="Search results" aria-busy={loading || undefined}>
           {results.map((m, i) => (
-            <button
+            // `role="option"` on a div, not a <button>. Options are not buttons in
+            // ARIA, and the change fixes a real behavioural problem as well as a
+            // semantic one: as tabbable buttons these rows created THREE competing
+            // cursors — Tab moved DOM focus, the arrows moved `highlighted`, and
+            // hover moved it again — so the `⏎` affordance could advertise on a row
+            // that Enter would not act on. Phase 9 patched the symptom by making
+            // Enter defer to a Tab-focused row; the combobox pattern removes the
+            // second cursor entirely, because focus never leaves the input. The
+            // `data-row` attribute and that Enter guard stay as belt-and-braces,
+            // but the branch is now unreachable.
+            <div
               key={m.id}
+              id={optionId(m.id)}
+              role="option"
+              aria-selected={i === highlighted}
               data-row={i}
+              // preventDefault on mousedown, and this is a focus fix, not a text fix.
+              //
+              // `<div>` text is selectable where `<button>` text is not, so once the
+              // rows stopped being buttons a mousedown-drag across two of them
+              // selected their text AND blurred the input — leaving
+              // `document.activeElement === document.body`, which is OUTSIDE the
+              // panel. The Tab trap is bound to the panel's onKeyDown, so it stopped
+              // firing entirely: the next two Tabs walked into TopNav's logo and Home
+              // tab, painting a focus ring on chrome behind a full-viewport
+              // aria-modal overlay (WCAG 2.4.3, 2.4.11) — the exact failure Phase 9
+              // added the trap to prevent. On the button version this was
+              // unreachable, because mousedown focused the row.
+              // Suppressing the default mousedown behaviour keeps focus in the
+              // combobox, where this pattern requires it to stay, and removes the
+              // stray selection as a side effect. Click still fires.
+              onMouseDown={e => e.preventDefault()}
               onMouseEnter={() => setHighlighted(i)}
               onClick={() => { onSelect(m); onClose() }}
-              // focus-visible:[outline-offset:-2px] — the scroller clips the
-              // floor's outward 2px ring; see the same note on TopNav's itemCls.
-              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors focus-visible:[outline-offset:-2px] ${
+              // No focus utility: these are `role="option"` and deliberately not
+              // focusable — DOM focus stays in the combobox. The
+              // `focus-visible:[outline-offset:-2px]` that was here became dead the
+              // moment they stopped being buttons.
+              className={`w-full flex items-center gap-4 px-5 py-3 text-left transition-colors cursor-pointer ${
                 i === highlighted
                   ? 'bg-purple-500/15 border-l-2 border-purple-400'
                   : 'border-l-2 border-transparent hover:bg-white/[0.03]'
@@ -345,10 +487,15 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
                 </div>
               </div>
               {i === highlighted && (
-                <kbd className="text-[10px] uppercase tracking-wider text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
+                // aria-hidden: this glyph is a visual echo of aria-selected, and
+                // without it the option's accessible name gained a trailing "⏎"
+                // that a reader announced as "return" on exactly one row.
+                <kbd aria-hidden="true" className="text-[10px] uppercase tracking-wider text-purple-200 border border-purple-500/30 rounded px-1.5 py-0.5 font-mono">⏎</kbd>
               )}
-            </button>
+            </div>
           ))}
+          </div>
+          )}
         </div>
       </div>
     </div>

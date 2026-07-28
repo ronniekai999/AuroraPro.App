@@ -882,8 +882,54 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           reads as one composition with the hero rather than a separate widget
           floating above the rails. relative + z-20 keeps it above the hero's scrim.
 
-          `max-w-3xl` — and it is important to record WHY, because Phase 8 briefly
-          changed it to `max-w-2xl` on a misreading and had to change it back.
+          FULL WIDTH, gutter to gutter — third and final answer on this bar, and the
+          first two were wrong for the same reason: I kept measuring it against the
+          hero's TEXT COLUMN and never against the thing it actually sits next to.
+
+          Look at what is directly beneath it: the Continue Watching rail panel, and
+          every rail after it, run the full gutter width, and the bar's bottom edge
+          sits exactly 32px above that panel's top edge (mb-8; 51px to the panel's
+          header CONTENT, which is what an earlier version of this comment reported
+          as "~50px above the panel" — the right number for the wrong edge).
+          Measured: the bar and the first rail panel now share both edges at every
+          width from 414 to 1920 — 48..1392 at 1440 — and so does every other
+          page-level child below them. On the previous revision the bar at 48..720
+          was the only misaligned element on the page. A bar ending mid-viewport
+          against a panel ending at the gutter reads as a stair-step, and agreeing
+          with a hero column 400px higher up does not fix that: the nearest
+          neighbour wins.
+
+          It also settles what this element IS. Capped, it read as the last item in
+          the hero's text stack; full width it reads as the first PAGE-level band,
+          which is what it behaves like — it replaces the rails below with results.
+
+          The three objections I raised to full width earlier, re-examined against
+          the rendered page instead of in the abstract:
+            - "it would slice the artwork's focal point" — it does not, and this is
+              the one that was actually measured rather than argued. Sampling the
+              rendered pixels over a pure-white backdrop, the composited scrim alpha
+              is 0.973 at the bar's top edge against 0.761 mid-hero: 2.7% of a white
+              frame's luminance survives where the bar sits, versus 24% where the
+              artwork reads. Only the bar's top 20px of 48 overlap the hero at all —
+              the rest is over page background — so "sits at the very bottom of the
+              hero" was itself a mild overstatement. ("the subjects are ~400px above
+              it" was in an earlier draft and is not checkable: subject position
+              depends entirely on the artwork. Dropped rather than kept as decoration.)
+            - "it strands the ↵ Search chip from the caret" — a pinned submit
+              affordance on a full-width search field is what every search bar does,
+              and this field takes short phrases, so the caret never travels.
+            - "a 62-character placeholder looks lost" — that was an argument about
+              the placeholder, and the placeholder was shortened.
+
+          For the record, since the arithmetic is still worth knowing and was
+          independently re-verified in a live build: when a max-width sat on THIS
+          element, `.stage-gutter`'s 48px padding came out of it under border-box, so
+          `max-w-3xl` (768) resolved to content 48..720 — exactly the hero text
+          column — while `max-w-2xl` (672) gave 48..624, the hero DESCRIPTION's edge.
+          That asymmetry was the Phase 8 correction. It no longer applies to this
+          element, which now has `max-width: none`; the paragraphs above used to
+          state it in the present tense alongside the past-tense version, so the same
+          fact was asserted twice, once about code that no longer exists.
 
           This wrapper carries BOTH `.stage-gutter` (which is
           `padding-left/right: var(--page-gutter)`, 48px at md+) AND the
@@ -912,7 +958,7 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           An earlier version of this comment said "Centered under the hero".
           There is no `mx-auto` here and never was — it is gutter-aligned. */}
       {onConversationalSearch && (
-        <div className="stage-gutter relative z-20 -mt-5 mb-8 max-w-3xl">
+        <div className="stage-gutter relative z-20 -mt-5 mb-8">
           <div className="convo-search flex items-center">
             <Icon name="sparkle" size={17} className="ml-4 mr-2 shrink-0 text-purple-300 pointer-events-none" />
             <input
@@ -923,13 +969,26 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               // two search affordances are visible at once on Home — TopNav's
               // "Search titles…" (lexical, by name) and this one (semantic, by
               // description) — and nothing told a user which was which. Leading
-              // with the verb that distinguishes them does. Also 50 characters
-              // instead of 62, which matters now the field is 672px rather than
-              // 768px: the example is the part that teaches what this accepts,
-              // so it is the part that must survive.
+              // with the verb that distinguishes them does. Also shorter — 52
+              // characters against the original 75 — because the example is the
+              // part that teaches what this field accepts, so it is the part that
+              // has to survive truncation.
+              // (An earlier version justified the length with "the field is 672px
+              // rather than 768px". That stopped being true when the bar went full
+              // width, and both figures were wrong anyway — the strings are 52 and
+              // 75, not 50 and 62. The reason to keep it short is the 390px case,
+              // where it truncates regardless; on desktop there is now room to
+              // spare.)
+              // /70, not /40. A reviewer measured the placeholder at 3.18–3.53:1
+              // against the bar's own fill — under the 4.5:1 floor, and it is the
+              // only thing in the field until you type. Pre-existing rather than
+              // introduced here, but this is the element three phases have now been
+              // spent on, and `audit:contrast` cannot see it: that script only walks
+              // HeroSection's surfaces, so nothing in the gate was ever going to
+              // catch it.
               placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
               aria-label="Describe a vibe to search by"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/70 outline-none"
             />
             {convoText && (
               <button
@@ -963,14 +1022,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           below it. */}
       <div className="stage-gutter">
       {convoLoading && (
-        // max-w-2xl here equals max-w-3xl on the bar above, and that is not a
-        // typo: this element sits INSIDE a `.stage-gutter` parent so it pays no
-        // padding out of its own max-width, while the bar's `.stage-gutter` is on
-        // the same element as its max-width and does. Both resolve to 48..720 at
-        // 1440px. It was `max-w-3xl` (48..816), overhanging the bar it stands in
-        // for by 96px, so the layout visibly jumped on every query — the one real
-        // misalignment on this row.
-        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8 max-w-2xl">
+        // No cap, matching the bar it stands in for. Any cap here is a layout jump
+        // on every query, which is exactly what this row had when the two disagreed.
+        <div className="relative h-16 flex items-center justify-center overflow-hidden mb-8">
           <div className="aurora-pulse-blob w-24 h-24 bg-purple-500/40 -left-10 -top-2" style={{ animationDelay: '0s' }} />
           <div className="aurora-pulse-blob w-32 h-32 bg-fuchsia-500/30 left-1/3 top-0" style={{ animationDelay: '-2s' }} />
           <div className="aurora-pulse-blob w-28 h-28 bg-indigo-500/40 right-10 bottom-0" style={{ animationDelay: '-4s' }} />

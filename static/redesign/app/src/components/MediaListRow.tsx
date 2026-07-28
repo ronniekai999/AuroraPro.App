@@ -82,6 +82,42 @@ export function MediaListRow({
       onContextMenu={onCardContext}
       role="button"
       tabIndex={0}
+      // Phase 10 — announce that a context menu exists.
+      //
+      // Phase 9 established that the menu IS keyboard-reachable (browsers fire a
+      // real `contextmenu` for Shift+F10 and the Menu key on a focused element) and
+      // concluded "the trigger was never the problem". True for SC 2.1.1 —
+      // operability — and beside the point for discoverability: four of that menu's
+      // items have NO other route anywhere in the app, and nothing told a
+      // screen-reader user they were there. Being reachable by a shortcut you have
+      // no way to learn about is not much better than being unreachable.
+      //
+      // `aria-keyshortcuts`, and NOT `aria-haspopup`. The first version used
+      // haspopup alone, and a review showed that is the attribute ARIA's own
+      // authoring note argues against in exactly this situation: "If there is no
+      // visual indication that an element will trigger a popup, authors are advised
+      // to consider whether use of aria-haspopup is necessary, and avoid using it
+      // when it's not." This card has no chevron, no ellipsis, no affordance — that
+      // absence is the whole premise.
+      //
+      // It was also misleading in practice. `aria-haspopup` describes what the
+      // element's ACTIVATION opens, and activating a card opens the detail view,
+      // not the menu; the menu comes from `contextmenu` (Shift+F10 / Menu key /
+      // right-click). And NVDA maps the state to the literal string "subMenu", so
+      // the announcement read "…, button, subMenu" — "this is inside a menu and
+      // opens a submenu", which is not what is true.
+      //
+      // `aria-keyshortcuts` names the mechanism instead of gesturing at it, is
+      // announced by both NVDA and JAWS, and is precisely what closes the gap:
+      // four of that menu's items have no other route in the app, and the problem
+      // was never operability, it was that nobody could learn the shortcut.
+      // Gated on the handler actually being wired. `onCardContext` is optional and
+      // four call sites omit it — LibraryView (twice), SearchView and
+      // CollectionsView — so advertising the shortcut unconditionally taught it on
+      // three surfaces where pressing it does nothing at all. Measured: 7 of 7 cards
+      // on My Library carried it, and Shift+F10 produced no menu. MediaRail and
+      // BrowseView already thread `onCardContext ? … : undefined`; this matches.
+      aria-keyshortcuts={onCardContext ? 'Shift+F10' : undefined}
       onKeyDown={(e) => {
         // Don't activate the row when a nested control (the lib-add
         // button) has focus — that would double-fire (open detail AND
