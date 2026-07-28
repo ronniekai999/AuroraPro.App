@@ -12,7 +12,7 @@
     "audit:a11y": "node scripts/audit-focus-indicators.mjs",
     "audit:contrast": "node scripts/audit-onart-contrast.mjs",
     "audit:breakpoints": "node scripts/audit-breakpoints.mjs",
-    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:glass && npm run audit:motion && npm run audit:breakpoints && npm run audit:cascade",
+    "audit": "npm run build && npm run audit:a11y && npm run audit:contrast && npm run audit:glass && npm run audit:motion && npm run audit:breakpoints && npm run audit:cascade && node scripts/verify-page-alignment.mjs",
     "audit:cascade": "node scripts/resolve-focus.mjs",
     "audit:glass": "node scripts/audit-glass-contrast.mjs",
     "audit:motion": "node scripts/audit-reduced-motion.mjs",

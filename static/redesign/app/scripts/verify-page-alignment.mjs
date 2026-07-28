@@ -17,9 +17,14 @@
 //
 //   npm run verify:layout
 //
-// The executablePath pin is deliberate — this environment ships Chromium at a
-// build the npm `playwright` package does not expect, and `npx playwright install`
-// is unavailable. Env var override for other machines.
+// Chromium resolution: this environment ships a build the npm `playwright` package
+// does not expect (1194 vs 1234), so an unpinned launch fails HERE. The pin is a
+// FALLBACK, not a requirement — an earlier version of this comment claimed
+// `npx playwright install` was "unavailable", and a reviewer showed it works in 17
+// seconds. Worse, a hard pin breaks the machine that HAS done the documented thing,
+// and suppresses Playwright's own remedy ("run npx playwright install"), which is
+// the most useful error message available. So: use the pinned path only if it
+// exists, otherwise let Playwright resolve normally.
 
 import { chromium } from 'playwright'
 import fs from 'node:fs'
@@ -29,7 +34,8 @@ const cssPath = process.argv[2] ?? fs
   .map(f => `../../v2/assets/${f}`)[0]
 if (!cssPath) throw new Error('verify: no built CSS found — run `npm run build` first')
 const css = fs.readFileSync(cssPath, 'utf8')
-const EXE = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'
+const PINNED = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium-1194/chrome-linux/chrome'
+const EXE = fs.existsSync(PINNED) ? PINNED : undefined
 
 // A standalone page carrying the real built stylesheet and the real class
 // combinations, so the numbers come from a layout engine rather than arithmetic.
@@ -62,6 +68,7 @@ const HERO_FOOT = classesOf('src/components/HeroSection.tsx', 'absolute bottom-0
 
 const html = `<!doctype html><html><head><style>${css}</style>
 <style>body{margin:0}.probe{outline:0}</style></head><body>
+<div class="stage-topnav" id="nav">nav</div>
 <div class="min-h-screen">
   <div id="page" class="stage-page">
     <div id="admintb" class="${ADMIN_TB}">admin toolbar</div>
@@ -85,7 +92,7 @@ for (const width of [320, 390, 767, 768, 1440, 1920, 2000, 2560, 3840]) {
                right: +(b.right - parseFloat(cs.paddingRight)).toFixed(1),
                boxLeft: +b.left.toFixed(1), boxRight: +b.right.toFixed(1) }
     }
-    return { rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
+    return { nav: box('nav'), rail: box('rail'), browsetb: box('browsetb'), herofoot: box('herofoot'),
              admintb: box('admintb'), page: box('page'),
              // The LAYOUT viewport, not the window width. `100%` resolves against
              // this, and on a Chromium with classic 15px scrollbars they differ —
@@ -120,6 +127,7 @@ for (const r of out) {
     console.log(`   ${k.padEnd(9)} content ${String(r[k].left).padStart(6)} .. ${String(r[k].right).padStart(6)}   (width ${(r[k].right - r[k].left).toFixed(0)})`)
   }
   console.log(`   admintb   BOX     ${String(r.admintb.boxLeft).padStart(6)} .. ${String(r.admintb.boxRight).padStart(6)}`)
+  console.log(`   nav       content ${String(r.nav.left).padStart(6)} .. ${String(r.nav.right).padStart(6)}`)
 
   // 1. Every page system shares both content edges. This is the stair-step check.
   const ref = r[keys[0]]
@@ -173,6 +181,21 @@ for (const r of out) {
   //    My first expectation used the gutter at every width and reported the three
   //    mobile widths as "not bleeding" when they were bleeding correctly.
   const bleed = vw < 768 ? MOBILE : GUTTER
+  // 5. The TOP NAV, which is a fifth page system and was missed entirely by the
+  //    first version of this phase. Its inset is deliberately 18px tighter than
+  //    the page gutter below the cap, and must converge with it above — otherwise
+  //    the tabs sit at x=30 while every page they navigate to starts at x=320.
+  const NAV_INSET = 30, NAV_MOBILE = 18
+  const navExpected = vw < 768 ? NAV_MOBILE : Math.max(NAV_INSET, (vw - CAP) / 2)
+  if (Math.abs(r.nav.left - navExpected) > 0.5) {
+    console.log(`   *** nav inset is ${r.nav.left}, expected ${navExpected}`)
+    problems++
+  }
+  if (vw > CAP + 2 * GUTTER && Math.abs(r.nav.left - ref.left) > 0.5) {
+    console.log(`   *** past the cap the nav (${r.nav.left}) must track the page (${ref.left})`)
+    problems++
+  }
+
   const expectedBoxLeft = inset - bleed
   if (Math.abs(r.admintb.boxLeft - expectedBoxLeft) > 0.5) {
     console.log(`   *** admintb box starts at ${r.admintb.boxLeft}, expected ${expectedBoxLeft} — it is not bleeding`)

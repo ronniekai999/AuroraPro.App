@@ -725,7 +725,16 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 @media (min-width: 768px) {
-  .stage-topnav { padding: 0 30px; }
+  /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
+     and the first version of the phase missed it: at a flat 30px the logo and nav
+     tabs sat at x=30 while every page they navigate to started at x=320 — a 290px
+     stair-step at 2560 and 730px at 3440, the same defect class the phase exists
+     to remove, one level up.
+     `max()` against 30px rather than reading --page-pad-x, deliberately: the nav's
+     inset is a deliberate 18px tighter than the page gutter, and adopting the
+     token would shift it at EVERY width instead of only past the cap. Below the
+     cap this is byte-identical to what shipped. */
+  .stage-topnav { padding: 0 max(30px, (100% - var(--page-max)) / 2); }
 }
 html[data-glow="subtle"] .stage-topnav {
   backdrop-filter: none;
