@@ -979,9 +979,16 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
               // 75, not 50 and 62. The reason to keep it short is the 390px case,
               // where it truncates regardless; on desktop there is now room to
               // spare.)
+              // /70, not /40. A reviewer measured the placeholder at 3.18–3.53:1
+              // against the bar's own fill — under the 4.5:1 floor, and it is the
+              // only thing in the field until you type. Pre-existing rather than
+              // introduced here, but this is the element three phases have now been
+              // spent on, and `audit:contrast` cannot see it: that script only walks
+              // HeroSection's surfaces, so nothing in the gate was ever going to
+              // catch it.
               placeholder={'Describe a vibe — "a cozy mystery, nothing too dark"'}
               aria-label="Describe a vibe to search by"
-              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/40 outline-none"
+              className="flex-1 min-w-0 bg-transparent border-0 py-3 pl-1 pr-2 text-white text-sm placeholder:text-white/70 outline-none"
             />
             {convoText && (
               <button

@@ -278,7 +278,13 @@ export function MediaCardCinema({
       // announced by both NVDA and JAWS, and is precisely what closes the gap:
       // four of that menu's items have no other route in the app, and the problem
       // was never operability, it was that nobody could learn the shortcut.
-      aria-keyshortcuts="Shift+F10"
+      // Gated on the handler actually being wired. `onCardContext` is optional and
+      // four call sites omit it — LibraryView (twice), SearchView and
+      // CollectionsView — so advertising the shortcut unconditionally taught it on
+      // three surfaces where pressing it does nothing at all. Measured: 7 of 7 cards
+      // on My Library carried it, and Shift+F10 produced no menu. MediaRail and
+      // BrowseView already thread `onCardContext ? … : undefined`; this matches.
+      aria-keyshortcuts={onCardContext ? 'Shift+F10' : undefined}
       // role="button" makes descendants presentational, so EVERYTHING inside
       // the card is pruned from the a11y tree and this label is the only
       // thing a screen reader gets. Title + year alone left rating, runtime,

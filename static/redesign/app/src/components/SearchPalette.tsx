@@ -235,6 +235,12 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
         role="dialog"
         aria-modal="true"
         aria-label="Search Aurora"
+        // onKeyDownCapture on the panel is not enough on its own if focus has
+        // escaped the panel entirely, which is what the mousedown fix above
+        // prevents. Kept here rather than moved to the document because with the
+        // mousedown fix focus cannot leave the combobox by pointer, and a
+        // document-level trap would have to re-derive whether the palette owns the
+        // event — more moving parts for the same result.
         onKeyDown={e => {
           // Tab trap. `aria-modal` is a hint to AT's virtual cursor and does
           // nothing whatsoever to the browser's tab ring, so without this Tab
@@ -315,7 +321,7 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
             // off the panel's right edge, because an <input>'s default
             // min-width is `auto`, so it will not contract below its size
             // attribute's intrinsic width.
-            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/30 focus:ring-0"
+            className="flex-1 min-w-0 bg-transparent border-0 outline-none text-white font-display font-semibold text-[22px] tracking-tight placeholder:font-sans placeholder:font-normal placeholder:text-base placeholder-white/60 focus:ring-0"
             spellCheck={false}
             autoComplete="off"
           />
@@ -434,6 +440,22 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
               role="option"
               aria-selected={i === highlighted}
               data-row={i}
+              // preventDefault on mousedown, and this is a focus fix, not a text fix.
+              //
+              // `<div>` text is selectable where `<button>` text is not, so once the
+              // rows stopped being buttons a mousedown-drag across two of them
+              // selected their text AND blurred the input — leaving
+              // `document.activeElement === document.body`, which is OUTSIDE the
+              // panel. The Tab trap is bound to the panel's onKeyDown, so it stopped
+              // firing entirely: the next two Tabs walked into TopNav's logo and Home
+              // tab, painting a focus ring on chrome behind a full-viewport
+              // aria-modal overlay (WCAG 2.4.3, 2.4.11) — the exact failure Phase 9
+              // added the trap to prevent. On the button version this was
+              // unreachable, because mousedown focused the row.
+              // Suppressing the default mousedown behaviour keeps focus in the
+              // combobox, where this pattern requires it to stay, and removes the
+              // stray selection as a side effect. Click still fires.
+              onMouseDown={e => e.preventDefault()}
               onMouseEnter={() => setHighlighted(i)}
               onClick={() => { onSelect(m); onClose() }}
               // No focus utility: these are `role="option"` and deliberately not
