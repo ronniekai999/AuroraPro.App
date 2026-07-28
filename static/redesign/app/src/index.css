@@ -435,6 +435,21 @@
       0 0 20px -6px rgba(34, 211, 238, 0.25);
     transition: box-shadow 0.35s ease;
   }
+  /* The breathing halo. `z-index: -1` means this paints BEHIND its own parent's
+     background, which only works while something contains it.
+     STACKING CONTEXT: the wrapper in App.tsx, via `relative z-20`. NOT
+     `.convo-search` — that is `position: relative; z-index: auto` with no
+     transform/filter/opacity/isolation, so it is not a stacking context and
+     cannot contain a negative-z child.
+     This matters under prefers-reduced-motion specifically. If the containing
+     context were the HomeView root, that element is a stacking context only
+     because `.animate-fade-in` is animating, and `@media (prefers-reduced-motion:
+     reduce)` nulls that animation with `!important` — at which point this halo
+     escapes to the document root and paints behind `.aurora-bg`, invisible, for
+     exactly the users least likely to report a missing animation. The `z-20` on
+     the wrapper is what makes it motion-independent, and it must stay for that
+     reason rather than the scrim reason this file used to give.
+     audit-reduced-motion.mjs Check 2 requires this note to exist. */
   .convo-search::before {
     content: '';
     position: absolute;
