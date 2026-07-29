@@ -84,7 +84,12 @@ describe('validateReferralOptions', () => {
   it('accepts a label at the cap', () =>
     ok([{ key: 'a', label: 'x'.repeat(REFERRAL_LABEL_MAX) }]))
 
-  it('rejects an empty list', () => failsAt([], -1, /at least one/i))
+  it('ACCEPTS an empty list — that is how an operator reverts to the defaults', () => {
+    // Rejecting it made the editor's "leave blank to use the defaults" copy a
+    // lie and left no path back to the built-in options: Save stayed disabled
+    // forever once the last row was removed.
+    ok([])
+  })
   it('rejects too many options', () =>
     failsAt(
       Array.from({ length: REFERRAL_OPTIONS_MAX + 1 }, (_, i) => ({ key: `k${i}`, label: `L${i}` })),
@@ -108,6 +113,27 @@ describe('validateReferralOptions', () => {
   it('rejects a missing label', () => failsAt([{ key: 'a', label: '  ' }], 0, /label is required/i))
   it('rejects an over-long label', () =>
     failsAt([{ key: 'a', label: 'x'.repeat(REFERRAL_LABEL_MAX + 1) }], 0, /characters or fewer/i))
+  it('rejects a label with a hidden or direction-changing character', () =>
+    failsAt([{ key: 'a', label: 'A\u202Eb' }], 0, /hidden or direction-changing/i))
+  it('rejects a label with a zero-width space', () =>
+    failsAt([{ key: 'a', label: 'A\u200Bb' }], 0, /hidden or direction-changing/i))
+
+  it('does not flag a LOCKED key that today\'s pattern would reject', () => {
+    // A stored key is a historical fact and the editor renders it read-only, so
+    // flagging it would point an error at a field the admin cannot edit and
+    // wedge Save with no escape but deleting the option — the exact answer-loss
+    // the lock exists to prevent. Its label is still validated.
+    const rows = [{ key: 'LegacyKey', label: 'Legacy' }]
+    expect(validateReferralOptions(rows, new Set(['LegacyKey']))).toEqual([])
+    expect(validateReferralOptions(rows).length).toBeGreaterThan(0)
+  })
+
+  it('still flags a locked row\'s LABEL, which is editable', () => {
+    const issues = validateReferralOptions(
+      [{ key: 'LegacyKey', label: '' }], new Set(['LegacyKey']))
+    expect(issues.some(i => /label is required/i.test(i.message))).toBe(true)
+  })
+
   it('counts label length in characters, not UTF-16 units', () => {
     // A cap-length emoji label is legal to the user and to the Go validator,
     // which counts runes. Counting .length would reject it.

@@ -71,10 +71,9 @@ export function TasteOnboardingGate({ profileId, profile, onComplete }: TasteOnb
         setReferral(r)
         setPhase(wantsTaste || wantsReferral ? 'show' : 'hidden')
       })
-      .catch(() => {
-        // Never block the app on this — onboarding is a nicety, not a gate.
-        if (!cancelled) setPhase('hidden')
-      })
+    // No .catch: allSettled never rejects, and each result is unwrapped
+    // defensively above — a failed fetch simply contributes nothing, which is
+    // the "never block the app on a nicety" behaviour this gate has always had.
     return () => {
       cancelled = true
       ac.abort()

@@ -16,7 +16,7 @@
 // the Other field must be a labelled control announced when it appears.
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { OnboardingFlow } from './OnboardingFlow'
 import type { OnboardingStatus, ReferralPromptState } from '@/lib/api'
@@ -98,6 +98,27 @@ describe('referral step — radiogroup contract', () => {
     expect(tabStops(screen.getAllByRole('radio'))).toHaveLength(1)
   })
 
+  it('places focus inside the step, not on <body>', async () => {
+    renderStep()
+    // A roving tabIndex=0 makes the group a tab TARGET; it does not put focus
+    // there. Advancing into this step disables the footer button the keyboard
+    // user was standing on, which drops focus to <body> — so without an
+    // explicit placement the question is only reachable by tabbing from the top
+    // of the document, past the brand and the header skip.
+    await waitFor(() => expect(screen.getAllByRole('radio')[0]).toHaveFocus())
+    expect(document.body).not.toHaveFocus()
+  })
+
+  it('announces itself as a modal dialog', () => {
+    renderStep()
+    // The overlay covers the whole app. In a referral-only pass it appears to
+    // someone who finished onboarding long ago, so AT has to be told a modal
+    // arrived rather than leaving them reading the app underneath.
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog).toHaveAccessibleName()
+  })
+
   it('arrows MOVE AND CHECK, and the single tab stop follows', async () => {
     const user = userEvent.setup()
     renderStep()
@@ -135,6 +156,26 @@ describe('referral step — radiogroup contract', () => {
     expect(radios[last]).toHaveFocus()
     await user.keyboard('{Home}')
     expect(radios[0]).toHaveFocus()
+  })
+
+  it('keeps EXACTLY one tab stop through every selection state', async () => {
+    // The invariant, not just the initial state. An `active || isFirst`
+    // formulation satisfies the first assertion and can still reach zero tab
+    // stops later, which drops the whole group out of the tab ring — a
+    // keyboard user would find the question unreachable with no visible cause.
+    const user = userEvent.setup()
+    renderStep()
+    const radios = screen.getAllByRole('radio')
+
+    expect(tabStops(radios)).toHaveLength(1)
+    for (const r of radios) {
+      await user.click(r)
+      expect(tabStops(radios)).toHaveLength(1)
+      expect(tabStops(radios)[0]).toBe(r)
+    }
+    // And after arrow movement, not only after clicks.
+    await user.keyboard('{ArrowRight}{ArrowRight}{Home}{End}')
+    expect(tabStops(radios)).toHaveLength(1)
   })
 
   it('leaves unrelated keys alone', async () => {
@@ -278,6 +319,32 @@ describe('referral step — submission', () => {
   })
 })
 
+describe('referral step — the write survives the page teardown', () => {
+  it('does not close the flow until the referral write has settled', async () => {
+    // onDone is window.location.reload in the app, and navigation cancels an
+    // in-flight fetch. In the referral-only pass nothing else awaited, so the
+    // POST was aborted before it left and the user was re-prompted on the very
+    // next paint — the double-nag this step exists to prevent.
+    const user = userEvent.setup()
+    let release: () => void = () => {}
+    submitReferral.mockImplementationOnce(
+      () => new Promise(resolve => { release = () => resolve({ pending: false, recorded: true }) }),
+    )
+    const onDone = vi.fn()
+    render(
+      <OnboardingFlow profileId={1} profile={null} status={STATUS} taste={false}
+        referral={PROMPT} onDone={onDone} />,
+    )
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+
+    expect(submitReferral).toHaveBeenCalledWith({ skip: true })
+    expect(onDone).not.toHaveBeenCalled()
+
+    release()
+    await waitFor(() => expect(onDone).toHaveBeenCalled())
+  })
+})
+
 describe('referral step — the machine', () => {
   it('does not render the question when the server says not pending', () => {
     renderStep({ pending: false })
@@ -303,13 +370,36 @@ describe('referral step — the machine', () => {
     expect(document.querySelector('img')).toBeNull()
   })
 
+  it('still skips TASTE onboarding when the taste flow is running', async () => {
+    // Every other test here renders taste={false}, so nothing pinned the other
+    // side of the `if (taste)` guard that was added to skip(). Deleting that
+    // guard — or the call it protects — has to fail something.
+    const user = userEvent.setup()
+    render(
+      <OnboardingFlow profileId={1} profile={null} status={{ ...STATUS, eligible: true, completed: false }}
+        taste referral={{ pending: false }} onDone={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    expect(skipOnboarding).toHaveBeenCalledWith(1)
+    // …and no referral is recorded, because this user was never asked one.
+    expect(submitReferral).not.toHaveBeenCalled()
+  })
+
   it('skips the taste flow entirely in a referral-only pass', async () => {
     const user = userEvent.setup()
     renderStep()
     await user.click(screen.getByRole('button', { name: /skip this question/i }))
-    // Lands on the send-off, and never touches the profile-scoped skip endpoint
-    // — that flow was already complete or ineligible.
     expect(screen.getByRole('button', { name: /take me in/i })).toBeInTheDocument()
+  })
+
+  it('does NOT mark taste onboarding skipped from a referral-only pass', async () => {
+    // The header skip is the path that calls skip(); the in-step button never
+    // does, which made the old assertion vacuous. Marking taste onboarding
+    // complete here would rob a profile of a flow it was never offered.
+    const user = userEvent.setup()
+    renderStep()
+    await user.click(screen.getByRole('button', { name: /skip for now/i }))
+    expect(submitReferral).toHaveBeenCalledWith({ skip: true })
     expect(skipOnboarding).not.toHaveBeenCalled()
   })
 })

@@ -26,6 +26,20 @@ export const REFERRAL_LABEL_MAX = 64
 const REFERRAL_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/
 
 /**
+ * Control, format, and line/paragraph separator characters — the ones that
+ * change how surrounding text renders without being visible themselves.
+ * Mirrors dropDeceptiveRune in internal/api/referral_handlers.go; the server
+ * REJECTS admin strings containing them, so catching it here is the difference
+ * between "Label contains a hidden character" on the offending row and a bare
+ * "invalid value for setting" that names nothing.
+ */
+const DECEPTIVE_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+
+export function hasDeceptiveRunes(s: string): boolean {
+  return DECEPTIVE_RE.test(s)
+}
+
+/**
  * Returns the options in the order they should be displayed: the configured
  * options shuffled, then "other" appended.
  *
@@ -68,11 +82,22 @@ export interface ReferralOptionsIssue {
  * is wrong. This produces per-row messages. The server remains the authority —
  * this never gates anything the server doesn't also check.
  */
-export function validateReferralOptions(rows: readonly ReferralOption[]): ReferralOptionsIssue[] {
+export function validateReferralOptions(
+  rows: readonly ReferralOption[],
+  /**
+   * Keys that are already stored. Their shape is a historical fact, not
+   * something the operator can still fix: the editor locks them (renaming one
+   * orphans every answer that used it), so flagging a stored key that today's
+   * pattern rejects would point an error at a read-only field and wedge Save
+   * with no way out but deleting the option — the exact loss the lock prevents.
+   * Their LABEL is still validated, because that is editable.
+   */
+  lockedKeys: ReadonlySet<string> = new Set(),
+): ReferralOptionsIssue[] {
   const issues: ReferralOptionsIssue[] = []
-  if (rows.length === 0) {
-    issues.push({ index: -1, message: 'Add at least one option.' })
-  }
+  // An EMPTY list is legal and means "use the built-in defaults" — the same
+  // contract the question field has, and what the editor's own copy promises.
+  // Requiring at least one made the revert path unreachable.
   if (rows.length > REFERRAL_OPTIONS_MAX) {
     issues.push({ index: -1, message: `At most ${REFERRAL_OPTIONS_MAX} options.` })
   }
@@ -80,14 +105,17 @@ export function validateReferralOptions(rows: readonly ReferralOption[]): Referr
   rows.forEach((row, index) => {
     const key = row.key.trim()
     const label = row.label.trim()
-    if (key === REFERRAL_OTHER_KEY) {
-      issues.push({ index, message: '"other" is always offered and cannot be listed.' })
-    } else if (!REFERRAL_KEY_RE.test(key)) {
-      issues.push({
-        index,
-        message: 'Key must be lowercase letters, numbers, dashes or underscores (max 32).',
-      })
-    } else if (seen.has(key)) {
+    if (!lockedKeys.has(key)) {
+      if (key === REFERRAL_OTHER_KEY) {
+        issues.push({ index, message: '"other" is always offered and cannot be listed.' })
+      } else if (!REFERRAL_KEY_RE.test(key)) {
+        issues.push({
+          index,
+          message: 'Key must be lowercase letters, numbers, dashes or underscores (max 32).',
+        })
+      }
+    }
+    if (seen.has(key)) {
       issues.push({ index, message: `Duplicate key "${key}".` })
     }
     seen.add(key)
@@ -95,6 +123,8 @@ export function validateReferralOptions(rows: readonly ReferralOption[]): Referr
       issues.push({ index, message: 'Label is required.' })
     } else if ([...label].length > REFERRAL_LABEL_MAX) {
       issues.push({ index, message: `Label must be ${REFERRAL_LABEL_MAX} characters or fewer.` })
+    } else if (hasDeceptiveRunes(label)) {
+      issues.push({ index, message: 'Label contains a hidden or direction-changing character.' })
     }
   })
   return issues

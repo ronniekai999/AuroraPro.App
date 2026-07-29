@@ -180,6 +180,48 @@ for (const name of [...declared].sort()) {
   }
 }
 
+console.log('\n## Check 1b — an element that STARTS hidden must be revealed, not just stilled')
+// Check 1 asks whether an animation is nulled under reduced motion. That is the
+// wrong question for a class that sets `opacity: 0` and relies on a `forwards`
+// animation to become visible: `animation: none` on such a class freezes it at
+// opacity 0 and the content is permanently invisible — strictly worse than the
+// motion it was avoiding. index.css already documents this and keeps two
+// separate selector lists for it, but nothing enforced the split, so the next
+// author to add a rising element to the WRONG list would be told "ok".
+//
+// So: for every rule that sets opacity:0 AND a named animation, the
+// reduced-motion block must actually restore its opacity, not merely stop it.
+{
+  let hiddenStarters = 0
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const sel = m[1].trim().split('\n').pop().trim()
+    const body = m[2]
+    if (!/opacity:\s*0(?![.\d])/.test(body)) continue
+    if (!/animation:\s*(?!none)/.test(body)) continue
+    hiddenStarters++
+    const classes = [...sel.matchAll(/\.[\w-]+/g)].map(c => c[0])
+    // Does some reduced-motion rule set a non-zero opacity on one of them?
+    let revealed = false
+    for (const rmBody of rmBodies) {
+      for (const r of rmBody.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (!/opacity:\s*1/.test(r[2])) continue
+        const rmClasses = [...r[1].matchAll(/\.[\w-]+/g)].map(c => c[0])
+        if (classes.some(c => rmClasses.includes(c))) { revealed = true; break }
+      }
+      if (revealed) break
+    }
+    if (revealed) {
+      console.log(`  ok      ${sel} starts hidden and is revealed under reduced motion`)
+    } else {
+      console.log(`  ***     ${sel} sets opacity:0 with a forwards-style animation but no`)
+      console.log('          reduced-motion rule restores its opacity — it would be INVISIBLE,')
+      console.log('          not merely still. Add opacity:1 for it in a reduced-motion block.')
+      problems++
+    }
+  }
+  if (!hiddenStarters) console.log('  (no rules start at opacity:0 with an animation)')
+}
+
 console.log('\n## Check 2 — negative z-index needs a MOTION-INDEPENDENT stacking context')
 // The Phase 10b defect, generalised. An element painted at z-index:-1 escapes to
 // the nearest ancestor stacking context; if that ancestor is only a stacking
