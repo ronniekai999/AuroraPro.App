@@ -347,35 +347,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 			}
 			r.Get("/v2", v2Redirect)
 			r.Head("/v2", v2Redirect)
-			// Pre-compute the cleaned absolute base so the per-request
-			// path-traversal check is a constant-time string compare.
-			v2Base := filepath.Clean(filepath.Join(deps.StaticDir, "v2"))
-			v2Handler := func(w http.ResponseWriter, r *http.Request) {
-				// Strip /v2/ prefix. http.ServeFile is path-traversal
-				// safe in theory; defence-in-depth with Clean +
-				// HasPrefix below catches any `..` or %2e%2e tricks.
-				rel := strings.TrimPrefix(r.URL.Path, "/v2/")
-				if rel == "" || strings.HasSuffix(rel, "/") {
-					http.ServeFile(w, r, v2IndexPath)
-					return
-				}
-				// Reject hidden files (`.git`, `.DS_Store`) up-front.
-				if strings.HasPrefix(rel, ".") {
-					http.NotFound(w, r)
-					return
-				}
-				abs := filepath.Clean(filepath.Join(deps.StaticDir, "v2", rel))
-				if abs != v2Base && !strings.HasPrefix(abs, v2Base+string(filepath.Separator)) {
-					http.NotFound(w, r)
-					return
-				}
-				if info, err := os.Stat(abs); err == nil && !info.IsDir() {
-					http.ServeFile(w, r, abs)
-					return
-				}
-				// SPA fallback for client-side routes.
-				http.ServeFile(w, r, v2IndexPath)
-			}
+			// Extracted to a named constructor (PWA Phase 1) so the
+			// serving contract — SPA fallback, traversal checks, and
+			// the manifest content type — is testable without building
+			// the whole router. See static_pwa_test.go.
+			v2Handler := newV2Handler(deps.StaticDir, v2IndexPath)
 			r.Get("/v2/*", v2Handler)
 			r.Head("/v2/*", v2Handler)
 		})
@@ -1186,7 +1162,11 @@ func frontendHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
 				"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://www.gstatic.com/cv/ https://www.gstatic.com/cast/ https://www.gstatic.com/eureka/; "+
-				"worker-src blob:; "+
+				// 'self' is what permits navigator.serviceWorker.register
+				// ('/v2/sw.js') — SW registration is governed by worker-src,
+				// and without it the PWA worker is refused at the CSP layer.
+				// blob: stays for hls.js's inline transmux worker.
+				"worker-src 'self' blob:; "+
 				"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "+
 				"font-src 'self' https://fonts.gstatic.com; "+
 				// 2026-05-27 — `blob:` added for img-src so the bug-report
@@ -1212,6 +1192,49 @@ func frontendHeaders(next http.Handler) http.Handler {
 				"frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// newV2Handler serves the built V2 SPA from <staticDir>/v2. Real files are
+// served as-is; any other path gets the index.html SPA fallback so React
+// Router's BrowserRouter owns deep links (/v2/library/123, /v2/p/ABC).
+// http.ServeFile is path-traversal safe in theory; defence-in-depth with
+// Clean + HasPrefix catches any `..` or %2e%2e tricks.
+func newV2Handler(staticDir, indexPath string) http.HandlerFunc {
+	// Pre-compute the cleaned absolute base so the per-request
+	// path-traversal check is a constant-time string compare.
+	v2Base := filepath.Clean(filepath.Join(staticDir, "v2"))
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Strip /v2/ prefix.
+		rel := strings.TrimPrefix(r.URL.Path, "/v2/")
+		if rel == "" || strings.HasSuffix(rel, "/") {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		// Reject hidden files (`.git`, `.DS_Store`) up-front.
+		if strings.HasPrefix(rel, ".") {
+			http.NotFound(w, r)
+			return
+		}
+		abs := filepath.Clean(filepath.Join(staticDir, "v2", rel))
+		if abs != v2Base && !strings.HasPrefix(abs, v2Base+string(filepath.Separator)) {
+			http.NotFound(w, r)
+			return
+		}
+		if info, err := os.Stat(abs); err == nil && !info.IsDir() {
+			// The web app manifest needs its registered MIME type, and Go's
+			// extension lookup is host-dependent (the XDG shared-mime DB /
+			// /etc/mime.types) and commonly has no .webmanifest entry — on
+			// such hosts ServeFile would sniff text/plain. Set it explicitly;
+			// ServeFile honors a pre-set Content-Type.
+			if strings.HasSuffix(rel, ".webmanifest") {
+				w.Header().Set("Content-Type", "application/manifest+json")
+			}
+			http.ServeFile(w, r, abs)
+			return
+		}
+		// SPA fallback for client-side routes.
+		http.ServeFile(w, r, indexPath)
+	}
 }
 
 // safeFileServer wraps http.FileServer to block dotfiles, directory listings,

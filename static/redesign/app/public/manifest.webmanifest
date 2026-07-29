@@ -1,0 +1,18 @@
+{
+  "id": "/v2/",
+  "name": "Aurora Pro",
+  "short_name": "Aurora",
+  "description": "Your self-hosted cinema — stream your own library anywhere.",
+  "start_url": "/v2/",
+  "scope": "/v2/",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "categories": ["entertainment"],
+  "icons": [
+    { "src": "/v2/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/v2/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/v2/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/v2/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
