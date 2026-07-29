@@ -85,12 +85,13 @@ export interface ReferralOptionsIssue {
 export function validateReferralOptions(
   rows: readonly ReferralOption[],
   /**
-   * Keys that are already stored. Their shape is a historical fact, not
-   * something the operator can still fix: the editor locks them (renaming one
-   * orphans every answer that used it), so flagging a stored key that today's
-   * pattern rejects would point an error at a read-only field and wedge Save
-   * with no way out but deleting the option — the exact loss the lock prevents.
-   * Their LABEL is still validated, because that is editable.
+   * Keys that are already stored, which the editor renders read-only because
+   * renaming one orphans every answer that used it.
+   *
+   * This does NOT exempt them from validation — the server checks every key
+   * unconditionally, so exempting one here would only move the failure to an
+   * opaque save. It changes the MESSAGE, because "fix the key" is not an
+   * instruction anyone can follow on a read-only field. See the branch below.
    */
   lockedKeys: ReadonlySet<string> = new Set(),
 ): ReferralOptionsIssue[] {
