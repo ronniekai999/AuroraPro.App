@@ -104,6 +104,7 @@ import { isResumable } from '@/lib/format'
 import { currentPreferredQuality } from '@/lib/appearance'
 import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
+import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefresh'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -3253,6 +3254,61 @@ export default function App() {
   // on detail picks up the updated position_ms without triggering a
   // wasteful full home-rails refetch.
   const [cwReloadNonce, setCwReloadNonce] = useState(0)
+  // Home is loaded once and then kept in state: the effect below is keyed on
+  // [user, retryNonce, activeProfileId], none of which change when you navigate
+  // away and back, and this component never unmounts. So a library scan that
+  // adds titles was invisible until a hard refresh — the refresh worked only
+  // because it remounted everything. These two make it re-run: a staleness gate
+  // on returning to Home (every user), and a scan-completion signal (whoever is
+  // watching a scan). Both bump the same nonce so a scan finishing while you
+  // are already on Home doesn't need you to navigate at all.
+  const [homeReloadNonce, setHomeReloadNonce] = useState(0)
+  const lastHomeLoadRef = useRef(0)
+  // Which profile the rails currently on screen belong to. Distinguishes a
+  // profile switch (must wipe the personalized rails) from a same-profile
+  // refresh (must not). null is a real value here — "the account default" —
+  // so it starts undefined to force the first load down the switch path.
+  const railsProfileRef = useRef<number | null | undefined>(undefined)
+  // Read by the focus listener below, which must not re-bind on every
+  // navigation just to know where the user currently is. Written in an effect,
+  // not during render — React 19 forbids the latter, and eslint enforces it.
+  const viewRef = useRef(view)
+  useEffect(() => { viewRef.current = view }, [view])
+  const refreshHomeData = useCallback(() => setHomeReloadNonce(n => n + 1), [])
+
+  // Returning to Home refetches only if the data has had time to go stale. A
+  // quick tab bounce costs nothing; coming back later picks up anything a scan
+  // (or another device) added. Deliberately not keyed on `view` alone, which
+  // would re-run every core/CW/anchor/engagement fetch on every visit.
+  useEffect(() => {
+    if (!user || view !== 'home') return
+    if (shouldRefreshHome({ view, signedIn: true, lastAttemptAt: lastHomeLoadRef.current, now: Date.now() })) {
+      refreshHomeData()
+    }
+  }, [view, user, refreshHomeData])
+
+  // The gate above needs a navigation to fire, so someone who leaves the tab
+  // open on Home — or closes the lid and comes back — never picks anything up.
+  // Re-checking on tab focus covers that, and is the only path a NON-admin has
+  // to see a scan's results without navigating, since the scan-completion
+  // signal is behind the admin-gated poller.
+  useEffect(() => {
+    if (!user) return
+    const check = () => {
+      if (document.visibilityState !== 'visible') return
+      if (viewRef.current !== 'home') return
+      if (shouldRefreshHome({
+        view: viewRef.current, signedIn: true,
+        lastAttemptAt: lastHomeLoadRef.current, now: Date.now(),
+      })) refreshHomeData()
+    }
+    document.addEventListener('visibilitychange', check)
+    window.addEventListener('focus', check)
+    return () => {
+      document.removeEventListener('visibilitychange', check)
+      window.removeEventListener('focus', check)
+    }
+  }, [user, refreshHomeData])
 
   // ── Discover rails: progressive load + live "ready" handling ──────────
   // Personalized home rails arrive from several sources at different speeds:
@@ -3331,8 +3387,23 @@ export default function App() {
     const ac = new AbortController()
     let cancelled = false
     ;(async () => {
-      setHomeLoading(true)
-      setHomeError(null)
+      // Cold = nothing on screen yet. Captured BEFORE the attempt stamp below,
+      // because that stamp is what makes a load stop looking cold.
+      const cold = lastHomeLoadRef.current === 0
+      // Stamp on ATTEMPT, not on success. Stamping only after the fetch
+      // resolved left the staleness gate armed for the whole load, so every return
+      // to Home during a slow one aborted and restarted it — six bounces during
+      // an 8s load completed zero times and left Home silently rail-less, which
+      // is worse than the staleness this fixes.
+      lastHomeLoadRef.current = Date.now()
+      // Only show the skeleton on a COLD load. A stale-gated or scan-triggered
+      // refetch happens under rails the user is already looking at, and
+      // blanking them to a loading state would be a worse flicker than the
+      // staleness it fixes.
+      if (cold) setHomeLoading(true)
+      // Likewise only clear a visible error on a cold load: wiping it here on a
+      // background refresh would flash the banner off and back on.
+      if (cold) setHomeError(null)
       try {
         // QA 2026-05-25 — the original effect awaited all five fetches
         // (core + discover + anchor) in one Promise.all. discover/
@@ -3390,6 +3461,9 @@ export default function App() {
           { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const, showBadges: true,
             seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
         ]
+        // Re-stamp on success so the freshness window runs from when the data
+        // actually landed rather than from when we started asking for it.
+        lastHomeLoadRef.current = Date.now()
         setHomeRails(coreRails)
         // Core rails are visible. Clear the loading state now so the
         // spinner doesn't linger waiting on the personalized rails.
@@ -3401,14 +3475,30 @@ export default function App() {
         // rails already render above; each personalized source splices in via
         // recomposeHomeRails() when it lands.
         //
-        // Stash the core set and reset the per-load personalized buffers so a
-        // profile switch can't splice the previous profile's rails, and cancel
-        // any in-flight build poll.
+        // Stash the core set. The personalized buffers are wiped ONLY when the
+        // rails on screen belong to a different profile — that is what the
+        // wipe was for: stopping a profile switch from splicing the previous
+        // profile's picks. On a same-profile refresh (staleness gate, scan
+        // completion) wiping would yank every AI PICK / Discover / anchor rail
+        // off the page for a round-trip and collapse the layout — a bigger
+        // flicker than the one the skeleton suppression above avoids, on the
+        // most-visited screen in the app. Keeping them lets recomposeHomeRails
+        // splice the fresh core in underneath, and each personalized source
+        // overwrites its own buffer as it re-resolves.
+        const profileChanged = shouldResetPersonalizedRails(railsProfileRef.current, activeProfileId)
+        railsProfileRef.current = activeProfileId
         coreRailsRef.current = coreRails
-        discoverRailsRef.current = []
-        anchorRailsRef.current = []
-        engagementRailsRef.current = []
-        setDiscoverBuilding(false)
+        if (profileChanged) {
+          discoverRailsRef.current = []
+          anchorRailsRef.current = []
+          engagementRailsRef.current = []
+          // Cancel any in-flight build poll — it belongs to the old profile.
+          // NOT reset on a same-profile refresh: doing so tore down the poll
+          // fallback while the replacement getDiscoverRails could still fail
+          // into a swallowed catch, losing an already-rendered Discover rail
+          // until a full page reload.
+          setDiscoverBuilding(false)
+        }
 
         // Fast rails (pure vector + first-party engagement signals, no LLM).
         // Fire-and-forget: splice in as soon as they resolve, AbortController
@@ -3442,7 +3532,11 @@ export default function App() {
       } catch (err) {
         if (cancelled) return
         if (err && (err as Error).name === 'AbortError') return
-        setHomeError(err instanceof Error ? err.message : 'Unknown error')
+        // Only surface an error when there is nothing on screen. A background
+        // refresh that blips would otherwise paint "Couldn't load your library"
+        // above a perfectly good Home.
+        if (cold) setHomeError(err instanceof Error ? err.message : 'Unknown error')
+        else console.warn('[Aurora] background home refresh failed', err)
       } finally {
         // Note: setHomeLoading(false) for the success path now runs
         // earlier, right after the core rails land. This finally
@@ -3455,7 +3549,7 @@ export default function App() {
       cancelled = true
       ac.abort()
     }
-  }, [user, retryNonce, activeProfileId])
+  }, [user, retryNonce, activeProfileId, homeReloadNonce])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -4498,7 +4592,7 @@ export default function App() {
     // 2026-05-27 — Re-runs on retryNonce (Retry button bumps both
     // home + CW) AND on cwReloadNonce (player-close bumps only CW so
     // the Resume label freshens without re-fetching home rails).
-  }, [user, retryNonce, cwReloadNonce, activeProfileId])
+  }, [user, retryNonce, cwReloadNonce, activeProfileId, homeReloadNonce])
 
   // 2026-05-27 — Bug-report feature-flag probe. Single fetch on user
   // login; the flag is server-config-driven (env var only) so it
@@ -4677,7 +4771,7 @@ export default function App() {
               it changes the height of this whole sticky stack — which is
               why chromeRef publishes the measured height as --chrome-h
               (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={user.role === 'admin'} />
+          <ScanProgressBar isAdmin={user.role === 'admin'} onScanComplete={refreshHomeData} />
           <TopNav
             user={user}
             currentView={view}

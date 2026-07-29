@@ -11,7 +11,7 @@
 // fallback is correct but burns one API call per library every 4s
 // while a scan runs — acceptable for the typical 1-3 library case.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { getScanStatus, listLibraries, type Library, type ScanStatus } from '@/lib/api'
 
 interface ProgressItem {
@@ -19,7 +19,22 @@ interface ProgressItem {
   status: ScanStatus
 }
 
-export function ScanProgressBar({ isAdmin }: { isAdmin: boolean }) {
+export function ScanProgressBar({ isAdmin, onScanComplete }: {
+  isAdmin: boolean
+  /**
+   * Fired once when the last running scan finishes.
+   *
+   * This component was purely decorative: it polled, drew a bar, and told
+   * nobody. So a scan could add titles and Home — which loads once and keeps
+   * its rails in state — would keep showing the pre-scan library until a hard
+   * refresh. It already knows the exact moment new content landed; this hands
+   * that fact to the one place that can act on it.
+   *
+   * Only whoever is watching the scan gets this, because the polling is
+   * admin-gated. Everyone else is covered by Home's staleness gate.
+   */
+  onScanComplete?: () => void
+}) {
   const [libraries, setLibraries] = useState<Library[]>([])
   const [statuses, setStatuses] = useState<Map<number, ScanStatus>>(new Map())
 
@@ -44,19 +59,44 @@ export function ScanProgressBar({ isAdmin }: { isAdmin: boolean }) {
     if (!isAdmin || libraries.length === 0) return
     let cancelled = false
     const tick = async () => {
-      const next = new Map<number, ScanStatus>()
+      // Collect only the libraries that ANSWERED, then merge over the previous
+      // map. Rebuilding from empty each poll meant one failed request dropped
+      // that library, which read as "no longer running" — indistinguishable
+      // from the scan actually finishing. Since the completion signal keys off
+      // exactly that, a blip fired a spurious Home refetch, and every
+      // outage/recovery cycle fired another. Merging leaves the last known
+      // state in place; only a definitive response replaces it.
+      //
+      // The merge happens inside the updater rather than off a ref, so nothing
+      // reads mutable state during render.
+      const answered = new Map<number, ScanStatus>()
       await Promise.all(libraries.map(async lib => {
         try {
           const s = await getScanStatus(lib.id)
-          if (!cancelled) next.set(lib.id, s)
-        } catch { /* per-library failure ignored */ }
+          if (!cancelled) answered.set(lib.id, s)
+        } catch { /* per-library failure: keep the last known status */ }
       }))
-      if (!cancelled) setStatuses(next)
+      if (!cancelled) {
+        setStatuses(prev => {
+          const next = new Map(prev)
+          for (const [id, st] of answered) next.set(id, st)
+          return next
+        })
+      }
     }
     void tick()
     const id = window.setInterval(tick, 4000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [libraries, isAdmin])
+
+  // Detect the running -> idle edge. Derived from the same `statuses` the bar
+  // renders from, so it cannot disagree with what the user just watched finish.
+  const wasScanningRef = useRef(false)
+  const scanning = libraries.some(lib => statuses.get(lib.id)?.status === 'running')
+  useEffect(() => {
+    if (wasScanningRef.current && !scanning) onScanComplete?.()
+    wasScanningRef.current = scanning
+  }, [scanning, onScanComplete])
 
   // Audit H2 (Phase 5.3 audit-8) — filter on `status === 'running'`
   // (the real server field), and derive percent from total_files /
