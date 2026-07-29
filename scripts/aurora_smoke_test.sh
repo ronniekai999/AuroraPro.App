@@ -180,6 +180,12 @@ if [ "$IS_ADMIN" = "1" ] || [ "$HAS_JQ" = "0" ]; then
   check_get "  → has_api_key (sanity for cloud setup)"        /api/admin/llm  200 yes '.has_api_key | tostring'
   check_get "GET /api/admin/oauth"                   /api/admin/oauth                   200 yes ''
   check_get "GET /api/admin/embedding-status"        /api/admin/embedding-status        200 yes ''
+  # Referral attribution (migration 046). Shaped-empty on an instance where
+  # nobody was ever eligible, so this asserts the SHAPE, not a nonzero count.
+  check_get "GET /api/admin/referrals/summary"       /api/admin/referrals/summary       200 yes '.total | tostring'
+  check_get "  → by_source is an array"              /api/admin/referrals/summary       200 yes '.by_source | type | select(. == "array")'
+  check_get "  → windowed (?days=30)"                '/api/admin/referrals/summary?days=30' 200 yes '.window_days | tostring'
+  check_get "  → rejects an out-of-range window"     '/api/admin/referrals/summary?days=99999' 400 yes ''
   check_get "GET /api/admin/flagged"                 /api/admin/flagged                 200 yes ''
   check_get "GET /api/admin/logs"                    /api/admin/logs                    200 yes ''
   check_get "GET /api/admin/users"                   /api/admin/users                   200 yes '.[0].username // "none"'
@@ -191,6 +197,15 @@ fi
 
 section "12. 401 / 403 negatives — auth enforcement"
 # These should reject anonymous access.
+# The referral prompt: the standing test user signed up long before migration
+# 046, so the server must report NOT pending — and must disclose neither the
+# question nor the option list to an ineligible caller.
+check_get "GET /api/me/referral-prompt"              /api/me/referral-prompt  200 yes '.pending | tostring'
+check_get "  → not pending for an ineligible user"   /api/me/referral-prompt  200 yes '.pending | select(. == false) | "ok"'
+check_get "  → withholds the question"               /api/me/referral-prompt  200 yes '.question // "absent" | select(. == "absent")'
+
+check_get "GET /api/me/referral-prompt w/o token (expect 401)" /api/me/referral-prompt 401 no ''
+check_get "GET /api/admin/referrals/summary w/o token (expect 401)" /api/admin/referrals/summary 401 no ''
 check_get "GET /api/me/hero w/o token (expect 401)"  /api/me/hero   401 no ''
 check_get "GET /api/media w/o token (expect 401)"    /api/media     401 no ''
 

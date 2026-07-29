@@ -461,6 +461,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	requestH := NewRequestHandler(deps.Queries, deps.Hub, deps.Activity, deps.ArrClients, deps.Tmdb, deps.Tvdb)
 	notificationH := NewNotificationHandler(deps.Queries)
+	referralH := NewReferralHandler(deps.Queries)
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
 		// Reconcile requests orphaned in 'pending' by a dispatch goroutine that
@@ -902,6 +903,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Post("/api/me/notifications/read-all", notificationH.MarkAllRead)
 			r.Post("/api/me/notifications/{id}/read", notificationH.MarkRead)
 
+			// Referral prompt (migration 046) — asked once of signups that
+			// bypassed the invite gate. Mounted flat for the same reason as
+			// notifications: two trivial DB round-trips that shouldn't inherit
+			// the /api/me group's LLM-sized timeout. GET reports whether the
+			// server considers this user pending (the client is never the
+			// authority); POST records the answer or the skip, idempotently.
+			r.Get("/api/me/referral-prompt", referralH.Prompt)
+			r.Post("/api/me/referral", referralH.Submit)
+
 			// Admin (Phase 4)
 			r.Route("/api/admin", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
@@ -922,6 +932,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Post("/flagged/ai-rematch", adminH.AIRematchStart)
 				r.Get("/flagged/ai-rematch/status", adminH.AIRematchStatus)
 				r.Get("/embedding-status", adminH.EmbeddingStatus)
+				// Referral attribution breakdown (migration 046). ?days=N
+				// windows on signup date; 0/absent is all time.
+				r.Get("/referrals/summary", referralH.Summary)
 				// Smart Skip (intro/recap/credits markers). Status +
 				// fire-and-forget sweep trigger mirror the embedding /
 				// ai-rematch pattern; PUT/DELETE are the manual

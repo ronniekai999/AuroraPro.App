@@ -204,7 +204,7 @@ func TestCreateOAuthUserWithIdentity(t *testing.T) {
 	email := "owi_" + suffix + "@example.com"
 	subj := "owi_sub_" + suffix
 
-	user, err := q.CreateOAuthUserWithIdentity(ctx, username, email, "", "google", subj)
+	user, err := q.CreateOAuthUserWithIdentity(ctx, username, email, "", "google", subj, false)
 	if err != nil {
 		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
 	}
@@ -228,10 +228,220 @@ func TestCreateOAuthUserWithIdentity(t *testing.T) {
 
 	// A username collision propagates a *pgconn.PgError with code 23505 so the
 	// caller's email-vs-username disambiguation + retry loop still works.
-	_, cerr := q.CreateOAuthUserWithIdentity(ctx, username, "different_"+suffix+"@example.com", "", "discord", "x_"+suffix)
+	_, cerr := q.CreateOAuthUserWithIdentity(ctx, username, "different_"+suffix+"@example.com", "", "discord", "x_"+suffix, false)
 	var pgErr *pgconn.PgError
 	if !errors.As(cerr, &pgErr) || pgErr.Code != "23505" {
 		t.Errorf("duplicate-username create error = %v, want *pgconn.PgError code 23505", cerr)
+	}
+
+	// referralPending=false writes NULL, i.e. "never eligible" — the same state
+	// every password signup lands in by not naming the column at all.
+	// Not returned by design (see the pending test); assert against the row.
+	if st, serr := q.GetReferralStatus(ctx, user.ID); serr != nil || st != "" {
+		t.Errorf("referral status = (%q, %v), want (\"\", nil) for referralPending=false", st, serr)
+	}
+}
+
+// TestCreateOAuthUserWithIdentity_ReferralPending pins the referral stamp
+// (migration 046): eligibility is written INSIDE the create transaction, so a
+// new user can never exist in the eligible-but-unmarked state that would let
+// the prompt be silently skipped. The follow-up resolve is exercised here too,
+// because its "only if still pending" predicate is the entire idempotency
+// mechanism behind POST /api/me/referral.
+func TestCreateOAuthUserWithIdentity_ReferralPending(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+
+	user, err := q.CreateOAuthUserWithIdentity(ctx,
+		"ref_"+suffix, "ref_"+suffix+"@example.com", "", "google", "ref_sub_"+suffix, true)
+	if err != nil {
+		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID) })
+
+	// Read the stamp back rather than off the returned struct: the INSERT
+	// deliberately does NOT return referral_status, because the caller marshals
+	// this struct into localStorage and that would create a second, instantly
+	// stale answer to a question only GET /api/me/referral-prompt may answer.
+	if user.ReferralStatus != nil {
+		t.Errorf("referral_status = %q on the returned user; it must not be returned",
+			*user.ReferralStatus)
+	}
+	status, err := q.GetReferralStatus(ctx, user.ID)
+	if err != nil || status != "pending" {
+		t.Fatalf("GetReferralStatus = (%q, %v), want (\"pending\", nil)", status, err)
+	}
+
+	detail := "a podcast ad"
+	resolved, err := q.ResolveReferral(ctx, user.ID, "answered", "other", &detail)
+	if err != nil || !resolved {
+		t.Fatalf("ResolveReferral = (%v, %v), want (true, nil)", resolved, err)
+	}
+
+	// Second submit — the double-tap a slow network produces. It must report
+	// "didn't land" rather than erroring or overwriting the real answer.
+	resolved, err = q.ResolveReferral(ctx, user.ID, "skipped", "", nil)
+	if err != nil {
+		t.Fatalf("second ResolveReferral errored: %v", err)
+	}
+	if resolved {
+		t.Error("second ResolveReferral reported a write — the pending predicate didn't hold")
+	}
+	var gotStatus, gotSource, gotDetail *string
+	if err := q.pool.QueryRow(ctx,
+		`SELECT referral_status, referral_source, referral_detail FROM users WHERE id = $1`, user.ID,
+	).Scan(&gotStatus, &gotSource, &gotDetail); err != nil {
+		t.Fatalf("read back referral columns: %v", err)
+	}
+	if gotStatus == nil || *gotStatus != "answered" || gotSource == nil || *gotSource != "other" {
+		t.Errorf("after double-submit: status=%s source=%s, want answered/other", derefOr(gotStatus), derefOr(gotSource))
+	}
+	if gotDetail == nil || *gotDetail != detail {
+		t.Errorf("detail = %s, want %q", derefOr(gotDetail), detail)
+	}
+
+	// A user who was never eligible cannot be resolved into an answer.
+	other := seedOAuthTestUser(t, q, "hash")
+	resolved, err = q.ResolveReferral(ctx, other, "answered", "twitch", nil)
+	if err != nil {
+		t.Fatalf("ResolveReferral on ineligible user errored: %v", err)
+	}
+	if resolved {
+		t.Error("resolved a user whose referral_status was NULL — eligibility isn't being enforced")
+	}
+}
+
+// TestFinalizeInviteCodeRejectsUnknownClaim pins the invite gate against a
+// forged claim id.
+//
+// The id reaches the server in aurora_oauth_invite_claim, a plain unsigned
+// integer cookie that any client can set on its own request. resolveOAuthUser's
+// tier-3 check only asks whether it is > 0, so the finalize is the ONLY thing
+// standing between a made-up number and an account created without an invite.
+// While this returned nil on a zero-row update, the rollback that exists for
+// exactly this case never fired and the signup succeeded.
+func TestFinalizeInviteCodeRejectsUnknownClaim(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	user := seedOAuthTestUser(t, q, "hash")
+
+	// A claim id that was never issued: must be refused, so the OAuth callback
+	// rolls the new user back rather than enrolling them.
+	if err := q.FinalizeInviteCode(ctx, 999999999, user); err == nil {
+		t.Error("finalizing a nonexistent claim succeeded — a forged cookie would bypass the invite gate")
+	}
+
+	// The legitimate path still works: claim → finalize.
+	var inviteID int64
+	code := "code_" + randomSuffix(t)
+	if err := q.pool.QueryRow(ctx,
+		`INSERT INTO invite_codes (code, created_by, expires_at)
+		 VALUES ($1, $2, NOW() + INTERVAL '7 days') RETURNING id`, code, user,
+	).Scan(&inviteID); err != nil {
+		t.Fatalf("seed invite: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM invite_codes WHERE id = $1`, inviteID) })
+
+	claimed, err := q.ClaimInviteCode(ctx, code)
+	if err != nil || claimed != inviteID {
+		t.Fatalf("ClaimInviteCode = (%d, %v), want (%d, nil)", claimed, err, inviteID)
+	}
+	if err := q.FinalizeInviteCode(ctx, claimed, user); err != nil {
+		t.Fatalf("finalizing a real claim failed: %v", err)
+	}
+	var usedBy *int64
+	if err := q.pool.QueryRow(ctx, `SELECT used_by FROM invite_codes WHERE id = $1`, inviteID).Scan(&usedBy); err != nil {
+		t.Fatalf("read back invite: %v", err)
+	}
+	if usedBy == nil || *usedBy != user {
+		t.Errorf("used_by = %v, want %d", usedBy, user)
+	}
+}
+
+// TestReferralSummaryBuckets pins the aggregate the admin panel reads: the
+// three status buckets must partition the eligible users, and the per-source
+// breakdown must sum to the answered count — including for a key whose option
+// was deleted, which must still be reported rather than silently dropped.
+func TestReferralSummaryBuckets(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+
+	seed := func(name, status string, source *string) {
+		var id int64
+		if err := q.pool.QueryRow(ctx,
+			`INSERT INTO users (username, email, password_hash, referral_status, referral_source)
+			 VALUES ($1, $2, '', $3, $4) RETURNING id`,
+			name+"_"+suffix, name+"_"+suffix+"@example.com", status, source,
+		).Scan(&id); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+		t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id) })
+	}
+	twitch, gone := "twitch", "myspace"
+	seed("rs_a", "answered", &twitch)
+	seed("rs_b", "answered", &twitch)
+	seed("rs_c", "answered", &gone)
+	seed("rs_d", "skipped", nil)
+	seed("rs_e", "pending", nil)
+
+	sum, err := q.ReferralSummary(ctx, 0)
+	if err != nil {
+		t.Fatalf("ReferralSummary: %v", err)
+	}
+	if sum.Answered+sum.Skipped+sum.Pending != sum.Total {
+		t.Errorf("buckets don't partition: %d+%d+%d != %d",
+			sum.Answered, sum.Skipped, sum.Pending, sum.Total)
+	}
+	var bySource int64
+	seen := map[string]int64{}
+	for _, row := range sum.BySource {
+		bySource += row.Count
+		seen[row.Key] = row.Count
+	}
+	if bySource != sum.Answered {
+		t.Errorf("sum(by_source) = %d, want answered = %d", bySource, sum.Answered)
+	}
+	if seen["twitch"] < 2 {
+		t.Errorf("twitch count = %d, want at least the 2 seeded", seen["twitch"])
+	}
+	// The deleted-option key is still counted; the handler labels it later.
+	if seen["myspace"] < 1 {
+		t.Error("a source whose option was deleted was dropped from the breakdown")
+	}
+
+	// A window still partitions (everything just created falls inside it).
+	windowed, err := q.ReferralSummary(ctx, 7)
+	if err != nil {
+		t.Fatalf("ReferralSummary(7): %v", err)
+	}
+	if windowed.Answered+windowed.Skipped+windowed.Pending != windowed.Total {
+		t.Error("windowed buckets don't partition")
+	}
+	if windowed.WindowDays != 7 {
+		t.Errorf("window_days = %d, want 7", windowed.WindowDays)
+	}
+}
+
+// TestReferralDetailRequiresOtherSource pins the schema CHECK from migration
+// 046: referral_detail may only accompany source 'other'. The API validator
+// enforces the same rule, and this is the backstop that keeps the two from
+// drifting.
+func TestReferralDetailRequiresOtherSource(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	user, err := q.CreateOAuthUserWithIdentity(ctx,
+		"refchk_"+suffix, "refchk_"+suffix+"@example.com", "", "google", "refchk_sub_"+suffix, true)
+	if err != nil {
+		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID) })
+
+	detail := "should be refused"
+	if _, err := q.ResolveReferral(ctx, user.ID, "answered", "twitch", &detail); err == nil {
+		t.Error("detail alongside a non-other source was accepted — the CHECK constraint is missing")
 	}
 }
 
@@ -251,7 +461,7 @@ func TestCreateOAuthUserWithIdentity_AtomicRollback(t *testing.T) {
 	}
 
 	newUsername := "rollback_" + randomSuffix(t)
-	_, err := q.CreateOAuthUserWithIdentity(ctx, newUsername, newUsername+"@example.com", "", "google", subj)
+	_, err := q.CreateOAuthUserWithIdentity(ctx, newUsername, newUsername+"@example.com", "", "google", subj, true)
 	if err == nil {
 		t.Fatal("expected error from duplicate identity, got nil")
 	}
@@ -264,4 +474,14 @@ func TestCreateOAuthUserWithIdentity_AtomicRollback(t *testing.T) {
 		t.Errorf("orphan user %q exists after failed atomic create — rollback didn't fire", newUsername)
 		_, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, u.ID)
 	}
+}
+
+// derefOr renders a nullable text column for a failure message. Formatting a
+// *string with %v prints the pointer address, which is exactly the information
+// a diagnostic message must not be.
+func derefOr(s *string) string {
+	if s == nil {
+		return "<NULL>"
+	}
+	return *s
 }

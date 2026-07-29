@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,19 +30,32 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// settingsUpserter is the single write UpdateSettings performs. Extracted as a
+// seam so the validate-all-then-write-all ordering can be regression-tested
+// without a database: the old and new behavior differ only in WHICH writes
+// happen before a rejection, which is invisible unless the writes are
+// observable. *db.Queries satisfies it; the field is nil in production and
+// falls through to queries.
+type settingsUpserter interface {
+	UpsertSetting(ctx context.Context, key, value string, updatedBy int64) error
+}
+
 type AdminHandler struct {
-	queries      *db.Queries
-	transcode    *streaming.TranscodeManager
-	directPlay   *streaming.DirectPlayRegistry
-	hub          *ws.Hub
-	activity     *ActivityLogger
-	ringLog      *logging.RingBufferHandler
-	imgProxy     *metadata.ImageProxy
-	watcher      *library.Watcher
-	arrClients   *arr.ArrClients
-	startTime    time.Time
-	version      string
-	transcodeDir string // for disk free calculation
+	queries *db.Queries
+	// settingsWriter overrides the settings write path in tests. Nil in
+	// production — see settingsUpserter.
+	settingsWriter settingsUpserter
+	transcode      *streaming.TranscodeManager
+	directPlay     *streaming.DirectPlayRegistry
+	hub            *ws.Hub
+	activity       *ActivityLogger
+	ringLog        *logging.RingBufferHandler
+	imgProxy       *metadata.ImageProxy
+	watcher        *library.Watcher
+	arrClients     *arr.ArrClients
+	startTime      time.Time
+	version        string
+	transcodeDir   string // for disk free calculation
 
 	// Phase 5 — populated via SetEmbeddingInfo when the LLM subsystem is on.
 	embedEnabled bool
@@ -1089,29 +1103,65 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// writes would let admins set a value nothing consumes.
 		// Existing rows in server_settings are harmless dead data
 		// — no migration to delete, but no NEW writes allowed.
-		"radarr_url":        {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"radarr_api_key":    {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"radarr_4k_url":     {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"radarr_4k_api_key": {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"sonarr_url":        {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"sonarr_api_key":    {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"sonarr_4k_url":     {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"sonarr_4k_api_key": {func(v string) bool { return !isMaskedAPIKey(v) }},
+		// Referral prompt (migration 046). Both empty-allowed: empty means
+		// "revert to the built-in default", which is how an operator clears a
+		// customization. referral_prompt_options is the first JSON-valued
+		// setting in this table — server_settings stores TEXT, so
+		// parseReferralOptions is the only validation there is.
+		settingReferralQuestion: {validReferralQuestionSetting},
+		settingReferralOptions:  {validReferralOptionsSetting},
+		"radarr_url":            {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"radarr_api_key":        {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"radarr_4k_url":         {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"radarr_4k_api_key":     {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"sonarr_url":            {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"sonarr_api_key":        {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"sonarr_4k_url":         {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"sonarr_4k_api_key":     {func(v string) bool { return !isMaskedAPIKey(v) }},
 	}
 
 	claims := getClaimsFromRequest(r)
-	var changedKeys []string
-	for key, value := range req.Settings {
+
+	// Validate EVERY key before writing ANY of them. The previous version
+	// validated and upserted in the same pass, so a request carrying one bad
+	// key persisted an arbitrary subset of the good ones before returning 400
+	// — arbitrary because Go randomizes map iteration order, making the
+	// partial write non-deterministic and unreproducible. That was survivable
+	// while each admin panel saved a single key, but the referral prompt saves
+	// its question and its options together: a malformed options blob would
+	// otherwise land the question row anyway and leave the pair inconsistent.
+	//
+	// Sorted for the same reason: with two invalid keys, map order decided
+	// which one the error message named. Sorting makes the response
+	// deterministic for a given request body.
+	keys := make([]string, 0, len(req.Settings))
+	for key := range req.Settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		rule, ok := allowedKeys[key]
 		if !ok {
 			writeError(w, http.StatusBadRequest, "unknown setting: "+key)
 			return
 		}
-		if !rule.validate(value) {
+		if !rule.validate(req.Settings[key]) {
 			writeError(w, http.StatusBadRequest, "invalid value for setting: "+key)
 			return
 		}
-		if err := h.queries.UpsertSetting(r.Context(), key, value, claims.UserID); err != nil {
+	}
+
+	// Write pass. A mid-loop DB failure can still leave a partial write, but
+	// that's an infrastructure fault rather than a caller-triggerable one, and
+	// server_settings has no cross-key transactional story to preserve (every
+	// read is an independent GetSetting).
+	var upsert settingsUpserter = h.queries
+	if h.settingsWriter != nil {
+		upsert = h.settingsWriter
+	}
+	changedKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if err := upsert.UpsertSetting(r.Context(), key, req.Settings[key], claims.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update setting")
 			return
 		}

@@ -41,6 +41,29 @@ type User struct {
 	// users (those with empty password_hash).
 	OAuthProvider *string `json:"oauth_provider,omitempty"`
 	OAuthSubject  *string `json:"-"`
+	// Referral attribution (migration 046). Only set for users created through
+	// an invite-bypassing OAuth provider without redeeming an invite code —
+	// the one signup path that otherwise records nothing about where the user
+	// came from.
+	//
+	// ReferralStatus: nil = never eligible; "pending" = asked-but-unresolved;
+	// "answered" | "skipped" = resolved. ReferralSource holds the option KEY
+	// (not its admin-editable label, which would rewrite history on rename),
+	// and ReferralDetail is free text present only when the source is "other".
+	//
+	// Selected ONLY by GetAllUsers (the admin list); every other user lookup
+	// leaves them nil, so omitempty drops them from those responses. In
+	// particular CreateOAuthUserWithIdentity writes referral_status but does
+	// not return it, so the OAuth success page can't stash a stale copy —
+	// GET /api/me/referral-prompt is the single authority on whether to ask.
+	//
+	// ReferralDetail is attacker-controlled free text: length-capped and
+	// stripped of control/format characters at the API, and rendered as data,
+	// never markup, in the admin UI.
+	ReferralStatus     *string    `json:"referral_status,omitempty"`
+	ReferralSource     *string    `json:"referral_source,omitempty"`
+	ReferralDetail     *string    `json:"referral_detail,omitempty"`
+	ReferralAnsweredAt *time.Time `json:"referral_answered_at,omitempty"`
 }
 
 // OAuthIdentity is one row of the oauth_identities table (migration 031) — a
@@ -840,6 +863,41 @@ type ServerSetting struct {
 
 type UpdateSettingsRequest struct {
 	Settings map[string]string `json:"settings"`
+}
+
+// ReferralOption is one selectable answer to the referral prompt (migration
+// 046), stored as JSON in the `referral_prompt_options` setting. Key is what
+// lands in users.referral_source and must never change once answers exist;
+// Label is display text the operator can rename freely. The implicit "other"
+// option is not in this list — it is always offered, always last, and is not
+// deletable, because removing it would strand users.referral_detail.
+type ReferralOption struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// ReferralSourceCount is one row of the admin breakdown. Label is nil when the
+// key is no longer among the configured options — the panel renders those as
+// "<removed: key>" rather than dropping the rows, so history stays readable
+// after an operator deletes an option.
+type ReferralSourceCount struct {
+	Key   string  `json:"key"`
+	Label *string `json:"label"`
+	Count int64   `json:"count"`
+}
+
+// ReferralSummary is the aggregate panel's payload. Answered/Skipped/Pending
+// partition the users who were ever eligible; Total is their sum. The window
+// (when set) filters on users.created_at — signup date — so every bucket shares
+// one timeframe and the panel answers "of the signups in this period, what did
+// they say".
+type ReferralSummary struct {
+	Total      int64                 `json:"total"`
+	Answered   int64                 `json:"answered"`
+	Skipped    int64                 `json:"skipped"`
+	Pending    int64                 `json:"pending"`
+	BySource   []ReferralSourceCount `json:"by_source"`
+	WindowDays int                   `json:"window_days"`
 }
 
 type HealthStatus struct {

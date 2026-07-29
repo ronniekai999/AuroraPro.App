@@ -3,6 +3,7 @@ import {
   getOnboardingGrid,
   saveOnboardingSeeds,
   skipOnboarding,
+  submitReferral,
   updateProfile,
   getHeroPool,
   getDiscoverRails,
@@ -10,7 +11,16 @@ import {
   type UIMedia,
   type OnboardingStatus,
   type Profile,
+  type ReferralPromptState,
 } from '@/lib/api'
+import { buildSteps, nextStep, prevStep, type Step } from '@/lib/onboardingSteps'
+import {
+  shuffleReferralOptions,
+  REFERRAL_DETAIL_MAX,
+  REFERRAL_OTHER_KEY,
+  type ReferralOption,
+} from '@/lib/referral'
+import { nextRadioIndex } from '@/lib/radiogroup'
 import {
   FONT_OPTIONS,
   GLOW_OPTIONS,
@@ -30,13 +40,17 @@ interface OnboardingFlowProps {
    *  aren't forced to re-enter (and their existing settings aren't clobbered). */
   profile?: Profile | null
   status: OnboardingStatus
+  /**
+   * Whether the taste half of the flow applies. False means the profile has
+   * already completed (or can't run) taste onboarding and the ONLY reason we're
+   * on screen is an unanswered referral prompt — see buildSteps.
+   */
+  taste: boolean
+  /** Server-decided referral prompt state. Absent/not-pending hides the step. */
+  referral?: ReferralPromptState | null
   /** Called once everything is persisted and the rails are warmed. */
   onDone: () => void
 }
-
-type Step = 'avatar' | 'name' | 'age' | 'style' | 'titles' | 'welcome' | 'loading'
-const STEP_ORDER: readonly Step[] = ['avatar', 'name', 'age', 'style', 'titles', 'welcome', 'loading']
-const INPUT_STEPS: readonly Step[] = ['avatar', 'name', 'age', 'style', 'titles']
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
@@ -82,11 +96,17 @@ function ageForRating(maxRating?: string | null): number {
   return 24 // R / TV-MA / NC-17 / unknown → adult
 }
 
-export function OnboardingFlow({ profileId, profile, status, onDone }: OnboardingFlowProps) {
+export function OnboardingFlow({ profileId, profile, status, taste, referral, onDone }: OnboardingFlowProps) {
   const minPicks = status.min_picks ?? 5
   const previewThreshold = status.threshold ?? 3
 
-  const [step, setStep] = useState<Step>('avatar')
+  // The step machine is DERIVED, not a constant: the referral step appears only
+  // when the server says this user still owes an answer, and when the referral
+  // is the only thing owed the flow collapses to just that. Frozen on mount so
+  // a late-arriving prop can't renumber the steps mid-flow under the user.
+  const referralPending = !!referral?.pending
+  const [machine] = useState(() => buildSteps({ referralPending, taste }))
+  const [step, setStep] = useState<Step>(() => machine.order[0])
   // Pre-fill identity from the existing profile: an already-chosen nebula, the
   // current nickname, and an age that reflects the current content rating.
   const [avatarId, setAvatarId] = useState<string | null>(() => parseNebula(profile?.avatar_url)?.id ?? null)
@@ -116,6 +136,41 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
   const [reactive, setReactive] = useState<UIMedia[]>([])
   const [selected, setSelected] = useState<number[]>([])
 
+  // --- referral prompt state ---
+  // The display order is shuffled ONCE per mount. Attribution surveys have a
+  // well-documented primacy bias: whatever sits first gets over-picked, which
+  // doesn't just add noise, it skews the answer the operator acts on. Freezing
+  // it in a useState initializer keeps the list from re-ordering under the
+  // user's cursor on every render.
+  const [referralOptions] = useState<ReferralOption[]>(() =>
+    shuffleReferralOptions(referral?.options ?? []),
+  )
+  const [referralChoice, setReferralChoice] = useState<string | null>(null)
+  const [referralDetail, setReferralDetail] = useState('')
+  const referralRefs = useRef<Record<string, HTMLButtonElement | null>>({})
+  // The in-flight referral write, so the flow can await it before onDone tears
+  // the page down. See settleReferral.
+  const referralInFlightRef = useRef<Promise<void> | null>(null)
+
+  // Place focus inside the referral step when it opens.
+  //
+  // Without this the step is reachable only by Tabbing from the top of the
+  // document. The footer's Continue button is OUTSIDE the key={step} wrapper,
+  // so React keeps the same DOM node across the transition and merely flips it
+  // to disabled (the referral step can't advance until something is chosen) —
+  // and per the HTML focus fixup rule, disabling the element a keyboard user is
+  // standing on drops focus to <body>. They pressed Enter on "Build my Aurora"
+  // and landed nowhere, with the question they now have to answer several tab
+  // stops away behind the brand and the header skip.
+  //
+  // A roving tabIndex=0 makes the group a tab TARGET; it does not put focus
+  // there. This does.
+  useEffect(() => {
+    if (step !== 'referral') return
+    const first = referralOptions[0]?.key
+    if (first) referralRefs.current[first]?.focus()
+  }, [step, referralOptions])
+
   // --- loading screen state ---
   const [error, setError] = useState<string | null>(null)
   const [loadNonce, setLoadNonce] = useState(0)
@@ -139,6 +194,8 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
 
   // Initial popularity load (once — the grid is reused for the mosaic too).
   useEffect(() => {
+    // No taste steps in a referral-only pass, so nothing consumes this grid.
+    if (!taste) { setGridLoading(false); return }
     let cancelled = false
     const ac = new AbortController()
     setGridLoading(true)
@@ -162,7 +219,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
       cancelled = true
       ac.abort()
     }
-  }, [profileId, remember])
+  }, [profileId, remember, taste])
 
   const showMore = useCallback(async () => {
     if (loadingMore || !hasMore) return
@@ -217,9 +274,67 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
     return [...picked, ...pad].filter((m) => (seen.has(m.id) ? false : (seen.add(m.id), true))).slice(0, 10)
   }, [grid, reactive, selected, selectedSet])
 
+  // ---- referral submission ----
+  // Fire-and-forget by design: attribution is worth less than a signup, so a
+  // failed write logs and lets the user through rather than trapping them
+  // behind a retry. The row simply stays 'pending' and they may be asked once
+  // more on a later visit.
+  const sendReferral = useCallback(
+    (answer: { source: string; detail?: string } | { skip: true }) => {
+      // No send-once flag. Every caller either advances off the step in the
+      // same handler or is gated on `step === 'referral'`, and React commits
+      // that transition before the next click can be dispatched — so a second
+      // send is unreachable, and a flag here would be dead code that reads as
+      // live protection. If one ever did slip through, POST /api/me/referral
+      // is idempotent server-side: the second call is a 200 no-op that cannot
+      // overwrite the first answer.
+      //
+      // Keep the promise so the flow can wait for it before tearing the page
+      // down — see settleReferral. Errors are swallowed here so no caller has
+      // to handle them; a failed write leaves the row pending, which is the
+      // designed fallback.
+      referralInFlightRef.current = submitReferral(answer)
+        .then(() => undefined)
+        .catch((e) => {
+          console.warn('referral: submit failed, continuing', e)
+        })
+    },
+    [],
+  )
+
+  // Wait (briefly) for an in-flight referral write before closing the flow.
+  //
+  // onDone reloads the page (App passes window.location.reload), and a
+  // fire-and-forget fetch is cancelled by navigation. In the referral-only pass
+  // nothing else awaited, so the whole skip path ran in a single synchronous
+  // turn and the POST was aborted before it left — the row stayed pending and
+  // the user was re-prompted on the very next paint, which is precisely the
+  // double-nag this step exists to avoid.
+  //
+  // Bounded, because attribution must never hold the user at a spinner: if the
+  // write hasn't settled in two seconds we go anyway and they may be asked once
+  // more later.
+  const settleReferral = useCallback(async () => {
+    const inFlight = referralInFlightRef.current
+    if (!inFlight) return
+    await Promise.race([inFlight, sleep(2000)])
+  }, [])
+  const submitReferralChoice = useCallback(() => {
+    if (!referralChoice) {
+      sendReferral({ skip: true })
+      return
+    }
+    const detail = referralDetail.trim()
+    sendReferral(
+      referralChoice === REFERRAL_OTHER_KEY && detail
+        ? { source: referralChoice, detail }
+        : { source: referralChoice },
+    )
+  }, [referralChoice, referralDetail, sendReferral])
+
   // ---- navigation ----
-  const stepIndex = STEP_ORDER.indexOf(step)
-  const inputIndex = INPUT_STEPS.indexOf(step)
+  const stepIndex = machine.order.indexOf(step)
+  const inputIndex = machine.inputs.indexOf(step)
   const canAdvance = (): boolean => {
     switch (step) {
       case 'avatar':
@@ -228,6 +343,10 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
         return name.trim().length >= 1
       case 'titles':
         return selected.length >= minPicks
+      case 'referral':
+        // Continue needs a choice; Skip is the escape hatch beside it, so this
+        // is a disabled button with an obvious alternative, not a dead end.
+        return referralChoice !== null
       default:
         return true
     }
@@ -255,23 +374,35 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
   }
   const next = () => {
     if (!canAdvance()) return
-    const i = STEP_ORDER.indexOf(step)
-    if (i < STEP_ORDER.length - 1) goTo(STEP_ORDER[i + 1])
+    // Commit the referral on the way OUT of its step, mirroring how the style
+    // step commits appearance on leave. Back does NOT submit — reversing out of
+    // a step shouldn't record an answer the user was still considering.
+    if (step === 'referral') submitReferralChoice()
+    const n = nextStep(machine, step)
+    if (n) { goTo(n); return }
+    void settleReferral().then(onDone)
   }
   const back = () => {
-    const i = STEP_ORDER.indexOf(step)
-    if (i > 0) goTo(STEP_ORDER[i - 1])
+    const p = prevStep(machine, step)
+    if (p) goTo(p)
   }
 
   const skip = useCallback(async () => {
+    // The flow-level "Skip for now" closes EVERYTHING. If it's pressed while
+    // the referral question is on screen, the user has seen it and declined —
+    // record that, so a later session doesn't ask again. Pressed from any other
+    // step they never saw it, so it stays pending and they get one more chance.
+    if (step === 'referral') sendReferral({ skip: true })
     try {
-      await skipOnboarding(profileId ?? undefined)
+      if (taste) await skipOnboarding(profileId ?? undefined)
     } catch {
       /* never trap the user behind the overlay, even if the skip write fails */
     } finally {
+      // Let the referral write land before onDone reloads the page.
+      await settleReferral()
       onDone()
     }
-  }, [profileId, onDone])
+  }, [profileId, onDone, step, taste, sendReferral, settleReferral])
 
   const retryLoad = () => {
     setError(null)
@@ -357,11 +488,24 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, loadNonce])
 
-  const showNav = step === 'avatar' || step === 'name' || step === 'age' || step === 'style' || step === 'titles'
+  // The nav bar belongs to the input steps — the ones with a Back/Continue
+  // contract. Derived from the machine so a new input step gets it for free.
+  const showNav = machine.inputs.includes(step)
   const nebulaForWelcome = avatarId ?? 'aurora'
 
   return (
-    <div className="fixed inset-0 z-[80] flex flex-col overflow-hidden bg-[#07060c] aurora-bg animate-fade-in">
+    // role="dialog" + aria-modal, matching ProfilesGate. This overlay has always
+    // covered the whole app without saying so, but it used to appear only to
+    // profiles that had never onboarded. The referral-only pass shows it to
+    // people who finished onboarding long ago, so a screen reader now has to be
+    // told a modal question arrived rather than leaving the user reading the
+    // still-exposed app underneath.
+    <div
+      className="fixed inset-0 z-[80] flex flex-col overflow-hidden bg-[#07060c] aurora-bg animate-fade-in"
+      role="dialog"
+      aria-modal="true"
+      aria-label={taste ? 'Set up your Aurora' : 'One quick question'}
+    >
       <div className="onb-bg">
         <div className="onb-blob onb-blob1" />
         <div className="onb-blob onb-blob2" />
@@ -380,7 +524,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
           </span>
         </div>
         <div className="hidden flex-1 items-center justify-center gap-1.5 sm:flex">
-          {INPUT_STEPS.map((s, i) => (
+          {machine.inputs.map((s, i) => (
             <span
               key={s}
               className={
@@ -397,7 +541,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
         <div className="ml-auto flex items-center gap-4">
           {inputIndex >= 0 && (
             <span className="hidden text-xs tracking-wide text-white/40 sm:inline">
-              Step {inputIndex + 1} of {INPUT_STEPS.length}
+              Step {inputIndex + 1} of {machine.inputs.length}
             </span>
           )}
           {step !== 'loading' && (
@@ -426,6 +570,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
           {step === 'age' && renderAge()}
           {step === 'style' && renderStyle()}
           {step === 'titles' && renderTitles()}
+          {step === 'referral' && renderReferral()}
           {step === 'welcome' && renderWelcome()}
           {step === 'loading' && renderLoading()}
         </div>
@@ -458,6 +603,7 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
 
   function navHint(): string {
     if (step === 'avatar') return 'Tap a nebula — change it anytime'
+    if (step === 'referral') return 'Arrow keys move between options'
     if (step === 'titles') return `Pick at least ${minPicks} — more is better`
     if (step === 'style') return 'Applies live, everywhere'
     return ''
@@ -762,6 +908,117 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
     )
   }
 
+  // The referral step. A real radiogroup — `role="radiogroup"` with arrow-key
+  // movement, one tab stop, and activation on move — because a group of
+  // `aria-pressed` buttons announces as independent toggles and hands the arrow
+  // keys to an application that ignores them. See lib/radiogroup for the four
+  // shipped bugs that lesson comes from.
+  function renderReferral() {
+    const keys = referralOptions.map((o) => o.key)
+    const otherChosen = referralChoice === REFERRAL_OTHER_KEY
+    // The single tab stop, computed the SAME way the arrow handler computes
+    // "current" so the two cannot disagree. Deriving it from an index rather
+    // than from `active` also keeps the group in the tab ring when nothing is
+    // selected yet — and, unlike an `active || isFirst` test, it cannot land in
+    // a state where NO option is focusable if referralChoice ever holds a key
+    // that isn't in the list.
+    const tabStop = Math.max(0, keys.indexOf(referralChoice ?? ''))
+    return (
+      <>
+        <Eyebrow>One quick thing</Eyebrow>
+        {/* Admin-authored text, rendered as text. Never dangerouslySetInnerHTML. */}
+        <h1 className="font-display text-[clamp(1.9rem,4vw,2.8rem)] font-bold leading-[1.05] tracking-tight text-white">
+          {referral?.question || 'How did you hear about Aurora?'}
+        </h1>
+        <p className="mt-3 max-w-md text-[0.95rem] leading-relaxed text-white/55">
+          It helps us know where to show up. Entirely optional — skip if you'd rather not say.
+        </p>
+
+        <div
+          role="radiogroup"
+          aria-label={referral?.question || 'How did you hear about Aurora?'}
+          className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2"
+          // Inline handler rather than a factory taking a focus callback:
+          // react-hooks flags PASSING a ref-reading function during render,
+          // while reading a ref inside an event handler is exactly what the
+          // rule permits. The arithmetic still lives in tested nextRadioIndex.
+          onKeyDown={(e) => {
+            const n = nextRadioIndex(e.key, Math.max(0, keys.indexOf(referralChoice ?? '')), keys.length)
+            if (n === null) return
+            e.preventDefault()
+            // State BEFORE focus. Reversing these was a real keyboard trap
+            // once: `current` is derived from the selection, so focusing
+            // without selecting left it pinned and later options unreachable.
+            setReferralChoice(keys[n])
+            referralRefs.current[keys[n]]?.focus()
+          }}
+        >
+          {referralOptions.map((opt, i) => {
+            const active = referralChoice === opt.key
+            return (
+              <button
+                key={opt.key}
+                ref={(el) => {
+                  referralRefs.current[opt.key] = el
+                }}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                tabIndex={i === tabStop ? 0 : -1}
+                onClick={() => setReferralChoice(opt.key)}
+                className="stage-opt text-left"
+              >
+                <p className={`text-sm font-medium ${active ? 'text-white' : 'text-white/80'}`}>
+                  {opt.label}
+                </p>
+              </button>
+            )
+          })}
+        </div>
+
+        <div className="mt-5">
+          {/* The reveal is announced: the field appears in response to a
+              selection, which a screen-reader user would otherwise never learn
+              about. A real <label>, not a placeholder — placeholders vanish on
+              input and aren't reliably announced. */}
+          <div aria-live="polite" className="min-h-[5.25rem]">
+            {otherChosen && (
+              <div>
+                <label
+                  htmlFor="referral-detail"
+                  className="block text-[0.8rem] font-medium text-white/75"
+                >
+                  Where, specifically? <span className="text-white/45">(optional)</span>
+                </label>
+                <input
+                  id="referral-detail"
+                  type="text"
+                  value={referralDetail}
+                  maxLength={REFERRAL_DETAIL_MAX}
+                  onChange={(e) => setReferralDetail(e.target.value)}
+                  placeholder="A podcast, a forum, a friend's setup…"
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white placeholder:text-white/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7]/70"
+                />
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              sendReferral({ skip: true })
+              const n = nextStep(machine, 'referral')
+              if (n) { goTo(n); return }
+              void settleReferral().then(onDone)
+            }}
+            className="mt-4 rounded-full px-5 py-2.5 text-sm font-semibold text-white/75 ring-1 ring-white/[0.16] transition-colors hover:bg-white/[0.06] hover:text-white"
+          >
+            Skip this question
+          </button>
+        </div>
+      </>
+    )
+  }
+
   function renderWelcome() {
     return (
       <div className="text-center">
@@ -778,7 +1035,15 @@ export function OnboardingFlow({ profileId, profile, status, onDone }: Onboardin
         </p>
         <button
           type="button"
-          onClick={() => goTo('loading')}
+          // In the referral-only pass there is no loading step — nothing to
+          // seed and no rails to warm — so this ends the flow directly.
+          onClick={() => {
+            const n = nextStep(machine, 'welcome')
+            if (n) { goTo(n); return }
+            // Terminal (referral-only pass): same reload race as the header
+            // skip — wait for the answer to land before the page goes away.
+            void settleReferral().then(onDone)
+          }}
           className="mt-9 rounded-full bg-gradient-to-b from-[#b66bff] to-[#9333ea] px-8 py-3.5 text-sm font-bold text-white shadow-[0_0_22px_rgba(168,85,247,0.5)] transition-all hover:-translate-y-0.5 hover:shadow-[0_0_34px_rgba(168,85,247,0.7)]"
         >
           Take me in →

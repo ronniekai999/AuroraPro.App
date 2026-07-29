@@ -15,6 +15,16 @@ import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import ManualMatchModal from './ManualMatchModal'
 import {
+  parseReferralOptionsSetting,
+  serializeReferralOptions,
+  validateReferralOptions,
+  referralSourceLabel,
+  hasDeceptiveRunes,
+  type ReferralOption,
+} from '@/lib/referral'
+import {
+  getAdminReferralSummary,
+  type AdminReferralSummary,
   apiFetchResponse,
   approveRequest,
   createInvite,
@@ -74,6 +84,11 @@ import {
   type UpdateState,
   type UpdateStatus,
 } from '@/lib/api'
+
+// server_settings keys for the referral prompt (migration 046). Named here so
+// the editor and the Go whitelist can't drift on a string literal.
+const REFERRAL_QUESTION_KEY = 'referral_prompt_question'
+const REFERRAL_OPTIONS_KEY = 'referral_prompt_options'
 
 /* ─────────────────────── ADMIN VIEW ─────────────────────── */
 // Admin backup + restore card. Backup is a tokenized anchor
@@ -1447,6 +1462,11 @@ function AdminOAuthTab() {
   if (!s) return <p className="text-white/40 text-sm">Loading…</p>
   return (
     <div className="space-y-4">
+      {/* Above the provider cards because it spans them: the prompt exists to
+          replace the attribution that the per-provider bypass toggles below
+          give up. */}
+      <ReferralPromptSection />
+      <ReferralSummarySection />
       <OAuthProviderSection
         provider="google"
         label="Google"
@@ -1483,6 +1503,309 @@ function AdminOAuthTab() {
         onUpdate={setS}
       />
     </div>
+  )
+}
+
+// Referral prompt editor (migration 046). Sits with the bypass toggles it
+// depends on: when a provider bypasses the invite gate, the invite code — the
+// only record of where an account came from — is what gets skipped, and this
+// question is what replaces it.
+interface EditableOption extends ReferralOption { rowId: number }
+
+/** Truncate by CHARACTER, not UTF-16 unit — slicing mid-surrogate renders a
+ *  replacement glyph — and mark that it was cut. */
+function truncateChars(s: string, max: number): string {
+  const chars = [...s]
+  return chars.length <= max ? s : chars.slice(0, max).join('') + '…'
+}
+
+function ReferralPromptSection() {
+  const [question, setQuestion] = useState('')
+  // Rows carry a client-side id so React keys are stable across removal. With
+  // key={i} the LAST DOM row is the one destroyed, which leaves focus on a
+  // Remove button whose aria-label now names a different option — a second
+  // press deletes a row the admin never targeted.
+  const [rows, setRows] = useState<EditableOption[]>([])
+  const nextRowId = useRef(0)
+  // Keys that already existed when the settings loaded. Their answers are
+  // stored BY KEY, so renaming one orphans every answer that used it — the
+  // exact failure storing keys instead of labels exists to prevent. Renaming
+  // the label is free and is what the operator actually wants.
+  const [lockedKeys, setLockedKeys] = useState<Set<string>>(new Set())
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    const ac = new AbortController()
+    getAllSettings(ac.signal)
+      .then(map => {
+        setQuestion(map[REFERRAL_QUESTION_KEY] ?? '')
+        const parsed = parseReferralOptionsSetting(map[REFERRAL_OPTIONS_KEY] ?? '')
+        setRows(parsed.map(o => ({ ...o, rowId: nextRowId.current++ })))
+        setLockedKeys(new Set(parsed.map(o => o.key)))
+      })
+      .catch(e => { if (e.name !== 'AbortError') setErr(e instanceof Error ? e.message : 'Failed to load') })
+      .finally(() => setLoading(false))
+    return () => ac.abort()
+  }, [])
+
+  // Mirrors the Go validator so a rejected save names the offending ROW. The
+  // settings whitelist can only answer yes/no, so without this the admin gets
+  // a bare "invalid value for setting" with no idea which line is wrong.
+  // lockedKeys is passed so a stored key that today's pattern rejects doesn't
+  // raise an error on a field the admin cannot edit.
+  const issues = validateReferralOptions(rows, lockedKeys)
+  const issueFor = (i: number) => issues.find(x => x.index === i)?.message
+  const listIssue = issues.find(x => x.index === -1)?.message
+  const questionIssue = [...question.trim()].length > 200
+    ? 'Question must be 200 characters or fewer.'
+    : hasDeceptiveRunes(question.trim())
+      ? 'Question contains a hidden or direction-changing character.'
+      : null
+
+  const save = async () => {
+    setSaving(true); setErr(null); setSaved(false)
+    try {
+      await updateSettings({
+        [REFERRAL_QUESTION_KEY]: question.trim(),
+        [REFERRAL_OPTIONS_KEY]: rows.length ? serializeReferralOptions(rows) : '',
+      })
+      setLockedKeys(new Set(rows.map(o => o.key.trim())))
+      setSaved(true)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to save')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return <p className="text-white/40 text-sm">Loading…</p>
+
+  return (
+    <div className="glass-panel rounded-2xl p-5 space-y-3">
+      <h2 className="text-white font-semibold mb-1">Referral prompt</h2>
+      <p className="text-white/55 text-xs">
+        Asked once, of accounts created through a provider whose invite bypass is on below.
+        Everyone else is never asked. Leave blank to use the defaults.
+      </p>
+
+      <div>
+        <label htmlFor="referral-question" className="block text-white/80 text-sm mb-1.5">Question</label>
+        <input
+          id="referral-question"
+          type="text"
+          value={question}
+          onChange={e => { setQuestion(e.target.value); setSaved(false) }}
+          aria-invalid={!!questionIssue || undefined}
+          aria-describedby={questionIssue ? 'referral-question-err' : undefined}
+          placeholder="How did you hear about Aurora?"
+          className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+        />
+        {questionIssue && <p id="referral-question-err" className="text-red-300 text-xs mt-1">{questionIssue}</p>}
+      </div>
+
+      <div>
+        <p className="text-white/80 text-sm mb-1.5">Options</p>
+        {listIssue && <p className="text-red-300 text-xs mb-2">{listIssue}</p>}
+        <div className="space-y-2">
+          {rows.map((row, i) => {
+            const locked = lockedKeys.has(row.key)
+            const issue = issueFor(i)
+            const errId = `referral-opt-${row.rowId}-err`
+            return (
+              <div key={row.rowId}>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={row.key}
+                    readOnly={locked}
+                    aria-label={`Option ${i + 1} key${locked ? ' (locked)' : ''}`}
+                    aria-invalid={!!issue || undefined}
+                    aria-describedby={issue ? errId : undefined}
+                    onChange={e => { setRows(p => p.map((r, j) => j === i ? { ...r, key: e.target.value } : r)); setSaved(false) }}
+                    placeholder="key"
+                    title={locked ? 'Answers are stored by key — renaming would orphan them. Edit the label instead.' : undefined}
+                    className={`w-40 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-sm font-mono ${locked ? 'text-white/45' : 'text-white'}`}
+                  />
+                  <input
+                    type="text"
+                    value={row.label}
+                    aria-label={`Option ${i + 1} label`}
+                    aria-invalid={!!issue || undefined}
+                    aria-describedby={issue ? errId : undefined}
+                    onChange={e => { setRows(p => p.map((r, j) => j === i ? { ...r, label: e.target.value } : r)); setSaved(false) }}
+                    placeholder="Label shown to the user"
+                    className="flex-1 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => { setRows(p => p.filter((_, j) => j !== i)); setSaved(false) }}
+                    aria-label={`Remove option ${row.label || row.key || i + 1}`}
+                    className="px-3 py-2 text-white/50 hover:text-red-300 text-sm rounded"
+                  >
+                    Remove
+                  </button>
+                </div>
+                {issue && <p id={errId} className="text-red-300 text-xs mt-1">{issue}</p>}
+                {locked && !issue && (
+                  <p className="text-white/35 text-xs mt-1">
+                    Key locked — answers are stored by it. Rename the label instead.
+                  </p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        <div className="flex items-center justify-between mt-2">
+          <button
+            type="button"
+            onClick={() => { setRows(p => [...p, { key: '', label: '', rowId: nextRowId.current++ }]); setSaved(false) }}
+            disabled={rows.length >= 12}
+            className="px-3 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] text-white/80 text-xs rounded disabled:opacity-40"
+          >
+            + Add option
+          </button>
+          <span className="text-white/35 text-xs">
+            “Something else” with a free-text box is always offered last and can’t be removed.
+          </span>
+        </div>
+      </div>
+
+      {/* Rendered unconditionally so the region exists before it has content —
+          a live region created at the same moment as its text is not announced,
+          which would leave a screen-reader admin with no feedback at all on
+          either success or failure. */}
+      <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={saving || issues.length > 0 || !!questionIssue}
+          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
+        >
+          {saving ? 'Saving…' : 'Save prompt'}
+        </button>
+        <span role="status" className="text-white/55 text-xs">{saved ? 'Saved.' : ''}</span>
+      </div>
+    </div>
+  )
+}
+
+// Where signups say they came from. Counts and percentages only — a chart
+// library for one bar list would be a dependency for nothing, and the numbers
+// are the accessible content either way.
+function ReferralSummarySection() {
+  const [days, setDays] = useState(0)
+  const [data, setData] = useState<AdminReferralSummary | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    const ac = new AbortController()
+    setErr(null)
+    getAdminReferralSummary(days, ac.signal)
+      .then(setData)
+      .catch(e => { if (e.name !== 'AbortError') setErr(e instanceof Error ? e.message : 'Failed to load') })
+    return () => ac.abort()
+  }, [days])
+
+  const top = data && data.by_source.length ? data.by_source[0].count : 0
+  return (
+    <div className="glass-panel rounded-2xl p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-white font-semibold">Where sign-ups came from</h2>
+        <label className="text-white/55 text-xs">
+          <span className="sr-only">Time window</span>
+          <select
+            value={days}
+            onChange={e => setDays(Number(e.target.value))}
+            className="px-2 py-1 bg-white/[0.04] border border-white/[0.06] rounded text-white text-xs"
+          >
+            <option value={0}>All time</option>
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+        </label>
+      </div>
+
+      <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
+      {!data && !err && <p className="text-white/40 text-sm">Loading…</p>}
+      {data && (
+        <>
+          <div className="flex gap-6 text-sm">
+            <span className="text-white/80">{data.answered.toLocaleString()} <span className="text-white/45">answered</span></span>
+            <span className="text-white/80">{data.skipped.toLocaleString()} <span className="text-white/45">skipped</span></span>
+            <span className="text-white/80">{data.pending.toLocaleString()} <span className="text-white/45">not yet asked</span></span>
+          </div>
+          {data.total === 0 ? (
+            <p className="text-white/45 text-sm">
+              No one has been asked yet. Accounts become eligible when they sign up through a
+              provider with its invite bypass turned on.
+            </p>
+          ) : data.by_source.length === 0 ? (
+            <p className="text-white/45 text-sm">No answers yet.</p>
+          ) : (
+            <div className="space-y-1.5">
+              {data.by_source.map(row => {
+                const pct = data.answered > 0 ? Math.round((row.count / data.answered) * 100) : 0
+                return (
+                  <div key={row.key} className="flex items-center gap-3">
+                    {/* A deleted option's answers are still shown — dropping
+                        them would under-report history every time an operator
+                        tidies the list. */}
+                    <span className={`w-48 shrink-0 text-sm ${row.label ? 'text-white/80' : 'text-white/45 italic'}`}>
+                      {row.label ?? referralSourceLabel(row.key, [])}
+                    </span>
+                    <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-purple-500 to-purple-400"
+                        style={{ width: `${top > 0 ? (row.count / top) * 100 : 0}%` }}
+                      />
+                    </div>
+                    <span className="w-24 shrink-0 text-right text-white/60 text-sm tabular-nums">
+                      {row.count.toLocaleString()} · {pct}%
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+// One user's referral answer for the Users table. The detail is untrusted free
+// text from that user, rendered here as a text node (React escapes it) because
+// an admin's screen is exactly where an injection would matter.
+function ReferralCell({ user, options, answeredAt }: {
+  user: AdminUser
+  options: ReferralOption[]
+  /** Pre-formatted; fmtRelative is scoped to the AdminView component. */
+  answeredAt?: string
+}) {
+  if (!user.referral_status) {
+    // Never eligible — a password signup, an invited user, or a provider with
+    // no bypass. Not "we forgot to ask".
+    return <span className="text-white/25" title="Not eligible — signed up with an invite or a password">—</span>
+  }
+  if (user.referral_status === 'pending') {
+    return <span className="text-white/40 text-sm">Pending</span>
+  }
+  if (user.referral_status === 'skipped') {
+    return <span className="text-white/40 text-sm">— (skipped)</span>
+  }
+  const label = referralSourceLabel(user.referral_source ?? '', options)
+  return (
+    <span className="text-white/70 text-sm" title={answeredAt ? `Answered ${answeredAt}` : undefined}>
+      {label}
+      {user.referral_detail && (
+        <span className="text-white/45"> — “{truncateChars(user.referral_detail, 60)}”</span>
+      )}
+    </span>
   )
 }
 
@@ -1876,6 +2199,9 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
   const [users, setUsers] = useState<AdminUser[] | null>(null)
   const [usersLoading, setUsersLoading] = useState(false)
   const [usersErr, setUsersErr] = useState<string | null>(null)
+  // Current referral options, for resolving the Users table's stored keys to
+  // labels. Empty is fine — unknown keys render as "removed: <key>".
+  const [referralOptions, setReferralOptions] = useState<ReferralOption[]>([])
   // Invite code generation lives on the Users tab (its natural home)
   // rather than the Server settings tab. Local state so the latest code
   // sticks around until the admin clicks Generate again or navigates away.
@@ -1938,6 +2264,21 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       .finally(() => setUsersLoading(false))
     return () => ac.abort()
   }, [tab, users])
+
+  // The Referral column stores option KEYS, so it needs the current option list
+  // to render labels. Refetched on every entry to the tab — NOT folded into the
+  // users effect above, whose `users !== null` guard would have pinned the
+  // labels for the session, so editing an option on the OAuth tab and coming
+  // back here showed the old text until a full reload. Failure is non-fatal:
+  // referralSourceLabel degrades to "<removed: key>", which is honest.
+  useEffect(() => {
+    if (tab !== 'users') return
+    const ac = new AbortController()
+    getAllSettings(ac.signal)
+      .then(map => setReferralOptions(parseReferralOptionsSetting(map[REFERRAL_OPTIONS_KEY] ?? '')))
+      .catch(() => { /* labels degrade to the raw key */ })
+    return () => ac.abort()
+  }, [tab])
 
   useEffect(() => {
     if (tab !== 'activity' || activity !== null) return
@@ -2276,6 +2617,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                   <th>User</th>
                   <th>Role</th>
                   <th>Sign-in</th>
+                  <th>Referral</th>
                   <th>Created</th>
                   <th>Last login</th>
                   <th></th>
@@ -2303,6 +2645,13 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     <td>
                       <span className="text-white/60 text-sm">{u.oauth_provider ? u.oauth_provider : 'password'}</span>
                     </td>
+                    <td>
+                      <ReferralCell
+                        user={u}
+                        options={referralOptions}
+                        answeredAt={u.referral_answered_at ? fmtRelative(u.referral_answered_at) : undefined}
+                      />
+                    </td>
                     <td className="text-white/40">{fmtRelative(u.created_at)}</td>
                     <td className="text-white/40">{u.last_login_at ? fmtRelative(u.last_login_at) : 'Never'}</td>
                     <td className="text-right">
@@ -2323,7 +2672,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                   </tr>
                 ))}
                 {users.length === 0 && (
-                  <tr><td colSpan={6} className="text-white/40 text-sm text-center py-6">No users found.</td></tr>
+                  <tr><td colSpan={7} className="text-white/40 text-sm text-center py-6">No users found.</td></tr>
                 )}
               </tbody>
             </table>

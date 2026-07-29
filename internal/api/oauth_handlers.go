@@ -793,7 +793,12 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 		// can never exist without an authoritative identity. The 23505
 		// email-vs-username disambiguation below still works: the underlying
 		// *pgconn.PgError from the user INSERT is propagated unchanged.
-		newUser, cerr := h.queries.CreateOAuthUserWithIdentity(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject)
+		//
+		// The referral flag (migration 046) is stamped inside this INSERT's
+		// transaction, so a new user can never exist eligible-but-unmarked, and
+		// the rollback path below discards the mark along with the user.
+		newUser, cerr := h.queries.CreateOAuthUserWithIdentity(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject,
+			referralEligible(bypassInvite, inviteClaimID))
 		if cerr == nil {
 			// Finalize the invite claim against the new user. Mirrors the
 			// password Register flow's atomic Claim → Create → Finalize

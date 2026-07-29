@@ -1,5 +1,6 @@
 import { getDiagnosticBuffer, redactURL } from './diagnosticBuffer'
 import type { CodeInfo } from './party'
+import type { ReferralOption } from './referral'
 
 // Aurora V2 — API client.
 //
@@ -1220,6 +1221,16 @@ export interface AdminUser {
   // Absent (omitempty server-side) for users who haven't signed in since the
   // column was added — rendered as "Never". Bumped on login/OAuth/register.
   last_login_at?: string
+  // Referral attribution (migration 046). All absent unless the user signed up
+  // through an invite-bypassing OAuth provider without redeeming an invite —
+  // the one path that otherwise records nothing about where they came from.
+  // referral_source holds the option KEY; resolve it through
+  // referralSourceLabel so a renamed option follows and a deleted one is
+  // still readable.
+  referral_status?: 'pending' | 'answered' | 'skipped'
+  referral_source?: string
+  referral_detail?: string
+  referral_answered_at?: string
 }
 
 export async function getAdminDashboard(signal?: AbortSignal): Promise<ServerStats> {
@@ -2714,6 +2725,67 @@ export async function submitBugReport(
     throw new APIError(res.status, message, body)
   }
   return (await parseBody()) as BugReportSubmitResult
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Referral prompt ("How did you hear about Aurora?")
+//
+// Asked once, of signups that came through a provider whose invite-bypass
+// toggle is on. Those signups skip the invite code, which was the only record
+// of where the account came from.
+//
+// The server decides eligibility — `pending` is false unless it says otherwise,
+// and an ineligible caller isn't even told what the question is. The client
+// never infers whether to ask.
+
+export interface ReferralPromptState {
+  pending: boolean
+  /** Admin-authored. Render as TEXT — never as HTML. */
+  question?: string
+  options?: ReferralOption[]
+}
+
+export async function getReferralPrompt(signal?: AbortSignal): Promise<ReferralPromptState> {
+  return apiFetch<ReferralPromptState>('/api/me/referral-prompt', { signal })
+}
+
+/**
+ * Records the answer, or the skip. Idempotent server-side: a second call on an
+ * already-resolved user is a 200 no-op, so a retry after a flaky network is
+ * safe. `detail` is only accepted alongside source 'other'.
+ */
+export async function submitReferral(
+  answer: { source: string; detail?: string } | { skip: true },
+): Promise<{ pending: boolean; recorded: boolean }> {
+  return apiFetch<{ pending: boolean; recorded: boolean }>('/api/me/referral', {
+    method: 'POST',
+    body: answer,
+  })
+}
+
+export interface ReferralSourceCount {
+  key: string
+  /** null when the option was deleted after users had already chosen it. */
+  label: string | null
+  count: number
+}
+
+export interface AdminReferralSummary {
+  total: number
+  answered: number
+  skipped: number
+  pending: number
+  by_source: ReferralSourceCount[]
+  window_days: number
+}
+
+/** windowDays 0 (or omitted) means all time; the window is on signup date. */
+export async function getAdminReferralSummary(
+  windowDays = 0,
+  signal?: AbortSignal,
+): Promise<AdminReferralSummary> {
+  const qs = windowDays > 0 ? `?days=${windowDays}` : ''
+  return apiFetch<AdminReferralSummary>(`/api/admin/referrals/summary${qs}`, { signal })
 }
 
 // ──────────────────────────────────────────────────────────────────
