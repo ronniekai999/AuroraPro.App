@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1089,7 +1090,14 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		// writes would let admins set a value nothing consumes.
 		// Existing rows in server_settings are harmless dead data
 		// — no migration to delete, but no NEW writes allowed.
-		"radarr_url":        {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		// Referral prompt (migration 046). Both empty-allowed: empty means
+		// "revert to the built-in default", which is how an operator clears a
+		// customization. referral_prompt_options is the first JSON-valued
+		// setting in this table — server_settings stores TEXT, so
+		// parseReferralOptions is the only validation there is.
+		settingReferralQuestion: {validReferralQuestionSetting},
+		settingReferralOptions:  {validReferralOptionsSetting},
+		"radarr_url":            {func(v string) bool { return v == "" || isValidARRURL(v) }},
 		"radarr_api_key":    {func(v string) bool { return !isMaskedAPIKey(v) }},
 		"radarr_4k_url":     {func(v string) bool { return v == "" || isValidARRURL(v) }},
 		"radarr_4k_api_key": {func(v string) bool { return !isMaskedAPIKey(v) }},
@@ -1100,18 +1108,43 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := getClaimsFromRequest(r)
-	var changedKeys []string
-	for key, value := range req.Settings {
+
+	// Validate EVERY key before writing ANY of them. The previous version
+	// validated and upserted in the same pass, so a request carrying one bad
+	// key persisted an arbitrary subset of the good ones before returning 400
+	// — arbitrary because Go randomizes map iteration order, making the
+	// partial write non-deterministic and unreproducible. That was survivable
+	// while each admin panel saved a single key, but the referral prompt saves
+	// its question and its options together: a malformed options blob would
+	// otherwise land the question row anyway and leave the pair inconsistent.
+	//
+	// Sorted for the same reason: with two invalid keys, map order decided
+	// which one the error message named. Sorting makes the response
+	// deterministic for a given request body.
+	keys := make([]string, 0, len(req.Settings))
+	for key := range req.Settings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		rule, ok := allowedKeys[key]
 		if !ok {
 			writeError(w, http.StatusBadRequest, "unknown setting: "+key)
 			return
 		}
-		if !rule.validate(value) {
+		if !rule.validate(req.Settings[key]) {
 			writeError(w, http.StatusBadRequest, "invalid value for setting: "+key)
 			return
 		}
-		if err := h.queries.UpsertSetting(r.Context(), key, value, claims.UserID); err != nil {
+	}
+
+	// Write pass. A mid-loop DB failure can still leave a partial write, but
+	// that's an infrastructure fault rather than a caller-triggerable one, and
+	// server_settings has no cross-key transactional story to preserve (every
+	// read is an independent GetSetting).
+	changedKeys := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if err := h.queries.UpsertSetting(r.Context(), key, req.Settings[key], claims.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update setting")
 			return
 		}

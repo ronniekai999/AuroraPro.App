@@ -274,7 +274,8 @@ func (q *Queries) GetUsernamesByIDs(ctx context.Context, ids []int64) (map[int64
 
 func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, last_login_at
+		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, last_login_at,
+			oauth_provider, referral_status, referral_source, referral_detail
 		 FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("get all users: %w", err)
@@ -286,7 +287,14 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 		u := &models.User{}
 		// last_login_at is nullable (migration 036); scanned into *time.Time so a
 		// never-signed-in user stays nil → "Never" in the admin UI.
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.LastLoginAt); err != nil {
+		//
+		// oauth_provider was MISSING from this select while the admin table's
+		// "Sign-in" column rendered it — so every user, including Google and
+		// Discord signups, displayed as "password". Selecting it fixes that
+		// column, and the referral columns beside it are only meaningful for
+		// exactly the OAuth signups it identifies (migration 046).
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.LastLoginAt,
+			&u.OAuthProvider, &u.ReferralStatus, &u.ReferralSource, &u.ReferralDetail); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		users = append(users, u)

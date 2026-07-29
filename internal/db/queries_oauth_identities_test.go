@@ -204,7 +204,7 @@ func TestCreateOAuthUserWithIdentity(t *testing.T) {
 	email := "owi_" + suffix + "@example.com"
 	subj := "owi_sub_" + suffix
 
-	user, err := q.CreateOAuthUserWithIdentity(ctx, username, email, "", "google", subj)
+	user, err := q.CreateOAuthUserWithIdentity(ctx, username, email, "", "google", subj, false)
 	if err != nil {
 		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
 	}
@@ -228,10 +228,102 @@ func TestCreateOAuthUserWithIdentity(t *testing.T) {
 
 	// A username collision propagates a *pgconn.PgError with code 23505 so the
 	// caller's email-vs-username disambiguation + retry loop still works.
-	_, cerr := q.CreateOAuthUserWithIdentity(ctx, username, "different_"+suffix+"@example.com", "", "discord", "x_"+suffix)
+	_, cerr := q.CreateOAuthUserWithIdentity(ctx, username, "different_"+suffix+"@example.com", "", "discord", "x_"+suffix, false)
 	var pgErr *pgconn.PgError
 	if !errors.As(cerr, &pgErr) || pgErr.Code != "23505" {
 		t.Errorf("duplicate-username create error = %v, want *pgconn.PgError code 23505", cerr)
+	}
+
+	// referralPending=false writes NULL, i.e. "never eligible" — the same state
+	// every password signup lands in by not naming the column at all.
+	if user.ReferralStatus != nil {
+		t.Errorf("referral_status = %q, want NULL for referralPending=false", *user.ReferralStatus)
+	}
+}
+
+// TestCreateOAuthUserWithIdentity_ReferralPending pins the referral stamp
+// (migration 046): eligibility is written INSIDE the create transaction, so a
+// new user can never exist in the eligible-but-unmarked state that would let
+// the prompt be silently skipped. The follow-up resolve is exercised here too,
+// because its "only if still pending" predicate is the entire idempotency
+// mechanism behind POST /api/me/referral.
+func TestCreateOAuthUserWithIdentity_ReferralPending(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+
+	user, err := q.CreateOAuthUserWithIdentity(ctx,
+		"ref_"+suffix, "ref_"+suffix+"@example.com", "", "google", "ref_sub_"+suffix, true)
+	if err != nil {
+		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID) })
+
+	if user.ReferralStatus == nil || *user.ReferralStatus != "pending" {
+		t.Fatalf("returned referral_status = %v, want \"pending\"", user.ReferralStatus)
+	}
+	status, err := q.GetReferralStatus(ctx, user.ID)
+	if err != nil || status != "pending" {
+		t.Fatalf("GetReferralStatus = (%q, %v), want (\"pending\", nil)", status, err)
+	}
+
+	detail := "a podcast ad"
+	resolved, err := q.ResolveReferral(ctx, user.ID, "answered", "other", &detail)
+	if err != nil || !resolved {
+		t.Fatalf("ResolveReferral = (%v, %v), want (true, nil)", resolved, err)
+	}
+
+	// Second submit — the double-tap a slow network produces. It must report
+	// "didn't land" rather than erroring or overwriting the real answer.
+	resolved, err = q.ResolveReferral(ctx, user.ID, "skipped", "", nil)
+	if err != nil {
+		t.Fatalf("second ResolveReferral errored: %v", err)
+	}
+	if resolved {
+		t.Error("second ResolveReferral reported a write — the pending predicate didn't hold")
+	}
+	var gotStatus, gotSource, gotDetail *string
+	if err := q.pool.QueryRow(ctx,
+		`SELECT referral_status, referral_source, referral_detail FROM users WHERE id = $1`, user.ID,
+	).Scan(&gotStatus, &gotSource, &gotDetail); err != nil {
+		t.Fatalf("read back referral columns: %v", err)
+	}
+	if gotStatus == nil || *gotStatus != "answered" || gotSource == nil || *gotSource != "other" {
+		t.Errorf("after double-submit: status=%v source=%v, want answered/other", gotStatus, gotSource)
+	}
+	if gotDetail == nil || *gotDetail != detail {
+		t.Errorf("detail = %v, want %q", gotDetail, detail)
+	}
+
+	// A user who was never eligible cannot be resolved into an answer.
+	other := seedOAuthTestUser(t, q, "hash")
+	resolved, err = q.ResolveReferral(ctx, other, "answered", "twitch", nil)
+	if err != nil {
+		t.Fatalf("ResolveReferral on ineligible user errored: %v", err)
+	}
+	if resolved {
+		t.Error("resolved a user whose referral_status was NULL — eligibility isn't being enforced")
+	}
+}
+
+// TestReferralDetailRequiresOtherSource pins the schema CHECK from migration
+// 046: referral_detail may only accompany source 'other'. The API validator
+// enforces the same rule, and this is the backstop that keeps the two from
+// drifting.
+func TestReferralDetailRequiresOtherSource(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	suffix := randomSuffix(t)
+	user, err := q.CreateOAuthUserWithIdentity(ctx,
+		"refchk_"+suffix, "refchk_"+suffix+"@example.com", "", "google", "refchk_sub_"+suffix, true)
+	if err != nil {
+		t.Fatalf("CreateOAuthUserWithIdentity: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID) })
+
+	detail := "should be refused"
+	if _, err := q.ResolveReferral(ctx, user.ID, "answered", "twitch", &detail); err == nil {
+		t.Error("detail alongside a non-other source was accepted — the CHECK constraint is missing")
 	}
 }
 
@@ -251,7 +343,7 @@ func TestCreateOAuthUserWithIdentity_AtomicRollback(t *testing.T) {
 	}
 
 	newUsername := "rollback_" + randomSuffix(t)
-	_, err := q.CreateOAuthUserWithIdentity(ctx, newUsername, newUsername+"@example.com", "", "google", subj)
+	_, err := q.CreateOAuthUserWithIdentity(ctx, newUsername, newUsername+"@example.com", "", "google", subj, true)
 	if err == nil {
 		t.Fatal("expected error from duplicate identity, got nil")
 	}

@@ -247,7 +247,14 @@ func (q *Queries) CountOAuthIdentities(ctx context.Context, userID int64) (int, 
 // UNCHANGED as the underlying *pgconn.PgError so the caller's Tier-3
 // email-vs-username disambiguation (isEmailUniqueConstraint, audit H5) and its
 // username-collision retry loop keep working exactly as before.
-func (q *Queries) CreateOAuthUserWithIdentity(ctx context.Context, username, email, avatarURL, provider, subject string) (*models.User, error) {
+// referralPending (migration 046) stamps referral_status='pending' in the SAME
+// INSERT rather than a follow-up UPDATE. Callers pass the tier-3 eligibility
+// predicate — invite-bypass on AND no invite claim redeemed — and it is set
+// here so a new user can never exist in the eligible-but-unmarked state that
+// would let the prompt be silently skipped. false writes NULL, meaning "never
+// eligible", which is also what every password-signup path produces by simply
+// not naming the column.
+func (q *Queries) CreateOAuthUserWithIdentity(ctx context.Context, username, email, avatarURL, provider, subject string, referralPending bool) (*models.User, error) {
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("create oauth user with identity: begin: %w", err)
@@ -258,13 +265,14 @@ func (q *Queries) CreateOAuthUserWithIdentity(ctx context.Context, username, ema
 
 	user := &models.User{}
 	if err := tx.QueryRow(ctx,
-		`INSERT INTO users (username, email, password_hash, role, avatar_url, oauth_provider, oauth_subject)
-		 VALUES ($1, $2, '', 'user', $3, $4, $5)
+		`INSERT INTO users (username, email, password_hash, role, avatar_url, oauth_provider, oauth_subject, referral_status)
+		 VALUES ($1, $2, '', 'user', $3, $4, $5, CASE WHEN $6::boolean THEN 'pending' END)
 		 RETURNING id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, token_version,
-			oauth_provider, oauth_subject`,
-		username, email, avatarURL, provider, subject,
+			oauth_provider, oauth_subject, referral_status`,
+		username, email, avatarURL, provider, subject, referralPending,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AvatarURL,
-		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject); err != nil {
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject,
+		&user.ReferralStatus); err != nil {
 		// Propagate the raw error so errors.As(*pgconn.PgError) + the 23505
 		// constraint-name check still fire in resolveOAuthUser. NOT wrapped
 		// with extra context that could mask the PgError for the caller —

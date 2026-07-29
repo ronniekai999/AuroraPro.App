@@ -793,7 +793,19 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 		// can never exist without an authoritative identity. The 23505
 		// email-vs-username disambiguation below still works: the underlying
 		// *pgconn.PgError from the user INSERT is propagated unchanged.
-		newUser, cerr := h.queries.CreateOAuthUserWithIdentity(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject)
+		//
+		// referralPending (migration 046) is the eligibility predicate for the
+		// "How did you hear about Aurora?" prompt, evaluated HERE because this
+		// is the only place all of it is known: tier 3 means a genuinely new
+		// user, bypassInvite means the invite gate — and with it the only
+		// existing record of where the account came from — was skipped, and
+		// inviteClaimID <= 0 means no invite was redeemed after all (a user can
+		// present a valid invite AND use a bypassed provider; that user already
+		// has attribution and the prompt would be noise). Stamped inside the
+		// INSERT's transaction, so a new user can never exist eligible-but-
+		// unmarked, and the rollback path below discards the mark with the user.
+		referralPending := bypassInvite && inviteClaimID <= 0
+		newUser, cerr := h.queries.CreateOAuthUserWithIdentity(ctx, username, profile.Email, profile.AvatarURL, providerName, profile.Subject, referralPending)
 		if cerr == nil {
 			// Finalize the invite claim against the new user. Mirrors the
 			// password Register flow's atomic Claim → Create → Finalize
