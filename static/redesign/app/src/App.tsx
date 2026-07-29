@@ -1817,6 +1817,10 @@ function BrowseLoadingState({ title }: { title: string }) {
 // than this static map: opening a card pushes /title/<id>, so refresh,
 // browser Back, bookmarks, and shared links all land on the same title.
 // A cold load hydrates selectedMedia from GET /api/media/:id.
+// How long Home's data may sit before returning to it refetches. Long enough
+// that a tab bounce is free, short enough that a scan you just ran shows up.
+const HOME_STALE_MS = 30_000
+
 const VIEW_BY_PATH: Record<string, string> = {
   '': 'home',
   '/': 'home',
@@ -3242,6 +3246,26 @@ export default function App() {
   // on detail picks up the updated position_ms without triggering a
   // wasteful full home-rails refetch.
   const [cwReloadNonce, setCwReloadNonce] = useState(0)
+  // Home is loaded once and then kept in state: the effect below is keyed on
+  // [user, retryNonce, activeProfileId], none of which change when you navigate
+  // away and back, and this component never unmounts. So a library scan that
+  // adds titles was invisible until a hard refresh — the refresh worked only
+  // because it remounted everything. These two make it re-run: a staleness gate
+  // on returning to Home (every user), and a scan-completion signal (whoever is
+  // watching a scan). Both bump the same nonce so a scan finishing while you
+  // are already on Home doesn't need you to navigate at all.
+  const [homeReloadNonce, setHomeReloadNonce] = useState(0)
+  const lastHomeLoadRef = useRef(0)
+  const reloadHome = useCallback(() => setHomeReloadNonce(n => n + 1), [])
+
+  // Returning to Home refetches only if the data has had time to go stale. A
+  // quick tab bounce costs nothing; coming back later picks up anything a scan
+  // (or another device) added. Deliberately not keyed on `view` alone, which
+  // would re-run every core/CW/anchor/engagement fetch on every visit.
+  useEffect(() => {
+    if (!user || view !== 'home') return
+    if (Date.now() - lastHomeLoadRef.current > HOME_STALE_MS) reloadHome()
+  }, [view, user, reloadHome])
 
   // ── Discover rails: progressive load + live "ready" handling ──────────
   // Personalized home rails arrive from several sources at different speeds:
@@ -3320,7 +3344,11 @@ export default function App() {
     const ac = new AbortController()
     let cancelled = false
     ;(async () => {
-      setHomeLoading(true)
+      // Only show the skeleton on a COLD load. A stale-gated or scan-triggered
+      // refetch happens under rails the user is already looking at, and
+      // blanking them to a loading state would be a worse flicker than the
+      // staleness it fixes.
+      if (lastHomeLoadRef.current === 0) setHomeLoading(true)
       setHomeError(null)
       try {
         // QA 2026-05-25 — the original effect awaited all five fetches
@@ -3379,6 +3407,7 @@ export default function App() {
           { title: 'Top Rated Shows', items: shows as Media[], aspect: 'poster' as const, showBadges: true,
             seeAllTarget: { view: 'shows' as const, sortBy: 'rating' as const } },
         ]
+        lastHomeLoadRef.current = Date.now()
         setHomeRails(coreRails)
         // Core rails are visible. Clear the loading state now so the
         // spinner doesn't linger waiting on the personalized rails.
@@ -3444,7 +3473,7 @@ export default function App() {
       cancelled = true
       ac.abort()
     }
-  }, [user, retryNonce, activeProfileId])
+  }, [user, retryNonce, activeProfileId, homeReloadNonce])
 
   // Stage 2 fallback — if the Discover build is in progress and the
   // discover_ready WS push never arrives (socket down, missed event), poll the
@@ -4487,7 +4516,7 @@ export default function App() {
     // 2026-05-27 — Re-runs on retryNonce (Retry button bumps both
     // home + CW) AND on cwReloadNonce (player-close bumps only CW so
     // the Resume label freshens without re-fetching home rails).
-  }, [user, retryNonce, cwReloadNonce, activeProfileId])
+  }, [user, retryNonce, cwReloadNonce, activeProfileId, homeReloadNonce])
 
   // 2026-05-27 — Bug-report feature-flag probe. Single fetch on user
   // login; the flag is server-config-driven (env var only) so it
@@ -4666,7 +4695,7 @@ export default function App() {
               it changes the height of this whole sticky stack — which is
               why chromeRef publishes the measured height as --chrome-h
               (see the effect above) for everything anchored below it. */}
-          <ScanProgressBar isAdmin={user.role === 'admin'} />
+          <ScanProgressBar isAdmin={user.role === 'admin'} onScanComplete={reloadHome} />
           <TopNav
             user={user}
             currentView={view}
