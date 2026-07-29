@@ -80,6 +80,32 @@ describe('ScanProgressBar — scan completion signal', () => {
     expect(onScanComplete).not.toHaveBeenCalled()
   })
 
+  it('does NOT fire when a poll transiently fails mid-scan', async () => {
+    // The map used to be rebuilt from empty each poll, so one rejected request
+    // dropped that library and read as "not running" — identical to finishing.
+    // The in-app auto-updater restarts the service mid-scan, so this is a
+    // routine event, and each outage/recovery cycle fired again.
+    const onScanComplete = vi.fn()
+    getScanStatus.mockResolvedValue(status('running'))
+    render(<ScanProgressBar isAdmin onScanComplete={onScanComplete} />)
+    await waitFor(() => expect(getScanStatus).toHaveBeenCalled())
+    await tick()
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      getScanStatus.mockRejectedValueOnce(new Error('server restarting'))
+      await tick()
+      expect(onScanComplete).not.toHaveBeenCalled()
+      getScanStatus.mockResolvedValue(status('running'))
+      await tick()
+      expect(onScanComplete).not.toHaveBeenCalled()
+    }
+
+    // The REAL completion still lands.
+    getScanStatus.mockResolvedValue(status('idle'))
+    await tick()
+    await waitFor(() => expect(onScanComplete).toHaveBeenCalledTimes(1))
+  })
+
   it('survives having no callback at all', async () => {
     getScanStatus.mockResolvedValue(status('running'))
     const { rerender } = render(<ScanProgressBar isAdmin />)

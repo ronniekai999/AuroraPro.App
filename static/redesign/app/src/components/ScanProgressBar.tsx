@@ -59,14 +59,30 @@ export function ScanProgressBar({ isAdmin, onScanComplete }: {
     if (!isAdmin || libraries.length === 0) return
     let cancelled = false
     const tick = async () => {
-      const next = new Map<number, ScanStatus>()
+      // Collect only the libraries that ANSWERED, then merge over the previous
+      // map. Rebuilding from empty each poll meant one failed request dropped
+      // that library, which read as "no longer running" — indistinguishable
+      // from the scan actually finishing. Since the completion signal keys off
+      // exactly that, a blip fired a spurious Home refetch, and every
+      // outage/recovery cycle fired another. Merging leaves the last known
+      // state in place; only a definitive response replaces it.
+      //
+      // The merge happens inside the updater rather than off a ref, so nothing
+      // reads mutable state during render.
+      const answered = new Map<number, ScanStatus>()
       await Promise.all(libraries.map(async lib => {
         try {
           const s = await getScanStatus(lib.id)
-          if (!cancelled) next.set(lib.id, s)
-        } catch { /* per-library failure ignored */ }
+          if (!cancelled) answered.set(lib.id, s)
+        } catch { /* per-library failure: keep the last known status */ }
       }))
-      if (!cancelled) setStatuses(next)
+      if (!cancelled) {
+        setStatuses(prev => {
+          const next = new Map(prev)
+          for (const [id, st] of answered) next.set(id, st)
+          return next
+        })
+      }
     }
     void tick()
     const id = window.setInterval(tick, 4000)
