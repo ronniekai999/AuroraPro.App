@@ -224,8 +224,46 @@ function stack(...elements) {
 }
 
 const APP = 'src/App.tsx'
+const ONB = 'src/components/OnboardingFlow.tsx'
+
+// The onboarding overlay is `fixed inset-0` with its OWN opaque base, so its
+// text does not sit on the app ink at all. Derived from the overlay's utility
+// for the same reason INK is derived from the root's: measuring onboarding text
+// against the wrong base is off by the whole colour. Dies if the utility moves.
+const ONB_INK = (() => {
+  const m = read(ONB).match(/fixed inset-0 z-\[80\][^"]*bg-\[(#[0-9a-fA-F]{3,8})\]/)
+  if (!m) throw new Error('audit: onboarding overlay no longer carries its own bg-[#…] base — the audit is out of date, not passing')
+  return hex(m[1])
+})()
 
 const SURFACES = [
+  // ── The referral step. A one-shot question with a Skip, so every control
+  //    here has to be readable the FIRST time or the answer is noise. ──
+  {
+    what: 'referral step body copy', where: `${ONB} (referral step)`,
+    color: W, alpha: () => twAlpha(ONB, 'It helps us know where to show up', 'text-white'),
+    px: 15.2, on: () => [ONB_INK],
+  },
+  {
+    // The plan's requirement in one assertion: Skip must not be a
+    // low-contrast afterthought sitting next to a full-strength Continue.
+    what: 'referral step "Skip this question"', where: `${ONB} (referral step)`,
+    color: W, alpha: () => twAlpha(ONB, 'Skip this question', 'text-white'),
+    px: 14, on: () => [ONB_INK],
+  },
+  {
+    what: 'referral "Other" field label', where: `${ONB} (referral step)`,
+    color: W, alpha: () => twAlpha(ONB, 'Where, specifically?', 'text-white'),
+    px: 12.8, on: () => [ONB_INK],
+  },
+  {
+    // On the field's own translucent fill, not bare ink — one composite deeper
+    // than it looks, which is the case eyeballing gets wrong.
+    what: 'referral "Other" field placeholder', where: `${ONB} (referral step)`,
+    color: W, alpha: () => twAlpha(ONB, 'A podcast, a forum', 'placeholder:text-white'),
+    px: 14,
+    on: () => [over(W, twAlpha(ONB, 'A podcast, a forum', 'bg-white'), ONB_INK)],
+  },
   // ── The vibe search bar. THE case this script exists for. ──
   {
     what: 'vibe bar placeholder', where: `${APP} (.convo-search input)`,
