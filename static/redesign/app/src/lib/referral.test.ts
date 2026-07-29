@@ -5,7 +5,7 @@ import {
   serializeReferralOptions,
   parseReferralOptionsSetting,
   referralSourceLabel,
-  isRemovedReferralKey,
+  isRemovedSummaryRow,
   REFERRAL_OTHER_KEY,
   REFERRAL_OTHER_LABEL,
   REFERRAL_OPTIONS_MAX,
@@ -181,12 +181,26 @@ describe('referralSourceLabel', () => {
     expect(shuffleReferralOptions(OPTS, seededRng([0.5])).at(-1)!.label).toBe(REFERRAL_OTHER_LABEL)
   })
 
-  it('does not treat the free-text option as a removed key', () => {
-    // Its label is null over the wire by design (the server doesn't store it),
-    // which must not be read as "the operator deleted this option".
-    expect(isRemovedReferralKey(REFERRAL_OTHER_KEY, [])).toBe(false)
-    expect(isRemovedReferralKey('myspace', OPTS)).toBe(true)
-    expect(isRemovedReferralKey('twitch', OPTS)).toBe(false)
+  it('classifies summary rows from the wire shape, live options included', () => {
+    // The live-option case is the one that shipped broken: the predicate used
+    // to require the configured option list, the panel had none in scope and
+    // passed [], and every real option came back "removed" — the whole
+    // breakdown rendered as deleted history. A live row carries a label.
+    expect(isRemovedSummaryRow({ key: 'twitch', label: 'Twitch' })).toBe(false)
+    expect(isRemovedSummaryRow({ key: 'friend', label: 'A friend' })).toBe(false)
+    // A deleted option: the server found no label for it.
+    expect(isRemovedSummaryRow({ key: 'myspace', label: null })).toBe(true)
+    // The free-text option also has no label, and is NOT a removal.
+    expect(isRemovedSummaryRow({ key: REFERRAL_OTHER_KEY, label: null })).toBe(false)
+  })
+
+  it('pins the free-text option\'s actual copy, not just its plumbing', () => {
+    // Every other assertion compares REFERRAL_OTHER_LABEL to itself, so the
+    // string could be changed to anything and the suite would stay green —
+    // proven by mutation. This is the one that fails if the copy changes,
+    // which is the point: it is user-facing text, and changing it should be a
+    // deliberate act that updates a test.
+    expect(REFERRAL_OTHER_LABEL).toBe('Something else')
   })
   it('marks a deleted option instead of hiding the answer', () =>
     expect(referralSourceLabel('myspace', OPTS)).toBe('<removed: myspace>'))

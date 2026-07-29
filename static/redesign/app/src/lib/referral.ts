@@ -193,7 +193,7 @@ export function parseReferralOptionsSetting(raw: string): ReferralOption[] {
  *
  * The implicit `other` key is NOT a removal: it has no stored option by design,
  * so it resolves to REFERRAL_OTHER_LABEL. Callers deciding whether to style a
- * row as removed must ask isRemovedReferralKey, not whether a label was found.
+ * row as removed must ask isRemovedSummaryRow, not whether a label was found.
  */
 export function referralSourceLabel(key: string, options: readonly ReferralOption[]): string {
   if (key === REFERRAL_OTHER_KEY) return REFERRAL_OTHER_LABEL
@@ -202,10 +202,22 @@ export function referralSourceLabel(key: string, options: readonly ReferralOptio
 }
 
 /**
- * Whether a stored key no longer has a configured option — i.e. the operator
- * deleted it after users had chosen it. Distinct from `other`, which never has
- * one and is not a removal.
+ * Whether a summary row describes an option the operator has since deleted —
+ * the rows the breakdown dims as history rather than live configuration.
+ *
+ * Takes the WIRE SHAPE, deliberately. The previous signature asked for the
+ * configured option list, which the breakdown panel does not have in scope and
+ * never will: it renders the server's aggregate, not the settings. Its only
+ * caller therefore passed `[]`, which asserts "nothing is configured" and so
+ * marked every live option as deleted — the whole panel rendered as history.
+ * A predicate that cannot be called correctly from the one place that needs it
+ * is the wrong predicate, so this one asks for what that place actually holds.
+ *
+ * The server sends a null label for exactly two keys: one whose option was
+ * deleted, and the implicit `other`, which never has a stored option. The key
+ * separates them — `parseReferralOptions` refuses to store `other`, so no
+ * configured option can ever collide with it.
  */
-export function isRemovedReferralKey(key: string, options: readonly ReferralOption[]): boolean {
-  return key !== REFERRAL_OTHER_KEY && !options.some(o => o.key === key)
+export function isRemovedSummaryRow(row: { key: string; label: string | null }): boolean {
+  return row.label === null && row.key !== REFERRAL_OTHER_KEY
 }

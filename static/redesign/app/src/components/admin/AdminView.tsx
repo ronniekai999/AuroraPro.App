@@ -19,7 +19,7 @@ import {
   serializeReferralOptions,
   validateReferralOptions,
   referralSourceLabel,
-  isRemovedReferralKey,
+  isRemovedSummaryRow,
   hasDeceptiveRunes,
   REFERRAL_OTHER_LABEL,
   type ReferralOption,
@@ -1613,7 +1613,7 @@ function ReferralPromptSection() {
         {listIssue && <p className="text-red-300 text-xs mb-2">{listIssue}</p>}
         <div className="space-y-2">
           {rows.map((row, i) => {
-            const locked = lockedKeys.has(row.key)
+            const locked = lockedKeys.has(row.key.trim())
             const issue = issueFor(i)
             const errId = `referral-opt-${row.rowId}-err`
             return (
@@ -1759,7 +1759,7 @@ function ReferralSummarySection() {
                         tidies the list. A null label does NOT mean removed:
                         the implicit "other" never has a stored option, so the
                         key decides the styling, not the label's presence. */}
-                    <span className={`w-48 shrink-0 text-sm ${isRemovedReferralKey(row.key, []) ? 'text-white/45 italic' : 'text-white/80'}`}>
+                    <span className={`w-48 shrink-0 text-sm ${isRemovedSummaryRow(row) ? 'text-white/45 italic' : 'text-white/80'}`}>
                       {row.label ?? referralSourceLabel(row.key, [])}
                     </span>
                     <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">

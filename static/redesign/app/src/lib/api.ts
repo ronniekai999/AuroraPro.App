@@ -2765,7 +2765,12 @@ export async function submitReferral(
 
 export interface ReferralSourceCount {
   key: string
-  /** null when the option was deleted after users had already chosen it. */
+  /**
+   * null for a deleted option AND for the implicit "other", which never has a
+   * stored one — the key tells them apart, since "other" can never be a
+   * configured key. Classify with isRemovedSummaryRow rather than by testing
+   * the label, or the free-text row renders as deleted history.
+   */
   label: string | null
   count: number
 }

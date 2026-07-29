@@ -307,17 +307,27 @@ func (h *ReferralHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// This is an early-out, not the authority: ResolveReferral's
 	// `AND referral_status = 'pending'` is still what makes the write safe
 	// against a status that changes between here and there.
-	// A READ FAILURE FALLS THROUGH rather than short-circuiting. Returning here
-	// would discard an answer the user actually gave, and the client never
-	// retries — it treats this call as fire-and-forget so a failed write can't
-	// hold anyone at a spinner. Since ResolveReferral is gated on the row still
-	// being pending, attempting the write is safe even when we don't know the
-	// status: it either lands or matches zero rows. The narrow cost is that the
-	// oracle this early-out closes is briefly open while the database is
-	// faulting, which is a trade worth making to keep real input.
+	// A read failure short-circuits, and the answer is NOT lost by doing so.
+	//
+	// An earlier version fell through here on the theory that returning would
+	// discard input the user had given. That was wrong: the row stays
+	// 'pending', and TasteOnboardingGate re-reads /api/me/referral-prompt on
+	// every mount, so the user is asked again next session — the designed
+	// fallback OnboardingFlow already documents. The answer is deferred, not
+	// dropped.
+	//
+	// What falling through DID cost was real. Validation runs against the
+	// option list, so a configured key answered 200 and an unconfigured one
+	// 400: the enumeration oracle this early-out exists to close, reopened for
+	// any authenticated user whenever a single statement fails (a pool
+	// connection stale across a Postgres restart is enough). Worse, when the
+	// settings read fails too, promptConfig falls back to the BUILT-IN
+	// defaults, so a real operator-configured answer is rejected as "unknown
+	// source" — losing the very input the fall-through was meant to save.
 	if status, err := h.queries.GetReferralStatus(r.Context(), claims.UserID); err != nil {
-		slog.Warn("referral: status read failed on submit, attempting the write anyway",
-			"user_id", claims.UserID, "error", err)
+		slog.Warn("referral: status read failed on submit", "user_id", claims.UserID, "error", err)
+		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "recorded": false})
+		return
 	} else if status != "pending" {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "recorded": false})
 		return
