@@ -16,6 +16,16 @@ export interface ReferralOption {
 
 /** The implicit free-text option: always offered, always last, never listed. */
 export const REFERRAL_OTHER_KEY = 'other'
+/**
+ * The one place this option's display text is written.
+ *
+ * It is product copy for an option the server does not store — configured
+ * options carry admin-authored labels, this one does not — so the frontend
+ * owns it, and the summary API deliberately returns a null label for the
+ * `other` key rather than a second spelling of it. Every surface, user-facing
+ * and admin, resolves through here: the admin sees the words the user saw,
+ * which is already true of every other option and was not true of this one.
+ */
 export const REFERRAL_OTHER_LABEL = 'Something else'
 
 /** Mirrors referralDetailMaxLen in internal/api/referral_handlers.go. */
@@ -165,9 +175,22 @@ export function parseReferralOptionsSetting(raw: string): ReferralOption[] {
  * rather than dropped, because dropping them would quietly under-report history
  * every time someone tidies the list — the reason the column stores keys and
  * not labels in the first place.
+ *
+ * The implicit `other` key is NOT a removal: it has no stored option by design,
+ * so it resolves to REFERRAL_OTHER_LABEL. Callers deciding whether to style a
+ * row as removed must ask isRemovedReferralKey, not whether a label was found.
  */
 export function referralSourceLabel(key: string, options: readonly ReferralOption[]): string {
-  if (key === REFERRAL_OTHER_KEY) return 'Other'
+  if (key === REFERRAL_OTHER_KEY) return REFERRAL_OTHER_LABEL
   const hit = options.find(o => o.key === key)
   return hit ? hit.label : `<removed: ${key}>`
+}
+
+/**
+ * Whether a stored key no longer has a configured option — i.e. the operator
+ * deleted it after users had chosen it. Distinct from `other`, which never has
+ * one and is not a removal.
+ */
+export function isRemovedReferralKey(key: string, options: readonly ReferralOption[]): boolean {
+  return key !== REFERRAL_OTHER_KEY && !options.some(o => o.key === key)
 }

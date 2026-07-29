@@ -20,6 +20,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { OnboardingFlow } from './OnboardingFlow'
 import type { OnboardingStatus, ReferralPromptState } from '@/lib/api'
+import { REFERRAL_OTHER_LABEL } from '@/lib/referral'
 
 const submitReferral = vi.hoisted(() => vi.fn(async () => ({ pending: false, recorded: true })))
 const skipOnboarding = vi.hoisted(() => vi.fn(async () => ({ skipped: true })))
@@ -90,7 +91,7 @@ describe('referral step — radiogroup contract', () => {
     const labels = radios.map(r => r.textContent)
     for (const l of ['A friend', 'Twitch', 'Discord']) expect(labels).toContain(l)
     // Other is pinned last regardless of how the rest were shuffled.
-    expect(radios[radios.length - 1].textContent).toBe('Something else')
+    expect(radios[radios.length - 1].textContent).toBe(REFERRAL_OTHER_LABEL)
   })
 
   it('exposes exactly one tab stop before any selection', () => {
@@ -207,7 +208,7 @@ describe('referral step — the Other free-text field', () => {
     const user = userEvent.setup()
     const { container } = { container: document.body }
     renderStep()
-    await user.click(screen.getByRole('radio', { name: 'Something else' }))
+    await user.click(screen.getByRole('radio', { name: REFERRAL_OTHER_LABEL }))
 
     // getByLabelText proves the <label for> association — a placeholder alone
     // would not satisfy this, and placeholder-as-label is the failure mode.
@@ -221,14 +222,14 @@ describe('referral step — the Other free-text field', () => {
   it('caps the note at the length the API enforces', async () => {
     const user = userEvent.setup()
     renderStep()
-    await user.click(screen.getByRole('radio', { name: 'Something else' }))
+    await user.click(screen.getByRole('radio', { name: REFERRAL_OTHER_LABEL }))
     expect(screen.getByLabelText(/where, specifically/i)).toHaveAttribute('maxlength', '200')
   })
 
   it('hides again when a different option is chosen', async () => {
     const user = userEvent.setup()
     renderStep()
-    await user.click(screen.getByRole('radio', { name: 'Something else' }))
+    await user.click(screen.getByRole('radio', { name: REFERRAL_OTHER_LABEL }))
     await user.click(screen.getByRole('radio', { name: 'Twitch' }))
     expect(screen.queryByLabelText(/where, specifically/i)).not.toBeInTheDocument()
   })
@@ -268,7 +269,7 @@ describe('referral step — submission', () => {
   it('sends the note alongside other', async () => {
     const user = userEvent.setup()
     renderStep()
-    await user.click(screen.getByRole('radio', { name: 'Something else' }))
+    await user.click(screen.getByRole('radio', { name: REFERRAL_OTHER_LABEL }))
     await user.type(screen.getByLabelText(/where, specifically/i), 'a podcast')
     await advance(user)
     expect(submitReferral).toHaveBeenCalledWith({ source: 'other', detail: 'a podcast' })
@@ -277,7 +278,7 @@ describe('referral step — submission', () => {
   it('omits an empty note rather than sending a blank detail', async () => {
     const user = userEvent.setup()
     renderStep()
-    await user.click(screen.getByRole('radio', { name: 'Something else' }))
+    await user.click(screen.getByRole('radio', { name: REFERRAL_OTHER_LABEL }))
     await advance(user)
     expect(submitReferral).toHaveBeenCalledWith({ source: 'other' })
   })

@@ -19,7 +19,9 @@ import {
   serializeReferralOptions,
   validateReferralOptions,
   referralSourceLabel,
+  isRemovedReferralKey,
   hasDeceptiveRunes,
+  REFERRAL_OTHER_LABEL,
   type ReferralOption,
 } from '@/lib/referral'
 import {
@@ -1668,7 +1670,7 @@ function ReferralPromptSection() {
             + Add option
           </button>
           <span className="text-white/35 text-xs">
-            “Something else” with a free-text box is always offered last and can’t be removed.
+            “{REFERRAL_OTHER_LABEL}” with a free-text box is always offered last and can’t be removed.
           </span>
         </div>
       </div>
@@ -1754,8 +1756,10 @@ function ReferralSummarySection() {
                   <div key={row.key} className="flex items-center gap-3">
                     {/* A deleted option's answers are still shown — dropping
                         them would under-report history every time an operator
-                        tidies the list. */}
-                    <span className={`w-48 shrink-0 text-sm ${row.label ? 'text-white/80' : 'text-white/45 italic'}`}>
+                        tidies the list. A null label does NOT mean removed:
+                        the implicit "other" never has a stored option, so the
+                        key decides the styling, not the label's presence. */}
+                    <span className={`w-48 shrink-0 text-sm ${isRemovedReferralKey(row.key, []) ? 'text-white/45 italic' : 'text-white/80'}`}>
                       {row.label ?? referralSourceLabel(row.key, [])}
                     </span>
                     <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden" aria-hidden="true">
