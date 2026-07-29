@@ -124,7 +124,20 @@ export function validateReferralOptions(
     // read-only, so "fix the key" is not an instruction the admin can follow.
     // "Remove the row" is, and it is safe to say — the answers survive, keyed
     // by the same string, and the breakdown keeps reporting them.
-    const lockedNote = ' Remove this option to save; its existing answers stay readable in the breakdown.'
+    // parseReferralOptions is ALL-OR-NOTHING: one key it rejects means the
+    // server discards the entire stored list and serves the built-in defaults,
+    // so the operator's whole configuration is ALREADY offline. "This row is
+    // invalid" reads like one bad entry in an otherwise working list; it is the
+    // opposite, and it is the more urgent fact.
+    //
+    // The remedy is stated honestly too. Removing the row keeps its COUNTS —
+    // answers are stored by key and the breakdown still totals them — but the
+    // label is gone from every surface, and the key cannot be added back,
+    // because the same pattern that rejects it here rejects it there. Saying
+    // "its answers stay readable" implied more than that.
+    const lockedNote = ' Until it is removed none of your options are in use —'
+      + ' users are seeing the built-in defaults. Removing it keeps its answer counts,'
+      + ' but its label will read as removed and the key cannot be added back.'
     if (key === REFERRAL_OTHER_KEY) {
       issues.push({
         index,

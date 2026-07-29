@@ -128,7 +128,15 @@ describe('validateReferralOptions', () => {
     // be an instruction the admin can actually follow.
     const rows = [{ key: 'LegacyKey', label: 'Legacy' }]
     const locked = validateReferralOptions(rows, new Set(['LegacyKey']))
-    expect(locked.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
+    const msg = locked.find(i => i.index === 0)!.message
+    // The urgent fact, not just "this row is invalid": the server's parse is
+    // all-or-nothing, so one bad key means the whole configured list is already
+    // being ignored and users are seeing the built-in defaults.
+    expect(msg).toMatch(/defaults/i)
+    // And the remedy, stated without overpromising — counts survive, the label
+    // does not, and the key cannot come back.
+    expect(msg).toMatch(/remov/i)
+    expect(msg).toMatch(/cannot be added back/i)
     // Unlocked rows keep the "fix the key" wording, which they can act on.
     const fresh = validateReferralOptions(rows)
     expect(fresh.some(i => i.index === 0 && /lowercase/i.test(i.message))).toBe(true)
@@ -137,7 +145,7 @@ describe('validateReferralOptions', () => {
   it('flags a stored "other" row too — the server rejects it either way', () => {
     const issues = validateReferralOptions(
       [{ key: REFERRAL_OTHER_KEY, label: 'Other' }], new Set([REFERRAL_OTHER_KEY]))
-    expect(issues.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
+    expect(issues.find(i => i.index === 0)!.message).toMatch(/remov/i)
   })
 
   it('still flags a locked row\'s LABEL, which is editable', () => {

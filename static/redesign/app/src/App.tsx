@@ -811,8 +811,19 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           level with the thin subline, which measures 12px below the greeting
           block's optical centre — against a tall, heavy h1 that reads as the
           buttons sagging. Centring lands them within 0.1px of the block's
-          middle. */}
-      <div className="stage-gutter flex items-center justify-between gap-5 pt-10 mb-1">
+          middle.
+          
+          flex-wrap is load-bearing, not tidiness. The button group is shrink-0
+          and ~300px wide, so below ~430px it squeezes the greeting column until
+          an unbreakable username overflows its box — and centring raised that
+          overflow from the dim 14px subline onto the 32px extrabold headline.
+          Measured on painted text ink (element rects never show it, because
+          flex items don't overlap): collisions at 430/414/390/360/320px with
+          nowrap, none with. That state is Home's FIRST PAINT on every visit —
+          nPicks is 0 and libraryTotal null until the fetches land — so it is
+          the common case, not an edge. Wrapping drops the buttons to their own
+          line instead. */}
+      <div className="stage-gutter flex flex-wrap items-center justify-between gap-5 pt-10 mb-1">
         <div className="min-w-0">
           <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
             Good {greetWord},{' '}

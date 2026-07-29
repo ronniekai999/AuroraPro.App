@@ -1566,6 +1566,14 @@ function ReferralPromptSection() {
     : hasDeceptiveRunes(question.trim())
       ? 'Question contains a hidden or direction-changing character.'
       : null
+  const blocked = saving || issues.length > 0 || !!questionIssue
+  // Why Save is unavailable, as text. The state can exist from first paint
+  // (stored options already invalid), so there is no event to announce and a
+  // purely visual cue reaches nobody who cannot see it.
+  const blockedReason = saving ? null
+    : issues.length > 0 ? `Fix ${issues.length === 1 ? 'the issue' : `${issues.length} issues`} above to save.`
+    : questionIssue ? 'Fix the question above to save.'
+    : null
 
   const save = async () => {
     setSaving(true); setErr(null); setSaved(false)
@@ -1628,8 +1636,14 @@ function ReferralPromptSection() {
                     aria-describedby={issue ? errId : undefined}
                     onChange={e => { setRows(p => p.map((r, j) => j === i ? { ...r, key: e.target.value } : r)); setSaved(false) }}
                     placeholder="key"
-                    title={locked ? 'Answers are stored by key — renaming would orphan them. Edit the label instead.' : undefined}
-                    className={`w-40 px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-sm font-mono ${locked ? 'text-white/45' : 'text-white'}`}
+                    title={locked ? 'Answers are stored by this key, so it cannot be renamed.' : undefined}
+                    className={'w-40 px-3 py-2 rounded text-sm font-mono border '
+                      + (locked
+                        // Dashed and dimmer, with no text cursor: a field that
+                        // takes focus and then discards what you type has to
+                        // look like one that will.
+                        ? 'bg-white/[0.02] border-dashed border-white/[0.10] text-white/45 cursor-not-allowed'
+                        : 'bg-white/[0.04] border-white/[0.06] text-white')}
                   />
                   <input
                     type="text"
@@ -1645,6 +1659,7 @@ function ReferralPromptSection() {
                     type="button"
                     onClick={() => { setRows(p => p.filter((_, j) => j !== i)); setSaved(false) }}
                     aria-label={`Remove option ${row.label || row.key || i + 1}`}
+                    aria-describedby={issue ? errId : undefined}
                     className="px-3 py-2 text-white/50 hover:text-red-300 text-sm rounded"
                   >
                     Remove
@@ -1670,7 +1685,8 @@ function ReferralPromptSection() {
             + Add option
           </button>
           <span className="text-white/35 text-xs">
-            “{REFERRAL_OTHER_LABEL}” with a free-text box is always offered last and can’t be removed.
+            “{REFERRAL_OTHER_LABEL}” with a free-text box is always offered last. It is not
+            listed here because it cannot be edited or turned off.
           </span>
         </div>
       </div>
@@ -1681,14 +1697,24 @@ function ReferralPromptSection() {
           either success or failure. */}
       <p role="alert" className="text-red-300 text-sm empty:hidden">{err}</p>
       <div className="flex items-center gap-3">
+        {/* aria-disabled, not the native attribute. `disabled` removes the
+            button from the tab order, so an admin who cannot see it finds no
+            Save at all and no clue why — and when the stored options are
+            already invalid that state exists from first paint, with no event to
+            announce. This stays focusable and carries its own reason. */}
         <button
           type="button"
-          onClick={() => void save()}
-          disabled={saving || issues.length > 0 || !!questionIssue}
-          className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg disabled:opacity-50"
+          onClick={() => { if (!blocked) void save() }}
+          aria-disabled={blocked || undefined}
+          aria-describedby={blockedReason ? 'referral-save-blocked' : undefined}
+          className={'px-4 py-2 bg-purple-600 text-white text-sm rounded-lg '
+            + (blocked ? 'opacity-50 cursor-not-allowed' : 'hover:bg-purple-500')}
         >
           {saving ? 'Saving…' : 'Save prompt'}
         </button>
+        {blockedReason && (
+          <span id="referral-save-blocked" className="text-white/45 text-xs">{blockedReason}</span>
+        )}
         <span role="status" className="text-white/55 text-xs">{saved ? 'Saved.' : ''}</span>
       </div>
     </div>
