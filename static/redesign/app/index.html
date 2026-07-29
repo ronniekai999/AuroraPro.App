@@ -8,6 +8,13 @@
          /v2/favicon.svg. type="image/svg+xml" lets modern browsers
          use the vector at any DPI without bitmap scaling. -->
     <link rel="icon" type="image/svg+xml" href="/v2/favicon.svg" />
+    <!-- PWA (do/pwa-push/IMPLEMENTATION.md, Phase 1). Like the favicon,
+         everything in public/ deploys under /v2/, and these paths are
+         literals — they do NOT follow vite.config.ts `base` and must be
+         edited together with it if the SPA ever moves to the root. -->
+    <link rel="manifest" href="/v2/manifest.webmanifest" />
+    <meta name="theme-color" content="#050505" />
+    <link rel="apple-touch-icon" href="/v2/apple-touch-icon.png" />
     <title>Aurora Pro</title>
   </head>
   <body>

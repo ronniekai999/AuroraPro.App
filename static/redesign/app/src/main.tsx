@@ -6,6 +6,7 @@ import { CompanionApp } from './companion/CompanionApp'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { installDiagnosticBuffer } from './lib/diagnosticBuffer'
 import { installSyncDebug } from './lib/syncDebug'
+import { initPWA } from './lib/pwa'
 // The single source of truth for "which font values get an attribute".
 // Importing it here is what keeps the pre-paint shim from drifting out of
 // step with applyFont() — see appearance.ts.
@@ -26,6 +27,12 @@ installDiagnosticBuffer()
 // from localStorage. Off by default — the guest drift loop pays only a
 // boolean read per tick until a user enables it to chase a sync bug.
 installSyncDebug()
+
+// PWA boot: capture the browser install prompt (the listener must be attached
+// before Chrome can fire it, which happens early on repeat visits) and
+// register the push-only service worker. Both are contained best-effort —
+// see lib/pwa.ts; nothing here can affect app startup.
+initPWA()
 
 // Audit M4 fix (Phase 8) — basename is derived from Vite's
 // `import.meta.env.BASE_URL` instead of hardcoded "/v2". This makes

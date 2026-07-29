@@ -7,8 +7,9 @@
 // @/lib/oauth (shared leaf). `onToast={addToast}` is App's stable toast
 // callback, threaded in unchanged.
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { Icon } from '@/components/Icon'
+import { installPrompt, installUIState, isStandaloneDisplay, isIOSDevice } from '@/lib/pwa'
 import { PageHeader } from '@/components/PageHeader'
 import { MATURITY_OPTIONS, type MaturityPref } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
@@ -137,6 +138,33 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
 
   const toggle = (key: keyof typeof settings) => {
     setSettings(prev => ({ ...prev, [key]: typeof prev[key] === 'boolean' ? !prev[key] : prev[key] }))
+  }
+
+  // Install-as-app card state. The store subscription makes the one-tap
+  // button appear the moment Chrome volunteers its install prompt, even with
+  // Settings already open; the decision itself is the tested pure function in
+  // lib/pwa. Standalone/iOS are stable per page load, so reading them during
+  // render is fine.
+  const hasInstallPrompt = useSyncExternalStore(installPrompt.subscribe, installPrompt.has)
+  const installedNow = useSyncExternalStore(installPrompt.subscribe, installPrompt.installedThisSession)
+  const appInstallState = installUIState({
+    // `installedNow` covers the tab that just triggered the install — it
+    // keeps running as a plain tab (standalone stays false), and telling that
+    // user "open your browser's menu" would point them at the menu they just
+    // used.
+    standalone: isStandaloneDisplay(window) || installedNow,
+    hasDeferredPrompt: hasInstallPrompt,
+    isIOS: isIOSDevice(navigator),
+  })
+  const handleInstall = () => {
+    installPrompt.prompt().then(outcome => {
+      if (outcome === 'accepted') onToast?.('Aurora is installing to your device', 'success')
+    }).catch(() => {
+      // Chrome rejects prompt() on a stale event. Degrade to guidance — an
+      // uncaught rejection here would land in the diagnostic buffer as an
+      // app error, which this best-effort feature must never cause.
+      onToast?.('The install prompt could not be shown — try your browser menu instead', 'error')
+    })
   }
 
   const sections = [
@@ -432,6 +460,61 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             </div>
           </div>
         ))}
+
+        {/* Install-as-app (PWA Phase 1 — do/pwa-push/IMPLEMENTATION.md).
+            Which body renders is decided by installUIState: an installed app
+            confirms itself; a captured browser prompt gets a one-tap button;
+            iOS gets the Add-to-Home-Screen walkthrough it requires (and which
+            push will require in Phase 2); everywhere else gets the browser-
+            menu pointer, because our service worker deliberately has no fetch
+            handler and Chromium may therefore never volunteer its prompt. */}
+        <div className="glass-panel rounded-2xl p-6">
+          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <Icon name="download" size={18} className="text-purple-400" />
+            App
+          </h2>
+          {appInstallState === 'installed' && (
+            <div className="flex items-center gap-2 text-sm text-white/80">
+              <Icon name="check" size={16} className="text-emerald-400" />
+              Running as an installed app on this device.
+            </div>
+          )}
+          {appInstallState === 'prompt' && (
+            <div className="space-y-3">
+              <p className="text-white/60 text-xs">
+                Get Aurora as an app on this device — its own icon and a full-screen window.
+              </p>
+              <button
+                type="button"
+                onClick={handleInstall}
+                className="rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 px-4 py-2 text-sm font-medium text-white/90 transition-colors"
+              >
+                Install Aurora
+              </button>
+            </div>
+          )}
+          {appInstallState === 'ios-guide' && (
+            <div className="space-y-3">
+              <p className="text-white/60 text-xs">
+                Add Aurora to your Home Screen to use it as an app:
+              </p>
+              {/* No "in Safari": every iOS browser is WebKit and has a Share
+                  menu with this entry — naming Safari would misdirect
+                  Chrome-on-iOS users. */}
+              <ol className="list-decimal list-inside space-y-1.5 text-sm text-white/80">
+                <li>Tap the Share button</li>
+                <li>Choose &ldquo;Add to Home Screen&rdquo;</li>
+                <li>Open Aurora from your Home Screen</li>
+              </ol>
+            </div>
+          )}
+          {appInstallState === 'manual' && (
+            <p className="text-white/60 text-sm">
+              To use Aurora as an app, open your browser&rsquo;s menu and choose
+              &ldquo;Install Aurora&rdquo; or &ldquo;Add to Home screen&rdquo;.
+            </p>
+          )}
+        </div>
 
         {/* Language */}
         <div className="glass-panel rounded-2xl p-6">
