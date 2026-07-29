@@ -30,19 +30,32 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// settingsUpserter is the single write UpdateSettings performs. Extracted as a
+// seam so the validate-all-then-write-all ordering can be regression-tested
+// without a database: the old and new behavior differ only in WHICH writes
+// happen before a rejection, which is invisible unless the writes are
+// observable. *db.Queries satisfies it; the field is nil in production and
+// falls through to queries.
+type settingsUpserter interface {
+	UpsertSetting(ctx context.Context, key, value string, updatedBy int64) error
+}
+
 type AdminHandler struct {
-	queries      *db.Queries
-	transcode    *streaming.TranscodeManager
-	directPlay   *streaming.DirectPlayRegistry
-	hub          *ws.Hub
-	activity     *ActivityLogger
-	ringLog      *logging.RingBufferHandler
-	imgProxy     *metadata.ImageProxy
-	watcher      *library.Watcher
-	arrClients   *arr.ArrClients
-	startTime    time.Time
-	version      string
-	transcodeDir string // for disk free calculation
+	queries *db.Queries
+	// settingsWriter overrides the settings write path in tests. Nil in
+	// production — see settingsUpserter.
+	settingsWriter settingsUpserter
+	transcode      *streaming.TranscodeManager
+	directPlay     *streaming.DirectPlayRegistry
+	hub            *ws.Hub
+	activity       *ActivityLogger
+	ringLog        *logging.RingBufferHandler
+	imgProxy       *metadata.ImageProxy
+	watcher        *library.Watcher
+	arrClients     *arr.ArrClients
+	startTime      time.Time
+	version        string
+	transcodeDir   string // for disk free calculation
 
 	// Phase 5 — populated via SetEmbeddingInfo when the LLM subsystem is on.
 	embedEnabled bool
@@ -1098,13 +1111,13 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		settingReferralQuestion: {validReferralQuestionSetting},
 		settingReferralOptions:  {validReferralOptionsSetting},
 		"radarr_url":            {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"radarr_api_key":    {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"radarr_4k_url":     {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"radarr_4k_api_key": {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"sonarr_url":        {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"sonarr_api_key":    {func(v string) bool { return !isMaskedAPIKey(v) }},
-		"sonarr_4k_url":     {func(v string) bool { return v == "" || isValidARRURL(v) }},
-		"sonarr_4k_api_key": {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"radarr_api_key":        {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"radarr_4k_url":         {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"radarr_4k_api_key":     {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"sonarr_url":            {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"sonarr_api_key":        {func(v string) bool { return !isMaskedAPIKey(v) }},
+		"sonarr_4k_url":         {func(v string) bool { return v == "" || isValidARRURL(v) }},
+		"sonarr_4k_api_key":     {func(v string) bool { return !isMaskedAPIKey(v) }},
 	}
 
 	claims := getClaimsFromRequest(r)
@@ -1142,9 +1155,13 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// that's an infrastructure fault rather than a caller-triggerable one, and
 	// server_settings has no cross-key transactional story to preserve (every
 	// read is an independent GetSetting).
+	var upsert settingsUpserter = h.queries
+	if h.settingsWriter != nil {
+		upsert = h.settingsWriter
+	}
 	changedKeys := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if err := h.queries.UpsertSetting(r.Context(), key, req.Settings[key], claims.UserID); err != nil {
+		if err := upsert.UpsertSetting(r.Context(), key, req.Settings[key], claims.UserID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to update setting")
 			return
 		}

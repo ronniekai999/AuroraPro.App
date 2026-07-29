@@ -51,10 +51,15 @@ type User struct {
 	// (not its admin-editable label, which would rewrite history on rename),
 	// and ReferralDetail is free text present only when the source is "other".
 	//
-	// Selected by GetAllUsers (the admin list) and CreateOAuthUserWithIdentity;
-	// other user lookups leave them nil, so omitempty drops them there.
-	// ReferralDetail is attacker-controlled free text — length-capped at the
-	// API and rendered as data, never markup, in the admin UI.
+	// Selected ONLY by GetAllUsers (the admin list); every other user lookup
+	// leaves them nil, so omitempty drops them from those responses. In
+	// particular CreateOAuthUserWithIdentity writes referral_status but does
+	// not return it, so the OAuth success page can't stash a stale copy —
+	// GET /api/me/referral-prompt is the single authority on whether to ask.
+	//
+	// ReferralDetail is attacker-controlled free text: length-capped and
+	// stripped of control/format characters at the API, and rendered as data,
+	// never markup, in the admin UI.
 	ReferralStatus     *string    `json:"referral_status,omitempty"`
 	ReferralSource     *string    `json:"referral_source,omitempty"`
 	ReferralDetail     *string    `json:"referral_detail,omitempty"`

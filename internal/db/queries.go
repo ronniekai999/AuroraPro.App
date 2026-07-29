@@ -275,7 +275,7 @@ func (q *Queries) GetUsernamesByIDs(ctx context.Context, ids []int64) (map[int64
 func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 	rows, err := q.pool.Query(ctx,
 		`SELECT id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, last_login_at,
-			oauth_provider, referral_status, referral_source, referral_detail
+			oauth_provider, referral_status, referral_source, referral_detail, referral_answered_at
 		 FROM users ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("get all users: %w", err)
@@ -290,11 +290,17 @@ func (q *Queries) GetAllUsers(ctx context.Context) ([]*models.User, error) {
 		//
 		// oauth_provider was MISSING from this select while the admin table's
 		// "Sign-in" column rendered it — so every user, including Google and
-		// Discord signups, displayed as "password". Selecting it fixes that
-		// column, and the referral columns beside it are only meaningful for
-		// exactly the OAuth signups it identifies (migration 046).
+		// Discord signups, displayed as "password".
+		//
+		// Read it for what it is: a best-effort mirror of the user's PRIMARY
+		// (first-linked) identity, per queries_oauth_identities.go. It is also
+		// filled when a password user later links a provider, so it answers
+		// "can sign in with" rather than "signed up via", and shows only the
+		// first of several links. The referral columns beside it are the ones
+		// that actually track signup path (migration 046), and a NULL
+		// referral_status there means "never eligible", not "we forgot to ask".
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.AvatarURL, &u.CreatedAt, &u.UpdatedAt, &u.LastLoginAt,
-			&u.OAuthProvider, &u.ReferralStatus, &u.ReferralSource, &u.ReferralDetail); err != nil {
+			&u.OAuthProvider, &u.ReferralStatus, &u.ReferralSource, &u.ReferralDetail, &u.ReferralAnsweredAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		users = append(users, u)
@@ -555,11 +561,29 @@ func (q *Queries) ClaimInviteCode(ctx context.Context, code string) (int64, erro
 
 // FinalizeInviteCode sets the real user ID on a previously claimed invite code.
 func (q *Queries) FinalizeInviteCode(ctx context.Context, inviteID, userID int64) error {
-	_, err := q.pool.Exec(ctx,
+	tag, err := q.pool.Exec(ctx,
 		`UPDATE invite_codes SET used_by = $1 WHERE id = $2`,
 		userID, inviteID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// A zero-row update means the claim id does not exist, and the ONLY way
+	// the caller obtained one is the aurora_oauth_invite_claim cookie — which
+	// is a plain unsigned integer that any client can set on its own request
+	// (HttpOnly stops JavaScript from reading it; it does nothing to stop an
+	// attacker crafting the header directly).
+	//
+	// Reporting success here let a forged claim id walk the OAuth signup past
+	// the invite gate: resolveOAuthUser's tier-3 check only asks whether
+	// inviteClaimID > 0, the finalize then quietly matched nothing, and the
+	// rollback that exists for exactly this case never fired. The user was
+	// enrolled without ever holding an invite. Erroring makes the caller roll
+	// the signup back, which is the behavior that code was already written for.
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("finalize invite code: claim %d does not exist", inviteID)
+	}
+	return nil
 }
 
 // UnclaimInviteCode releases a previously claimed invite code so it can be used again.

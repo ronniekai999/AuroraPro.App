@@ -77,9 +77,9 @@ func (q *Queries) ResolveReferral(ctx context.Context, userID int64, status, sou
 // people who signed up in this period, what did they say" — instead of mixing
 // answers from one period with pendings from another.
 //
-// Two statements, one round-trip each: the totals (a single scan of the
-// eligible rows via COUNT FILTER) and the per-source breakdown (GROUP BY over
-// the partial index). Aggregation stays in Postgres; Go only labels the keys.
+// Two statements under one snapshot: the totals (a single scan of the eligible
+// rows via COUNT FILTER) and the per-source breakdown (GROUP BY over the
+// partial index). Aggregation stays in Postgres; Go only labels the keys.
 //
 // The interval is bound as `NOW() - INTERVAL '1 second' * $n` — Postgres cannot
 // parameterize an interval literal, and this is the repo's established idiom
@@ -88,7 +88,19 @@ func (q *Queries) ReferralSummary(ctx context.Context, windowDays int) (*models.
 	windowSeconds := int64(windowDays) * 86400
 	out := &models.ReferralSummary{WindowDays: windowDays, BySource: []models.ReferralSourceCount{}}
 
-	if err := q.pool.QueryRow(ctx,
+	// One snapshot for both statements. Without it the two queries see
+	// independent commits, so a user resolving between them yields
+	// sum(by_source) = answered + 1 — a panel that visibly fails to add up.
+	// REPEATABLE READ (not the default READ COMMITTED) is what makes the
+	// second statement see the same rows as the first; read-only, so it can't
+	// hit a serialization conflict.
+	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, fmt.Errorf("referral summary: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := tx.QueryRow(ctx,
 		`SELECT COUNT(*),
 		        COUNT(*) FILTER (WHERE referral_status = 'answered'),
 		        COUNT(*) FILTER (WHERE referral_status = 'skipped'),
@@ -101,7 +113,7 @@ func (q *Queries) ReferralSummary(ctx context.Context, windowDays int) (*models.
 		return nil, fmt.Errorf("referral summary totals: %w", err)
 	}
 
-	rows, err := q.pool.Query(ctx,
+	rows, err := tx.Query(ctx,
 		`SELECT referral_source, COUNT(*)
 		   FROM users
 		  WHERE referral_source IS NOT NULL
@@ -122,6 +134,10 @@ func (q *Queries) ReferralSummary(ctx context.Context, windowDays int) (*models.
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate referral sources: %w", err)
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("referral summary: commit: %w", err)
 	}
 	return out, nil
 }

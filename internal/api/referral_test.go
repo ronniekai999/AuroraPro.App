@@ -99,12 +99,25 @@ func TestValidateReferralAnswer(t *testing.T) {
 			wantErrSub: "only allowed when source is other",
 		},
 		{
-			// Even an empty note is illegal for a non-other source: accepting
-			// it would mean the schema CHECK is the only thing enforcing the
-			// pairing, and a future refactor could silently drop it.
-			name:       "empty detail alongside a non-other source",
-			req:        referralAnswerRequest{Source: "twitch", Detail: strptr("")},
+			// An EMPTY note against a preset option is absent, not illegal.
+			// A client that always sends the field — `detail: this.note` with
+			// an untouched textbox — would otherwise 400 on every non-"other"
+			// answer, leaving the row pending and re-prompting forever. The
+			// stored detail is still nil, so the schema CHECK is satisfied.
+			name:       "empty detail alongside a non-other source is treated as absent",
+			req:        referralAnswerRequest{Source: "twitch", Detail: strptr("  ")},
+			wantStatus: "answered", wantSource: "twitch", wantDetail: nil,
+		},
+		{
+			// A NON-empty note against a preset option is still contradictory.
+			name:       "non-empty detail alongside a non-other source",
+			req:        referralAnswerRequest{Source: "twitch", Detail: strptr("hello")},
 			wantErrSub: "only allowed when source is other",
+		},
+		{
+			name:       "empty detail alongside a skip is treated as absent",
+			req:        referralAnswerRequest{Skip: true, Detail: strptr("")},
+			wantStatus: "skipped",
 		},
 		{
 			name:       "detail alongside a skip",
@@ -148,6 +161,65 @@ func TestValidateReferralAnswer(t *testing.T) {
 				t.Errorf("detail = %q, want %q", *got.Detail, *tc.wantDetail)
 			}
 		})
+	}
+}
+
+// TestSanitizeReferralDetailStripsDeceptiveRunes covers the characters that
+// change how the SURROUNDING text renders without being visible themselves.
+// The detail field's whole purpose is to be read and believed by an admin, so
+// a user who controls how it displays can mislead the person acting on it —
+// U+202E reverses the rest of the cell, zero-width characters hide inside it.
+// unicode.IsControl alone (category Cc) catches none of these.
+func TestSanitizeReferralDetailStripsDeceptiveRunes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"right-to-left override", "safe‮gnihsihp", "safegnihsihp"},
+		{"left-to-right override", "a‭b", "ab"},
+		{"zero-width space", "spa​ced", "spaced"},
+		{"zero-width joiner", "a‍b", "ab"},
+		{"line separator", "a b", "ab"},
+		{"paragraph separator", "a b", "ab"},
+		{"soft hyphen", "a­b", "ab"},
+		{"C0 control", "a\x00b", "ab"},
+		{"C1 control", "ab", "ab"},
+		{"newline and tab", "a\nb\tc", "abc"},
+		{"legitimate text is untouched", "Björk's podcast — ep. 12 (2024)", "Björk's podcast — ep. 12 (2024)"},
+		{"emoji survive", "saw it on 🎬 twitch", "saw it on 🎬 twitch"},
+		{"CJK survives", "朋友推荐的", "朋友推荐的"},
+		{"surrounding whitespace trimmed", "  hello  ", "hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeReferralDetail(tc.in); got != tc.want {
+				t.Errorf("sanitizeReferralDetail(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAdminStringsRejectDeceptiveRunes pins the asymmetry and the reason for
+// it: admin-authored strings are REJECTED rather than stripped, because an
+// operator should see their input round-trip exactly rather than be silently
+// rewritten. These strings are also shown to every eligible user, not just to
+// one admin, so they get at least as much scrutiny as the detail field.
+func TestAdminStringsRejectDeceptiveRunes(t *testing.T) {
+	if validReferralQuestionSetting("How did you hear‮ about Aurora?") {
+		t.Error("a question containing U+202E was accepted")
+	}
+	if validReferralQuestionSetting("Zero​width?") {
+		t.Error("a question containing a zero-width space was accepted")
+	}
+	if !validReferralQuestionSetting("How did you hear about Aurora? — be honest!") {
+		t.Error("a legitimate question with punctuation and an em dash was rejected")
+	}
+	if validReferralOptionsSetting(`[{"key":"a","label":"A‮b"}]`) {
+		t.Error("an option label containing U+202E was accepted")
+	}
+	if !validReferralOptionsSetting(`[{"key":"a","label":"A friend — or family"}]`) {
+		t.Error("a legitimate label was rejected")
 	}
 }
 
@@ -294,11 +366,17 @@ func TestDefaultReferralOptionsAreValid(t *testing.T) {
 	}
 }
 
-// TestReferralEligibilityPredicate pins the rule the OAuth callback applies at
-// user creation. Attribution is only missing when the invite gate was bypassed
-// AND no invite was redeemed; a user who presented a valid invite already has
+// TestReferralEligible pins the rule the OAuth callback applies at user
+// creation. Attribution is only missing when the invite gate was bypassed AND
+// no invite was redeemed; a user who presented a valid invite already has
 // attribution, so asking them would be noise.
-func TestReferralEligibilityPredicate(t *testing.T) {
+//
+// This calls the production referralEligible. An earlier version of this test
+// recomputed `bypassInvite && inviteClaimID <= 0` in the test body and asserted
+// against its own copy — which meant deleting the second condition from the
+// caller left the suite green, and the test that claimed to pin the rule could
+// not fail. Restating the logic under test IS the bug.
+func TestReferralEligible(t *testing.T) {
 	cases := []struct {
 		name          string
 		bypassInvite  bool
@@ -306,16 +384,22 @@ func TestReferralEligibilityPredicate(t *testing.T) {
 		want          bool
 	}{
 		{"bypass on, no claim → ask", true, 0, true},
+		// PLAN.md trigger condition 4, the one that looks redundant with 3 and
+		// isn't: a user may present a valid invite AND use a bypassed provider.
 		{"bypass on, claim redeemed → already attributed", true, 42, false},
 		{"bypass off, claim redeemed → already attributed", false, 42, false},
 		// Unreachable at the call site (tier 3 rejects this combination before
 		// creating anyone), but the predicate stays total.
 		{"bypass off, no claim → not eligible", false, 0, false},
+		// A negative id is not a claim; treat it as absent rather than as a
+		// truthy "some claim exists".
+		{"bypass on, negative claim id → ask", true, -1, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.bypassInvite && tc.inviteClaimID <= 0; got != tc.want {
-				t.Errorf("referralPending = %v, want %v", got, tc.want)
+			if got := referralEligible(tc.bypassInvite, tc.inviteClaimID); got != tc.want {
+				t.Errorf("referralEligible(%v, %d) = %v, want %v",
+					tc.bypassInvite, tc.inviteClaimID, got, tc.want)
 			}
 		})
 	}

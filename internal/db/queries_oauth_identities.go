@@ -265,14 +265,19 @@ func (q *Queries) CreateOAuthUserWithIdentity(ctx context.Context, username, ema
 
 	user := &models.User{}
 	if err := tx.QueryRow(ctx,
+		// referral_status is written but deliberately NOT returned. The caller
+		// hands this struct to renderSuccess, which marshals it into
+		// localStorage.aurora_user — a second, immediately-stale source of
+		// truth for a value whose whole contract is that only
+		// GET /api/me/referral-prompt may answer it. Read it back with
+		// GetReferralStatus instead.
 		`INSERT INTO users (username, email, password_hash, role, avatar_url, oauth_provider, oauth_subject, referral_status)
 		 VALUES ($1, $2, '', 'user', $3, $4, $5, CASE WHEN $6::boolean THEN 'pending' END)
 		 RETURNING id, username, email, role, COALESCE(avatar_url, ''), created_at, updated_at, token_version,
-			oauth_provider, oauth_subject, referral_status`,
+			oauth_provider, oauth_subject`,
 		username, email, avatarURL, provider, subject, referralPending,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.Role, &user.AvatarURL,
-		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject,
-		&user.ReferralStatus); err != nil {
+		&user.CreatedAt, &user.UpdatedAt, &user.TokenVersion, &user.OAuthProvider, &user.OAuthSubject); err != nil {
 		// Propagate the raw error so errors.As(*pgconn.PgError) + the 23505
 		// constraint-name check still fire in resolveOAuthUser. NOT wrapped
 		// with extra context that could mask the PgError for the caller —
