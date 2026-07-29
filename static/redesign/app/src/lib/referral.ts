@@ -105,15 +105,29 @@ export function validateReferralOptions(
   rows.forEach((row, index) => {
     const key = row.key.trim()
     const label = row.label.trim()
-    if (!lockedKeys.has(key)) {
-      if (key === REFERRAL_OTHER_KEY) {
-        issues.push({ index, message: '"other" is always offered and cannot be listed.' })
-      } else if (!REFERRAL_KEY_RE.test(key)) {
-        issues.push({
-          index,
-          message: 'Key must be lowercase letters, numbers, dashes or underscores (max 32).',
-        })
-      }
+    // A locked key still has to satisfy the SAME rules — the server validates
+    // every key unconditionally, so exempting one here would let Save look
+    // enabled and then fail with a bare "invalid value for setting" naming no
+    // row, which is precisely the opaque rejection this mirroring exists to
+    // prevent. What changes for a locked row is the MESSAGE: the field is
+    // read-only, so "fix the key" is not an instruction the admin can follow.
+    // "Remove the row" is, and it is safe to say — the answers survive, keyed
+    // by the same string, and the breakdown keeps reporting them.
+    const lockedNote = ' Remove this option to save; its existing answers stay readable in the breakdown.'
+    if (key === REFERRAL_OTHER_KEY) {
+      issues.push({
+        index,
+        message: lockedKeys.has(key)
+          ? `Stored key "other" is reserved and cannot be listed.${lockedNote}`
+          : '"other" is always offered and cannot be listed.',
+      })
+    } else if (!REFERRAL_KEY_RE.test(key)) {
+      issues.push({
+        index,
+        message: lockedKeys.has(key)
+          ? `Stored key "${key}" is no longer valid.${lockedNote}`
+          : 'Key must be lowercase letters, numbers, dashes or underscores (max 32).',
+      })
     }
     if (seen.has(key)) {
       issues.push({ index, message: `Duplicate key "${key}".` })
