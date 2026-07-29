@@ -158,6 +158,27 @@
        Phase 2 walked into it. --topnav-h remains the nav's OWN height. */
     --chrome-h: 64px;
     --page-gutter: 48px;
+    /* Ultra-wide cap (Phase 12). Above this the gutter alone stops being a layout:
+       at 2560 the content box was 2464px, so a rail ran nine posters wide and the
+       vibe bar's placeholder floated in the middle of two metres of glass. */
+    --page-max: 1920px;
+    /* The horizontal page padding, and the ONLY thing any page-level rule should
+       read. `max()` with a percentage, NOT a max-width plus auto margins.
+       Phase 11.4 tried `max-width: var(--page-max); margin-inline: auto` on
+       .stage-gutter and it had to be reverted: `margin-inline` CLOBBERS deliberate
+       negative margins, and AdminView's full-bleed sticky toolbar is
+       `.stage-gutter -mx-[...]`. Emitted later at the same (0,1,0), it silently
+       won, and below 768px that band stopped bleeding — the exact failure its own
+       call-site comment exists to prevent. It also over-constrained the box at md+,
+       solving margin-right to 592px at 2560.
+       Padding has no such conflict. Below the cap `(100% - 1920px)/2` is negative
+       and `max()` picks the gutter, so every width measured in Phases 8-11 is
+       byte-identical; above it, the padding grows and the content stops at 1920.
+       NOTE the `100%`: a custom property is substituted as tokens, so the
+       percentage resolves against the USING element's containing block. That is
+       what makes it correct on page-level children and is why `.stage-bleed` below
+       yields the capped-content edge rather than the viewport edge. */
+    --page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
 
     /* Display type scale. Option B's whole "content is the UI" read
        comes from oversized Bricolage display type, so the sizes are
@@ -704,7 +725,16 @@
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 @media (min-width: 768px) {
-  .stage-topnav { padding: 0 30px; }
+  /* Tracks the ultra-wide cap (Phase 12 fix pass). This bar is a FIFTH page system
+     and the first version of the phase missed it: at a flat 30px the logo and nav
+     tabs sat at x=30 while every page they navigate to started at x=320 — a 290px
+     stair-step at 2560 and 730px at 3440, the same defect class the phase exists
+     to remove, one level up.
+     `max()` against 30px rather than reading --page-pad-x, deliberately: the nav's
+     inset is a deliberate 18px tighter than the page gutter, and adopting the
+     token would shift it at EVERY width instead of only past the cap. Below the
+     cap this is byte-identical to what shipped. */
+  .stage-topnav { padding: 0 max(30px, (100% - var(--page-max)) / 2); }
 }
 html[data-glow="subtle"] .stage-topnav {
   backdrop-filter: none;
@@ -948,7 +978,7 @@ html[data-glow="subtle"] .stage-topnav {
    wrapper used to apply to every view: pages are full-bleed now and opt
    IN to the gutter, so a hero can reach the viewport edge. */
 .stage-page {
-  padding: 28px var(--page-gutter) 70px;
+  padding: 28px var(--page-pad-x) 70px;
 }
 /* `not all and (min-width: 768px)`, not `max-width: 767px`.
    Tailwind's `md:` is `min-width: 768px`, so a `max-width: 767px` companion
@@ -960,7 +990,7 @@ html[data-glow="subtle"] .stage-topnav {
    The negated form is the exact complement of `md:`, so no width falls
    between them. */
 @media not all and (min-width: 768px) {
-  .stage-page { padding: 20px 18px 56px; }
+  .stage-page { padding: 20px var(--page-pad-x) 56px; }
 }
 
 /* ── Full-bleed page sections (Aurora Stage Phase 4) ───────────────
@@ -968,34 +998,83 @@ html[data-glow="subtle"] .stage-topnav {
    heroes reach the viewport edge; their non-hero content opts back IN to
    the same gutter with this class. Keeping the gutter in ONE token means a
    hero and the rails beneath it can never drift apart. */
-.stage-gutter {
-  padding-left: var(--page-gutter);
-  padding-right: var(--page-gutter);
-}
-/* NO ultra-wide cap here, and the reasoning is worth keeping because the obvious
-   fix is the one that was tried and reverted.
-   Phase 11.4 added `max-width: var(--page-max); margin-inline: auto` to this rule.
-   A review measured two problems that made it net-negative:
-   1. `margin-inline` CLOBBERS deliberate negative margins. AdminView's mobile
-      toolbar is `stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)]`,
-      and this rule is emitted AFTER `.-mx-\[18px\]` in the bundle — same (0,1,0),
-      later wins — so below 768px the full-bleed sticky band silently stopped
-      bleeding, which is the exact failure the twelve-line comment at that call site
-      exists to prevent. At md+ the `-48px` margin won but the max-width still bound,
-      over-constraining the box so `margin-right` solved to 592px at 2560.
-   2. The cap was half-applied. `.stage-page` was uncapped, and BrowseView's sticky
-      toolbar reads `--page-gutter` directly rather than using this class, so at 2560
-      its genre chips sat at x=48 while the grid it filters started at x=368 — a
-      320px stair-step, precisely the defect the change claimed to prevent.
-   A real ultra-wide cap has to cover .stage-page, BrowseView's toolbar, DetailHero
-   and DetailView's own max-w-[1400px] together. That is a layout-system change, not
-   a one-line token, and it belongs in its own phase. Recorded, not attempted. */
-/* Same negated form as .stage-page above, for the same reason. */
+/* The mobile value of the token, matching what `.stage-page` and `.stage-gutter`
+   each used to hard-code separately. The negated form is the exact complement of
+   Tailwind's `md:`, so no width — including a fractional 767.5 reachable via zoom
+   or DPR — falls between them and takes neither.
+   The cap term is omitted deliberately: below 768px `(100% - 1920px)/2` cannot be
+   positive, so `max()` would always pick the gutter anyway. */
 @media not all and (min-width: 768px) {
-  .stage-gutter {
-    padding-left: 18px;
-    padding-right: 18px;
-  }
+  :root { --page-pad-x: 18px; }
+}
+
+.stage-gutter {
+  /* One declaration, and it carries the ultra-wide cap for free — see
+     --page-pad-x. The mobile override that used to live here is gone: the token
+     already resolves to 18px below md, so the two hard-coded 18px literals that
+     a Phase 10b review found agreeing only by coincidence are now one value. */
+  padding-inline: var(--page-pad-x);
+}
+/* Cancel the page padding to bleed a band to the page's edge.
+   Reads NO token: margin and padding are exact inverses of each other
+   (`50% - 50vw` and `50vw - 50%`), so they cannot drift by construction. That is
+   stronger than the shared-token version this replaced, and stronger than the
+   `-mx-[18px] md:-mx-[var(--page-gutter)]` pair before that, which restated two
+   literals. (This line claimed "reads the SAME token" through five commits after
+   it stopped reading one.)
+   The box reaches the true viewport edge at every width; its CONTENT lines up
+   with every other page system.
+   (Two earlier versions of this paragraph were wrong in opposite directions. One
+   said "bleeds to the CAPPED content edge" — off by 48px each side. The other
+   explained a `100%`-based padding whose "cap term is zero there", describing an
+   implementation that no longer exists, two lines above the sentence contradicting
+   it. There is no `100%`, no cap term and no gutter in this rule.)
+
+   RESOLVED, and the resolution is the rule: surfaces span, content caps —
+   the same one `.stage-topnav` follows. BrowseView's identical `.stage-toolbar`
+   sits in a full-bleed view and already ran edge to edge; this one now matches it
+   at every width. (An earlier version of this comment recorded the disagreement
+   as an open design call. It was settled one commit later and the note was left
+   standing — the sixth time in this file that has happened.)
+   */
+.stage-bleed {
+  /* SURFACES SPAN, CONTENT CAPS — the same rule .stage-topnav follows, now the
+     one principle for all chrome.
+     `50% - 50vw` reaches the true viewport edge from inside ANY padded parent,
+     which `calc(var(--page-pad-x) * -1)` could not: that value resolves against
+     the parent's already-padded content box, so above the cap it only pulled back
+     one gutter and left the band stopping 272px short at 2560 — while
+     BrowseView's identical `.stage-toolbar`, sitting in a full-bleed view, still
+     ran edge to edge. Two siblings of one class rendering differently, with a
+     hard seam and a border hairline ending in mid-air.
+     The box still overruns the layout viewport by half a scrollbar, which
+     `body { overflow-x: hidden }` clips. Note what that does NOT do: it hides the
+     scrollbar without preventing the scroll, so `documentElement.scrollLeft` can
+     reach 5px. Accepted as the cost of a true full-bleed band; the CONTENT is
+     unaffected now that the padding is the margin's inverse. And do not claim
+     `scrollbar-gutter: stable` protects this — the app locks scroll with
+     `body.style.overflow = 'hidden'` (lib/scrollLock.ts), and the gutter is not
+     reserved on an overflow:hidden box, so the band shifts when a modal opens.
+     Measured rather than assumed — see verify:layout. */
+  margin-inline: calc(50% - 50vw);
+  /* The EXACT INVERSE of the margin, so the content lands back in the parent's
+     content box unconditionally. Not a viewport-space recomputation of the page
+     padding — that was the first attempt and it is wrong on any browser with
+     classic, space-taking scrollbars, i.e. Chrome and Firefox on Windows and
+     Linux by default.
+     `100vw` INCLUDES the scrollbar; the layout viewport the page systems are laid
+     out in EXCLUDES it. So a `max(gutter, (100vw - cap)/2)` padding is measured
+     from the wrong origin and lands the band's content half a scrollbar off at
+     every width below the cap — measured -5px with a 10px scrollbar, ~-7.5px on
+     Windows. It cancels only above the cap, where the vw/% error happens to
+     appear on both sides. That is the same stair-step class this phase exists to
+     remove, one order of magnitude smaller, on a majority of desktop browsers.
+     `calc(50vw - 50%)` has no such dependency: whatever the margin pulled out, it
+     puts back. Verified headed under Xvfb with real scrollbars — delta 0.0 at
+     390 / 1440 / 2016 / 2560.
+     Same (0,1,0) as `.stage-gutter`, declared after it, so it wins on order —
+     which is why this rule must stay below it in the file. */
+  padding-inline: calc(50vw - 50%);
 }
 
 /* ── Hero (Aurora Stage Phase 4) ────────────────────────────────────

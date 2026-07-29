@@ -2025,17 +2025,18 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           for the acronyms; everything else still falls through to
           the existing capitalize rule. */}
       {/* The negative margin cancels .stage-page's side padding so the sticky
-          strip's fill reaches the viewport edges, and .stage-gutter puts the
-          same padding back on the inside.
-          It has to be RESPONSIVE, matching .stage-page rather than the token:
-          --page-gutter is 48px at every width, but .stage-page drops to 18px
-          below md. A flat, unprefixed negative page-gutter margin would
-          therefore pull 48px against 18px of padding on a phone and push 30px of
-          the strip off each edge — silently, because body sets overflow-x:
-          hidden. (Deliberately not naming that class here: Tailwind's extractor
-          scans comments, so writing it out ships a dead top-level rule. Verified
-          by rebuild — the unprefixed selector is gone.) */}
-      <div className="stage-toolbar stage-gutter -mx-[18px] md:-mx-[var(--page-gutter)] mb-6">
+          strip's fill reaches the VIEWPORT edges at every width, and its own
+          padding-inline puts the content back in line with every other page
+          system. `.stage-gutter` is NOT on this element any more — `.stage-bleed`
+          set the same property later in the file and shadowed it, so it was dead
+          and one source-order flip away from reinstating the bug this phase
+          started from.
+          Corrected three times in six commits, twice wrongly: it claimed the
+          viewport edge, then "one gutter outside the capped content above 2016px",
+          then still named a class that had just been removed. It also recorded the
+          BrowseView inconsistency as unresolved after it was settled — measured at
+          HEAD, the two bands are byte-identical at every width. */}
+      <div className="stage-toolbar stage-bleed mb-6">
         {/* MANUAL activation: arrows move focus, Enter/Space (native on a
             <button>) selects. Not the automatic variant this started as.
             APG recommends manual "when the tab panel's content is loaded

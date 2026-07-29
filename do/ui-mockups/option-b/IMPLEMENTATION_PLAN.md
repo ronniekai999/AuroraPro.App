@@ -801,3 +801,72 @@ hashes against what `https://aurorapro.app/v2/` serves. That works, but it check
 that the right bytes shipped, not that the app behaves. Either configure the secrets
 or document the hash-match as the supported fallback.
 
+
+
+---
+
+### Phase 12 — the ultra-wide cap, done across every page system at once
+
+**Branch** `feat/stage-ultrawide`
+
+Phase 11.4 tried this and it was reverted. Worth recording why, because both
+failures were in the mechanism rather than the intent.
+
+1. **`margin-inline: auto` clobbers deliberate negative margins.** AdminView's
+   full-bleed sticky toolbar was `.stage-gutter -mx-[18px] md:-mx-[…]`, and the
+   capped `.stage-gutter` rule was emitted later at the same (0,1,0), so it won —
+   below 768px that band silently stopped bleeding, the exact failure its own
+   call-site comment exists to prevent. At md+ the max-width still bound while the
+   `-48px` won, over-constraining the box so `margin-right` solved to 592px at 2560.
+2. **A partial cap is worse than none.** It landed on `.stage-gutter` only, while
+   BrowseView's toolbar restated `--page-gutter` itself — so at 2560 the genre chips
+   sat at x=48 and the grid they filter started at x=368. A 320px stair-step between
+   a control and the thing it controls, which is the defect the change claimed to
+   prevent.
+
+Phase 12 uses **padding, not margin**, and one token everything reads:
+
+```css
+--page-max: 1920px;
+--page-pad-x: max(var(--page-gutter), (100% - var(--page-max)) / 2);
+```
+
+Below the cap the second term is negative and `max()` picks the gutter, so every
+width measured in Phases 8–11 is byte-identical. Above it the padding grows and
+content stops at 1920. No margin is involved, so nothing is clobbered. `.stage-page`,
+`.stage-gutter`, BrowseView's toolbar and the hero footer row all read it, and
+`.stage-bleed` cancels it with `calc(50% - 50vw)` and puts the content back with
+`calc(50vw - 50%)` — exact inverses, so they cannot drift. An earlier form used a
+viewport-space recomputation of the page inset and was wrong on every browser with
+classic scrollbars: `100vw` includes the scrollbar and the layout viewport does
+not, which put the band's content half a scrollbar off at every width below the
+cap. Found by running the check headed under Xvfb, where it reported 28 problems
+against 0 headless.
+
+**Measured in Chromium, not derived**, at 320 / 390 / 767 / 768 / 1440 / 1920 /
+2000 / 2560 / 3840, in TWO passes — once with zero-width overlay scrollbars and
+once with a simulated 15px classic scrollbar, because the whole bug above is
+invisible under the first. It asserts that all page systems share both content
+edges, that the cap binds where it should (at ≥2016, not >1920 — `max()` keeps
+picking the gutter until the cap term exceeds it), that the bleed band spans the
+viewport while its content aligns, that the nav converges past the cap, and that
+detail's left edge and its hero's text column track the page.
+
+| width | inset | content |
+|---|---|---|
+| 390 | 18 | 354 |
+| 768 | 48 | 672 |
+| 1440 | 48 | 1344 |
+| 1920 | 48 | 1824 |
+| **2560** | **320** | **1920** |
+
+**The detail view is IN scope after all.** It was excluded on the grounds that its
+1400/1048 arithmetic is self-consistent — true, and beside the point: the exclusion
+covered its internal measure and not its left edge, which regressed from 0px to
+272px at 2560 and 912px at 3840 once the other pages capped. It now takes the page
+padding on the outside and caps the measure at 1304 on the inside (1304 = the
+content width `max-w-[1400px]` already yielded at md+, which also makes
+DetailHero's 1048 derivable: 1304 − 216 poster − 40 gap).
+
+**In `npm run audit`.** It was excluded at first "to keep the gate fast"; measured,
+it is ~2.6s against the gate's ~44s, most of which is a build it already runs.

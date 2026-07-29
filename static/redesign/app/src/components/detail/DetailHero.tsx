@@ -81,7 +81,18 @@ export function DetailHero({
       <button
         type="button"
         onClick={onBack}
-        className="absolute top-6 left-6 z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-all border border-white/10"
+        // `left-[var(--page-pad-x)]`, not `left-6`. Phase 12 fix pass: this was the
+        // one piece of detail chrome that stayed pinned to the viewport while the
+        // rest of the page gained an ultra-wide cap, so it sat at x=24 while
+        // everything it belongs to moved to 320 at 2560 and 960 at 3840 — 936px
+        // adrift, measured in the running app.
+        // Pre-existing (24 vs 48 was a 24px offset before), but the cap turns a
+        // rounding difference into a page-width one. Same defect class as the top
+        // nav, one element over.
+        // 24px at md+ vs the page's 48 was never deliberate the way the nav's 30px
+        // is; there is no comment claiming it and no measurement behind it, so this
+        // adopts the page inset outright rather than preserving an accident.
+        className="absolute top-6 left-[var(--page-pad-x)] z-10 flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/15 backdrop-blur-md rounded-full text-sm transition-all border border-white/10"
       >
         <ArrowLeftIcon size={16} /> Back
       </button>
@@ -99,16 +110,16 @@ export function DetailHero({
           error line stay selectable and the title's tooltip can fire. Below
           the rail's lg:z-20, so the poster still overlaps the artwork.
 
-          Insets read --page-gutter rather than hard-coding it: the right edge
+          Insets read --page-pad-x (the page token, capped) rather than hard-coding them: the right edge
           already did, and a left edge baked at 304px would silently desync the
           moment the token changes. 256px = 216 rail + 40 gap.
 
-          lg:max-w-[1048px] = the body's 1400px cap minus the 304px offset and
+          lg:max-w-[1048px] = the body's 1304px measure minus the 304px offset and
           the 48px gutter. Without it the title kept measuring 48px from the
           VIEWPORT while the column beneath it stopped at 1352px, so above
           1400px wide the headline cantilevered up to 1160px past the tabs and
           storyline it is supposed to align with. */}
-      <div className="absolute bottom-7 z-10 left-[18px] right-[18px] md:left-[var(--page-gutter)] md:right-[var(--page-gutter)] lg:left-[calc(var(--page-gutter)+256px)] lg:right-[var(--page-gutter)] lg:max-w-[1048px]">
+      <div className="absolute bottom-7 z-10 left-[var(--page-pad-x)] right-[var(--page-pad-x)] lg:left-[calc(var(--page-pad-x)+256px)] lg:max-w-[1048px]">
         <div className="flex items-center gap-2.5 mb-3">
           <span className="badge-glass bg-purple-500/15 text-purple-200 border border-purple-500/25 uppercase tracking-wide">
             {kindLabel}

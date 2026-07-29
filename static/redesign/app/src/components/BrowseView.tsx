@@ -314,7 +314,14 @@ export default function BrowseView({
           `.stage-toolbar{position:sticky}` at single-class specificity — so
           sticky would win only by source order. Reordering the Stage block,
           or moving it into a @layer, would silently un-stick this. */}
-      <div className="stage-toolbar browse-toolbar mb-6 flex items-center gap-3 flex-wrap px-[var(--page-gutter)] max-md:px-[18px]">
+      {/* `.stage-gutter`, not `px-[var(--page-gutter)] max-md:px-[18px]` (Phase 12).
+          This toolbar restated the gutter itself, so the Phase 12 cap would have
+          landed on the grid below it and not on this — at 2560 the genre chips
+          would sit at x=48 while the grid they filter started at x=368, a 320px
+          stair-step between a control and the thing it controls. That is the
+          defect the Phase 11.4 attempt actually shipped, and using the shared
+          class is what makes it structurally impossible rather than remembered. */}
+      <div className="stage-toolbar browse-toolbar stage-gutter mb-6 flex items-center gap-3 flex-wrap">
         {/* Genre chips — replaces the old <select>. Horizontally
             scrollable so a long genre list never wraps into a tall
             block. "All Genres" maps to the empty-string filter the

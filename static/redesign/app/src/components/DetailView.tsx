@@ -348,7 +348,22 @@ export default function DetailView({
         onBack={onBack}
       />
 
-      {/* Gutter reads --page-gutter so detail lines up with every other
+      {/* `.stage-gutter` for the PADDING, `max-w-[1304px]` on the grid inside for
+          the MEASURE. Phase 12 fix pass, and the split is the whole point.
+          This was `px-[…] max-w-[1400px]` on one element, left-aligned. Once the
+          other pages gained an ultra-wide cap that left detail hugging the left
+          while they centred: measured 0px apart at 1920, 272px at 2560, 912px at
+          3840 — a visible jump on an ordinary Home→title click.
+          Centring the 1400 box was considered and is WORSE, not better: at 2560 a
+          centred box puts detail's content at 628 against the page's 320, a 308px
+          jump. The narrower measure and the shared left edge are independent
+          things, and only separating them gets both.
+          So the outer element takes the same padding as every other page (so the
+          left edge always matches) and the inner grid caps the measure at 1304 =
+          the content width `max-w-[1400px]` used to yield at md+ (1400 − 2×48).
+          That also makes DetailHero's `lg:max-w-[1048px]` derivable rather than
+          magic: 1304 − 216 (poster col) − 40 (gap) = 1048 exactly.
+          Gutter reads the page token so detail lines up with every other
           page. It was px-8 (32px) to match the old global p-8; after the
           Phase 2 shell change every other page moved to 48px and detail
           alone stayed behind, shifting content 16px on navigation. */}
@@ -364,8 +379,8 @@ export default function DetailView({
 
           px-[18px] md:… matches home and browse, which drop to an 18px gutter
           on phones; detail was keeping 48px, a 30px jump on navigation. */}
-      <div className="px-[18px] md:px-[var(--page-gutter)] pt-9 pb-12 max-w-[1400px] lg:-mt-[238px]">
-        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10">
+      <div className="stage-gutter pt-9 pb-12 lg:-mt-[238px]">
+        <div className="grid grid-cols-1 lg:grid-cols-[216px_minmax(0,1fr)] gap-10 max-w-[1304px]">
           <DetailRail
             poster={realPoster}
             title={media.title}

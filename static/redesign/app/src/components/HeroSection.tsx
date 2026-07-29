@@ -257,7 +257,19 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
           meaningless there. */}
       {!compact && (
       <div
-        className="absolute top-6 right-6 md:top-11 md:right-[52px] z-20 flex flex-col items-center gap-1.5"
+        // Insets read the PAGE token, not a literal (Phase 12 fix pass). At md+ up
+        // to the cap this resolves to 48+4 = 52px — byte-identical to the
+        // `md:right-[52px]` it replaces, so nothing below 2016px moves and the
+        // contrast audit's sample geometry is untouched.
+        // Past the cap it tracks: pinned to the viewport this ring sat 824px
+        // outside the content column at 3840, measured in the running app, with a
+        // wide dead gap between "Surprise me" and the ring. Same missed-page-system
+        // defect the phase caught in .stage-topnav, one element over.
+        // NOTE for audit-onart-contrast.mjs: its x:0.935 samples are a FRACTION of
+        // the hero width and stay exact below the cap. Above it the ring moves
+        // INWARD, where the scrim's horizontal ramp is stronger — so the audit's
+        // figure becomes conservative there rather than wrong.
+        className="absolute top-6 right-[var(--page-pad-x)] md:top-11 md:right-[calc(var(--page-pad-x)+4px)] z-20 flex flex-col items-center gap-1.5"
         role="img"
         aria-label={`${matchScore} percent ${showingPersonal ? 'match' : 'Aurora score'}`}
       >
