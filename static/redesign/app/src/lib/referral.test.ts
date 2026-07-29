@@ -5,7 +5,9 @@ import {
   serializeReferralOptions,
   parseReferralOptionsSetting,
   referralSourceLabel,
+  isRemovedReferralKey,
   REFERRAL_OTHER_KEY,
+  REFERRAL_OTHER_LABEL,
   REFERRAL_OPTIONS_MAX,
   REFERRAL_LABEL_MAX,
   type ReferralOption,
@@ -161,8 +163,21 @@ describe('serialize / parse round-trip', () => {
 describe('referralSourceLabel', () => {
   it('resolves a configured key to its current label', () =>
     expect(referralSourceLabel('twitch', OPTS)).toBe('Twitch'))
-  it('renders "other" as Other', () =>
-    expect(referralSourceLabel(REFERRAL_OTHER_KEY, OPTS)).toBe('Other'))
+  it('renders the free-text option with the SAME label the user was shown', () => {
+    // The admin surfaces used to say "Other" while the step said "Something
+    // else", so a breakdown row didn't match the button anyone clicked. Every
+    // other option already showed the user's own words; this one now does too.
+    expect(referralSourceLabel(REFERRAL_OTHER_KEY, OPTS)).toBe(REFERRAL_OTHER_LABEL)
+    expect(shuffleReferralOptions(OPTS, seededRng([0.5])).at(-1)!.label).toBe(REFERRAL_OTHER_LABEL)
+  })
+
+  it('does not treat the free-text option as a removed key', () => {
+    // Its label is null over the wire by design (the server doesn't store it),
+    // which must not be read as "the operator deleted this option".
+    expect(isRemovedReferralKey(REFERRAL_OTHER_KEY, [])).toBe(false)
+    expect(isRemovedReferralKey('myspace', OPTS)).toBe(true)
+    expect(isRemovedReferralKey('twitch', OPTS)).toBe(false)
+  })
   it('marks a deleted option instead of hiding the answer', () =>
     expect(referralSourceLabel('myspace', OPTS)).toBe('<removed: myspace>'))
   it('follows a renamed label, since answers store the key', () =>

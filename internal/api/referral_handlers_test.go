@@ -441,8 +441,13 @@ func TestSummaryLabelsKeysAndMarksRemovedOnes(t *testing.T) {
 	if byKey["myspace"] != nil {
 		t.Errorf("removed key label = %v, want null", byKey["myspace"])
 	}
-	if byKey[referralOtherKey] != "Other" {
-		t.Errorf("other label = %v, want \"Other\"", byKey[referralOtherKey])
+	// "other" is deliberately UNLABELLED by the server: its display text is
+	// product copy for an option the server does not store, and a second
+	// spelling in Go is what let the admin panel say "Other" while the user was
+	// shown "Something else". The client resolves it from its own constant.
+	if byKey[referralOtherKey] != nil {
+		t.Errorf("other label = %v, want null — the server must not name this option",
+			byKey[referralOtherKey])
 	}
 }
 

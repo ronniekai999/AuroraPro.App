@@ -366,16 +366,24 @@ func (h *ReferralHandler) Summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Label the keys against the CURRENT options. A key with no matching
-	// option is left with a nil label so the panel can render
-	// "<removed: key>" — dropping the row would quietly under-report history
-	// every time an operator tidies the list.
+	// Label the keys against the CURRENT options. A nil label means "this key
+	// has no configured option", which covers two cases the CLIENT tells apart
+	// by the key itself:
+	//
+	//   - a key whose option was deleted after users chose it — rendered as
+	//     "<removed: key>", because dropping the row would quietly under-report
+	//     history every time an operator tidies the list; and
+	//   - the implicit "other", which has no stored option by design.
+	//
+	// "other" is deliberately NOT labelled here. Its display text is product
+	// copy for an option this server does not store, and writing a second
+	// spelling of it in Go is what let the admin panel say "Other" while the
+	// user had been shown "Something else". The frontend owns that string.
 	_, options := h.promptConfig(r.Context())
-	labels := make(map[string]string, len(options)+1)
+	labels := make(map[string]string, len(options))
 	for _, o := range options {
 		labels[o.Key] = o.Label
 	}
-	labels[referralOtherKey] = "Other"
 	for i := range summary.BySource {
 		if label, found := labels[summary.BySource[i].Key]; found {
 			l := label
