@@ -120,14 +120,24 @@ describe('validateReferralOptions', () => {
   it('rejects a label with a zero-width space', () =>
     failsAt([{ key: 'a', label: 'A\u200Bb' }], 0, /hidden or direction-changing/i))
 
-  it('does not flag a LOCKED key that today\'s pattern would reject', () => {
-    // A stored key is a historical fact and the editor renders it read-only, so
-    // flagging it would point an error at a field the admin cannot edit and
-    // wedge Save with no escape but deleting the option — the exact answer-loss
-    // the lock exists to prevent. Its label is still validated.
+  it('STILL flags a locked key the server would reject, but says what to do', () => {
+    // Parity with the Go validator, which checks every key unconditionally.
+    // Exempting locked keys made Save look enabled and then fail with a bare
+    // "invalid value for setting" naming no row — the opaque rejection this
+    // mirroring exists to prevent. The row is read-only, so the message has to
+    // be an instruction the admin can actually follow.
     const rows = [{ key: 'LegacyKey', label: 'Legacy' }]
-    expect(validateReferralOptions(rows, new Set(['LegacyKey']))).toEqual([])
-    expect(validateReferralOptions(rows).length).toBeGreaterThan(0)
+    const locked = validateReferralOptions(rows, new Set(['LegacyKey']))
+    expect(locked.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
+    // Unlocked rows keep the "fix the key" wording, which they can act on.
+    const fresh = validateReferralOptions(rows)
+    expect(fresh.some(i => i.index === 0 && /lowercase/i.test(i.message))).toBe(true)
+  })
+
+  it('flags a stored "other" row too — the server rejects it either way', () => {
+    const issues = validateReferralOptions(
+      [{ key: REFERRAL_OTHER_KEY, label: 'Other' }], new Set([REFERRAL_OTHER_KEY]))
+    expect(issues.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
   })
 
   it('still flags a locked row\'s LABEL, which is editable', () => {

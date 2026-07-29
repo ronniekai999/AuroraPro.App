@@ -384,6 +384,33 @@ func TestSubmitRejectsBadRequests(t *testing.T) {
 	}
 }
 
+// TestSubmitKeepsTheAnswerWhenTheStatusReadFails pins the fall-through. The
+// eligibility read is an optimization and an anti-enumeration guard, NOT the
+// authority — ResolveReferral's pending predicate is. Short-circuiting on a
+// transient read error threw away an answer the user actually gave, and the
+// client never retries: it treats this call as fire-and-forget precisely so a
+// failed write can't trap anyone.
+func TestSubmitKeepsTheAnswerWhenTheStatusReadFails(t *testing.T) {
+	store := &fakeReferralStore{status: "pending", statusErr: errors.New("transient blip")}
+	h := newTestReferralHandler(store)
+	rec := httptest.NewRecorder()
+	h.Submit(rec, authed(http.MethodPost, "/api/me/referral", `{"source":"twitch"}`))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if len(store.resolveCalls) != 1 {
+		t.Fatalf("%d resolve calls, want 1 — the answer was discarded on a read blip",
+			len(store.resolveCalls))
+	}
+	if got := store.resolveCalls[0]; got.source != "twitch" || got.status != "answered" {
+		t.Errorf("resolve call = %+v, want the user's actual answer", got)
+	}
+	if decodeBody(t, rec)["recorded"] != true {
+		t.Error("recorded should be true — the write landed despite the read failing")
+	}
+}
+
 func TestSubmitSurfacesWriteFailures(t *testing.T) {
 	store := &fakeReferralStore{status: "pending", resolveErr: errors.New("db down")}
 	h := newTestReferralHandler(store)

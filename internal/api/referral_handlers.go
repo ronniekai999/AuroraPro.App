@@ -307,10 +307,17 @@ func (h *ReferralHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	// This is an early-out, not the authority: ResolveReferral's
 	// `AND referral_status = 'pending'` is still what makes the write safe
 	// against a status that changes between here and there.
+	// A READ FAILURE FALLS THROUGH rather than short-circuiting. Returning here
+	// would discard an answer the user actually gave, and the client never
+	// retries — it treats this call as fire-and-forget so a failed write can't
+	// hold anyone at a spinner. Since ResolveReferral is gated on the row still
+	// being pending, attempting the write is safe even when we don't know the
+	// status: it either lands or matches zero rows. The narrow cost is that the
+	// oracle this early-out closes is briefly open while the database is
+	// faulting, which is a trade worth making to keep real input.
 	if status, err := h.queries.GetReferralStatus(r.Context(), claims.UserID); err != nil {
-		slog.Warn("referral: status read failed on submit", "user_id", claims.UserID, "error", err)
-		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "recorded": false})
-		return
+		slog.Warn("referral: status read failed on submit, attempting the write anyway",
+			"user_id", claims.UserID, "error", err)
 	} else if status != "pending" {
 		writeJSON(w, http.StatusOK, map[string]any{"pending": false, "recorded": false})
 		return
