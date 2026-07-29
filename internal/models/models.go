@@ -743,15 +743,15 @@ type AddToWatchlistRequest struct {
 // rails — typically set by admin for franchise-level groupings.
 
 type Collection struct {
-	ID          int64     `json:"id"`
-	OwnerUserID int64     `json:"owner_user_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	Kind        string    `json:"kind"` // 'manual' | 'ai'
-	Prompt      string    `json:"prompt,omitempty"`
-	IsPublic    bool      `json:"is_public"`
-	CoverPath   string    `json:"cover_path,omitempty"`
-	ItemCount   int       `json:"item_count,omitempty"`
+	ID          int64  `json:"id"`
+	OwnerUserID int64  `json:"owner_user_id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Kind        string `json:"kind"` // 'manual' | 'ai'
+	Prompt      string `json:"prompt,omitempty"`
+	IsPublic    bool   `json:"is_public"`
+	CoverPath   string `json:"cover_path,omitempty"`
+	ItemCount   int    `json:"item_count,omitempty"`
 	// PosterPaths is up to four member posters in collection order, for the
 	// stacked-poster card the collections grid draws. CoverPath is a single
 	// image (auto-populated from the first item added), which reads as one
@@ -876,10 +876,18 @@ type ReferralOption struct {
 	Label string `json:"label"`
 }
 
-// ReferralSourceCount is one row of the admin breakdown. Label is nil when the
-// key is no longer among the configured options — the panel renders those as
-// "<removed: key>" rather than dropping the rows, so history stays readable
-// after an operator deletes an option.
+// ReferralSourceCount is one row of the admin breakdown.
+//
+// Label is nil for BOTH of the keys that have no configured option:
+//   - one whose option the operator deleted after users had chosen it — the
+//     panel renders those as "<removed: key>" rather than dropping the rows,
+//     so history stays readable; and
+//   - the implicit "other", which never has a stored option and whose display
+//     text is owned by the client (see REFERRAL_OTHER_LABEL).
+//
+// The KEY separates them: parseReferralOptions refuses to store "other", so no
+// configured option can collide with it. A consumer that treats nil as
+// "removed" alone will mislabel the free-text row.
 type ReferralSourceCount struct {
 	Key   string  `json:"key"`
 	Label *string `json:"label"`

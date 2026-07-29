@@ -41,7 +41,13 @@ type resolveCall struct {
 
 func (f *fakeReferralStore) GetReferralStatus(_ context.Context, _ int64) (string, error) {
 	f.statusCalls++
-	return f.status, f.statusErr
+	if f.statusErr != nil {
+		// The real one returns ("", err) — never a status alongside an error.
+		// Mirroring that keeps tests from asserting a state production cannot
+		// reach, which is how a fake quietly stops being evidence.
+		return "", f.statusErr
+	}
+	return f.status, nil
 }
 
 func (f *fakeReferralStore) ResolveReferral(_ context.Context, userID int64, status, source string, detail *string) (bool, error) {
@@ -62,7 +68,14 @@ func (f *fakeReferralStore) ReferralSummary(_ context.Context, windowDays int) (
 	if f.summaryErr != nil {
 		return nil, f.summaryErr
 	}
+	// Deep-copy BySource: Summary labels rows in place, and a shared backing
+	// array would let one test's assertions mutate the fixture another reads.
 	s := *f.summary
+	// make+copy, not append-to-nil: appending an EMPTY slice to nil yields nil,
+	// which marshals as `null` and breaks the panel's .map(). The real store is
+	// careful to hand back a non-nil empty slice; the fake must be too.
+	s.BySource = make([]models.ReferralSourceCount, len(f.summary.BySource))
+	copy(s.BySource, f.summary.BySource)
 	s.WindowDays = windowDays
 	return &s, nil
 }
@@ -305,24 +318,30 @@ func TestSubmitOnIneligibleUserIsANoOpAndLeaksNothing(t *testing.T) {
 	// this into an enumeration oracle: a configured key answered 200 and an
 	// unconfigured one 400, telling any authenticated user the option set the
 	// GET handler deliberately withholds.
+	// Both the healthy path AND a failing status read: the fall-through that
+	// briefly shipped made only the second case leak, so a test covering just
+	// the first stayed green while the property was gone.
+	faults := map[string]error{"healthy": nil, "status read failing": errors.New("db fault")}
 	for _, source := range []string{"twitch", "definitely-not-configured"} {
-		t.Run(source, func(t *testing.T) {
-			store := &fakeReferralStore{status: ""} // never eligible
-			h := newTestReferralHandler(store)
-			rec := httptest.NewRecorder()
-			h.Submit(rec, authed(http.MethodPost, "/api/me/referral", `{"source":"`+source+`"}`))
+		for faultName, faultErr := range faults {
+			t.Run(source+"/"+faultName, func(t *testing.T) {
+				store := &fakeReferralStore{status: "", statusErr: faultErr} // never eligible
+				h := newTestReferralHandler(store)
+				rec := httptest.NewRecorder()
+				h.Submit(rec, authed(http.MethodPost, "/api/me/referral", `{"source":"`+source+`"}`))
 
-			if rec.Code != http.StatusOK {
-				t.Fatalf("status = %d for source %q, want 200 — differing codes are the oracle",
-					rec.Code, source)
-			}
-			if decodeBody(t, rec)["recorded"] != false {
-				t.Error("recorded should be false for an ineligible user")
-			}
-			if len(store.resolveCalls) != 0 {
-				t.Error("ineligible submit reached the write path")
-			}
-		})
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d for source %q, want 200 — differing codes are the oracle",
+						rec.Code, source)
+				}
+				if decodeBody(t, rec)["recorded"] != false {
+					t.Error("recorded should be false for an ineligible user")
+				}
+				if len(store.resolveCalls) != 0 {
+					t.Error("ineligible submit reached the write path")
+				}
+			})
+		}
 	}
 }
 
@@ -384,30 +403,32 @@ func TestSubmitRejectsBadRequests(t *testing.T) {
 	}
 }
 
-// TestSubmitKeepsTheAnswerWhenTheStatusReadFails pins the fall-through. The
-// eligibility read is an optimization and an anti-enumeration guard, NOT the
-// authority — ResolveReferral's pending predicate is. Short-circuiting on a
-// transient read error threw away an answer the user actually gave, and the
-// client never retries: it treats this call as fire-and-forget precisely so a
-// failed write can't trap anyone.
-func TestSubmitKeepsTheAnswerWhenTheStatusReadFails(t *testing.T) {
+// TestSubmitOnStatusReadFailureIsASafeNoOp pins the short-circuit.
+//
+// An earlier version fell through and attempted the write, reasoning that
+// returning would discard the user's answer. It does not: the row stays
+// pending and the gate re-asks next session. Falling through instead reopened
+// the enumeration oracle below, so this asserts the no-op.
+func TestSubmitOnStatusReadFailureIsASafeNoOp(t *testing.T) {
 	store := &fakeReferralStore{status: "pending", statusErr: errors.New("transient blip")}
 	h := newTestReferralHandler(store)
 	rec := httptest.NewRecorder()
 	h.Submit(rec, authed(http.MethodPost, "/api/me/referral", `{"source":"twitch"}`))
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200 — a read blip is not the caller's problem", rec.Code)
 	}
-	if len(store.resolveCalls) != 1 {
-		t.Fatalf("%d resolve calls, want 1 — the answer was discarded on a read blip",
+	if decodeBody(t, rec)["recorded"] != false {
+		t.Error("recorded should be false — nothing was written")
+	}
+	if len(store.resolveCalls) != 0 {
+		t.Errorf("%d resolve calls, want 0 — the write must not be attempted blind",
 			len(store.resolveCalls))
 	}
-	if got := store.resolveCalls[0]; got.source != "twitch" || got.status != "answered" {
-		t.Errorf("resolve call = %+v, want the user's actual answer", got)
-	}
-	if decodeBody(t, rec)["recorded"] != true {
-		t.Error("recorded should be true — the write landed despite the read failing")
+	// The row is untouched, so the prompt is still pending and the user is
+	// asked again on their next visit. That is the designed recovery.
+	if store.status != "pending" {
+		t.Errorf("status = %q, want it left pending for the next session", store.status)
 	}
 }
 

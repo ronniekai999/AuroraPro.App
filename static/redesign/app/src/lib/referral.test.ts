@@ -5,7 +5,7 @@ import {
   serializeReferralOptions,
   parseReferralOptionsSetting,
   referralSourceLabel,
-  isRemovedReferralKey,
+  isRemovedSummaryRow,
   REFERRAL_OTHER_KEY,
   REFERRAL_OTHER_LABEL,
   REFERRAL_OPTIONS_MAX,
@@ -128,7 +128,15 @@ describe('validateReferralOptions', () => {
     // be an instruction the admin can actually follow.
     const rows = [{ key: 'LegacyKey', label: 'Legacy' }]
     const locked = validateReferralOptions(rows, new Set(['LegacyKey']))
-    expect(locked.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
+    const msg = locked.find(i => i.index === 0)!.message
+    // The urgent fact, not just "this row is invalid": the server's parse is
+    // all-or-nothing, so one bad key means the whole configured list is already
+    // being ignored and users are seeing the built-in defaults.
+    expect(msg).toMatch(/defaults/i)
+    // And the remedy, stated without overpromising — counts survive, the label
+    // does not, and the key cannot come back.
+    expect(msg).toMatch(/remov/i)
+    expect(msg).toMatch(/cannot be added back/i)
     // Unlocked rows keep the "fix the key" wording, which they can act on.
     const fresh = validateReferralOptions(rows)
     expect(fresh.some(i => i.index === 0 && /lowercase/i.test(i.message))).toBe(true)
@@ -137,7 +145,7 @@ describe('validateReferralOptions', () => {
   it('flags a stored "other" row too — the server rejects it either way', () => {
     const issues = validateReferralOptions(
       [{ key: REFERRAL_OTHER_KEY, label: 'Other' }], new Set([REFERRAL_OTHER_KEY]))
-    expect(issues.some(i => i.index === 0 && /remove this option/i.test(i.message))).toBe(true)
+    expect(issues.find(i => i.index === 0)!.message).toMatch(/remov/i)
   })
 
   it('still flags a locked row\'s LABEL, which is editable', () => {
@@ -181,12 +189,26 @@ describe('referralSourceLabel', () => {
     expect(shuffleReferralOptions(OPTS, seededRng([0.5])).at(-1)!.label).toBe(REFERRAL_OTHER_LABEL)
   })
 
-  it('does not treat the free-text option as a removed key', () => {
-    // Its label is null over the wire by design (the server doesn't store it),
-    // which must not be read as "the operator deleted this option".
-    expect(isRemovedReferralKey(REFERRAL_OTHER_KEY, [])).toBe(false)
-    expect(isRemovedReferralKey('myspace', OPTS)).toBe(true)
-    expect(isRemovedReferralKey('twitch', OPTS)).toBe(false)
+  it('classifies summary rows from the wire shape, live options included', () => {
+    // The live-option case is the one that shipped broken: the predicate used
+    // to require the configured option list, the panel had none in scope and
+    // passed [], and every real option came back "removed" — the whole
+    // breakdown rendered as deleted history. A live row carries a label.
+    expect(isRemovedSummaryRow({ key: 'twitch', label: 'Twitch' })).toBe(false)
+    expect(isRemovedSummaryRow({ key: 'friend', label: 'A friend' })).toBe(false)
+    // A deleted option: the server found no label for it.
+    expect(isRemovedSummaryRow({ key: 'myspace', label: null })).toBe(true)
+    // The free-text option also has no label, and is NOT a removal.
+    expect(isRemovedSummaryRow({ key: REFERRAL_OTHER_KEY, label: null })).toBe(false)
+  })
+
+  it('pins the free-text option\'s actual copy, not just its plumbing', () => {
+    // Every other assertion compares REFERRAL_OTHER_LABEL to itself, so the
+    // string could be changed to anything and the suite would stay green —
+    // proven by mutation. This is the one that fails if the copy changes,
+    // which is the point: it is user-facing text, and changing it should be a
+    // deliberate act that updates a test.
+    expect(REFERRAL_OTHER_LABEL).toBe('Something else')
   })
   it('marks a deleted option instead of hiding the answer', () =>
     expect(referralSourceLabel('myspace', OPTS)).toBe('<removed: myspace>'))

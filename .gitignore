@@ -36,6 +36,15 @@ static/redesign/app/dist/
 static/redesign/app/node_modules/
 static/v2/
 
+# The rule above is path-specific, so anything that runs npm/npx from a
+# directory other than static/redesign/app leaves an UNTRACKED node_modules
+# behind — a tool resolving upward from a worktree does exactly that, and the
+# result is either repo-noise or, worse, someone committing it. These are
+# unanchored on purpose: never track a dependency or bundler cache, wherever
+# it lands.
+node_modules/
+.vite/
+
 # Go build cache (in case anyone runs builds in-tree)
 /tmp/
 
