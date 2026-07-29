@@ -807,7 +807,12 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
           X titles" clause only renders when a real library total is
           reachable (libraryTotal != null) — omitted, never faked,
           otherwise. The "✨ Surprise me" button reuses the hero refresh. */}
-      <div className="stage-gutter flex items-end justify-between gap-5 pt-10 mb-1">
+      {/* items-center, not items-end. Bottom-aligning the button group put it
+          level with the thin subline, which measures 12px below the greeting
+          block's optical centre — against a tall, heavy h1 that reads as the
+          buttons sagging. Centring lands them within 0.1px of the block's
+          middle. */}
+      <div className="stage-gutter flex items-center justify-between gap-5 pt-10 mb-1">
         <div className="min-w-0">
           <h1 className="font-display text-3xl md:type-page font-extrabold tracking-tight leading-tight">
             Good {greetWord},{' '}
