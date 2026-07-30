@@ -20,6 +20,8 @@ import (
 	"github.com/aurora-media/aurora/internal/logging"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
+	"github.com/aurora-media/aurora/internal/push"
 	"github.com/aurora-media/aurora/internal/skipmarkers"
 	"github.com/aurora-media/aurora/internal/streaming"
 	"github.com/aurora-media/aurora/internal/watchparty"
@@ -173,6 +175,8 @@ type RouterDeps struct {
 	EmbeddingEnabled      bool                 // for the admin dashboard's coverage card
 	EmbeddingVersion      int16                // current embedding.CurrentVersion at boot
 	LLMClient             *llm.Client          // optional — admin debug toggle target (Phase 6)
+	Dispatcher            *notify.Dispatcher   // notification pipeline (persist → WS → push); producers route through it
+	PushSender            *push.Sender         // Web Push transport, for the /api/me/push/* handlers
 	AIBackfill            AIBackfillController // optional — enables /admin/flagged/ai-rematch endpoints
 	SkipMarkers           *skipmarkers.Worker  // optional — Smart Skip status/sweep/correction endpoints
 	// RootCtx is the server-lifecycle context. Handlers that spawn long-
@@ -368,6 +372,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	authH.SetSecureCookies(cfg.Server.SecureCookies)  // deep-debug H10
 	oauthH.SetSecureCookies(cfg.Server.SecureCookies) // deep-debug H10 — OAuth login also sets cookies
 	libH := NewLibraryHandler(deps.Queries, deps.Scanner, deps.Hub, deps.Watcher, deps.Activity)
+	libH.SetDispatcher(deps.Dispatcher)
 	mediaH := NewMediaHandler(deps.Queries, deps.Activity)
 	if deps.Semantic != nil {
 		mediaH.SetSemanticSearcher(deps.Semantic)
@@ -436,7 +441,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 		adminH.SetLLMClient(deps.LLMClient)
 	}
 	requestH := NewRequestHandler(deps.Queries, deps.Hub, deps.Activity, deps.ArrClients, deps.Tmdb, deps.Tvdb)
+	requestH.SetDispatcher(deps.Dispatcher)
 	notificationH := NewNotificationHandler(deps.Queries)
+	// Web Push endpoints (Phase 2 — do/pwa-push/IMPLEMENTATION.md D12).
+	// PushSender may be nil in tests that build a router without push;
+	// the handler is only registered when it exists.
+	var pushH *PushHandler
+	if deps.PushSender != nil {
+		pushH = NewPushHandler(deps.Queries, deps.PushSender)
+	}
 	referralH := NewReferralHandler(deps.Queries)
 	if deps.RootCtx != nil {
 		requestH.SetRootContext(deps.RootCtx)
@@ -878,6 +891,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 			r.Get("/api/me/notifications", notificationH.List)
 			r.Post("/api/me/notifications/read-all", notificationH.MarkAllRead)
 			r.Post("/api/me/notifications/{id}/read", notificationH.MarkRead)
+			if pushH != nil {
+				r.Get("/api/me/push/config", pushH.Config)
+				r.Post("/api/me/push/subscriptions", pushH.Subscribe)
+				r.Delete("/api/me/push/subscriptions", pushH.Unsubscribe)
+				r.Post("/api/me/push/test", pushH.Test)
+			}
 
 			// Referral prompt (migration 046) — asked once of signups that
 			// bypassed the invite gate. Mounted flat for the same reason as

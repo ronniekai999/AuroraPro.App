@@ -606,6 +606,22 @@ func (q *Queries) SetSetting(ctx context.Context, key, value string) error {
 	return q.UpsertSetting(ctx, key, value, 0)
 }
 
+// InsertSettingIfAbsent writes a setting only when no row exists — the
+// racing-first-writer-wins primitive VAPID key provisioning needs (see
+// do/pwa-push/IMPLEMENTATION.md D6). UpsertSetting is last-write-wins by
+// design, which is correct for admin edits and exactly wrong for a
+// generated keypair: two racing generators upserting would leave clients
+// holding a public key whose private half was clobbered. With DO NOTHING,
+// both racers converge by re-reading whichever single value won.
+func (q *Queries) InsertSettingIfAbsent(ctx context.Context, key, value string) error {
+	_, err := q.pool.Exec(ctx, `
+		INSERT INTO server_settings (key, value, updated_by)
+		VALUES ($1, $2, NULL)
+		ON CONFLICT (key) DO NOTHING`,
+		key, value)
+	return err
+}
+
 // GetSettingExists is the three-state read: returns (value, exists, err).
 // "exists=true with value=”" means the operator explicitly cleared the
 // setting in the UI (an intentional override), distinct from "exists=false"

@@ -986,6 +986,14 @@ const (
 	// finished rendering (minutes after the party — and its UI — ended).
 	// Carries the reel URL in Link.
 	NotificationPartyReelReady = "party_reel_ready"
+	// NotificationAdminNewRequest tells each admin a media request was
+	// created (including held pending_approval ones). Deduped per
+	// (admin, request, type) by the table's unique index.
+	NotificationAdminNewRequest = "admin_new_request"
+	// NotificationScanComplete tells admins a library scan finished AND
+	// added items. No table-level dedupe (no request_id) — producers only
+	// fire it on the new_files>0 terminal transition, once per scan run.
+	NotificationScanComplete = "scan_complete"
 )
 
 // Notification is a durable, per-user in-app notification backing the bell +
@@ -1002,6 +1010,24 @@ type Notification struct {
 	Link      string     `json:"link,omitempty"`       // optional deep link (e.g. highlight-reel MP4)
 	ReadAt    *time.Time `json:"read_at,omitempty"`    // nil ⇒ unread
 	CreatedAt time.Time  `json:"created_at"`
+}
+
+// PushSubscription is one browser-profile-on-a-device's Web Push endpoint
+// (migration 047). The endpoint is globally unique per the Push API; the
+// upsert reassigns an endpoint to whichever account most recently enabled
+// push on that device — the property that stops user A receiving user B's
+// notifications on a shared machine. p256dh/auth are the client's
+// base64url-encoded encryption parameters (RFC 8291), stored verbatim.
+type PushSubscription struct {
+	ID            int64      `json:"id"`
+	UserID        int64      `json:"user_id"`
+	Endpoint      string     `json:"endpoint"`
+	P256dh        string     `json:"-"`
+	Auth          string     `json:"-"`
+	UserAgent     string     `json:"user_agent,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	LastSeenAt    time.Time  `json:"last_seen_at"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
 }
 
 // CreateRequestPayload is the JSON body for POST /api/requests.

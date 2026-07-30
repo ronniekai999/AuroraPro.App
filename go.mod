@@ -3,6 +3,7 @@ module github.com/aurora-media/aurora
 go 1.26.3
 
 require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/buckket/go-blurhash v1.1.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-chi/chi/v5 v5.2.2
