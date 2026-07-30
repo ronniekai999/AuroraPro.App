@@ -18,6 +18,7 @@ import (
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,6 +37,9 @@ type RequestHandler struct {
 	// actually stops them. nil → fall back to context.Background() for
 	// backwards compatibility with tests that don't set it.
 	rootCtx context.Context
+	// dispatcher fans out admin_new_request notifications on creation.
+	// Optional (nil in tests) — creation works without it.
+	dispatcher *notify.Dispatcher
 }
 
 // NewRequestHandler creates a new RequestHandler with all dependencies.
@@ -63,6 +67,12 @@ func NewRequestHandler(
 // goroutines participate in graceful shutdown.
 func (h *RequestHandler) SetRootContext(ctx context.Context) {
 	h.rootCtx = ctx
+}
+
+// SetDispatcher wires the notification pipeline (admin_new_request on
+// creation). Optional: nil simply skips the admin alert.
+func (h *RequestHandler) SetDispatcher(d *notify.Dispatcher) {
+	h.dispatcher = d
 }
 
 // GetConfig returns the requests feature configuration flags.
@@ -329,6 +339,15 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 		slog.Error("failed to insert request", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to create request")
 		return
+	}
+
+	// Tell the admins — for held requests this is the review nudge, for
+	// admitted ones a heads-up. Deduped per (admin, request, type) by the
+	// notifications table; the requester is excluded (their own request is
+	// not news to them). Detached goroutine: fan-out must not add latency
+	// to the response, and AdminNewRequest detaches from ctx internally.
+	if h.dispatcher != nil {
+		go h.dispatcher.AdminNewRequest(r.Context(), req, claims.UserID)
 	}
 
 	// Only dispatch immediately when the request was admitted (pending).
@@ -986,10 +1005,11 @@ func (h *RequestHandler) DenyRequest(w http.ResponseWriter, r *http.Request) {
 // requests have completed (files downloaded). Updates status and sends
 // WebSocket notifications on completion.
 type RequestMonitor struct {
-	queries *db.Queries
-	hub     *ws.Hub
-	clients *arr.ArrClients
-	scanner *library.Scanner
+	queries    *db.Queries
+	hub        *ws.Hub
+	clients    *arr.ArrClients
+	scanner    *library.Scanner
+	dispatcher *notify.Dispatcher
 
 	mu           sync.Mutex
 	failCounts   map[int64]int              // consecutive API failures per request ID
@@ -1012,13 +1032,16 @@ const maxMonitorFailures = 10
 // in a dual-quality pair) while still letting the request leave 'processing'.
 const maxGoneChecks = 5
 
-// NewRequestMonitor creates a new RequestMonitor.
-func NewRequestMonitor(queries *db.Queries, hub *ws.Hub, clients *arr.ArrClients, scanner *library.Scanner) *RequestMonitor {
+// NewRequestMonitor creates a new RequestMonitor. dispatcher carries
+// request-lifecycle notifications to the bell, WS, and push; nil (tests)
+// downgrades notifyRequest to a no-op.
+func NewRequestMonitor(queries *db.Queries, hub *ws.Hub, clients *arr.ArrClients, scanner *library.Scanner, dispatcher *notify.Dispatcher) *RequestMonitor {
 	return &RequestMonitor{
 		queries:      queries,
 		hub:          hub,
 		clients:      clients,
 		scanner:      scanner,
+		dispatcher:   dispatcher,
 		failCounts:   make(map[int64]int),
 		goneCounts:   make(map[int64]int),
 		lastProgress: make(map[int64]downloadProgress),
@@ -1215,6 +1238,9 @@ func (m *RequestMonitor) triggerMatchingLibraryScan(ctx context.Context, req *mo
 						"new_items":    p.NewFiles,
 						"action":       "scan_completed",
 					})
+					if m.dispatcher != nil {
+						m.dispatcher.ScanCompleted(context.Background(), l.Name, p.NewFiles)
+					}
 				}
 			})
 		}(lib)
@@ -1413,45 +1439,23 @@ func (m *RequestMonitor) handleGone(ctx context.Context, req *models.Request) {
 	m.notifyRequest(ctx, req, models.NotificationRequestFailed)
 }
 
-// notifyRequest persists a per-user notification for a request lifecycle outcome
-// and pushes it live over the 'notification' WebSocket event. CreateNotification
-// dedupes by (user, request, type), so the 5s monitor poll re-entering a row
-// cannot spawn duplicate notifications — and we only push over WS when a NEW row
-// was actually created. Best-effort: a persistence failure is logged, never
-// allowed to disrupt the status transition that triggered it.
+// notifyRequest hands a request lifecycle outcome to the notification
+// pipeline: persist (deduped by (user, request, type)) → WS 'notification'
+// event → push fan-out, all best-effort. The dispatcher owns the
+// WithoutCancel+timeout detachment this function used to hand-roll — the
+// status UPDATE has already committed, so a graceful shutdown must not drop
+// the only record an offline user will get.
 func (m *RequestMonitor) notifyRequest(ctx context.Context, req *models.Request, notifType string) {
+	if m.dispatcher == nil {
+		return
+	}
 	reqID := req.ID
-	n := &models.Notification{
+	m.dispatcher.Notify(ctx, &models.Notification{
 		UserID:    req.UserID,
 		Type:      notifType,
 		Title:     req.Title,
 		MediaType: req.MediaType,
 		RequestID: &reqID,
-	}
-	// Detach the durable write from the cancellable poll ctx. The status UPDATE
-	// has already committed, so a graceful shutdown here must NOT drop the
-	// notification — it's the "source of truth" for offline users, and the
-	// monitor only re-polls 'processing' rows, so a missed write is never
-	// retried. WithoutCancel keeps ctx values but drops cancellation/deadline;
-	// the timeout still bounds it. Mirrors dispatchToARR's rootCtx+timeout.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	created, err := m.queries.CreateNotification(writeCtx, n)
-	if err != nil {
-		slog.Error("request monitor: failed to persist notification",
-			"request_id", req.ID, "type", notifType, "error", err)
-		return
-	}
-	if !created {
-		return // already notified for this (user, request, type) — don't re-push
-	}
-	m.hub.BroadcastToUser(req.UserID, ws.EventNotification, map[string]interface{}{
-		"id":         n.ID,
-		"type":       n.Type,
-		"title":      n.Title,
-		"media_type": n.MediaType,
-		"request_id": req.ID,
-		"created_at": n.CreatedAt,
 	})
 }
 

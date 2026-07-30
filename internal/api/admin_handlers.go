@@ -1087,6 +1087,15 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		"requests_enabled": {func(v string) bool {
 			return v == "true" || v == "false"
 		}},
+		// Web Push operator switch (do/pwa-push/IMPLEMENTATION.md D10).
+		// Push transits vendor push services (Google/Apple/Mozilla), so on
+		// self-hosted software it must be the operator's call. Hot-read by
+		// the sender on every send; absent row = enabled. The VAPID keypair
+		// row (push_vapid_secret) is deliberately NOT in this map — it is
+		// machine-generated and must never be admin-writable.
+		"push_enabled": {func(v string) bool {
+			return v == "true" || v == "false"
+		}},
 		// Per-user media-request quota tuning (carve-out C). A request over
 		// either cap is held for admin approval rather than dispatched.
 		"requests_quota_active": {func(v string) bool {

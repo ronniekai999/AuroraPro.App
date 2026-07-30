@@ -626,6 +626,13 @@ function AdminServerSettingsTab() {
             </div>
             <div className="flex items-center justify-between">
               <div>
+                <p className="text-white/80 text-sm">Push notifications</p>
+                <p className="text-white/40 text-xs">Deliver via browser push services (Google/Apple/Mozilla); payloads are end-to-end encrypted</p>
+              </div>
+              <input type="checkbox" checked={val('push_enabled', 'true') === 'true'} onChange={e => setVal('push_enabled', e.target.checked ? 'true' : 'false')} />
+            </div>
+            <div className="flex items-center justify-between">
+              <div>
                 <p className="text-white/80 text-sm">Filesystem watch</p>
                 <p className="text-white/40 text-xs">Auto-detect changes between scans</p>
               </div>

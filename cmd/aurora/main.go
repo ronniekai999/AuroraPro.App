@@ -29,6 +29,8 @@ import (
 	"github.com/aurora-media/aurora/internal/matching"
 	"github.com/aurora-media/aurora/internal/metadata"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
+	"github.com/aurora-media/aurora/internal/push"
 	"github.com/aurora-media/aurora/internal/recommender"
 	"github.com/aurora-media/aurora/internal/search"
 	"github.com/aurora-media/aurora/internal/skipmarkers"
@@ -148,6 +150,14 @@ func main() {
 		skipWorker.TriggerSweep()
 	}
 
+	// Notification pipeline (Phase 2 push — do/pwa-push/IMPLEMENTATION.md
+	// D7/D8): one dispatcher owns persist → WS broadcast → push fan-out.
+	// Every producer (request monitor, watch party, the four scan sites,
+	// request creation) routes through it. Constructed here, before the
+	// watcher, because the watcher's scan callback is the first producer.
+	pushSender := push.NewSender(queries, nil)
+	dispatcher := notify.NewDispatcher(queries, hub, pushSender, push.Envelope)
+
 	// File watcher: triggers incremental rescan when files change on disk
 	watcher := library.NewWatcher(cfg.Scanner, scanner, func(lib *models.Library) {
 		// Use TryStartScan to prevent concurrent scans if an API-triggered scan
@@ -166,6 +176,7 @@ func main() {
 					"new_items":    p.NewFiles,
 					"action":       "scan_completed",
 				})
+				dispatcher.ScanCompleted(context.Background(), lib.Name, p.NewFiles)
 			}
 		})
 	})
@@ -748,6 +759,9 @@ func main() {
 	// V3 tuning uses DefaultSyncConfig; per-deployment overrides can be
 	// added to config as V3-named knobs if anyone ever needs them.
 	partyManager := watchparty.NewManagerWithConfig(queries, hub, watchparty.SyncConfig{})
+	// Reel-ready notifications route through the dispatcher so they push
+	// to closed tabs like every other notification.
+	partyManager.SetDispatcher(dispatcher)
 	// M9 — set the shutdown context BEFORE the cache dir so background
 	// goroutines (the reaper, in-flight ffmpeg renders) parent off it.
 	// On SIGTERM, ctx cancels and the renders unwind cleanly rather
@@ -770,7 +784,7 @@ func main() {
 	// monitor idles (slow 60s cadence, no ARR calls) whenever the feature is
 	// disabled — pollOnce early-returns on !Enabled() — or nothing is
 	// processing, so an always-on monitor is cheap. See audit H5.
-	requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner)
+	requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner, dispatcher)
 	go requestMonitor.Start(ctx)
 
 	// Locate static files directory for frontend SPA
@@ -801,6 +815,8 @@ func main() {
 		Queries:               queries,
 		Scanner:               scanner,
 		Hub:                   hub,
+		Dispatcher:            dispatcher,
+		PushSender:            pushSender,
 		LoginLimiter:          loginLimiter,
 		RefreshLimiter:        refreshLimiter,
 		ChangePasswordLimiter: pwChangeLimiter,

@@ -10,6 +10,8 @@
 import { useState, useEffect, useRef, useCallback, useSyncExternalStore } from 'react'
 import { Icon } from '@/components/Icon'
 import { installPrompt, installUIState, isStandaloneDisplay, isIOSDevice } from '@/lib/pwa'
+import { pushUIState, pushSupported, enablePush, disablePush, type PushUIState } from '@/lib/push'
+import { getPushConfig, sendPushTest } from '@/lib/api'
 import { PageHeader } from '@/components/PageHeader'
 import { MATURITY_OPTIONS, type MaturityPref } from '@/lib/maturity'
 import { nextRadioIndex } from '@/lib/radiogroup'
@@ -177,13 +179,10 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
         { key: 'hardwareDecoding' as const, label: 'Hardware Decoding', desc: 'Use GPU acceleration for video decoding' },
       ]
     },
-    {
-      title: 'Notifications',
-      icon: 'bell',
-      items: [
-        { key: 'notifications' as const, label: 'Enable Notifications', desc: 'Get notified about new episodes and completions' },
-      ]
-    },
+    // Notifications moved out of this generic-toggle array: the card now
+    // combines the in-app pref with the device push controls, which need
+    // real state (permission, subscription, server switch) a bare toggle
+    // can't express. See the dedicated card below.
   ]
 
   return (
@@ -460,6 +459,36 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             </div>
           </div>
         ))}
+
+        {/* Notifications: the in-app pref plus per-device Web Push
+            (do/pwa-push/IMPLEMENTATION.md D13). Push state is capability-
+            driven — PushControls decides what this browser/device can do
+            via the tested pushUIState machine. */}
+        <div className="glass-panel rounded-2xl p-6">
+          <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
+            <Icon name="bell" size={18} className="text-purple-400" />
+            Notifications
+          </h2>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between py-2">
+              <div>
+                <p id="setting-label-notifications" className="text-white/80 text-sm font-medium">Enable Notifications</p>
+                <p className="text-white/60 text-xs">Get notified about new episodes and completions</p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!!settings.notifications}
+                aria-labelledby="setting-label-notifications"
+                className={`toggle ${settings.notifications ? 'active' : ''}`}
+                onClick={() => toggle('notifications')}
+              >
+                <div className="toggle-handle" />
+              </button>
+            </div>
+            <PushControls onToast={onToast} />
+          </div>
+        </div>
 
         {/* Install-as-app (PWA Phase 1 — do/pwa-push/IMPLEMENTATION.md).
             Which body renders is decided by installUIState: an installed app
@@ -874,5 +903,148 @@ function ProfilesAndWatchlistsCard() {
         </p>
       </div>
     </div>
+  )
+}
+
+/* ─────────────────────── PUSH CONTROLS ─────────────────────── */
+
+/** navigator.serviceWorker.ready never rejects — it waits forever when no
+ *  registration exists (e.g. registration failed at boot). Every use here
+ *  must therefore be bounded, or an edge-case device shows a spinner
+ *  eternally and the enable flow hangs a tap. */
+function readyWithTimeout(ms = 4000): Promise<ServiceWorkerRegistration> {
+  return Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('service worker never became ready')), ms)),
+  ])
+}
+
+/**
+ * Per-device Web Push controls (do/pwa-push/IMPLEMENTATION.md D13). What
+ * renders is decided by the tested pushUIState machine over real
+ * capability inputs; every path out of 'off'/'on' is a direct response to
+ * a user tap — no automatic permission prompts, ever.
+ */
+function PushControls({ onToast }: { onToast?: (message: string, type?: Toast['type']) => void }) {
+  const [state, setState] = useState<PushUIState | 'loading' | 'error'>('loading')
+  const [busy, setBusy] = useState(false)
+
+  const refresh = useCallback(async () => {
+    if (!pushSupported(window)) {
+      setState('unsupported')
+      return
+    }
+    try {
+      const [cfg, sub] = await Promise.all([
+        getPushConfig(),
+        readyWithTimeout().then(r => r.pushManager.getSubscription()),
+      ])
+      setState(pushUIState({
+        supported: true,
+        serverEnabled: cfg.enabled && !!cfg.vapid_public_key,
+        isIOS: isIOSDevice(navigator),
+        standalone: isStandaloneDisplay(window),
+        permission: Notification.permission,
+        subscribed: !!sub,
+      }))
+    } catch {
+      setState('error')
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const handleEnable = () => {
+    if (busy) return
+    setBusy(true)
+    enablePush({
+      requestPermission: () => Notification.requestPermission(),
+      ready: () => readyWithTimeout(),
+    }).then(result => {
+      if (result === 'enabled') onToast?.('Push enabled — this device will get notifications even when Aurora is closed', 'success')
+      else if (result === 'failed') onToast?.('Could not enable push on this device', 'error')
+      // permission-denied / server-disabled: the refreshed card explains.
+    }).finally(() => {
+      setBusy(false)
+      void refresh()
+    })
+  }
+
+  const handleDisable = () => {
+    if (busy) return
+    setBusy(true)
+    disablePush({ ready: () => readyWithTimeout() })
+      .then(() => onToast?.('Push disabled on this device', 'info'))
+      .catch(() => onToast?.('Could not disable push on this device', 'error'))
+      .finally(() => {
+        setBusy(false)
+        void refresh()
+      })
+  }
+
+  const handleTest = () => {
+    if (busy) return
+    setBusy(true)
+    sendPushTest()
+      .then(r => onToast?.(`Test sent to ${r.devices} device${r.devices === 1 ? '' : 's'}`, 'success'))
+      .catch((e: unknown) => onToast?.(e instanceof Error ? e.message : 'Test failed', 'error'))
+      .finally(() => setBusy(false))
+  }
+
+  if (state === 'loading') {
+    return <p className="text-white/40 text-xs py-2">Checking push support…</p>
+  }
+
+  const explain: Partial<Record<typeof state, string>> = {
+    'unsupported': 'This browser does not support push notifications.',
+    'error': 'Push notifications are not available right now.',
+    'server-disabled': 'Push is turned off by the server operator.',
+    'ios-needs-install': 'On iPhone and iPad, push works from the installed app — add Aurora to your Home Screen first (see the App card).',
+    'permission-denied': 'Notifications are blocked for Aurora in your browser settings — re-allow them there, then come back.',
+  }
+  if (state in explain) {
+    return (
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <p className="text-white/80 text-sm font-medium">Push to this device</p>
+          <p className="text-white/60 text-xs">{explain[state]}</p>
+        </div>
+      </div>
+    )
+  }
+
+  const on = state === 'on'
+  return (
+    <>
+      <div className="flex items-center justify-between py-2">
+        <div>
+          <p id="setting-label-push" className="text-white/80 text-sm font-medium">Push to this device</p>
+          <p className="text-white/60 text-xs">
+            Request updates, reels, and admin alerts — even when Aurora is closed
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          aria-labelledby="setting-label-push"
+          disabled={busy}
+          className={`toggle ${on ? 'active' : ''} ${busy ? 'opacity-50' : ''}`}
+          onClick={on ? handleDisable : handleEnable}
+        >
+          <div className="toggle-handle" />
+        </button>
+      </div>
+      {on && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={handleTest}
+          className="rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 px-4 py-2 text-sm font-medium text-white/90 transition-colors disabled:opacity-50"
+        >
+          Send test notification
+        </button>
+      )}
+    </>
   )
 }

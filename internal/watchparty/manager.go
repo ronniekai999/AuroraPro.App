@@ -20,6 +20,7 @@ import (
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/gorilla/websocket"
 )
@@ -484,6 +485,10 @@ type Manager struct {
 	queries *db.Queries
 	hub     *ws.Hub
 	cfg     SyncConfig
+	// dispatcher carries the reel-ready notification through the shared
+	// persist → WS → push pipeline. Set via SetDispatcher at boot; nil
+	// (tests) skips the notification with a warn.
+	dispatcher *notify.Dispatcher
 
 	cleanupDone chan struct{} // closed when CleanupStale goroutine exits
 
@@ -511,6 +516,15 @@ type Manager struct {
 // SyncConfig returns the active sync tuning. Exposed for handlers and tests
 // that need to read the advertised V3 thresholds.
 func (m *Manager) SyncConfig() SyncConfig { return m.cfg }
+
+// SetDispatcher wires the notification pipeline for reel-ready
+// announcements (persist → WS → push). Optional — nil skips the
+// notification. Called once at boot.
+func (m *Manager) SetDispatcher(d *notify.Dispatcher) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dispatcher = d
+}
 
 // SetShutdownContext wires the server-lifecycle context for background
 // goroutines (M9 highlight-reel renders + reaper). Cancellation unwinds
@@ -2035,44 +2049,31 @@ func highlightReelFilename(code string, partyDBID int64) string {
 // audit rows. Best-effort like the reel itself: failures log and move on.
 func (m *Manager) notifyReelReady(ctx context.Context, code string, partyDBID, hostUserID int64, mediaTitle string) {
 	m.mu.RLock()
-	queries := m.queries
-	hub := m.hub
+	dispatcher := m.dispatcher
 	m.mu.RUnlock()
-	if queries == nil || hostUserID == 0 {
+	if dispatcher == nil {
+		// Not wired (tests). Production always wires it in main.go; dropping
+		// the notification beats duplicating the persist+broadcast pipeline.
+		slog.Warn("highlight reel: no dispatcher wired; skipping ready notification", "code", code)
 		return
 	}
-	// Detach the durable write from the render ctx (mirrors notifyRequest,
-	// request_handlers.go): the reel just landed on disk, and this is its
-	// only announcement — a render that consumed most of the shared 5-minute
-	// budget, or a SIGTERM between the rename and here, must not silently
-	// drop the write. WithoutCancel keeps values, drops cancellation; the
-	// fresh timeout still bounds it.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
+	if hostUserID == 0 {
+		return
+	}
 	title := mediaTitle
 	if title == "" {
 		title = "Watch party"
 	}
-	n := &models.Notification{
+	// The dispatcher owns the persist → WS → push pipeline, including the
+	// WithoutCancel+timeout detachment this function used to hand-roll: the
+	// reel just landed on disk and this is its only announcement, so a
+	// SIGTERM between the rename and here must not silently drop the write.
+	dispatcher.Notify(ctx, &models.Notification{
 		UserID: hostUserID,
 		Type:   models.NotificationPartyReelReady,
 		Title:  title,
 		Link:   fmt.Sprintf("/api/parties/%s/highlight.mp4?session=%d", code, partyDBID),
-	}
-	created, err := queries.CreateNotification(writeCtx, n)
-	if err != nil {
-		slog.Warn("highlight reel: failed to persist ready notification", "code", code, "err", err)
-		return
-	}
-	if created && hub != nil {
-		hub.BroadcastToUser(hostUserID, ws.EventNotification, map[string]interface{}{
-			"id":         n.ID,
-			"type":       n.Type,
-			"title":      n.Title,
-			"link":       n.Link,
-			"created_at": n.CreatedAt,
-		})
-	}
+	})
 }
 
 // pickHighlightMoments buckets reactions into sliding windows and returns

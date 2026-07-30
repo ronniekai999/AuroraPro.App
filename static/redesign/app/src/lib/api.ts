@@ -2402,6 +2402,38 @@ export async function markAllNotificationsRead(): Promise<void> {
   await apiFetch('/api/me/notifications/read-all', { method: 'POST' })
 }
 
+// ── Web Push (do/pwa-push/IMPLEMENTATION.md, Phase 2) ─────────────
+
+export interface PushConfig {
+  /** Operator switch (admin setting push_enabled). false ⇒ no key served. */
+  enabled: boolean
+  vapid_public_key: string
+}
+
+/** The browser's PushSubscription.toJSON() shape — POSTed verbatim. */
+export interface PushSubscriptionWire {
+  endpoint: string
+  keys: { p256dh: string; auth: string }
+}
+
+export async function getPushConfig(signal?: AbortSignal): Promise<PushConfig> {
+  return apiFetch<PushConfig>('/api/me/push/config', { signal })
+}
+
+export async function postPushSubscription(sub: PushSubscriptionWire): Promise<void> {
+  await apiFetch('/api/me/push/subscriptions', { method: 'POST', body: sub })
+}
+
+export async function deletePushSubscription(endpoint: string): Promise<void> {
+  await apiFetch('/api/me/push/subscriptions', { method: 'DELETE', body: { endpoint } })
+}
+
+/** Fires a real push at every device this account has enabled. Server
+ *  throttles per user (429 + message when leaned on). */
+export async function sendPushTest(): Promise<{ status: string; devices: number }> {
+  return apiFetch('/api/me/push/test', { method: 'POST' })
+}
+
 // TMDB-via-Aurora search for the request-create form. Aurora proxies
 // TMDB so users don't need their own API keys. Returns a small shape
 // — we only display poster + title + year + tmdb_id (used in the

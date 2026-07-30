@@ -17,20 +17,28 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/library"
 	"github.com/aurora-media/aurora/internal/models"
+	"github.com/aurora-media/aurora/internal/notify"
 	ws "github.com/aurora-media/aurora/internal/websocket"
 	"github.com/go-chi/chi/v5"
 )
 
 type LibraryHandler struct {
-	queries  *db.Queries
-	scanner  *library.Scanner
-	hub      *ws.Hub
-	watcher  *library.Watcher
-	activity *ActivityLogger
+	queries    *db.Queries
+	scanner    *library.Scanner
+	hub        *ws.Hub
+	watcher    *library.Watcher
+	activity   *ActivityLogger
+	dispatcher *notify.Dispatcher
 }
 
 func NewLibraryHandler(queries *db.Queries, scanner *library.Scanner, hub *ws.Hub, watcher *library.Watcher, activity *ActivityLogger) *LibraryHandler {
 	return &LibraryHandler{queries: queries, scanner: scanner, hub: hub, watcher: watcher, activity: activity}
+}
+
+// SetDispatcher wires scan_complete admin notifications. Optional: nil
+// (tests) means scans finish silently, exactly as before Phase 2.
+func (h *LibraryHandler) SetDispatcher(d *notify.Dispatcher) {
+	h.dispatcher = d
 }
 
 // pathAccessError turns a stat/EvalSymlinks failure on a library path
@@ -166,6 +174,9 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 						"new_items":    p.NewFiles,
 						"action":       "scan_completed",
 					})
+					if h.dispatcher != nil {
+						h.dispatcher.ScanCompleted(scanCtx, lib.Name, p.NewFiles)
+					}
 				}
 			})
 		}
@@ -294,6 +305,9 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 					"new_items":    p.NewFiles,
 					"action":       "scan_completed",
 				})
+				if h.dispatcher != nil {
+					h.dispatcher.ScanCompleted(scanCtx, lib.Name, p.NewFiles)
+				}
 			}
 		})
 	}()

@@ -105,6 +105,7 @@ import { currentPreferredQuality } from '@/lib/appearance'
 import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefresh'
+import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -2449,6 +2450,19 @@ export default function App() {
   // App-wide realtime hub: live request-status patches + push notifications.
   // One socket for the whole session, enabled only while logged in.
   const realtimeUserId = user && typeof user === 'object' ? user.id : null
+
+  // Boot-time push re-POST (do/pwa-push/IMPLEMENTATION.md D11): once per
+  // signed-in session, re-report this device's live subscription so
+  // last_seen_at stays fresh and a push-service key rotation heals. Reads
+  // state only — never prompts, never subscribes.
+  useEffect(() => {
+    if (realtimeUserId == null) return
+    void bootResyncPush({
+      supported: pushSupported(window),
+      permission: typeof Notification !== 'undefined' ? Notification.permission : 'denied',
+      ready: () => navigator.serviceWorker.ready,
+    })
+  }, [realtimeUserId])
   useRealtime({
     enabled: realtimeUserId != null,
     onRequestStatus: (ev) => {
@@ -4665,6 +4679,14 @@ export default function App() {
   // Logout — shares resetUserState with the cross-tab logout path.
   const handleLogout = useCallback(async () => {
     party.leave()
+    // Best-effort, bounded (1.5s): this device should stop receiving the
+    // outgoing account's push notifications, and the DELETE needs the
+    // session that apiLogout is about to end. A hung service worker can't
+    // hold the logout hostage — the race inside resolves either way.
+    await unsubscribePushOnLogout({
+      supported: pushSupported(window),
+      ready: () => navigator.serviceWorker.ready,
+    })
     await apiLogout()
     setUser(false)
     resetUserState()
