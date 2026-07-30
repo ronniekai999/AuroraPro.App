@@ -2,7 +2,7 @@
 
 The in-app "Report a Bug" feature lets authenticated Aurora users file
 GitHub issues directly from the SPA. A floating launcher in the bottom-
-left opens a modal with name / title / description fields plus an
+right opens a modal with name / title / description fields plus an
 optional screenshot or short recording attachment. On submit, the
 Aurora server creates a labeled issue in your configured GitHub repo
 and links the user to it.
@@ -97,7 +97,7 @@ Restart Aurora to pick up the env changes.
 ## Step 3 — Verify
 
 Sign in to Aurora as any authenticated user. You should see a small
-"Report bug" pill in the bottom-left corner of any view. Clicking it
+"Report bug" pill in the bottom-right corner of any view. Clicking it
 opens the modal.
 
 To smoke-test the full flow:
