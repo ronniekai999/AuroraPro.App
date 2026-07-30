@@ -16,7 +16,11 @@ import (
 // `_secret` suffix is load-bearing: isSecretSettingKey masks it in the admin
 // listing, and it is deliberately absent from allowedKeys so the admin API
 // cannot overwrite it (do/pwa-push/IMPLEMENTATION.md D6). Rotation = delete
-// the row and restart; devices re-subscribe on next app boot.
+// the row and restart; sends to old subscriptions are then REJECTED
+// (401/403 — not pruned, see sendOne) until each device's next app boot,
+// where bootResyncPush detects the key change and replaces its
+// subscription. Devices that never return age out via the 180-day prune.
+// Full procedure: docs/push.md.
 const VAPIDSettingKey = "push_vapid_secret"
 
 // vapidPair is stored as ONE JSON value so the public/private halves can

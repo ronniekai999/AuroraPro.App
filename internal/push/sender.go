@@ -139,7 +139,19 @@ func (s *Sender) sendOne(ctx context.Context, sub *models.PushSubscription, payl
 		// The push service says this subscription no longer exists (user
 		// revoked permission, deleted the installed app, browser profile
 		// gone). Standard hygiene: drop the row so we stop paying for it.
-		if err := s.store.DeletePushSubscriptionByEndpoint(context.WithoutCancel(ctx), sub.Endpoint); err != nil {
+		// Detached from the (possibly nearly-spent) send budget but still
+		// bounded — an unbounded DELETE against a stalled DB would pin the
+		// producer goroutine inside the errgroup Wait.
+		//
+		// 401/403 (VAPID auth rejections — e.g. after a key rotation) are
+		// deliberately NOT pruned: they're indistinguishable from a server
+		// misconfiguration, and mass-deleting every subscription on a
+		// misconfig would be the worse failure. Rotation healing is
+		// client-side instead: bootResyncPush replaces stale-key
+		// subscriptions at each device's next app boot (docs/push.md).
+		delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := s.store.DeletePushSubscriptionByEndpoint(delCtx, sub.Endpoint); err != nil {
 			slog.Warn("push: pruning dead subscription failed", "error", err)
 		}
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:

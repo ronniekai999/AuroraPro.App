@@ -964,6 +964,12 @@ function PushControls({ onToast }: { onToast?: (message: string, type?: Toast['t
       if (result === 'enabled') onToast?.('Push enabled — this device will get notifications even when Aurora is closed', 'success')
       else if (result === 'failed') onToast?.('Could not enable push on this device', 'error')
       // permission-denied / server-disabled: the refreshed card explains.
+    }).catch(() => {
+      // enablePush itself rejects when the config fetch or the SW-ready
+      // wait fails (readyWithTimeout's 4s bound exists for exactly the
+      // registration-failed device) — same user answer, no unhandled
+      // rejection in the diagnostic buffer.
+      onToast?.('Could not enable push on this device', 'error')
     }).finally(() => {
       setBusy(false)
       void refresh()

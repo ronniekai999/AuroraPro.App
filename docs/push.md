@@ -52,11 +52,22 @@ code, so an installed iOS app in the foreground may show both.
 
 ## Key rotation
 
-Delete the `push_vapid_secret` row from `server_settings` and restart. Every
-existing subscription then fails auth at the push service and is pruned on
-the next send; devices re-subscribe automatically at their next app boot
-(the boot re-POST) — users don't need to touch anything, but there is a
-delivery gap until each device next opens Aurora.
+Delete the `push_vapid_secret` row from `server_settings` and restart. What
+actually happens next, honestly:
+
+- Sends to existing subscriptions are **rejected** by the push services
+  (401/403 — the old key no longer signs). These rejections are logged and
+  deliberately **not** pruned: from the server's side they are
+  indistinguishable from a misconfiguration, and mass-deleting every
+  subscription on a misconfig would be the worse failure.
+- Each device **heals itself at its next app boot**: the boot re-sync
+  compares its subscription's key against the server's current one, and on
+  mismatch replaces the subscription (unsubscribe → re-subscribe → register)
+  with no user interaction. Enabling push from Settings does the same check.
+- Devices that never come back age out via the 180-day prune.
+
+So: rotation is safe, but expect a per-device delivery gap until each device
+next opens Aurora, and warn-level send logs in the meantime.
 
 ## Retention hygiene
 

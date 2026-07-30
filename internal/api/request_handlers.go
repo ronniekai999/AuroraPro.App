@@ -291,6 +291,11 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// requests are inserted as pending_approval and NOT dispatched until an
 	// admin approves them.
 	status := models.RequestPending
+	// Review LOW-7: held requests are inserted (not rejected), and each
+	// insert alerts every admin — so without a cap, N distinct titles = N
+	// pushes to every admin's phone. Past double the daily quota the held
+	// rows still land in the Requests view, but the pings stop.
+	suppressAdminAlert := false
 	if claims.Role != string(models.RoleAdmin) {
 		activeMax, dailyMax := h.requestQuota(r.Context())
 
@@ -308,6 +313,9 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		if activeCount >= activeMax || dailyCount >= dailyMax {
 			status = models.RequestPendingApproval
+		}
+		if dailyCount >= dailyMax*2 {
+			suppressAdminAlert = true
 		}
 	}
 
@@ -346,7 +354,7 @@ func (h *RequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	// notifications table; the requester is excluded (their own request is
 	// not news to them). Detached goroutine: fan-out must not add latency
 	// to the response, and AdminNewRequest detaches from ctx internally.
-	if h.dispatcher != nil {
+	if h.dispatcher != nil && !suppressAdminAlert {
 		go h.dispatcher.AdminNewRequest(r.Context(), req, claims.UserID)
 	}
 

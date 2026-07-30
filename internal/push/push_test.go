@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/models"
 )
@@ -201,13 +202,18 @@ func TestEnvelopeUsesLinkAndRefusesOffOrigin(t *testing.T) {
 }
 
 // scriptedTransport implements webpush.HTTPClient: records requests, returns
-// scripted status codes per endpoint host.
+// scripted status codes per endpoint host. When `gate` is non-nil, every Do
+// BLOCKS on it until the test releases — that hold-open is what makes the
+// concurrency assertion bind (an instant transport never observably exceeds
+// the limit, bounded or not; the review proved the ungated version passed
+// 50/50 runs with the SetLimit removed).
 type scriptedTransport struct {
 	mu       sync.Mutex
 	requests []*http.Request
 	status   map[string]int // endpoint host → status
 	maxInUse int
 	inUse    int
+	gate     chan struct{} // nil → don't block
 }
 
 func (s *scriptedTransport) Do(req *http.Request) (*http.Response, error) {
@@ -218,12 +224,22 @@ func (s *scriptedTransport) Do(req *http.Request) (*http.Response, error) {
 	}
 	s.requests = append(s.requests, req)
 	code := s.status[req.URL.Host]
+	gate := s.gate
 	s.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
 	defer func() { s.mu.Lock(); s.inUse--; s.mu.Unlock() }()
 	if code == 0 {
 		code = 201
 	}
 	return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(""))}, nil
+}
+
+func (s *scriptedTransport) snapshot() (inUse, maxInUse, total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.inUse, s.maxInUse, len(s.requests)
 }
 
 func seedSubs(store *fakeStore, userID int64, hosts ...string) {
@@ -300,12 +316,37 @@ func TestSenderBoundsConcurrency(t *testing.T) {
 		hosts[i] = fmt.Sprintf("svc%d.example", i)
 	}
 	seedSubs(store, 1, hosts...)
-	tr := &scriptedTransport{}
-	NewSender(store, tr).SendToUser(context.Background(), 1, []byte(`x`))
-	if len(tr.requests) != 12 {
-		t.Fatalf("all 12 must be attempted, got %d", len(tr.requests))
+	tr := &scriptedTransport{gate: make(chan struct{})}
+
+	done := make(chan struct{})
+	go func() {
+		NewSender(store, tr).SendToUser(context.Background(), 1, []byte(`x`))
+		close(done)
+	}()
+
+	// With the gate holding every send open, a bounded group parks at
+	// exactly sendConcurrency in-flight; an unbounded one blows straight to
+	// 12. Wait for the steady state, then give any over-limit sends a
+	// moment to (incorrectly) join before reading the high-water mark.
+	deadline := time.After(5 * time.Second)
+	for {
+		if in, _, _ := tr.snapshot(); in >= sendConcurrency {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("sends never reached the concurrency limit")
+		case <-time.After(2 * time.Millisecond):
+		}
 	}
-	if tr.maxInUse > sendConcurrency {
-		t.Errorf("observed %d concurrent sends, bound is %d", tr.maxInUse, sendConcurrency)
+	time.Sleep(50 * time.Millisecond)
+	if _, max, _ := tr.snapshot(); max != sendConcurrency {
+		t.Errorf("high-water mark = %d concurrent sends, want exactly the bound %d", max, sendConcurrency)
+	}
+
+	close(tr.gate) // release everyone
+	<-done
+	if _, _, total := tr.snapshot(); total != 12 {
+		t.Errorf("all 12 must be attempted, got %d", total)
 	}
 }

@@ -1653,9 +1653,16 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
 /* ─────────────────────── NOTIFICATION PANEL ─────────────────────── */
 // Shared by the NotificationPanel rows and the live WS toast so the
 // notification type→copy mapping can't drift between the two surfaces.
+// Every server-side type (internal/push/payload.go bodyFor) needs a case
+// here — the review caught both Phase 2 admin types falling through to
+// "is now available", which is false for a request awaiting review and
+// word salad for a scan summary. The foreground policy suppresses the OS
+// banner while a window is focused, so THIS line is the primary surface.
 const notifLine = (n: AppNotification): string =>
   n.type === 'request_failed' ? `Request failed: ${n.title}`
   : n.type === 'party_reel_ready' ? `Highlight reel ready: ${n.title}`
+  : n.type === 'admin_new_request' ? `New request awaiting review: ${n.title}`
+  : n.type === 'scan_complete' ? `Library scan — ${n.title}`
   : `${n.title} is now available`
 
 // Render a notification's link only when it is a same-origin path. The

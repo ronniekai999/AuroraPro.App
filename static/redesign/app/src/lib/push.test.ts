@@ -4,6 +4,7 @@ import {
   pushSupported,
   urlBase64ToUint8Array,
   subscriptionToWire,
+  subscriptionKeyMatches,
   enablePush,
   disablePush,
   bootResyncPush,
@@ -214,30 +215,83 @@ describe('disablePush', () => {
   })
 })
 
+const okCfg = () => vi.fn().mockResolvedValue({ enabled: true, vapid_public_key: 'AQI' })
+
+/** A subscription whose recorded applicationServerKey is [1,2] — matching
+ *  the server key 'AQI' — or something else, for the rotation cases. */
+function keyedSub(bytes: number[], json?: ReturnType<SubscriptionLike['toJSON']>) {
+  const sub = fakeSub(json ? { json } : {})
+  return Object.assign(sub, { options: { applicationServerKey: new Uint8Array(bytes).buffer } })
+}
+
+describe('subscriptionKeyMatches', () => {
+  it('matches equal bytes, rejects different or different-length keys', () => {
+    expect(subscriptionKeyMatches(keyedSub([1, 2]), 'AQI')).toBe(true)
+    expect(subscriptionKeyMatches(keyedSub([9, 9]), 'AQI')).toBe(false)
+    expect(subscriptionKeyMatches(keyedSub([1, 2, 3]), 'AQI')).toBe(false)
+  })
+  it('treats an unreadable key as a match — no churn on engines that hide options', () => {
+    expect(subscriptionKeyMatches(fakeSub(), 'AQI')).toBe(true)
+  })
+})
+
 describe('bootResyncPush', () => {
   it('re-POSTs the live subscription', async () => {
     const post = vi.fn().mockResolvedValue(undefined)
-    await bootResyncPush({ supported: true, permission: 'granted', ready: async () => fakeReg(fakeSub()), post })
+    await bootResyncPush({ supported: true, permission: 'granted', ready: async () => fakeReg(fakeSub()), config: okCfg(), post })
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('HEALS a rotated key: replaces the stale subscription with one for the current key', async () => {
+    // The operator procedure in docs/push.md (delete the row, restart) only
+    // works because of this path — 401/403 sends do NOT prune server-side.
+    const stale = keyedSub([9, 9])
+    const fresh = fakeSub({ json: { endpoint: 'https://push.example/e2', keys: { p256dh: 'P2', auth: 'A2' } } })
+    const reg = fakeReg(stale, fresh)
+    const post = vi.fn().mockResolvedValue(undefined)
+    await bootResyncPush({ supported: true, permission: 'granted', ready: async () => reg, config: okCfg(), post })
+
+    expect(stale.unsubscribe).toHaveBeenCalled()
+    expect(reg.subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: expect.any(Uint8Array) })
+    expect(post).toHaveBeenCalledWith({ endpoint: 'https://push.example/e2', keys: { p256dh: 'P2', auth: 'A2' } })
+  })
+
+  it('does NOT churn the subscription while the operator has push disabled', async () => {
+    // Disabled config serves no key; replacing/unsubscribing here would
+    // erode the fleet the operator expects back when they re-enable. The
+    // plain re-POST keeps last_seen_at fresh instead.
+    const stale = keyedSub([9, 9])
+    const reg = fakeReg(stale)
+    const post = vi.fn().mockResolvedValue(undefined)
+    await bootResyncPush({
+      supported: true, permission: 'granted', ready: async () => reg,
+      config: vi.fn().mockResolvedValue({ enabled: false, vapid_public_key: '' }), post,
+    })
+    expect(stale.unsubscribe).not.toHaveBeenCalled()
+    expect(reg.subscribe).not.toHaveBeenCalled()
     expect(post).toHaveBeenCalledTimes(1)
   })
 
   it('never runs without support or granted permission', async () => {
     const post = vi.fn()
     const ready = vi.fn()
-    await bootResyncPush({ supported: false, permission: 'granted', ready, post })
-    await bootResyncPush({ supported: true, permission: 'default', ready, post })
+    await bootResyncPush({ supported: false, permission: 'granted', ready, post, config: okCfg() })
+    await bootResyncPush({ supported: true, permission: 'default', ready, post, config: okCfg() })
     expect(ready).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
   })
 
-  it('only re-reports — an absent subscription is left absent', async () => {
-    // Re-subscribing here would resurrect push on a device where the user
-    // turned it off from another tab.
+  it('never CREATES — an absent subscription is left absent', async () => {
+    // Re-subscribing from nothing would resurrect push on a device where
+    // the user turned it off from another tab. (The heal path above only
+    // ever REPLACES an existing subscription.)
     const reg = fakeReg(null)
     const post = vi.fn()
-    await bootResyncPush({ supported: true, permission: 'granted', ready: async () => reg, post })
+    const config = vi.fn()
+    await bootResyncPush({ supported: true, permission: 'granted', ready: async () => reg, post, config })
     expect(reg.subscribe).not.toHaveBeenCalled()
     expect(post).not.toHaveBeenCalled()
+    expect(config).not.toHaveBeenCalled()
   })
 
   it('swallows every failure — boot must never depend on it', async () => {
@@ -245,8 +299,28 @@ describe('bootResyncPush', () => {
       supported: true,
       permission: 'granted',
       ready: async () => { throw new Error('sw dead') },
+      config: okCfg(),
       post: vi.fn(),
     })).resolves.toBeUndefined()
+  })
+})
+
+describe('enablePush with a stale-key subscription', () => {
+  it('replaces it instead of reusing a channel the server can no longer sign for', async () => {
+    const stale = keyedSub([9, 9])
+    const fresh = fakeSub({ json: { endpoint: 'https://push.example/e2', keys: { p256dh: 'P2', auth: 'A2' } } })
+    const reg = fakeReg(stale, fresh)
+    const post = vi.fn().mockResolvedValue(undefined)
+    const result = await enablePush({
+      requestPermission: async () => 'granted',
+      ready: async () => reg,
+      config: okCfg(),
+      post,
+    })
+    expect(result).toBe('enabled')
+    expect(stale.unsubscribe).toHaveBeenCalled()
+    expect(reg.subscribe).toHaveBeenCalled()
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ endpoint: 'https://push.example/e2' }))
   })
 })
 

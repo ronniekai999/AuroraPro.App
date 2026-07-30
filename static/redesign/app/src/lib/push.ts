@@ -68,8 +68,32 @@ export function urlBase64ToUint8Array(base64url: string): Uint8Array<ArrayBuffer
 /** Narrow slice of a PushSubscription the flows below touch. */
 export interface SubscriptionLike {
   endpoint: string
+  options?: { applicationServerKey?: ArrayBuffer | null }
   toJSON(): { endpoint?: string; keys?: { p256dh?: string; auth?: string } }
   unsubscribe(): Promise<boolean>
+}
+
+/**
+ * Does an existing subscription belong to the server's CURRENT VAPID key?
+ *
+ * After a key rotation (docs/push.md), every existing subscription is signed
+ * for a key the server no longer holds — sends are rejected with 401/403,
+ * which deliberately do NOT prune rows (indistinguishable from a server
+ * misconfig, and mass-deleting on those would be the worse failure). This
+ * comparison is the healing side instead: boot/enable spot the stale key
+ * and replace the subscription. Unreadable options (older engines) count as
+ * a match — churning every boot on those would be worse than not healing.
+ */
+export function subscriptionKeyMatches(sub: SubscriptionLike, serverKeyB64: string): boolean {
+  const raw = sub.options?.applicationServerKey
+  if (!raw) return true
+  const have = new Uint8Array(raw)
+  const want = urlBase64ToUint8Array(serverKeyB64)
+  if (have.length !== want.length) return false
+  for (let i = 0; i < have.length; i++) {
+    if (have[i] !== want[i]) return false
+  }
+  return true
 }
 
 /** Narrow slice of a ServiceWorkerRegistration. BufferSource (not
@@ -117,7 +141,14 @@ export async function enablePush(deps: {
   const reg = await deps.ready()
   let sub: SubscriptionLike
   try {
-    sub = (await reg.pushManager.getSubscription())
+    let existing = await reg.pushManager.getSubscription()
+    if (existing && !subscriptionKeyMatches(existing, cfg.vapid_public_key)) {
+      // Signed for a rotated-away key — reusing it would subscribe a
+      // channel the server can never authenticate to again.
+      await existing.unsubscribe().catch(() => {})
+      existing = null
+    }
+    sub = existing
       ?? await reg.pushManager.subscribe({
         userVisibleOnly: true, // mandatory in Chrome; honest everywhere
         applicationServerKey: urlBase64ToUint8Array(cfg.vapid_public_key),
@@ -164,21 +195,45 @@ export async function disablePush(deps: {
 /**
  * Boot-time re-POST (D11): pushsubscriptionchange is unreliable in practice,
  * so every authenticated app start re-registers the live subscription. This
- * refreshes last_seen_at (the 180-day prune's liveness signal) and heals a
- * subscription the push service rotated. Deliberately does NOT ask for
- * permission or create subscriptions — it only re-reports what exists.
+ * refreshes last_seen_at (the 180-day prune's liveness signal) — and it is
+ * the fleet-wide healing path after a VAPID key rotation: a subscription
+ * signed for a stale key is replaced (unsubscribe → subscribe with the
+ * current key) right here, which is what makes "delete the row and restart"
+ * a safe operator procedure instead of a silent fleet-wide kill.
+ *
+ * Deliberately does NOT ask for permission and never CREATES a subscription
+ * where none exists — a device that turned push off stays off.
  */
 export async function bootResyncPush(deps: {
   supported: boolean
   permission: NotificationPermission
   ready: () => Promise<RegistrationLike>
+  config?: typeof getPushConfig
   post?: typeof postPushSubscription
 }): Promise<void> {
   if (!deps.supported || deps.permission !== 'granted') return
   const post = deps.post ?? postPushSubscription
+  const config = deps.config ?? getPushConfig
   try {
-    const sub = await (await deps.ready()).pushManager.getSubscription()
+    const reg = await deps.ready()
+    const sub = await reg.pushManager.getSubscription()
     if (!sub) return
+
+    const cfg = await config()
+    if (cfg.enabled && cfg.vapid_public_key && !subscriptionKeyMatches(sub, cfg.vapid_public_key)) {
+      // Rotated key: replace the dead channel with a live one.
+      await sub.unsubscribe().catch(() => {})
+      const fresh = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(cfg.vapid_public_key),
+      })
+      const wire = subscriptionToWire(fresh)
+      if (wire) await post(wire)
+      return
+    }
+
+    // Steady state (including operator-disabled: keep the liveness stamp
+    // fresh so re-enabling later doesn't find a pruned fleet).
     const wire = subscriptionToWire(sub)
     if (wire) await post(wire)
   } catch {
