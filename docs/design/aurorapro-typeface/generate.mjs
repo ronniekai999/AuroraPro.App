@@ -307,6 +307,12 @@ const specimen = `<!doctype html>
     color: var(--faint); border: 1px solid var(--line); border-radius: 999px;
     padding: 4px 12px; white-space: nowrap;
   }
+  .chosen {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--cyan);
+    border: 1px solid rgba(34, 211, 238, 0.45); background: rgba(34, 211, 238, 0.08);
+    border-radius: 999px; padding: 4px 12px; white-space: nowrap; align-self: center;
+  }
   .plate h2 { font-size: clamp(22px, 3vw, 30px); font-weight: 700; letter-spacing: -0.01em; margin: 0; }
   .plate h2 small { font-weight: 500; color: var(--faint); font-size: 0.62em; margin-left: 10px; letter-spacing: 0; }
   .thesis { color: var(--dim); font-size: 17px; margin: 6px 0 22px; max-width: 58ch; }
@@ -470,6 +476,7 @@ ${pathEls(photonPaths, ' pathLength="1"').replace(/^ {4}/gm, '      ')}
     <div class="plate-head">
       <span class="idx">CONCEPT 01</span>
       <h2>Borealis <small>the ribbon of light</small></h2>
+      <span class="chosen">Chosen &middot; primary</span>
     </div>
     <p class="thesis">The aurora as motion &mdash; soft, continuous, friendly. A rounded
       geometric monoline where the wave lives <em>inside</em> the letters: the A&rsquo;s crossbar
@@ -531,6 +538,7 @@ ${pathEls(photonPaths, ' pathLength="1"').replace(/^ {4}/gm, '      ')}
     <div class="plate-head">
       <span class="idx">CONCEPT 03</span>
       <h2>Photon <small>the title card</small></h2>
+      <span class="chosen">Chosen &middot; display</span>
     </div>
     <p class="thesis">For the ten-foot screen. A heavyweight rounded display cut by two
       full-width light bands &mdash; an auroral curtain sheared horizontal &mdash; with the glow
@@ -575,21 +583,25 @@ ${pathEls(photonPaths, ' pathLength="1"').replace(/^ {4}/gm, '      ')}
       </table>
     </div>
     <div class="reco">
-      <p><b>Recommendation: lead with 01 &middot; Borealis.</b> It carries the aurora story in the
-        letterforms themselves, keeps the existing gradient, and is the only concept that works
-        everywhere the name appears today &mdash; header, README banner, PWA icons.</p>
-      <p>If you want a family rather than a single face: Borealis as the wordmark,
-        <b>Photon as the splash/TV display cut</b> (same skeleton, so they harmonize), and
-        Meridian&rsquo;s chamfer language reserved for ops surfaces like the status page.</p>
+      <p><b>Decision &mdash; 2026-07-30: the Borealis + Photon family shipped.</b> Borealis is the
+        primary wordmark; Photon is the display cut. Both live in the app as drawn vector
+        lockups &mdash; the gradient ink, band mask, and glow that define these cuts are things a
+        classic font file cannot carry, so the wordmark ships as art (the way the play-circle
+        mark always has).</p>
+      <p>Where they landed: the <code>AuroraWordmark</code> component
+        (<code>static/redesign/app/src/components/</code>) &mdash; gradient Borealis on the sign-in
+        hero, flat-ink Borealis in the top nav and companion app; a static <b>Photon boot splash
+        in <code>index.html</code></b> that paints before the bundles load; and the README
+        banner&rsquo;s wordmark redrawn in Borealis paths.</p>
     </div>
     <div class="next">
-      <h3>From mockup to font file</h3>
+      <h3>If the family ever needs to set more than the name</h3>
       <ol>
-        <li>Pick a direction (or a two-cut family) and I&rsquo;ll refine spacing and details.</li>
-        <li>Extend the winner beyond these nine letters: full lower/upper case, digits, punctuation.</li>
-        <li>Trace the outlines in FontForge (free, scriptable) and export <code>AuroraPro.woff2</code>.</li>
-        <li>Ship via <code>@font-face</code> in <code>static/redesign/app/src/index.css</code>; swap the header
-          lockup in <code>App.tsx</code> and the README banner to the new face.</li>
+        <li>Extend Borealis beyond these nine letters: full lower/upper case, digits, punctuation.</li>
+        <li>Trace the outlines in FontForge (free, scriptable) and export <code>AuroraPro.woff2</code>
+          &mdash; flat ink only; the gradient stays exclusive to the drawn lockup.</li>
+        <li>Ship via <code>@font-face</code> in <code>static/redesign/app/src/index.css</code> as a
+          display face for headings.</li>
       </ol>
     </div>
   </section>

@@ -75,6 +75,7 @@ import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { HeroSection } from '@/components/HeroSection'
+import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
 import { BugReportButton } from '@/components/BugReportButton'
 import { ReactionOverlay } from '@/components/ReactionOverlay'
@@ -364,15 +365,14 @@ function AuthView({ onLogin }: { onLogin: (user: ApiUser) => void }) {
               <path d="M14 11L26 18L14 25Z" fill="#FFFFFF" />
             </svg>
           </div>
-          {/* 46px wordmark from lg. Stays an h1 — the sign-in screen's only
-              heading, and the card's own "Welcome Back" is an h2 under it. */}
-          <h1 className="text-white font-display font-extrabold tracking-tight text-3xl lg:text-[46px] lg:leading-[1.05]">
-            {/* The space is inside the span, not between the text nodes:
-                accessible-name computation concatenates without inserting one,
-                so `AURORA<span>PRO</span>` announced as a single word
-                "AURORAPRO". A leading space in the span keeps the name
-                "AURORA PRO" while `-ml-[0.06em]` cancels it visually. */}
-            AURORA<span className="text-purple-400 -ml-[0.06em]">&nbsp;PRO</span>
+          {/* Drawn Borealis wordmark (docs/design/aurorapro-typeface). Stays
+              an h1 — the sign-in screen's only heading, and the card's own
+              "Welcome Back" is an h2 under it. The svg's role="img" +
+              aria-label give the h1 its accessible name "Aurora Pro" (the
+              old text version needed a whitespace hack for the same result).
+              Inline svg follows the parent's text-center/lg:text-left. */}
+          <h1 className="leading-none">
+            <AuroraWordmark className="inline-block h-8 lg:h-[46px] w-auto" />
           </h1>
           <p className="text-white/60 text-sm lg:text-base mt-3 max-w-[38ch] mx-auto lg:mx-0">
             Your personal media universe — every film and series you own, on any screen.

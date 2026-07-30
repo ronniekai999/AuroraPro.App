@@ -16,9 +16,88 @@
     <meta name="theme-color" content="#050505" />
     <link rel="apple-touch-icon" href="/v2/apple-touch-icon.png" />
     <title>Aurora Pro</title>
+    <!-- Boot splash (below, #boot-splash) styles. Inline ON PURPOSE: the
+         splash exists to cover the window before the JS/CSS bundles arrive,
+         so its styles cannot live in the bundled index.css. It also replaces
+         the white flash users saw between navigation and first paint. -->
+    <style>
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background:
+          radial-gradient(60% 45% at 50% 48%, rgba(34, 211, 238, 0.10), transparent 70%),
+          radial-gradient(45% 38% at 68% 30%, rgba(168, 85, 247, 0.12), transparent 70%),
+          #070B18;
+        opacity: 1;
+        transition: opacity 0.24s ease;
+        pointer-events: none;
+      }
+      #boot-splash.is-done { opacity: 0; }
+      #boot-splash svg { width: min(72vw, 520px); height: auto; }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash { transition: none; }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <!-- Photon boot splash — the display cut of the drawn AuroraPro wordmark.
+         STATIC COPY of the letterform paths: the canonical source is
+         docs/design/aurorapro-typeface/generate.mjs, and the in-app React
+         copy is src/components/AuroraWordmark.tsx (variant="photon"); this
+         one cannot import either because it must paint pre-bundle. Removed
+         by main.tsx once React commits into #root. aria-hidden: purely
+         decorative — the page title already says Aurora Pro. -->
+    <div id="boot-splash" aria-hidden="true">
+      <svg viewBox="22 12 1246 226" fill="none">
+        <defs>
+          <!-- userSpaceOnUse: objectBoundingBox gradients are undefined on
+               zero-width vertical-stem bboxes and Chromium drops them. -->
+          <linearGradient id="bs-ink" gradientUnits="userSpaceOnUse" x1="0" y1="12" x2="0" y2="238">
+            <stop offset="0" stop-color="#6EE7B7" />
+            <stop offset="0.45" stop-color="#22D3EE" />
+            <stop offset="1" stop-color="#A855F7" />
+          </linearGradient>
+          <filter id="bs-glow" x="-20%" y="-40%" width="140%" height="180%">
+            <feGaussianBlur stdDeviation="10" />
+          </filter>
+          <mask id="bs-bands" maskUnits="userSpaceOnUse" x="0" y="0" width="1290" height="250">
+            <rect x="0" y="0" width="1290" height="250" fill="#fff" />
+            <rect x="0" y="156" width="1290" height="12" fill="#000" />
+            <rect x="0" y="184" width="1290" height="8" fill="#000" />
+          </mask>
+          <g id="bs-core" stroke="url(#bs-ink)" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M 40 220 L 115 30 L 190 220" />
+            <path d="M 76 134 H 154" />
+            <path d="M 234 110 V 172 A 48 48 0 0 0 330 172" />
+            <path d="M 330 110 V 220" />
+            <path d="M 388 110 V 220" />
+            <path d="M 388 168 A 58 58 0 0 1 446 110" />
+            <path d="M 480 165 A 55 55 0 1 1 590 165 A 55 55 0 1 1 480 165" />
+            <path d="M 648 110 V 220" />
+            <path d="M 648 168 A 58 58 0 0 1 706 110" />
+            <path d="M 740 165 A 55 55 0 1 1 850 165 A 55 55 0 1 1 740 165" />
+            <path d="M 850 110 V 220" />
+            <path d="M 912 30 V 220" />
+            <path d="M 912 30 H 964 A 47 47 0 0 1 964 124 H 912" />
+            <path d="M 1048 110 V 220" />
+            <path d="M 1048 168 A 58 58 0 0 1 1106 110" />
+            <path d="M 1140 165 A 55 55 0 1 1 1250 165 A 55 55 0 1 1 1140 165" />
+          </g>
+        </defs>
+        <use href="#bs-core" filter="url(#bs-glow)" opacity="0.55" />
+        <use href="#bs-core" mask="url(#bs-bands)" />
+      </svg>
+    </div>
+    <noscript>
+      <!-- Without JS nothing ever mounts to remove the splash; drop it so the
+           (equally static) blank page at least doesn't glow misleadingly. -->
+      <style>#boot-splash { display: none; }</style>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

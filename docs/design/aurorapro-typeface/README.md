@@ -5,8 +5,16 @@ The nine letters of the name are hand-drawn as vector paths on one shared
 skeleton (cap 190 / x-height 110 units, baseline-relative), then styled three
 different ways — like three cuts of one family. No existing font is used.
 
+> **Decision — 2026-07-30: Borealis + Photon shipped as a two-cut family.**
+> Borealis is the primary wordmark (sign-in hero in gradient ink; top nav and
+> companion app in flat ink), Photon the display cut (the boot splash in
+> `index.html`). Both ship as drawn vector lockups via the app's
+> `AuroraWordmark` component — the gradient ink, band mask, and glow that
+> define these cuts are things a `.woff2` cannot carry. The README banner's
+> wordmark is redrawn in Borealis paths too. Meridian remains a concept.
+
 Open **`specimen.html`** in a browser for the full pitch (side-by-side
-comparison, scale tests, recommendation), or view the plates directly:
+comparison, scale tests, the recorded decision), or view the plates directly:
 
 ## Concept 01 — Borealis · the ribbon of light
 

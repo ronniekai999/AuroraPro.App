@@ -1,9 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Aurora Pro — self-hosted media server">
   <!-- Aurora Pro README banner. Brand gradient mirrors the favicon /
        in-app marks (App.tsx auroraMarkA/B): violet #A855F7 →
-       purple #7C3AED → cyan #22D3EE over a night sky. Self-contained:
-       system font stack, no external refs, own dark background so it
-       reads correctly on GitHub light AND dark themes. -->
+       purple #7C3AED → cyan #22D3EE over a night sky. The wordmark is
+       the drawn Borealis cut of the AuroraPro letterforms
+       (docs/design/aurorapro-typeface, mirrored in the app's
+       AuroraWordmark component) — vector paths, so it renders
+       identically everywhere; only the tagline still uses a system
+       font stack. Self-contained: no external refs, own dark
+       background so it reads correctly on GitHub light AND dark
+       themes. -->
   <defs>
     <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0A0E1E"/>
@@ -26,9 +31,15 @@
       <stop offset="0.75" stop-color="#22D3EE" stop-opacity="0.4"/>
       <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
     </linearGradient>
-    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+    <!-- Wordmark ink, in the letter-path coordinate space (the g below
+         translates+scales; userSpaceOnUse resolves post-transform).
+         userSpaceOnUse is REQUIRED: objectBoundingBox gradients are
+         undefined on the zero-width bbox of vertical stems and Chromium
+         drops those strokes. -->
+    <linearGradient id="wordInk" gradientUnits="userSpaceOnUse" x1="27" y1="0" x2="1263" y2="0">
       <stop offset="0" stop-color="#C4B5FD"/>
-      <stop offset="0.55" stop-color="#A855F7"/>
+      <stop offset="0.42" stop-color="#A855F7"/>
+      <stop offset="0.72" stop-color="#7C3AED"/>
       <stop offset="1" stop-color="#22D3EE"/>
     </linearGradient>
     <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
@@ -70,25 +81,44 @@
     </g>
 
     <!-- mark: gradient circle + play triangle (favicon geometry, scaled).
-         Lockup spans mark-left → "PRO"-right ≈ 654 units in a typical
-         system-font render; x-offsets below center that span on the
-         1200-wide canvas (273 left margin ≈ 273 right margin). -->
-    <g transform="translate(273,102)">
+         Lockup spans mark-left (355) → wordmark-right (845): the drawn
+         paths have exact widths, so the span is a constant 490 units and
+         the offsets center it on the 1200-wide canvas (355 each side) —
+         no more guessing at system-font render widths. -->
+    <g transform="translate(355,102)">
       <circle cx="48" cy="48" r="46" fill="url(#brand)"/>
       <circle cx="48" cy="48" r="46" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="1.5"/>
       <path d="M36 27 L70 48 L36 69 Z" fill="#FFFFFF"/>
     </g>
 
-    <!-- wordmark: one <text>, two tspans — PRO flows after AURORA at
-         whatever width the viewer's font renders, so the gap survives
-         any system font stack (a fixed dx overlapped on some). -->
-    <text x="397" y="162" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
-          font-size="64" letter-spacing="10"><tspan font-weight="800"
-          fill="url(#wordmark)">AURORA</tspan><tspan dx="14" font-weight="300"
-          fill="#22D3EE" opacity="0.95">PRO</tspan></text>
+    <!-- wordmark: the drawn Borealis letterforms (cap top y=30, x-height
+         y=110, baseline y=220 in path units; stroke 26). scale 0.2963 sets
+         the artwork box (y 17–233) to 64px tall, vertically centered on the
+         mark's cy=150; visual left edge lands at x=479 (mark right 451 +
+         28 gap). Path data mirrors docs/design/aurorapro-typeface. -->
+    <g transform="translate(471 113) scale(0.2963)" fill="none"
+       stroke="url(#wordInk)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M 40 220 L 115 30 L 190 220"/>
+      <path d="M 69 151 C 99 139 131 163 161 151"/>
+      <path d="M 234 110 V 172 A 48 48 0 0 0 330 172"/>
+      <path d="M 330 110 V 220"/>
+      <path d="M 388 110 V 220"/>
+      <path d="M 388 168 A 58 58 0 0 1 446 110 Q 452 110 458 104"/>
+      <path d="M 480 165 A 55 55 0 1 1 590 165 A 55 55 0 1 1 480 165"/>
+      <path d="M 648 110 V 220"/>
+      <path d="M 648 168 A 58 58 0 0 1 706 110 Q 712 110 718 104"/>
+      <path d="M 740 165 A 55 55 0 1 1 850 165 A 55 55 0 1 1 740 165"/>
+      <path d="M 850 110 V 220"/>
+      <path d="M 912 30 V 220"/>
+      <path d="M 912 30 H 964 A 47 47 0 0 1 964 124 H 912"/>
+      <path d="M 1048 110 V 220"/>
+      <path d="M 1048 168 A 58 58 0 0 1 1106 110 Q 1112 110 1118 104"/>
+      <path d="M 1140 165 A 55 55 0 1 1 1250 165 A 55 55 0 1 1 1140 165"/>
+    </g>
 
-    <!-- tagline -->
-    <text x="399" y="200" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+    <!-- tagline (aligned to the wordmark's visual left edge, 38 under its
+         baseline at y≈178 — same rhythm as the old text lockup) -->
+    <text x="481" y="216" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
           font-size="19" font-weight="400" letter-spacing="2.5" fill="#9BA3C7">YOUR MOVIES · YOUR SHOWS · YOUR SERVER</text>
 
     <!-- baseline shimmer -->
