@@ -21,6 +21,7 @@
 //   mobile drawer      → the menu sheet below md (see MobileSheet)
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { Icon } from '@/components/Icon'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { ProfileSwitcher } from '@/components/ProfileSwitcher'
@@ -647,10 +648,11 @@ export function TopNav({
         <span className="flex-none drop-shadow-[0_0_10px_rgba(168,85,247,0.45)]">
           <AuroraMark />
         </span>
-        <span className="hidden sm:block text-left font-display leading-[1.05]">
-          <span className="block text-[13.5px] font-extrabold tracking-[0.16em] text-white">AURORA</span>
-          <span className="block text-[9px] font-light tracking-[0.34em] text-cyan-300 mt-0.5">PRO</span>
-        </span>
+        {/* Drawn Borealis wordmark (docs/design/aurorapro-typeface), flat
+            ink per the study's small-size guidance — the gradient has
+            nowhere to travel at 15px. Decorative: the button's aria-label
+            already names it. */}
+        <AuroraWordmark decorative ink="#DDD6FE" className="hidden sm:block h-[15px] w-auto" />
       </button>
 
       {/* Tabs. Hidden below md (the sheet takes over); a scrolling strip

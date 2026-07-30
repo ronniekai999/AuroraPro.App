@@ -113,7 +113,8 @@ try {
 //                          URL space to it exactly as before).
 // Splitting here (rather than inside App) keeps the heavy desktop tree
 // — and its watch-party/player hooks — entirely unmounted on the phone.
-createRoot(document.getElementById('root')!).render(
+const rootEl = document.getElementById('root')!
+createRoot(rootEl).render(
   <ErrorBoundary>
     <BrowserRouter basename={BASENAME}>
       <Routes>
@@ -124,3 +125,33 @@ createRoot(document.getElementById('root')!).render(
     </BrowserRouter>
   </ErrorBoundary>,
 )
+
+// Retire the boot splash (index.html #boot-splash — the Photon wordmark that
+// paints before the bundles arrive) once React has committed real DOM into
+// #root. Observing the commit rather than "after render()" matters: under
+// React 18 createRoot, render() returns before the first commit, so a naive
+// removal here would re-expose the blank page the splash exists to cover.
+// The ErrorBoundary fallback also commits children, so a first-render crash
+// still clears the splash instead of hiding the error behind it.
+{
+  const splash = document.getElementById('boot-splash')
+  if (splash) {
+    const retire = () => {
+      splash.classList.add('is-done')
+      // Matches the 0.24s opacity transition in index.html; the element is
+      // pointer-events:none throughout, so the wait can't swallow input.
+      window.setTimeout(() => splash.remove(), 300)
+    }
+    if (rootEl.hasChildNodes()) {
+      retire()
+    } else {
+      const mo = new MutationObserver(() => {
+        if (rootEl.hasChildNodes()) {
+          mo.disconnect()
+          retire()
+        }
+      })
+      mo.observe(rootEl, { childList: true })
+    }
+  }
+}

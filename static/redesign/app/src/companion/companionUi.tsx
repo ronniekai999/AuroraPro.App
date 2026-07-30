@@ -6,6 +6,7 @@
 // Aurora's index.css tokens.
 
 import { useEffect, useState } from 'react'
+import { AuroraWordmark } from '@/components/AuroraWordmark'
 
 // useReducedMotion — reactive `prefers-reduced-motion: reduce`. Used to
 // suppress the floating-reaction rise, mic pulse ring, and button hover
@@ -59,9 +60,9 @@ export function CompanionBrand({
         </svg>
       </div>
       {withWord && (
-        <span className="font-display text-base font-bold uppercase tracking-[0.14em] text-white">
-          Aurora<span className="text-[#D8B4FE]"> Pro</span>
-        </span>
+        // Drawn Borealis wordmark (docs/design/aurorapro-typeface); carries
+        // its own accessible name "Aurora Pro", like the text it replaced.
+        <AuroraWordmark ink="#EDE9FE" className="h-[15px] w-auto" />
       )}
     </div>
   )
