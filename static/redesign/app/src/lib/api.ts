@@ -1797,6 +1797,36 @@ export async function submitMediaFeedback(
   })
 }
 
+// Star ratings — the profile's own 1-5★ verdict on a title (distinct from the
+// read-only TMDB community `rating`). The server stores it + invalidates the
+// profile's rec caches: 4-5★ feeds the taste vector ("more like this"), 1-2★
+// excludes the title from every recommendation surface and steers the AI away
+// from similar titles, 3★ is neutral. stars=0 clears the rating.
+export async function setUserRating(
+  mediaItemId: number,
+  stars: number,
+  profileId?: number,
+): Promise<void> {
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  await apiFetch(`/api/me/rating${qs}`, {
+    method: 'POST',
+    body: { media_item_id: mediaItemId, stars },
+  })
+}
+
+// getUserRating returns the profile's stars for a title (0 = unrated). Drives
+// the detail page's star widget initial state.
+export async function getUserRating(
+  mediaItemId: number,
+  profileId?: number,
+): Promise<number> {
+  const pid = profileId ? `&profile_id=${profileId}` : ''
+  const res = await apiFetch<{ media_item_id: number; stars: number }>(
+    `/api/me/rating?media_item_id=${mediaItemId}${pid}`,
+  )
+  return res.stars ?? 0
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Phase 6 — Collections
 //

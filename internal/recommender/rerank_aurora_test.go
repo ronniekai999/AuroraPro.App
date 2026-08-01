@@ -18,7 +18,7 @@ func TestBuildRerankPromptInjectsAuroraScore(t *testing.T) {
 		{ID: 2, Title: "Dark", Year: 2017, Type: models.MediaShow},
 	}
 	scores := map[int64]int{1: 87, 2: 64}
-	out := buildRerankPrompt(anchors, candidates, scores)
+	out := buildRerankPrompt(anchors, nil, candidates, scores)
 	if !strings.Contains(out, "[Aurora 87]") || !strings.Contains(out, "[Aurora 64]") {
 		t.Errorf("expected both Aurora tags in prompt, got:\n%s", out)
 	}
@@ -30,7 +30,7 @@ func TestBuildRerankPromptInjectsAuroraScore(t *testing.T) {
 func TestBuildRerankPromptOmitsMissingScore(t *testing.T) {
 	anchors := []db.TasteAnchor{{Title: "X", Year: 2000, Type: "movie"}}
 	candidates := []*models.MediaItem{{ID: 9, Title: "Y", Year: 2001, Type: models.MediaMovie}}
-	if out := buildRerankPrompt(anchors, candidates, nil); strings.Contains(out, "[Aurora") {
+	if out := buildRerankPrompt(anchors, nil, candidates, nil); strings.Contains(out, "[Aurora") {
 		t.Errorf("expected no Aurora tag when scores absent, got:\n%s", out)
 	}
 }

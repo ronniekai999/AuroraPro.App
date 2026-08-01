@@ -2,9 +2,11 @@
 //
 // Poster (with optional resume-progress overlay) + action stack (primary
 // Resume / secondary From-start, 3-up Library/List/Party tiles) + a glass
-// "Details" credits card + admin Refresh/Identify. Fully presentational —
-// all labels/handlers/rows are passed in by DetailView.
+// "My Rating" 1-5★ card + a glass "Details" credits card + admin
+// Refresh/Identify. Fully presentational — all labels/handlers/rows are
+// passed in by DetailView.
 
+import { useState } from 'react'
 import { cn } from '../../lib/utils'
 import {
   PlayIcon,
@@ -16,6 +18,7 @@ import {
   RefreshIcon,
   InfoIcon,
   SparkleIcon,
+  StarIcon,
   TrashIcon,
 } from './icons'
 
@@ -53,6 +56,13 @@ interface DetailRailProps {
   onAddToList?: () => void
   onParty?: () => void
   inParty?: boolean
+  // "My Rating" star widget — the profile's own 1-5★ verdict on this title
+  // (feeds the AI recommender: 4-5★ = more like this, 1-2★ = avoid it and its
+  // likes). userRating 0 = unrated; undefined onRate hides the card (e.g.
+  // while the current rating is still loading, so a click can't clobber an
+  // unseen server value).
+  userRating?: number
+  onRate?: (stars: number) => void
   // credits card
   detailRows: DetailRow[]
   // admin
@@ -103,6 +113,54 @@ function Tile({
   )
 }
 
+// RATING_LABELS[n] captions the n-star verdict — shown for the hovered star
+// (preview) or the saved rating, and read to screen readers via the buttons'
+// aria-labels.
+const RATING_LABELS = ['', 'Hated it', 'Not for me', 'It was OK', 'Really liked it', 'Loved it']
+
+// StarRatingRow — five toggle stars. Click sets; clicking the current rating
+// clears (the widget's only affordance for "un-rate", mirroring the thumbs
+// context-menu's re-click-to-clear). Hover/focus previews the would-be rating.
+function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: number) => void }) {
+  const [hovered, setHovered] = useState(0)
+  const shown = hovered || rating
+  return (
+    <div>
+      <div
+        role="radiogroup"
+        aria-label="Rate this title"
+        className="flex items-center justify-between"
+        onMouseLeave={() => setHovered(0)}
+      >
+        {[1, 2, 3, 4, 5].map(n => (
+          <button
+            key={n}
+            type="button"
+            role="radio"
+            aria-checked={rating === n}
+            aria-label={n === rating ? `Clear your ${n}-star rating` : `Rate ${n} star${n === 1 ? '' : 's'} — ${RATING_LABELS[n]}`}
+            title={n === rating ? 'Clear rating' : RATING_LABELS[n]}
+            onClick={() => onRate(n === rating ? 0 : n)}
+            onMouseEnter={() => setHovered(n)}
+            onFocus={() => setHovered(n)}
+            onBlur={() => setHovered(0)}
+            className={cn(
+              'p-1.5 rounded-lg transition-all hover:scale-110',
+              n <= shown ? 'text-yellow-400' : 'text-white/25 hover:text-white/50',
+            )}
+          >
+            <StarIcon size={22} />
+          </button>
+        ))}
+      </div>
+      {/* Fixed-height caption slot so the card doesn't jump between states. */}
+      <div className="h-4 mt-1 text-center text-[12px] text-white/45" aria-live="polite">
+        {shown > 0 ? RATING_LABELS[shown] : 'Tap a star — Aurora learns from it'}
+      </div>
+    </div>
+  )
+}
+
 export function DetailRail({
   poster,
   title,
@@ -123,6 +181,8 @@ export function DetailRail({
   onAddToList,
   onParty,
   inParty,
+  userRating,
+  onRate,
   detailRows,
   onRefresh,
   onIdentify,
@@ -239,6 +299,14 @@ export function DetailRail({
           )}
         </div>
       </div>
+
+      {/* My Rating star card — personal 1-5★ verdict, feeds the recommender */}
+      {onRate && (
+        <div className="glass-card rounded-2xl px-4 pt-3.5 pb-2.5">
+          <div className="text-[11px] uppercase tracking-[.18em] text-white/40 mb-1.5 font-semibold">My Rating</div>
+          <StarRatingRow rating={userRating ?? 0} onRate={onRate} />
+        </div>
+      )}
 
       {/* Details credits card */}
       {detailRows.length > 0 && (

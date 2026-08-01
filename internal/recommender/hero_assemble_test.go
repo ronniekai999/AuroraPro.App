@@ -112,7 +112,7 @@ func TestBuildRerankPrompt_RendersCandidateGenresAndRating(t *testing.T) {
 			Genres: []string{"Adventure", "Science Fiction", "Thriller"}},
 	}
 	candidates := assembleTestCandidates()
-	out := buildRerankPrompt(anchors, candidates, map[int64]int{1: 48})
+	out := buildRerankPrompt(anchors, nil, candidates, map[int64]int{1: 48})
 
 	if !strings.Contains(out, "[Comedy]") {
 		t.Errorf("prompt missing candidate genre tag [Comedy]:\n%s", out)

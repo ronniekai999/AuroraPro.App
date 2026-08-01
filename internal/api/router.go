@@ -810,6 +810,13 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Phase D: steerable thumbs. 👍/👎 on a title reshapes the
 				// feed live (taste-vector boost / recall exclusion) + invalidates.
 				r.Post("/feedback", heroH.Feedback)
+				// Star ratings: graded 1-5★ verdicts. 4-5★ feeds the taste
+				// vector, 1-2★ excludes the title everywhere + anti-anchors
+				// its neighbors in the LLM prompts; GET drives the detail
+				// page's star widget. Both are cheap DB hits — the wide
+				// timeout is irrelevant to them.
+				r.Get("/rating", heroH.GetRating)
+				r.Post("/rating", heroH.SetRating)
 			})
 
 			// Watch Progress

@@ -6,7 +6,7 @@
 // App state) and are threaded in as props — NOT moved here. DetailViewProps
 // is module-private. DetailView fetches its own "Previously" recap (getRecap)
 // so the recap modal stays presentational.
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { DetailHero } from '@/components/detail/DetailHero'
 import { DetailRail } from '@/components/detail/DetailRail'
 import { TrailerModal } from '@/components/detail/TrailerModal'
@@ -18,7 +18,7 @@ import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
-import { getRecap, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
+import { getRecap, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
 import { type Media } from '@/lib/types'
 
 interface DetailViewProps {
@@ -117,6 +117,29 @@ export default function DetailView({
       .then((data) => setRecapState({ loading: false, data }))
       .catch((e) => setRecapState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load recap' }))
   }, [media.id, profileId])
+  // "My Rating" star widget. DetailView owns the fetch + submit (like the
+  // recap) so App stays untouched. null = not yet loaded — the rail hides the
+  // widget until the server value arrives so a click can't clobber an unseen
+  // rating. Optimistic submit with revert-on-error; the server invalidates
+  // the profile's rec caches, so the feed re-curates on the next home load.
+  const [myRating, setMyRating] = useState<number | null>(null)
+  useEffect(() => {
+    let stale = false
+    setMyRating(null)
+    getUserRating(media.id, profileId ?? undefined)
+      .then((stars) => { if (!stale) setMyRating(stars) })
+      // Load failure → show the widget unrated rather than never: rating is
+      // still likely to work (POST is a separate call), and if it doesn't,
+      // handleRate reverts.
+      .catch(() => { if (!stale) setMyRating(0) })
+    return () => { stale = true }
+  }, [media.id, profileId])
+  const handleRate = useCallback((stars: number) => {
+    const previous = myRating ?? 0
+    setMyRating(stars)
+    setUserRating(media.id, stars, profileId ?? undefined)
+      .catch(() => setMyRating(previous))
+  }, [media.id, profileId, myRating])
   // Prefer real metadata when available — overview, runtime, rating
   // straight from the server. Falls back to whatever the lightweight
   // Media object had so the page still shows something pre-fetch.
@@ -413,6 +436,8 @@ export default function DetailView({
               onStartParty(media, episodeId)
             } : undefined}
             inParty={inParty}
+            userRating={myRating ?? 0}
+            onRate={myRating !== null ? handleRate : undefined}
             detailRows={railDetailRows}
             onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
             onIdentify={onIdentify ? () => onIdentify(media) : undefined}
