@@ -459,8 +459,112 @@ func (h *HeroHandler) Feedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-curate live: drops hero/discover/engagement caches + bumps the epoch.
+	// clearDiscoverEmpty mirrors ?refresh=1 (and SetRating): a thumb from a
+	// cold profile shouldn't wait out discoverEmptyTTL for its first rails.
 	h.hero.Invalidate(profileID)
+	h.clearDiscoverEmpty(profileID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// SetRating records a profile's 1-5★ star rating on a title and invalidates
+// the profile's rec caches so the feed re-curates: 4-5★ feeds the taste
+// vector, 1-2★ excludes the title from every recommendation surface AND
+// anti-anchors its neighbors in the LLM prompts, 3★ is neutral (stored +
+// displayed only). stars=0 clears the rating.
+// Body: {"media_item_id": N, "stars": 0-5}. Returns 204.
+//
+// Unlike Feedback, this deliberately does NOT 503 when the recommender is
+// unattached: a star rating has standalone value (detail-page display, and
+// it steers recommendations retroactively the moment personalization is
+// enabled), so storage must work on an LLM-less install too.
+func (h *HeroHandler) SetRating(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	var req struct {
+		MediaItemID int64 `json:"media_item_id"`
+		Stars       int   `json:"stars"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.MediaItemID <= 0 {
+		writeError(w, http.StatusBadRequest, "media_item_id required")
+		return
+	}
+	switch {
+	case req.Stars >= 1 && req.Stars <= 5:
+		if err := h.queries.SetUserRating(r.Context(), profileID, req.MediaItemID, req.Stars); err != nil {
+			// A positive-but-nonexistent id trips the media_items FK (23503):
+			// that's a client error, not a server fault — surface 404, not 500.
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+				writeError(w, http.StatusNotFound, "media item not found")
+				return
+			}
+			slog.Warn("rating: set failed", "profile", profileID, "item", req.MediaItemID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to record rating")
+			return
+		}
+	case req.Stars == 0:
+		if err := h.queries.DeleteUserRating(r.Context(), profileID, req.MediaItemID); err != nil {
+			slog.Warn("rating: clear failed", "profile", profileID, "item", req.MediaItemID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to clear rating")
+			return
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "stars must be 1-5, or 0 to clear")
+		return
+	}
+	// Re-curate live: drops hero/discover/engagement caches + bumps the epoch.
+	// Nil-guarded (see the handler doc): storage works without a recommender.
+	// Also lift the Discover empty-suppression window (like ?refresh=1 does):
+	// a cold profile bootstrapping its taste via ratings shouldn't wait out
+	// discoverEmptyTTL to see its first rails.
+	if h.hero != nil {
+		h.hero.Invalidate(profileID)
+		h.clearDiscoverEmpty(profileID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GetRating returns the profile's own star rating for one title:
+// {"media_item_id": N, "stars": 0-5} (0 = unrated). Drives the detail page's
+// star widget initial state. ?media_item_id=N required; ?profile_id=N
+// optional (validated), defaulting to the user's default profile like every
+// other /api/me endpoint.
+func (h *HeroHandler) GetRating(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	mediaItemID, err := strconv.ParseInt(r.URL.Query().Get("media_item_id"), 10, 64)
+	if err != nil || mediaItemID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid media_item_id")
+		return
+	}
+	stars, err := h.queries.GetUserRating(r.Context(), profileID, mediaItemID)
+	if err != nil {
+		slog.Warn("rating: get failed", "profile", profileID, "item", mediaItemID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load rating")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"media_item_id": mediaItemID,
+		"stars":         stars,
+	})
 }
 
 // resolveProfileID returns the profile to personalize for and a bool

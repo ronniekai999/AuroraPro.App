@@ -6,7 +6,7 @@
 // App state) and are threaded in as props — NOT moved here. DetailViewProps
 // is module-private. DetailView fetches its own "Previously" recap (getRecap)
 // so the recap modal stays presentational.
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { DetailHero } from '@/components/detail/DetailHero'
 import { DetailRail } from '@/components/detail/DetailRail'
 import { TrailerModal } from '@/components/detail/TrailerModal'
@@ -18,7 +18,7 @@ import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
-import { getRecap, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
+import { getRecap, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
 import { type Media } from '@/lib/types'
 
 interface DetailViewProps {
@@ -35,6 +35,11 @@ interface DetailViewProps {
   inLibrary: boolean
   // Active profile — scopes the per-profile "Previously" recap boundary.
   profileId?: number | null
+  // Fired after a star rating COMMITS server-side (not on the optimistic
+  // update). App uses it to keep already-fetched personalized state honest —
+  // e.g. dropping a freshly-panned title from the loaded hero pool so it
+  // isn't still headlining Home during the server-side re-curation.
+  onRated?: (mediaId: number, stars: number) => void
   // Phase 2 extras:
   detail?: MediaDetail
   apiEpisodes?: ApiEpisode[]
@@ -93,7 +98,7 @@ interface DetailViewProps {
   }
 }
 export default function DetailView({
-  media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId,
+  media, onBack, onPlay, onPlayIntent, onToggleLib, inLibrary, profileId, onRated,
   detail, apiEpisodes, onPlayEpisode, onEpisodeUnavailable, loading, error,
   onStartParty, inParty,
   seasons, selectedSeason, onSelectSeason,
@@ -117,6 +122,41 @@ export default function DetailView({
       .then((data) => setRecapState({ loading: false, data }))
       .catch((e) => setRecapState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load recap' }))
   }, [media.id, profileId])
+  // "My Rating" star widget. DetailView owns the fetch + submit (like the
+  // recap) so App's involvement is one optional onRated callback. null = not
+  // yet loaded — clicks no-op until the server value arrives so they can't
+  // clobber an unseen rating (the card still renders, so the rail doesn't
+  // layout-shift when the value lands). Optimistic submit with
+  // revert-on-error; the server invalidates the profile's rec caches and the
+  // hero/rails refetch on the next Home visit (homeReloadNonce), with onRated
+  // scrubbing the already-loaded hero pool immediately.
+  const [myRating, setMyRating] = useState<number | null>(null)
+  // Monotonic submit sequence. Guards the async tails of BOTH the GET and the
+  // POSTs: a stale POST's revert (or onRated) must not fire after a newer
+  // click or an identity switch already superseded it — review found the
+  // unguarded catch could rewind a rapid re-rate, or replay onto the next
+  // profile's freshly-fetched value (the component survives profile switches;
+  // it's keyed by media.id only).
+  const rateSeqRef = useRef(0)
+  useEffect(() => {
+    const seq = ++rateSeqRef.current
+    setMyRating(null)
+    getUserRating(media.id, profileId ?? undefined)
+      .then((stars) => { if (seq === rateSeqRef.current) setMyRating(stars) })
+      // Load failure → show the widget unrated rather than never: rating is
+      // still likely to work (POST is a separate call), and if it doesn't,
+      // handleRate reverts.
+      .catch(() => { if (seq === rateSeqRef.current) setMyRating(0) })
+  }, [media.id, profileId])
+  const handleRate = useCallback((stars: number) => {
+    if (myRating === null) return // still loading the saved value
+    const previous = myRating
+    const seq = ++rateSeqRef.current
+    setMyRating(stars)
+    setUserRating(media.id, stars, profileId ?? undefined)
+      .then(() => { if (seq === rateSeqRef.current) onRated?.(media.id, stars) })
+      .catch(() => { if (seq === rateSeqRef.current) setMyRating(previous) })
+  }, [media.id, profileId, myRating, onRated])
   // Prefer real metadata when available — overview, runtime, rating
   // straight from the server. Falls back to whatever the lightweight
   // Media object had so the page still shows something pre-fetch.
@@ -413,6 +453,8 @@ export default function DetailView({
               onStartParty(media, episodeId)
             } : undefined}
             inParty={inParty}
+            userRating={myRating ?? 0}
+            onRate={handleRate}
             detailRows={railDetailRows}
             onRefresh={onRefreshMetadata ? () => onRefreshMetadata(media) : undefined}
             onIdentify={onIdentify ? () => onIdentify(media) : undefined}

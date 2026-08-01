@@ -64,7 +64,7 @@ func (q *Queries) TrendingUnwatched(ctx context.Context, profileID int64, allowe
 		WHERE m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
 		  AND ($5::text[] IS NULL OR m.content_rating = ANY($5))
 		  AND NOT EXISTS (SELECT 1 FROM watch_progress wp WHERE wp.profile_id = $1 AND wp.media_item_id = m.id)
-		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+`
+		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+lowRatedNotExists+`
 		ORDER BY h.heat DESC
 		LIMIT $6`,
 		profileID, decayDays, windowDays, minStarts, allowedRatings, limit)
@@ -95,7 +95,7 @@ func (q *Queries) HiddenGems(ctx context.Context, profileID int64, allowedRating
 		  AND m.rating >= $2 AND COALESCE(m.vote_count, 0) >= $3
 		  AND COALESCE(e.starts, 0) <= $4
 		  AND NOT EXISTS (SELECT 1 FROM watch_progress wp WHERE wp.profile_id = $1 AND wp.media_item_id = m.id)
-		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+`
+		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+lowRatedNotExists+`
 		ORDER BY m.rating DESC, COALESCE(m.vote_count, 0) DESC
 		LIMIT $6`,
 		profileID, minRating, minVotes, maxStarts, allowedRatings, limit)
@@ -120,7 +120,7 @@ func (q *Queries) FinishTonightShortMovies(ctx context.Context, profileID int64,
 		  AND m.rating > 0
 		  AND ($4::text[] IS NULL OR m.content_rating = ANY($4))
 		  AND NOT EXISTS (SELECT 1 FROM watch_progress wp WHERE wp.profile_id = $1 AND wp.media_item_id = m.id)
-		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+`
+		  AND NOT EXISTS (SELECT 1 FROM taste_seeds ts WHERE ts.profile_id = $1 AND ts.media_item_id = m.id)`+dislikedNotExists+lowRatedNotExists+`
 		ORDER BY m.rating DESC, COALESCE(m.vote_count, 0) DESC
 		LIMIT $5`,
 		profileID, runtimeMin, runtimeMax, allowedRatings, limit)
@@ -155,7 +155,7 @@ func (q *Queries) ComfortRewatch(ctx context.Context, profileID int64, allowedRa
 		    JOIN watch_progress wp ON wp.media_item_id = m.id
 		    WHERE wp.profile_id = $1 AND wp.completed = TRUE
 		      AND m.backdrop_path IS NOT NULL AND m.backdrop_path <> ''
-		      AND ($2::text[] IS NULL OR m.content_rating = ANY($2))`+dislikedNotExists+`
+		      AND ($2::text[] IS NULL OR m.content_rating = ANY($2))`+dislikedNotExists+lowRatedNotExists+`
 		    ORDER BY m.id, wp.completed_at DESC NULLS LAST, wp.updated_at DESC
 		) d
 		ORDER BY ca DESC NULLS LAST, ua DESC

@@ -102,15 +102,17 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 
 // tasteRecentSliceCTE is the shared "recent taste slice": a profile's top-20
 // embedded items by recency — completed/in-progress watches UNION onboarding
-// taste_seeds UNION Phase D 👍 item_feedback, deduped. BuildProfileVector
-// AVERAGES this slice into a single centroid; ProfileEmbeddingSlice (Phase E1)
-// returns the rows UN-averaged for Go-side k-means. ONE const, two callers, so
-// the cluster input can never drift from the average input. Binds $1=profileID;
-// append a `SELECT … FROM recent` to use it.
+// taste_seeds UNION Phase D 👍 item_feedback UNION 4-5★ user_ratings, deduped,
+// minus anything the profile rated 1-2★. BuildProfileVector AVERAGES this
+// slice into a single centroid; ProfileEmbeddingSlice (Phase E1) returns the
+// rows UN-averaged for Go-side k-means. ONE const, two callers, so the cluster
+// input can never drift from the average input. Binds $1=profileID; append a
+// `SELECT … FROM recent` to use it.
 const tasteRecentSliceCTE = `
 		WITH recent AS (
 		  SELECT embedding FROM (
 		    SELECT m.embedding,
+		           m.id          AS media_item_id,
 		           wp.completed  AS completed,
 		           wp.updated_at AS ts
 		    FROM watch_progress wp
@@ -119,6 +121,7 @@ const tasteRecentSliceCTE = `
 		      AND m.embedding IS NOT NULL
 		    UNION ALL
 		    SELECT m.embedding,
+		           m.id          AS media_item_id,
 		           TRUE          AS completed,
 		           ts.created_at AS ts
 		    FROM taste_seeds ts
@@ -138,6 +141,7 @@ const tasteRecentSliceCTE = `
 		    -- supersedes the thumb) AND taste_seeds (the seed row already represents
 		    -- this title) so a seeded-and-thumbed item isn't double-weighted.
 		    SELECT m.embedding,
+		           m.id          AS media_item_id,
 		           TRUE          AS completed,
 		           fb.created_at AS ts
 		    FROM item_feedback fb
@@ -153,7 +157,46 @@ const tasteRecentSliceCTE = `
 		        SELECT 1 FROM taste_seeds ts2
 		        WHERE ts2.profile_id = $1 AND ts2.media_item_id = fb.media_item_id
 		      )
+		    UNION ALL
+		    -- Star ratings: a 4-5★ verdict steers the centroid like a thumb
+		    -- (counts as completed, recency-weighted by the rating's updated_at)
+		    -- — the user can rate from the detail page without ever pressing
+		    -- play. Deduped against watch_progress, taste_seeds AND 👍 thumbs so
+		    -- a watched/seeded/thumbed title that's also rated isn't
+		    -- double-weighted; those rows already carry it into the slice.
+		    SELECT m.embedding,
+		           m.id          AS media_item_id,
+		           TRUE          AS completed,
+		           ur.updated_at AS ts
+		    FROM user_ratings ur
+		    JOIN media_items m ON m.id = ur.media_item_id
+		    WHERE ur.profile_id = $1
+		      AND ur.stars >= 4
+		      AND m.embedding IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watch_progress wp4
+		        WHERE wp4.profile_id = $1 AND wp4.media_item_id = ur.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM taste_seeds ts3
+		        WHERE ts3.profile_id = $1 AND ts3.media_item_id = ur.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM item_feedback fb2
+		        WHERE fb2.profile_id = $1 AND fb2.media_item_id = ur.media_item_id
+		          AND fb2.feedback = 'up'
+		      )
 		  ) src
+		  -- 1-2★ exclusion, applied across ALL branches: a low-starred title
+		  -- must stop pulling the centroid no matter how it entered the slice.
+		  -- This is what fixes the "watched 5 minutes of it, hated it" case —
+		  -- the abandoned watch_progress row would otherwise keep steering
+		  -- recommendations toward the title until 20 newer watches displaced it.
+		  WHERE NOT EXISTS (
+		    SELECT 1 FROM user_ratings lr
+		    WHERE lr.profile_id = $1 AND lr.media_item_id = src.media_item_id
+		      AND lr.stars <= 2
+		  )
 		  ORDER BY completed DESC, ts DESC
 		  LIMIT 20
 		)`
@@ -189,36 +232,28 @@ func (q *Queries) ProfileEmbeddingSlice(ctx context.Context, profileID int64) ([
 }
 
 // PersonalizationHistoryCount returns the number of embedded inputs
-// BuildProfileVector would count for the profile: embedded watch_progress rows
-// PLUS embedded taste_seeds the profile hasn't watched yet. Exposed for UI
-// cold-start hints ("Watch X more titles to unlock personalized picks"); once a
-// profile has finished taste onboarding this reads as already-personalized.
+// BuildProfileVector would count for the profile. Exposed for UI cold-start
+// hints ("Watch X more titles to unlock personalized picks"); once a profile
+// has finished taste onboarding this reads as already-personalized.
 //
-// Capped at 20 to mirror BuildProfileVector's LIMIT — past that we're
-// fully personalized and the exact count stops mattering for UX.
+// Counts over the SAME tasteRecentSliceCTE the vector averages (adversarial
+// review of the star-ratings diff): the old hand-mirrored watches+seeds
+// arithmetic ignored 👍 thumbs and now star ratings too, so a profile
+// bootstrapped by ratings alone showed "0/3 so far" under fully personalized
+// picks, and a profile whose 3 watches were all 1-starred kept cold_start=
+// false while actually falling back to the popular pool. Deriving from the
+// shared const means the hint can never drift from the gate again.
+//
+// The CTE's LIMIT 20 is the historical Go-side cap — past that we're fully
+// personalized and the exact count stops mattering for UX.
 func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int64) (int, error) {
-	row := q.pool.QueryRow(ctx, `
-		SELECT
-		  (SELECT COUNT(*)
-		     FROM watch_progress wp
-		     JOIN media_items m ON m.id = wp.media_item_id
-		     WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL)
-		  +
-		  (SELECT COUNT(*)
-		     FROM taste_seeds ts
-		     JOIN media_items m ON m.id = ts.media_item_id
-		     WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
-		       AND NOT EXISTS (
-		         SELECT 1 FROM watch_progress wp2
-		         WHERE wp2.profile_id = $1 AND wp2.media_item_id = ts.media_item_id))`,
+	row := q.pool.QueryRow(ctx, tasteRecentSliceCTE+`
+		SELECT COUNT(*) FROM recent`,
 		profileID,
 	)
 	var n int
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("personalization history count: %w", err)
-	}
-	if n > 20 {
-		n = 20
 	}
 	return n, nil
 }
@@ -288,7 +323,8 @@ func maturityTierCase(col string) string {
 //     taste vector (tasteRecentSliceCTE), so the lean must see them too.
 //   - thumbs-down exclusion: a watched-then-disliked title must not pull the
 //     lean toward its own tier (disliking an R film should never cause MORE
-//     R recommendations).
+//     R recommendations). 1-2★ ratings get the identical exclusion for the
+//     identical reason.
 //   - majority gate (n*5 >= total*3): a mixed household profile (half G/PG,
 //     half R/TV-MA) has NO dominant tier — the old mean-based idea would
 //     have leaned it toward PG-13 content nobody actually watches. No
@@ -326,6 +362,12 @@ var maturityPenaltyExpr = `COALESCE(0.04 * ABS(
 		                       WHERE dfb.profile_id = $1
 		                         AND dfb.media_item_id = src_mt.media_item_id
 		                         AND dfb.feedback = 'down'
+		                     )
+		                     AND NOT EXISTS (
+		                       SELECT 1 FROM user_ratings lrt
+		                       WHERE lrt.profile_id = $1
+		                         AND lrt.media_item_id = src_mt.media_item_id
+		                         AND lrt.stars <= 2
 		                     )
 		                   ) dt
 		                   WHERE dt.tier IS NOT NULL
@@ -397,7 +439,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )`+dislikedNotExists+`
+		    )`+dislikedNotExists+lowRatedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -483,7 +525,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )`+dislikedNotExists+`
+		    )`+dislikedNotExists+lowRatedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -584,6 +626,12 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	// row (completed first, then most recent), and the outer query re-sorts
 	// those one-per-title rows by the same key before LIMIT. Without this a
 	// binged show produced N identical "Because you watched <show>" rails.
+	// dislikedNotExists + lowRatedNotExists: a 👎'd or 1-2★ title must not
+	// headline a "Because you watched X" rail — the user told us they did
+	// NOT like X, so "more like X" is exactly wrong. (The rail's ITEMS are
+	// already covered by the same fragments inside NearestUnwatched. The
+	// thumbs half landed with the star-ratings pass — both review agents
+	// flagged the asymmetry of excluding a panned anchor but not a 👎'd one.)
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, title, type, year, embedding FROM (
 			SELECT DISTINCT ON (m.id)
@@ -592,7 +640,7 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 			       wp.completed AS completed, wp.updated_at AS updated_at
 			FROM watch_progress wp
 			JOIN media_items m ON m.id = wp.media_item_id
-			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL
+			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL`+dislikedNotExists+lowRatedNotExists+`
 			ORDER BY m.id, wp.completed DESC, wp.updated_at DESC
 		) d
 		ORDER BY d.completed DESC, d.updated_at DESC
@@ -620,15 +668,23 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 // real history. QA BUG-010 fix: include each anchor's actual genres so the
 // LLM doesn't have to infer them from its training data (which led to
 // confidently-wrong claims like "action-spy fun similar to Drake & Josh").
+//
+// Star ratings: each anchor carries the profile's own stars (0 = unrated) so
+// the prompts can weight a 4-5★ anchor as a strong like. 1-2★ titles are
+// EXCLUDED here — every consumer of this query grounds POSITIVE reasoning
+// ("because you watched X"), and a panned title must never be the reason for
+// a pick. The negative signal flows through LowRatedAnchors instead.
 func (q *Queries) RecentTasteAnchors(ctx context.Context, profileID int64, limit int) ([]TasteAnchor, error) {
 	if limit <= 0 {
 		limit = 5
 	}
 	rows, err := q.pool.Query(ctx, `
-		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, '')
+		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, ''), COALESCE(ur.stars, 0)
 		FROM watch_progress wp
 		JOIN media_items m ON m.id = wp.media_item_id
+		LEFT JOIN user_ratings ur ON ur.profile_id = wp.profile_id AND ur.media_item_id = m.id
 		WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL
+		  AND (ur.stars IS NULL OR ur.stars > 2)
 		ORDER BY wp.completed DESC, wp.updated_at DESC
 		LIMIT $2`,
 		profileID, limit,
@@ -641,7 +697,7 @@ func (q *Queries) RecentTasteAnchors(ctx context.Context, profileID int64, limit
 	var ids []int64
 	for rows.Next() {
 		var a TasteAnchor
-		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating); err != nil {
+		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating, &a.Stars); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -684,10 +740,12 @@ func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit i
 		limit = 5
 	}
 	rows, err := q.pool.Query(ctx, `
-		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, '')
+		SELECT m.id, m.title, m.type::text, COALESCE(m.year, 0), COALESCE(m.content_rating, ''), COALESCE(ur.stars, 0)
 		FROM taste_seeds ts
 		JOIN media_items m ON m.id = ts.media_item_id
+		LEFT JOIN user_ratings ur ON ur.profile_id = ts.profile_id AND ur.media_item_id = m.id
 		WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
+		  AND (ur.stars IS NULL OR ur.stars > 2)
 		ORDER BY ts.created_at DESC
 		LIMIT $2`,
 		profileID, limit,
@@ -700,7 +758,7 @@ func (q *Queries) TasteSeedAnchors(ctx context.Context, profileID int64, limit i
 	var ids []int64
 	for rows.Next() {
 		var a TasteAnchor
-		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating); err != nil {
+		if err := rows.Scan(&a.ID, &a.Title, &a.Type, &a.Year, &a.ContentRating, &a.Stars); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -746,6 +804,12 @@ type TasteAnchor struct {
 	// regression).
 	ContentRating string
 	Genres        []string
+	// Stars is the profile's own star rating on the anchor (1-5; 0 =
+	// unrated). Surfaced in the LLM prompts as "[rated N/5]" so a 4-5★
+	// anchor reads as a strong like. Positive-grounding queries
+	// (RecentTasteAnchors / TasteSeedAnchors) never return 1-2★ rows;
+	// LowRatedAnchors returns ONLY them.
+	Stars int
 }
 
 // PopularUnwatched is the cold-start fallback: top-rated items the profile
@@ -774,7 +838,7 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		  AND NOT EXISTS (
 		    SELECT 1 FROM taste_seeds ts
 		    WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		  )`+dislikedNotExists+`
+		  )`+dislikedNotExists+lowRatedNotExists+`
 		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
 		LIMIT $2`,
 		profileID, limit*2, allowedRatings,
