@@ -459,7 +459,10 @@ func (h *HeroHandler) Feedback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-curate live: drops hero/discover/engagement caches + bumps the epoch.
+	// clearDiscoverEmpty mirrors ?refresh=1 (and SetRating): a thumb from a
+	// cold profile shouldn't wait out discoverEmptyTTL for its first rails.
 	h.hero.Invalidate(profileID)
+	h.clearDiscoverEmpty(profileID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -522,8 +525,12 @@ func (h *HeroHandler) SetRating(w http.ResponseWriter, r *http.Request) {
 	}
 	// Re-curate live: drops hero/discover/engagement caches + bumps the epoch.
 	// Nil-guarded (see the handler doc): storage works without a recommender.
+	// Also lift the Discover empty-suppression window (like ?refresh=1 does):
+	// a cold profile bootstrapping its taste via ratings shouldn't wait out
+	// discoverEmptyTTL to see its first rails.
 	if h.hero != nil {
 		h.hero.Invalidate(profileID)
+		h.clearDiscoverEmpty(profileID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

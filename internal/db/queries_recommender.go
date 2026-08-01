@@ -232,36 +232,28 @@ func (q *Queries) ProfileEmbeddingSlice(ctx context.Context, profileID int64) ([
 }
 
 // PersonalizationHistoryCount returns the number of embedded inputs
-// BuildProfileVector would count for the profile: embedded watch_progress rows
-// PLUS embedded taste_seeds the profile hasn't watched yet. Exposed for UI
-// cold-start hints ("Watch X more titles to unlock personalized picks"); once a
-// profile has finished taste onboarding this reads as already-personalized.
+// BuildProfileVector would count for the profile. Exposed for UI cold-start
+// hints ("Watch X more titles to unlock personalized picks"); once a profile
+// has finished taste onboarding this reads as already-personalized.
 //
-// Capped at 20 to mirror BuildProfileVector's LIMIT — past that we're
-// fully personalized and the exact count stops mattering for UX.
+// Counts over the SAME tasteRecentSliceCTE the vector averages (adversarial
+// review of the star-ratings diff): the old hand-mirrored watches+seeds
+// arithmetic ignored 👍 thumbs and now star ratings too, so a profile
+// bootstrapped by ratings alone showed "0/3 so far" under fully personalized
+// picks, and a profile whose 3 watches were all 1-starred kept cold_start=
+// false while actually falling back to the popular pool. Deriving from the
+// shared const means the hint can never drift from the gate again.
+//
+// The CTE's LIMIT 20 is the historical Go-side cap — past that we're fully
+// personalized and the exact count stops mattering for UX.
 func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int64) (int, error) {
-	row := q.pool.QueryRow(ctx, `
-		SELECT
-		  (SELECT COUNT(*)
-		     FROM watch_progress wp
-		     JOIN media_items m ON m.id = wp.media_item_id
-		     WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL)
-		  +
-		  (SELECT COUNT(*)
-		     FROM taste_seeds ts
-		     JOIN media_items m ON m.id = ts.media_item_id
-		     WHERE ts.profile_id = $1 AND m.embedding IS NOT NULL
-		       AND NOT EXISTS (
-		         SELECT 1 FROM watch_progress wp2
-		         WHERE wp2.profile_id = $1 AND wp2.media_item_id = ts.media_item_id))`,
+	row := q.pool.QueryRow(ctx, tasteRecentSliceCTE+`
+		SELECT COUNT(*) FROM recent`,
 		profileID,
 	)
 	var n int
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("personalization history count: %w", err)
-	}
-	if n > 20 {
-		n = 20
 	}
 	return n, nil
 }
@@ -634,10 +626,12 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	// row (completed first, then most recent), and the outer query re-sorts
 	// those one-per-title rows by the same key before LIMIT. Without this a
 	// binged show produced N identical "Because you watched <show>" rails.
-	// lowRatedNotExists: a 1-2★ title must not headline a "Because you
-	// watched X" rail — the user told us they did NOT like X, so "more like
-	// X" is exactly wrong. (The rail's ITEMS are already covered by the same
-	// fragment inside NearestUnwatched.)
+	// dislikedNotExists + lowRatedNotExists: a 👎'd or 1-2★ title must not
+	// headline a "Because you watched X" rail — the user told us they did
+	// NOT like X, so "more like X" is exactly wrong. (The rail's ITEMS are
+	// already covered by the same fragments inside NearestUnwatched. The
+	// thumbs half landed with the star-ratings pass — both review agents
+	// flagged the asymmetry of excluding a panned anchor but not a 👎'd one.)
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, title, type, year, embedding FROM (
 			SELECT DISTINCT ON (m.id)
@@ -646,7 +640,7 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 			       wp.completed AS completed, wp.updated_at AS updated_at
 			FROM watch_progress wp
 			JOIN media_items m ON m.id = wp.media_item_id
-			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL`+lowRatedNotExists+`
+			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL`+dislikedNotExists+lowRatedNotExists+`
 			ORDER BY m.id, wp.completed DESC, wp.updated_at DESC
 		) d
 		ORDER BY d.completed DESC, d.updated_at DESC

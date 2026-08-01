@@ -58,9 +58,10 @@ interface DetailRailProps {
   inParty?: boolean
   // "My Rating" star widget — the profile's own 1-5★ verdict on this title
   // (feeds the AI recommender: 4-5★ = more like this, 1-2★ = avoid it and its
-  // likes). userRating 0 = unrated; undefined onRate hides the card (e.g.
-  // while the current rating is still loading, so a click can't clobber an
-  // unseen server value).
+  // likes). userRating 0 = unrated; undefined onRate hides the card entirely
+  // (callers that support rating pass it always — even while the saved value
+  // loads, so the card doesn't pop in and shift the rail — and no-op clicks
+  // until the value arrives).
   userRating?: number
   onRate?: (stars: number) => void
   // credits card
@@ -121,13 +122,19 @@ const RATING_LABELS = ['', 'Hated it', 'Not for me', 'It was OK', 'Really liked 
 // StarRatingRow — five toggle stars. Click sets; clicking the current rating
 // clears (the widget's only affordance for "un-rate", mirroring the thumbs
 // context-menu's re-click-to-clear). Hover/focus previews the would-be rating.
+//
+// Semantics are toggle-buttons in a group (aria-pressed), NOT a radiogroup:
+// review flagged that role="radio" promises the roving-tabindex + arrow-key
+// contract these five tab-stop buttons don't implement, and "re-click to
+// uncheck" is behavior radios never have. Plain pressed-buttons describe the
+// control honestly to screen readers with the same labels.
 function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: number) => void }) {
   const [hovered, setHovered] = useState(0)
   const shown = hovered || rating
   return (
     <div>
       <div
-        role="radiogroup"
+        role="group"
         aria-label="Rate this title"
         className="flex items-center justify-between"
         onMouseLeave={() => setHovered(0)}
@@ -136,11 +143,14 @@ function StarRatingRow({ rating, onRate }: { rating: number; onRate: (stars: num
           <button
             key={n}
             type="button"
-            role="radio"
-            aria-checked={rating === n}
+            aria-pressed={rating === n}
             aria-label={n === rating ? `Clear your ${n}-star rating` : `Rate ${n} star${n === 1 ? '' : 's'} — ${RATING_LABELS[n]}`}
             title={n === rating ? 'Clear rating' : RATING_LABELS[n]}
-            onClick={() => onRate(n === rating ? 0 : n)}
+            // Reset the hover preview on click: without this, the just-set
+            // (or just-cleared) value hides behind the stuck `hovered` until
+            // the pointer leaves — and on touch, where mouseleave never
+            // fires, a clear looked like a no-op forever (review M-finding).
+            onClick={() => { setHovered(0); onRate(n === rating ? 0 : n) }}
             onMouseEnter={() => setHovered(n)}
             onFocus={() => setHovered(n)}
             onBlur={() => setHovered(0)}

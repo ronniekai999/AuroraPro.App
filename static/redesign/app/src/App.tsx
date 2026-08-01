@@ -4495,9 +4495,37 @@ export default function App() {
       setHeroPersonalization(null)
     }
   }, [user, activeProfileId])
+  // homeReloadNonce is deliberately a dependency (trigger-only, like the
+  // home-rails and continue-watching effects): the hero was the ONE home
+  // surface that never refetched after first load, so a star rating or 👎
+  // given from a detail page invalidated the server's hero cache and then
+  // nothing ever re-pulled it — the panned title kept headlining Home for
+  // the whole session (star-ratings adversarial review, H1). Riding the
+  // same staleness nonce means at most one refetch per stale Home return,
+  // which is a cheap server-side cache hit whenever taste didn't change.
   useEffect(() => {
     void reloadHeroPool(false)
-  }, [reloadHeroPool])
+  }, [reloadHeroPool, homeReloadNonce])
+
+  // A committed 1-2★ rating scrubs the title from the ALREADY-LOADED hero
+  // pool immediately — the nonce refetch above re-curates on the next Home
+  // return, but until that lands the panned title could still be the
+  // on-screen featured hero (it's often the very title the user just came
+  // from). Mirrors the thumbs-👎 optimistic removal from homeRails.
+  const handleRatedMedia = useCallback((mediaId: number, stars: number) => {
+    if (stars === 0 || stars > 2) return
+    const pool = heroPoolRef.current.filter(p => p.media.id !== mediaId)
+    if (pool.length === heroPoolRef.current.length) return
+    heroPoolRef.current = pool
+    setHeroPool(pool)
+    heroIndexRef.current = 0
+    setHeroIndex(0)
+    // Re-point the displayed hero only if the panned title was showing.
+    // Empty pool: keep the current hero on screen (same rule as
+    // reloadHeroPool's empty-response path) — the nonce refetch or the
+    // catalog fallback will replace it.
+    setHomeHero(prev => (prev && prev.id === mediaId && pool.length > 0 ? pool[0].media : prev))
+  }, [])
 
   // "Not tonight" — advance to the NEXT pick in the loaded hero pool
   // instantly (no refetch), distinct from "Surprise me" (a whole fresh
@@ -5097,6 +5125,7 @@ export default function App() {
                 onPlay={handlePlay}
                 onPlayIntent={handlePrimaryIntent}
                 onToggleLib={handleToggleLib}
+                onRated={handleRatedMedia}
                 inLibrary={library.some(l => l.id === selectedMedia.id)}
                 profileId={activeProfileId}
                 detail={detailItem ?? undefined}

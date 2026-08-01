@@ -154,6 +154,13 @@ func TestHighStarsFeedTasteVector(t *testing.T) {
 	if vec == "" {
 		t.Errorf("expected a non-empty centroid")
 	}
+	// The cold-start hint must agree with the gate it explains: a profile
+	// bootstrapped purely by ratings counts as personalized history
+	// (adversarial-review M-finding — the old count ignored ratings and
+	// thumbs, showing "0/3 so far" under fully personalized picks).
+	if n, err := q.PersonalizationHistoryCount(ctx, profileID); err != nil || n != 3 {
+		t.Errorf("history count should mirror the taste slice: want 3, got %d (err %v)", n, err)
+	}
 }
 
 // TestLowStarsRemoveWatchFromTasteSlice pins the headline scenario: start a
@@ -177,6 +184,10 @@ func TestLowStarsRemoveWatchFromTasteSlice(t *testing.T) {
 		rows, err := q.ProfileEmbeddingSlice(ctx, profileID)
 		if err != nil {
 			t.Fatalf("profile embedding slice: %v", err)
+		}
+		// The cold-start hint counts the same slice — they may never diverge.
+		if n, cerr := q.PersonalizationHistoryCount(ctx, profileID); cerr != nil || n != len(rows) {
+			t.Errorf("history count (%d, err %v) diverged from the taste slice (%d rows)", n, cerr, len(rows))
 		}
 		return len(rows)
 	}
@@ -251,7 +262,16 @@ func TestRatingAnchorSplit(t *testing.T) {
 		t.Errorf("LowRatedAnchors should return exactly the panned title with its stars, got %+v", low)
 	}
 
-	// The panned title must not headline a "Because You Watched X" rail either.
+	// Neither a panned nor a 👎'd title may headline a "Because You Watched X"
+	// rail (the thumbs half landed with this pass — review-flagged asymmetry).
+	thumbed := seedEmbeddedItem(t, q, libID, 2)
+	seedRatingWatch(t, q, userID, profileID, thumbed, true)
+	if err := q.RecordItemFeedback(ctx, profileID, thumbed, "down"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = q.pool.Exec(context.Background(), `DELETE FROM item_feedback WHERE profile_id=$1`, profileID)
+	})
 	railAnchors, err := q.RecentAnchorsWithEmbeddings(ctx, profileID, 10)
 	if err != nil {
 		t.Fatalf("anchor rails: %v", err)
@@ -260,5 +280,11 @@ func TestRatingAnchorSplit(t *testing.T) {
 		if a.MediaItemID == panned {
 			t.Errorf("1★ title must not be an anchor-rail anchor")
 		}
+		if a.MediaItemID == thumbed {
+			t.Errorf("👎'd title must not be an anchor-rail anchor")
+		}
+	}
+	if len(railAnchors) == 0 {
+		t.Errorf("the loved title should still anchor a rail")
 	}
 }

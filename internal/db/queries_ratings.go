@@ -39,7 +39,9 @@ const (
 // lowRatedNotExists is a WHERE-clause fragment (leading space, no trailing
 // whitespace) concatenated into every recall query so 1-2★ titles stop being
 // proactively recommended. Same contract as dislikedNotExists (its Phase D
-// sibling, always appended alongside it): reuses the caller's $1 (always the
+// sibling, appended alongside it at every recall site; anchor selection —
+// RecentAnchorsWithEmbeddings — takes both too, so neither a 👎'd nor a
+// panned title can headline a rail): reuses the caller's $1 (always the
 // profileID) and the `m` media_items alias every recall query already has; it
 // adds NO new bind parameter.
 const lowRatedNotExists = ` AND NOT EXISTS (SELECT 1 FROM user_ratings lr WHERE lr.profile_id = $1 AND lr.media_item_id = m.id AND lr.stars <= 2)`
