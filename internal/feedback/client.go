@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,12 @@ type Client struct {
 	repo    string // "owner/repo"
 	http    *http.Client
 	apiHost string // overridable for tests; "" → githubAPIHost
+
+	// visibility caches what Validate last observed about the repo. Guarded
+	// because Validate runs on a periodic re-check goroutine while handlers
+	// read it. See RepoVisibility.
+	visMu      sync.Mutex
+	visibility RepoVisibility
 }
 
 // CreateIssueRequest is the subset of GitHub's issue body fields the
@@ -200,13 +207,14 @@ func (c *Client) Validate(ctx context.Context) error {
 		return fmt.Errorf("feedback: validation request: %w", err)
 	}
 	defer resp.Body.Close()
-	// Drain a small portion of the body so the connection can be
-	// returned to the pool cleanly. Don't need to parse — only the
-	// status code matters here.
-	_, _ = io.CopyN(io.Discard, resp.Body, 4*1024)
+	// Read a bounded slice: the status code drives the result, but a 200
+	// also carries the repo's visibility, which the caller needs (see
+	// RepoIsPrivate). 64KB matches CreateIssue's cap.
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		c.recordVisibility(body)
 		return nil
 	case http.StatusUnauthorized:
 		return errors.New("token rejected by GitHub (401) — generate a fresh PAT")
@@ -333,4 +341,68 @@ func isBlockedIP(ip net.IP) bool {
 		ip.IsLoopback() ||
 		ip.IsPrivate() ||
 		ip.Equal(net.IPv4(169, 254, 169, 254))
+}
+
+// Repository visibility — the control behind the every-boot privacy warning.
+//
+// Bug-report attachments (screenshots and up to 30s screen recordings) are
+// served unauthenticated via unguessable capability URLs and linked from the
+// issue body. That is safe exactly as long as the bug-report repository is
+// PRIVATE, because the issue URL is what gates access to the link.
+//
+// The server used to just warn about this on every boot, unconditionally,
+// whether or not the repo was actually public — advice, not a check, and
+// the kind of warning operators learn to scroll past. Validate() already
+// fetches GET /repos/{owner}/{repo}, whose payload includes `private`, so
+// the real answer is available for free on a call already being made.
+//
+// Tri-state on purpose: "we could not determine it" must not be reported as
+// "it is fine".
+type RepoVisibility int
+
+const (
+	// RepoVisibilityUnknown — not checked yet, or the check failed.
+	RepoVisibilityUnknown RepoVisibility = iota
+	RepoVisibilityPrivate
+	RepoVisibilityPublic
+)
+
+func (v RepoVisibility) String() string {
+	switch v {
+	case RepoVisibilityPrivate:
+		return "private"
+	case RepoVisibilityPublic:
+		return "public"
+	default:
+		return "unknown"
+	}
+}
+
+// recordVisibility parses the repo payload from a successful Validate.
+// A payload we cannot parse leaves visibility Unknown rather than guessing.
+func (c *Client) recordVisibility(body []byte) {
+	var meta struct {
+		Private *bool `json:"private"`
+	}
+	if err := json.Unmarshal(body, &meta); err != nil || meta.Private == nil {
+		return
+	}
+	v := RepoVisibilityPublic
+	if *meta.Private {
+		v = RepoVisibilityPrivate
+	}
+	c.visMu.Lock()
+	c.visibility = v
+	c.visMu.Unlock()
+}
+
+// Visibility reports the last observed repository visibility. Unknown until
+// a Validate() call has succeeded.
+func (c *Client) Visibility() RepoVisibility {
+	if c == nil {
+		return RepoVisibilityUnknown
+	}
+	c.visMu.Lock()
+	defer c.visMu.Unlock()
+	return c.visibility
 }
