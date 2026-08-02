@@ -100,20 +100,68 @@ func (q *Queries) BuildProfileVector(ctx context.Context, profileID int64) (stri
 	return *vec, nil
 }
 
+// engagedProgressFraction is how far into a title counts as real engagement.
+//
+// A string const, not a float, so it can be concatenated into the CTE below
+// and stay a compile-time constant — one definition the SQL and the tests both
+// read, rather than a Go number and a hardcoded SQL literal that can drift.
+//
+// 20% is past the point where someone is still deciding. Below it a watch is
+// indistinguishable from a bounce, and letting a 30-second sample outrank a
+// deliberate declaration (a rating, a seed, a watchlist add) would be a worse
+// error than the one this fixes.
+const engagedProgressFraction = "0.20"
+
+// watchlistedNotExists drops titles already on the profile's want_to_watch or
+// favourites lists out of RECALL. Same fragment idiom as dislikedNotExists:
+// reuses the caller's $1 (profileID) and the `m` media_items alias, adds no
+// bind parameter.
+//
+// Required by the taste-slice change that put those lists into the centroid.
+// Once a watchlist add steers the centroid, the added title sits almost exactly
+// ON that centroid — so it comes back as its own nearest neighbour. Measured
+// before this fragment existed: 5 of 8 recalled items were titles the profile
+// had already saved. A discovery surface that returns your own watchlist has
+// spent its slots telling you what you already told it.
+//
+// taste_seeds are excluded from these same queries for exactly this reason;
+// this extends the rule to the other two ways a profile says "I know about
+// this one". It does NOT touch explicit search — going looking for a title by
+// name should still find it, saved or not.
+const watchlistedNotExists = ` AND NOT EXISTS (SELECT 1 FROM watchlist_items wl JOIN watchlists wll ON wll.id = wl.watchlist_id WHERE wll.profile_id = $1 AND wll.list_type IN ('want_to_watch','favorites') AND wl.media_item_id = m.id)`
+
 // tasteRecentSliceCTE is the shared "recent taste slice": a profile's top-20
-// embedded items by recency — completed/in-progress watches UNION onboarding
-// taste_seeds UNION Phase D 👍 item_feedback UNION 4-5★ user_ratings, deduped,
-// minus anything the profile rated 1-2★. BuildProfileVector AVERAGES this
-// slice into a single centroid; ProfileEmbeddingSlice (Phase E1) returns the
-// rows UN-averaged for Go-side k-means. ONE const, two callers, so the cluster
-// input can never drift from the average input. Binds $1=profileID; append a
-// `SELECT … FROM recent` to use it.
+// embedded items by recency — finished-or-meaningfully-progressed watches UNION
+// onboarding taste_seeds UNION Phase D 👍 item_feedback UNION 4-5★ user_ratings
+// UNION watchlist want_to_watch UNION watchlist favourites, deduped in that
+// precedence order (each branch excludes every branch above it), minus anything
+// the profile rated 1-2★.
+//
+// BuildProfileVector AVERAGES this slice into a single centroid;
+// ProfileEmbeddingSlice (Phase E1) returns the rows UN-averaged for Go-side
+// k-means; PersonalizationHistoryCount counts them for the cold-start gate. ONE
+// const, three callers, so what the clusters see can never drift from what the
+// average sees. Binds $1=profileID; append a `SELECT … FROM recent` to use it.
+//
+// Anything added here must also be excluded from RECALL — see
+// watchlistedNotExists. A source that steers the centroid puts its own items on
+// top of it, and they come back as their own nearest neighbours.
 const tasteRecentSliceCTE = `
 		WITH recent AS (
 		  SELECT embedding FROM (
+		    -- A watch counts as top-tier when it is finished OR meaningfully
+		    -- under way. The ` + "`completed`" + ` column alone put every in-progress watch
+		    -- BELOW every seed, thumb, rating and watchlist add — all of which
+		    -- are stamped TRUE unconditionally — so the titles a profile is
+		    -- part-way through ranked beneath a click made once at signup, and
+		    -- fell out of the 20-row slice as soon as enough deliberate signals
+		    -- existed to fill it. Observed in production 2026-08-02: 18 of 20
+		    -- slots taken by seeds and ratings, both live watches at rows 19-20.
 		    SELECT m.embedding,
-		           m.id          AS media_item_id,
-		           wp.completed  AS completed,
+		           m.id AS media_item_id,
+		           (wp.completed
+		            OR (wp.duration_ms > 0
+		                AND wp.position_ms::float8 / wp.duration_ms::float8 >= ` + engagedProgressFraction + `)) AS completed,
 		           wp.updated_at AS ts
 		    FROM watch_progress wp
 		    JOIN media_items m ON m.id = wp.media_item_id
@@ -185,6 +233,91 @@ const tasteRecentSliceCTE = `
 		        SELECT 1 FROM item_feedback fb2
 		        WHERE fb2.profile_id = $1 AND fb2.media_item_id = ur.media_item_id
 		          AND fb2.feedback = 'up'
+		      )
+		    UNION ALL
+		    -- Watchlist "want to watch": the purest statement of intent the UI
+		    -- collects — this is the title someone has told us they want NEXT,
+		    -- which is the exact question the hero rail exists to answer. It fed
+		    -- nothing before this branch.
+		    --
+		    -- NOTE the join: profile_id lives on ` + "`watchlists`" + `, NOT on
+		    -- ` + "`watchlist_items`" + `. Filtering the items table by profile would silently
+		    -- blend every profile's lists into one taste model.
+		    --
+		    -- Counts as completed for the same reason a thumb does: it is a
+		    -- deliberate act, not a passive one. Recency comes from added_at.
+		    SELECT m.embedding,
+		           m.id        AS media_item_id,
+		           TRUE        AS completed,
+		           wi.added_at AS ts
+		    FROM watchlist_items wi
+		    JOIN watchlists w  ON w.id = wi.watchlist_id
+		    JOIN media_items m ON m.id = wi.media_item_id
+		    WHERE w.profile_id = $1
+		      AND w.list_type = 'want_to_watch'
+		      AND m.embedding IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watch_progress wp5
+		        WHERE wp5.profile_id = $1 AND wp5.media_item_id = wi.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM taste_seeds ts4
+		        WHERE ts4.profile_id = $1 AND ts4.media_item_id = wi.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM item_feedback fb3
+		        WHERE fb3.profile_id = $1 AND fb3.media_item_id = wi.media_item_id
+		          AND fb3.feedback = 'up'
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM user_ratings ur2
+		        WHERE ur2.profile_id = $1 AND ur2.media_item_id = wi.media_item_id
+		          AND ur2.stars >= 4
+		      )
+		    UNION ALL
+		    -- Favourites: a personal verdict that until now counted only in the
+		    -- GLOBAL Aurora Score (scoringEngagementJoins counts favourites
+		    -- across every profile, with no profile_id filter), so marking one
+		    -- nudged that title for the whole server and did nothing for the
+		    -- person who marked it. This is the personal half. The global count
+		    -- stays where it is — it is a legitimate popularity signal, just not
+		    -- a personalisation one.
+		    --
+		    -- Deduped against want_to_watch too: the same title on both lists is
+		    -- one opinion, not two.
+		    SELECT m.embedding,
+		           m.id        AS media_item_id,
+		           TRUE        AS completed,
+		           wi.added_at AS ts
+		    FROM watchlist_items wi
+		    JOIN watchlists w  ON w.id = wi.watchlist_id
+		    JOIN media_items m ON m.id = wi.media_item_id
+		    WHERE w.profile_id = $1
+		      AND w.list_type = 'favorites'
+		      AND m.embedding IS NOT NULL
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watch_progress wp6
+		        WHERE wp6.profile_id = $1 AND wp6.media_item_id = wi.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM taste_seeds ts5
+		        WHERE ts5.profile_id = $1 AND ts5.media_item_id = wi.media_item_id
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM item_feedback fb4
+		        WHERE fb4.profile_id = $1 AND fb4.media_item_id = wi.media_item_id
+		          AND fb4.feedback = 'up'
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM user_ratings ur3
+		        WHERE ur3.profile_id = $1 AND ur3.media_item_id = wi.media_item_id
+		          AND ur3.stars >= 4
+		      )
+		      AND NOT EXISTS (
+		        SELECT 1 FROM watchlist_items wi2
+		        JOIN watchlists w2 ON w2.id = wi2.watchlist_id
+		        WHERE w2.profile_id = $1 AND w2.list_type = 'want_to_watch'
+		          AND wi2.media_item_id = wi.media_item_id
 		      )
 		  ) src
 		  -- 1-2★ exclusion, applied across ALL branches: a low-starred title
@@ -439,7 +572,7 @@ func (q *Queries) NearestUnwatched(ctx context.Context, profileID int64, vectorL
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )`+dislikedNotExists+lowRatedNotExists+`
+		    )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -525,7 +658,7 @@ func (q *Queries) NearestUnwatchedRich(ctx context.Context, profileID int64, vec
 		    AND NOT EXISTS (
 		      SELECT 1 FROM taste_seeds ts
 		      WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		    )`+dislikedNotExists+lowRatedNotExists+`
+		    )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
 		  ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.embedding <=> $2::vector, m.id
 		)
 		SELECT id, library_id, type, title, sort_title, year, overview, rating,
@@ -632,6 +765,14 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	// already covered by the same fragments inside NearestUnwatched. The
 	// thumbs half landed with the star-ratings pass — both review agents
 	// flagged the asymmetry of excluding a panned anchor but not a 👎'd one.)
+	//
+	// watchlistedNotExists is deliberately NOT here. It belongs to RECALL,
+	// where "I already know about this" means don't recommend it. These rows
+	// are the profile's own history, and saving a title you watched is a
+	// POSITIVE verdict — applying the recall rule here would delete the
+	// "Because you watched X" rail for anything you favourited, which is
+	// backwards. The two negative fragments above stay: a panned anchor
+	// really must not headline a rail.
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, title, type, year, embedding FROM (
 			SELECT DISTINCT ON (m.id)
@@ -838,7 +979,7 @@ func (q *Queries) PopularUnwatched(ctx context.Context, profileID int64, limit i
 		  AND NOT EXISTS (
 		    SELECT 1 FROM taste_seeds ts
 		    WHERE ts.profile_id = $1 AND ts.media_item_id = m.id
-		  )`+dislikedNotExists+lowRatedNotExists+`
+		  )`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
 		ORDER BY COALESCE(NULLIF(m.tmdb_id, 0)::bigint, -m.id), m.rating DESC
 		LIMIT $2`,
 		profileID, limit*2, allowedRatings,
