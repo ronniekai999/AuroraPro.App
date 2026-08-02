@@ -2070,12 +2070,12 @@ export default function App() {
   const theaterActive = playerSurface === 'theater'
 
   // Stamp the surface on <html> so CSS can react to it. This is what gates the
-  // watch-party surfaces' theater anchoring (IMPLEMENTATION_PLAN §D5) — they are
-  // rendered outside <main>, so they stay live and visible during playback, and
-  // until now they stayed viewport-anchored too: MiniDock floated on the dimmed
-  // app entirely outside the picture. An attribute rather than a class because
-  // three different overlays key off it and `html[data-player-surface="theater"]`
-  // reads as the state it is.
+  // watch-party surfaces' theater rules (IMPLEMENTATION_PLAN §D5) — they are
+  // rendered outside <main>, so they stay live and visible during playback:
+  // the rail and reactions anchor into the box, and the minimized-party chip
+  // keys its full-bleed `top` off it (index.css `.stage-party-*`). An
+  // attribute rather than a class because three different overlays key off it
+  // and `html[data-player-surface="theater"]` reads as the state it is.
   useEffect(() => {
     const el = document.documentElement
     if (!playerSurface) { el.removeAttribute('data-player-surface'); return }

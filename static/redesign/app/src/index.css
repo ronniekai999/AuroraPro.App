@@ -1907,12 +1907,19 @@ html[data-glow="subtle"] .stage-dim-veil {
    than a max-width card, because the mockup's proportions are asymmetric
    (90px sides, 58px top/bottom) and a centred card cannot express that. */
 /* The inset lives in custom properties so the theater box and the watch-party
-   surfaces that anchor to it read the same two numbers. Declared unlayered and
+   surfaces that anchor to it read the same numbers. Declared unlayered and
    immediately before the rules that consume them, so the responsive `:root`
-   overrides further down win on source order (all three are (0,1,0)). */
+   overrides further down win on source order (all are (0,1,0)).
+
+   `--theater-chip-top` is the minimized-party chip's `top` while the theater is
+   up (consumed by the `.stage-party-dock` rule below). 16px = the chip's own
+   `top-4`, putting it in the dimmed strip above the inset box; the full-bleed
+   width block overrides it because there the box corner IS the viewport corner
+   and 16px would sit the chip on the topbar title. */
 :root {
   --theater-inset-x: 90px;
   --theater-inset-y: 58px;
+  --theater-chip-top: 16px;
 }
 .stage-theater {
   position: absolute;
@@ -1942,6 +1949,16 @@ html[data-glow="subtle"] .stage-dim-veil {
   :root {
     --theater-inset-x: 0px;
     --theater-inset-y: 0px;
+    /* Full-bleed: the theater topbar (always visible, in flow — only
+       fullscreen auto-hides it) now starts at the viewport's top-left and
+       draws the title at (24px, ~12px), exactly under a 16px-anchored chip.
+       Drop the chip below the topbar instead: py-3 (24px) + the 17px title
+       line (25.5px at lh 1.5) + the 11.5px subtitle line (~19px with mt-0.5)
+       ≈ 69px of topbar, +7px clearance. The height-only full-bleed block
+       below deliberately does NOT override this: it keeps --theater-inset-x
+       at 90px, so the title starts at x≈114 and the chip (right edge ≈96px)
+       clears it at 16px. */
+    --theater-chip-top: 76px;
   }
   .stage-theater {
     border-radius: 0;
@@ -1967,26 +1984,38 @@ html[data-glow="subtle"] .stage-dim-veil {
   }
 }
 
-/* ── Watch-party surfaces, anchored to the theater box ─────────────────
+/* ── Watch-party surfaces vs the theater box ───────────────────────────
    IMPLEMENTATION_PLAN §D5 called for this and Phase 7b's first pass missed it:
-   these four are viewport-anchored, which was invisible while the player filled
+   these were viewport-anchored, which was invisible while the player filled
    the screen behind an opaque backdrop and is not any more. With the theater
-   inset 90px/58px, MiniDock at `top-4 left-4` landed entirely OUTSIDE the
-   picture — floating on the dimmed, desaturated app — and the party rail
-   straddled the boundary, ~250px over video and ~90px over the app.
+   inset 90px/58px, the party rail straddled the boundary (~265px over the
+   video, ~75px over the dimmed app) and the reactions overlay floated emoji
+   across the dimmed app.
 
    Gated on `html[data-player-surface="theater"]`, which App stamps from the
    surface the player reports: fullscreen and minimized must keep their viewport
-   offsets. The offsets are `calc()` over the same two custom properties
+   offsets. The offsets are computed from the same custom properties
    `.stage-theater` uses, so the responsive blocks above move the box and its
-   overlays together — there is no second copy of 90/58 to drift.
+   overlays together — there is no second copy of the numbers to drift.
 
-   These beat the call sites' `top-4`/`right-3` utilities on specificity
-   ((0,2,1) vs (0,1,0)), which is the intent: the attribute is only present while
-   the theater is up. */
+   These beat the call sites' positioning utilities (`top-3 right-3` /
+   `sm:top-4 sm:right-4` on the rail, `top-4 left-4` on the dock chip,
+   `inset-0` on reactions) on specificity ((0,2,1) vs (0,1,0)), which is the
+   intent: the attribute is only present while the theater is up.
+
+   The rail and reactions anchor INTO the box. The minimized-party restore
+   chip (`.stage-party-dock`, PartyPanel's "Party" button) is the opposite
+   case: Phase 7b anchored it into the box's top-left too, which is the
+   corner the player topbar's title block owns — the chip sat ON the title.
+   The chip belongs at the viewport's top-left, mirroring the VoicePill's
+   `top-4 right-4` on the opposite side of the screen (the pill was never
+   box-anchored); in the inset theater that is the dimmed strip above the
+   box. Its rule therefore adjusts `top` ONLY, via `--theater-chip-top`:
+   16px (= its own `top-4`) while the box is inset, below the always-visible
+   topbar when the width query zeroes the insets and the title moves under
+   the viewport corner. `left` stays the call site's 16px everywhere. */
 html[data-player-surface="theater"] .stage-party-dock {
-  top: calc(var(--theater-inset-y) + 16px);
-  left: calc(var(--theater-inset-x) + 16px);
+  top: var(--theater-chip-top);
 }
 html[data-player-surface="theater"] .stage-party-rail {
   top: calc(var(--theater-inset-y) + 12px);
