@@ -119,7 +119,11 @@ func (tm *TranscodeManager) SetStreamStateFile(path string) bool {
 // "zero viewers".
 //
 // Written via temp file + rename so a reader never observes a half-written
-// snapshot and parses it as zero sessions.
+// snapshot and parses it as zero sessions. publishMu serializes publishers so
+// two callers (the startup publish and a cleanup tick) can't interleave writes
+// to the same temp path — the reader would recover via its staleness/format
+// checks, but a corrupt snapshot silently downgrades the deploy gate back to
+// the ffmpeg heuristic, which is the thing being fixed.
 func (tm *TranscodeManager) publishDrainState() {
 	tm.mu.Lock()
 	path := tm.streamStateFile
@@ -127,6 +131,9 @@ func (tm *TranscodeManager) publishDrainState() {
 	if path == "" {
 		return
 	}
+
+	tm.publishMu.Lock()
+	defer tm.publishMu.Unlock()
 
 	// DrainState takes tm.mu itself — call it unlocked.
 	blob, err := json.Marshal(tm.DrainState())

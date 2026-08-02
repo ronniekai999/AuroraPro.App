@@ -2202,7 +2202,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // the ping never fires at all and the server GCs the session. That is the
   // exact failure this effect exists to prevent.
   const keepaliveRecoveryRef = useRef({ party, onSeekRebuild })
-  keepaliveRecoveryRef.current = { party, onSeekRebuild }
+  // Updated in an effect rather than during render — a render-phase ref
+  // mutation is a side effect, and StrictMode's double render would run it
+  // twice. No dependency array: refresh after every commit, which is exactly
+  // the "always the latest props" semantics the ticker needs.
+  useEffect(() => {
+    keepaliveRecoveryRef.current = { party, onSeekRebuild }
+  })
 
   useEffect(() => {
     if (!target) return

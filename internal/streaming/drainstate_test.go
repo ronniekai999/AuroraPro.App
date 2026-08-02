@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,6 +174,54 @@ func TestSetStreamStateFile_MissingDirDisables(t *testing.T) {
 	tm.publishDrainState() // must not panic or create anything
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("nothing should have been written")
+	}
+}
+
+// TestPublishDrainState_ConcurrentWritesStayValid — the published file is
+// parsed by a shell script that falls back to the old ffmpeg heuristic on any
+// malformed input. A torn write therefore doesn't crash anything; it silently
+// downgrades the deploy gate back to the bug this all exists to fix. Hammer
+// the publisher from several goroutines and require every observation to be
+// well-formed. Run with -race to also catch unsynchronized access.
+func TestPublishDrainState_ConcurrentWritesStayValid(t *testing.T) {
+	tm := drainTestManager(t)
+	path := filepath.Join(t.TempDir(), "stream-state.json")
+	tm.SetStreamStateFile(path)
+	addSession(tm, "live", time.Second)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				tm.publishDrainState()
+			}
+		}()
+	}
+	// Concurrent readers, mimicking the update script polling mid-write.
+	var readErr error
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				blob, err := os.ReadFile(path)
+				if err != nil {
+					continue // mid-rename; the script retries too
+				}
+				var st StreamState
+				if uerr := json.Unmarshal(blob, &st); uerr != nil {
+					readErr = uerr
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if readErr != nil {
+		t.Fatalf("observed a torn snapshot: %v", readErr)
 	}
 }
 

@@ -593,15 +593,27 @@ viewers_held() {
 }
 
 # streams_busy is the drain predicate: true while a restart would interrupt
-# someone. Prefers the server's own count; falls back to pgrep when the
-# snapshot is unavailable.
+# someone.
+#
+# The UNION of both signals, not a preference between them — each covers a
+# gap the other has:
+#
+#   - The snapshot refreshes every 30s, so a stream started seconds ago still
+#     reports held_by_viewer=0. pgrep sees its encoder immediately.
+#   - A paused viewer's encoder is reaped, so pgrep sees nothing. The
+#     snapshot still counts them, which is the whole point of this change.
+#
+# Taking either signal alone reintroduces one of the two bugs. The union is
+# never less conservative than the pgrep-only gate it replaces, and it still
+# converges: an abandoned session's variants are reaped after 75s (ffmpeg
+# exits) and it drops out of the 120s viewer window, so both signals go
+# quiet and the drain completes.
 streams_busy() {
     _sb_held=$(viewers_held)
-    if [ -n "$_sb_held" ]; then
-        [ "$_sb_held" -gt 0 ]
-    else
-        pgrep -u aurora ffmpeg >/dev/null 2>&1
+    if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
+        return 0
     fi
+    pgrep -u aurora ffmpeg >/dev/null 2>&1
 }
 
 _DRAIN_MAX=300
@@ -609,12 +621,15 @@ _DRAIN_WAITED=0
 _DRAIN_LOG_EVERY=30  # log at most once per 30 s
 _DRAIN_NEXT_LOG=0
 if streams_busy; then
-    if [ -n "$(viewers_held)" ]; then
-        _DRAIN_SOURCE="server-reported"
+    # Say which signals are live, so a deploy that waits (or doesn't) can be
+    # explained after the fact from this log alone — the old gate logged
+    # "drained" while it was actively breaking someone's stream.
+    _DRAIN_HELD=$(viewers_held)
+    if [ -z "$_DRAIN_HELD" ]; then
+        log "drain gate: ffmpeg-only (no fresh $STREAM_STATE_FILE — old build or stale snapshot)"
     else
-        _DRAIN_SOURCE="ffmpeg-heuristic (no fresh $STREAM_STATE_FILE)"
+        log "drain gate: server reports ${_DRAIN_HELD} session(s) held by viewers"
     fi
-    log "drain gate: $_DRAIN_SOURCE"
     write_status restarting "Waiting for active stream sessions to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
     while streams_busy && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
         if [ "$_DRAIN_WAITED" -ge "$_DRAIN_NEXT_LOG" ]; then

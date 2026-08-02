@@ -1011,6 +1011,10 @@ type TranscodeManager struct {
 	// streamStateFile, when non-empty, is where the cleanup loop publishes
 	// the deploy drain snapshot (see drainstate.go). Guarded by tm.mu.
 	streamStateFile string
+	// publishMu serializes drain-state writes. Separate from tm.mu on
+	// purpose: publishing does file I/O and must never sit on the lock that
+	// session create/get/keepalive contend for.
+	publishMu sync.Mutex
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
 	// change state (created, stopped, expired). The callback receives an event
