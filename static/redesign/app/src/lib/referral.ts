@@ -215,6 +215,36 @@ export function referralSourceLabel(key: string, options: readonly ReferralOptio
 }
 
 /**
+ * Derives an option list for referralSourceLabel from the admin summary's
+ * by_source rows — the option list AS THE SERVER SERVES IT.
+ *
+ * This exists because the obvious alternative shipped broken, in exactly the
+ * shape the isRemovedSummaryRow comment below warns about. The Users table
+ * resolved its Referral column by parsing the raw `referral_prompt_options`
+ * setting — but an EMPTY setting is the normal state and means "the built-in
+ * defaults are in use" (the server's promptConfig contract, and the editor's
+ * own copy). Parsed client-side, empty became `[]`, which asserts "nothing is
+ * configured", so every live default key rendered as "<removed: friend>" on
+ * any instance whose operator never touched the list.
+ *
+ * The summary endpoint labels each answered key against the EFFECTIVE options
+ * server-side, so its rows are the one admin-visible source that cannot drift
+ * from what users were actually shown. Null-label rows are dropped, not mapped:
+ * a deleted option must keep resolving to "<removed: key>", and the implicit
+ * `other` must keep resolving through REFERRAL_OTHER_LABEL rather than gaining
+ * a fake stored option.
+ *
+ * Completeness holds by construction: any key on a user row has at least one
+ * answer, so it appears in the all-time summary — fetch with windowDays 0;
+ * a windowed summary would drop labels for keys whose answers all pre-date it.
+ */
+export function referralOptionsFromSummary(
+  rows: readonly { key: string; label: string | null }[],
+): ReferralOption[] {
+  return rows.flatMap(r => (r.label === null ? [] : [{ key: r.key, label: r.label }]))
+}
+
+/**
  * Whether a summary row describes an option the operator has since deleted —
  * the rows the breakdown dims as history rather than live configuration.
  *
