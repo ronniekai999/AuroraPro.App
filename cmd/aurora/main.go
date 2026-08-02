@@ -987,11 +987,6 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// Tell every ctx-aware background worker to stop, FIRST. This used to
-	// happen only via `defer cancel()` when main returned — i.e. after the
-	// whole shutdown sequence — so workers kept issuing queries throughout it.
-	cancel()
-
 	// Stop watch parties
 	slog.Info("stopping watch parties...")
 	partyManager.Shutdown()
@@ -1012,6 +1007,18 @@ func main() {
 	}
 
 	slog.Info("server stopped")
+
+	// Only NOW tell background workers to stop.
+	//
+	// Ordering matters and the obvious choice is wrong. Cancelling before
+	// server.Shutdown would kill RootCtx-derived work belonging to requests
+	// still being drained — the graceful window exists precisely so those
+	// finish. Letting workers query for the few extra seconds of the drain
+	// costs nothing (the pool is still open); cutting live requests short
+	// does. Previously this happened only via `defer cancel()` on return,
+	// i.e. after the pool had already been closed by its own defer, which is
+	// how enrichment writes landed on a dead pool.
+	cancel()
 
 	// Wait (bounded) for tracked background workers to notice the cancel and
 	// unwind before the pool goes away, so an in-flight enrichment write

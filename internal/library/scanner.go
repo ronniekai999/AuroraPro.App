@@ -235,8 +235,12 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		// there, so the rest of the library — which walked cleanly — is
 		// pruned normally.
 		if len(unreadable) > 0 {
+			// Bounded: this fires on EVERY scan (~200/day) for a persistently
+			// unreadable folder, and an unbounded list would put up to 1000
+			// paths on each line.
 			slog.Warn("walk incomplete: unreadable entries — prune scoped around them",
-				"path", rootPath, "unreadable", len(unreadable), "paths", unreadable)
+				"path", rootPath, "unreadable", len(unreadable),
+				"paths", boundedPaths(unreadable, 5))
 			unreadablePaths = append(unreadablePaths, unreadable...)
 		}
 		allFiles = append(allFiles, files...)
@@ -252,15 +256,17 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 
 	s.mu.Lock()
 	progress.TotalFiles = len(allFiles)
-	// Surface incomplete walks on the status API: a persistently
-	// unreadable entry (root-owned lost+found, NAS .snapshots) disables
-	// the prune on EVERY scan, and a log line is the wrong place for the
-	// only evidence of that.
+	// Surface incomplete walks on the status API. Note these two fields are
+	// now INDEPENDENT: unreadable entries (root-owned lost+found, NAS
+	// .snapshots, a permission-denied show folder) no longer disable the
+	// prune — it is scoped around them — so WalkErrors > 0 with
+	// PruneSkipped false is the normal, healthy case. PruneSkipped means the
+	// prune was abandoned wholesale: an unwalkable root, or so many unreadable
+	// entries that scoping stopped being trustworthy.
 	progress.WalkErrors = len(unreadablePaths)
 	progress.PruneSkipped = walkFailed
-	// Surface WHICH paths are unreadable, bounded for display. Without this
-	// the only evidence is a log line, which is how one folder disabled TV
-	// pruning for three days unnoticed.
+	// ...and WHICH paths, bounded for display. A log line being the only
+	// evidence is how one folder went unnoticed for three days.
 	progress.UnreadablePaths = boundedPaths(unreadablePaths, 10)
 	s.mu.Unlock()
 	notify()
