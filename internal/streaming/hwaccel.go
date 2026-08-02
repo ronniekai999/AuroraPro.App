@@ -69,7 +69,11 @@ func DetectHWAccel(forceType string) HWAccelInfo {
 				if info, ok := tryProbe(p); ok {
 					return info
 				}
-				slog.Warn("forced hardware encoder failed test encode, falling back to software", "requested", forceType)
+				// Deliberately vague about which step failed: tryProbe now
+				// logs the reason itself when a test encode fails, and this
+				// path is also reached when the device was never detected —
+				// where the old "failed test encode" wording was simply wrong.
+				slog.Warn("forced hardware encoder is unavailable, falling back to software", "requested", forceType)
 				return softwareFallback()
 			}
 		}
@@ -98,22 +102,41 @@ func tryProbe(p hwProbe) (HWAccelInfo, bool) {
 	}
 	slog.Info("device detected, running test encode...", "encoder", p.displayName)
 	args, devPath := p.testArgsFn()
-	if runTestEncode(args) {
+	reason, err := runTestEncode(args)
+	if err == nil {
 		info := HWAccelInfo{Type: p.accelType, VideoEncoder: p.encoder, DevicePath: devPath, DisplayName: p.displayName}
 		slog.Info("hardware acceleration available", "encoder", p.displayName, "ffmpeg_encoder", p.encoder)
 		return info, true
 	}
-	slog.Debug("test encode failed", "encoder", p.displayName)
+
+	// Warn, not Debug. The hardware IS present — detectFn just said so — and
+	// its encoder still didn't work, so every transcode on this box silently
+	// runs on the CPU. At Debug the operator's only trace is "no hardware
+	// acceleration detected", which cannot distinguish a missing driver from
+	// no permission on the render node from an FFmpeg built without the
+	// encoder. Machines with no such hardware never reach this line, so it
+	// stays quiet where it would have nothing to offer.
+	attrs := []any{
+		"encoder", p.displayName,
+		"ffmpeg_encoder", p.encoder,
+		"error", err,
+		"ffmpeg_stderr", reason,
+	}
+	if devPath != "" {
+		attrs = append(attrs, "device", devPath)
+	}
+	slog.Warn("hardware encoder detected but its test encode failed — this box will transcode on the CPU", attrs...)
 	return HWAccelInfo{}, false
 }
 
-// runTestEncode generates 1 frame of synthetic video and encodes it.
-// Thin wrapper over runProbeFFmpeg (hwdecode.go) so encode and decode
-// probes share one bounded runner and can't drift in hardening behavior.
-func runTestEncode(extraArgs []string) bool {
+// runTestEncode generates 1 frame of synthetic video and encodes it, and
+// returns FFmpeg's reason when that fails (see tryProbe). Thin wrapper over
+// runProbeFFmpegDiag (hwdecode.go) so encode and decode probes share one
+// bounded runner and can't drift in hardening behavior.
+func runTestEncode(extraArgs []string) (string, error) {
 	args := append([]string{"-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=1"}, extraArgs...)
 	args = append(args, "-frames:v", "1", "-f", "null", "-")
-	return runProbeFFmpeg(args)
+	return runProbeFFmpegDiag(args)
 }
 
 // ============================================================
