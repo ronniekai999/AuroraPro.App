@@ -18,6 +18,7 @@ import {
   parseReferralOptionsSetting,
   serializeReferralOptions,
   validateReferralOptions,
+  referralOptionsFromSummary,
   referralSourceLabel,
   isRemovedSummaryRow,
   hasDeceptiveRunes,
@@ -2302,17 +2303,27 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
     return () => ac.abort()
   }, [tab, users])
 
-  // The Referral column stores option KEYS, so it needs the current option list
-  // to render labels. Refetched on every entry to the tab — NOT folded into the
-  // users effect above, whose `users !== null` guard would have pinned the
-  // labels for the session, so editing an option on the OAuth tab and coming
-  // back here showed the old text until a full reload. Failure is non-fatal:
-  // referralSourceLabel degrades to "<removed: key>", which is honest.
+  // The Referral column stores option KEYS, so it needs the option list the
+  // server actually SERVES to render labels. That is not the raw
+  // `referral_prompt_options` setting: empty is the normal state and means
+  // "built-in defaults in use", so parsing it here resolved labels against []
+  // and every live default key rendered as "<removed: friend>" on any
+  // instance whose operator never customized the list — the exact failure
+  // referralOptionsFromSummary's comment documents. The summary endpoint
+  // labels every answered key against the effective list server-side; derive
+  // the options from its rows (windowDays 0 — a window would drop keys whose
+  // answers all pre-date it).
+  // Refetched on every entry to the tab — NOT folded into the users effect
+  // above, whose `users !== null` guard would have pinned the labels for the
+  // session, so editing an option on the OAuth tab and coming back here
+  // showed the old text until a full reload. Failure is non-fatal: a failed
+  // FIRST fetch leaves [], so labels degrade to "<removed: key>", which is
+  // honest; a failed refetch keeps the previous entry's labels instead.
   useEffect(() => {
     if (tab !== 'users') return
     const ac = new AbortController()
-    getAllSettings(ac.signal)
-      .then(map => setReferralOptions(parseReferralOptionsSetting(map[REFERRAL_OPTIONS_KEY] ?? '')))
+    getAdminReferralSummary(0, ac.signal)
+      .then(s => setReferralOptions(referralOptionsFromSummary(s.by_source)))
       .catch(() => { /* labels degrade to the raw key */ })
     return () => ac.abort()
   }, [tab])

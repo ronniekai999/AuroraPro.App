@@ -194,8 +194,8 @@ export function PartyPanel({
   // still spans (nearly) full width but keeps the float inset + radius.
   return (
     // .stage-party-rail insets this by the theater's own offsets while the
-    // theater is up — it used to straddle the boundary, ~250px over the picture
-    // and ~90px over the dimmed app behind it.
+    // theater is up — it used to straddle the boundary, ~265px over the picture
+    // and ~75px over the dimmed app behind it.
     <aside className="stage-party-rail aurora-glass-overlay fixed top-3 right-3 bottom-3 w-[calc(100%-1.5rem)] sm:w-[340px] sm:top-4 sm:right-4 sm:bottom-4 bg-[rgba(12,10,20,0.4)] backdrop-blur-xl rounded-2xl border border-[var(--glow-border)] shadow-[var(--glow-halo),0_20px_60px_rgba(0,0,0,0.5)] z-[70] flex flex-col overflow-hidden motion-safe:animate-fade-in">
       {/* Header */}
       <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">

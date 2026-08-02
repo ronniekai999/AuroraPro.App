@@ -4,6 +4,7 @@ import {
   validateReferralOptions,
   serializeReferralOptions,
   parseReferralOptionsSetting,
+  referralOptionsFromSummary,
   referralSourceLabel,
   isRemovedSummaryRow,
   REFERRAL_OTHER_KEY,
@@ -214,6 +215,53 @@ describe('referralSourceLabel', () => {
     expect(referralSourceLabel('myspace', OPTS)).toBe('<removed: myspace>'))
   it('follows a renamed label, since answers store the key', () =>
     expect(referralSourceLabel('twitch', [{ key: 'twitch', label: 'Twitch.tv' }])).toBe('Twitch.tv'))
+})
+
+describe('referralOptionsFromSummary', () => {
+  // The wire shape of a default-configuration instance: the setting is empty,
+  // the server serves the built-in defaults, and the summary labels answered
+  // keys against them.
+  const ROWS = [
+    { key: 'friend', label: 'A friend or family member', count: 3 },
+    { key: 'myspace', label: null, count: 2 },
+    { key: REFERRAL_OTHER_KEY, label: null, count: 1 },
+  ]
+
+  it('resolves a live default key on an untouched instance — the shipped bug', () => {
+    // The Users table used to parse the raw referral_prompt_options setting,
+    // where empty means "defaults in use" — but parsed client-side it became
+    // [], so this exact call rendered "<removed: friend>" for an answer the
+    // user gave from the built-in list.
+    expect(referralSourceLabel('friend', referralOptionsFromSummary(ROWS)))
+      .toBe('A friend or family member')
+  })
+
+  it('drops null-label rows so a deleted option still reads as removed', () =>
+    expect(referralSourceLabel('myspace', referralOptionsFromSummary(ROWS)))
+      .toBe('<removed: myspace>'))
+
+  it('never fabricates an option for the implicit "other"', () => {
+    // "other" reaches the summary with a null label BY DESIGN (the server
+    // refuses to spell its copy); mapping it to an empty-label option would
+    // shadow REFERRAL_OTHER_LABEL with "".
+    expect(referralOptionsFromSummary(ROWS).some(o => o.key === REFERRAL_OTHER_KEY)).toBe(false)
+    expect(referralSourceLabel(REFERRAL_OTHER_KEY, referralOptionsFromSummary(ROWS)))
+      .toBe(REFERRAL_OTHER_LABEL)
+  })
+
+  it('returns [] for an instance with no answers yet', () =>
+    expect(referralOptionsFromSummary([])).toEqual([]))
+
+  it('treats an ABSENT label like null — hardened against a future omitempty', () => {
+    // The Go Label field serializes explicit nulls today; were it ever given
+    // omitempty, removed keys would arrive with the field missing entirely
+    // (undefined after JSON.parse). Both spellings must mean "no usable
+    // label": the option is dropped and the breakdown row still dims.
+    expect(referralOptionsFromSummary([{ key: 'friend', label: 'A friend' }, { key: 'myspace' }]))
+      .toEqual([{ key: 'friend', label: 'A friend' }])
+    expect(isRemovedSummaryRow({ key: 'myspace' })).toBe(true)
+    expect(isRemovedSummaryRow({ key: REFERRAL_OTHER_KEY })).toBe(false)
+  })
 })
 
 describe('buildSteps', () => {

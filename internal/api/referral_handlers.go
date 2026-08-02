@@ -396,6 +396,12 @@ func (h *ReferralHandler) Summary(w http.ResponseWriter, r *http.Request) {
 	// copy for an option this server does not store, and writing a second
 	// spelling of it in Go is what let the admin panel say "Other" while the
 	// user had been shown "Something else". The frontend owns that string.
+	//
+	// This labeling is load-bearing beyond the breakdown panel: the Users
+	// table's Referral column derives its option list from these rows too
+	// (referralOptionsFromSummary client-side), because they are the one
+	// admin-visible surface labeled against the EFFECTIVE options — the
+	// raw setting is empty whenever the built-in defaults are in use.
 	_, options := h.promptConfig(r.Context())
 	labels := make(map[string]string, len(options))
 	for _, o := range options {

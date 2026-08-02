@@ -1994,9 +1994,11 @@ html[data-glow="subtle"] .stage-dim-veil {
 
    Gated on `html[data-player-surface="theater"]`, which App stamps from the
    surface the player reports: fullscreen and minimized must keep their viewport
-   offsets. The offsets are computed from the same custom properties
-   `.stage-theater` uses, so the responsive blocks above move the box and its
-   overlays together — there is no second copy of the numbers to drift.
+   offsets. The rail/reactions offsets are computed from the same inset
+   properties `.stage-theater` uses, and the dock chip's `--theater-chip-top`
+   is declared in the same `:root` blocks, so the responsive blocks above move
+   the box and its overlays together — there is no second copy of the numbers
+   to drift.
 
    These beat the call sites' positioning utilities (`top-3 right-3` /
    `sm:top-4 sm:right-4` on the rail, `top-4 left-4` on the dock chip,
