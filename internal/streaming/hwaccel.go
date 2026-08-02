@@ -167,7 +167,17 @@ var encoderAvailable = ffmpegHasEncoder
 func ffmpegHasEncoder(name string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").Output()
+	// CombinedOutput, not Output: FFmpeg routes informational listings through
+	// av_log, and which stream that lands on has varied across builds. Reading
+	// stdout alone would report EVERY encoder missing on a build that logs to
+	// stderr — silently disabling working hardware acceleration and warning
+	// that the build has no encoder, on a box where it does.
+	//
+	// Folding stderr in can only cost a false POSITIVE (some diagnostic line
+	// whose second field happens to be an encoder name), and a false positive
+	// just means we run the test encode — which is the real gate. Every
+	// ambiguous case should land there rather than be decided here.
+	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").CombinedOutput()
 	if err != nil {
 		slog.Debug("could not list FFmpeg encoders; leaving the verdict to the test encode", "error", err)
 		return true
@@ -260,7 +270,14 @@ func hasAMDDisplayDevice(lspciOut string) bool {
 // graphics devices, so a host bridge or audio controller from the same vendor
 // cannot stand in for a GPU.
 func isDisplayControllerLine(lowerLine string) bool {
-	for _, class := range []string{"vga compatible controller", "display controller", "3d controller"} {
+	// PCI classes 0300 / 0301 / 0302 / 0380. XGA is vanishingly rare but
+	// costs one string, and omitting it would miss the device entirely.
+	for _, class := range []string{
+		"vga compatible controller",
+		"xga compatible controller",
+		"3d controller",
+		"display controller",
+	} {
 		if strings.Contains(lowerLine, class) {
 			return true
 		}

@@ -90,6 +90,37 @@ func TestFFmpegHasEncoder_UnrunnableFFmpegDefersToTheTestEncode(t *testing.T) {
 	}
 }
 
+// FFmpeg routes its listings through av_log, and which stream that lands on
+// has varied across builds. Reading stdout alone would report every encoder
+// missing on a build that logs to stderr — silently disabling working
+// hardware acceleration and warning that the build has no encoder, on a box
+// where it does. That failure is severe and silent, so both streams count.
+func TestFFmpegHasEncoder_FindsTheListingOnEitherStream(t *testing.T) {
+	const listing = ` V....D h264_vaapi           H.264/AVC (VAAPI) (codec h264)`
+
+	t.Run("stdout", func(t *testing.T) {
+		stubFFmpeg(t, "echo '"+listing+"'\nexit 0\n")
+		if !ffmpegHasEncoder("h264_vaapi") {
+			t.Fatal("missed an encoder listed on stdout")
+		}
+	})
+
+	t.Run("stderr", func(t *testing.T) {
+		stubFFmpeg(t, "echo '"+listing+"' >&2\nexit 0\n")
+		if !ffmpegHasEncoder("h264_vaapi") {
+			t.Fatal("a listing on stderr was read as 'encoder missing'")
+		}
+	})
+
+	// Reading both streams must not turn every query into a yes.
+	t.Run("genuinely absent stays absent", func(t *testing.T) {
+		stubFFmpeg(t, "echo '"+listing+"'\nexit 0\n")
+		if ffmpegHasEncoder("h264_amf") {
+			t.Fatal("reported an encoder that is not in the listing")
+		}
+	})
+}
+
 // Fixtures taken from the 2026-08-02 production box: an AMD-CPU server whose
 // only display device is an ASPEED BMC console chip. It reported "AMD AMF"
 // hardware, ran a doomed test encode, and warned about a GPU that isn't there.
