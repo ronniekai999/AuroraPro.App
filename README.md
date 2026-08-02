@@ -170,7 +170,8 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | `CACHE_IMAGE_DIR` / `CACHE_TRANSCODE_DIR` / `CACHE_SUBTITLE_DIR` | Cache locations |
 | `LOG_DIR` / `LOG_LEVEL` | Logging |
 | `AURORA_SOURCE_DIR` / `AURORA_UPDATE_BRANCH` / `AURORA_EXPECTED_REMOTE` | Auto-updater source (root-owned mirror) |
-| `AURORA_UPDATE_REQUIRE_SIGNED` + `AURORA_UPDATE_ALLOWED_SIGNERS` | Require verified commit signatures before the updater builds as root |
+| `AURORA_UPDATE_REQUIRE_SIGNED` + `AURORA_UPDATE_ALLOWED_SIGNERS` | Require verified commit signatures before the updater builds as root. **Run `scripts/check-update-signing.sh` first** — if verification fails the updater stops deploying entirely, and recovering needs shell access |
+| `AURORA_TRUSTED_PROXIES` | CIDRs whose `X-Forwarded-For` is honoured, e.g. `127.0.0.1/32,::1/128` for a local nginx. **Required behind a reverse proxy** — without it every request looks like it came from the proxy, so the per-IP auth rate limiter shares one bucket across all clients and audit logs record the proxy instead of the client. `install.sh`/`setup-domain.sh` set it for you |
 
 **On disk:** binary at `/usr/local/bin/aurora` · app + static + migrations at `/opt/aurora` · cache at `/var/cache/aurora` · logs at `/var/log/aurora` + journald · state + source mirror at `/var/lib/aurora` · listens on port **8484**.
 

@@ -279,11 +279,15 @@ func NewFeedbackHandler(ctx context.Context, cfg config.BugReportConfig, imageDi
 	// 2026-05-29 (deep-debug H3) — bug-report attachments (screenshots and up
 	// to 30s screen recordings) are served unauthenticated via unguessable
 	// capability URLs and linked from the GitHub issue body, so anyone with the
-	// issue URL can fetch them. Surface this at boot so operators keep the
-	// bug-report repository PRIVATE.
-	if cfg.Enabled {
-		slog.Warn("feedback: attachments (incl. screen recordings) are served via unguessable public URLs embedded in GitHub issues — ensure the bug-report repository is PRIVATE so recordings aren't retrievable by anyone with the issue URL")
-	}
+	// issue URL can fetch them. That is safe exactly as long as the bug-report
+	// repository is PRIVATE.
+	//
+	// This used to be an unconditional warning on every boot: advice rather
+	// than a check, fired identically whether the repo was public or private,
+	// and therefore the kind of line operators learn to scroll past. The PAT
+	// health check already fetches GET /repos/{owner}/{repo}, whose payload
+	// carries `private`, so the real answer arrives for free — see
+	// checkTokenHealth, which now reports the actual state.
 	h := &FeedbackHandler{
 		cfg:                    cfg,
 		cacheDir:               filepath.Join(imageDir, "bug-reports"),
@@ -398,6 +402,46 @@ func (h *FeedbackHandler) runHealthChecks(ctx context.Context) {
 	}
 }
 
+// reportRepoVisibility logs the ACTUAL privacy posture of the bug-report
+// repository, replacing the unconditional every-boot warning this used to be.
+//
+// Attachments (screenshots, up to 30s screen recordings) are served
+// unauthenticated from unguessable capability URLs embedded in the issue
+// body, so the issue's own access control is what protects them. A public
+// repo means anyone who can see the issue can fetch a user's screen
+// recording.
+//
+// Three states, and the distinction matters:
+//   - public  → ERROR. This is a live privacy exposure, not a reminder.
+//   - private → INFO, once. The setup is correct; saying so and then being
+//     quiet is what makes the ERROR case legible when it happens.
+//   - unknown → the old generic warning. We could not determine it (the API
+//     shape changed, or the payload was unparseable), so we must not claim
+//     it is fine.
+//
+// verbose is set on the first successful check so a healthy install logs the
+// confirmation once at boot rather than every re-check.
+func (h *FeedbackHandler) reportRepoVisibility(verbose bool) {
+	switch h.client.Visibility() {
+	case feedback.RepoVisibilityPublic:
+		// Logged on EVERY re-check, deliberately: unlike a broken PAT (which
+		// degrades gracefully), this is an ongoing exposure of user-submitted
+		// recordings and should keep showing up until it is fixed.
+		slog.Error("feedback: the bug-report repository is PUBLIC — attachments, including screen recordings, are fetchable by anyone who can see the issue. Make the repository private, or disable attachments.",
+			"repo", h.cfg.GitHubRepo)
+	case feedback.RepoVisibilityPrivate:
+		if verbose {
+			slog.Info("feedback: bug-report repository is private — attachment capability URLs are protected by issue access control",
+				"repo", h.cfg.GitHubRepo)
+		}
+	default:
+		if verbose {
+			slog.Warn("feedback: could not determine whether the bug-report repository is private — attachments (incl. screen recordings) are served via unguessable URLs embedded in issues, so verify the repository is PRIVATE",
+				"repo", h.cfg.GitHubRepo)
+		}
+	}
+}
+
 // checkTokenHealth runs a single Validate call and updates
 // h.tokenHealth atomically. Idempotent; safe to call from any
 // goroutine.
@@ -430,6 +474,7 @@ func (h *FeedbackHandler) checkTokenHealth(ctx context.Context) {
 		}
 	} else {
 		next = &patHealth{Healthy: true, CheckedAt: now}
+		h.reportRepoVisibility(prev == nil)
 		// Log INFO only on the FIRST success or when recovering
 		// from a failed state — avoids spamming logs every 6h for
 		// healthy deployments.

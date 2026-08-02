@@ -26,7 +26,7 @@
 
 import Hls from 'hls.js'
 
-import { apiFetch, type SkipMarker } from './api'
+import { apiFetch, apiFetchResponse, type SkipMarker } from './api'
 
 // /api/stream/info response — sparse subset of what the server returns,
 // covering only the fields the V2 player consumes today. Phase 2.5
@@ -411,17 +411,53 @@ export async function deleteSession(sessionId: string): Promise<void> {
   }
 }
 
-export async function keepalive(sessionId: string, signal?: AbortSignal): Promise<void> {
+// Outcome of one keepalive ping.
+//
+//  'ok'      — the session is alive.
+//  'gone'    — the server says this session no longer exists (404). It is
+//              never coming back: session IDs aren't reissued, so retrying
+//              this ID is pure noise. The caller must stop pinging and
+//              rebuild.
+//  'error'   — transient (offline, 5xx, timeout, aborted). Keep pinging; the
+//              session may well still be there.
+export type KeepaliveResult = 'ok' | 'gone' | 'error'
+
+// Ping the server to extend a transcode session's lifetime.
+//
+// This used to swallow every failure, on the reasoning that "the next segment
+// fetch will 404 and HLS.js's error handler will surface the real failure".
+// That reasoning had two holes, and together they produced the worst outcome
+// available: a silently dead player.
+//
+//  1. A PAUSED player fetches no segments, so nothing ever surfaced. When a
+//     deploy restarted the server out from under a paused viewer, the client
+//     pinged a dead session every 10s indefinitely — 370 times over 62 minutes
+//     in one observed production case — while the user stared at a frozen
+//     frame with no error.
+//  2. The recovery it deferred to ("session recovery in Phase 2.5") was never
+//     built; see the Phase 2.5 list at the top of VideoPlayer.tsx.
+//
+// A 404 is now reported so the caller can stop and rebuild. Note the status
+// check must survive apiFetchResponse's transparent 401-refresh-and-retry:
+// we read the FINAL response, so a 404 here is a real "session not found",
+// not an auth artifact.
+export async function keepalive(sessionId: string, signal?: AbortSignal): Promise<KeepaliveResult> {
   try {
-    await apiFetch(`/api/stream/sessions/${sessionId}/keepalive`, {
+    const res = await apiFetchResponse(`/api/stream/sessions/${sessionId}/keepalive`, {
       method: 'POST',
       signal,
     })
+    if (res.ok) return 'ok'
+    // The server returns a uniform 404 for both "no such session" and "not
+    // yours" (see StreamHandler.KeepAlive) — either way this session ID is
+    // dead to this client and pinging it again cannot help.
+    if (res.status === 404) return 'gone'
+    return 'error'
   } catch {
-    // Keepalive failures are silent — if the session is gone, the
-    // next segment fetch will 404 and HLS.js's error handler will
-    // surface the real failure (and trigger session recovery in
-    // Phase 2.5).
+    // Network-level failure — offline, DNS, aborted. Transient by
+    // assumption: treating a blip as 'gone' would tear down a healthy
+    // session, which is far worse than one wasted ping.
+    return 'error'
   }
 }
 

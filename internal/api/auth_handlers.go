@@ -408,7 +408,16 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	refreshTok := ""
 	if c, cerr := r.Cookie(auth.RefreshCookieName); cerr == nil && c.Value != "" {
 		refreshTok = c.Value
-	} else {
+	} else if r.ContentLength != 0 {
+		// Only attempt the body decode when a body was actually sent.
+		//
+		// The browser sends NONE — the refresh token rides the httpOnly
+		// cookie. So once that cookie expired, this fell through to
+		// decodeJSON on an empty body and answered 400 "invalid request
+		// body" for what is simply an expired session: 734 of them in two
+		// weeks of production logs, every one mislabelled. Worse, the 400
+		// returned BEFORE the clearAuthCookies call below, so the dead
+		// cookies were left in place.
 		var req models.RefreshRequest
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
@@ -499,7 +508,13 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	refreshTok := ""
 	if c, cerr := r.Cookie(auth.RefreshCookieName); cerr == nil && c.Value != "" {
 		refreshTok = c.Value
-	} else {
+	} else if r.ContentLength != 0 {
+		// Same empty-body trap as Refresh, and it bit harder here: a browser
+		// logging out with an already-expired refresh cookie sends no body,
+		// hit the decode error, and returned 400 BEFORE clearAuthCookies —
+		// so "log me out" left the stale cookies in the browser. Logout must
+		// be idempotent; an absent token now falls through to the revoke +
+		// clear below, which already tolerate an empty/unknown token.
 		var req models.RefreshRequest
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")

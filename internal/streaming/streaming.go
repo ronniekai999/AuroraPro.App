@@ -1008,6 +1008,16 @@ type TranscodeManager struct {
 	// early sessions plan software decode. Written once, read per variant
 	// launch — atomic.Pointer, no lock.
 	hwDecodeCaps atomic.Pointer[HWAccelInfo]
+	// streamStateFile, when non-empty, is where the cleanup loop publishes
+	// the deploy drain snapshot (see drainstate.go). Guarded by tm.mu.
+	streamStateFile string
+	// publishMu serializes drain-state writes. Separate from tm.mu on
+	// purpose: publishing does file I/O and must never sit on the lock that
+	// session create/get/keepalive contend for.
+	publishMu sync.Mutex
+	// drainExtraViewers counts viewers that hold no transcode session
+	// (direct play). Guarded by tm.mu; invoked unlocked. See drainstate.go.
+	drainExtraViewers func() int
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
 	// change state (created, stopped, expired). The callback receives an event
@@ -1510,6 +1520,9 @@ func (tm *TranscodeManager) cleanupLoop() {
 		select {
 		case <-ticker.C:
 		case <-tm.done:
+			// Don't leave a stale snapshot behind for the next deploy to
+			// read. Readers check freshness anyway, but belt and braces.
+			tm.clearDrainState()
 			return
 		}
 		tick++
@@ -1567,6 +1580,13 @@ func (tm *TranscodeManager) cleanupLoop() {
 			s.variantMu.Unlock()
 			os.RemoveAll(s.OutputDir)
 		}
+
+		// Publish the deploy drain snapshot LAST, so it reflects this tick's
+		// expiries rather than the state before them. 30s granularity is fine:
+		// aurora-update.sh polls every 10s and tolerates a stale-by-one-tick
+		// file, which at worst makes a deploy wait an extra half-minute after
+		// the final viewer leaves. Erring toward waiting is the whole point.
+		tm.publishDrainState()
 	}
 }
 

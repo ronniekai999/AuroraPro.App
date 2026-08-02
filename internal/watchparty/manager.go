@@ -2390,7 +2390,16 @@ func renderHighlightReel(ctx context.Context, srcPath, outPath string, moments [
 	if len(moments) == 0 {
 		return fmt.Errorf("no moments to render")
 	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", highlightReelArgs(srcPath, outPath, moments)...)
+	return runHighlightReelFFmpeg(cmd)
+}
 
+// highlightReelArgs builds the ffmpeg argv for a reel render. Split out from
+// renderHighlightReel purely so the argv is assertable without a real ffmpeg
+// binary: the muxer bug this guards against is invisible to any test that
+// can't run ffmpeg, and CI has no media tooling. See
+// TestHighlightReelArgs_ExplicitMuxer.
+func highlightReelArgs(srcPath, outPath string, moments []highlightMoment) []string {
 	args := make([]string, 0, 6+len(moments)*4+8)
 	args = append(args, "-y", "-hide_banner", "-loglevel", "warning")
 
@@ -2433,10 +2442,21 @@ func renderHighlightReel(ctx context.Context, srcPath, outPath string, moments [
 		"-c:a", "aac",
 		"-b:a", "128k",
 		"-movflags", "+faststart",
+		// Muxer MUST be explicit. Callers render to "<name>.mp4.tmp"
+		// (atomic-rename staging, see generateHighlightReel), and ffmpeg
+		// infers the output format from the file extension — ".tmp" matches
+		// nothing, so every render died with "Unable to choose an output
+		// format ... Invalid argument" before the encode even started.
+		"-f", "mp4",
 		outPath,
 	)
+	return args
+}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+// runHighlightReelFFmpeg starts the prepared command, drains stderr with a
+// bounded buffer, and waits. Split from renderHighlightReel alongside
+// highlightReelArgs; behaviour is unchanged.
+func runHighlightReelFFmpeg(cmd *exec.Cmd) error {
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("ffmpeg stderr pipe: %w", err)

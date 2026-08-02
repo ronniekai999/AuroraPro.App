@@ -1236,7 +1236,14 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "settings updated"})
 }
 
-// Logs returns recent server log entries from the in-memory ring buffer.
+// Logs serves the in-memory log rings.
+//
+// ?level=warn switches to the dedicated WARN+ERROR ring rather than filtering
+// the main one. That distinction is the whole feature: the main ring holds
+// ~1000 entries, which at Aurora's rate is 3.6–17 minutes of history, and
+// ~95% of lines are INFO request logs. Filtering it would return an empty
+// list for an incident twenty minutes old. The problem ring fills far more
+// slowly (0.26% of volume in the observed window) and so holds days.
 func (h *AdminHandler) Logs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
@@ -1247,7 +1254,18 @@ func (h *AdminHandler) Logs(w http.ResponseWriter, r *http.Request) {
 		offset = 0 // negative offset would underflow ring-buffer indexing
 	}
 
-	entries := h.ringLog.Entries(limit, offset)
+	// Unknown values fall through to "all" rather than erroring: a stale
+	// frontend sending ?level=debug should get logs, not a 400.
+	var entries []models.LogEntry
+	switch strings.ToLower(r.URL.Query().Get("level")) {
+	case "warn", "warning", "error", "problem":
+		entries = h.ringLog.ProblemEntries(limit, offset)
+	default:
+		entries = h.ringLog.Entries(limit, offset)
+	}
+	if entries == nil {
+		entries = []models.LogEntry{}
+	}
 	writeJSON(w, http.StatusOK, entries)
 }
 

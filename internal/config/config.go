@@ -848,6 +848,20 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AURORA_SECURE_COOKIES"); v != "" {
 		cfg.Server.SecureCookies = v == "true" || v == "1" || v == "yes"
 	}
+	// AURORA_TRUSTED_PROXIES — comma-separated CIDRs, e.g.
+	// "127.0.0.1/32,::1/128" for the nginx that setup-domain.sh installs.
+	//
+	// This was YAML-only, which made it unreachable in practice: the managed
+	// deployment configures Aurora through /etc/aurora/aurora.env, so the knob
+	// could not be set without hand-editing a config file the scripts don't
+	// manage. Left unset behind a reverse proxy, EVERY request appears to come
+	// from 127.0.0.1 — the per-IP auth rate limiter collapses into one shared
+	// global bucket, and audit logs record the proxy's address instead of the
+	// client's (visible in production as client_ip=127.0.0.1 on every
+	// refresh-replay warning).
+	if v := os.Getenv("AURORA_TRUSTED_PROXIES"); v != "" {
+		cfg.Server.TrustedProxies = parseTrustedProxies(v)
+	}
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		cfg.Database.URL = v
 	}
@@ -1267,6 +1281,34 @@ func parseOrigins(raw string) []string {
 		}
 	}
 	return origins
+}
+
+// parseTrustedProxies splits the CIDR list and normalizes bare IPs into
+// single-host CIDRs, so "127.0.0.1" works as well as "127.0.0.1/32".
+//
+// Being lenient here matters: a bare IP is the shape an operator will
+// naturally write, and silently ignoring it would leave the rate limiter
+// degraded while the config LOOKS correct — the worst failure mode for a
+// security control. Genuinely malformed entries are dropped by the CIDR
+// parser downstream (ParseTrustedProxyCIDRs), which logs them.
+func parseTrustedProxies(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !strings.Contains(p, "/") {
+			if strings.Contains(p, ":") {
+				p += "/128" // IPv6 single host
+			} else {
+				p += "/32" // IPv4 single host
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func splitCSV(raw string) []string {

@@ -335,6 +335,13 @@ type ScanProgress struct {
 	// clean "complete" while cleanup is silently disabled.
 	WalkErrors   int  `json:"walk_errors,omitempty"`
 	PruneSkipped bool `json:"prune_skipped,omitempty"`
+	// UnreadablePaths names the entries that failed to read, bounded to a
+	// handful for display. A single unreadable directory used to disable the
+	// prune for an ENTIRE library with only a log line as evidence — one
+	// permission-denied folder went unnoticed for three days that way. The
+	// prune is now scoped around these paths rather than skipped wholesale,
+	// but the operator still needs to see what is unreadable to fix it.
+	UnreadablePaths []string `json:"unreadable_paths,omitempty"`
 }
 
 // --- API Request/Response ---

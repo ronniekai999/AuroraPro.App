@@ -571,9 +571,62 @@ for tool in curl tar git python3; do
         pkg_install "$tool"
     fi
 done
-if ! command -v node &>/dev/null; then
-    info "Installing nodejs..."
+# Node. The frontend's dependency tree needs Node >= 22 (jsdom 30, undici 8,
+# whatwg-url 17, @testing-library/jest-dom 7 all declare it), and distro
+# packages lag badly — Ubuntu 24.04 ships 18.x, and the production box was
+# running v20.20.2, which emitted 90 EBADENGINE warnings on every single
+# deploy. The production BUILD works anyway (vite/tsc are fine on 20), so this
+# is not urgent; it is unsupported-configuration drift that gets worse over
+# time and buries real npm output in noise.
+#
+# NODE_MIN is the floor the package.json engines actually ask for. On apt we
+# add NodeSource, which is the vendor-supported way to get a current LTS;
+# elsewhere we fall back to the distro package and warn if it's too old rather
+# than fighting each distro's packaging.
+NODE_MIN=22
+
+node_major() {
+    command -v node &>/dev/null || { echo 0; return; }
+    node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/' || echo 0
+}
+
+install_node() {
+    if [ "$PKG_MGR" = "apt" ]; then
+        info "Installing Node.js ${NODE_MIN}.x from NodeSource..."
+        # NodeSource's setup script adds the apt repo and its signing key.
+        # mktemp, not a fixed /tmp path: this runs as root, and a predictable
+        # name in a world-writable directory lets a local user pre-place a
+        # symlink that curl -o would then write through. Matches the Ollama
+        # installer's handling of the same pattern below.
+        NODE_SETUP="$(mktemp)"
+        if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN}.x" -o "$NODE_SETUP" \
+            && bash "$NODE_SETUP" >/dev/null 2>&1; then
+            rm -f "$NODE_SETUP"
+            APT_UPDATED=false   # NodeSource changed the sources list
+            pkg_install nodejs  # NodeSource's nodejs bundles npm
+            return
+        fi
+        rm -f "$NODE_SETUP"
+        warn "NodeSource setup failed — falling back to the distro nodejs package"
+    fi
     pkg_install nodejs
+    command -v npm &>/dev/null || pkg_install npm
+}
+
+CURRENT_NODE_MAJOR="$(node_major)"
+if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
+    if [ "${CURRENT_NODE_MAJOR:-0}" -eq 0 ]; then
+        info "Node.js not found — installing..."
+    else
+        info "Node.js v${CURRENT_NODE_MAJOR} is older than the frontend's requirement (>= ${NODE_MIN}) — upgrading..."
+    fi
+    install_node
+    CURRENT_NODE_MAJOR="$(node_major)"
+    if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
+        # Non-fatal: the production build genuinely works on older Node, so
+        # refusing to install over this would be worse than the warning.
+        warn "Node.js is v${CURRENT_NODE_MAJOR}, below the frontend's requirement (>= ${NODE_MIN}). The build will still work, but npm will warn on every deploy. Upgrade manually to silence it."
+    fi
 fi
 if ! command -v npm &>/dev/null; then
     info "Installing npm..."
@@ -1342,12 +1395,36 @@ info "Writing $CONFIG_DIR/aurora.env..."
         # HTTP and would never mark auth cookies Secure on its own.
         # Force it whenever a domain fronts the install (2026-07-18).
         printf 'AURORA_SECURE_COOKIES=true\n'
+        # A domain install means nginx proxies from loopback, so EVERY request
+        # reaches Aurora with RemoteAddr 127.0.0.1. Without this the per-IP
+        # auth rate limiter degrades into one shared bucket for the whole
+        # internet, and audit logs record the proxy instead of the client
+        # (production showed client_ip=127.0.0.1 on every refresh-replay
+        # warning). Trust ONLY loopback: these are the addresses the nginx
+        # config written by install.sh / setup-domain.sh proxies from, and
+        # trusting anything wider would let a client forge its own IP.
+        # Preserve an operator's value rather than asserting loopback.
+        # Unlike AURORA_ALLOWED_ORIGINS above — where a new domain genuinely
+        # invalidates the old origins — a trusted-proxy list describes network
+        # topology this script cannot see. Someone fronting Aurora with an
+        # ADDITIONAL upstream proxy (Cloudflare tunnel, a separate LB host)
+        # will have widened it deliberately, and silently resetting them to
+        # loopback would break their client IPs on the next install re-run.
+        EXISTING_PROXIES="$(read_env_key AURORA_TRUSTED_PROXIES)"
+        printf 'AURORA_TRUSTED_PROXIES=%s\n' "${EXISTING_PROXIES:-127.0.0.1/32,::1/128}"
     else
         # Re-run without AURORA_DOMAIN: keep whatever origins the previous
         # config had (a prior domain setup, or an operator edit) instead
         # of resetting them to the localhost defaults (2026-07-18).
         EXISTING_ORIGINS="$(read_env_key AURORA_ALLOWED_ORIGINS)"
         printf 'AURORA_ALLOWED_ORIGINS=%s\n' "${EXISTING_ORIGINS:-http://localhost:*,https://localhost:*}"
+        # Same preservation rule as the origins above: a re-run without
+        # AURORA_DOMAIN must not silently drop a proxy allowlist the operator
+        # (or an earlier domain install) already configured.
+        EXISTING_PROXIES="$(read_env_key AURORA_TRUSTED_PROXIES)"
+        if [ -n "$EXISTING_PROXIES" ]; then
+            printf 'AURORA_TRUSTED_PROXIES=%s\n' "$EXISTING_PROXIES"
+        fi
     fi
     printf '\n# Logging\n'
     printf 'LOG_DIR=%s\n' "$LOG_DIR"

@@ -549,25 +549,101 @@ ensure_llm_models
 # ── Restart + health check ────────────────────────────────────────
 
 # Drain active HLS stream sessions before restarting: systemctl restart
-# sends SIGTERM to the entire cgroup (KillMode=control-group default),
-# which kills FFmpeg children immediately and breaks playback for active
-# viewers. Wait up to 300 s for streams to finish organically; the
-# _DRAIN_LOG_EVERY throttle keeps log noise low.
+# sends SIGTERM to the entire cgroup (KillMode=control-group default), which
+# kills FFmpeg children immediately AND destroys the in-memory transcode
+# sessions, breaking playback for anyone watching. Wait up to 300 s for
+# viewers to finish organically; the _DRAIN_LOG_EVERY throttle keeps log
+# noise low.
+#
+# The gate used to be `pgrep -u aurora ffmpeg`, which measured the wrong
+# thing. Aurora reaps the encoder for a PAUSED viewer ("reaped idle transcode
+# variant ... resumable") while keeping the session alive, so a paused viewer
+# has NO ffmpeg process. pgrep saw an idle box and we restarted out from under
+# them; the client then POSTed keepalive against a dead session for the next
+# hour. Observed twice in production on 2026-08-02.
+#
+# The server now publishes the honest count — sessions a client is still
+# holding, playing or paused — to $STREAM_STATE_FILE every 30 s.
+STREAM_STATE_FILE=/var/lib/aurora/stream-state.json
+_STREAM_STATE_MAX_AGE=90   # snapshot older than this is "unknown", not "zero"
+
+# viewers_held echoes the number of sessions a client is still holding, or the
+# empty string when the server's snapshot is missing/stale/unparseable — the
+# caller then falls back to the pgrep heuristic.
+#
+# Staleness matters: a wedged or freshly-restarted server leaves a snapshot
+# that looks exactly like an idle one, and believing a stale zero is precisely
+# the bug being fixed. Old servers that predate this file always fall back,
+# which is what makes the script safe to deploy before the binary that writes
+# it (the drain reads the OLD, still-running server).
+viewers_held() {
+    [ -r "$STREAM_STATE_FILE" ] || return 0
+
+    _vh_now=$(date +%s)
+    _vh_ts=$(sed -n 's/.*"unix_time"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$STREAM_STATE_FILE")
+    _vh_held=$(sed -n 's/.*"held_by_viewer"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$STREAM_STATE_FILE")
+    # Validate each field independently. A partially-written or renamed-key
+    # file must land on "unknown" (fall back to pgrep), never on a bare 0
+    # that would wave a deploy through while someone is watching.
+    case "$_vh_ts" in ''|*[!0-9]*) return 0 ;; esac
+    case "$_vh_held" in ''|*[!0-9]*) return 0 ;; esac
+    [ $((_vh_now - _vh_ts)) -le "$_STREAM_STATE_MAX_AGE" ] || return 0
+
+    printf '%s' "$_vh_held"
+}
+
+# streams_busy is the drain predicate: true while a restart would interrupt
+# someone.
+#
+# The UNION of both signals, not a preference between them — each covers a
+# gap the other has:
+#
+#   - The snapshot refreshes every 30s, so a stream started seconds ago still
+#     reports held_by_viewer=0. pgrep sees its encoder immediately.
+#   - A paused viewer's encoder is reaped, so pgrep sees nothing. The
+#     snapshot still counts them, which is the whole point of this change.
+#
+# Taking either signal alone reintroduces one of the two bugs. The union is
+# never less conservative than the pgrep-only gate it replaces, and it still
+# converges: an abandoned session's variants are reaped after 75s (ffmpeg
+# exits) and it drops out of the 120s viewer window, so both signals go
+# quiet and the drain completes.
+streams_busy() {
+    _sb_held=$(viewers_held)
+    if [ -n "$_sb_held" ] && [ "$_sb_held" -gt 0 ]; then
+        return 0
+    fi
+    pgrep -u aurora ffmpeg >/dev/null 2>&1
+}
+
 _DRAIN_MAX=300
 _DRAIN_WAITED=0
 _DRAIN_LOG_EVERY=30  # log at most once per 30 s
 _DRAIN_NEXT_LOG=0
-if pgrep -u aurora ffmpeg >/dev/null 2>&1; then
+if streams_busy; then
+    # Say which signals are live, so a deploy that waits (or doesn't) can be
+    # explained after the fact from this log alone — the old gate logged
+    # "drained" while it was actively breaking someone's stream.
+    _DRAIN_HELD=$(viewers_held)
+    if [ -z "$_DRAIN_HELD" ]; then
+        log "drain gate: ffmpeg-only (no fresh $STREAM_STATE_FILE — old build or stale snapshot)"
+    else
+        log "drain gate: server reports ${_DRAIN_HELD} session(s) held by viewers"
+    fi
     write_status restarting "Waiting for active stream sessions to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
-    while pgrep -u aurora ffmpeg >/dev/null 2>&1 && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
+    while streams_busy && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do
         if [ "$_DRAIN_WAITED" -ge "$_DRAIN_NEXT_LOG" ]; then
-            log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s)..."
+            _DRAIN_HELD=$(viewers_held)
+            log "active stream sessions detected — waiting for viewers to finish (${_DRAIN_WAITED}/${_DRAIN_MAX}s${_DRAIN_HELD:+, ${_DRAIN_HELD} held by viewers})..."
             _DRAIN_NEXT_LOG=$((_DRAIN_NEXT_LOG + _DRAIN_LOG_EVERY))
         fi
         sleep 10
         _DRAIN_WAITED=$((_DRAIN_WAITED + 10))
     done
-    if pgrep -u aurora ffmpeg >/dev/null 2>&1; then
+    if streams_busy; then
+        # Deliberately still restarting: a viewer who fell asleep mid-movie
+        # must not block deploys forever. Clients recover — VideoPlayer
+        # rebuilds the session at the current position when keepalive 404s.
         log "WARNING: stream sessions still active after ${_DRAIN_MAX}s, restarting anyway"
     else
         log "stream sessions drained after ${_DRAIN_WAITED}s"
