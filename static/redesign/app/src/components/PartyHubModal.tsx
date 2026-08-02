@@ -189,8 +189,9 @@ export function PartyHubModal({ currentUserId, onJoin, onClose }: PartyHubModalP
             </button>
             {lastParty.wasHost && (
               <p className="text-amber-300/70 text-[11px] mt-2 leading-snug">
-                Quick parties end when the host leaves — rejoin may say the party has ended.
-                Persistent rooms (below) survive host leaves.
+                Leaving as host hands the party to whoever's been there longest,
+                so rejoin usually works — you'll come back as a guest. If nobody
+                stayed, the party ended and rejoin will say so.
               </p>
             )}
           </div>

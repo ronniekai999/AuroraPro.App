@@ -511,10 +511,19 @@ func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expe
 	}
 
 	ps.mu.Lock()
-	if ps.HostDisconnectedAt == nil {
-		// Host reconnected within the grace window — nothing to do.
+	if ps.ending {
+		// Party is already mid-teardown — the reap must not touch it
+		// (see PartyState.ending; a promotion here could resurrect a
+		// dying party).
 		ps.mu.Unlock()
-		slog.Info("v3: host grace timer found host reconnected", "code", code)
+		return
+	}
+	if ps.HostDisconnectedAt == nil {
+		// Nothing to reap: either the host reconnected within the grace
+		// window, or a handoff already moved the crown (promotion clears
+		// the marker too).
+		ps.mu.Unlock()
+		slog.Info("v3: host grace timer superseded — host reconnected or party already handed off", "code", code)
 		return
 	}
 	if !ps.HostDisconnectedAt.Equal(expectedDisconnectTime) {
@@ -532,6 +541,16 @@ func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expe
 	if p, ok := ps.Participants[staleHostID]; ok {
 		staleHostName = p.Username
 	}
+	// The host's ROOM socket is what died; their SYNC socket may still be
+	// alive (the exact split that motivated the grace period). Capture
+	// both before the map deletes so they can be closed after the lock is
+	// released — once out of the maps, neither endPartyInternal nor any
+	// broadcast can reach them, and an unclosed sync conn would keep its
+	// write pump, read loop, and ping goroutine alive indefinitely while
+	// the demoted host's player freezes on the last tick with no terminal
+	// frame.
+	staleRoomConn := ps.roomConns[staleHostID]
+	staleSyncConn := ps.syncConns[staleHostID]
 	// Idempotent; their voice presence died with the room socket.
 	_ = m.leaveVoiceLocked(ps, staleHostID)
 	delete(ps.Participants, staleHostID)
@@ -545,8 +564,9 @@ func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expe
 
 	if m.promoteSuccessorLocked(ps, staleHostID, staleHostName, "disconnected") == nil {
 		ps.mu.Unlock()
+		closeStaleConns(staleRoomConn, staleSyncConn)
 		slog.Info("v3: host grace period expired without reconnect, ending party", "code", code)
-		_ = m.endPartyInternal(code, ps)
+		_ = m.endPartyInternal(code, ps, 0)
 		return
 	}
 
@@ -564,7 +584,19 @@ func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expe
 	})
 	m.maybeRetryScheduledStartLocked(ps)
 	ps.mu.Unlock()
+	closeStaleConns(staleRoomConn, staleSyncConn)
 	slog.Info("v3: host grace expired, handed party to successor", "code", code, "stale_host", staleHostID)
+}
+
+// closeStaleConns closes a reaped host's captured conns outside ps.mu
+// (Close is cheap but there's no reason to hold the party lock for it).
+// Nil-safe on both.
+func closeStaleConns(conns ...*SafeConn) {
+	for _, c := range conns {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
 }
 
 // LeavePartyV3Room removes the participant entirely. Also removes any
@@ -618,7 +650,7 @@ func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 		if m.promoteSuccessorLocked(ps, userID, username, "left") == nil {
 			ps.mu.Unlock()
 			slog.Info("v3: host left with no successor, ending party", "code", code)
-			return m.endPartyInternal(code, ps)
+			return m.endPartyInternal(code, ps, 0)
 		}
 		// Promoted — fall through to the normal leaver bookkeeping below.
 		// Note the order the room pool sees: host-changed + a fresh
@@ -748,6 +780,13 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 
 	if ps.HostUserID != userID {
 		return errUser("only the host can start playback")
+	}
+	// A party mid-teardown must not start playback: endPartyInternal has
+	// already run stopTickLoopLocked, and starting a fresh tick loop here
+	// would leak its goroutine forever once the party leaves the map
+	// (see PartyState.ending — the succession review's resurrection case).
+	if ps.ending {
+		return errUser("party has ended")
 	}
 	if ps.Running {
 		return nil // no-op, already running

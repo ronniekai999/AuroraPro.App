@@ -34,6 +34,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   buildWsUrl,
+  participantFromJoinEvent,
   type ChatMessageEvent,
   type CodeInfo,
   type HostChangedEvent,
@@ -557,19 +558,11 @@ export function useParty(currentUserId?: number): UseParty {
             return { participants: prev.participants.filter(u => u.user_id !== p.user_id) }
           }
           if (prev.participants.some(u => u.user_id === p.user_id)) return {}
-          return {
-            participants: [
-              ...prev.participants,
-              {
-                user_id: p.user_id,
-                username: p.username,
-                is_host: !!p.is_host,
-                is_buffering: false,
-                last_seen: new Date().toISOString(),
-                ready: false,
-              },
-            ],
-          }
+          // participantFromJoinEvent carries EVERY event field — the
+          // inline object it replaced dropped `companion`, which made
+          // PartyPanel's hand-off dialog count phone companions as
+          // eligible hosts (see the helper's comment in lib/party.ts).
+          return { participants: [...prev.participants, participantFromJoinEvent(p)] }
         })
         break
       }
@@ -1241,9 +1234,15 @@ export function useParty(currentUserId?: number): UseParty {
   const end = useCallback(async (): Promise<boolean> => {
     const code = activeCodeRef.current
     if (!code) return false
+    // Flag BEFORE the await: the server broadcasts party-ended and closes
+    // our sockets before the HTTP 200 arrives, and the room onclose must
+    // not arm a reconnect against the party we are ending. Restored on
+    // failure so a later real drop still reconnects.
+    userInitiatedLeaveRef.current = true
     try {
       await apiFetch(`/api/parties/${encodeURIComponent(code)}/end`, { method: 'POST' })
     } catch (err) {
+      userInitiatedLeaveRef.current = false
       setStatePatch({
         error: err instanceof Error ? err.message : 'Failed to end the party.',
       })
@@ -1252,7 +1251,6 @@ export function useParty(currentUserId?: number): UseParty {
     // Local teardown mirrors leave()'s, minus the leave-party frame (the
     // server already ended the party) and minus the last-party cache —
     // an ended party's code is dead, so "Recently in" must not offer it.
-    userInitiatedLeaveRef.current = true
     activeCodeRef.current = null
     reconnectAttemptRef.current = 0
     syncReconnectAttemptRef.current = 0

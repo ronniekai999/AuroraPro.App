@@ -141,11 +141,39 @@ export interface ParticipantEvent {
   user_id: number
   username: string
   is_host?: boolean
+  // Sent on participant-join so a reconnecting peer's existing ready
+  // state isn't erased by the optimistic patch (server includes it for
+  // exactly that reason — see the join broadcast in sync_v3.go).
+  ready?: boolean
   // Mirrors PartyParticipant.companion — present on participant-join
   // events for a mobile-companion joiner so the optimistic local list
   // patch in useParty/useCompanion can carry the flag forward without
   // waiting for a fresh party-state. Optional / omitted for desktop.
   companion?: boolean
+}
+
+/**
+ * Builds the optimistic local participant for a `participant-join` event.
+ *
+ * Extracted and pure because silently dropping a field here has already
+ * shipped a real bug (host-succession review, 2026-08): the inline patch
+ * in useParty omitted `companion`, so a phone companion who joined AFTER
+ * the initial snapshot read as a regular watcher — and PartyPanel's
+ * hand-off dialog then counted them as an eligible host, promising the
+ * host a hand-off that the server (which excludes companions) turned
+ * into an end-for-everyone. Every field the event carries must land
+ * here; the unit tests pin each one.
+ */
+export function participantFromJoinEvent(p: ParticipantEvent): PartyParticipant {
+  return {
+    user_id: p.user_id,
+    username: p.username,
+    is_host: !!p.is_host,
+    is_buffering: false,
+    last_seen: new Date().toISOString(),
+    ready: !!p.ready,
+    companion: !!p.companion,
+  }
 }
 
 export interface TickPayload {
