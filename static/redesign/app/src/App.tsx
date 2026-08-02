@@ -2958,7 +2958,26 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [party.onMediaChange])
 
-  // 2026-05-25 — Guest auto-open-player. Symptom: in the EEJ7DB live test,
+  // 2026-08 — host succession. The server promotes silently at the
+  // protocol level; a crown moving with no explanation reads as a
+  // glitch, so name the handoff for everyone still in the room. State
+  // (hostUserId, is_host flags) is already patched by useParty before
+  // this fires — the toast is the only App-level job.
+  useEffect(() => {
+    return party.onHostChange(p => {
+      if (user && p.new_host_user_id === user.id) {
+        addToast(
+          `${p.previous_host_username || 'The host'} ${p.reason === 'disconnected' ? 'disconnected' : 'left'} — you're hosting now`,
+          'info',
+        )
+      } else {
+        addToast(`${p.new_host_username} is now the host`, 'info')
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [party.onHostChange, user, addToast])
+
+  // 2026-05-25 — Party auto-open-player. Symptom: in the EEJ7DB live test,
   // the host clicked Play but nothing opened on the guest's end. Root
   // cause: onMediaChange above only fires when the host SWITCHES media
   // mid-party (server emits a `media-change` event), but the initial
@@ -2968,25 +2987,24 @@ export default function App() {
   // opens the player for the guest, and the sync events go nowhere.
   //
   // Fix: watch (state.code, state.mediaItemId, state.isPlaying, user.id,
-  // state.hostUserId, playerTarget) and auto-open the guest's player
-  // when all of: in a party, we're not the host, media is set, host
-  // is playing, and we don't already have a player open. This also
-  // covers the "guest joined a party that was ALREADY playing" case —
-  // party-state arrives with isPlaying=true and the effect fires
-  // immediately.
+  // state.hostUserId, playerTarget) and auto-open the player when all
+  // of: in a party, media is set, party is playing, and we don't
+  // already have a player open. This also covers the "guest joined a
+  // party that was ALREADY playing" case — party-state arrives with
+  // isPlaying=true and the effect fires immediately.
   //
-  // We deliberately do NOT auto-open if isPlaying is false — the
+  // We deliberately do NOT auto-open GUESTS if isPlaying is false — the
   // lobby (with the I'm Ready button, chat, reactions) should remain
-  // visible until the host actually starts. Closing the player
-  // manually mid-party will allow this to re-fire on the next tick
-  // (state.isPlaying is sampled live), which is the desired "pop me
-  // back into the player" UX.
+  // visible until the host actually starts. (The HOST additionally
+  // opens when a mid-movie party is paused — see the succession note
+  // inside the effect.) Closing the player manually mid-party will
+  // allow this to re-fire on the next tick (state.isPlaying is sampled
+  // live), which is the desired "pop me back into the player" UX.
   const guestAutoOpenGenRef = useRef(0)
   useEffect(() => {
     if (!user) return
     if (!party.state.code) return
     if (!party.state.mediaItemId) return
-    if (!party.state.isPlaying) return
     // 2026-05-25 — require hostUserId to actually be set before
     // making the host vs guest decision. Without this null-check,
     // a transient render where state.code/mediaItemId/isPlaying are
@@ -2995,7 +3013,22 @@ export default function App() {
     // guard, and auto-open the host's player as if they were a
     // guest. Fix: bail if hostUserId hasn't arrived yet.
     if (party.state.hostUserId == null) return
-    if (party.state.hostUserId === user.id) return // we ARE the host
+    // 2026-08 — host succession removed the old `we ARE the host` early
+    // return. A host can now EXIST without a player: succession promotes
+    // a guest who may never have opened one (the lobby, or a mid-party
+    // handoff), and transport controls live only inside the player — a
+    // Running party whose host has no player is a party NOBODY can
+    // pause. So the host auto-opens like a guest, at the party position
+    // (which also keeps their first pause/seek from re-anchoring the
+    // room to a stale personal offset). Hosts additionally open when the
+    // party is PAUSED mid-movie (currentTimeMs > 0, read from the ref so
+    // ticks don't churn this effect): a playerless host of a paused
+    // party is the only one who can resume it. Guests keep the
+    // isPlaying-only rule — the pre-start lobby stays visible, and a
+    // paused-mid-movie guest who closed their player may stay out.
+    const iAmHost = party.state.hostUserId === user.id
+    if (!party.state.isPlaying &&
+        !(iAmHost && partyStateRef.current.currentTimeMs > 0)) return
     if (playerTarget) return // already has player open
     const myGen = ++guestAutoOpenGenRef.current
     const mediaItemId = party.state.mediaItemId
@@ -5418,6 +5451,16 @@ export default function App() {
           onSendReaction={party.sendReaction}
           onLeave={() => { party.leave(); setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
           onClose={() => { setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
+          // 2026-08 — host succession. Leaving hands the party off, so
+          // ending it for everyone is its own deliberate action. end()
+          // is async and only tears down on success — mirror the leave
+          // path's UI resets only when it reports ok, so a failed end
+          // (party stays live) keeps the panel open.
+          onEndParty={() => {
+            void party.end().then(ok => {
+              if (ok) { setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }
+            })
+          }}
           // Feature 2 — Cinematic Overlay. variant + toggle flip the panel
           // between the floating glass rail and the minimal ticker/pill/
           // dock face (composed inside PartyPanel). The dock button in the

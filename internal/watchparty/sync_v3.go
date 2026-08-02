@@ -209,6 +209,7 @@ func (m *Manager) JoinPartyV3RoomCompanion(code string, userID int64, username s
 		IsBuffering: false,
 		LastSeen:    time.Now(),
 		Companion:   companion,
+		JoinedAt:    time.Now(),
 	}
 	ps.roomConns[userID] = sc
 
@@ -387,12 +388,14 @@ func (m *Manager) LeavePartyV3RoomIfConn(code string, userID int64, sc *SafeConn
 // LeavePartyV3RoomGraceful is the implicit-disconnect variant of
 // LeavePartyV3Room. For guests it behaves identically (remove from
 // participants, broadcast participant-left). For the HOST it does NOT
-// immediately end the party — instead it:
+// immediately act — instead it:
 //  1. Removes the room conn (so broadcasts don't try to write to it)
 //  2. Sets ps.HostDisconnectedAt = now
-//  3. Spawns a goroutine that ends the party after HostDisconnectGracePeriod
-//     IF and ONLY IF HostDisconnectedAt is still set at that point
-//     (i.e. host hasn't reconnected via JoinPartyV3Room)
+//  3. Spawns a goroutine that, after HostDisconnectGracePeriod — IF and
+//     ONLY IF HostDisconnectedAt is still set at that point (i.e. host
+//     hasn't reconnected via JoinPartyV3Room) — hands the party to the
+//     most senior remaining participant, or ends it when nobody
+//     eligible remains (2026-08 host succession; reapExpiredHostGrace)
 //
 // 2026-05-25 — added in response to "guests can't join, party died at
 // 90s" production diagnosis. Host's WS hit a proxy/idle timeout; before
@@ -479,7 +482,22 @@ func (m *Manager) LeavePartyV3RoomGraceful(code string, userID int64) error {
 //     finally end the party.
 func (m *Manager) checkHostGraceExpiry(code string, expectedPS *PartyState, expectedDisconnectTime time.Time) {
 	time.Sleep(HostDisconnectGracePeriod)
+	m.reapExpiredHostGrace(code, expectedPS, expectedDisconnectTime)
+}
 
+// reapExpiredHostGrace is checkHostGraceExpiry's post-sleep body, split
+// out so tests can exercise the expiry decision without waiting out the
+// real 90s grace period.
+//
+// 2026-08 — host succession. An expired grace used to end the party for
+// everyone. Now the vanished host's reserved slot is cleared and the
+// party is handed to the most senior remaining participant; only when
+// nobody eligible remains does the party end (the pre-succession
+// behavior). The host is genuinely gone by this point: the client's own
+// room-reconnect backoff gives up after ~31s, well inside the 90s grace,
+// and a host who returns later simply rejoins as a guest — the reconnect
+// path keys on HostUserID, which is no longer theirs.
+func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expectedDisconnectTime time.Time) {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
@@ -493,10 +511,19 @@ func (m *Manager) checkHostGraceExpiry(code string, expectedPS *PartyState, expe
 	}
 
 	ps.mu.Lock()
-	if ps.HostDisconnectedAt == nil {
-		// Host reconnected within the grace window — nothing to do.
+	if ps.ending {
+		// Party is already mid-teardown — the reap must not touch it
+		// (see PartyState.ending; a promotion here could resurrect a
+		// dying party).
 		ps.mu.Unlock()
-		slog.Info("v3: host grace timer found host reconnected", "code", code)
+		return
+	}
+	if ps.HostDisconnectedAt == nil {
+		// Nothing to reap: either the host reconnected within the grace
+		// window, or a handoff already moved the crown (promotion clears
+		// the marker too).
+		ps.mu.Unlock()
+		slog.Info("v3: host grace timer superseded — host reconnected or party already handed off", "code", code)
 		return
 	}
 	if !ps.HostDisconnectedAt.Equal(expectedDisconnectTime) {
@@ -505,16 +532,86 @@ func (m *Manager) checkHostGraceExpiry(code string, expectedPS *PartyState, expe
 		ps.mu.Unlock()
 		return
 	}
-	ps.mu.Unlock()
 
-	slog.Info("v3: host grace period expired without reconnect, ending party", "code", code)
-	_ = m.endPartyInternal(code, ps)
+	// The grace is spent. Remove the vanished host like any leaver —
+	// their entry was only reserved so a reconnect could reclaim the
+	// crown, and that window is over — then try to hand the party on.
+	staleHostID := ps.HostUserID
+	staleHostName := ""
+	if p, ok := ps.Participants[staleHostID]; ok {
+		staleHostName = p.Username
+	}
+	// The host's ROOM socket is what died; their SYNC socket may still be
+	// alive (the exact split that motivated the grace period). Capture
+	// both before the map deletes so they can be closed after the lock is
+	// released — once out of the maps, neither endPartyInternal nor any
+	// broadcast can reach them, and an unclosed sync conn would keep its
+	// write pump, read loop, and ping goroutine alive indefinitely while
+	// the demoted host's player freezes on the last tick with no terminal
+	// frame.
+	staleRoomConn := ps.roomConns[staleHostID]
+	staleSyncConn := ps.syncConns[staleHostID]
+	// Idempotent; their voice presence died with the room socket.
+	_ = m.leaveVoiceLocked(ps, staleHostID)
+	delete(ps.Participants, staleHostID)
+	delete(ps.roomConns, staleHostID)
+	delete(ps.syncConns, staleHostID)
+	if ps.dbID > 0 && m.queries != nil {
+		if err := m.queries.UpdateParticipantLeft(context.Background(), ps.dbID, staleHostID); err != nil {
+			slog.Warn("v3: update participant left failed", "err", err, "code", code)
+		}
+	}
+
+	if m.promoteSuccessorLocked(ps, staleHostID, staleHostName, "disconnected") == nil {
+		ps.mu.Unlock()
+		closeStaleConns(staleRoomConn, staleSyncConn)
+		slog.Info("v3: host grace period expired without reconnect, ending party", "code", code)
+		_ = m.endPartyInternal(code, ps, 0)
+		return
+	}
+
+	// Promoted. Announce the old host's departure (the party-state
+	// snapshot inside promoteSuccessorLocked already excluded them) and
+	// give an overdue scheduled start its retry — the vanished host was
+	// exactly the "host must be a current participant" blocker, and the
+	// promoted successor satisfies it now.
+	m.broadcastToRoomPeersLocked(ps, map[string]interface{}{
+		"type": "participant-left",
+		"payload": map[string]interface{}{
+			"user_id":  staleHostID,
+			"username": staleHostName,
+		},
+	})
+	m.maybeRetryScheduledStartLocked(ps)
+	ps.mu.Unlock()
+	closeStaleConns(staleRoomConn, staleSyncConn)
+	slog.Info("v3: host grace expired, handed party to successor", "code", code, "stale_host", staleHostID)
 }
 
-// LeavePartyV3Room removes the participant entirely, mirroring V2's
-// LeaveParty semantics (host-leaving ends the party). Also removes any
+// closeStaleConns closes a reaped host's captured conns outside ps.mu
+// (Close is cheap but there's no reason to hold the party lock for it).
+// Nil-safe on both.
+func closeStaleConns(conns ...*SafeConn) {
+	for _, c := range conns {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
+}
+
+// LeavePartyV3Room removes the participant entirely. Also removes any
 // lingering sync-socket conn for that user, so one socket dying cleans
 // up the other.
+//
+// 2026-08 — host succession. A host's explicit leave used to end the
+// party for everyone (V2's LeaveParty semantics, carried into V3).
+// Now it hands the party to the most senior remaining participant
+// (promoteSuccessorLocked) and the movie keeps playing — the V3 anchor
+// is server-side, so nothing about playback even blinks. Ending the
+// party for everyone is a separate deliberate action (EndParty).
+// The historical end-it behavior remains only when nobody eligible is
+// left: a lone host, or a remainder of phone companions who have no
+// player to keep watching on.
 func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
@@ -550,9 +647,15 @@ func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 	}
 
 	if isHost {
-		ps.mu.Unlock()
-		slog.Info("v3: host left, ending party", "code", code)
-		return m.endPartyInternal(code, ps)
+		if m.promoteSuccessorLocked(ps, userID, username, "left") == nil {
+			ps.mu.Unlock()
+			slog.Info("v3: host left with no successor, ending party", "code", code)
+			return m.endPartyInternal(code, ps, 0)
+		}
+		// Promoted — fall through to the normal leaver bookkeeping below.
+		// Note the order the room pool sees: host-changed + a fresh
+		// party-state (inside promoteSuccessorLocked, sans the departed
+		// host — their entry was deleted above), then participant-left.
 	}
 
 	// Announce departure on the room socket.
@@ -564,7 +667,9 @@ func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 		},
 	})
 	// The leaver may have been the last not-ready blocker of an overdue
-	// scheduled start (2026-06 review).
+	// scheduled start (2026-06 review) — and since succession, a leaving
+	// HOST unblocks the same gate: HandleRequestPlay requires the host to
+	// be a current participant, which the promoted successor is.
 	m.maybeRetryScheduledStartLocked(ps)
 	ps.mu.Unlock()
 	return nil
@@ -675,6 +780,13 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 
 	if ps.HostUserID != userID {
 		return errUser("only the host can start playback")
+	}
+	// A party mid-teardown must not start playback: endPartyInternal has
+	// already run stopTickLoopLocked, and starting a fresh tick loop here
+	// would leak its goroutine forever once the party leaves the map
+	// (see PartyState.ending — the succession review's resurrection case).
+	if ps.ending {
+		return errUser("party has ended")
 	}
 	if ps.Running {
 		return nil // no-op, already running

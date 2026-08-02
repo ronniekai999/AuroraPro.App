@@ -226,6 +226,21 @@ type Participant struct {
 	// behavior is identical to before this field existed. It is NOT
 	// persisted to the DB — it's a live-presence attribute only.
 	Companion bool `json:"companion"`
+
+	// JoinedAt is the moment this participant's CURRENT tenure began.
+	// Slot-replacement reconnects keep it (the entry survives; the
+	// reconnect path only refreshes conn + LastSeen), but a fully
+	// cleaned-up leaver who rejoins mints a fresh one — a senior guest
+	// who blips completely can lose succession seniority to a junior
+	// one, which is accepted: tenure, not lifetime attendance, is the
+	// claim. Host succession orders candidates by it
+	// (promoteSuccessorLocked). Zero on entries created before the field
+	// existed (in-memory state only, so just parties live across a
+	// deploy); zero sorts earliest, which is the right answer — those
+	// entries are by definition the oldest. Not serialized: party-state
+	// participants are hand-built in BuildPartyStateMessage, which
+	// deliberately doesn't include it.
+	JoinedAt time.Time `json:"-"`
 }
 
 // ChatMessage represents a single chat message in the party history.
@@ -349,9 +364,12 @@ type PartyState struct {
 	// shared code → "we never see them on our end, show never starts."
 	//
 	// HostDisconnectedAt is set when the host's room WS closes
-	// unexpectedly (NOT on explicit leave-party — that's still
-	// immediate). If non-nil and the host's WS hasn't reconnected
-	// within HostGracePeriod, a background goroutine ends the party.
+	// unexpectedly (NOT on explicit leave-party — that path hands the
+	// party off, or ends it when nobody eligible remains, immediately).
+	// If non-nil and the host's WS hasn't reconnected within
+	// HostGracePeriod, a background goroutine hands the party to the
+	// most senior remaining participant (2026-08 host succession;
+	// reapExpiredHostGrace) — or ends it if no one eligible is left.
 	// If the host's room WS reconnects in that window, the field is
 	// cleared and the goroutine no-ops on next check.
 	//
@@ -400,6 +418,18 @@ type PartyState struct {
 	// per-party goroutine starts emitting tick broadcasts every 250ms
 	// over syncConns. tickCancel stops it cleanly on pause or party end.
 	tickCancel context.CancelFunc
+
+	// ending is set (under ps.mu) at the top of endPartyInternal and never
+	// cleared: teardown releases ps.mu midway (socket I/O + DB happen
+	// unlocked), so for a window the party is dying but still present in
+	// m.parties with its mutex takeable. 2026-08 host succession gave the
+	// paths that can win that window (grace reap, host-leave promotion,
+	// scheduled-start retry) NON-idempotent, liveness-creating actions —
+	// promoting a host on a dying party, or worst case starting a fresh
+	// tick loop after stopTickLoopLocked already ran, leaking the
+	// goroutine forever once the party leaves the map. Every such action
+	// now checks this flag first; a second endPartyInternal is a no-op.
+	ending bool
 
 	// ============================================================
 	// Host-controlled countdown (migration 019).
@@ -888,10 +918,18 @@ func (m *Manager) CreateParty(
 	}
 	settings.MaxParticipants = maxParticipants
 
-	// Pre-check (non-authoritative) to avoid unnecessary work
+	// Pre-check (non-authoritative) to avoid unnecessary work.
+	// HostUserID is mutable since host succession (promoteSuccessorLocked
+	// writes it under ps.mu), so the read needs ps.mu. Lock order here is
+	// m.mu → ps.mu; nothing in the package acquires m.mu while holding a
+	// ps.mu (endPartyInternal releases ps.mu before its map delete), so
+	// the one-way nesting cannot deadlock.
 	m.mu.RLock()
 	for _, ps := range m.parties {
-		if ps.HostUserID == hostUserID {
+		ps.mu.Lock()
+		isDup := ps.HostUserID == hostUserID
+		ps.mu.Unlock()
+		if isDup {
 			m.mu.RUnlock()
 			return nil, errUser("you already have an active party")
 		}
@@ -1007,9 +1045,14 @@ func (m *Manager) CreateParty(
 
 	// Authoritative check under write lock to prevent TOCTOU race:
 	// two concurrent CreateParty calls could both pass the RLock pre-check.
+	// Same m.mu → ps.mu one-way nesting as the pre-check above (HostUserID
+	// is mutable since host succession).
 	m.mu.Lock()
 	for _, existing := range m.parties {
-		if existing.HostUserID == hostUserID {
+		existing.mu.Lock()
+		isDup := existing.HostUserID == hostUserID
+		existing.mu.Unlock()
+		if isDup {
 			m.mu.Unlock()
 			// Best-effort cleanup: mark the party row inactive AND
 			// soft-delete the room we created for it. 2026-06 review
@@ -1271,7 +1314,7 @@ func (m *Manager) DeleteRoom(ctx context.Context, ownerUserID int64, roomID int6
 		// TouchRoom (not SoftDeleteRoom) when persistent. So we need to
 		// flip persistence to false before ending, OR do the delete
 		// explicitly after. Cleaner: end-then-delete explicitly.
-		if err := m.endPartyInternal(room.Code, ps); err != nil {
+		if err := m.endPartyInternal(room.Code, ps, 0); err != nil {
 			slog.Warn("delete room: end active party failed", "code", room.Code, "error", err)
 		}
 	}
@@ -1434,11 +1477,19 @@ func (m *Manager) fireScheduledStart(code string) {
 	// Dedup guard: skip if the party already started — a prior fire or a
 	// manual host play stamped StartedAt / set HasEverPlayed (both happen
 	// in HandleRequestPlay) — or another fire is in flight right now.
-	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring {
+	// Also skip a party mid-teardown (see PartyState.ending): starting
+	// playback on one would leak a tick goroutine past endPartyInternal's
+	// stopTickLoopLocked.
+	if ps.StartedAt != nil || ps.HasEverPlayed || ps.scheduleFiring || ps.ending {
 		ps.mu.Unlock()
 		return
 	}
 	ps.scheduleFiring = true
+	// Capture the host under the lock. HostUserID is mutable since host
+	// succession, and reading it after the unlock below raced promotion —
+	// caught by the succession review's -race repro (write in
+	// promoteSuccessorLocked vs the old unlocked read here).
+	firedHostID := ps.HostUserID
 	ps.mu.Unlock()
 
 	// Engage playback via the V3 intent path (audit H6): HandleRequestPlay
@@ -1453,11 +1504,21 @@ func (m *Manager) fireScheduledStart(code string) {
 	// later manual host play still works and nothing persists a bogus start
 	// time; maybeRetryScheduledStartLocked re-fires when the gate's inputs
 	// change (ready toggle, blocker leaves, host (re)joins).
-	playErr := m.HandleRequestPlay(code, ps.HostUserID)
+	playErr := m.HandleRequestPlay(code, firedHostID)
 
 	ps.mu.Lock()
 	ps.scheduleFiring = false
 	if playErr != nil {
+		// If a host handoff landed while this fire was in flight, the
+		// failure is stale ("not a participant"/"only the host" against
+		// the departed host) — and the promotion's own retry was
+		// suppressed by scheduleFiring above, so the retry event would
+		// otherwise be permanently consumed. Re-arm with the current
+		// host; the recursion is bounded because maybeRetry's pre-checks
+		// mirror the fire's failure modes.
+		if ps.HostUserID != firedHostID {
+			m.maybeRetryScheduledStartLocked(ps)
+		}
 		ps.mu.Unlock()
 		slog.Warn("scheduled-start play did not engage; party left unstarted (retried when the gate unblocks)", "code", code, "error", playErr)
 		return
@@ -1492,6 +1553,9 @@ func (m *Manager) fireScheduledStart(code string) {
 // dedups, so a spurious call is harmless. Caller MUST hold ps.mu; the
 // fire runs in a goroutine because it re-acquires the lock.
 func (m *Manager) maybeRetryScheduledStartLocked(ps *PartyState) {
+	if ps.ending {
+		return // dying party — must not spawn a fire (see PartyState.ending)
+	}
 	if ps.ScheduledStartAt == nil || ps.ScheduledStartAt.After(time.Now()) {
 		return // no schedule, or not due yet (the timer goroutine owns it)
 	}
@@ -1507,7 +1571,17 @@ func (m *Manager) maybeRetryScheduledStartLocked(ps *PartyState) {
 	go m.fireScheduledStart(ps.Code)
 }
 
-// EndParty ends a party. Only the host can end it via the REST endpoint.
+// EndParty ends a party via the REST endpoint. Allowed for the CURRENT
+// host — re-validated atomically inside endPartyInternal, because host
+// succession makes HostUserID mutable and a check here could be stale by
+// the time the teardown commits (an ex-host's in-flight end must not
+// kill a successor's party) — and, for a party running in a persistent
+// room, for the ROOM OWNER. The owner allowance exists because
+// succession created a state that couldn't exist before: the owner
+// hands off (or times out), a guest inherits, and the owner of the room
+// would otherwise have no way to end the session in their own room
+// short of DeleteRoom, which destroys the room and its stable code.
+// Ownership is immutable, so the owner path needs no atomic re-check.
 func (m *Manager) EndParty(code string, userID int64) error {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
@@ -1518,19 +1592,172 @@ func (m *Manager) EndParty(code string, userID int64) error {
 	}
 
 	ps.mu.Lock()
-	if ps.HostUserID != userID {
-		ps.mu.Unlock()
-		return errUser("only the host can end the party")
-	}
+	isCurrentHost := ps.HostUserID == userID
+	roomDBID := ps.roomDBID
+	isPersistent := ps.IsRoomPersistent
 	ps.mu.Unlock()
 
-	return m.endPartyInternal(code, ps)
+	if isCurrentHost {
+		return m.endPartyInternal(code, ps, userID)
+	}
+	if isPersistent && roomDBID > 0 && m.queries != nil {
+		room, err := m.queries.GetRoomByID(context.Background(), roomDBID)
+		if err == nil && room != nil && room.OwnerUserID == userID {
+			slog.Info("v3: room owner ended a session they no longer host", "code", code, "owner", userID)
+			return m.endPartyInternal(code, ps, 0)
+		}
+	}
+	return errUser("only the host can end the party")
+}
+
+// promoteSuccessorLocked transfers the host role to the most senior
+// eligible participant after the host departs, so an in-progress party
+// survives as long as at least one person is still actively in it.
+// Caller MUST hold ps.mu, and must have already handled (or be about to
+// remove) the departing host's own Participants entry — the departing
+// user is never a candidate.
+//
+// Eligible: any remaining participant except mobile companions — a
+// companion surface has no video player and no sync socket (see
+// Participant.Companion), so a party whose only remaining members are
+// companions cannot play anything and is not worth keeping alive.
+// Among the eligible, a participant with a live room conn outranks one
+// briefly between sockets (a joiner mid-handshake), then seniority
+// decides: earliest JoinedAt, tiebroken by lowest UserID. Deterministic,
+// and matches the social expectation that the longest-present friend
+// inherits the remote.
+//
+// On success: HostUserID and every per-participant IsHost flag are
+// updated, any pending host-disconnect grace is cleared (it described
+// the OLD host; the goroutine's nil check makes it a no-op), the
+// revision is bumped, and two messages go out on the room pool — a
+// "host-changed" event (drives the "X is now the host" toast) followed
+// by a full party-state snapshot, whose revision guard makes it
+// idempotent and whose participant list carries the flipped is_host
+// flags so no client ever computes a hostless interval. The handoff is
+// persisted best-effort, like every other in-party DB write.
+//
+// The V3 anchor is deliberately NOT touched: playback truth lives
+// server-side (Running + AnchorAbsMs/AnchorServerAt), so the movie keeps
+// playing through the handoff without a hiccup.
+//
+// Returns nil when no eligible successor exists — the caller falls back
+// to ending the party, exactly the pre-succession behavior.
+//
+// departingUsername is passed in rather than looked up because both call
+// sites remove the departing host's Participants entry before promoting
+// (the explicit-leave path deletes every leaver up front; the grace path
+// clears the reserved slot) — by the time this runs, the map no longer
+// knows the name.
+func (m *Manager) promoteSuccessorLocked(ps *PartyState, departingUserID int64, departingUsername, reason string) *Participant {
+	// A dying party must not sprout a new host (see PartyState.ending):
+	// returning nil sends every caller down its historical end-the-party
+	// fallback, where endPartyInternal no-ops on the ending flag.
+	if ps.ending {
+		return nil
+	}
+	var successor *Participant
+	better := func(cand, cur *Participant) bool {
+		if cur == nil {
+			return true
+		}
+		candConn := ps.roomConns[cand.UserID] != nil
+		curConn := ps.roomConns[cur.UserID] != nil
+		if candConn != curConn {
+			return candConn
+		}
+		if !cand.JoinedAt.Equal(cur.JoinedAt) {
+			return cand.JoinedAt.Before(cur.JoinedAt)
+		}
+		return cand.UserID < cur.UserID
+	}
+	for uid, p := range ps.Participants {
+		if uid == departingUserID || p == nil || p.Companion {
+			continue
+		}
+		if better(p, successor) {
+			successor = p
+		}
+	}
+	if successor == nil {
+		return nil
+	}
+
+	previousHostID := ps.HostUserID
+	ps.HostUserID = successor.UserID
+	for uid, p := range ps.Participants {
+		if p == nil {
+			continue
+		}
+		p.IsHost = uid == successor.UserID
+	}
+	ps.HostDisconnectedAt = nil
+	m.bumpRevLocked(ps)
+
+	m.broadcastToPartyLocked(ps, map[string]interface{}{
+		"type": "host-changed",
+		"payload": map[string]interface{}{
+			"new_host_user_id":       successor.UserID,
+			"new_host_username":      successor.Username,
+			"previous_host_user_id":  previousHostID,
+			"previous_host_username": departingUsername,
+			"reason":                 reason,
+		},
+	})
+	m.broadcastToPartyLocked(ps, m.BuildPartyStateMessage(ps))
+
+	// Persist off the lock: this runs while the caller holds ps.mu on the
+	// hot leave path, and a slow Postgres must not stall ticks/joins/chat
+	// (the async style ChangeMedia/MarkPartyStarted use, vs the in-line
+	// UpdateParticipantLeft pattern). Bounded so a wedged pool can't
+	// accumulate goroutines.
+	if ps.dbID > 0 && m.queries != nil {
+		dbID, newHost, partyCode := ps.dbID, successor.UserID, ps.Code
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := m.queries.UpdatePartyHost(ctx, dbID, newHost); err != nil {
+				slog.Warn("v3: persist host handoff failed", "code", partyCode, "error", err)
+			}
+		}()
+	}
+
+	slog.Info("v3: host handoff",
+		"code", ps.Code,
+		"previous_host", previousHostID,
+		"new_host", successor.UserID,
+		"reason", reason,
+	)
+	return successor
 }
 
 // endPartyInternal broadcasts party-ended, cleans up DB and memory.
 // ps.mu must NOT be held when calling this.
-func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
+// endPartyInternal tears the party down. expectedHost is an atomicity
+// hook for the one authorization-gated caller (EndParty): 0 means end
+// unconditionally; non-zero means "end only if this user is STILL the
+// host", re-validated under the same ps.mu acquisition that commits the
+// teardown. Since host succession made HostUserID mutable, a check done
+// in the caller's earlier lock hold can be stale by the time this runs —
+// an ex-host's in-flight POST /end must not end the party a successor
+// just inherited.
+func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int64) error {
 	ps.mu.Lock()
+
+	// Idempotence + resurrection guard (2026-08, host succession review).
+	// Teardown below releases ps.mu for the socket/DB work, so a second
+	// ender (grace reap racing an explicit end, a stale-cleanup sweep)
+	// can acquire the mutex mid-teardown. Everything liveness-creating
+	// checks ps.ending; a second end is a clean no-op.
+	if ps.ending {
+		ps.mu.Unlock()
+		return nil
+	}
+	if expectedHost != 0 && ps.HostUserID != expectedHost {
+		ps.mu.Unlock()
+		return errUser("only the host can end the party")
+	}
+	ps.ending = true
 
 	// 2026-05-26 — diagnostic snapshot for "why did my party end?" reports.
 	// Without this, journalctl shows only "ending stale watch party" or
@@ -1559,6 +1786,10 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState) error {
 	reactionsForReel := make([]ReactionRecord, len(ps.Reactions))
 	copy(reactionsForReel, ps.Reactions)
 	mediaItemIDForReel := ps.MediaItemID
+	// Since host succession this is the FINAL host, not necessarily the
+	// creator — deliberate: the last steward gets the reel-ready bell. A
+	// creator who handed off can still fetch the reel (party membership,
+	// not hostship, gates access).
 	hostForReel := ps.HostUserID
 	mediaTitleForReel := ps.MediaTitle
 
@@ -2736,7 +2967,7 @@ func (m *Manager) cleanupOnce() {
 		ps, exists := m.parties[code]
 		m.mu.RUnlock()
 		if exists {
-			m.endPartyInternal(code, ps)
+			m.endPartyInternal(code, ps, 0)
 		}
 	}
 }
@@ -2971,7 +3202,7 @@ func (m *Manager) Shutdown() {
 		ps, exists := m.parties[code]
 		m.mu.RUnlock()
 		if exists {
-			_ = m.endPartyInternal(code, ps)
+			_ = m.endPartyInternal(code, ps, 0)
 		}
 	}
 

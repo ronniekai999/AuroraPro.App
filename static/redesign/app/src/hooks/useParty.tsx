@@ -34,8 +34,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   buildWsUrl,
+  participantFromJoinEvent,
   type ChatMessageEvent,
   type CodeInfo,
+  type HostChangedEvent,
   type InboundRoomMessage,
   type InboundSyncMessage,
   type OutboundRoomMessage,
@@ -157,6 +159,19 @@ export interface UseParty {
   // The consumer should tear down their current player and re-init
   // with the new media. Returns an unsubscribe function.
   onMediaChange: (cb: (payload: { media_item_id: number; episode_id?: number }) => void) => () => void
+  // 2026-08 — host succession. Fires when the server hands the party to
+  // a new host (previous host left or timed out). State (hostUserId +
+  // participants' is_host) is already patched by the time the callback
+  // runs; the callback exists for App-level UX (the "X is now the host"
+  // toast). Returns an unsubscribe function.
+  onHostChange: (cb: (payload: HostChangedEvent) => void) => () => void
+  // 2026-08 — host succession made "leave" and "end" different actions:
+  // a host's leave() now hands the party off server-side. end() is the
+  // deliberate end-for-everyone (POST /api/parties/{code}/end, host
+  // only). On success the local session is torn down without waiting
+  // for the party-ended broadcast; on failure state.error is set and
+  // the party stays live.
+  end: () => Promise<boolean>
   // Preflight + join. Returns { ok } on success and { ok: false,
   // error } on failure. Audit M1 (Phase 4.5) — callers need the
   // synchronous error string because `state.error` is set via React
@@ -277,6 +292,8 @@ export function useParty(currentUserId?: number): UseParty {
   // glue to swap playerTarget when the host advances to a new
   // episode mid-party.
   const mediaChangeSubsRef = useRef<Set<(p: { media_item_id: number; episode_id?: number }) => void>>(new Set())
+  // 2026-08 — host-succession subscribers (the App-level toast).
+  const hostChangeSubsRef = useRef<Set<(p: HostChangedEvent) => void>>(new Set())
   // 2026-05-25 — room-socket keepalive + reconnect machinery.
   // heartbeatTimerRef holds the setInterval handle that fires a
   // `{type: "heartbeat"}` data frame every ROOM_HEARTBEAT_INTERVAL_MS
@@ -388,10 +405,11 @@ export function useParty(currentUserId?: number): UseParty {
     // we wipe React state, so the join-modal's "Recently in" pill has
     // something to surface for accidental-leave recovery. Scoped to
     // currentUserId so logging out + back in as a different user
-    // doesn't leak the prior user's history. Quick-parties die
-    // server-side immediately on host-leave; the rejoin attempt will
-    // 404 and the pill self-clears. For guests + persistent rooms,
-    // the rejoin actually works.
+    // doesn't leak the prior user's history. Since host succession
+    // (2026-08), a host's leave hands the party off rather than ending
+    // it, so the rejoin genuinely works whenever anyone stayed behind
+    // (the ex-host comes back as a guest); if the party ended for lack
+    // of a successor, the rejoin 404s and the pill self-clears.
     const userId = currentUserIdRef.current
     if (userId && state.code) {
       cacheLastParty({
@@ -540,20 +558,29 @@ export function useParty(currentUserId?: number): UseParty {
             return { participants: prev.participants.filter(u => u.user_id !== p.user_id) }
           }
           if (prev.participants.some(u => u.user_id === p.user_id)) return {}
-          return {
-            participants: [
-              ...prev.participants,
-              {
-                user_id: p.user_id,
-                username: p.username,
-                is_host: !!p.is_host,
-                is_buffering: false,
-                last_seen: new Date().toISOString(),
-                ready: false,
-              },
-            ],
-          }
+          // participantFromJoinEvent carries EVERY event field — the
+          // inline object it replaced dropped `companion`, which made
+          // PartyPanel's hand-off dialog count phone companions as
+          // eligible hosts (see the helper's comment in lib/party.ts).
+          return { participants: [...prev.participants, participantFromJoinEvent(p)] }
         })
+        break
+      }
+      case 'host-changed': {
+        // 2026-08 — host succession. Patch instantly so the crown moves
+        // even if the follow-up party-state snapshot is lost to a blip;
+        // the snapshot (revision-guarded) then confirms the same facts.
+        const p = msg.payload
+        setStatePatch(prev => ({
+          hostUserId: p.new_host_user_id,
+          participants: prev.participants.map(u => ({
+            ...u,
+            is_host: u.user_id === p.new_host_user_id,
+          })),
+        }))
+        for (const cb of hostChangeSubsRef.current) {
+          try { cb(p) } catch { /* defensive */ }
+        }
         break
       }
       case 'chat-message': {
@@ -1194,6 +1221,49 @@ export function useParty(currentUserId?: number): UseParty {
     return () => { mediaChangeSubsRef.current.delete(cb) }
   }, [])
 
+  const onHostChange = useCallback((cb: (p: HostChangedEvent) => void) => {
+    hostChangeSubsRef.current.add(cb)
+    return () => { hostChangeSubsRef.current.delete(cb) }
+  }, [])
+
+  // 2026-08 — the deliberate end-for-everyone. Distinct from leave():
+  // since host succession, a host's leave hands the party off; ending it
+  // is this explicit host-only action. POST first, tear down only on
+  // success — a failed end must leave the session intact (the party is
+  // still live for everyone, including us).
+  const end = useCallback(async (): Promise<boolean> => {
+    const code = activeCodeRef.current
+    if (!code) return false
+    // Flag BEFORE the await: the server broadcasts party-ended and closes
+    // our sockets before the HTTP 200 arrives, and the room onclose must
+    // not arm a reconnect against the party we are ending. Restored on
+    // failure so a later real drop still reconnects.
+    userInitiatedLeaveRef.current = true
+    try {
+      await apiFetch(`/api/parties/${encodeURIComponent(code)}/end`, { method: 'POST' })
+    } catch (err) {
+      userInitiatedLeaveRef.current = false
+      setStatePatch({
+        error: err instanceof Error ? err.message : 'Failed to end the party.',
+      })
+      return false
+    }
+    // Local teardown mirrors leave()'s, minus the leave-party frame (the
+    // server already ended the party) and minus the last-party cache —
+    // an ended party's code is dead, so "Recently in" must not offer it.
+    activeCodeRef.current = null
+    reconnectAttemptRef.current = 0
+    syncReconnectAttemptRef.current = 0
+    closeSockets()
+    setState(INITIAL_STATE)
+    tickRef.current = null
+    helloAbsMsRef.current = 0
+    // Same Audit H1 (P4) guard leave() carries: no stale intents may
+    // replay against a future party's sync socket.
+    pendingSyncIntentRef.current = {}
+    return true
+  }, [closeSockets, setStatePatch])
+
   return {
     state,
     voice: voiceState,
@@ -1213,5 +1283,7 @@ export function useParty(currentUserId?: number): UseParty {
     clockOffsetRef,
     rttRef,
     onMediaChange,
+    onHostChange,
+    end,
   }
 }
