@@ -36,6 +36,7 @@ package streaming
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -359,7 +360,13 @@ func runProbeFFmpegDiag(args []string) (string, error) {
 	// no pipe and so could not stall this way.
 	cmd.WaitDelay = probeWaitDelay
 	err := cmd.Run()
-	if err == nil {
+	// WaitDelay's own failure mode: when the process exits SUCCESSFULLY but
+	// leaves a pipe open past the delay, Wait reports ErrWaitDelay instead of
+	// nil. Treating that as a failed probe would disable hardware acceleration
+	// on a box whose encoder actually works — and log a "test encode failed"
+	// warning quoting stderr from an encode that succeeded. The probe's
+	// verdict comes from the exit status, not from how tidily it closed.
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
 		return "", nil
 	}
 	if ctx.Err() != nil {

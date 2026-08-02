@@ -38,6 +38,23 @@ const (
 	// this is a diagnostic, and a diagnostic must not become a way to grow
 	// server memory.
 	staleKeepaliveMaxTracked = 512
+
+	// staleKeepaliveWarnBudget bounds how many warnings one window can
+	// produce, whatever the traffic.
+	//
+	// The map cap alone does not bound the LOG: entries expire, freeing slots
+	// for the next batch of invented IDs, so a client looping over fresh
+	// session IDs could sustain hundreds of warnings an hour. This endpoint
+	// has no rate limiter (those exist only on the auth routes), and since
+	// #415 warnings land in a scarce 2000-entry ring that the admin log
+	// filter reads — so flooding it evicts the real warnings someone is
+	// trying to find.
+	//
+	// A handful is all the diagnostic needs. Knowing two clients are stuck is
+	// as actionable as knowing five hundred are, and legitimate traffic never
+	// approaches this: it takes one dead session per viewer who was streaming
+	// when the server restarted.
+	staleKeepaliveWarnBudget = 10
 )
 
 type staleKeepaliveEntry struct {
@@ -52,6 +69,11 @@ type staleKeepaliveEntry struct {
 type staleKeepaliveWatcher struct {
 	mu      sync.Mutex
 	entries map[string]*staleKeepaliveEntry
+
+	// Warnings emitted in the current budget window, and when that window
+	// started. Refilled lazily on the next miss after it lapses.
+	warnsThisWindow int
+	windowStart     time.Time
 }
 
 // miss records a 404 for sessionID and reports whether THIS ping is the one to
@@ -83,11 +105,25 @@ func (w *staleKeepaliveWatcher) miss(sessionID string, now time.Time) (misses in
 
 	e.misses++
 	e.seen = now
-	if e.misses >= staleKeepaliveThreshold && !e.warned {
-		e.warned = true
-		return e.misses, true
+	if e.misses < staleKeepaliveThreshold || e.warned {
+		return e.misses, false
 	}
-	return e.misses, false
+
+	// Latch regardless of whether the budget allows the line. A session that
+	// crossed the threshold has been counted; leaving it unlatched would make
+	// it try again on every subsequent ping and spend the next window's budget
+	// on a client already known about.
+	e.warned = true
+
+	if now.Sub(w.windowStart) > staleKeepaliveTTL {
+		w.windowStart = now
+		w.warnsThisWindow = 0
+	}
+	if w.warnsThisWindow >= staleKeepaliveWarnBudget {
+		return e.misses, false
+	}
+	w.warnsThisWindow++
+	return e.misses, true
 }
 
 // alive drops a session ID that answered successfully, so a run of misses
