@@ -571,9 +571,58 @@ for tool in curl tar git python3; do
         pkg_install "$tool"
     fi
 done
-if ! command -v node &>/dev/null; then
-    info "Installing nodejs..."
+# Node. The frontend's dependency tree needs Node >= 22 (jsdom 30, undici 8,
+# whatwg-url 17, @testing-library/jest-dom 7 all declare it), and distro
+# packages lag badly — Ubuntu 24.04 ships 18.x, and the production box was
+# running v20.20.2, which emitted 90 EBADENGINE warnings on every single
+# deploy. The production BUILD works anyway (vite/tsc are fine on 20), so this
+# is not urgent; it is unsupported-configuration drift that gets worse over
+# time and buries real npm output in noise.
+#
+# NODE_MIN is the floor the package.json engines actually ask for. On apt we
+# add NodeSource, which is the vendor-supported way to get a current LTS;
+# elsewhere we fall back to the distro package and warn if it's too old rather
+# than fighting each distro's packaging.
+NODE_MIN=22
+
+node_major() {
+    command -v node &>/dev/null || { echo 0; return; }
+    node --version 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/' || echo 0
+}
+
+install_node() {
+    if [ "$PKG_MGR" = "apt" ]; then
+        info "Installing Node.js ${NODE_MIN}.x from NodeSource..."
+        # NodeSource's setup script adds the apt repo and its signing key.
+        if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN}.x" -o /tmp/nodesource_setup.sh; then
+            if bash /tmp/nodesource_setup.sh >/dev/null 2>&1; then
+                APT_UPDATED=false   # NodeSource changed the sources list
+                pkg_install nodejs  # NodeSource's nodejs bundles npm
+                rm -f /tmp/nodesource_setup.sh
+                return
+            fi
+        fi
+        rm -f /tmp/nodesource_setup.sh
+        warn "NodeSource setup failed — falling back to the distro nodejs package"
+    fi
     pkg_install nodejs
+    command -v npm &>/dev/null || pkg_install npm
+}
+
+CURRENT_NODE_MAJOR="$(node_major)"
+if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
+    if [ "${CURRENT_NODE_MAJOR:-0}" -eq 0 ]; then
+        info "Node.js not found — installing..."
+    else
+        info "Node.js v${CURRENT_NODE_MAJOR} is older than the frontend's requirement (>= ${NODE_MIN}) — upgrading..."
+    fi
+    install_node
+    CURRENT_NODE_MAJOR="$(node_major)"
+    if [ "${CURRENT_NODE_MAJOR:-0}" -lt "$NODE_MIN" ]; then
+        # Non-fatal: the production build genuinely works on older Node, so
+        # refusing to install over this would be worse than the warning.
+        warn "Node.js is v${CURRENT_NODE_MAJOR}, below the frontend's requirement (>= ${NODE_MIN}). The build will still work, but npm will warn on every deploy. Upgrade manually to silence it."
+    fi
 fi
 if ! command -v npm &>/dev/null; then
     info "Installing npm..."
