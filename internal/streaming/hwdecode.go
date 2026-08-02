@@ -332,9 +332,114 @@ func ProbeHWDecode(info *HWAccelInfo, workDir string) {
 // runProbeFFmpeg runs one bounded probe invocation; any non-zero exit or
 // timeout is "capability absent".
 func runProbeFFmpeg(args []string) bool {
+	_, err := runProbeFFmpegDiag(args)
+	return err == nil
+}
+
+// runProbeFFmpegDiag is runProbeFFmpeg plus the reason: FFmpeg's own stderr,
+// reduced to the few trailing lines that name the cause.
+//
+// Decode probes stay on runProbeFFmpeg — there are a dozen of them, most
+// legitimately fail on most hardware, and their absence is a tier the code
+// already degrades through. This exists for the one probe whose failure an
+// operator has to act on (encoder detection, see tryProbe), where the only
+// other trace is "no hardware acceleration detected" and that names nothing
+// to fix.
+func runProbeFFmpegDiag(args []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	return cmd.Run() == nil
+	stderr := &tailBuffer{limit: probeStderrLimit}
+	cmd.Stdout, cmd.Stderr = nil, stderr
+	// Attaching a writer to Stderr changes Wait's contract: os/exec now copies
+	// through a pipe and Wait blocks until that pipe closes, which a process
+	// holding the descriptor open can stretch past the context deadline. These
+	// probes run in the startup path, so a hang here is a server that never
+	// finishes booting. WaitDelay bounds the wait; the previous nil Stderr had
+	// no pipe and so could not stall this way.
+	cmd.WaitDelay = probeWaitDelay
+	err := cmd.Run()
+	if err == nil {
+		return "", nil
+	}
+	if ctx.Err() != nil {
+		// A killed process reports "signal: killed", which reads like a
+		// crash. Say which of the two it was.
+		err = fmt.Errorf("%w (probe exceeded %s)", err, hwProbeTimeout)
+	}
+	return probeErrorSummary(stderr.String()), err
+}
+
+// probeWaitDelay bounds how long Wait keeps draining stderr after the process
+// is done or the context has fired. Generous for a pipe that should already be
+// closed, short enough that startup cannot stall on it.
+const probeWaitDelay = 2 * time.Second
+
+// probeStderrLimit caps how much of a probe's stderr we hold. FFmpeg's banner
+// alone is ~2 KB, and a probe that fails by looping on a driver error can
+// print without bound inside the timeout — so we keep a window, not a stream.
+const probeStderrLimit = 8 << 10
+
+// probeSummaryLines is how many meaningful trailing stderr lines reach the
+// log. FFmpeg prints the real error last; past a few lines the entry stops
+// being readable, which defeats the point.
+const probeSummaryLines = 4
+
+// tailBuffer keeps only the last `limit` bytes written to it. The useful end
+// of FFmpeg's stderr is the end.
+type tailBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	// Report the full length regardless of how much we keep — a short write
+	// would be an io.ErrShortWrite to the caller, i.e. os/exec would fail
+	// the command we are only trying to observe.
+	n := len(p)
+	if t.limit > 0 {
+		if len(p) > t.limit {
+			p = p[len(p)-t.limit:]
+		}
+		t.buf = append(t.buf, p...)
+		if len(t.buf) > t.limit {
+			t.buf = t.buf[len(t.buf)-t.limit:]
+		}
+		return n, nil
+	}
+	t.buf = append(t.buf, p...)
+	return n, nil
+}
+
+func (t *tailBuffer) String() string { return string(t.buf) }
+
+// probeErrorSummary reduces a probe's stderr to the lines that say why it
+// failed. FFmpeg's fixed preamble (version, build flags, library versions) is
+// most of the output and never the reason.
+func probeErrorSummary(stderr string) string {
+	var keep []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || isFFmpegBannerLine(line) {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	if len(keep) > probeSummaryLines {
+		keep = keep[len(keep)-probeSummaryLines:]
+	}
+	return strings.Join(keep, " | ")
+}
+
+// isFFmpegBannerLine matches the version/build preamble FFmpeg writes to
+// stderr before doing any work. Dropping it is what lets the summary fit on
+// one log line.
+func isFFmpegBannerLine(line string) bool {
+	for _, p := range []string{"ffmpeg version", "built with", "configuration:", "Copyright (c)"} {
+		if strings.HasPrefix(line, p) {
+			return true
+		}
+	}
+	// Library versions: "libavutil      58. 29.100 / 58. 29.100".
+	return strings.HasPrefix(line, "lib") && strings.Contains(line, " / ")
 }

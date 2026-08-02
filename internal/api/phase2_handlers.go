@@ -636,6 +636,10 @@ type StreamHandler struct {
 	hub        *ws.Hub
 	activity   *ActivityLogger
 	authSvc    *auth.Service // for minting cast-scoped tokens
+
+	// Notices clients that keep pinging sessions the server has dropped.
+	// Zero value is ready to use — see keepalive_watch.go.
+	staleKeepalive staleKeepaliveWatcher
 }
 
 func NewStreamHandler(queries *db.Queries, transcode *streaming.TranscodeManager, directPlay *streaming.DirectPlayRegistry, subCache string, hub *ws.Hub, activity *ActivityLogger, authSvc *auth.Service) *StreamHandler {
@@ -1638,17 +1642,44 @@ func (h *StreamHandler) KeepAlive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := chi.URLParam(r, "sessionID")
-	// Uniform 404 (review finding S3) — see requireSessionAccess.
+	// Uniform 404 (review finding S3) — see requireSessionAccess. The two
+	// causes stay separate on this side of the wire: only a session the
+	// server genuinely does not have says anything about a stuck client.
 	owner := h.transcode.GetSessionOwner(sessionID)
-	if owner < 0 || (owner != claims.UserID && claims.Role != "admin") {
+	if owner < 0 {
+		h.noteStaleKeepalive(sessionID, claims.UserID)
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if owner != claims.UserID && claims.Role != "admin" {
+		// The session exists, it just isn't theirs. Same 404 on the wire,
+		// but not a stale client — it must not consume the watcher's budget
+		// or raise a warning that names the wrong problem.
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	if !h.transcode.KeepAlive(sessionID) {
+		// Raced: reaped between the two lookups. Same signal as above.
+		h.noteStaleKeepalive(sessionID, claims.UserID)
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	h.staleKeepalive.alive(sessionID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// noteStaleKeepalive records a keepalive for a session the server does not
+// have, and warns the first time one client's pings cross the threshold.
+func (h *StreamHandler) noteStaleKeepalive(sessionID string, userID int64) {
+	misses, warn := h.staleKeepalive.miss(sessionID, time.Now())
+	if !warn {
+		return
+	}
+	slog.Warn("client keeps pinging a stream session that no longer exists — "+
+		"its player is probably stuck on a frozen frame and needs a reload",
+		"session_id", sessionID,
+		"user_id", userID,
+		"consecutive_404s", misses)
 }
 
 // HWAccelStatus returns detected hardware acceleration info.
