@@ -1969,11 +1969,11 @@ html[data-glow="subtle"] .stage-dim-veil {
 
 /* ── Watch-party surfaces, anchored to the theater box ─────────────────
    IMPLEMENTATION_PLAN §D5 called for this and Phase 7b's first pass missed it:
-   these four are viewport-anchored, which was invisible while the player filled
+   these were viewport-anchored, which was invisible while the player filled
    the screen behind an opaque backdrop and is not any more. With the theater
-   inset 90px/58px, MiniDock at `top-4 left-4` landed entirely OUTSIDE the
-   picture — floating on the dimmed, desaturated app — and the party rail
-   straddled the boundary, ~250px over video and ~90px over the app.
+   inset 90px/58px, the party rail straddled the boundary, ~250px over video
+   and ~90px over the app, and the reactions overlay floated emoji across the
+   dimmed app.
 
    Gated on `html[data-player-surface="theater"]`, which App stamps from the
    surface the player reports: fullscreen and minimized must keep their viewport
@@ -1983,11 +1983,15 @@ html[data-glow="subtle"] .stage-dim-veil {
 
    These beat the call sites' `top-4`/`right-3` utilities on specificity
    ((0,2,1) vs (0,1,0)), which is the intent: the attribute is only present while
-   the theater is up. */
-html[data-player-surface="theater"] .stage-party-dock {
-  top: calc(var(--theater-inset-y) + 16px);
-  left: calc(var(--theater-inset-x) + 16px);
-}
+   the theater is up.
+
+   Deliberately NO rule for the minimized-party restore chip (PartyPanel's
+   "Party" button, formerly `.stage-party-dock`). Phase 7b re-anchored it into
+   the box's top-left — directly onto the player topbar's title block, which
+   occupies that same corner of the theater card. The chip now keeps its
+   viewport `top-4 left-4` in every surface, mirroring the VoicePill's
+   `top-4 right-4` on the opposite side of the screen (the pill was never
+   box-anchored either). */
 html[data-player-surface="theater"] .stage-party-rail {
   top: calc(var(--theater-inset-y) + 12px);
   right: calc(var(--theater-inset-x) + 12px);

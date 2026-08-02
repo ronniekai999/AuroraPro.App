@@ -143,24 +143,26 @@ export function PartyPanel({
           onToggleVoiceMute={onToggleVoiceMute}
         />
         {/* Restore-to-rail affordance. Only when the parent supports
-            toggling; otherwise minimal is a locked presentation. Sits
-            top-left, clear of the top-right VoicePill. */}
+            toggling; otherwise minimal is a locked presentation. Pinned to
+            the viewport's top-left in EVERY surface, mirroring the VoicePill
+            pinned at the viewport's top-right — deliberately NOT re-anchored
+            into the theater box (the box's top-left corner is the player
+            topbar's title block, which the chip used to cover). The glyph is
+            a chat bubble: the old corners-out glyph read as "fullscreen"
+            while the player's real fullscreen button was on screen. */}
         {onToggleVariant && (
           <button
             type="button"
             onClick={onToggleVariant}
-            // .stage-party-dock re-anchors this to the theater box while the
-            // theater is up (see index.css); the `top-4 left-4` below stays as
-            // the fullscreen/minimized position.
-            className="stage-party-dock aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
+            className="aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
                        bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.16)]
                        text-white/70 hover:text-white hover:border-[rgba(220,200,255,0.3)]
                        text-xs font-medium transition-colors"
-            title="Expand the watch-party rail"
-            aria-label="Expand the watch-party rail"
+            title="Open the party chat"
+            aria-label="Open the party chat"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M4 4h7v2H6v5H4V4zm9 0h7v7h-2V6h-5V4zM4 13h2v5h5v2H4v-7zm14 0h2v7h-7v-2h5v-5z" />
+              <path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z" />
             </svg>
             Party
             {state.code && state.reconnecting && (
@@ -266,16 +268,19 @@ export function PartyPanel({
           )}
           {/* 2026-05-30 — dock → minimal toggle. Collapses the rail into
               the cinematic ticker/pill/dock face. Hidden when the parent
-              doesn't support toggling (rail-only callers). */}
+              doesn't support toggling (rail-only callers). The glyph is a
+              window-chrome minus: the original corners-out glyph read as
+              "fullscreen" (the player's real fullscreen button is on screen
+              at the same time), so users avoided it. */}
           {onToggleVariant && (
             <button
               onClick={onToggleVariant}
               className="w-8 h-8 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-white/60 hover:text-white flex items-center justify-center transition-colors"
-              title="Switch to minimal (cinematic) mode"
-              aria-label="Switch to minimal cinematic mode"
+              title="Minimize the party chat"
+              aria-label="Minimize the party chat"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M4 4h7v2H6v5H4V4zm9 0h7v7h-2V6h-5V4zM4 13h2v5h5v2H4v-7zm14 0h2v7h-7v-2h5v-5z" />
+                <path d="M5 11h14v2H5z" />
               </svg>
             </button>
           )}
