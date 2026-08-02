@@ -2184,12 +2184,73 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // setInterval re-creates per session because sessionIdRef is a ref
   // (no re-render when it changes); the effect re-runs only on
   // target change, which is the right granularity.
+  //
+  // A 404 means the session is gone server-side — almost always because a
+  // deploy restarted the service (StopAllSessions) while this player sat
+  // paused. Before 2026-08 the ping result was discarded, so the client kept
+  // pinging a corpse forever (370 pings / 62 minutes in one production case)
+  // and the user saw a frozen frame with no error and no way back except a
+  // reload that lost their position. Now: stop the ticker and rebuild the
+  // session at the current position, reusing the same machinery the
+  // forward-seek path uses.
+  //
+  // The recovery inputs (party, onSeekRebuild) are read through a ref rather
+  // than listed as dependencies. `party` is rebuilt as a FRESH OBJECT LITERAL
+  // on every App render (see where VideoPlayer is mounted in App.tsx), so
+  // depending on it would clear and re-arm this interval on every render —
+  // and during party sync App re-renders faster than 10s, which would mean
+  // the ping never fires at all and the server GCs the session. That is the
+  // exact failure this effect exists to prevent.
+  const keepaliveRecoveryRef = useRef({ party, onSeekRebuild })
+  keepaliveRecoveryRef.current = { party, onSeekRebuild }
+
   useEffect(() => {
     if (!target) return
+    let stopped = false
+    let recovering = false
+
     const ping = () => {
       const sid = sessionIdRef.current
-      if (sid) void keepalive(sid)
+      if (!sid || stopped) return
+      void keepalive(sid).then((result) => {
+        if (result !== 'gone' || stopped) return
+        // Latch immediately: the visibilitychange handler can fire a second
+        // ping while this promise is settling, and two concurrent rebuilds
+        // would race the play effect's teardown.
+        if (recovering) return
+        recovering = true
+        stopped = true
+        window.clearInterval(id)
+
+        const vid = videoRef.current
+        // Absolute media position — currentTime is relative to the session's
+        // start_sec anchor, and the rebuild wants absolute seconds (same
+        // convention as onSeek / the forward-seek rebuild above).
+        const absSec = vid
+          ? Math.max(0, vid.currentTime + (startSecRef.current ?? 0))
+          : Math.max(0, startSecRef.current ?? 0)
+
+        // The session is already dead, so nothing here can make playback
+        // worse — but a host rebuilding mid-party would drift the guests
+        // (same reasoning as the seek-rebuild party gate). Guests and hosts
+        // watching the party's media get a message instead of a silent
+        // freeze; the non-party case self-heals.
+        const { party: livePartyState, onSeekRebuild: rebuild } = keepaliveRecoveryRef.current
+        const isPartySyncingThisMedia = !!livePartyState
+          && livePartyState.partyMediaItemId !== undefined
+          && target?.mediaItemId === livePartyState.partyMediaItemId
+
+        if (rebuild && !isPartySyncingThisMedia) {
+          setStatus('Reconnecting…')
+          rebuild(absSec)
+        } else {
+          // No rebuild available: surface it rather than leaving a dead
+          // player on screen. This is the branch that used to be silent.
+          setStatus('Playback session ended — reload to resume')
+        }
+      })
     }
+
     const id = window.setInterval(ping, 10000)
     // Background tabs and locked phones throttle or suspend setInterval, so
     // the 10s ping can stall long enough for the server to GC the session
@@ -2201,9 +2262,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {
+      stopped = true
       window.clearInterval(id)
       document.removeEventListener('visibilitychange', onVisible)
     }
+    // Deps stay at [target] deliberately — see the ref note above. Adding
+    // `party` or `onSeekRebuild` here re-arms the interval on every render.
   }, [target])
 
   // M10 Phase 4 — party sync. Two responsibilities:
