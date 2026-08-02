@@ -195,9 +195,12 @@ if [ "$VERIFY_RC" -eq 0 ]; then
         echo
         echo "To silence the warning and record the intent, mark the key trusted"
         echo "(no secret key required — this is why 'gpg --lsign-key' fails on a"
-        echo "server, it needs a signing key of your own):"
-        echo "    gpg --list-keys --with-colons ${KEY:-<key>} | awk -F: '/^fpr/{print \$10; exit}'"
-        echo "    echo '<that-fingerprint>:6:' | gpg --import-ownertrust"
+        echo "server, it needs a signing key of your own). One command, nothing"
+        echo "to substitute — the fingerprint is piped straight through:"
+        echo
+        echo "    gpg --list-keys --with-colons ${KEY:-<key-id>} \\"
+        echo "      | awk -F: '/^fpr/{print \$10\":6:\"; exit}' \\"
+        echo "      | gpg --import-ownertrust"
     fi
     exit 0
 fi
