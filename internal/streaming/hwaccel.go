@@ -100,6 +100,20 @@ func tryProbe(p hwProbe) (HWAccelInfo, bool) {
 		slog.Debug("device not detected", "encoder", p.displayName)
 		return HWAccelInfo{}, false
 	}
+	// Ask FFmpeg whether it even has this encoder before asking it to run one.
+	// Without this the test encode fails with "Unknown encoder 'h264_amf'",
+	// which tryProbe then reports as a failed test encode — pointing an
+	// operator at their driver or their permissions when the truth is that
+	// their FFmpeg was never built with the encoder. Distro builds routinely
+	// omit AMF; VA-API is the Linux path for both AMD and Intel silicon.
+	if !encoderAvailable(p.encoder) {
+		slog.Warn("hardware device detected but this FFmpeg build has no encoder for it — this box will transcode on the CPU",
+			"encoder", p.displayName,
+			"ffmpeg_encoder", p.encoder,
+			"hint", "check `ffmpeg -encoders`; a build without this encoder cannot use the device however it is configured")
+		return HWAccelInfo{}, false
+	}
+
 	slog.Info("device detected, running test encode...", "encoder", p.displayName)
 	args, devPath := p.testArgsFn()
 	reason, err := runTestEncode(args)
@@ -139,6 +153,54 @@ func runTestEncode(extraArgs []string) (string, error) {
 	return runProbeFFmpegDiag(args)
 }
 
+// encoderAvailable reports whether the FFmpeg on PATH was built with the named
+// encoder. Indirected through a variable so tests can drive tryProbe without a
+// real FFmpeg; production always uses ffmpegHasEncoder.
+var encoderAvailable = ffmpegHasEncoder
+
+// ffmpegHasEncoder parses `ffmpeg -encoders` for an exact encoder name.
+//
+// Answers TRUE when FFmpeg cannot be run at all. The test encode is the real
+// gate — this check exists only to tell "the build lacks the encoder" apart
+// from "the encoder failed", and if we cannot ask, the honest move is to let
+// the test encode produce its own verdict rather than invent one here.
+func ffmpegHasEncoder(name string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
+	defer cancel()
+	// CombinedOutput, not Output: FFmpeg routes informational listings through
+	// av_log, and which stream that lands on has varied across builds. Reading
+	// stdout alone would report EVERY encoder missing on a build that logs to
+	// stderr — silently disabling working hardware acceleration and warning
+	// that the build has no encoder, on a box where it does.
+	//
+	// Folding stderr in can only cost a false POSITIVE (some diagnostic line
+	// whose second field happens to be an encoder name), and a false positive
+	// just means we run the test encode — which is the real gate. Every
+	// ambiguous case should land there rather than be decided here.
+	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").CombinedOutput()
+	if err != nil {
+		slog.Debug("could not list FFmpeg encoders; leaving the verdict to the test encode", "error", err)
+		return true
+	}
+	return encoderListed(string(out), name)
+}
+
+// encoderListed scans `ffmpeg -encoders` output for an exact name.
+//
+// The listing is "<flags> <name> <description>", and descriptions mention
+// other encoders freely ("codec h264", "Intel Quick Sync Video acceleration"),
+// so a substring search over the whole output would match nearly anything.
+// Only the second field is the encoder's name.
+func encoderListed(encodersOut, name string) bool {
+	for _, line := range strings.Split(encodersOut, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ============================================================
 // Device Detection
 // ============================================================
@@ -167,8 +229,60 @@ func detectAMF() bool {
 	if err != nil {
 		return false
 	}
-	lower := strings.ToLower(string(out))
-	return strings.Contains(lower, "amd") && (strings.Contains(lower, "vga") || strings.Contains(lower, "display"))
+	return hasAMDDisplayDevice(string(out))
+}
+
+// hasAMDDisplayDevice reports whether lspci lists an AMD/ATI DISPLAY adapter.
+//
+// This used to search the whole output for "amd" and, separately, for "vga" or
+// "display" — which matches when those words are on DIFFERENT lines. Every
+// Ryzen and EPYC box says "Advanced Micro Devices, Inc. [AMD]" on its
+// host-bridge lines, so any AMD-CPU machine with any display adapter at all
+// looked like AMD encode hardware.
+//
+// The 2026-08-02 production box is the case in point: an AMD CPU whose only
+// display device is an ASPEED BMC console chip — display-only silicon with no
+// video engine at all. It was reported as "AMD AMF", ran a doomed test encode,
+// and (once probe failures became visible) raised a warning about hardware
+// that does not exist.
+//
+// Matching per line, and only on lines lspci classifies as graphics, is what
+// makes the answer mean anything.
+func hasAMDDisplayDevice(lspciOut string) bool {
+	for _, line := range strings.Split(lspciOut, "\n") {
+		lower := strings.ToLower(line)
+		if !isDisplayControllerLine(lower) {
+			continue
+		}
+		// "[AMD/ATI]" is how modern lspci labels Radeon parts; the older
+		// "ATI Technologies" and product-name "Radeon" forms still appear on
+		// long-lived installs.
+		for _, vendor := range []string{"amd", "ati technologies", "radeon"} {
+			if strings.Contains(lower, vendor) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isDisplayControllerLine matches the PCI class names lspci prints for
+// graphics devices, so a host bridge or audio controller from the same vendor
+// cannot stand in for a GPU.
+func isDisplayControllerLine(lowerLine string) bool {
+	// PCI classes 0300 / 0301 / 0302 / 0380. XGA is vanishingly rare but
+	// costs one string, and omitting it would miss the device entirely.
+	for _, class := range []string{
+		"vga compatible controller",
+		"xga compatible controller",
+		"3d controller",
+		"display controller",
+	} {
+		if strings.Contains(lowerLine, class) {
+			return true
+		}
+	}
+	return false
 }
 
 func driDeviceExists() bool {
