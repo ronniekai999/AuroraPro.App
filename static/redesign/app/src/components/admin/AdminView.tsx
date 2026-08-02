@@ -49,6 +49,7 @@ import {
   getUpdateStatus,
   listAdminActivity,
   listAdminLogs,
+  type LogLevelFilter,
   listAdminSessions,
   listAdminUsers,
   listFlaggedItems,
@@ -2250,6 +2251,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
   const [activityLoading, setActivityLoading] = useState(false)
   const [activityErr, setActivityErr] = useState<string | null>(null)
   const [logs, setLogs] = useState<LogEntry[] | null>(null)
+  const [logLevel, setLogLevel] = useState<LogLevelFilter>('all')
   const [logsLoading, setLogsLoading] = useState(false)
   const [logsErr, setLogsErr] = useState<string | null>(null)
 
@@ -2348,7 +2350,11 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
     if (tab !== 'logs' || logs !== null) return
     const ac = new AbortController()
     setLogsLoading(true)
-    listAdminLogs(ac.signal)
+    setLogsErr(null)
+    // logLevel is a dependency, but the `logs !== null` guard above would
+    // block the refetch — switching filters clears `logs` first (see the
+    // toggle) so this effect re-runs against the other ring.
+    listAdminLogs(logLevel, ac.signal)
       .then(l => setLogs(l))
       .catch(err => {
         if (err && err.name === 'AbortError') return
@@ -2357,7 +2363,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
       .finally(() => setLogsLoading(false))
     // Same cleanup pattern as activity above.
     return () => ac.abort()
-  }, [tab, logs])
+  }, [tab, logs, logLevel])
 
   // Helpers for human-readable formatting.
   const fmtBytes = (n: number): string => {
@@ -2756,12 +2762,57 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
 
       {tab === 'logs' && (
         <div className="glass-panel rounded-2xl p-6 font-mono text-xs">
-          <h2 className="text-white font-semibold mb-4 font-sans">System Logs</h2>
+          <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+            <h2 className="text-white font-semibold font-sans">System Logs</h2>
+            {/* Level filter. 'Problems' reads a SEPARATE server-side ring for
+                WARN+ERROR rather than filtering what's already loaded: the
+                main ring holds ~1000 entries, which is minutes of history at
+                Aurora's request volume, so a client-side filter would show
+                nothing for an incident twenty minutes old. */}
+            <div className="flex items-center gap-1 rounded-lg bg-white/5 p-1 font-sans" role="group" aria-label="Log level filter">
+              {([
+                { key: 'all' as const, label: 'All' },
+                { key: 'problems' as const, label: 'Warnings & errors' },
+              ]).map(opt => (
+                <button
+                  key={opt.key}
+                  type="button"
+                  aria-pressed={logLevel === opt.key}
+                  onClick={() => {
+                    if (logLevel === opt.key) return
+                    setLogLevel(opt.key)
+                    // Clear so the fetch effect's `logs !== null` guard lets
+                    // it re-run against the other ring.
+                    setLogs(null)
+                  }}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                    logLevel === opt.key
+                      ? 'bg-white/15 text-white'
+                      : 'text-white/50 hover:text-white/80'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {logLevel === 'problems' && (
+            <p className="text-white/40 text-[11px] font-sans mb-3">
+              Warnings and errors are kept in a dedicated buffer, so these reach
+              much further back than the full log.
+            </p>
+          )}
           {logsLoading && !logs && <p className="text-white/40 text-sm font-sans">Loading logs…</p>}
           {logsErr && <p className="text-red-300 text-sm font-sans">{logsErr}</p>}
           {logs && (
             <div className="space-y-1 max-h-[500px] overflow-y-auto">
-              {logs.length === 0 && <p className="text-white/40 text-sm font-sans">No log entries.</p>}
+              {logs.length === 0 && (
+                <p className="text-white/40 text-sm font-sans">
+                  {logLevel === 'problems'
+                    ? 'No warnings or errors recorded.'
+                    : 'No log entries.'}
+                </p>
+              )}
               {logs.map((entry, i) => {
                 // QA BUG-011 — surface structured attrs.
                 // RequestLogger emits method/path/status/latency/user_id;

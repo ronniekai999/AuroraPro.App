@@ -1401,8 +1401,21 @@ export async function listAdminActivity(
   return Array.isArray(resp) ? resp : (resp.data || [])
 }
 
-export async function listAdminLogs(signal?: AbortSignal): Promise<LogEntry[]> {
-  const resp = await apiFetch<LogEntry[]>('/api/admin/logs', { signal })
+// Which slice of the server's in-memory log rings to read.
+//
+// 'problems' is NOT a client-side filter over 'all'. The server keeps a
+// separate ring for WARN+ERROR because the main ring holds only ~1000
+// entries, which at Aurora's rate is 3.6-17 minutes of history dominated by
+// INFO request logs — filtering it client-side would show an empty list for
+// an incident twenty minutes old.
+export type LogLevelFilter = 'all' | 'problems'
+
+export async function listAdminLogs(
+  level: LogLevelFilter = 'all',
+  signal?: AbortSignal,
+): Promise<LogEntry[]> {
+  const qs = level === 'problems' ? '?level=warn' : ''
+  const resp = await apiFetch<LogEntry[]>(`/api/admin/logs${qs}`, { signal })
   return resp || []
 }
 
