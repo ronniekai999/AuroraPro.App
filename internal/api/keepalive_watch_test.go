@@ -143,6 +143,87 @@ func TestStaleKeepalive_TTLFreesCapacity(t *testing.T) {
 	}
 }
 
+// The map cap bounds MEMORY, not the log: entries expire, freeing slots for
+// the next batch of invented IDs. This endpoint has no rate limiter, and since
+// #415 warnings land in a scarce ring the admin log filter reads — so without
+// a budget an authenticated client looping over fresh session IDs could evict
+// every real warning someone is trying to find.
+func TestStaleKeepalive_WarnBudgetBoundsTheFlood(t *testing.T) {
+	var w staleKeepaliveWatcher
+	now := time.Now()
+
+	warns := 0
+	for i := 0; i < staleKeepaliveWarnBudget*5; i++ {
+		id := fmt.Sprintf("minted-%d", i)
+		for j := 0; j < staleKeepaliveThreshold; j++ {
+			if _, warn := w.miss(id, now); warn {
+				warns++
+			}
+		}
+	}
+
+	if warns != staleKeepaliveWarnBudget {
+		t.Fatalf("emitted %d warnings for %d stuck sessions; budget is %d",
+			warns, staleKeepaliveWarnBudget*5, staleKeepaliveWarnBudget)
+	}
+}
+
+// The budget must throttle the log, not switch the diagnostic off for good —
+// a genuinely stuck client turning up tomorrow still has to be reportable.
+func TestStaleKeepalive_BudgetRefillsInTheNextWindow(t *testing.T) {
+	var w staleKeepaliveWatcher
+	start := time.Now()
+
+	for i := 0; i < staleKeepaliveWarnBudget*2; i++ {
+		id := fmt.Sprintf("minted-%d", i)
+		for j := 0; j < staleKeepaliveThreshold; j++ {
+			w.miss(id, start)
+		}
+	}
+
+	later := start.Add(staleKeepaliveTTL + time.Minute)
+	var warned bool
+	for j := 0; j < staleKeepaliveThreshold; j++ {
+		if _, warn := w.miss("stuck-tomorrow", later); warn {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatal("a stuck client in a later window never warned — the budget silenced the diagnostic permanently")
+	}
+}
+
+// A session that crossed the threshold while the budget was spent must still
+// latch. Leaving it unlatched would make it retry on every subsequent ping and
+// spend the next window's budget on a client already counted.
+func TestStaleKeepalive_BudgetedOutSessionDoesNotRetryLater(t *testing.T) {
+	var w staleKeepaliveWatcher
+	start := time.Now()
+
+	for i := 0; i < staleKeepaliveWarnBudget; i++ {
+		id := fmt.Sprintf("filler-%d", i)
+		for j := 0; j < staleKeepaliveThreshold; j++ {
+			w.miss(id, start)
+		}
+	}
+
+	// Crosses the threshold with the budget already gone.
+	for j := 0; j < staleKeepaliveThreshold; j++ {
+		if _, warn := w.miss("budgeted-out", start); warn {
+			t.Fatal("warned past the budget")
+		}
+	}
+
+	// Next window: this session must not resurface, having already been
+	// counted once.
+	later := start.Add(staleKeepaliveTTL + time.Minute)
+	for j := 0; j < staleKeepaliveThreshold+2; j++ {
+		if _, warn := w.miss("budgeted-out", later); warn {
+			t.Fatal("a session already past its threshold warned in a later window")
+		}
+	}
+}
+
 func TestStaleKeepalive_ConcurrentMisses(t *testing.T) {
 	var w staleKeepaliveWatcher
 	now := time.Now()

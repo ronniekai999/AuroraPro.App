@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // stubFFmpeg puts a script named ffmpeg at the front of PATH.
@@ -36,6 +37,33 @@ func TestRunProbeFFmpegDiag_CarriesTheReasonThroughExec(t *testing.T) {
 	}
 	if strings.Contains(reason, "libavutil") {
 		t.Fatalf("banner leaked into the reason: %q", reason)
+	}
+}
+
+// The failure mode WaitDelay introduces. os/exec returns ErrWaitDelay — not
+// nil — when a process exits SUCCESSFULLY but leaves a pipe open past the
+// delay. Reading that as a failed probe would disable hardware acceleration on
+// a box whose encoder works, and raise a "test encode failed" warning quoting
+// stderr from an encode that succeeded. The verdict comes from the exit
+// status, not from how tidily the process closed its descriptors.
+//
+// Unreachable before this change: a nil Stderr has no pipe to leave open.
+func TestRunProbeFFmpegDiag_SuccessWithALingeringPipeIsStillSuccess(t *testing.T) {
+	// The grandchild inherits stderr and outlives its parent, so the pipe
+	// stays open well after the stub itself exits 0.
+	stubFFmpeg(t, "( sleep 5 ) &\nexit 0\n")
+
+	start := time.Now()
+	reason, err := runProbeFFmpegDiag([]string{"-hide_banner"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("a probe that exited 0 was reported as failed: %v (reason %q)", err, reason)
+	}
+	// It must also have stopped waiting, rather than blocking until the
+	// grandchild finished — that is the hang WaitDelay is here to prevent.
+	if elapsed >= 4*time.Second {
+		t.Fatalf("probe waited %s for a lingering pipe; WaitDelay is %s", elapsed, probeWaitDelay)
 	}
 }
 
