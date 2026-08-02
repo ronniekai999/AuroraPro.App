@@ -262,10 +262,10 @@ psql_q -P pager=off -c "
 echo
 echo "## 6. Anything the profile has already been shown"
 echo
-echo "The recommender rotates picks it has surfaced recently. A small library"
-echo "plus aggressive anti-repeat can push the hero into the dregs."
+echo "The recommender DEMOTES picks it has shown recently rather than excluding"
+echo "them, so this cannot starve the pool — it only rotates what leads."
 psql_q -P pager=off -c "
-    SELECT surface, COUNT(*) AS remembered, MIN(created_at) AS oldest, MAX(created_at) AS newest
+    SELECT surface, COUNT(*) AS remembered, MIN(surfaced_at) AS oldest, MAX(surfaced_at) AS newest
       FROM recently_surfaced_items WHERE profile_id = $PID GROUP BY surface ORDER BY 1;"
 
 echo
