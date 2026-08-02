@@ -1237,7 +1237,10 @@ func (m *RequestMonitor) triggerMatchingLibraryScan(ctx context.Context, req *mo
 		}
 		slog.Info("request monitor: triggering library scan", "library_id", lib.ID, "library", lib.Name, "reason", req.Title)
 		go func(l *models.Library) {
-			m.scanner.ScanLibrary(context.Background(), l, func(p *models.ScanProgress) {
+			// ctx here descends from Start(ctx) with no timeout — the server
+			// lifecycle. context.Background() detached the scan from shutdown
+			// and let it write into a closed pool.
+			m.scanner.ScanLibrary(ctx, l, func(p *models.ScanProgress) {
 				m.hub.Broadcast(ws.EventScanProgress, p)
 				if p.Status == models.ScanComplete && p.NewFiles > 0 {
 					m.hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{

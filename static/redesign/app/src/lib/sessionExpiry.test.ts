@@ -144,6 +144,29 @@ describe('session-expired event', () => {
     expect(count).toBe(1)
   })
 
+  // register() starts a session just as login() does. Missing the re-arm there
+  // left a tab that had already seen one expiry permanently deaf to the next.
+  it('re-arms after register() too, not just login()', async () => {
+    const api = await importApi()
+
+    fetchMock.mockResolvedValue(res(401))
+    let count = 0
+    const onExpired = () => { count++ }
+    window.addEventListener(api.SESSION_EXPIRED_EVENT, onExpired)
+
+    await api.refreshAccessToken()
+    expect(count).toBe(1)
+
+    fetchMock.mockResolvedValue(res(200, tokenBody))
+    await api.register({ username: 'u', password: 'p', email: 'u@t.test' } as never)
+
+    fetchMock.mockResolvedValue(res(401))
+    await api.refreshAccessToken()
+
+    window.removeEventListener(api.SESSION_EXPIRED_EVENT, onExpired)
+    expect(count).toBe(2)
+  })
+
   it('re-arms after a successful login so a SECOND expiry still fires', async () => {
     const api = await importApi()
 

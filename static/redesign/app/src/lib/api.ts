@@ -2333,6 +2333,11 @@ export interface RegisterRequest {
 export async function register(body: RegisterRequest): Promise<TokenResponse> {
   const t = await apiFetch<TokenResponse>('/api/auth/register', { method: 'POST', body })
   storeTokens(t)
+  // Same re-arm as login(). Without it, a tab that saw one expiry and then
+  // registered a new account (no page reload) keeps the latch set, so a
+  // SECOND expiry never fires the event and the polling storm returns
+  // silently. Every path that starts a fresh session must reset it.
+  resetSessionEndedLatch()
   return t
 }
 

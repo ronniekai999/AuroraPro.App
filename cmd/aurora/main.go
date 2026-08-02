@@ -197,17 +197,32 @@ func main() {
 			return
 		}
 		slog.Info("file watcher triggered rescan", "library", lib.Name)
-		go scanner.ScanLibrary(context.Background(), lib, func(p *models.ScanProgress) {
-			hub.Broadcast(ws.EventScanProgress, p)
-			if p.Status == models.ScanComplete && p.NewFiles > 0 {
-				hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
-					"library_id":   lib.ID,
-					"library_name": lib.Name,
-					"new_items":    p.NewFiles,
-					"action":       "scan_completed",
-				})
-				dispatcher.ScanCompleted(context.Background(), lib.Name, p.NewFiles)
-			}
+		// ctx + bgWorker, not context.Background() + a bare `go`.
+		//
+		// This is the path the pool-close race actually ran through, and the
+		// earlier fix missed it: watcher-triggered rescans fired ~3,100 times
+		// in a two-week window, each one writing items and running inline
+		// enrichment, on a context that could not be cancelled and a goroutine
+		// nobody waited for. A deploy landing mid-scan closed the pool under
+		// it — the "upsert cast ...: closed pool" line from 2026-07-30.
+		//
+		// Threading ctx does not SAVE the in-flight write (pgx aborts it on
+		// cancel either way); it makes the scan stop promptly and fail with a
+		// clear context.Canceled instead of scribbling at a dead pool, and
+		// scans are idempotent so the next one recovers the work.
+		bgWorker(func() {
+			scanner.ScanLibrary(ctx, lib, func(p *models.ScanProgress) {
+				hub.Broadcast(ws.EventScanProgress, p)
+				if p.Status == models.ScanComplete && p.NewFiles > 0 {
+					hub.Broadcast(ws.EventLibraryUpdate, map[string]interface{}{
+						"library_id":   lib.ID,
+						"library_name": lib.Name,
+						"new_items":    p.NewFiles,
+						"action":       "scan_completed",
+					})
+					dispatcher.ScanCompleted(ctx, lib.Name, p.NewFiles)
+				}
+			})
 		})
 	})
 	defer watcher.StopAll()

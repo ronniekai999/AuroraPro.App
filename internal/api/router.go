@@ -383,6 +383,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	authH.SetSecureCookies(cfg.Server.SecureCookies)  // deep-debug H10
 	oauthH.SetSecureCookies(cfg.Server.SecureCookies) // deep-debug H10 — OAuth login also sets cookies
 	libH := NewLibraryHandler(deps.Queries, deps.Scanner, deps.Hub, deps.Watcher, deps.Activity)
+	if deps.RootCtx != nil {
+		libH.SetRootContext(deps.RootCtx)
+	}
 	libH.SetDispatcher(deps.Dispatcher)
 	mediaH := NewMediaHandler(deps.Queries, deps.Activity)
 	if deps.Semantic != nil {
