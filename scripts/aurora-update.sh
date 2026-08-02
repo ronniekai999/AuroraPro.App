@@ -627,8 +627,14 @@ if streams_busy; then
     _DRAIN_HELD=$(viewers_held)
     if [ -z "$_DRAIN_HELD" ]; then
         log "drain gate: ffmpeg-only (no fresh $STREAM_STATE_FILE — old build or stale snapshot)"
-    else
+    elif [ "$_DRAIN_HELD" -gt 0 ]; then
         log "drain gate: server reports ${_DRAIN_HELD} session(s) held by viewers"
+    else
+        # Snapshot is fresh and says nobody, yet we are waiting — so ffmpeg is
+        # the reason (a stream started inside the publish window). Saying
+        # "server reports 0 held" here read as if the snapshot were the cause,
+        # which defeats the point of logging why a deploy waits.
+        log "drain gate: snapshot reports 0 held, but ffmpeg is still running — waiting on it"
     fi
     write_status restarting "Waiting for active stream sessions to finish before restart (up to ${_DRAIN_MAX}s)…" "$OLD_SHA" "$NEW_SHA"
     while streams_busy && [ "$_DRAIN_WAITED" -lt "$_DRAIN_MAX" ]; do

@@ -1367,6 +1367,7 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	}
 
 	go tm.cleanupLoop()
+	go tm.drainPublishLoop()
 
 	// Launch the decode probe off the startup path. ProbeHWDecode no-ops
 	// for HWAccelNone (software-only boxes); its own completion log line
@@ -1520,9 +1521,6 @@ func (tm *TranscodeManager) cleanupLoop() {
 		select {
 		case <-ticker.C:
 		case <-tm.done:
-			// Don't leave a stale snapshot behind for the next deploy to
-			// read. Readers check freshness anyway, but belt and braces.
-			tm.clearDrainState()
 			return
 		}
 		tick++
@@ -1580,13 +1578,43 @@ func (tm *TranscodeManager) cleanupLoop() {
 			s.variantMu.Unlock()
 			os.RemoveAll(s.OutputDir)
 		}
+	}
+}
 
-		// Publish the deploy drain snapshot LAST, so it reflects this tick's
-		// expiries rather than the state before them. 30s granularity is fine:
-		// aurora-update.sh polls every 10s and tolerates a stale-by-one-tick
-		// file, which at worst makes a deploy wait an extra half-minute after
-		// the final viewer leaves. Erring toward waiting is the whole point.
-		tm.publishDrainState()
+// drainPublishInterval is how often the deploy drain snapshot is refreshed.
+//
+// Deliberately its OWN goroutine rather than a step in cleanupLoop. Two
+// reasons, both found in review:
+//
+//  1. Freshness. cleanupLoop ticks every 30s, so a stream that started
+//     moments after a tick was invisible to the deploy gate for up to half a
+//     minute — and direct play spawns no ffmpeg, so the pgrep half of the
+//     union could not cover for it either.
+//  2. Isolation. That loop also runs enforceDiskCap (full directory walks)
+//     and os.RemoveAll over expired sessions' segment trees. On slow storage
+//     a multi-gigabyte removal can take minutes, during which no snapshot is
+//     written; aurora-update.sh treats anything older than 90s as unknown and
+//     falls back to pgrep-only — silently reopening the paused-viewer bug
+//     this whole mechanism exists to close.
+//
+// 10s keeps the snapshot far inside the script's 90s staleness cap (nine
+// missed ticks of margin) for a write of a couple hundred bytes.
+const drainPublishInterval = 10 * time.Second
+
+// drainPublishLoop refreshes the deploy drain snapshot on its own cadence.
+func (tm *TranscodeManager) drainPublishLoop() {
+	ticker := time.NewTicker(drainPublishInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			tm.publishDrainState()
+		case <-tm.done:
+			// Don't leave a stale snapshot behind for the next deploy to
+			// read. Readers check freshness anyway, but belt and braces.
+			tm.clearDrainState()
+			return
+		}
 	}
 }
 

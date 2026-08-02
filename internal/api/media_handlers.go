@@ -29,6 +29,24 @@ type LibraryHandler struct {
 	watcher    *library.Watcher
 	activity   *ActivityLogger
 	dispatcher *notify.Dispatcher
+	// rootCtx is the server-lifecycle context. Background scans parent off it
+	// so a shutdown stops them; using context.Background() meant a scan kept
+	// writing after main closed the DB pool ("closed pool" errors, 2026-07-30).
+	// Optional — nil falls back to Background, which is the pre-existing
+	// behaviour and keeps tests that build the handler directly working.
+	rootCtx context.Context
+}
+
+// SetRootContext wires the server-lifecycle context. Mirrors SetDispatcher:
+// optional, called once from the router.
+func (h *LibraryHandler) SetRootContext(ctx context.Context) { h.rootCtx = ctx }
+
+// scanContext returns the context background scans should use.
+func (h *LibraryHandler) scanContext() context.Context {
+	if h.rootCtx != nil {
+		return h.rootCtx
+	}
+	return context.Background()
 }
 
 func NewLibraryHandler(queries *db.Queries, scanner *library.Scanner, hub *ws.Hub, watcher *library.Watcher, activity *ActivityLogger) *LibraryHandler {
@@ -161,7 +179,7 @@ func (h *LibraryHandler) Create(w http.ResponseWriter, r *http.Request) {
 			if h.watcher != nil {
 				h.watcher.NoteExternalScan(lib.ID)
 			}
-			scanCtx := context.Background()
+			scanCtx := h.scanContext()
 			h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
 				h.hub.Broadcast(ws.EventScanProgress, p)
 				if h.activity != nil && (p.Status == models.ScanComplete || p.Status == models.ScanFailed) {
@@ -287,9 +305,11 @@ func (h *LibraryHandler) Scan(w http.ResponseWriter, r *http.Request) {
 		h.activity.LogScanStarted(r.Context(), lib.ID, lib.Name)
 	}
 
-	// Start scan in background with detached context
-	// IMPORTANT: r.Context() gets cancelled when the HTTP response completes,
-	// so we use context.Background() for the long-running scan goroutine.
+	// Start scan in background with a detached context.
+	// IMPORTANT: r.Context() is cancelled when the HTTP response completes, so
+	// the long-running scan needs its own — but NOT context.Background(), which
+	// outlives shutdown and lands writes on a closed pool. The server-lifecycle
+	// context detaches from the request while still ending at shutdown.
 	go func() {
 		scanCtx := context.Background()
 		h.scanner.ScanLibrary(scanCtx, lib, func(p *models.ScanProgress) {
