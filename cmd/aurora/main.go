@@ -400,6 +400,20 @@ func main() {
 		hub.BroadcastToAdmins(ws.EventTranscodeStatus, data)
 	}
 
+	// Publish the deploy drain snapshot so aurora-update.sh can wait on
+	// "sessions a viewer is still holding" instead of "is ffmpeg running".
+	// A paused viewer has no ffmpeg process (the encoder is reaped as idle
+	// and resumed on demand), so the old pgrep gate restarted out from under
+	// paused playback. Skipped when the state dir is absent — a source
+	// checkout or a dev box without install.sh — so we don't log a failed
+	// write every 30s forever.
+	if transcode.SetStreamStateFile(streaming.DefaultStreamStateFile) {
+		slog.Info("publishing stream drain state", "path", streaming.DefaultStreamStateFile)
+	} else {
+		slog.Debug("drain state: state dir absent, not publishing",
+			"path", streaming.DefaultStreamStateFile)
+	}
+
 	// Direct-play registry — companion to the transcode manager for
 	// tracking byte-range / remux streams that don't have an FFmpeg
 	// process lifecycle. Touched on every stream-serve in the
