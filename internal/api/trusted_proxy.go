@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
 
 // TrustedProxyMiddleware returns a chi middleware that consults
@@ -20,9 +21,33 @@ import (
 // headers from anyone — a remote attacker could forge them to spoof
 // arbitrary source IPs and bypass per-IP rate limits.
 func TrustedProxyMiddleware(trustedCIDRs []*net.IPNet) func(http.Handler) http.Handler {
+	var warnOnce sync.Once
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if len(trustedCIDRs) == 0 {
+				// Detect the silent misconfiguration: a reverse proxy IS in
+				// front of us (it set X-Forwarded-For) but we're not
+				// configured to trust anything, so RemoteAddr is the proxy's
+				// loopback address for EVERY request. The per-IP auth rate
+				// limiter then collapses into a single shared bucket, and
+				// audit logs record 127.0.0.1 instead of the real client —
+				// which is exactly what production shows on every
+				// refresh-replay warning.
+				//
+				// Warn ONCE. This is a per-request path and the condition is
+				// permanent until an operator changes config; logging per
+				// request would bury the very logs it's complaining about.
+				if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Real-IP") != "" {
+					warnOnce.Do(func() {
+						slog.Warn("reverse proxy detected but trusted_proxies is empty — "+
+							"every request looks like it comes from the proxy, so the per-IP auth "+
+							"rate limiter shares ONE bucket across all clients and audit logs record "+
+							"the proxy's address. Set AURORA_TRUSTED_PROXIES (e.g. 127.0.0.1/32,::1/128 "+
+							"for a local nginx) in /etc/aurora/aurora.env and restart.",
+							"peer", r.RemoteAddr,
+							"forwarded_for", r.Header.Get("X-Forwarded-For"))
+					})
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

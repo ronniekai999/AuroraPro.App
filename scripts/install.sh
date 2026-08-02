@@ -1342,12 +1342,28 @@ info "Writing $CONFIG_DIR/aurora.env..."
         # HTTP and would never mark auth cookies Secure on its own.
         # Force it whenever a domain fronts the install (2026-07-18).
         printf 'AURORA_SECURE_COOKIES=true\n'
+        # A domain install means nginx proxies from loopback, so EVERY request
+        # reaches Aurora with RemoteAddr 127.0.0.1. Without this the per-IP
+        # auth rate limiter degrades into one shared bucket for the whole
+        # internet, and audit logs record the proxy instead of the client
+        # (production showed client_ip=127.0.0.1 on every refresh-replay
+        # warning). Trust ONLY loopback: these are the addresses the nginx
+        # config written by install.sh / setup-domain.sh proxies from, and
+        # trusting anything wider would let a client forge its own IP.
+        printf 'AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n'
     else
         # Re-run without AURORA_DOMAIN: keep whatever origins the previous
         # config had (a prior domain setup, or an operator edit) instead
         # of resetting them to the localhost defaults (2026-07-18).
         EXISTING_ORIGINS="$(read_env_key AURORA_ALLOWED_ORIGINS)"
         printf 'AURORA_ALLOWED_ORIGINS=%s\n' "${EXISTING_ORIGINS:-http://localhost:*,https://localhost:*}"
+        # Same preservation rule as the origins above: a re-run without
+        # AURORA_DOMAIN must not silently drop a proxy allowlist the operator
+        # (or an earlier domain install) already configured.
+        EXISTING_PROXIES="$(read_env_key AURORA_TRUSTED_PROXIES)"
+        if [ -n "$EXISTING_PROXIES" ]; then
+            printf 'AURORA_TRUSTED_PROXIES=%s\n' "$EXISTING_PROXIES"
+        fi
     fi
     printf '\n# Logging\n'
     printf 'LOG_DIR=%s\n' "$LOG_DIR"

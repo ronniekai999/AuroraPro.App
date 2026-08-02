@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -507,6 +508,27 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// ── API routes (with restrictive security headers) ─────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(securityHeaders)
+
+		// robots.txt — 1,139 real 404s over two weeks of production logs.
+		// Aurora is a private media server: nothing here should be crawled or
+		// indexed, and the absence of this file meant every crawler probed
+		// paths individually and logged a 404 each time. Disallow everything.
+		r.Get("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /\n")
+		})
+
+		// sitemap.xml — 706 real 404s. A private server has no public site to
+		// map, but answering with a valid empty sitemap stops well-behaved
+		// crawlers retrying and is cheaper than a 404 through the SPA fallback.
+		r.Get("/sitemap.xml", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			_, _ = io.WriteString(w,
+				`<?xml version="1.0" encoding="UTF-8"?>`+"\n"+
+					`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`+"\n")
+		})
 
 		// Health check.
 		//

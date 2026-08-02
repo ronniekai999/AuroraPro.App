@@ -309,6 +309,31 @@ else
     ok "nginx started"
 fi
 
+# ── Trust the proxy we just installed ────────────────────────────
+# nginx proxies from 127.0.0.1, so without this Aurora sees EVERY request as
+# coming from loopback: the per-IP auth rate limiter collapses into a single
+# bucket shared by the whole internet, and audit logs record 127.0.0.1 instead
+# of the client (which is exactly what production logs showed on every
+# refresh-replay warning). Trust ONLY loopback — the addresses the upstream
+# block above proxies from. Anything wider would let clients forge their IP.
+AURORA_ENV_FILE=/etc/aurora/aurora.env
+if [ -f "$AURORA_ENV_FILE" ]; then
+    if grep -q '^AURORA_TRUSTED_PROXIES=' "$AURORA_ENV_FILE"; then
+        ok "AURORA_TRUSTED_PROXIES already set — leaving it alone"
+    else
+        printf 'AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n' >> "$AURORA_ENV_FILE"
+        ok "Added AURORA_TRUSTED_PROXIES to $AURORA_ENV_FILE"
+        if systemctl is-active aurora &>/dev/null; then
+            systemctl restart aurora
+            ok "Restarted aurora to pick it up"
+        else
+            warn "aurora is not running — the new setting applies on next start"
+        fi
+    fi
+else
+    warn "$AURORA_ENV_FILE not found — set AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128 by hand, or the auth rate limiter will treat every client as one IP"
+fi
+
 # Quick local probe to confirm HTTP routes through nginx → Aurora
 if curl -fsS -m 5 -H "Host: $DOMAIN" http://127.0.0.1/api/health >/dev/null 2>&1; then
     ok "HTTP routing works: nginx → aurora /api/health"
