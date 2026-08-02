@@ -141,12 +141,15 @@ psql_q -P pager=off -c "
 echo
 echo "## 3. The recency slice — the ACTUAL input to the centroid"
 echo
-echo "The server averages the top 20 embedded items by recency across all"
-echo "four sources. This is that slice. If it does not look like this"
-echo "profile's taste, nothing downstream can recover."
+echo "The server takes the top 20 embedded items by recency across all four"
+echo "sources and clusters them into taste modes. This is that slice. If it"
+echo "does not look like this profile's taste, nothing downstream can recover."
 echo
-echo "Note 'completed': a title someone bailed on after five minutes still"
-echo "steers the centroid, it just sorts below finished ones."
+echo "Watch the 'via' column. Onboarding seeds are stamped completed=TRUE"
+echo "unconditionally, so they outrank any watch still in progress no matter"
+echo "how recent it is. A slice that is mostly seeds means the hero is still"
+echo "recommending against what was clicked once during setup rather than"
+echo "against what this profile actually watches."
 psql_q -P pager=off -c "
     WITH slice AS (
       SELECT m.id, m.title, m.type::text AS type, m.year,
@@ -262,11 +265,8 @@ echo
 echo "The recommender rotates picks it has surfaced recently. A small library"
 echo "plus aggressive anti-repeat can push the hero into the dregs."
 psql_q -P pager=off -c "
-    SELECT to_regclass('public.surfaced_items') IS NOT NULL AS table_exists;"
-psql_q -P pager=off -c "
     SELECT surface, COUNT(*) AS remembered, MIN(created_at) AS oldest, MAX(created_at) AS newest
-      FROM surfaced_items WHERE profile_id = $PID GROUP BY surface ORDER BY 1;" 2>/dev/null \
-  || echo "(surfaced_items not present under that name — skip, not an error)"
+      FROM recently_surfaced_items WHERE profile_id = $PID GROUP BY surface ORDER BY 1;"
 
 echo
 echo "## 7. Library size available to recall"
