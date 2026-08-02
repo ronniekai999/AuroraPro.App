@@ -105,9 +105,9 @@ func permanentConnectError(err error) bool {
 	}
 	switch pgErr.Code {
 	case "28P01", // invalid_password
-		"28000",  // invalid_authorization_specification
-		"3D000",  // invalid_catalog_name — database does not exist
-		"42501":  // insufficient_privilege
+		"28000", // invalid_authorization_specification
+		"3D000", // invalid_catalog_name — database does not exist
+		"42501": // insufficient_privilege
 		return true
 	}
 	// 57P03 (cannot_connect_now) is explicitly NOT permanent: it is what

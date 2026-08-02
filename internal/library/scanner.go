@@ -212,27 +212,42 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 
 	// Phase 1: Walk all paths and collect video files
 	var allFiles []string
+	var unreadablePaths []string
 	walkFailed := false
-	totalWalkErrs := 0
 	for _, rootPath := range lib.Paths {
-		files, walkErrs, err := collectVideoFiles(rootPath)
+		files, unreadable, err := collectVideoFiles(rootPath)
 		if err != nil {
+			// The ROOT itself is unwalkable (unmounted share, removed drive).
+			// Nothing under it can be reasoned about, so the prune stays off
+			// for the whole library — this is the catastrophic case the H9
+			// guard was written for and it is unchanged.
 			slog.Error("walk path failed", "path", rootPath, "error", err)
 			walkFailed = true
-			totalWalkErrs++
 			continue
 		}
-		// deep-debug H9 addendum — a walk that "succeeded" but skipped
-		// unreadable entries is just as dangerous as a failed one: the file
-		// list is missing everything under the unreadable subtree, so a
-		// prune would delete those rows. Scan what we found, skip the prune.
-		if walkErrs > 0 {
-			slog.Warn("walk incomplete: unreadable entries — prune will be skipped",
-				"path", rootPath, "unreadable", walkErrs)
-			walkFailed = true
-			totalWalkErrs += walkErrs
+		// A walk that "succeeded" but skipped unreadable entries still has an
+		// incomplete file list. Previously that disabled the prune for the
+		// ENTIRE library: one permission-denied folder
+		// (/media/tvshows/CSI - Miami) left every deleted TV episode in the
+		// database for three days, with a log line as the only evidence.
+		//
+		// Now the unreadable subtrees are carried into the prune and excluded
+		// there, so the rest of the library — which walked cleanly — is
+		// pruned normally.
+		if len(unreadable) > 0 {
+			slog.Warn("walk incomplete: unreadable entries — prune scoped around them",
+				"path", rootPath, "unreadable", len(unreadable), "paths", unreadable)
+			unreadablePaths = append(unreadablePaths, unreadable...)
 		}
 		allFiles = append(allFiles, files...)
+	}
+	// Too many unreadable entries to scope around: at this scale the
+	// "everything else walked cleanly" assumption no longer holds, so fall
+	// back to the old all-or-nothing behaviour.
+	if len(unreadablePaths) >= maxTrackedUnreadable {
+		slog.Warn("walk incomplete: too many unreadable entries to scope the prune — skipping it entirely",
+			"library", lib.Name, "unreadable", len(unreadablePaths))
+		walkFailed = true
 	}
 
 	s.mu.Lock()
@@ -241,8 +256,12 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 	// unreadable entry (root-owned lost+found, NAS .snapshots) disables
 	// the prune on EVERY scan, and a log line is the wrong place for the
 	// only evidence of that.
-	progress.WalkErrors = totalWalkErrs
+	progress.WalkErrors = len(unreadablePaths)
 	progress.PruneSkipped = walkFailed
+	// Surface WHICH paths are unreadable, bounded for display. Without this
+	// the only evidence is a log line, which is how one folder disabled TV
+	// pruning for three days unnoticed.
+	progress.UnreadablePaths = boundedPaths(unreadablePaths, 10)
 	s.mu.Unlock()
 	notify()
 
@@ -261,7 +280,7 @@ func (s *Scanner) ScanLibrary(ctx context.Context, lib *models.Library, progress
 		slog.Warn("skipping prune: one or more library paths failed to walk (transient mount/permission issue?) — leaving DB file rows intact",
 			"library", lib.Name)
 	} else {
-		pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles)
+		pruned, pruneErr := s.pruneDeletedFiles(ctx, lib, allFiles, unreadablePaths)
 		if pruneErr != nil {
 			slog.Error("prune deleted files failed", "library", lib.Name, "error", pruneErr)
 		} else if pruned > 0 {
@@ -717,11 +736,24 @@ func (s *Scanner) backfillEpisodeMetadata(ctx context.Context, item *models.Medi
 	}
 }
 
-// pruneDeletedFiles removes DB rows for files that no longer exist on disk.
-// It compares the set of files discovered by the walk against all file paths
-// stored in the DB for this library. Any DB path not in the discovered set
-// is deleted. Returns the number of rows pruned.
-func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, discoveredFiles []string) (int64, error) {
+// boundedPaths returns at most n entries, for surfacing on the status API
+// without letting a pathological mount blow up the JSON payload.
+func boundedPaths(paths []string, n int) []string {
+	if len(paths) <= n {
+		return paths
+	}
+	return paths[:n]
+}
+
+// pruneDeletedFiles removes DB rows for files no longer on disk.
+//
+// unreadablePaths lists subtrees the walk could not read. Rows under those
+// paths are SKIPPED rather than pruned: their files may well still exist, we
+// simply could not see them, and deleting them would be data loss driven by a
+// permission error. Everything outside those subtrees walked cleanly and is
+// pruned normally — which is the difference between one bad folder disabling
+// cleanup for a whole library and it disabling cleanup only for itself.
+func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, discoveredFiles []string, unreadablePaths []string) (int64, error) {
 	// deep-debug H9 — refuse to prune when zero files were discovered. The
 	// canonical NFS/SMB failure leaves the mountpoint present-but-EMPTY, so
 	// collectVideoFiles returns ([], nil) — no error, so the walkFailed guard
@@ -749,11 +781,23 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 			return 0, err
 		}
 		var staleIDs []int64
+		shielded := 0
 		for path, id := range dbPaths {
-			if _, exists := discovered[path]; !exists {
-				staleIDs = append(staleIDs, id)
-				slog.Info("pruning deleted episode file", "path", path)
+			if _, exists := discovered[path]; exists {
+				continue
 			}
+			if underAnyPrefix(path, unreadablePaths) {
+				// Absent from the walk only because we could not read its
+				// directory — not evidence the file is gone.
+				shielded++
+				continue
+			}
+			staleIDs = append(staleIDs, id)
+			slog.Info("pruning deleted episode file", "path", path)
+		}
+		if shielded > 0 {
+			slog.Warn("prune: kept rows under unreadable paths", "library", lib.Name,
+				"kept", shielded, "unreadable", boundedPaths(unreadablePaths, 5))
 		}
 		if len(staleIDs) > 0 {
 			n, err := s.queries.DeleteEpisodeFilesByIDs(ctx, staleIDs)
@@ -768,11 +812,21 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 			return 0, err
 		}
 		var staleIDs []int64
+		shielded := 0
 		for path, id := range dbPaths {
-			if _, exists := discovered[path]; !exists {
-				staleIDs = append(staleIDs, id)
-				slog.Info("pruning deleted media file", "path", path)
+			if _, exists := discovered[path]; exists {
+				continue
 			}
+			if underAnyPrefix(path, unreadablePaths) {
+				shielded++
+				continue
+			}
+			staleIDs = append(staleIDs, id)
+			slog.Info("pruning deleted media file", "path", path)
+		}
+		if shielded > 0 {
+			slog.Warn("prune: kept rows under unreadable paths", "library", lib.Name,
+				"kept", shielded, "unreadable", boundedPaths(unreadablePaths, 5))
 		}
 		if len(staleIDs) > 0 {
 			n, err := s.queries.DeleteMediaFilesByIDs(ctx, staleIDs)
@@ -786,11 +840,20 @@ func (s *Scanner) pruneDeletedFiles(ctx context.Context, lib *models.Library, di
 	return pruned, nil
 }
 
-// collectVideoFiles walks root and returns the video files found, plus the
-// number of entries the walk could not read (permission errors, I/O
-// failures, a subtree whose mount dropped mid-walk). A non-zero count means
-// the returned list is INCOMPLETE — callers must not prune against it.
-func collectVideoFiles(root string) ([]string, int, error) {
+// maxTrackedUnreadable bounds how many unreadable paths we remember for
+// prune-scoping. Beyond this the caller falls back to skipping the prune for
+// the whole library: a mount that fails wholesale should not be handled by
+// accumulating a million paths, and at that scale the "everything else walked
+// cleanly" assumption the scoping rests on no longer holds.
+const maxTrackedUnreadable = 1000
+
+// collectVideoFiles walks root and returns the video files it found plus the
+// paths it could NOT read (permission errors, I/O failures, a subtree whose
+// mount dropped mid-walk). A non-empty unreadable list means the file list is
+// INCOMPLETE for those subtrees — which is what lets the caller prune the rest
+// of the library safely instead of skipping the prune wholesale. See
+// pruneDeletedFiles.
+func collectVideoFiles(root string) ([]string, []string, error) {
 	// 2026-05-19 audit (BE-H3) — defend against symlinked files that
 	// escape the library root. filepath.WalkDir (Go 1.21+) does NOT
 	// follow directory symlinks, but it DOES traverse FILE-level
@@ -806,11 +869,16 @@ func collectVideoFiles(root string) ([]string, int, error) {
 	// is self-contained).
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return nil, 0, fmt.Errorf("resolve root: %w", err)
+		return nil, nil, fmt.Errorf("resolve root: %w", err)
 	}
 	resolvedRoot = filepath.Clean(resolvedRoot)
 	var files []string
-	walkErrs := 0
+	var unreadable []string
+	noteUnreadable := func(path string) {
+		if len(unreadable) < maxTrackedUnreadable {
+			unreadable = append(unreadable, filepath.Clean(path))
+		}
+	}
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			// deep-debug H9 addendum — count the failure instead of silently
@@ -818,7 +886,10 @@ func collectVideoFiles(root string) ([]string, int, error) {
 			// to scan every readable file), but the caller must know the file
 			// list is incomplete: pruning against a partial list would delete
 			// the DB rows for everything under an unreadable subtree.
-			walkErrs++
+			// Record WHICH path failed, not just that one did: everything
+			// under an unreadable subtree is unknown to the prune, but the
+			// rest of the library walked cleanly and is still safe to prune.
+			noteUnreadable(path)
 			slog.Warn("walk error", "path", path, "error", err)
 			return nil
 		}
@@ -840,7 +911,7 @@ func collectVideoFiles(root string) ([]string, int, error) {
 			// otherwise this skip silently shrinks the discovered list and
 			// the prune deletes the row of a file that is still on disk.
 			if !errors.Is(err, fs.ErrNotExist) {
-				walkErrs++
+				noteUnreadable(path)
 			}
 			slog.Warn("skip: resolve symlink failed", "path", path, "error", err)
 			return nil
@@ -853,7 +924,23 @@ func collectVideoFiles(root string) ([]string, int, error) {
 		files = append(files, path)
 		return nil
 	})
-	return files, walkErrs, walkErr
+	return files, unreadable, walkErr
+}
+
+// underAnyPrefix reports whether path lives at or beneath one of prefixes.
+// Compares on path boundaries so "/media/CSI - Miami" does not shield
+// "/media/CSI - Miami 2".
+func underAnyPrefix(path string, prefixes []string) bool {
+	if len(prefixes) == 0 {
+		return false
+	}
+	clean := filepath.Clean(path)
+	for _, p := range prefixes {
+		if clean == p || strings.HasPrefix(clean, p+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func generateFileHash(path string) (string, int64, error) {
