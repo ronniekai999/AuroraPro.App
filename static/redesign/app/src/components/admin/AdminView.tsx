@@ -2316,8 +2316,9 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
   // Refetched on every entry to the tab — NOT folded into the users effect
   // above, whose `users !== null` guard would have pinned the labels for the
   // session, so editing an option on the OAuth tab and coming back here
-  // showed the old text until a full reload. Failure is non-fatal:
-  // referralSourceLabel degrades to "<removed: key>", which is honest.
+  // showed the old text until a full reload. Failure is non-fatal: a failed
+  // FIRST fetch leaves [], so labels degrade to "<removed: key>", which is
+  // honest; a failed refetch keeps the previous entry's labels instead.
   useEffect(() => {
     if (tab !== 'users') return
     const ac = new AbortController()

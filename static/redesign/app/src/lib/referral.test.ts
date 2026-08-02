@@ -251,6 +251,17 @@ describe('referralOptionsFromSummary', () => {
 
   it('returns [] for an instance with no answers yet', () =>
     expect(referralOptionsFromSummary([])).toEqual([]))
+
+  it('treats an ABSENT label like null — hardened against a future omitempty', () => {
+    // The Go Label field serializes explicit nulls today; were it ever given
+    // omitempty, removed keys would arrive with the field missing entirely
+    // (undefined after JSON.parse). Both spellings must mean "no usable
+    // label": the option is dropped and the breakdown row still dims.
+    expect(referralOptionsFromSummary([{ key: 'friend', label: 'A friend' }, { key: 'myspace' }]))
+      .toEqual([{ key: 'friend', label: 'A friend' }])
+    expect(isRemovedSummaryRow({ key: 'myspace' })).toBe(true)
+    expect(isRemovedSummaryRow({ key: REFERRAL_OTHER_KEY })).toBe(false)
+  })
 })
 
 describe('buildSteps', () => {

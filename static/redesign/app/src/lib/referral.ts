@@ -239,9 +239,16 @@ export function referralSourceLabel(key: string, options: readonly ReferralOptio
  * a windowed summary would drop labels for keys whose answers all pre-date it.
  */
 export function referralOptionsFromSummary(
-  rows: readonly { key: string; label: string | null }[],
+  rows: readonly { key: string; label?: string | null }[],
 ): ReferralOption[] {
-  return rows.flatMap(r => (r.label === null ? [] : [{ key: r.key, label: r.label }]))
+  // `typeof`, not a strict null check: the wire promises an explicit null for
+  // unlabeled keys (the Go Label field carries no omitempty, and models.go
+  // documents the nil-label semantics), but a future omitempty would turn
+  // them into ABSENT fields — and `=== null` would then keep
+  // {label: undefined} rows, rendering removed-key cells blank instead of
+  // "<removed: key>". Accepting only a real string fails safe under both
+  // encodings.
+  return rows.flatMap(r => (typeof r.label === 'string' ? [{ key: r.key, label: r.label }] : []))
 }
 
 /**
@@ -260,7 +267,12 @@ export function referralOptionsFromSummary(
  * deleted, and the implicit `other`, which never has a stored option. The key
  * separates them — `parseReferralOptions` refuses to store `other`, so no
  * configured option can ever collide with it.
+ *
+ * "No label" is tested with `typeof`, not `=== null`, for the same wire-
+ * hardening reason referralOptionsFromSummary documents: an omitempty added
+ * to the Go field would make removed keys arrive with the label ABSENT, and a
+ * strict null check would silently stop dimming them.
  */
-export function isRemovedSummaryRow(row: { key: string; label: string | null }): boolean {
-  return row.label === null && row.key !== REFERRAL_OTHER_KEY
+export function isRemovedSummaryRow(row: { key: string; label?: string | null }): boolean {
+  return typeof row.label !== 'string' && row.key !== REFERRAL_OTHER_KEY
 }
