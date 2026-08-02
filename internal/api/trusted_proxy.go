@@ -62,22 +62,41 @@ func TrustedProxyMiddleware(trustedCIDRs []*net.IPNet) func(http.Handler) http.H
 				return
 			}
 
-			// Peer is trusted; honor a single header value (no chained
-			// XFF traversal — that just multiplies the spoofing surface).
-			// XFF takes precedence over X-Real-IP; both are common.
+			// Peer is trusted. Take the value our OWN proxy contributed —
+			// never a value the client could have chosen.
+			//
+			// This used to take the LEFT-most X-Forwarded-For entry, on the
+			// reasoning that XFF reads "client, proxy1, proxy2" so the client
+			// is first. That is true only when every hop is trustworthy. The
+			// nginx this repo ships sets
+			//
+			//     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+			//
+			// which expands to "$http_x_forwarded_for, $remote_addr" — it
+			// APPENDS the real client to whatever XFF the client sent. So the
+			// left-most entry is entirely attacker-controlled: sending
+			// "X-Forwarded-For: 10.0.0.<n>" yields a fresh rate-limit bucket
+			// per request and defeats the 10/min login limiter completely.
+			//
+			// The right-most entry is the one our trusted proxy appended, and
+			// X-Real-IP is set by the same nginx directly from $remote_addr.
+			// Prefer X-Real-IP (unambiguous), fall back to right-most XFF.
+			//
+			// Trade-off, deliberately chosen: behind MULTIPLE proxies (a CDN
+			// in front of nginx) this yields the CDN's address rather than the
+			// end user's, so clients bucket together and the limiter gets
+			// stricter than intended. That fails CLOSED. Left-most fails OPEN
+			// — an outright bypass — and for a security control the closed
+			// failure is the only acceptable one.
 			var clientIP string
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				// XFF is "client, proxy1, proxy2, ..." — left-most is the
-				// originating client. We trust only the left-most because
-				// each entry past the first is set by upstream proxies we
-				// haven't validated.
-				if i := strings.IndexByte(xff, ','); i >= 0 {
-					clientIP = strings.TrimSpace(xff[:i])
+			if xri := r.Header.Get("X-Real-IP"); xri != "" {
+				clientIP = strings.TrimSpace(xri)
+			} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+				if i := strings.LastIndexByte(xff, ','); i >= 0 {
+					clientIP = strings.TrimSpace(xff[i+1:])
 				} else {
 					clientIP = strings.TrimSpace(xff)
 				}
-			} else if xri := r.Header.Get("X-Real-IP"); xri != "" {
-				clientIP = strings.TrimSpace(xri)
 			}
 
 			if clientIP != "" && net.ParseIP(clientIP) != nil {
