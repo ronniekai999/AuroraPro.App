@@ -249,6 +249,32 @@ export function clearTokens() {
   localStorage.removeItem(EXPIRES_AT_KEY)
 }
 
+// Event dispatched when the session ends WITHOUT the user asking — an expired
+// or revoked refresh token, as opposed to clicking Log out. App listens and
+// drops to the auth screen, which unmounts the authed subtree and with it
+// every poller and socket. That unmount is the actual fix for the polling
+// storm: the pollers stop existing rather than each learning to give up.
+export const SESSION_EXPIRED_EVENT = 'aurora:session-expired'
+
+// endSession tears down local auth state and announces it. Idempotent — a
+// wave of concurrent 401s all routes through the single coalesced refresh, but
+// belt and braces in case a future caller invokes it directly.
+let sessionEnded = false
+function endSession(): void {
+  if (sessionEnded) return
+  sessionEnded = true
+  clearTokens()
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT))
+  }
+}
+
+// resetSessionEndedLatch re-arms endSession after a successful login, so a
+// second expiry in the same page lifetime still fires.
+export function resetSessionEndedLatch(): void {
+  sessionEnded = false
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Image URL helpers (mirrors V1's imgPath + /api/images/w500/...)
 
@@ -342,13 +368,29 @@ async function tryRefresh(): Promise<boolean> {
         credentials: 'same-origin',
         signal: ac.signal,
       })
-      if (!res.ok) return false
+      if (!res.ok) {
+        // A refresh the SERVER rejected means this session is definitively
+        // over — the refresh cookie is expired, revoked, or was never there.
+        // Retrying cannot help, and nothing else in the app was ending the
+        // session: clearTokens() was reachable only from an explicit logout,
+        // and /api/auth/me is validated once at mount. So a long-lived tab
+        // whose session expired kept rendering as logged-in and kept polling
+        // forever — 8,562 requests at user_id=0 in the production logs, one
+        // storm running for hours.
+        //
+        // 5xx / 429 are NOT definitive: the server is unwell, not the
+        // session. Ending the session on those would log everyone out on a
+        // flaky morning, which is a far worse failure than a delayed logout.
+        if (res.status < 500 && res.status !== 429) endSession()
+        return false
+      }
       const tokens = (await res.json()) as TokenResponse
       storeTokens(tokens)
       return true
     } catch {
-      // AbortError (timeout) or network error both count as failure.
-      // Callers will surface the original 401 to the user.
+      // AbortError (timeout) or network error — transient by assumption, and
+      // deliberately NOT treated as session expiry. Callers surface the
+      // original 401 and the next attempt re-tries.
       return false
     } finally {
       clearTimeout(timeoutId)
@@ -501,6 +543,10 @@ export async function login(username: string, password: string): Promise<User> {
     body: { username, password },
   })
   storeTokens(tokens)
+  // Re-arm the expiry latch: without this, a session that expired earlier in
+  // this page's lifetime would leave the latch set and a SECOND expiry would
+  // pass silently, putting us back to polling forever.
+  resetSessionEndedLatch()
   return tokens.user
 }
 

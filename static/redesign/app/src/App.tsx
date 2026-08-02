@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router'
 import {
   fetchMe,
   getStoredUser,
+  SESSION_EXPIRED_EVENT,
   getMedia,
   getMediaFiles,
   getSeasons,
@@ -2852,6 +2853,19 @@ export default function App() {
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
   }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen])
+
+  // Session expiry. /api/auth/me is validated once at mount (below), so a
+  // long-lived tab whose session expired mid-session never re-checked: it kept
+  // rendering as logged-in and kept polling with dead credentials — 8,562
+  // requests at user_id=0 in the production logs, one storm running for hours
+  // on 2026-07-24. api.ts now fires this event when the server definitively
+  // rejects a refresh; dropping to the auth screen unmounts the authed
+  // subtree, and with it every poller, socket and interval.
+  useEffect(() => {
+    const onExpired = () => setUser(false)
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
+  }, [])
 
   // Auth boot. deep-debug H10 — tokens are httpOnly cookies (invisible to JS),
   // so a cached user is our auth signal: optimistically render with it while
