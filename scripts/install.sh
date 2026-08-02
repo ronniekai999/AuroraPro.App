@@ -594,15 +594,19 @@ install_node() {
     if [ "$PKG_MGR" = "apt" ]; then
         info "Installing Node.js ${NODE_MIN}.x from NodeSource..."
         # NodeSource's setup script adds the apt repo and its signing key.
-        if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN}.x" -o /tmp/nodesource_setup.sh; then
-            if bash /tmp/nodesource_setup.sh >/dev/null 2>&1; then
-                APT_UPDATED=false   # NodeSource changed the sources list
-                pkg_install nodejs  # NodeSource's nodejs bundles npm
-                rm -f /tmp/nodesource_setup.sh
-                return
-            fi
+        # mktemp, not a fixed /tmp path: this runs as root, and a predictable
+        # name in a world-writable directory lets a local user pre-place a
+        # symlink that curl -o would then write through. Matches the Ollama
+        # installer's handling of the same pattern below.
+        NODE_SETUP="$(mktemp)"
+        if curl -fsSL "https://deb.nodesource.com/setup_${NODE_MIN}.x" -o "$NODE_SETUP" \
+            && bash "$NODE_SETUP" >/dev/null 2>&1; then
+            rm -f "$NODE_SETUP"
+            APT_UPDATED=false   # NodeSource changed the sources list
+            pkg_install nodejs  # NodeSource's nodejs bundles npm
+            return
         fi
-        rm -f /tmp/nodesource_setup.sh
+        rm -f "$NODE_SETUP"
         warn "NodeSource setup failed — falling back to the distro nodejs package"
     fi
     pkg_install nodejs
@@ -1399,7 +1403,15 @@ info "Writing $CONFIG_DIR/aurora.env..."
         # warning). Trust ONLY loopback: these are the addresses the nginx
         # config written by install.sh / setup-domain.sh proxies from, and
         # trusting anything wider would let a client forge its own IP.
-        printf 'AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n'
+        # Preserve an operator's value rather than asserting loopback.
+        # Unlike AURORA_ALLOWED_ORIGINS above — where a new domain genuinely
+        # invalidates the old origins — a trusted-proxy list describes network
+        # topology this script cannot see. Someone fronting Aurora with an
+        # ADDITIONAL upstream proxy (Cloudflare tunnel, a separate LB host)
+        # will have widened it deliberately, and silently resetting them to
+        # loopback would break their client IPs on the next install re-run.
+        EXISTING_PROXIES="$(read_env_key AURORA_TRUSTED_PROXIES)"
+        printf 'AURORA_TRUSTED_PROXIES=%s\n' "${EXISTING_PROXIES:-127.0.0.1/32,::1/128}"
     else
         # Re-run without AURORA_DOMAIN: keep whatever origins the previous
         # config had (a prior domain setup, or an operator edit) instead

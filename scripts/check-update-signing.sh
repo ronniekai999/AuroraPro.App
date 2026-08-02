@@ -35,7 +35,10 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --source-dir) SOURCE_DIR="${2:?--source-dir needs a value}"; shift 2 ;;
         --branch)     BRANCH="${2:?--branch needs a value}"; shift 2 ;;
-        -h|--help)    sed -n '2,28p' "$0"; exit 0 ;;
+        # Print the header block by content, not a hardcoded line range —
+        # a fixed range silently truncates the help the moment the comment
+        # above grows a line.
+        -h|--help)    awk 'NR>1 && /^#/ {print} NR>1 && !/^#/ {exit}' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done

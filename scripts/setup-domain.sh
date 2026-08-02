@@ -321,6 +321,15 @@ if [ -f "$AURORA_ENV_FILE" ]; then
     if grep -q '^AURORA_TRUSTED_PROXIES=' "$AURORA_ENV_FILE"; then
         ok "AURORA_TRUSTED_PROXIES already set — leaving it alone"
     else
+        # Guarantee a trailing newline before appending. If the file's last
+        # byte isn't one — an operator edit, an editor that strips it — a bare
+        # >> concatenates onto the last line, producing e.g.
+        # "LOG_LEVEL=infoAURORA_TRUSTED_PROXIES=...". That corrupts the
+        # previous setting, fails to apply this one, AND defeats the grep
+        # guard above so a re-run appends again on top of the damage.
+        if [ -s "$AURORA_ENV_FILE" ] && [ "$(tail -c1 "$AURORA_ENV_FILE" | wc -l)" -eq 0 ]; then
+            printf '\n' >> "$AURORA_ENV_FILE"
+        fi
         printf 'AURORA_TRUSTED_PROXIES=127.0.0.1/32,::1/128\n' >> "$AURORA_ENV_FILE"
         ok "Added AURORA_TRUSTED_PROXIES to $AURORA_ENV_FILE"
         if systemctl is-active aurora &>/dev/null; then
