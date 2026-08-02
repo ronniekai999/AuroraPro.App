@@ -143,18 +143,26 @@ export function PartyPanel({
           onToggleVoiceMute={onToggleVoiceMute}
         />
         {/* Restore-to-rail affordance. Only when the parent supports
-            toggling; otherwise minimal is a locked presentation. Pinned to
-            the viewport's top-left in EVERY surface, mirroring the VoicePill
-            pinned at the viewport's top-right — deliberately NOT re-anchored
-            into the theater box (the box's top-left corner is the player
-            topbar's title block, which the chip used to cover). The glyph is
-            a chat bubble: the old corners-out glyph read as "fullscreen"
-            while the player's real fullscreen button was on screen. */}
+            toggling; otherwise minimal is a locked presentation. Lives at
+            the viewport's top-left, mirroring the VoicePill pinned at the
+            viewport's top-right — in the inset theater that is the dimmed
+            strip above the box, opposite the pill. `.stage-party-dock`
+            (index.css) adjusts `top` ONLY, and only while the theater is
+            up: same 16px while the box is inset, below the topbar when the
+            theater goes full-bleed and the always-visible title would sit
+            under the chip. It must never re-anchor the chip into the box's
+            top-left — that corner belongs to the topbar's title block (the
+            original bug). Moot in element-fullscreen: the chip is a sibling
+            of the fullscreened player root, so it isn't rendered there —
+            same as the pill. The glyph is a chat bubble: the old
+            corners-out glyph read as "fullscreen" while the player's real
+            fullscreen button was on screen. */}
         {onToggleVariant && (
           <button
             type="button"
             onClick={onToggleVariant}
-            className="aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
+            data-screenshot-exclude="true"
+            className="stage-party-dock aurora-glass-overlay fixed top-4 left-4 z-[67] flex items-center gap-2 px-3 py-2 rounded-full
                        bg-[rgba(8,6,14,0.5)] backdrop-blur-md border border-[rgba(220,200,255,0.16)]
                        text-white/70 hover:text-white hover:border-[rgba(220,200,255,0.3)]
                        text-xs font-medium transition-colors"

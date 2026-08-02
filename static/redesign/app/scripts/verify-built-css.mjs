@@ -75,11 +75,8 @@ console.log('\n>> Winner for `transform` on .stage-scrub-knob under :hover of .s
 }
 
 // 2. New primitives emitted?
-// `stage-party-dock` is gone on purpose: the theater re-anchor parked the
-// minimized-party chip on the player title, so the chip is viewport-anchored
-// again and the class + rule were removed.
 const wanted = ['stage-controls-scrim', 'stage-player-topbar', 'stage-orb', 'stage-scrub',
-  'stage-party-rail', 'stage-party-reactions']
+  'stage-party-dock', 'stage-party-rail', 'stage-party-reactions']
 console.log('\n## New primitives emitted')
 for (const w of wanted) {
   const n = find(r => new RegExp(`\\.${w}(?![-\\w])`).test(r.sel)).length
