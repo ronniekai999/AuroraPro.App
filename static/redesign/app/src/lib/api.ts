@@ -1410,11 +1410,17 @@ export async function listAdminActivity(
 // an incident twenty minutes old.
 export type LogLevelFilter = 'all' | 'problems'
 
+// The problem ring holds 2000 entries against the main ring's 1000, and the
+// server's per-request cap is 1000. Ask for a big slice when filtering:
+// reaching further back is the entire reason to switch to this view, and the
+// endpoint's 100-entry default would have quietly thrown that away.
+const PROBLEM_LOG_LIMIT = 500
+
 export async function listAdminLogs(
   level: LogLevelFilter = 'all',
   signal?: AbortSignal,
 ): Promise<LogEntry[]> {
-  const qs = level === 'problems' ? '?level=warn' : ''
+  const qs = level === 'problems' ? `?level=warn&limit=${PROBLEM_LOG_LIMIT}` : ''
   const resp = await apiFetch<LogEntry[]>(`/api/admin/logs${qs}`, { signal })
   return resp || []
 }

@@ -1236,7 +1236,6 @@ func (h *AdminHandler) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "settings updated"})
 }
 
-// Logs returns recent server log entries from the in-memory ring buffer.
 // Logs serves the in-memory log rings.
 //
 // ?level=warn switches to the dedicated WARN+ERROR ring rather than filtering

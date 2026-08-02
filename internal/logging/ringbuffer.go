@@ -49,7 +49,13 @@ type RingBufferHandler struct {
 
 // warnRingSize is deliberately generous relative to the main ring: WARN+ERROR
 // is a small fraction of total volume (0.26% in the observed window), so this
-// buys days-to-weeks of problem history for a fraction of a megabyte.
+// buys days-to-weeks of problem history cheaply.
+//
+// Memory note: entries retain their Attrs map, and some warnings carry bulky
+// values — ffmpeg stderr tails on skip-marker and transcode failures run to a
+// few KB each. Worst case here is single-digit megabytes held for as long as
+// the ring takes to wrap, where previously those entries rotated out within
+// minutes. That is a deliberate trade for being able to see an error at all.
 const warnRingSize = 2000
 
 func NewRingBufferHandler(inner slog.Handler, size int) *RingBufferHandler {
@@ -143,6 +149,13 @@ func (h *RingBufferHandler) WithGroup(name string) slog.Handler {
 // appendEntry pushes one entry into a ring. Split out so both rings share
 // exactly one implementation of the wraparound bookkeeping.
 func appendEntry(s *ringState, entry models.LogEntry) {
+	// Defensive: logging must never be the thing that crashes the process, and
+	// a handler value built without a ring (hand-constructed in a test, or a
+	// future field added to the struct literals) would otherwise nil-panic on
+	// the first log line.
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.buf[s.head] = entry
 	s.head = (s.head + 1) % s.size
@@ -169,6 +182,9 @@ func (h *RingBufferHandler) ProblemEntries(limit, offset int) []models.LogEntry 
 }
 
 func readRing(s *ringState, limit, offset int) []models.LogEntry {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
