@@ -97,6 +97,23 @@ func (q *Queries) UpdatePartyMedia(ctx context.Context, partyID int64, mediaItem
 	return nil
 }
 
+// UpdatePartyHost persists a host-succession handoff — the previous host
+// left (or timed out of the disconnect grace) and a remaining participant
+// inherited the party. Gated on is_active so a party that ended in the
+// same instant is a no-op rather than a corruption. The in-memory
+// PartyState is the live authority; this row feeds crash recovery and the
+// share-image lookup.
+func (q *Queries) UpdatePartyHost(ctx context.Context, partyID, hostUserID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE watch_parties SET host_user_id = $1 WHERE id = $2 AND is_active = true`,
+		hostUserID, partyID,
+	)
+	if err != nil {
+		return fmt.Errorf("update party host: %w", err)
+	}
+	return nil
+}
+
 // MarkPartyStarted stamps started_at to the given time. Called either when
 // the scheduled-start timer fires, or when the host manually plays an
 // unscheduled party for the first time. Idempotent at the DB layer — calling

@@ -254,13 +254,23 @@ func TestLeavePartyV3Room_NotParticipant(t *testing.T) {
 	}
 }
 
-func TestLeavePartyV3Room_HostEndsParty(t *testing.T) {
-	m := mockPartyManager()
+// ============================================================
+// Host succession (2026-08) — a party in progress survives the host
+// leaving as long as at least one eligible participant remains.
+// ============================================================
 
+// succession test harness: host 1 plus guests, party Running with a
+// known anchor so the tests can assert playback is untouched by a
+// handoff. JoinedAt spreads establish seniority.
+func successionParty() *PartyState {
 	ps := &PartyState{
 		Code:            "ABCDEF",
 		HostUserID:      1,
 		MaxParticipants: 5,
+		Running:         true,
+		AnchorAbsMs:     42_000,
+		AnchorServerAt:  time.Now(),
+		StateRevision:   7,
 		Participants:    make(map[int64]*Participant),
 		roomConns:       make(map[int64]*SafeConn),
 		syncConns:       make(map[int64]*SafeConn),
@@ -268,24 +278,279 @@ func TestLeavePartyV3Room_HostEndsParty(t *testing.T) {
 		Settings:        PartySettings{},
 		CreatedAt:       time.Now(),
 	}
-	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}
-	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: time.Now()}
+	now := time.Now()
+	ps.Participants[1] = &Participant{UserID: 1, Username: "host", IsHost: true, LastSeen: now, JoinedAt: now.Add(-30 * time.Minute)}
+	return ps
+}
+
+func TestLeavePartyV3Room_HostLeaves_PromotesMostSeniorGuest(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	// Guest 3 joined BEFORE guest 2 — seniority, not user ID, must decide.
+	ps.Participants[2] = &Participant{UserID: 2, Username: "late", LastSeen: now, JoinedAt: now.Add(-5 * time.Minute)}
+	ps.Participants[3] = &Participant{UserID: 3, Username: "early", LastSeen: now, JoinedAt: now.Add(-20 * time.Minute)}
 
 	m.mu.Lock()
 	m.parties["ABCDEF"] = ps
 	m.mu.Unlock()
 
-	err := m.LeavePartyV3Room("ABCDEF", 1)
-	if err != nil {
+	if err := m.LeavePartyV3Room("ABCDEF", 1); err != nil {
 		t.Fatalf("LeavePartyV3Room (host) failed: %v", err)
 	}
 
-	// Party should be removed from memory (explicit host leave ends it)
+	m.mu.RLock()
+	_, exists := m.parties["ABCDEF"]
+	m.mu.RUnlock()
+	if !exists {
+		t.Fatal("party must survive a host leave while eligible guests remain")
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID != 3 {
+		t.Errorf("HostUserID = %d, want 3 (earliest JoinedAt)", ps.HostUserID)
+	}
+	if _, stillThere := ps.Participants[1]; stillThere {
+		t.Error("departed host must be removed from participants")
+	}
+	if !ps.Participants[3].IsHost {
+		t.Error("successor's IsHost flag must flip true")
+	}
+	if ps.Participants[2].IsHost {
+		t.Error("non-successor must not be flagged host")
+	}
+	// The movie must not blink: the V3 anchor is server-side truth and a
+	// handoff has no business touching it.
+	if !ps.Running || ps.AnchorAbsMs != 42_000 {
+		t.Errorf("playback anchor changed on handoff: Running=%v AnchorAbsMs=%d", ps.Running, ps.AnchorAbsMs)
+	}
+	if ps.StateRevision <= 7 {
+		t.Errorf("StateRevision = %d, want a bump past 7 so clients apply the new snapshot", ps.StateRevision)
+	}
+	if ps.HostDisconnectedAt != nil {
+		t.Error("HostDisconnectedAt must be cleared on handoff")
+	}
+}
+
+func TestLeavePartyV3Room_LoneHostLeaves_EndsParty(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	if err := m.LeavePartyV3Room("ABCDEF", 1); err != nil {
+		t.Fatalf("LeavePartyV3Room (lone host) failed: %v", err)
+	}
+
 	m.mu.RLock()
 	_, exists := m.parties["ABCDEF"]
 	m.mu.RUnlock()
 	if exists {
-		t.Error("party should be removed from memory after host leaves")
+		t.Error("party should end when the last participant (the host) leaves")
+	}
+}
+
+func TestLeavePartyV3Room_HostLeaves_OnlyCompanionsRemain_EndsParty(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	// A phone companion has no player and no sync socket — it cannot
+	// keep a party "playing" and must not inherit it.
+	ps.Participants[2] = &Participant{UserID: 2, Username: "phone", LastSeen: now, JoinedAt: now.Add(-25 * time.Minute), Companion: true}
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	if err := m.LeavePartyV3Room("ABCDEF", 1); err != nil {
+		t.Fatalf("LeavePartyV3Room (host, companions only) failed: %v", err)
+	}
+
+	m.mu.RLock()
+	_, exists := m.parties["ABCDEF"]
+	m.mu.RUnlock()
+	if exists {
+		t.Error("party should end when only companions remain — nobody left can actually watch")
+	}
+}
+
+func TestReapExpiredHostGrace_PromotesSuccessor(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: now, JoinedAt: now.Add(-10 * time.Minute)}
+	disconnectAt := now.Add(-HostDisconnectGracePeriod)
+	ps.HostDisconnectedAt = &disconnectAt
+	delete(ps.roomConns, 1) // host's room conn died with the disconnect
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	m.reapExpiredHostGrace("ABCDEF", ps, disconnectAt)
+
+	m.mu.RLock()
+	_, exists := m.parties["ABCDEF"]
+	m.mu.RUnlock()
+	if !exists {
+		t.Fatal("party must survive grace expiry while an eligible guest remains")
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID != 2 {
+		t.Errorf("HostUserID = %d, want 2", ps.HostUserID)
+	}
+	if _, stillThere := ps.Participants[1]; stillThere {
+		t.Error("vanished host's reserved slot must be cleared on grace expiry")
+	}
+	if ps.HostDisconnectedAt != nil {
+		t.Error("HostDisconnectedAt must be cleared after the handoff")
+	}
+	if !ps.Running || ps.AnchorAbsMs != 42_000 {
+		t.Errorf("playback anchor changed on grace handoff: Running=%v AnchorAbsMs=%d", ps.Running, ps.AnchorAbsMs)
+	}
+}
+
+func TestReapExpiredHostGrace_HostReconnected_NoOp(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: now, JoinedAt: now}
+	// HostDisconnectedAt nil = the host came back inside the window.
+	staleDisconnect := now.Add(-HostDisconnectGracePeriod)
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	m.reapExpiredHostGrace("ABCDEF", ps, staleDisconnect)
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID != 1 {
+		t.Errorf("reconnected host must keep the party; HostUserID = %d", ps.HostUserID)
+	}
+	if _, hostThere := ps.Participants[1]; !hostThere {
+		t.Error("reconnected host must keep their participant entry")
+	}
+}
+
+func TestReapExpiredHostGrace_SupersededTimer_NoOp(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: now, JoinedAt: now}
+	// A NEWER disconnect than the one this timer was armed for — the
+	// newer goroutine owns the decision.
+	newerDisconnect := now.Add(-1 * time.Second)
+	ps.HostDisconnectedAt = &newerDisconnect
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	m.reapExpiredHostGrace("ABCDEF", ps, now.Add(-HostDisconnectGracePeriod))
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID != 1 {
+		t.Errorf("superseded timer must not act; HostUserID = %d", ps.HostUserID)
+	}
+	if _, hostThere := ps.Participants[1]; !hostThere {
+		t.Error("superseded timer must not clear the host's slot")
+	}
+}
+
+func TestReapExpiredHostGrace_NoSuccessor_EndsParty(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	disconnectAt := time.Now().Add(-HostDisconnectGracePeriod)
+	ps.HostDisconnectedAt = &disconnectAt
+	delete(ps.roomConns, 1)
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	m.reapExpiredHostGrace("ABCDEF", ps, disconnectAt)
+
+	m.mu.RLock()
+	_, exists := m.parties["ABCDEF"]
+	m.mu.RUnlock()
+	if exists {
+		t.Error("party should end when the grace expires with nobody to hand off to")
+	}
+}
+
+func TestLeavePartyV3Room_HostLeaves_LiveConnOutranksSeniority(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	// Guest 2 is senior but between sockets (no room conn — e.g. a
+	// mid-handshake rejoin); guest 3 is junior but demonstrably present.
+	// The party should go to the one who is actually there.
+	ps.Participants[2] = &Participant{UserID: 2, Username: "senior-adrift", LastSeen: now, JoinedAt: now.Add(-25 * time.Minute)}
+	ps.Participants[3] = &Participant{UserID: 3, Username: "junior-live", LastSeen: now, JoinedAt: now.Add(-2 * time.Minute)}
+	ps.roomConns[3] = &SafeConn{} // zero-value SafeConn: Send() discards (see Send's nil-outbox branch)
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	if err := m.LeavePartyV3Room("ABCDEF", 1); err != nil {
+		t.Fatalf("LeavePartyV3Room (host) failed: %v", err)
+	}
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.HostUserID != 3 {
+		t.Errorf("HostUserID = %d, want 3 (live room conn outranks seniority)", ps.HostUserID)
+	}
+}
+
+func TestPromotion_TransfersPlaybackControl(t *testing.T) {
+	m := mockPartyManager()
+	ps := successionParty()
+	now := time.Now()
+	ps.Participants[2] = &Participant{UserID: 2, Username: "viewer", LastSeen: now, JoinedAt: now}
+
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	if err := m.LeavePartyV3Room("ABCDEF", 1); err != nil {
+		t.Fatalf("host leave failed: %v", err)
+	}
+
+	// The crown moved: the ex-host is rejected, the successor controls.
+	if err := m.HandleRequestPause("ABCDEF", 1, 43_000); err == nil {
+		t.Error("ex-host must lose pause control after the handoff")
+	}
+	if err := m.HandleRequestPause("ABCDEF", 2, 43_000); err != nil {
+		t.Errorf("promoted host pause failed: %v", err)
+	}
+	ps.mu.Lock()
+	if ps.Running {
+		t.Error("party should be Paused after the promoted host's pause")
+	}
+	ps.mu.Unlock()
+
+	// And the deliberate end stays host-gated on the NEW host.
+	if err := m.EndParty("ABCDEF", 1); err == nil {
+		t.Error("ex-host must not be able to end the party")
+	}
+	if err := m.EndParty("ABCDEF", 2); err != nil {
+		t.Errorf("promoted host EndParty failed: %v", err)
+	}
+	m.mu.RLock()
+	_, exists := m.parties["ABCDEF"]
+	m.mu.RUnlock()
+	if exists {
+		t.Error("party should be removed after the promoted host ends it")
 	}
 }
 

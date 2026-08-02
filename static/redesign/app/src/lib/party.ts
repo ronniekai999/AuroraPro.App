@@ -182,10 +182,25 @@ export interface HelloPayload {
   hls_start_sec?: number
 }
 
+// 2026-08 — host succession. The previous host left (reason 'left') or
+// timed out of the disconnect grace (reason 'disconnected') and the
+// server handed the party to a remaining participant. A fresh
+// party-state snapshot follows on the same socket; this event exists so
+// the UI can NAME the change ("X is now the host") without diffing
+// snapshots, and so a client can patch hostUserId instantly.
+export interface HostChangedEvent {
+  new_host_user_id: number
+  new_host_username: string
+  previous_host_user_id: number
+  previous_host_username: string
+  reason: 'left' | 'disconnected'
+}
+
 export type InboundRoomMessage =
   | { type: 'party-state'; payload: PartyStatePayload }
   | { type: 'participant-join'; payload: ParticipantEvent }
   | { type: 'participant-left'; payload: ParticipantEvent }
+  | { type: 'host-changed'; payload: HostChangedEvent }
   | { type: 'chat-message'; payload: ChatMessageEvent }
   | { type: 'reaction'; payload: ReactionEvent }
   | { type: 'ready-changed'; payload: { user_id: number; ready: boolean } }

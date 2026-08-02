@@ -74,6 +74,12 @@ interface PartyPanelProps {
   // link for phones). Optional: guests don't get it, so the button is
   // hidden. Rail-only (minimal mode has no header).
   onInvite?: () => void
+  // 2026-08 — host succession made "leave" and "end" different actions:
+  // the host's leave hands the party off, and THIS is the deliberate
+  // end-for-everyone (useParty.end → POST /api/parties/{code}/end).
+  // Optional: when absent, the hand-off dialog simply omits the "End
+  // for everyone" option.
+  onEndParty?: () => void
 }
 
 export function PartyPanel({
@@ -84,19 +90,30 @@ export function PartyPanel({
   variant = 'rail',
   onToggleVariant,
   onInvite,
+  onEndParty,
 }: PartyPanelProps) {
   const [draft, setDraft] = useState('')
   const chatRef = useRef<HTMLDivElement | null>(null)
-  // 2026-05-25 — host-aware leave confirmation. The host clicking
-  // "Leave" actually ENDS the party server-side (manager.go:1489-1493
-  // — explicit leave-party from the host triggers endPartyInternal
-  // immediately, kicking all guests). Until this guard, the button
-  // was labeled "Leave Party" for everyone with no warning, leading
-  // to surprised hosts wondering why their movie night ended.
+  // 2026-05-25 — host-aware leave confirmation; reworked 2026-08 for
+  // host succession. A host's leave now HANDS THE PARTY OFF server-side
+  // (promoteSuccessorLocked picks the most senior remaining watcher and
+  // the movie keeps playing), so the dialog's job changed from "are you
+  // sure you want to end it?" to a choice: hand off and leave, or end
+  // for everyone (a separate deliberate action, onEndParty). Only when
+  // nobody eligible remains — lone host, or only phone companions left,
+  // who have no player to keep watching on — does a leave still end the
+  // party, and the dialog keeps the historical end-confirm copy for
+  // exactly that case.
   //
   // Guests get the silent button (their leave is non-destructive —
   // party continues, others stay).
   const isHost = !!currentUserId && currentUserId === state.hostUserId
+  // Mirrors the server's successor-eligibility rule (companions can't
+  // inherit: no player, no sync socket). Presentation-only — the server
+  // decides for real on leave; this just picks which dialog to show.
+  const canHandOff = isHost && state.participants.some(
+    p => p.user_id !== currentUserId && !p.companion,
+  )
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false)
 
   // Auto-scroll chat to bottom on new messages — only if the user
@@ -504,9 +521,13 @@ export function PartyPanel({
             Send
           </button>
         </div>
-        {/* 2026-05-25 — host sees "End Party" with a confirm dialog
-            since their leave kicks every guest; guest sees the silent
-            "Leave Party" since their leave is non-destructive. */}
+        {/* 2026-05-25 — the host gets a confirm dialog; guests get the
+            silent button (their leave is non-destructive). 2026-08 host
+            succession changed what the host's dialog offers: with an
+            eligible successor present, leaving hands the party off, so
+            the button reads "Leave Party" and the dialog offers hand-off
+            vs end-for-everyone. Without one, leaving still ends the
+            party, and button + dialog keep the historical end copy. */}
         <button
           onClick={() => {
             if (isHost) {
@@ -517,7 +538,7 @@ export function PartyPanel({
           }}
           className="w-full mt-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-red-300 text-sm transition-colors"
         >
-          {isHost ? 'End Party' : 'Leave Party'}
+          {isHost && !canHandOff ? 'End Party' : 'Leave Party'}
         </button>
         {showLeaveConfirm && (
           <div
@@ -528,26 +549,62 @@ export function PartyPanel({
               className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-6"
               onClick={e => e.stopPropagation()}
             >
-              <h2 className="text-white text-base font-semibold mb-2">End the party?</h2>
-              <p className="text-white/60 text-sm mb-5 leading-snug">
-                You're the host. Leaving will end the party for everyone
-                {state.participants.length > 1 && ` (${state.participants.length - 1} other ${state.participants.length === 2 ? 'guest' : 'guests'})`}
-                . The join code <span className="text-purple-300 font-mono">{state.code}</span> will stop working.
-              </p>
-              <div className="flex gap-2 justify-end">
-                <button
-                  onClick={() => setShowLeaveConfirm(false)}
-                  className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
-                >
-                  Keep watching
-                </button>
-                <button
-                  onClick={() => { setShowLeaveConfirm(false); onLeave() }}
-                  className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
-                >
-                  End party
-                </button>
-              </div>
+              {canHandOff ? (
+                <>
+                  <h2 className="text-white text-base font-semibold mb-2">Leave the party?</h2>
+                  <p className="text-white/60 text-sm mb-5 leading-snug">
+                    You're the host. If you leave, hosting passes to another
+                    watcher and the movie keeps playing — the code{' '}
+                    <span className="text-purple-300 font-mono">{state.code}</span>{' '}
+                    keeps working, and you can rejoin any time.
+                  </p>
+                  <div className="flex gap-2 justify-end flex-wrap">
+                    <button
+                      onClick={() => setShowLeaveConfirm(false)}
+                      className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
+                    >
+                      Keep watching
+                    </button>
+                    {onEndParty && (
+                      <button
+                        onClick={() => { setShowLeaveConfirm(false); onEndParty() }}
+                        className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
+                      >
+                        End for everyone
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setShowLeaveConfirm(false); onLeave() }}
+                      className="px-4 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-white text-sm font-medium transition-colors"
+                    >
+                      Hand off &amp; leave
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-white text-base font-semibold mb-2">End the party?</h2>
+                  <p className="text-white/60 text-sm mb-5 leading-snug">
+                    You're the host. Leaving will end the party for everyone
+                    {state.participants.length > 1 && ` (${state.participants.length - 1} other ${state.participants.length === 2 ? 'guest' : 'guests'})`}
+                    . The join code <span className="text-purple-300 font-mono">{state.code}</span> will stop working.
+                  </p>
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      onClick={() => setShowLeaveConfirm(false)}
+                      className="px-4 py-2 text-white/70 hover:text-white text-sm transition-colors"
+                    >
+                      Keep watching
+                    </button>
+                    <button
+                      onClick={() => { setShowLeaveConfirm(false); onLeave() }}
+                      className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 rounded-lg text-red-200 text-sm font-medium transition-colors"
+                    >
+                      End party
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

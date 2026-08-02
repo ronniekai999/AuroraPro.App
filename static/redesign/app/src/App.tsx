@@ -2958,6 +2958,24 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [party.onMediaChange])
 
+  // 2026-08 — host succession. The server promotes silently at the
+  // protocol level; a crown moving with no explanation reads as a
+  // glitch, so name the handoff for everyone still in the room. State
+  // (hostUserId, is_host flags) is already patched by useParty before
+  // this fires — the toast is the only App-level job.
+  useEffect(() => {
+    return party.onHostChange(p => {
+      if (user && p.new_host_user_id === user.id) {
+        addToast(
+          `${p.previous_host_username || 'The host'} ${p.reason === 'disconnected' ? 'disconnected' : 'left'} — you're hosting now`,
+          'info',
+        )
+      } else {
+        addToast(`${p.new_host_username} is now the host`, 'info')
+      }
+    })
+  }, [party.onHostChange, user, addToast])
+
   // 2026-05-25 — Guest auto-open-player. Symptom: in the EEJ7DB live test,
   // the host clicked Play but nothing opened on the guest's end. Root
   // cause: onMediaChange above only fires when the host SWITCHES media
@@ -5418,6 +5436,16 @@ export default function App() {
           onSendReaction={party.sendReaction}
           onLeave={() => { party.leave(); setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
           onClose={() => { setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }}
+          // 2026-08 — host succession. Leaving hands the party off, so
+          // ending it for everyone is its own deliberate action. end()
+          // is async and only tears down on success — mirror the leave
+          // path's UI resets only when it reports ok, so a failed end
+          // (party stays live) keeps the panel open.
+          onEndParty={() => {
+            void party.end().then(ok => {
+              if (ok) { setPartyPanelOpen(false); setPartyVariant('rail'); setPartyInviteOpen(false) }
+            })
+          }}
           // Feature 2 — Cinematic Overlay. variant + toggle flip the panel
           // between the floating glass rail and the minimal ticker/pill/
           // dock face (composed inside PartyPanel). The dock button in the

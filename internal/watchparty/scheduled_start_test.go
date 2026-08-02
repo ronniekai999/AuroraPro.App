@@ -212,6 +212,53 @@ func TestV3_LeaveRetriesOverdueScheduledStart(t *testing.T) {
 		"party never started after the blocking guest left (leave-path retry missing)")
 }
 
+// TestV3_HostLeaveHandoffRetriesOverdueScheduledStart — 2026-08 host
+// succession: a host bailing before an overdue scheduled start used to
+// end the party outright. Now the remaining guest inherits it — and
+// because the spoiler gate never counts the HOST as a blocker
+// (spoilerGateBlockersLocked skips IsHost), the handoff itself clears a
+// gate that was blocked on that very guest, so the leave path's retry
+// must fire the start for the survivor. Deliberate rule composition,
+// not an accident: a scheduled party auto-starting on schedule is what
+// its members signed up for, and the inherited host can pause at will.
+func TestV3_HostLeaveHandoffRetriesOverdueScheduledStart(t *testing.T) {
+	m := NewManager(nil, nil)
+	ps := v3TestParty(m, "SCHED7", 1)
+	overdue := time.Now().Add(-1 * time.Second)
+	ps.mu.Lock()
+	ps.Settings.SpoilerFreeStart = true
+	ps.ScheduledStartAt = &overdue
+	// Guest 2 hasn't readied up — the gate's sole blocker.
+	ps.Participants[2] = &Participant{
+		UserID: 2, Username: "guest", IsHost: false, Ready: false,
+		LastSeen: time.Now(), JoinedAt: time.Now(),
+	}
+	ps.mu.Unlock()
+
+	// Countdown fires while the guest is not ready — blocked.
+	m.fireScheduledStart("SCHED7")
+	ps.mu.Lock()
+	if ps.Running || ps.StartedAt != nil {
+		ps.mu.Unlock()
+		t.Fatal("precondition failed: not-ready guest should have blocked the scheduled start")
+	}
+	ps.mu.Unlock()
+
+	// The host bails. Pre-succession this ended the party for everyone.
+	if err := m.LeavePartyV3Room("SCHED7", 1); err != nil {
+		t.Fatalf("LeavePartyV3Room: %v", err)
+	}
+	m.mu.RLock()
+	_, exists := m.parties["SCHED7"]
+	m.mu.RUnlock()
+	if !exists {
+		t.Fatal("party must survive the host leave while a guest remains (succession)")
+	}
+
+	waitForScheduledStart(t, m, ps,
+		"party never started after the host handed off (promotion retry missing)")
+}
+
 // TestV3_HostJoinRetriesOverdueScheduledStart — 2026-06 review follow-up:
 // the countdown can fire before the host's room socket has joined
 // (HandleRequestPlay rejects non-participants), and if every guest was

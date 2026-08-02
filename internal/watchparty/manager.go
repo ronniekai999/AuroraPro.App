@@ -226,6 +226,17 @@ type Participant struct {
 	// behavior is identical to before this field existed. It is NOT
 	// persisted to the DB — it's a live-presence attribute only.
 	Companion bool `json:"companion"`
+
+	// JoinedAt is the moment this participant FIRST joined the party.
+	// Reconnects keep the original value — the Participants entry
+	// survives them (the reconnect path only refreshes conn + LastSeen).
+	// Host succession orders candidates by it: when the host departs, the
+	// most senior remaining participant inherits the party
+	// (promoteSuccessorLocked). Zero on entries created before the field
+	// existed (in-memory state only, so just parties live across a
+	// deploy); zero sorts earliest, which is the right answer — those
+	// entries are by definition the oldest.
+	JoinedAt time.Time `json:"joined_at"`
 }
 
 // ChatMessage represents a single chat message in the party history.
@@ -349,9 +360,12 @@ type PartyState struct {
 	// shared code → "we never see them on our end, show never starts."
 	//
 	// HostDisconnectedAt is set when the host's room WS closes
-	// unexpectedly (NOT on explicit leave-party — that's still
-	// immediate). If non-nil and the host's WS hasn't reconnected
-	// within HostGracePeriod, a background goroutine ends the party.
+	// unexpectedly (NOT on explicit leave-party — that path hands the
+	// party off, or ends it when nobody eligible remains, immediately).
+	// If non-nil and the host's WS hasn't reconnected within
+	// HostGracePeriod, a background goroutine hands the party to the
+	// most senior remaining participant (2026-08 host succession;
+	// reapExpiredHostGrace) — or ends it if no one eligible is left.
 	// If the host's room WS reconnects in that window, the field is
 	// cleared and the goroutine no-ops on next check.
 	//
@@ -1525,6 +1539,108 @@ func (m *Manager) EndParty(code string, userID int64) error {
 	ps.mu.Unlock()
 
 	return m.endPartyInternal(code, ps)
+}
+
+// promoteSuccessorLocked transfers the host role to the most senior
+// eligible participant after the host departs, so an in-progress party
+// survives as long as at least one person is still actively in it.
+// Caller MUST hold ps.mu, and must have already handled (or be about to
+// remove) the departing host's own Participants entry — the departing
+// user is never a candidate.
+//
+// Eligible: any remaining participant except mobile companions — a
+// companion surface has no video player and no sync socket (see
+// Participant.Companion), so a party whose only remaining members are
+// companions cannot play anything and is not worth keeping alive.
+// Among the eligible, a participant with a live room conn outranks one
+// briefly between sockets (a joiner mid-handshake), then seniority
+// decides: earliest JoinedAt, tiebroken by lowest UserID. Deterministic,
+// and matches the social expectation that the longest-present friend
+// inherits the remote.
+//
+// On success: HostUserID and every per-participant IsHost flag are
+// updated, any pending host-disconnect grace is cleared (it described
+// the OLD host; the goroutine's nil check makes it a no-op), the
+// revision is bumped, and two messages go out on the room pool — a
+// "host-changed" event (drives the "X is now the host" toast) followed
+// by a full party-state snapshot, whose revision guard makes it
+// idempotent and whose participant list carries the flipped is_host
+// flags so no client ever computes a hostless interval. The handoff is
+// persisted best-effort, like every other in-party DB write.
+//
+// The V3 anchor is deliberately NOT touched: playback truth lives
+// server-side (Running + AnchorAbsMs/AnchorServerAt), so the movie keeps
+// playing through the handoff without a hiccup.
+//
+// Returns nil when no eligible successor exists — the caller falls back
+// to ending the party, exactly the pre-succession behavior.
+//
+// departingUsername is passed in rather than looked up because both call
+// sites remove the departing host's Participants entry before promoting
+// (the explicit-leave path deletes every leaver up front; the grace path
+// clears the reserved slot) — by the time this runs, the map no longer
+// knows the name.
+func (m *Manager) promoteSuccessorLocked(ps *PartyState, departingUserID int64, departingUsername, reason string) *Participant {
+	var successor *Participant
+	better := func(cand, cur *Participant) bool {
+		if cur == nil {
+			return true
+		}
+		candConn := ps.roomConns[cand.UserID] != nil
+		curConn := ps.roomConns[cur.UserID] != nil
+		if candConn != curConn {
+			return candConn
+		}
+		if !cand.JoinedAt.Equal(cur.JoinedAt) {
+			return cand.JoinedAt.Before(cur.JoinedAt)
+		}
+		return cand.UserID < cur.UserID
+	}
+	for uid, p := range ps.Participants {
+		if uid == departingUserID || p == nil || p.Companion {
+			continue
+		}
+		if better(p, successor) {
+			successor = p
+		}
+	}
+	if successor == nil {
+		return nil
+	}
+
+	previousHostID := ps.HostUserID
+	ps.HostUserID = successor.UserID
+	for uid, p := range ps.Participants {
+		p.IsHost = uid == successor.UserID
+	}
+	ps.HostDisconnectedAt = nil
+	m.bumpRevLocked(ps)
+
+	m.broadcastToPartyLocked(ps, map[string]interface{}{
+		"type": "host-changed",
+		"payload": map[string]interface{}{
+			"new_host_user_id":       successor.UserID,
+			"new_host_username":      successor.Username,
+			"previous_host_user_id":  previousHostID,
+			"previous_host_username": departingUsername,
+			"reason":                 reason,
+		},
+	})
+	m.broadcastToPartyLocked(ps, m.BuildPartyStateMessage(ps))
+
+	if ps.dbID > 0 && m.queries != nil {
+		if err := m.queries.UpdatePartyHost(context.Background(), ps.dbID, successor.UserID); err != nil {
+			slog.Warn("v3: persist host handoff failed", "code", ps.Code, "error", err)
+		}
+	}
+
+	slog.Info("v3: host handoff",
+		"code", ps.Code,
+		"previous_host", previousHostID,
+		"new_host", successor.UserID,
+		"reason", reason,
+	)
+	return successor
 }
 
 // endPartyInternal broadcasts party-ended, cleans up DB and memory.
