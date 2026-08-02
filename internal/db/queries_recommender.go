@@ -765,6 +765,14 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 	// already covered by the same fragments inside NearestUnwatched. The
 	// thumbs half landed with the star-ratings pass — both review agents
 	// flagged the asymmetry of excluding a panned anchor but not a 👎'd one.)
+	//
+	// watchlistedNotExists is deliberately NOT here. It belongs to RECALL,
+	// where "I already know about this" means don't recommend it. These rows
+	// are the profile's own history, and saving a title you watched is a
+	// POSITIVE verdict — applying the recall rule here would delete the
+	// "Because you watched X" rail for anything you favourited, which is
+	// backwards. The two negative fragments above stay: a panned anchor
+	// really must not headline a rail.
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, title, type, year, embedding FROM (
 			SELECT DISTINCT ON (m.id)
@@ -773,7 +781,7 @@ func (q *Queries) RecentAnchorsWithEmbeddings(ctx context.Context, profileID int
 			       wp.completed AS completed, wp.updated_at AS updated_at
 			FROM watch_progress wp
 			JOIN media_items m ON m.id = wp.media_item_id
-			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL`+dislikedNotExists+lowRatedNotExists+watchlistedNotExists+`
+			WHERE wp.profile_id = $1 AND m.embedding IS NOT NULL`+dislikedNotExists+lowRatedNotExists+`
 			ORDER BY m.id, wp.completed DESC, wp.updated_at DESC
 		) d
 		ORDER BY d.completed DESC, d.updated_at DESC

@@ -12,6 +12,8 @@ package db
 import (
 	"context"
 	"testing"
+
+	"github.com/aurora-media/aurora/internal/models"
 )
 
 // seedWatchlist creates a list of the given type for a profile and returns its
@@ -323,6 +325,127 @@ func TestRecall_DoesNotReturnTitlesAlreadyOnTheWatchlist(t *testing.T) {
 			t.Fatalf("recall returned item %d, which is already on this profile's watchlist", it.ID)
 		}
 	}
+}
+
+// The recall exclusion must NOT reach the profile's own watch history.
+// RecentAnchorsWithEmbeddings answers "what did this profile watch" for the
+// "Because you watched X" rails — it is not recall. Saving a title you watched
+// is a positive verdict, so applying the recall rule there would delete the
+// rail for anything you favourited: exactly backwards, and silent.
+func TestAnchors_FavouritingAWatchedTitleKeepsItsAnchor(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	userID := seedTestUser(t, q)
+	profileID := seedDefaultProfile(t, q, userID)
+	libID := seedTestLibrary(t, q, userID)
+
+	watched := seedEmbeddedItem(t, q, libID, 0)
+	setProgress(t, q, userID, profileID, watched, 100, 100, true)
+
+	before, err := q.RecentAnchorsWithEmbeddings(ctx, profileID, 10)
+	if err != nil {
+		t.Fatalf("anchors before: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("expected the watched title as an anchor, got %d", len(before))
+	}
+
+	// Loving it enough to favourite it must not erase it.
+	favs := seedWatchlist(t, q, profileID, "favorites")
+	addToList(t, q, favs, watched)
+
+	after, err := q.RecentAnchorsWithEmbeddings(ctx, profileID, 10)
+	if err != nil {
+		t.Fatalf("anchors after: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("favouriting a watched title removed its anchor: %d anchors, want 1", len(after))
+	}
+}
+
+// The exclusion has to reach EVERY recall surface, or a saved title just
+// reappears on a different rail. These three are recall — they already exclude
+// watch_progress and taste_seeds, which is the tell.
+func TestEngagementRails_DoNotReturnSavedTitles(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	userID := seedTestUser(t, q)
+	profileID := seedDefaultProfile(t, q, userID)
+	libID := seedTestLibrary(t, q, userID)
+
+	// A well-rated, short, popular title — the shape every one of these rails
+	// wants to surface — that the profile has already saved.
+	saved := seedRailItem(t, q, libID, "movie", 8.5, 5000, 95)
+	want := seedWatchlist(t, q, profileID, "want_to_watch")
+	addToList(t, q, want, saved)
+
+	// TrendingUnwatched ranks by HEAT — watch activity from OTHER people. Without
+	// a recent watch by somebody else the title never surfaces, and the subtest
+	// would pass whether or not the exclusion works. (It did, until a mutation
+	// run showed only two of the three subtests failing with the exclusion
+	// removed.) A second user's completed watch supplies the heat; it must not be
+	// this profile's, or the "unwatched" filter removes it for the real reason.
+	otherUser := seedTestUser(t, q)
+	otherProfile := seedDefaultProfile(t, q, otherUser)
+	setProgress(t, q, otherUser, otherProfile, saved, 100, 100, true)
+
+	for _, tc := range []struct {
+		name string
+		call func() ([]*models.MediaItem, error)
+	}{
+		{"TrendingUnwatched", func() ([]*models.MediaItem, error) {
+			// Wide-open thresholds: the rail must be ABLE to return the item,
+			// so that its absence proves the exclusion rather than a filter.
+			return q.TrendingUnwatched(ctx, profileID, nil, 30, 3650, 0, 50)
+		}},
+		{"HiddenGems", func() ([]*models.MediaItem, error) {
+			return q.HiddenGems(ctx, profileID, nil, 0, 0, 1000000, 50)
+		}},
+		{"FinishTonightShortMovies", func() ([]*models.MediaItem, error) {
+			return q.FinishTonightShortMovies(ctx, profileID, nil, 1, 100000, 50)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, err := tc.call()
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			for _, it := range items {
+				if it.ID == saved {
+					t.Fatalf("%s returned a title already on the profile's watchlist", tc.name)
+				}
+			}
+		})
+	}
+}
+
+// ComfortRewatch is the documented exception: it exists to surface titles the
+// profile has already WATCHED. Favourites are the archetypal comfort rewatch,
+// so applying the recall exclusion here would empty the rail of exactly what it
+// is for.
+func TestComfortRewatch_StillReturnsFavouritedRewatches(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	userID := seedTestUser(t, q)
+	profileID := seedDefaultProfile(t, q, userID)
+	libID := seedTestLibrary(t, q, userID)
+
+	comfort := seedRailItem(t, q, libID, "movie", 8.0, 3000, 100)
+	setProgress(t, q, userID, profileID, comfort, 100, 100, true)
+
+	favs := seedWatchlist(t, q, profileID, "favorites")
+	addToList(t, q, favs, comfort)
+
+	items, err := q.ComfortRewatch(ctx, profileID, nil, 50)
+	if err != nil {
+		t.Fatalf("ComfortRewatch: %v", err)
+	}
+	for _, it := range items {
+		if it.ID == comfort {
+			return // present, as it must be
+		}
+	}
+	t.Fatal("favouriting a comfort rewatch removed it from the rewatch rail")
 }
 
 // The 1-2★ exclusion is applied to `src` as a whole, so it must reach the new
