@@ -108,6 +108,57 @@ func TestDrainState_AbandonedSessionDoesNotBlockDeploys(t *testing.T) {
 	}
 }
 
+// TestDrainState_CountsDirectPlay — direct-play streams hold NO transcode
+// session and spawn NO ffmpeg process, so before they were counted here they
+// were invisible to BOTH halves of the deploy gate: absent from tm.sessions
+// and absent from pgrep. A deploy would see an idle box and restart mid-stream.
+func TestDrainState_CountsDirectPlay(t *testing.T) {
+	tm := drainTestManager(t)
+	tm.SetDrainExtraViewers(func() int { return 2 })
+
+	st := tm.DrainState()
+	if st.Sessions != 0 || st.TranscodeHeld != 0 {
+		t.Fatalf("expected no transcode sessions, got %+v", st)
+	}
+	if st.DirectPlay != 2 {
+		t.Fatalf("DirectPlay = %d, want 2", st.DirectPlay)
+	}
+	if st.HeldByViewer != 2 {
+		t.Fatalf("HeldByViewer = %d, want 2 — direct-play viewers must block a "+
+			"deploy even with zero transcode sessions and no ffmpeg", st.HeldByViewer)
+	}
+}
+
+func TestDrainState_SumsTranscodeAndDirectPlay(t *testing.T) {
+	tm := drainTestManager(t)
+	addSession(tm, "held", 2*time.Second)
+	addSession(tm, "abandoned", 5*time.Minute)
+	tm.SetDrainExtraViewers(func() int { return 3 })
+
+	st := tm.DrainState()
+	if st.Sessions != 2 {
+		t.Fatalf("Sessions = %d, want 2", st.Sessions)
+	}
+	if st.TranscodeHeld != 1 {
+		t.Fatalf("TranscodeHeld = %d, want 1", st.TranscodeHeld)
+	}
+	if st.HeldByViewer != 4 {
+		t.Fatalf("HeldByViewer = %d, want 4 (1 transcode + 3 direct play)", st.HeldByViewer)
+	}
+}
+
+// nil is the default and must not panic — direct play is optional wiring.
+func TestDrainState_NilExtraViewers(t *testing.T) {
+	tm := drainTestManager(t)
+	tm.SetDrainExtraViewers(nil)
+	addSession(tm, "held", time.Second)
+
+	st := tm.DrainState()
+	if st.HeldByViewer != 1 || st.DirectPlay != 0 {
+		t.Fatalf("unexpected state with nil extra counter: %+v", st)
+	}
+}
+
 func TestDrainState_Empty(t *testing.T) {
 	st := drainTestManager(t).DrainState()
 	if st.Sessions != 0 || st.HeldByViewer != 0 {
@@ -146,7 +197,10 @@ func TestPublishDrainState_FileShape(t *testing.T) {
 	if uerr := json.Unmarshal(blob, &raw); uerr != nil {
 		t.Fatalf("published state is not valid JSON: %v\n%s", uerr, blob)
 	}
-	for _, key := range []string{"unix_time", "sessions", "held_by_viewer", "window_seconds"} {
+	for _, key := range []string{
+		"unix_time", "sessions", "transcode_held", "direct_play",
+		"held_by_viewer", "window_seconds",
+	} {
 		if _, ok := raw[key]; !ok {
 			t.Fatalf("published state missing %q — aurora-update.sh greps for it\n%s", key, blob)
 		}

@@ -1015,6 +1015,9 @@ type TranscodeManager struct {
 	// purpose: publishing does file I/O and must never sit on the lock that
 	// session create/get/keepalive contend for.
 	publishMu sync.Mutex
+	// drainExtraViewers counts viewers that hold no transcode session
+	// (direct play). Guarded by tm.mu; invoked unlocked. See drainstate.go.
+	drainExtraViewers func() int
 
 	// OnSessionEvent is an optional callback invoked when transcode sessions
 	// change state (created, stopped, expired). The callback receives an event

@@ -58,15 +58,37 @@ type StreamState struct {
 	// Sessions is every live transcode session, including ones whose client
 	// has wandered off but which have not hit the GC timeout yet.
 	Sessions int `json:"sessions"`
-	// HeldByViewer is the subset with a client still touching them inside
-	// viewerHeldWindow. This is the number a deploy should actually wait on.
+	// TranscodeHeld is the subset of Sessions with a client still touching
+	// them inside viewerHeldWindow.
+	TranscodeHeld int `json:"transcode_held"`
+	// DirectPlay is the count of active direct-play streams. These have NO
+	// transcode session and NO ffmpeg process, so before they were counted
+	// here they were invisible to both halves of the deploy gate.
+	DirectPlay int `json:"direct_play"`
+	// HeldByViewer is TranscodeHeld + DirectPlay — the total number of
+	// viewers a restart would interrupt, and the only field the deploy script
+	// reads. The components are published alongside it for diagnosis.
 	HeldByViewer int `json:"held_by_viewer"`
-	// WindowSeconds documents the window HeldByViewer was computed with, so
+	// WindowSeconds documents the window TranscodeHeld was computed with, so
 	// the file is interpretable without reading this source.
 	WindowSeconds int `json:"window_seconds"`
 }
 
-// DrainState snapshots session counts for the deploy drain gate.
+// SetDrainExtraViewers registers an additional source of "a client is actively
+// watching" for the drain gate — currently the direct-play registry.
+//
+// Kept as a callback rather than a *DirectPlayRegistry field so the transcode
+// manager doesn't take a dependency on a sibling subsystem it otherwise knows
+// nothing about, and so tests can drive the count directly.
+//
+// Passing nil clears it.
+func (tm *TranscodeManager) SetDrainExtraViewers(fn func() int) {
+	tm.mu.Lock()
+	tm.drainExtraViewers = fn
+	tm.mu.Unlock()
+}
+
+// DrainState snapshots viewer counts for the deploy drain gate.
 func (tm *TranscodeManager) DrainState() StreamState {
 	now := time.Now()
 
@@ -78,12 +100,22 @@ func (tm *TranscodeManager) DrainState() StreamState {
 			held++
 		}
 	}
+	extraFn := tm.drainExtraViewers
 	tm.mu.Unlock()
+
+	// Called outside tm.mu: the registry takes its own lock, and holding two
+	// subsystem locks at once is how ordering bugs start.
+	extra := 0
+	if extraFn != nil {
+		extra = extraFn()
+	}
 
 	return StreamState{
 		UnixTime:      now.Unix(),
 		Sessions:      total,
-		HeldByViewer:  held,
+		TranscodeHeld: held,
+		DirectPlay:    extra,
+		HeldByViewer:  held + extra,
 		WindowSeconds: int(viewerHeldWindow / time.Second),
 	}
 }

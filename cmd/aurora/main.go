@@ -93,13 +93,43 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Database
-	pool, err := db.NewPool(ctx, cfg.Database)
+	// Tracked background workers.
+	//
+	// The DB pool used to be closed by `defer pool.Close()`, which fires the
+	// instant main returns — while ~18 background goroutines are still
+	// running. Cancellation is cooperative, so a worker mid-write keeps going
+	// and lands on a closed pool. Production logs caught it on 2026-07-30:
+	//
+	//   failed to store cast   error="upsert cast Shaquille O'Neal: closed pool"
+	//   failed to set match status   error="closed pool"
+	//
+	// i.e. enrichment work silently lost whenever a deploy landed mid-scan.
+	// Workers registered through bgWorker are waited for (bounded) after ctx
+	// is cancelled and before the pool closes. Fire-and-forget goroutines that
+	// never touch the DB are deliberately left unwrapped.
+	var bgWG sync.WaitGroup
+	bgWorker := func(fn func()) {
+		bgWG.Add(1)
+		go func() {
+			defer bgWG.Done()
+			fn()
+		}()
+	}
+
+	// Names what a timed-out graceful shutdown was waiting on. See
+	// internal/api/inflight.go for why the request log can't answer that.
+	inFlight := api.NewInFlightRegistry()
+
+	// Database. Retries transient failures for up to a minute: systemd's
+	// After=postgresql.service orders startup but does not wait for Postgres
+	// to accept connections, so on a reboot Aurora can win the race and exit
+	// before the database is listening. Misconfiguration (bad password,
+	// missing database) still fails immediately.
+	pool, err := db.NewPoolWithRetry(ctx, cfg.Database, 0)
 	if err != nil {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	defer pool.Close()
 
 	// Run schema migrations
 	migrationsDir := findMigrationsDir()
@@ -145,7 +175,7 @@ func main() {
 	// finishing) during boot, and the scan goroutine reads this field
 	// in its completion path.
 	skipWorker := skipmarkers.NewWorker(queries)
-	go skipWorker.Run(ctx)
+	bgWorker(func() { skipWorker.Run(ctx) })
 	scanner.OnScanComplete = func(lib *models.Library) {
 		skipWorker.TriggerSweep()
 	}
@@ -375,7 +405,7 @@ func main() {
 
 		// One-shot backfill of any items missing/outdated embeddings. Runs in
 		// the background so it doesn't block HTTP startup; ctx cancel stops it.
-		go embedder.RunBackfill(ctx)
+		bgWorker(func() { embedder.RunBackfill(ctx) })
 
 		// One-shot AI re-match sweep over any currently-flagged items
 		// that haven't been LLM-evaluated yet. Idempotent — cheap COUNT
@@ -383,7 +413,7 @@ func main() {
 		// on SIGTERM. The inline OnNewItem hook below covers
 		// newly-flagged items going forward; this one drains the
 		// pre-existing backlog.
-		go aiBackfill.Run(ctx)
+		bgWorker(func() { aiBackfill.Run(ctx) })
 	} else {
 		slog.Info("LLM disabled (LLM_ENABLED=false); skipping embedding subsystem")
 	}
@@ -421,6 +451,12 @@ func main() {
 	// transcode.ListSessions() for a unified view. 60s default TTL.
 	directPlay := streaming.NewDirectPlayRegistry(0)
 	defer directPlay.Close()
+
+	// Direct-play viewers hold no transcode session and spawn no ffmpeg, so
+	// until they were counted here a deploy saw an idle box and restarted
+	// mid-stream. Registered after the registry exists; the drain snapshot
+	// picks it up on the next publish.
+	transcode.SetDrainExtraViewers(directPlay.ActiveCount)
 
 	// embedItem is invoked after each successful enrichment path below. It
 	// regenerates the semantic-search vector so newly-imported content is
@@ -788,7 +824,7 @@ func main() {
 	if cfg.Cache.ImageDir != "" {
 		partyManager.SetHighlightCacheDir(filepath.Join(cfg.Cache.ImageDir, "party-highlights"))
 	}
-	go partyManager.CleanupStale(ctx)
+	bgWorker(func() { partyManager.CleanupStale(ctx) })
 
 	// Request monitor: polls ARR services for processing request completion.
 	// Started UNCONDITIONALLY (not gated on arrClients.Enabled() at boot) so
@@ -799,7 +835,7 @@ func main() {
 	// disabled — pollOnce early-returns on !Enabled() — or nothing is
 	// processing, so an always-on monitor is cheap. See audit H5.
 	requestMonitor := api.NewRequestMonitor(queries, hub, arrClients, scanner, dispatcher)
-	go requestMonitor.Start(ctx)
+	bgWorker(func() { requestMonitor.Start(ctx) })
 
 	// Locate static files directory for frontend SPA
 	staticDir := findStaticDir()
@@ -862,6 +898,7 @@ func main() {
 		AIBackfill:  aiBackfillIface(aiBackfill),
 		SkipMarkers: skipWorker,
 		RootCtx:     ctx, // server-lifecycle ctx for background goroutines spawned in handlers
+		InFlight:    inFlight,
 	})
 
 	// HTTP Server
@@ -950,6 +987,11 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
+	// Tell every ctx-aware background worker to stop, FIRST. This used to
+	// happen only via `defer cancel()` when main returned — i.e. after the
+	// whole shutdown sequence — so workers kept issuing queries throughout it.
+	cancel()
+
 	// Stop watch parties
 	slog.Info("stopping watch parties...")
 	partyManager.Shutdown()
@@ -960,10 +1002,33 @@ func main() {
 	transcode.StopAllSessions()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		slog.Error("server shutdown error", "error", err)
+		// Every observed occurrence burned the full timeout, and the request
+		// log can't say why: it only logs on COMPLETION, so a request still in
+		// flight leaves no line at all. Name the stragglers here — this is the
+		// evidence needed to decide whether the 10s budget is wrong or a
+		// handler is failing to return.
+		slog.Error("server shutdown error", "error", err,
+			"in_flight", inFlight.Snapshot())
 	}
 
 	slog.Info("server stopped")
+
+	// Wait (bounded) for tracked background workers to notice the cancel and
+	// unwind before the pool goes away, so an in-flight enrichment write
+	// doesn't land on a closed pool. Bounded because a wedged worker must not
+	// hold the deploy open — the drain gate upstream already waited for
+	// viewers, and systemd will SIGKILL us eventually regardless.
+	workersDone := make(chan struct{})
+	go func() {
+		bgWG.Wait()
+		close(workersDone)
+	}()
+	select {
+	case <-workersDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("background workers still running after 5s — closing pool anyway")
+	}
+	pool.Close()
 
 	// Close the lumberjack file logger LAST, after all log lines have been written.
 	// This ensures the final "server stopped" message is captured in the log file.

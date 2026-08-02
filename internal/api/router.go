@@ -183,6 +183,10 @@ type RouterDeps struct {
 	// lived background goroutines (e.g. ARR dispatch) parent off this so
 	// graceful shutdown stops them. May be nil; handlers must tolerate it.
 	RootCtx context.Context
+	// InFlight records executing handlers so a shutdown that exceeds its
+	// deadline can name what it was waiting on. Optional; nil disables
+	// tracking. See inflight.go.
+	InFlight *InFlightRegistry
 }
 
 func NewRouter(deps RouterDeps) http.Handler {
@@ -257,6 +261,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	})
+	// Outside RequestLogger: the tracked window must cover the same span the
+	// server's graceful shutdown waits on, and RequestLogger only emits AFTER
+	// the handler returns (which is why a stalled shutdown left no evidence).
+	if deps.InFlight != nil {
+		r.Use(TrackInFlight(deps.InFlight))
+	}
 	r.Use(RequestLogger)
 	r.Use(middleware.Recoverer)
 	// NOTE: 60s request timeout is applied per-route-group below, NOT globally,
