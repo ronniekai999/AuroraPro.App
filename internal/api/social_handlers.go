@@ -88,24 +88,39 @@ func normalizeHandle(s string) string {
 	return strings.TrimPrefix(strings.TrimSpace(s), "@")
 }
 
-// applyHandle validates one submitted handle patch into dst. nil raw = leave
-// unchanged; empty (after normalization) = clear. Returns false after
-// writing a 400 so the caller can bail with a bare return.
-func applyHandle(w http.ResponseWriter, raw *string, re *regexp.Regexp, network string, dst *string) bool {
+// applyHandle validates one submitted handle patch and normalizes it in
+// place. nil = leave unchanged (stays nil for the COALESCE update); empty
+// after normalization = clear. Returns false after writing a 400 so the
+// caller can bail with a bare return.
+func applyHandle(w http.ResponseWriter, raw *string, re *regexp.Regexp, network string) bool {
 	if raw == nil {
 		return true
 	}
 	v := normalizeHandle(*raw)
-	if v == "" {
-		*dst = ""
-		return true
-	}
-	if !re.MatchString(v) {
+	if v != "" && !re.MatchString(v) {
 		writeError(w, http.StatusBadRequest, network+" handle looks invalid — enter just the username, not a URL")
 		return false
 	}
-	*dst = v
+	*raw = v
 	return true
+}
+
+// memberSafeAvatar filters an avatar reference for the member-visible
+// boundary. Sub-profile avatars accept ANY http(s) URL (validAvatarValue) —
+// fine while only the owner's browser loads them, but a member card is
+// fetched by every viewer, which would (a) disclose the raw URL string to
+// all members and (b) hand each viewer's IP/UA to whatever host the URL
+// names. The SPA's img-src CSP blocks such fetches today, but one loosened
+// header shouldn't be the only thing standing (PR-428 review). Member
+// cards therefore carry only references that actually render under that
+// CSP — built-in nebula ids and TMDB paths; anything else falls back to
+// ” and the UI shows the initial (which is also strictly better than the
+// blank box CSP-blocked foreign URLs render as).
+func memberSafeAvatar(v string) string {
+	if v == "" || strings.HasPrefix(v, "nebula:") || strings.HasPrefix(v, "https://image.tmdb.org/") {
+		return v
+	}
+	return ""
 }
 
 // MyProfile returns the signed-in user's own member profile — the settings
@@ -125,13 +140,16 @@ func (h *SocialHandler) MyProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
+	p.AvatarURL = memberSafeAvatar(p.AvatarURL)
 	writeJSON(w, http.StatusOK, p)
 }
 
 // UpdateMyProfile applies a partial patch (nil = leave unchanged, empty =
 // clear) to the signed-in user's member profile. The entire patch is
-// validated before the current row is read, so bad input never costs a
-// query — and pure-validation tests can run with nil queries.
+// validated before any DB touch — bad input never costs a query, and the
+// pure-validation tests run with nil queries to pin that ordering. The
+// write itself is a single atomic per-field COALESCE update (see
+// UpdateMemberProfile), then the response re-reads the fresh row.
 func (h *SocialHandler) UpdateMyProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
@@ -159,63 +177,35 @@ func (h *SocialHandler) UpdateMyProfile(w http.ResponseWriter, r *http.Request) 
 		}
 		req.Bio = &v
 	}
-
-	// Validate handles into a scratch profile first (validation must precede
-	// any DB touch); the real overlay onto current happens below.
-	var scratch models.MemberProfile
-	if !applyHandle(w, req.SocialX, socialXRe, "X", &scratch.SocialX) {
+	if !applyHandle(w, req.SocialX, socialXRe, "X") {
 		return
 	}
-	if !applyHandle(w, req.SocialInstagram, socialInstagramRe, "Instagram", &scratch.SocialInstagram) {
+	if !applyHandle(w, req.SocialInstagram, socialInstagramRe, "Instagram") {
 		return
 	}
-	if !applyHandle(w, req.SocialFacebook, socialFacebookRe, "Facebook", &scratch.SocialFacebook) {
+	if !applyHandle(w, req.SocialFacebook, socialFacebookRe, "Facebook") {
 		return
 	}
-	if !applyHandle(w, req.SocialSnapchat, socialSnapchatRe, "Snapchat", &scratch.SocialSnapchat) {
+	if !applyHandle(w, req.SocialSnapchat, socialSnapchatRe, "Snapchat") {
 		return
 	}
 
-	current, err := h.queries.GetMemberProfileByID(r.Context(), claims.UserID)
+	found, err := h.queries.UpdateMemberProfile(r.Context(), claims.UserID, &req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profile")
-		return
-	}
-	if current == nil {
-		writeError(w, http.StatusNotFound, "user not found")
-		return
-	}
-
-	if req.DisplayName != nil {
-		current.DisplayName = *req.DisplayName
-	}
-	if req.Bio != nil {
-		current.Bio = *req.Bio
-	}
-	if req.SocialX != nil {
-		current.SocialX = scratch.SocialX
-	}
-	if req.SocialInstagram != nil {
-		current.SocialInstagram = scratch.SocialInstagram
-	}
-	if req.SocialFacebook != nil {
-		current.SocialFacebook = scratch.SocialFacebook
-	}
-	if req.SocialSnapchat != nil {
-		current.SocialSnapchat = scratch.SocialSnapchat
-	}
-	if req.ShareWatchHistory != nil {
-		current.ShareWatchHistory = *req.ShareWatchHistory
-	}
-
-	if err := h.queries.UpdateMemberProfile(r.Context(), claims.UserID,
-		current.DisplayName, current.Bio,
-		current.SocialX, current.SocialInstagram, current.SocialFacebook, current.SocialSnapchat,
-		current.ShareWatchHistory); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update profile")
 		return
 	}
-	writeJSON(w, http.StatusOK, current)
+	if !found {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	p, err := h.queries.GetMemberProfileByID(r.Context(), claims.UserID)
+	if err != nil || p == nil {
+		writeError(w, http.StatusInternalServerError, "failed to load profile")
+		return
+	}
+	p.AvatarURL = memberSafeAvatar(p.AvatarURL)
+	writeJSON(w, http.StatusOK, p)
 }
 
 // memberProfileResponse wraps the profile card with its watch strip.
@@ -255,6 +245,7 @@ func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	p.AvatarURL = memberSafeAvatar(p.AvatarURL)
 	resp := memberProfileResponse{
 		Profile:       p,
 		IsMe:          p.UserID == claims.UserID,

@@ -87,7 +87,9 @@ type MemberProfile struct {
 	// AvatarURL mirrors the account's DEFAULT sub-profile avatar (falling
 	// back to users.avatar_url, which OAuth signup may have set), so the face
 	// other members see is the one the user picked for their main profile.
-	AvatarURL   string    `json:"avatar_url,omitempty"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	// MemberSince is truncated to YEAR precision at the query (the UI shows
+	// "Member since 2025"; other members get no use of the exact second).
 	MemberSince time.Time `json:"member_since"`
 	// ShareWatchHistory gates the profile page's "Recently Watched" strip
 	// (and the follow feed once that lands). Opt-in, default false.

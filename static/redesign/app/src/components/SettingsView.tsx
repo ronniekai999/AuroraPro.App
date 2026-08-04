@@ -740,13 +740,35 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
   }, [])
 
   const save = async () => {
+    // Reduce pasted URLs/@handles to bare handles before submit. null =
+    // the paste can't honestly be reduced (unknown host, deep path,
+    // page-route segment like profile.php) — refuse with a per-network
+    // error instead of saving a wrong-but-shape-valid handle (PR-428
+    // review). Length is checked here too so an over-long clean handle
+    // reads "too long", not the server regex path's "not a URL".
+    const handles: Partial<Record<(typeof SOCIAL_NETWORKS)[number]['key'], string>> = {}
+    for (const n of SOCIAL_NETWORKS) {
+      const norm = normalizeHandleInput(form[n.key], n)
+      if (norm === null) {
+        onToast?.(`${n.label}: couldn't read a username from that link — enter just the handle`, 'error')
+        return
+      }
+      if (norm.length > n.maxLen) {
+        onToast?.(`${n.label} handle is too long (max ${n.maxLen} characters)`, 'error')
+        return
+      }
+      handles[n.key] = norm
+    }
     setSaving(true)
     try {
-      const patch = { ...form }
-      // Reduce pasted URLs/@handles to bare handles before submit; the
-      // server re-validates shape and 400s with a per-network message.
-      for (const n of SOCIAL_NETWORKS) patch[n.key] = normalizeHandleInput(form[n.key], n)
-      const p = await updateMyProfile(patch)
+      // share_watch_history is NOT in this patch — the toggle persists
+      // itself on flip (it's a privacy control; deferred-save would let a
+      // "turn it off" silently evaporate on nav-away).
+      const p = await updateMyProfile({
+        display_name: form.display_name,
+        bio: form.bio,
+        ...handles,
+      })
       setLoaded(p)
       syncForm(p)
       onToast?.('Profile updated', 'success')
@@ -754,6 +776,24 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
       onToast?.(e instanceof Error ? e.message : 'Failed to update profile', 'error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  // The share toggle commits immediately (one-field atomic patch on the
+  // server): every other control on this Settings page persists on
+  // interaction, and a privacy switch is the last place a silent
+  // discard-on-nav-away is acceptable. Optimistic flip, roll back on error.
+  const toggleShare = async () => {
+    const next = !form.share_watch_history
+    setForm(f => ({ ...f, share_watch_history: next }))
+    try {
+      const p = await updateMyProfile({ share_watch_history: next })
+      setLoaded(p)
+      setForm(f => ({ ...f, share_watch_history: p.share_watch_history }))
+      onToast?.(next ? 'Recently watched is now visible on your profile' : 'Watch history hidden from your profile', 'success')
+    } catch (e) {
+      setForm(f => ({ ...f, share_watch_history: !next }))
+      onToast?.(e instanceof Error ? e.message : 'Failed to update sharing', 'error')
     }
   }
 
@@ -825,12 +865,12 @@ function MemberProfileCard({ onToast, onOpenMyProfile }: {
           <div className="flex items-center justify-between py-2">
             <div>
               <p className="text-white/80 text-sm font-medium">Share watch history</p>
-              <p className="text-white/40 text-xs">Show your recently watched titles on your profile. Off by default; only your default profile's completed titles are ever shown.</p>
+              <p className="text-white/40 text-xs">Show your recently watched titles on your profile — applies immediately. Off by default; only your default profile's completed titles are ever shown.</p>
             </div>
             <button
               type="button"
               aria-pressed={form.share_watch_history}
-              onClick={() => setForm(f => ({ ...f, share_watch_history: !f.share_watch_history }))}
+              onClick={toggleShare}
               className={`px-4 py-2 rounded-lg text-sm border transition-colors ${
                 form.share_watch_history
                   ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'

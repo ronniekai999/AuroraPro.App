@@ -68,6 +68,10 @@ export default function UserProfileView({ username, onSelect }: {
     let cancelled = false
     setResp(null)
     setError(null)
+    // Same issue-#261 contract handleSelect follows: a profile opened from
+    // a scrolled page must start at the top. Instant, not smooth — the
+    // content is being replaced.
+    window.scrollTo({ top: 0, behavior: 'auto' })
     getMemberProfile(username)
       .then(r => { if (!cancelled) setResp(r) })
       .catch((e: unknown) => {
@@ -86,7 +90,11 @@ export default function UserProfileView({ username, onSelect }: {
         <div className="glass-panel rounded-2xl p-8 text-center">
           <Icon name="user" size={28} className="text-white/25 mx-auto" />
           <p className="text-white/80 text-sm font-medium mt-3">{error}</p>
-          <p className="text-white/40 text-xs mt-1">Check the link — profiles live at /user/&lt;username&gt;.</p>
+          {/* The link hint only makes sense for a 404 — under a 500 it
+              would blame the URL for a server problem. */}
+          {error.toLowerCase().includes('not found') && (
+            <p className="text-white/40 text-xs mt-1">Check the link — profiles live at /user/&lt;username&gt;.</p>
+          )}
         </div>
       </div>
     )
@@ -101,7 +109,9 @@ export default function UserProfileView({ username, onSelect }: {
 
   const { profile, is_me: isMe, history_visible: historyVisible, recent_watches: watches } = resp
   const shownName = profile.display_name || profile.username
-  const memberYear = new Date(profile.member_since).getFullYear()
+  // UTC, not local: the server truncates member_since to Jan-1 UTC, so a
+  // viewer west of UTC would read local getFullYear() as the prior year.
+  const memberYear = new Date(profile.member_since).getUTCFullYear()
   const socials = SOCIAL_NETWORKS
     .map(n => ({ n, handle: profile[n.key] }))
     .filter((s): s is { n: typeof s.n; handle: string } => !!s.handle)
@@ -123,8 +133,10 @@ export default function UserProfileView({ username, onSelect }: {
             </p>
             {profile.bio && (
               // whitespace-pre-line: the bio is the one multi-line profile
-              // field (the server preserves its newlines).
-              <p className="text-white/70 text-sm mt-3 max-w-2xl whitespace-pre-line">{profile.bio}</p>
+              // field (the server preserves its newlines). break-words:
+              // member-authored text — a 500-char unbroken token (pasted
+              // URL) must wrap instead of forcing horizontal scroll.
+              <p className="text-white/70 text-sm mt-3 max-w-2xl whitespace-pre-line break-words">{profile.bio}</p>
             )}
             {socials.length > 0 && (
               <div className="flex flex-wrap gap-2 mt-4">
@@ -140,7 +152,9 @@ export default function UserProfileView({ username, onSelect }: {
                   >
                     <Icon name="globe" size={12} className="text-white/40" />
                     {n.label}
-                    <span className="text-white/35">@{handle}</span>
+                    {/* Facebook handles run to 60 chars — cap the chip so
+                        one long handle can't overflow a phone viewport. */}
+                    <span className="text-white/35 inline-block max-w-[18ch] truncate">@{handle}</span>
                   </a>
                 ))}
               </div>

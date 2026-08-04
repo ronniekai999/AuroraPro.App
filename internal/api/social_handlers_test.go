@@ -238,9 +238,9 @@ func TestSocialProfile_RoundtripAndPrivacy(t *testing.T) {
 			t.Fatalf("seed watch progress: %v", err)
 		}
 	}
-	upsert(sharedItem.ID, 0, 100_000, 100_000)          // default profile, completed
+	upsert(sharedItem.ID, 0, 100_000, 100_000)            // default profile, completed
 	upsert(kidsItem.ID, kidsProfile.ID, 100_000, 100_000) // non-default profile, completed
-	upsert(halfItem.ID, 0, 10_000, 100_000)             // default profile, in progress
+	upsert(halfItem.ID, 0, 10_000, 100_000)               // default profile, in progress
 
 	// Opt in via partial patch — earlier fields must persist.
 	w = socialDo(h.UpdateMyProfile, socialPutReq(`{"share_watch_history":true}`, owner.ID))
@@ -274,6 +274,71 @@ func TestSocialProfile_RoundtripAndPrivacy(t *testing.T) {
 	// Unknown member → 404.
 	if w := socialDo(h.MemberProfile, memberGetReq("social_missing_"+suffix, viewer.ID)); w.Code != http.StatusNotFound {
 		t.Errorf("unknown member: want 404, got %d", w.Code)
+	}
+}
+
+// TestMemberSafeAvatar pins the member-visible avatar boundary: only
+// references that render under the SPA's img-src CSP pass through; foreign
+// URLs (OAuth pictures, arbitrary http avatars) drop to ” so viewers get
+// the initial fallback and the raw URL string is never disclosed.
+func TestMemberSafeAvatar(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                                      "",
+		"nebula:tidal":                          "nebula:tidal",
+		"https://image.tmdb.org/t/p/w500/x.jpg": "https://image.tmdb.org/t/p/w500/x.jpg",
+		"https://lh3.googleusercontent.com/a/pic": "",
+		"http://logger.evil/p.png":                "",
+		"https://image.tmdb.org.evil.com/p.png":   "",
+	} {
+		if got := memberSafeAvatar(in); got != want {
+			t.Errorf("memberSafeAvatar(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestMemberProfile_OAuthAvatarFallbackAndYearTruncation covers two PR-428
+// review findings at once: (1) the users.avatar_url fallback must survive
+// the app-created default profile's ” avatar (NULLIF — a bare COALESCE
+// treated ” as present and killed the fallback), asserted at the DB layer;
+// (2) at the API layer that foreign OAuth URL must then be FILTERED by
+// memberSafeAvatar, and member_since must carry year precision only.
+func TestMemberProfile_OAuthAvatarFallbackAndYearTruncation(t *testing.T) {
+	q := requireSocialTestDB(t)
+	ctx := context.Background()
+	suffix := socialTestSuffix(t)
+	name := "social_oauth_" + suffix
+	oauthPic := "https://lh3.googleusercontent.com/a/test-pic-" + suffix
+	user, err := q.CreateOAuthUser(ctx, name, name+"@example.com", oauthPic, "google", "sub_"+suffix)
+	if err != nil {
+		t.Fatalf("seed oauth user: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.DeleteUser(ctx, user.ID) })
+	// App-created default profile stores avatar_url = '' (not NULL) — the
+	// exact shape that used to defeat the fallback.
+	if _, err := q.CreateDefaultProfileForUser(ctx, user.ID, name); err != nil {
+		t.Fatalf("seed default profile: %v", err)
+	}
+
+	// DB layer: fallback reaches users.avatar_url through the '' profile row.
+	p, err := q.GetMemberProfileByID(ctx, user.ID)
+	if err != nil || p == nil {
+		t.Fatalf("get member profile: %v (nil=%v)", err, p == nil)
+	}
+	if p.AvatarURL != oauthPic {
+		t.Errorf("DB fallback: avatar = %q, want the users.avatar_url %q", p.AvatarURL, oauthPic)
+	}
+	if p.MemberSince.Month() != 1 || p.MemberSince.Day() != 1 || p.MemberSince.Hour() != 0 {
+		t.Errorf("member_since should be year-truncated, got %v", p.MemberSince)
+	}
+
+	// API layer: the foreign URL is filtered before it reaches other members.
+	h := NewSocialHandler(q)
+	w := socialDo(h.MemberProfile, memberGetReq(name, user.ID))
+	if w.Code != http.StatusOK {
+		t.Fatalf("member profile: status %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "googleusercontent") {
+		t.Errorf("foreign avatar URL leaked to member-visible JSON: %s", w.Body.String())
 	}
 }
 

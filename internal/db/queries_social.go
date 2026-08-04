@@ -15,17 +15,22 @@ import (
 // memberProfileSelect is the shared column list for member-profile lookups.
 // The avatar subquery mirrors the account's DEFAULT sub-profile avatar
 // (partial unique index idx_user_profiles_default guarantees at most one),
-// falling back to users.avatar_url (OAuth signup may have set it) then ''.
-// Never add email/role/auth columns here — this struct is shown to OTHER
-// members.
+// falling back to users.avatar_url (OAuth signup may have set it) then ”.
+// The NULLIF matters: app-created default profiles store avatar_url = ”
+// (CreateProfile inserts the zero value verbatim), and a bare COALESCE
+// treats ” as present — which silently killed the OAuth fallback until the
+// PR-428 review caught it. Only migration-backfilled rows carry NULL.
+// created_at is deliberately truncated to YEAR precision: this struct is
+// shown to OTHER members, and the exact registration second is metadata
+// they have no use for. Never add email/role/auth columns here.
 const memberProfileSelect = `
 	SELECT u.id, u.username, u.display_name, u.bio,
 	       u.social_x, u.social_instagram, u.social_facebook, u.social_snapchat,
-	       u.share_watch_history, u.created_at,
+	       u.share_watch_history, date_trunc('year', u.created_at),
 	       COALESCE(
-	         (SELECT p.avatar_url FROM user_profiles p
+	         NULLIF((SELECT p.avatar_url FROM user_profiles p
 	           WHERE p.user_id = u.id AND p.is_default = TRUE
-	           LIMIT 1),
+	           LIMIT 1), ''),
 	         u.avatar_url, '') AS avatar_url
 	FROM users u`
 
@@ -66,26 +71,33 @@ func (q *Queries) GetMemberProfileByID(ctx context.Context, userID int64) (*mode
 	return p, nil
 }
 
-// UpdateMemberProfile writes the full set of member-profile fields for one
-// user. The handler owns patch semantics (read current row, overlay non-nil
-// request fields, call this with final values) — keeping the SQL a plain
-// full-row write like UpdateProfile does for sub-profiles.
-func (q *Queries) UpdateMemberProfile(ctx context.Context, userID int64, displayName, bio, socialX, socialInstagram, socialFacebook, socialSnapchat string, shareWatchHistory bool) error {
+// UpdateMemberProfile applies a partial patch atomically: nil fields keep
+// the stored value via COALESCE (pgx maps nil pointers to SQL NULL), so two
+// concurrent PUTs each touch only the fields they carry. The earlier
+// read-modify-write version could interleave — a bio save re-writing a
+// stale share_watch_history=true the user had just switched off is exactly
+// the direction a privacy flag must not race (PR-428 review). Handles
+// arrive pre-validated/normalized from the handler. updated_at is bumped by
+// 001's trg_users_updated_at trigger, not here. Returns false when no such
+// user exists.
+func (q *Queries) UpdateMemberProfile(ctx context.Context, userID int64, patch *models.UpdateMemberProfileRequest) (bool, error) {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE users
-		 SET display_name = $2, bio = $3,
-		     social_x = $4, social_instagram = $5, social_facebook = $6, social_snapchat = $7,
-		     share_watch_history = $8,
-		     updated_at = NOW()
+		 SET display_name        = COALESCE($2, display_name),
+		     bio                 = COALESCE($3, bio),
+		     social_x            = COALESCE($4, social_x),
+		     social_instagram    = COALESCE($5, social_instagram),
+		     social_facebook     = COALESCE($6, social_facebook),
+		     social_snapchat     = COALESCE($7, social_snapchat),
+		     share_watch_history = COALESCE($8, share_watch_history)
 		 WHERE id = $1`,
-		userID, displayName, bio, socialX, socialInstagram, socialFacebook, socialSnapchat, shareWatchHistory)
+		userID, patch.DisplayName, patch.Bio,
+		patch.SocialX, patch.SocialInstagram, patch.SocialFacebook, patch.SocialSnapchat,
+		patch.ShareWatchHistory)
 	if err != nil {
-		return fmt.Errorf("update member profile: %w", err)
+		return false, fmt.Errorf("update member profile: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("update member profile: user %d not found", userID)
-	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // GetMemberRecentWatches returns the newest completed titles for a member's
