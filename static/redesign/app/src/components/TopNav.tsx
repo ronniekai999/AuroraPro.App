@@ -81,6 +81,7 @@ function AvatarMenu({
   onOpenServer,
   onOpenNotifications,
   notifCount,
+  onOpenMyProfile,
 }: {
   user: ApiUser
   avatarUrl?: string
@@ -90,6 +91,9 @@ function AvatarMenu({
   onOpenServer?: () => void
   onOpenNotifications: () => void
   notifCount: number
+  /** Opens /user/:username (social phase 1). Optional so test renders
+   *  without routing wired keep working; no row when absent. */
+  onOpenMyProfile?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -143,8 +147,9 @@ function AvatarMenu({
       }
     }
     // Focus the first RENDERED row on open. `.filter(Boolean)` rather than
-    // `itemRefs.current[0]`, because the row set is conditional — the Server
-    // Status row is admin-only, so slot 0 is empty for everyone else. The earlier
+    // `itemRefs.current[0]`, because the row set is conditional — My Profile
+    // (slot 0) renders only when routing is wired, and Server Status (slot 1)
+    // is admin-only, so leading slots can be empty. The earlier
     // version of this pass pinned `tabIndex={0}` to that same slot, which meant a
     // non-admin's open panel had ZERO tab stops; the rows are ordinary tab stops
     // now, so that particular hazard is gone, but the focus call still has to
@@ -276,9 +281,22 @@ function AvatarMenu({
               ) : 'Account'}
             </p>
           </div>
-          {onOpenServer && (
+          {onOpenMyProfile && (
             <button
               ref={el => { itemRefs.current[0] = el }}
+              type="button"
+              // closeTo (not openPanel): this row NAVIGATES — same dismissal
+              // contract as the Settings/Admin rows' go().
+              onClick={() => closeTo(onOpenMyProfile)}
+              className={itemCls}
+            >
+              <Icon name="user" size={14} className="text-white/50" />
+              My Profile
+            </button>
+          )}
+          {onOpenServer && (
+            <button
+              ref={el => { itemRefs.current[1] = el }}
               type="button"
               onClick={() => openPanel(onOpenServer)}
               className={itemCls}
@@ -288,7 +306,7 @@ function AvatarMenu({
             </button>
           )}
           <button
-              ref={el => { itemRefs.current[1] = el }}
+              ref={el => { itemRefs.current[2] = el }}
               type="button"
               onClick={() => openPanel(onOpenNotifications)}
               className={itemCls}
@@ -303,7 +321,7 @@ function AvatarMenu({
           </button>
           <div className="border-t border-white/[0.06] my-1" />
           <button
-              ref={el => { itemRefs.current[2] = el }}
+              ref={el => { itemRefs.current[3] = el }}
               type="button"
               onClick={() => go('settings')}
               className={itemCls}
@@ -313,7 +331,7 @@ function AvatarMenu({
           </button>
           {user.role === 'admin' && (
             <button
-              ref={el => { itemRefs.current[3] = el }}
+              ref={el => { itemRefs.current[4] = el }}
               type="button"
               onClick={() => go('admin')}
               className={itemCls}
@@ -324,7 +342,7 @@ function AvatarMenu({
           )}
           <div className="border-t border-white/[0.06] my-1" />
           <button
-            ref={el => { itemRefs.current[4] = el }}
+            ref={el => { itemRefs.current[5] = el }}
             type="button"
             // closeTo focuses the trigger before calling onSignOut, which is the
             // best that can be done from here — but it does NOT save this path, and
@@ -552,6 +570,8 @@ export interface TopNavProps {
   onOpenProfilesGate?: () => void
   avatarUrl?: string
   onSignOut: () => void
+  /** Opens the signed-in user's own profile page (social phase 1). */
+  onOpenMyProfile?: () => void
 }
 
 export function TopNav({
@@ -581,6 +601,7 @@ export function TopNav({
   onOpenProfilesGate,
   avatarUrl,
   onSignOut,
+  onOpenMyProfile,
 }: TopNavProps) {
   const isAdmin = user.role === 'admin'
   const tabs = useMemo(() => navTabsFor(user.role), [user.role])
@@ -799,6 +820,9 @@ export function TopNav({
           onOpenServer={isAdmin ? onOpenServerPanel : undefined}
           onOpenNotifications={onOpenNotificationsPanel}
           notifCount={notifCount}
+          // Wrapped like go(): navigating from the dropdown must also
+          // dismiss the mobile sheet if it's open behind it.
+          onOpenMyProfile={onOpenMyProfile && (() => { setSheetOpen(false); onOpenMyProfile() })}
         />
 
         {/* Menu button — below md only. */}

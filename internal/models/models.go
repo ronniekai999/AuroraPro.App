@@ -66,6 +66,64 @@ type User struct {
 	ReferralAnsweredAt *time.Time `json:"referral_answered_at,omitempty"`
 }
 
+// MemberProfile is the member-visible identity card for one account
+// (migration 049) — the "profile page" surface. Distinct from UserProfile
+// (the Netflix-style sub-profiles within an account): a MemberProfile is
+// account-level and is what OTHER signed-in members may see, so it must
+// never grow email, role, or any auth field.
+type MemberProfile struct {
+	UserID      int64  `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name,omitempty"`
+	Bio         string `json:"bio,omitempty"`
+	// Social handles are stored bare (no "@", no URL) — per-network shape is
+	// enforced at the API (social_handlers.go), and the frontend composes the
+	// links against fixed well-known domains, so a profile can never link to
+	// an arbitrary site.
+	SocialX         string `json:"social_x,omitempty"`
+	SocialInstagram string `json:"social_instagram,omitempty"`
+	SocialFacebook  string `json:"social_facebook,omitempty"`
+	SocialSnapchat  string `json:"social_snapchat,omitempty"`
+	// AvatarURL mirrors the account's DEFAULT sub-profile avatar (falling
+	// back to users.avatar_url, which OAuth signup may have set), so the face
+	// other members see is the one the user picked for their main profile.
+	AvatarURL   string    `json:"avatar_url,omitempty"`
+	MemberSince time.Time `json:"member_since"`
+	// ShareWatchHistory gates the profile page's "Recently Watched" strip
+	// (and the follow feed once that lands). Opt-in, default false.
+	ShareWatchHistory bool `json:"share_watch_history"`
+}
+
+// MemberRecentWatch is one completed title on a member's profile page: a
+// media-card summary plus when it was finished. Only rows with a non-NULL
+// completed_at qualify (migration 033 deliberately did not backfill), so the
+// strip reflects activity from that migration forward — and rewatches update
+// in place rather than appearing twice, because watch_progress is per-item
+// state, not an event log.
+type MemberRecentWatch struct {
+	ID           int64     `json:"id"` // media_items.id — the card's click target
+	Title        string    `json:"title"`
+	Type         string    `json:"type"`
+	PosterPath   string    `json:"poster_path,omitempty"`
+	BackdropPath string    `json:"backdrop_path,omitempty"`
+	Year         int       `json:"year,omitempty"`
+	Rating       float64   `json:"rating,omitempty"`
+	WatchedAt    time.Time `json:"watched_at"`
+}
+
+// UpdateMemberProfileRequest is the PUT /api/me/profile patch body.
+// nil = leave unchanged; empty string = clear the field (same convention as
+// UpdateProfileRequest).
+type UpdateMemberProfileRequest struct {
+	DisplayName       *string `json:"display_name,omitempty"`
+	Bio               *string `json:"bio,omitempty"`
+	SocialX           *string `json:"social_x,omitempty"`
+	SocialInstagram   *string `json:"social_instagram,omitempty"`
+	SocialFacebook    *string `json:"social_facebook,omitempty"`
+	SocialSnapchat    *string `json:"social_snapchat,omitempty"`
+	ShareWatchHistory *bool   `json:"share_watch_history,omitempty"`
+}
+
 // OAuthIdentity is one row of the oauth_identities table (migration 031) — a
 // single (provider, subject) link belonging to a user. Multiple rows per user
 // (one per provider) is the whole point: it's what lets an account link both
