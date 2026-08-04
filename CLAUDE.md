@@ -43,3 +43,27 @@ Key facts:
 Relevant code/scripts: `scripts/server-test-loop.sh`,
 `scripts/aurora_smoke_test.sh`, `scripts/aurora-update.sh`,
 `internal/api/system_handlers.go` (update trigger/status endpoints).
+
+## Social features (member profiles + follows, PRs #428/#429)
+
+Member-visible profiles (`/user/:name`, bio/socials/recent watches), a
+follow graph, a `/members` directory, and the "From People You Follow" home
+rail. Code: migrations 049–050, `internal/db/queries_social.go`,
+`internal/api/social_handlers.go` (+ tests), SPA `UserProfileView` /
+`MembersView` / `lib/socialLinks`.
+
+Invariants to preserve when touching this area:
+
+- **Watch-history sharing is opt-in** (`users.share_watch_history`, default
+  FALSE) and re-checked inside every read query — no caches to invalidate.
+- History surfaces show the **default sub-profile only** (kids profiles
+  never attribute to the account) and only rows with `completed_at`.
+- The follow **feed applies the viewing sub-profile's parental ceiling**
+  (`allowedRatingsForMax`) like every home rail.
+- Member-visible responses never carry email/role/auth fields; avatars pass
+  `memberSafeAvatar` (nebula/TMDB only); social handles are stored bare and
+  shape-validated per network (links can only point at the four fixed
+  domains).
+- `/api/members/*` is the member-visible namespace — the admin-gated
+  `/api/users` subtree must stay admin-only (and chi can't mix `{id}` /
+  `{username}` wildcards at one node anyway).
