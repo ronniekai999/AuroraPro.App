@@ -21,9 +21,11 @@ import {
   getDiscoverRails,
   getAnchorRails,
   getEngagementRails,
+  getFollowingRecent,
   type DiscoverRailUI,
   type AnchorRailUI,
   type EngagementRailUI,
+  type FollowedWatch,
   getGamificationStats,
   listActiveParties,
   type ActiveParty,
@@ -166,6 +168,10 @@ const SearchView = lazy(() => import('@/components/SearchView'))
 // memberUsernameFromPath) and threads onSelect for the recent-watches
 // rail. Loads on first profile nav.
 const UserProfileView = lazy(() => import('@/components/UserProfileView'))
+// Social phase 2 — the member directory (/members): find + follow people.
+// Reached from the avatar dropdown, not the tab strip (the strip is curated
+// browse surfaces; this is an occasional destination like Settings).
+const MembersView = lazy(() => import('@/components/MembersView'))
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -1856,6 +1862,7 @@ const VIEW_BY_PATH: Record<string, string> = {
   '/admin': 'admin',
   '/settings': 'settings',
   '/search': 'search',
+  '/members': 'members',
 }
 
 // titleIdFromPath extracts the media id from a /title/:id pathname, or
@@ -1879,6 +1886,40 @@ const MEMBER_PATH_RE = /^\/user\/([A-Za-z0-9._-]{1,50})$/
 function memberUsernameFromPath(pathname: string): string | null {
   const m = MEMBER_PATH_RE.exec(pathname)
   return m ? m[1] : null
+}
+
+// Card mapping + subtitle for the "From People You Follow" rail (social
+// phase 2). Module-level like the route helpers: pure functions of the feed
+// row, no App state.
+function mapFollowedToMedia(w: FollowedWatch): Media {
+  return {
+    id: w.id,
+    title: w.title,
+    year: w.year || 0,
+    rating: w.rating || 0,
+    duration: '',
+    genre: '',
+    type: w.type === 'show' ? 'show' : 'movie',
+    poster: posterURL(w.poster_path),
+    backdrop: backdropURL(w.backdrop_path),
+    description: '',
+  }
+}
+
+// "alice · 2d ago" — mirrors UserProfileView's watchedAgo buckets, but
+// leads with WHO because attribution is this rail's whole point.
+function followedWatchSubtitle(w: FollowedWatch): string {
+  const t = Date.parse(w.watched_at)
+  let ago = ''
+  if (!Number.isNaN(t)) {
+    const days = Math.floor((Date.now() - t) / 86_400_000)
+    if (days <= 0) ago = 'today'
+    else if (days === 1) ago = 'yesterday'
+    else if (days < 7) ago = `${days}d ago`
+    else if (days < 30) ago = `${Math.floor(days / 7)}w ago`
+    else ago = new Date(t).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
+  }
+  return ago ? `${w.watched_by} · ${ago}` : w.watched_by
 }
 
 function pathToView(pathname: string): string {
@@ -3409,6 +3450,11 @@ export default function App() {
   const discoverRailsRef = useRef<DiscoverRailUI[]>([])
   const anchorRailsRef = useRef<AnchorRailUI[]>([])
   const engagementRailsRef = useRef<EngagementRailUI[]>([])
+  // Social phase 2 — "From People You Follow". USER-scoped (the follow
+  // graph is account-level, not sub-profile-level), so unlike the three
+  // refs above it is deliberately NOT wiped on a profile switch — the same
+  // feed is correct for every profile, and it refetches each cycle anyway.
+  const followingRailRef = useRef<FollowedWatch[]>([])
   // True while the server is still building the LLM Discover rail; arms the
   // discover_ready WS handler and the poll fallback effect below.
   const [discoverBuilding, setDiscoverBuilding] = useState(false)
@@ -3423,6 +3469,22 @@ export default function App() {
     const core = coreRailsRef.current
     if (!core || core.length === 0) return // core not loaded yet
     const personalized: NonNullable<HomeViewProps['rails']> = [
+      // Friends first, algorithms after: the social rail leads the
+      // personalized block because "alice watched this" beats "the model
+      // thinks you'd like this" as a reason to care. Zero items (follows
+      // nobody / nobody shares) → filtered out here, rail never renders.
+      ...(followingRailRef.current.length > 0
+        ? [{
+            title: 'From People You Follow',
+            items: followingRailRef.current.map(mapFollowedToMedia),
+            aspect: 'poster' as const,
+            showBadges: true,
+            subtitle: 'Recently watched by members you follow',
+            cardSubtitles: Object.fromEntries(
+              followingRailRef.current.map(w => [w.id, followedWatchSubtitle(w)]),
+            ) as Record<number, string>,
+          }]
+        : []),
       ...discoverRailsRef.current
         .filter(r => r.items.length > 0)
         .map(r => ({ title: r.title, items: r.items as Media[], aspect: 'poster' as const,
@@ -3593,10 +3655,15 @@ export default function App() {
         void Promise.all([
           getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
           getEngagementRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
-        ]).then(([a, e]) => {
+          // Social rail (phase 2): one indexed query server-side, so it
+          // rides the fast batch. Empty for members who follow nobody —
+          // recompose filters zero-item rails.
+          getFollowingRecent(ac.signal).catch(() => []),
+        ]).then(([a, e, f]) => {
           if (cancelled) return
           anchorRailsRef.current = a
           engagementRailsRef.current = e
+          followingRailRef.current = f
           recomposeHomeRails()
         })
 
@@ -4937,6 +5004,9 @@ export default function App() {
             // view id): the member page is keyed by username in the URL,
             // same pattern as /title/:id.
             onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
+            // Social phase 2 — the member directory. A real view id, so it
+            // rides handleNavigate like Settings does from this menu.
+            onOpenMembers={() => handleNavigate('members')}
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}
@@ -5298,10 +5368,23 @@ export default function App() {
             const uname = memberUsernameFromPath(location.pathname)
             return uname ? (
               <ViewSuspense fallback={<ViewFallback />}>
-                <UserProfileView username={uname} onSelect={handleSelect} />
+                <UserProfileView
+                  username={uname}
+                  onSelect={handleSelect}
+                  onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                />
               </ViewSuspense>
             ) : null
           })()}
+          {view === 'members' && (
+            <ViewSuspense fallback={<ViewFallback />}>
+              <MembersView
+                onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}
+                currentUsername={user.username}
+                onToast={addToast}
+              />
+            </ViewSuspense>
+          )}
           {view === 'collections' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView

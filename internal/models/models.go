@@ -126,6 +126,31 @@ type UpdateMemberProfileRequest struct {
 	ShareWatchHistory *bool   `json:"share_watch_history,omitempty"`
 }
 
+// MemberSummary is the row shape for member lists (directory, followers,
+// following): just enough to render a member card + link. Same exposure
+// rules as MemberProfile — never grow auth fields here.
+type MemberSummary struct {
+	UserID      int64  `json:"user_id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name,omitempty"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
+	// IsFollowing is viewer-relative (does the CALLER follow this member);
+	// only the directory query populates it.
+	IsFollowing bool `json:"is_following"`
+}
+
+// FollowedRecentWatch is one feed row for the "From People You Follow" home
+// rail: a completed title plus WHO (display name falling back to username)
+// and WHEN. Only followees with share_watch_history = TRUE ever contribute
+// — the 049 opt-in is the single privacy gate and the feed query re-checks
+// it on every read, so flipping sharing off empties a member out of every
+// feed immediately.
+type FollowedRecentWatch struct {
+	MemberRecentWatch
+	WatchedBy         string `json:"watched_by"`
+	WatchedByUsername string `json:"watched_by_username"`
+}
+
 // OAuthIdentity is one row of the oauth_identities table (migration 031) — a
 // single (provider, subject) link belonging to a user. Multiple rows per user
 // (one per provider) is the whole point: it's what lets an account link both

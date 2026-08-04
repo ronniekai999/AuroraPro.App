@@ -217,6 +217,34 @@ type memberProfileResponse struct {
 	IsMe           bool                       `json:"is_me"`
 	HistoryVisible bool                       `json:"history_visible"`
 	RecentWatches  []models.MemberRecentWatch `json:"recent_watches"`
+	// Follow graph (social phase 2). is_following is viewer-relative and
+	// meaningless on your own profile (self-follows can't exist).
+	FollowerCount  int  `json:"follower_count"`
+	FollowingCount int  `json:"following_count"`
+	IsFollowing    bool `json:"is_following"`
+}
+
+// resolveMemberParam turns the {username} route param into a member profile,
+// writing the 400/404/500 itself. Returns nil when the response is already
+// written.
+func (h *SocialHandler) resolveMemberParam(w http.ResponseWriter, r *http.Request) *models.MemberProfile {
+	username := chi.URLParam(r, "username")
+	// users.username is VARCHAR(50); anything longer can't exist. Cheap
+	// upper bound before the DB round-trip.
+	if username == "" || len(username) > 100 {
+		writeError(w, http.StatusBadRequest, "invalid username")
+		return nil
+	}
+	p, err := h.queries.GetMemberProfileByUsername(r.Context(), username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load profile")
+		return nil
+	}
+	if p == nil {
+		writeError(w, http.StatusNotFound, "member not found")
+		return nil
+	}
+	return p
 }
 
 // MemberProfile returns another member's profile card. Any signed-in member
@@ -228,20 +256,8 @@ func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	username := chi.URLParam(r, "username")
-	// users.username is VARCHAR(50); anything longer can't exist. Cheap
-	// upper bound before the DB round-trip.
-	if username == "" || len(username) > 100 {
-		writeError(w, http.StatusBadRequest, "invalid username")
-		return
-	}
-	p, err := h.queries.GetMemberProfileByUsername(r.Context(), username)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profile")
-		return
-	}
+	p := h.resolveMemberParam(w, r)
 	if p == nil {
-		writeError(w, http.StatusNotFound, "member not found")
 		return
 	}
 
@@ -251,6 +267,12 @@ func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 		IsMe:          p.UserID == claims.UserID,
 		RecentWatches: []models.MemberRecentWatch{},
 	}
+	followers, following, isFollowing, err := h.queries.GetFollowStats(r.Context(), p.UserID, claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load follow stats")
+		return
+	}
+	resp.FollowerCount, resp.FollowingCount, resp.IsFollowing = followers, following, isFollowing
 	if p.ShareWatchHistory || resp.IsMe {
 		resp.HistoryVisible = true
 		watches, err := h.queries.GetMemberRecentWatches(r.Context(), p.UserID, recentWatchesLimit)
@@ -263,4 +285,129 @@ func (h *SocialHandler) MemberProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// Follow makes the caller follow {username}. Idempotent (re-follow = 204).
+// Open follow, no approval flow: the only thing an edge unlocks is content
+// the followee already opted into sharing (share_watch_history) — the
+// privacy gate lives on the data, not the edge.
+func (h *SocialHandler) Follow(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	p := h.resolveMemberParam(w, r)
+	if p == nil {
+		return
+	}
+	if p.UserID == claims.UserID {
+		writeError(w, http.StatusBadRequest, "you cannot follow yourself")
+		return
+	}
+	if err := h.queries.FollowMember(r.Context(), claims.UserID, p.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to follow")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Unfollow removes the caller's edge to {username}. Idempotent.
+func (h *SocialHandler) Unfollow(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	p := h.resolveMemberParam(w, r)
+	if p == nil {
+		return
+	}
+	if err := h.queries.UnfollowMember(r.Context(), claims.UserID, p.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to unfollow")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// memberListResponse is the shared envelope for the directory and the
+// follower/following lists. Avatars pass the same member-visible boundary
+// filter the profile card uses.
+type memberListResponse struct {
+	Members []models.MemberSummary `json:"members"`
+}
+
+func filteredMemberList(members []models.MemberSummary) memberListResponse {
+	if members == nil {
+		members = []models.MemberSummary{}
+	}
+	for i := range members {
+		members[i].AvatarURL = memberSafeAvatar(members[i].AvatarURL)
+	}
+	return memberListResponse{Members: members}
+}
+
+// ListMembers is the member directory — how you find someone to follow.
+func (h *SocialHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	members, err := h.queries.ListMembers(r.Context(), claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list members")
+		return
+	}
+	writeJSON(w, http.StatusOK, filteredMemberList(members))
+}
+
+// Followers lists who follows {username}.
+func (h *SocialHandler) Followers(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireClaims(w, r); !ok {
+		return
+	}
+	p := h.resolveMemberParam(w, r)
+	if p == nil {
+		return
+	}
+	members, err := h.queries.ListFollowers(r.Context(), p.UserID, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list followers")
+		return
+	}
+	writeJSON(w, http.StatusOK, filteredMemberList(members))
+}
+
+// Following lists who {username} follows.
+func (h *SocialHandler) Following(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireClaims(w, r); !ok {
+		return
+	}
+	p := h.resolveMemberParam(w, r)
+	if p == nil {
+		return
+	}
+	members, err := h.queries.ListFollowing(r.Context(), p.UserID, 100)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list following")
+		return
+	}
+	writeJSON(w, http.StatusOK, filteredMemberList(members))
+}
+
+// FollowingRecent feeds the "From People You Follow" home rail. Empty when
+// the caller follows nobody (or nobody they follow shares) — the SPA skips
+// zero-item rails, so cold accounts cost one cheap query and render nothing.
+func (h *SocialHandler) FollowingRecent(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	items, err := h.queries.GetFollowedRecentWatches(r.Context(), claims.UserID, recentWatchesLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feed")
+		return
+	}
+	if items == nil {
+		items = []models.FollowedRecentWatch{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
