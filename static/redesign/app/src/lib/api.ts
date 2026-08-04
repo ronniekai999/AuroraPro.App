@@ -1750,6 +1750,64 @@ export async function updateProfile(
 export async function deleteProfile(id: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}`, { method: 'DELETE' })
 }
+// ── Member profiles (social phase 1) ─────────────────────────────
+// Account-level identity shown to OTHER signed-in members — distinct from
+// the Netflix-style sub-profiles above (Profile), which stay private to the
+// account. Server: /api/me/profile (self) + /api/members/{username} (any
+// member). Social handles travel bare; SettingsView normalizes pasted
+// URLs/@s via lib/socialLinks before submit and the server re-validates.
+
+export interface MemberProfile {
+  user_id: number
+  username: string
+  display_name?: string
+  bio?: string
+  social_x?: string
+  social_instagram?: string
+  social_facebook?: string
+  social_snapchat?: string
+  /** Mirrors the default sub-profile's avatar (nebula id or http URL). */
+  avatar_url?: string
+  member_since: string
+  /** Opt-in gate for the profile page's Recently Watched strip. */
+  share_watch_history: boolean
+}
+
+export interface MemberRecentWatch {
+  id: number
+  title: string
+  type: string
+  poster_path?: string
+  backdrop_path?: string
+  year?: number
+  rating?: number
+  watched_at: string
+}
+
+export interface MemberProfileResponse {
+  profile: MemberProfile
+  is_me: boolean
+  /** false = the member keeps history private; true with an empty
+   *  recent_watches = shared but nothing completed yet. Distinct renders. */
+  history_visible: boolean
+  recent_watches: MemberRecentWatch[]
+}
+
+export async function getMyProfile(signal?: AbortSignal): Promise<MemberProfile> {
+  return apiFetch<MemberProfile>('/api/me/profile', { signal })
+}
+
+export type MemberProfilePatch = Partial<Pick<MemberProfile,
+  'display_name' | 'bio' | 'social_x' | 'social_instagram' | 'social_facebook' | 'social_snapchat' | 'share_watch_history'>>
+
+export async function updateMyProfile(patch: MemberProfilePatch): Promise<MemberProfile> {
+  return apiFetch<MemberProfile>('/api/me/profile', { method: 'PUT', body: patch })
+}
+
+export async function getMemberProfile(username: string, signal?: AbortSignal): Promise<MemberProfileResponse> {
+  return apiFetch<MemberProfileResponse>(`/api/members/${encodeURIComponent(username)}`, { signal })
+}
+
 export async function setDefaultProfile(id: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}/default`, { method: 'POST' })
 }

@@ -435,6 +435,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.HeroProv != nil {
 		onboardingH.SetHeroProvider(deps.HeroProv)
 	}
+	// Member profiles (social phase 1): /api/me/profile self-service +
+	// /api/members/{username} member-visible cards.
+	socialH := NewSocialHandler(deps.Queries)
 	adminH := NewAdminHandler(deps.Queries, deps.Transcode, deps.DirectPlay, deps.Hub, deps.Activity, deps.RingLog, deps.ImgProxy, deps.Watcher, deps.ArrClients, deps.StartTime, deps.Version, deps.Cfg.Cache.TranscodeDir)
 	adminH.SetEmbeddingInfo(deps.EmbeddingEnabled, deps.EmbeddingVersion)
 	if deps.AIBackfill != nil {
@@ -685,6 +688,18 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Delete("/{id}", authH.DeleteUser)
 			})
 
+			// Members — the user-facing profile surface. Deliberately a
+			// separate namespace from the admin-gated /api/users subtree:
+			// any signed-in member may view a member's profile card (this
+			// is an invite-only server; "member-visible" ≠ public
+			// internet). Also unmixable with /api/users for a mechanical
+			// reason: that tree's routes bind the {id} wildcard and chi
+			// panics on a sibling {username} wildcard at the same node.
+			r.Route("/api/members", func(r chi.Router) {
+				r.Use(middleware.Timeout(60 * time.Second))
+				r.Get("/{username}", socialH.MemberProfile)
+			})
+
 			// Libraries
 			r.Route("/api/libraries", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
@@ -852,6 +867,12 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// timeout is irrelevant to them.
 				r.Get("/rating", heroH.GetRating)
 				r.Post("/rating", heroH.SetRating)
+				// Member profile self-service (the Account card's "Phase 3"):
+				// read + edit display name / bio / social handles and the
+				// share-watch-history opt-in. Cheap DB hits — the wide
+				// /api/me timeout Discover needs is irrelevant here.
+				r.Get("/profile", socialH.MyProfile)
+				r.Put("/profile", socialH.UpdateMyProfile)
 			})
 
 			// Watch Progress

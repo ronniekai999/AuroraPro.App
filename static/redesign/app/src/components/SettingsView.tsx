@@ -50,11 +50,15 @@ import {
   listWatchlists,
   createWatchlist,
   deleteWatchlist,
+  getMyProfile,
+  updateMyProfile,
   type User as ApiUser,
   type Profile,
   type OAuthLinksResponse,
   type Watchlist,
+  type MemberProfile,
 } from '@/lib/api'
+import { SOCIAL_NETWORKS, normalizeHandleInput } from '@/lib/socialLinks'
 
 /* ─────────────────────── SETTINGS VIEW ─────────────────────── */
 interface SettingsViewProps {
@@ -64,8 +68,11 @@ interface SettingsViewProps {
   activeProfile?: Profile | null
   onMaturityChange?: (pref: number) => void | Promise<void>
   onAvatarChange?: (avatarUrl: string) => void | Promise<void>
+  /** Opens /user/:username for the signed-in user (threaded from App's
+   *  navigate — SettingsView itself doesn't own routing). */
+  onOpenMyProfile?: () => void
 }
-export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange, onAvatarChange }: SettingsViewProps = {}) {
+export default function SettingsView({ user: settingsUser, onLogout, onToast, activeProfile, onMaturityChange, onAvatarChange, onOpenMyProfile }: SettingsViewProps = {}) {
   // Phase E2c content-tone dial. Optimistic local override so the chip flips
   // instantly; reset when the active profile changes (server value wins again).
   const [localMaturity, setLocalMaturity] = useState<number | null>(null)
@@ -623,8 +630,9 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
           </div>
         </div>
 
-        {/* Account — M10 Phase 1. Only logout is functional today.
-            Profile editing + password change land in Phase 3. */}
+        {/* Account — M10 Phase 1. Sign-out lives here; the old "Phase 3"
+            profile-editing promise landed as the My Profile card below
+            (social phase 1). Password change still pending. */}
         {(settingsUser || onLogout) && (
           <div className="glass-panel rounded-2xl p-6">
             <h2 className="text-white text-lg font-semibold mb-4 flex items-center gap-2">
@@ -668,6 +676,12 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
             individual grid items, splitting each card's header away from its
             list. */}
         <div className="md:col-span-2">
+          {/* My Profile — member-visible identity (social phase 1): display
+              name, bio, social handles, watch-history sharing. */}
+          <MemberProfileCard onToast={onToast} onOpenMyProfile={onOpenMyProfile} />
+        </div>
+
+        <div className="md:col-span-2">
           {/* Connected accounts — multi-provider OAuth linking (carve-out D). */}
           <ConnectedAccountsCard onToast={onToast} />
         </div>
@@ -685,6 +699,203 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
     </div>
   )
 }
+// My Profile card — the member-visible identity editor (social phase 1).
+// Fetches its own data like ConnectedAccountsCard does: this card is the
+// only consumer of /api/me/profile, so App doesn't own the state. The form
+// doubles as the privacy control surface — share_watch_history is the
+// opt-in for the profile page's Recently Watched strip, default off.
+function MemberProfileCard({ onToast, onOpenMyProfile }: {
+  onToast?: (message: string, type?: Toast['type']) => void
+  onOpenMyProfile?: () => void
+}) {
+  const [loaded, setLoaded] = useState<MemberProfile | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [form, setForm] = useState({
+    display_name: '',
+    bio: '',
+    social_x: '',
+    social_instagram: '',
+    social_facebook: '',
+    social_snapchat: '',
+    share_watch_history: false,
+  })
+
+  const syncForm = (p: MemberProfile) => setForm({
+    display_name: p.display_name ?? '',
+    bio: p.bio ?? '',
+    social_x: p.social_x ?? '',
+    social_instagram: p.social_instagram ?? '',
+    social_facebook: p.social_facebook ?? '',
+    social_snapchat: p.social_snapchat ?? '',
+    share_watch_history: p.share_watch_history,
+  })
+
+  useEffect(() => {
+    let cancelled = false
+    getMyProfile()
+      .then(p => { if (!cancelled) { setLoaded(p); syncForm(p) } })
+      .catch(() => { if (!cancelled) setErr('Failed to load your profile') })
+    return () => { cancelled = true }
+  }, [])
+
+  const save = async () => {
+    // Reduce pasted URLs/@handles to bare handles before submit. null =
+    // the paste can't honestly be reduced (unknown host, deep path,
+    // page-route segment like profile.php) — refuse with a per-network
+    // error instead of saving a wrong-but-shape-valid handle (PR-428
+    // review). Length is checked here too so an over-long clean handle
+    // reads "too long", not the server regex path's "not a URL".
+    const handles: Partial<Record<(typeof SOCIAL_NETWORKS)[number]['key'], string>> = {}
+    for (const n of SOCIAL_NETWORKS) {
+      const norm = normalizeHandleInput(form[n.key], n)
+      if (norm === null) {
+        onToast?.(`${n.label}: couldn't read a username from that link — enter just the handle`, 'error')
+        return
+      }
+      if (norm.length > n.maxLen) {
+        onToast?.(`${n.label} handle is too long (max ${n.maxLen} characters)`, 'error')
+        return
+      }
+      handles[n.key] = norm
+    }
+    setSaving(true)
+    try {
+      // share_watch_history is NOT in this patch — the toggle persists
+      // itself on flip (it's a privacy control; deferred-save would let a
+      // "turn it off" silently evaporate on nav-away).
+      const p = await updateMyProfile({
+        display_name: form.display_name,
+        bio: form.bio,
+        ...handles,
+      })
+      setLoaded(p)
+      syncForm(p)
+      onToast?.('Profile updated', 'success')
+    } catch (e) {
+      onToast?.(e instanceof Error ? e.message : 'Failed to update profile', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // The share toggle commits immediately (one-field atomic patch on the
+  // server): every other control on this Settings page persists on
+  // interaction, and a privacy switch is the last place a silent
+  // discard-on-nav-away is acceptable. Optimistic flip, roll back on error.
+  const toggleShare = async () => {
+    const next = !form.share_watch_history
+    setForm(f => ({ ...f, share_watch_history: next }))
+    try {
+      const p = await updateMyProfile({ share_watch_history: next })
+      setLoaded(p)
+      setForm(f => ({ ...f, share_watch_history: p.share_watch_history }))
+      onToast?.(next ? 'Recently watched is now visible on your profile' : 'Watch history hidden from your profile', 'success')
+    } catch (e) {
+      setForm(f => ({ ...f, share_watch_history: !next }))
+      onToast?.(e instanceof Error ? e.message : 'Failed to update sharing', 'error')
+    }
+  }
+
+  const inputCls = 'w-full px-3 py-2 bg-white/[0.04] border border-white/[0.08] rounded-lg text-sm text-white placeholder:text-white/25'
+
+  return (
+    <div className="glass-panel rounded-2xl p-6">
+      <div className="flex items-start justify-between gap-4 mb-1">
+        <h2 className="text-white text-lg font-semibold flex items-center gap-2">
+          <Icon name="user" size={18} className="text-purple-400" />
+          My Profile
+        </h2>
+        {onOpenMyProfile && (
+          <button
+            type="button"
+            onClick={onOpenMyProfile}
+            className="px-3 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] rounded-lg text-white/75 text-xs transition-colors"
+          >
+            View my profile
+          </button>
+        )}
+      </div>
+      <p className="text-white/40 text-xs mb-5">
+        {loaded ? <>What other members see at /user/{loaded.username}.</> : 'What other members see on your profile page.'}
+      </p>
+
+      {err && <p className="text-red-300/85 text-sm">{err}</p>}
+      {!err && !loaded && <p className="text-white/40 text-sm">Loading…</p>}
+      {!err && loaded && (
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-4">
+            <label className="block">
+              <span className="text-white/60 text-xs block mb-1.5">Display name</span>
+              <input
+                value={form.display_name}
+                onChange={e => setForm(f => ({ ...f, display_name: e.target.value }))}
+                placeholder={loaded.username}
+                maxLength={80}
+                className={inputCls}
+              />
+            </label>
+          </div>
+          <label className="block">
+            <span className="text-white/60 text-xs block mb-1.5">Bio</span>
+            <textarea
+              value={form.bio}
+              onChange={e => setForm(f => ({ ...f, bio: e.target.value }))}
+              placeholder="A line or two about you"
+              rows={3}
+              maxLength={500}
+              className={`${inputCls} resize-y`}
+            />
+          </label>
+          <div className="grid sm:grid-cols-2 gap-4">
+            {SOCIAL_NETWORKS.map(n => (
+              <label key={n.key} className="block">
+                <span className="text-white/60 text-xs block mb-1.5">{n.label}</span>
+                <input
+                  value={form[n.key]}
+                  onChange={e => setForm(f => ({ ...f, [n.key]: e.target.value }))}
+                  // Paste the profile URL or the @handle — save reduces both.
+                  placeholder={`@${n.placeholder}`}
+                  maxLength={120}
+                  className={inputCls}
+                />
+              </label>
+            ))}
+          </div>
+          <div className="flex items-center justify-between py-2">
+            <div>
+              <p className="text-white/80 text-sm font-medium">Share watch history</p>
+              <p className="text-white/40 text-xs">Show your recently watched titles on your profile — applies immediately. Off by default; only your default profile's completed titles are ever shown.</p>
+            </div>
+            <button
+              type="button"
+              aria-pressed={form.share_watch_history}
+              onClick={toggleShare}
+              className={`px-4 py-2 rounded-lg text-sm border transition-colors ${
+                form.share_watch_history
+                  ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
+                  : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/60'
+              }`}
+            >
+              {form.share_watch_history ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={save}
+              disabled={saving}
+              className="px-4 py-2 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/40 rounded-lg text-purple-200 text-sm transition-colors disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save profile'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // Connected accounts card — multi-provider OAuth linking (audit carve-out D).
 // Lists linked providers (with Disconnect) and available providers (with
 // Connect). Disconnect is disabled for the user's only sign-in method (no

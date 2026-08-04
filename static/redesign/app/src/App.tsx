@@ -161,6 +161,11 @@ const LibraryView = lazy(() => import('@/components/LibraryView'))
 // ACTIVE_STATES/updateStateMeta/timeAgo (those stay in the admin chunk).
 // Loads on first /search nav.
 const SearchView = lazy(() => import('@/components/SearchView'))
+// Social phase 1 — member profile page (/user/:username). Self-contained:
+// fetches its own data by username, so App only parses the URL (see
+// memberUsernameFromPath) and threads onSelect for the recent-watches
+// rail. Loads on first profile nav.
+const UserProfileView = lazy(() => import('@/components/UserProfileView'))
 
 
 /* ─────────────────────── MOCK DATA ─────────────────────── */
@@ -1863,10 +1868,24 @@ function titleIdFromPath(pathname: string): number | null {
   return m ? Number(m[1]) : null
 }
 
+// memberUsernameFromPath extracts the username from a /user/:username
+// pathname (the member profile page, social phase 1), or null otherwise.
+// Charset covers what registration + OAuth's sanitizeUsername can mint
+// (alnum/underscore, plus dot/dash headroom), capped at the DB column's 50.
+// Kept strict for the same reason TITLE_PATH_RE is: a malformed deep link
+// falls through to home instead of a dangling profile page; a well-formed
+// but unknown name 404s at the API and the view says so.
+const MEMBER_PATH_RE = /^\/user\/([A-Za-z0-9._-]{1,50})$/
+function memberUsernameFromPath(pathname: string): string | null {
+  const m = MEMBER_PATH_RE.exec(pathname)
+  return m ? m[1] : null
+}
+
 function pathToView(pathname: string): string {
   // Exact match first.
   if (VIEW_BY_PATH[pathname] !== undefined) return VIEW_BY_PATH[pathname]
   if (titleIdFromPath(pathname) !== null) return 'detail'
+  if (memberUsernameFromPath(pathname) !== null) return 'member'
   // First-segment fallback so future subroutes (e.g. /movies/genre/action)
   // still resolve to the top-level view that contains them.
   const first = pathname.split('/').filter(Boolean)[0]
@@ -4914,6 +4933,10 @@ export default function App() {
             // only surface for these, with no icon state to explain it.
             onOpenServerPanel={() => { setServerOpen(true); setNotifOpen(false) }}
             onOpenNotificationsPanel={() => { setNotifOpen(true); setServerOpen(false) }}
+            // Social phase 1 — "My Profile" dropdown row. Path nav (not a
+            // view id): the member page is keyed by username in the URL,
+            // same pattern as /title/:id.
+            onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
             notifCount={unreadCount}
             profiles={profiles}
             activeProfileId={activeProfileId}
@@ -5260,9 +5283,25 @@ export default function App() {
                     .then(() => addToast('Avatar updated', 'success'))
                     .catch((e) => { addToast('Failed to update avatar', 'error'); throw e })
                 }}
+                onOpenMyProfile={() => navigate(`/user/${encodeURIComponent(user.username)}`)}
               />
             </ViewSuspense>
           )}
+          {view === 'member' && (() => {
+            // Social phase 1 — /user/:username. The username lives in the
+            // URL (parsed fresh each render, like the detail view's id);
+            // the lazy view fetches its own data, so a stale username can't
+            // survive a path change. pathToView only maps to 'member' when
+            // the regex matches, so uname is never null here in practice —
+            // the guard is for the belt-and-braces render race where view
+            // lags a popstate by one frame.
+            const uname = memberUsernameFromPath(location.pathname)
+            return uname ? (
+              <ViewSuspense fallback={<ViewFallback />}>
+                <UserProfileView username={uname} onSelect={handleSelect} />
+              </ViewSuspense>
+            ) : null
+          })()}
           {view === 'collections' && (
             <ViewSuspense fallback={<ViewFallback />}>
               <CollectionsView
