@@ -85,11 +85,12 @@ export default function MembersView({ onOpenMember, currentUsername, onToast }: 
                   </span>
                 </button>
                 {!isMe && (
+                  // No aria-pressed — the label itself carries the state
+                  // (see the profile page's follow button).
                   <button
                     type="button"
                     onClick={() => toggleFollow(m)}
                     disabled={busy.has(m.username)}
-                    aria-pressed={m.is_following}
                     className={`flex-none px-3 py-1.5 rounded-lg text-xs border transition-colors disabled:opacity-50 ${
                       m.is_following
                         ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'

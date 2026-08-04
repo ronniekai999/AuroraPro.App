@@ -12,7 +12,7 @@
 // this" subtitle, so your own page is an exact preview of what opting in
 // would reveal.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaRail } from '@/components/MediaRail'
 import { PageHeader } from '@/components/PageHeader'
@@ -78,6 +78,12 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
   // Which connections list is expanded, and its rows (fetched on expand).
   const [expanded, setExpanded] = useState<'followers' | 'following' | null>(null)
   const [connections, setConnections] = useState<MemberSummary[] | null>(null)
+  const [connError, setConnError] = useState(false)
+  // Monotonic token: only the LATEST expand's response may render, so a
+  // slow followers fetch can't land under the Following heading after a
+  // quick flip (PR-429 review). Cross-profile staleness is handled by the
+  // key={username} remount at the call site.
+  const connSeqRef = useRef(0)
 
   const toggleFollow = async () => {
     if (followBusy || !resp) return
@@ -100,12 +106,19 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
       setExpanded(null)
       return
     }
+    const seq = ++connSeqRef.current
     setExpanded(which)
     setConnections(null)
+    setConnError(false)
     const fetcher = which === 'followers' ? listMemberFollowers : listMemberFollowing
     fetcher(username)
-      .then(setConnections)
-      .catch(() => setConnections([]))
+      .then(list => { if (connSeqRef.current === seq) setConnections(list) })
+      .catch(() => {
+        if (connSeqRef.current === seq) {
+          setConnections([])
+          setConnError(true)
+        }
+      })
   }
 
   useEffect(() => {
@@ -181,11 +194,13 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
             <div className="flex items-start justify-between gap-4">
               <h2 className="text-white text-xl font-semibold truncate">{shownName}</h2>
               {!isMe && (
+                // No aria-pressed: the accessible name itself flips
+                // (Follow/Following) — pairing both makes readers announce
+                // the state twice.
                 <button
                   type="button"
                   onClick={toggleFollow}
                   disabled={followBusy}
-                  aria-pressed={isFollowing}
                   className={`flex-none px-4 py-2 rounded-lg text-sm border transition-colors disabled:opacity-50 ${
                     isFollowing
                       ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
@@ -204,6 +219,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
                 type="button"
                 onClick={() => toggleConnections('followers')}
                 aria-expanded={expanded === 'followers'}
+                aria-controls="member-connections"
                 className="text-white/60 hover:text-white transition-colors"
               >
                 <span className="text-white font-medium">{followerCount}</span> follower{followerCount === 1 ? '' : 's'}
@@ -213,6 +229,7 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
                 type="button"
                 onClick={() => toggleConnections('following')}
                 aria-expanded={expanded === 'following'}
+                aria-controls="member-connections"
                 className="text-white/60 hover:text-white transition-colors"
               >
                 <span className="text-white font-medium">{resp.following_count}</span> following
@@ -250,14 +267,17 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
         </div>
 
         {expanded && (
-          <div className="mt-5 pt-5 border-t border-white/[0.06]">
+          <div id="member-connections" className="mt-5 pt-5 border-t border-white/[0.06]">
             <p className="text-white/50 text-xs uppercase tracking-wide font-semibold mb-3">
               {expanded === 'followers' ? 'Followers' : 'Following'}
             </p>
             {connections === null && <p className="text-white/40 text-sm">Loading…</p>}
             {connections !== null && connections.length === 0 && (
+              // A failed fetch must not masquerade as an empty list.
               <p className="text-white/40 text-sm">
-                {expanded === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
+                {connError
+                  ? 'Couldn’t load this list — try again.'
+                  : expanded === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
               </p>
             )}
             {connections !== null && connections.length > 0 && (

@@ -3269,6 +3269,10 @@ export default function App() {
     setHeroIndex(0)
     setHeroPaused(false)
     heroPoolRef.current = []
+    // Same leak class for the follow feed (PR-429 review): the ref
+    // survives the auth swap, and a warm-cache Discover resolving first
+    // would recompose user B's home with user A's feed spliced in.
+    followingRailRef.current = []
     setContinueItems([])
     setMoviesList(null)
     setShowsList(null)
@@ -3450,10 +3454,12 @@ export default function App() {
   const discoverRailsRef = useRef<DiscoverRailUI[]>([])
   const anchorRailsRef = useRef<AnchorRailUI[]>([])
   const engagementRailsRef = useRef<EngagementRailUI[]>([])
-  // Social phase 2 — "From People You Follow". USER-scoped (the follow
-  // graph is account-level, not sub-profile-level), so unlike the three
-  // refs above it is deliberately NOT wiped on a profile switch — the same
-  // feed is correct for every profile, and it refetches each cycle anyway.
+  // Social phase 2 — "From People You Follow". The follow GRAPH is
+  // account-level, but the feed is fetched per viewing profile because the
+  // server applies the profile's parental ceiling (max_age_rating) to it
+  // like every other home rail — so this ref IS wiped on profile switch
+  // (an adult profile's R-rated feed cards must not splice into the kids
+  // profile's home between recompose and refetch) and on user reset.
   const followingRailRef = useRef<FollowedWatch[]>([])
   // True while the server is still building the LLM Discover rail; arms the
   // discover_ready WS handler and the poll fallback effect below.
@@ -3480,9 +3486,8 @@ export default function App() {
             aspect: 'poster' as const,
             showBadges: true,
             subtitle: 'Recently watched by members you follow',
-            cardSubtitles: Object.fromEntries(
-              followingRailRef.current.map(w => [w.id, followedWatchSubtitle(w)]),
-            ) as Record<number, string>,
+            cardSubtitles: followingRailRef.current.reduce<Record<number, string>>(
+              (acc, w) => { acc[w.id] = followedWatchSubtitle(w); return acc }, {}),
           }]
         : []),
       ...discoverRailsRef.current
@@ -3641,6 +3646,7 @@ export default function App() {
           discoverRailsRef.current = []
           anchorRailsRef.current = []
           engagementRailsRef.current = []
+          followingRailRef.current = []
           // Cancel any in-flight build poll — it belongs to the old profile.
           // NOT reset on a same-profile refresh: doing so tore down the poll
           // fallback while the replacement getDiscoverRails could still fail
@@ -3656,9 +3662,10 @@ export default function App() {
           getAnchorRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
           getEngagementRails(activeProfileId ?? undefined, ac.signal).catch(() => []),
           // Social rail (phase 2): one indexed query server-side, so it
-          // rides the fast batch. Empty for members who follow nobody —
-          // recompose filters zero-item rails.
-          getFollowingRecent(ac.signal).catch(() => []),
+          // rides the fast batch. Profile id threads through so the
+          // server applies this profile's parental ceiling. Empty for
+          // members who follow nobody — recompose filters zero-item rails.
+          getFollowingRecent(activeProfileId ?? undefined, ac.signal).catch(() => []),
         ]).then(([a, e, f]) => {
           if (cancelled) return
           anchorRailsRef.current = a
@@ -5368,7 +5375,11 @@ export default function App() {
             const uname = memberUsernameFromPath(location.pathname)
             return uname ? (
               <ViewSuspense fallback={<ViewFallback />}>
+                {/* key: remount per username so profile A's in-flight
+                    fetches (connections, follow toggle) can't write into
+                    profile B's freshly-seeded state (PR-429 review). */}
                 <UserProfileView
+                  key={uname}
                   username={uname}
                   onSelect={handleSelect}
                   onOpenMember={(u) => navigate(`/user/${encodeURIComponent(u)}`)}

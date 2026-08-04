@@ -1,8 +1,10 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -10,6 +12,7 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // SocialHandler serves the member-facing profile surfaces (the Account
@@ -305,6 +308,15 @@ func (h *SocialHandler) Follow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.queries.FollowMember(r.Context(), claims.UserID, p.UserID); err != nil {
+		// The followee can vanish between resolveMemberParam and the
+		// INSERT (admin delete) — the FK violation (23503) is "member not
+		// found", not a server fault. Mirrors Unfollow, which no-ops in
+		// the same race. Same errors.As pattern as SetRating's FK→404.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			writeError(w, http.StatusNotFound, "member not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to follow")
 		return
 	}
@@ -359,16 +371,18 @@ func (h *SocialHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filteredMemberList(members))
 }
 
-// Followers lists who follows {username}.
+// Followers lists who follows {username}, each row flagged with whether the
+// CALLER follows them.
 func (h *SocialHandler) Followers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireClaims(w, r); !ok {
+	claims, ok := requireClaims(w, r)
+	if !ok {
 		return
 	}
 	p := h.resolveMemberParam(w, r)
 	if p == nil {
 		return
 	}
-	members, err := h.queries.ListFollowers(r.Context(), p.UserID, 100)
+	members, err := h.queries.ListFollowers(r.Context(), p.UserID, claims.UserID, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list followers")
 		return
@@ -376,16 +390,17 @@ func (h *SocialHandler) Followers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filteredMemberList(members))
 }
 
-// Following lists who {username} follows.
+// Following lists who {username} follows, same caller-relative flagging.
 func (h *SocialHandler) Following(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireClaims(w, r); !ok {
+	claims, ok := requireClaims(w, r)
+	if !ok {
 		return
 	}
 	p := h.resolveMemberParam(w, r)
 	if p == nil {
 		return
 	}
-	members, err := h.queries.ListFollowing(r.Context(), p.UserID, 100)
+	members, err := h.queries.ListFollowing(r.Context(), p.UserID, claims.UserID, 100)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list following")
 		return
@@ -393,15 +408,54 @@ func (h *SocialHandler) Following(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, filteredMemberList(members))
 }
 
+// resolveViewerProfile mirrors HeroHandler.resolveProfileID (?profile_id=
+// validated for ownership, else the default profile) but returns the whole
+// profile row — the feed needs max_age_rating, not just the id.
+func (h *SocialHandler) resolveViewerProfile(w http.ResponseWriter, r *http.Request, userID int64) (*models.UserProfile, bool) {
+	if pidStr := r.URL.Query().Get("profile_id"); pidStr != "" {
+		profileID, parseErr := strconv.ParseInt(pidStr, 10, 64)
+		if parseErr != nil || profileID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid profile_id")
+			return nil, false
+		}
+		profile, err := h.queries.GetProfile(r.Context(), profileID)
+		if err != nil || profile == nil {
+			writeError(w, http.StatusNotFound, "profile not found")
+			return nil, false
+		}
+		if profile.UserID != userID {
+			writeError(w, http.StatusForbidden, "profile does not belong to this user")
+			return nil, false
+		}
+		return profile, true
+	}
+	profile, err := h.queries.GetDefaultProfile(r.Context(), userID)
+	if err != nil || profile == nil {
+		writeError(w, http.StatusNotFound, "no default profile")
+		return nil, false
+	}
+	return profile, true
+}
+
 // FollowingRecent feeds the "From People You Follow" home rail. Empty when
 // the caller follows nobody (or nobody they follow shares) — the SPA skips
 // zero-item rails, so cold accounts cost one cheap query and render nothing.
+//
+// The feed is account-scoped DATA but gated by the VIEWING sub-profile's
+// parental ceiling, same as every other server-pushed home surface (Trending
+// uses server-wide data and still gates) — a kids profile must not get
+// R-rated cards because the account follows someone (PR-429 review).
 func (h *SocialHandler) FollowingRecent(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireClaims(w, r)
 	if !ok {
 		return
 	}
-	items, err := h.queries.GetFollowedRecentWatches(r.Context(), claims.UserID, recentWatchesLimit)
+	profile, ok := h.resolveViewerProfile(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	allowed := allowedRatingsForMax(profile.MaxAgeRating)
+	items, err := h.queries.GetFollowedRecentWatches(r.Context(), claims.UserID, allowed, recentWatchesLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load feed")
 		return

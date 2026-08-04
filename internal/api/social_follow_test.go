@@ -9,8 +9,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
@@ -23,6 +25,21 @@ func memberActionReq(method, username, action string, viewerID int64) *http.Requ
 	rctx.URLParams.Add("username", username)
 	r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, rctx))
 	return socialClaimsCtx(r, viewerID)
+}
+
+func seedRatedItem(t *testing.T, q *db.Queries, libID int64, title, contentRating string) *models.MediaItem {
+	t.Helper()
+	item := &models.MediaItem{
+		LibraryID:     libID,
+		Type:          models.MediaMovie,
+		Title:         title,
+		SortTitle:     strings.ToLower(title),
+		ContentRating: contentRating,
+	}
+	if err := q.UpsertMediaItem(context.Background(), item); err != nil {
+		t.Fatalf("seed rated item %s: %v", title, err)
+	}
+	return item
 }
 
 func seedCompletedWatch(t *testing.T, q *db.Queries, userID, profileID, itemID int64) {
@@ -80,11 +97,25 @@ func TestFollow_Lifecycle(t *testing.T) {
 	if !strings.Contains(body, bob.Username) || !strings.Contains(body, carol.Username) {
 		t.Errorf("directory missing members: %s", body)
 	}
-	if !strings.Contains(body, `"username":"`+bob.Username+`","display_name":"","avatar_url":"","is_following":true`) &&
-		!strings.Contains(body, `"username":"`+bob.Username+`","is_following":true`) {
-		// Field order is fixed by the struct; the first form matches today.
-		// The fallback keeps the assertion honest if omitempty fields appear.
+	// display_name/avatar_url are omitempty and empty in this fixture, so
+	// the serialized row is exactly username followed by is_following.
+	if !strings.Contains(body, `"username":"`+bob.Username+`","is_following":true`) {
 		t.Errorf("directory should mark bob followed: %s", body)
+	}
+
+	// Connection lists carry the caller-relative flag too (PR-429 review):
+	// carol doesn't follow alice, so alice's row in bob's followers reads
+	// false FOR CAROL — and after carol follows alice, true.
+	w = socialDo(h.Followers, memberActionReq(http.MethodGet, bob.Username, "followers", carol.ID))
+	if body := w.Body.String(); !strings.Contains(body, `"username":"`+alice.Username+`","is_following":false`) {
+		t.Errorf("bob's followers should read is_following=false for carol: %s", body)
+	}
+	if w := socialDo(h.Follow, memberActionReq(http.MethodPost, alice.Username, "follow", carol.ID)); w.Code != http.StatusNoContent {
+		t.Fatalf("carol follows alice: %d", w.Code)
+	}
+	w = socialDo(h.Followers, memberActionReq(http.MethodGet, bob.Username, "followers", carol.ID))
+	if body := w.Body.String(); !strings.Contains(body, `"username":"`+alice.Username+`","is_following":true`) {
+		t.Errorf("bob's followers should read is_following=true after carol follows alice: %s", body)
 	}
 
 	// Lists.
@@ -198,5 +229,105 @@ func TestFollowingRecent_PrivacyAndAttribution(t *testing.T) {
 	w = socialDo(h.FollowingRecent, socialClaimsCtx(httptest.NewRequest(http.MethodGet, "/api/me/following/recent", nil), sharer.ID))
 	if body := w.Body.String(); !strings.Contains(body, `"items":[]`) {
 		t.Errorf("empty feed should be [], got: %s", body)
+	}
+}
+
+// TestFollowingRecent_CeilingAndSharedTitle pins the two PR-429 review
+// findings on the feed query: (1) the viewing sub-profile's parental
+// ceiling applies to the rail exactly like every sibling home surface;
+// (2) when two followees complete the SAME title, the feed shows one row
+// attributed to the LATER completer (DISTINCT ON keeps whole rows, so
+// watched_at and watched_by can never disagree).
+func TestFollowingRecent_CeilingAndSharedTitle(t *testing.T) {
+	q := requireSocialTestDB(t)
+	ctx := context.Background()
+	suffix := socialTestSuffix(t)
+	h := NewSocialHandler(q)
+
+	// Restricted viewer: default profile with a PG ceiling (seedSocialUser
+	// can't be used — its default profile is unrestricted).
+	kidName := "feed_kid_" + suffix
+	kid, err := q.CreateUser(ctx, kidName, kidName+"@example.com", "$2a$10$placeholder", models.RoleUser)
+	if err != nil {
+		t.Fatalf("seed restricted user: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.DeleteUser(ctx, kid.ID) })
+	kidProfile := &models.UserProfile{UserID: kid.ID, Name: kidName, IsDefault: true, MaxAgeRating: "PG", Language: "en", SubtitleMode: "off"}
+	if err := q.CreateProfile(ctx, kidProfile); err != nil {
+		t.Fatalf("seed restricted profile: %v", err)
+	}
+	adult := seedSocialUser(t, q, "feed_adult_"+suffix)
+	s1 := seedSocialUser(t, q, "feed_s1_"+suffix)
+	s2 := seedSocialUser(t, q, "feed_s2_"+suffix)
+	for id, name := range map[int64]string{s1.ID: "S One", s2.ID: "S Two"} {
+		if w := socialDo(h.UpdateMyProfile, socialPutReq(`{"display_name":"`+name+`","share_watch_history":true}`, id)); w.Code != http.StatusOK {
+			t.Fatalf("sharer opt-in: %d %s", w.Code, w.Body.String())
+		}
+	}
+
+	lib := &models.Library{
+		Name:    "feed_ceiling_lib_" + suffix,
+		Type:    models.LibraryMovies,
+		Paths:   []string{"/tmp/feed_ceiling_test"},
+		OwnerID: adult.ID,
+	}
+	if err := q.CreateLibrary(ctx, lib); err != nil {
+		t.Fatalf("seed library: %v", err)
+	}
+	t.Cleanup(func() { _, _ = q.DeleteLibrary(ctx, lib.ID) })
+	pgItem := seedRatedItem(t, q, lib.ID, "Feed PG Movie "+suffix, "PG")
+	rItem := seedRatedItem(t, q, lib.ID, "Feed R Movie "+suffix, "R")
+
+	for _, viewerID := range []int64{kid.ID, adult.ID} {
+		for _, followee := range []string{s1.Username, s2.Username} {
+			if w := socialDo(h.Follow, memberActionReq(http.MethodPost, followee, "follow", viewerID)); w.Code != http.StatusNoContent {
+				t.Fatalf("follow %s as %d: %d", followee, viewerID, w.Code)
+			}
+		}
+	}
+
+	// s1 completes both titles; s2 completes the PG title strictly later,
+	// so the shared-title row must attribute to S Two.
+	seedCompletedWatch(t, q, s1.ID, 0, pgItem.ID)
+	seedCompletedWatch(t, q, s1.ID, 0, rItem.ID)
+	time.Sleep(25 * time.Millisecond) // completed_at = statement NOW(); force a strictly later stamp
+	seedCompletedWatch(t, q, s2.ID, 0, pgItem.ID)
+
+	feedFor := func(userID int64, query string) string {
+		t.Helper()
+		w := socialDo(h.FollowingRecent, socialClaimsCtx(httptest.NewRequest(http.MethodGet, "/api/me/following/recent"+query, nil), userID))
+		if w.Code != http.StatusOK {
+			t.Fatalf("feed for %d: status %d: %s", userID, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+
+	// Restricted viewer: R title gone, PG title present exactly once.
+	body := feedFor(kid.ID, "")
+	if strings.Contains(body, rItem.Title) {
+		t.Errorf("ceiling: R title leaked into restricted feed: %s", body)
+	}
+	if got := strings.Count(body, pgItem.Title); got != 1 {
+		t.Errorf("shared title should appear exactly once, got %d: %s", got, body)
+	}
+	if !strings.Contains(body, `"watched_by":"S Two"`) {
+		t.Errorf("shared title should attribute to the later completer: %s", body)
+	}
+
+	// Unrestricted viewer sees the R title (attributed to its only
+	// completer) and the same single shared-title row.
+	body = feedFor(adult.ID, "")
+	if !strings.Contains(body, rItem.Title) || !strings.Contains(body, `"watched_by":"S One"`) {
+		t.Errorf("unrestricted feed missing R title/attribution: %s", body)
+	}
+	if got := strings.Count(body, pgItem.Title); got != 1 {
+		t.Errorf("unrestricted: shared title should appear exactly once, got %d", got)
+	}
+
+	// ?profile_id= ownership: another user's profile id is a 403.
+	w := socialDo(h.FollowingRecent, socialClaimsCtx(
+		httptest.NewRequest(http.MethodGet, "/api/me/following/recent?profile_id="+strconv.FormatInt(kidProfile.ID, 10), nil), adult.ID))
+	if w.Code != http.StatusForbidden {
+		t.Errorf("foreign profile_id: want 403, got %d: %s", w.Code, w.Body.String())
 	}
 }

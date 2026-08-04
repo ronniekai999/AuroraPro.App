@@ -1840,8 +1840,11 @@ export async function listMemberFollowing(username: string, signal?: AbortSignal
   return res.members || []
 }
 
-export async function getFollowingRecent(signal?: AbortSignal): Promise<FollowedWatch[]> {
-  const res = await apiFetch<{ items: FollowedWatch[] }>('/api/me/following/recent', { signal })
+export async function getFollowingRecent(profileId?: number, signal?: AbortSignal): Promise<FollowedWatch[]> {
+  // profile_id threads the viewing sub-profile so the server applies its
+  // parental ceiling to the feed — same contract as getAnchorRails.
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  const res = await apiFetch<{ items: FollowedWatch[] }>(`/api/me/following/recent${qs}`, { signal })
   return res.items || []
 }
 

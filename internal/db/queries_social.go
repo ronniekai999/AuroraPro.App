@@ -114,14 +114,16 @@ const memberSummaryCols = `
 	    LIMIT 1), ''),
 	  u.avatar_url, '') AS avatar_url`
 
-// scanMemberSummaries scans the 4 memberSummaryCols columns. ListMembers
-// (which adds is_following as a 5th) scans inline instead.
+// scanMemberSummaries scans memberSummaryCols + the viewer-relative
+// is_following column — every member-list query selects all five, so a
+// serialized false always means "the caller doesn't follow them", never
+// "nobody computed it" (PR-429 review).
 func scanMemberSummaries(rows pgx.Rows) ([]models.MemberSummary, error) {
 	defer rows.Close()
 	var out []models.MemberSummary
 	for rows.Next() {
 		var m models.MemberSummary
-		if err := rows.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.AvatarURL); err != nil {
+		if err := rows.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsFollowing); err != nil {
 			return nil, fmt.Errorf("scan member summary: %w", err)
 		}
 		out = append(out, m)
@@ -171,34 +173,42 @@ func (q *Queries) GetFollowStats(ctx context.Context, subjectID, viewerID int64)
 	return followers, following, isFollowing, nil
 }
 
-// ListFollowers returns who follows the subject, newest edge first.
-func (q *Queries) ListFollowers(ctx context.Context, subjectID int64, limit int) ([]models.MemberSummary, error) {
+// isFollowingCol is the viewer-relative flag every member list carries.
+// vf is a fresh alias so it composes with queries already joining f.
+const isFollowingCol = `,
+	EXISTS(SELECT 1 FROM user_follows vf
+	  WHERE vf.follower_id = $3 AND vf.followee_id = u.id) AS is_following`
+
+// ListFollowers returns who follows the subject, newest edge first, each
+// flagged with whether the VIEWER follows them.
+func (q *Queries) ListFollowers(ctx context.Context, subjectID, viewerID int64, limit int) ([]models.MemberSummary, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	rows, err := q.pool.Query(ctx,
-		`SELECT `+memberSummaryCols+`
+		`SELECT `+memberSummaryCols+isFollowingCol+`
 		 FROM user_follows f JOIN users u ON u.id = f.follower_id
 		 WHERE f.followee_id = $1
 		 ORDER BY f.created_at DESC
-		 LIMIT $2`, subjectID, limit)
+		 LIMIT $2`, subjectID, limit, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("list followers: %w", err)
 	}
 	return scanMemberSummaries(rows)
 }
 
-// ListFollowing returns who the subject follows, newest edge first.
-func (q *Queries) ListFollowing(ctx context.Context, subjectID int64, limit int) ([]models.MemberSummary, error) {
+// ListFollowing returns who the subject follows, newest edge first, each
+// flagged with whether the VIEWER follows them.
+func (q *Queries) ListFollowing(ctx context.Context, subjectID, viewerID int64, limit int) ([]models.MemberSummary, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
 	rows, err := q.pool.Query(ctx,
-		`SELECT `+memberSummaryCols+`
+		`SELECT `+memberSummaryCols+isFollowingCol+`
 		 FROM user_follows f JOIN users u ON u.id = f.followee_id
 		 WHERE f.follower_id = $1
 		 ORDER BY f.created_at DESC
-		 LIMIT $2`, subjectID, limit)
+		 LIMIT $2`, subjectID, limit, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("list following: %w", err)
 	}
@@ -210,26 +220,19 @@ func (q *Queries) ListFollowing(ctx context.Context, subjectID int64, limit int)
 // invite-only boxes hold tens of users, and the 500 cap is a tripwire, not
 // a page size.
 func (q *Queries) ListMembers(ctx context.Context, viewerID int64) ([]models.MemberSummary, error) {
+	// Inline (not the shared isFollowingCol, which binds $3 — this query
+	// has a single param).
 	rows, err := q.pool.Query(ctx,
 		`SELECT `+memberSummaryCols+`,
-		   EXISTS(SELECT 1 FROM user_follows f
-		     WHERE f.follower_id = $1 AND f.followee_id = u.id) AS is_following
+		   EXISTS(SELECT 1 FROM user_follows vf
+		     WHERE vf.follower_id = $1 AND vf.followee_id = u.id) AS is_following
 		 FROM users u
 		 ORDER BY LOWER(u.username)
 		 LIMIT 500`, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("list members: %w", err)
 	}
-	defer rows.Close()
-	var out []models.MemberSummary
-	for rows.Next() {
-		var m models.MemberSummary
-		if err := rows.Scan(&m.UserID, &m.Username, &m.DisplayName, &m.AvatarURL, &m.IsFollowing); err != nil {
-			return nil, fmt.Errorf("scan member row: %w", err)
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	return scanMemberSummaries(rows)
 }
 
 // GetFollowedRecentWatches builds the "From People You Follow" home rail:
@@ -238,8 +241,20 @@ func (q *Queries) ListMembers(ctx context.Context, viewerID int64) ([]models.Mem
 // off removes a member from every feed instantly, no cache to chase). Same
 // default-profile + completed_at + DISTINCT ON discipline as
 // GetMemberRecentWatches; when several followees watched the same title,
-// the most recent completion wins and is the one attributed.
-func (q *Queries) GetFollowedRecentWatches(ctx context.Context, viewerID int64, limit int) ([]models.FollowedRecentWatch, error) {
+// the most recent completion wins and is the one attributed (DISTINCT ON
+// keeps whole rows, so watched_at and watched_by can never disagree).
+//
+// allowedRatings is the VIEWING sub-profile's parental ceiling
+// (allowedRatingsForMax; nil = unrestricted) — the feed is account-scoped
+// data but content gating is profile-level everywhere in Aurora, and a kids
+// profile must not get R-rated cards at the top of home (PR-429 review).
+//
+// The wp.user_id = u.id join term is load-bearing twice over: it lets the
+// planner seek idx_watch_progress_completed_at (user_id, completed_at)
+// WHERE completed per followee — without it the only usable plan scanned
+// EVERY completed row server-wide — and it pins attribution to the row's
+// owner even if some future write path ever de-syncs user_id/profile_id.
+func (q *Queries) GetFollowedRecentWatches(ctx context.Context, viewerID int64, allowedRatings []string, limit int) ([]models.FollowedRecentWatch, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 18
 	}
@@ -259,15 +274,17 @@ func (q *Queries) GetFollowedRecentWatches(ctx context.Context, viewerID int64, 
 		  FROM user_follows f
 		  JOIN users u        ON u.id = f.followee_id AND u.share_watch_history = TRUE
 		  JOIN user_profiles up ON up.user_id = u.id AND up.is_default = TRUE
-		  JOIN watch_progress wp ON wp.profile_id = up.id
+		  JOIN watch_progress wp ON wp.user_id = u.id
+		                        AND wp.profile_id = up.id
 		                        AND wp.completed = TRUE
 		                        AND wp.completed_at IS NOT NULL
 		  JOIN media_items mi ON mi.id = wp.media_item_id
 		  WHERE f.follower_id = $1
+		    AND ($2::text[] IS NULL OR mi.content_rating = ANY($2))
 		  ORDER BY wp.media_item_id, wp.completed_at DESC
 		) dedup
-		ORDER BY watched_at DESC
-		LIMIT $2`, viewerID, limit)
+		ORDER BY watched_at DESC, id DESC
+		LIMIT $3`, viewerID, allowedRatings, limit)
 	if err != nil {
 		return nil, fmt.Errorf("followed recent watches: %w", err)
 	}
@@ -321,7 +338,7 @@ func (q *Queries) GetMemberRecentWatches(ctx context.Context, userID int64, limi
 		    AND wp.completed_at IS NOT NULL
 		  ORDER BY wp.media_item_id, wp.completed_at DESC
 		) dedup
-		ORDER BY watched_at DESC
+		ORDER BY watched_at DESC, id DESC
 		LIMIT $2`, userID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get member recent watches: %w", err)

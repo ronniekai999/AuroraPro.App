@@ -151,8 +151,9 @@ function AvatarMenu({
     }
     // Focus the first RENDERED row on open. `.filter(Boolean)` rather than
     // `itemRefs.current[0]`, because the row set is conditional — My Profile
-    // (slot 0) renders only when routing is wired, and Server Status (slot 1)
-    // is admin-only, so leading slots can be empty. The earlier
+    // (slot 0) and Members (slot 1) render only when routing is wired, and
+    // Server Status (slot 2) is admin-only, so leading slots can be empty.
+    // The earlier
     // version of this pass pinned `tabIndex={0}` to that same slot, which meant a
     // non-admin's open panel had ZERO tab stops; the rows are ordinary tab stops
     // now, so that particular hazard is gone, but the focus call still has to
