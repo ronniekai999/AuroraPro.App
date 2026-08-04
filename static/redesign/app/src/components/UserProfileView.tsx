@@ -12,17 +12,22 @@
 // this" subtitle, so your own page is an exact preview of what opting in
 // would reveal.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { MediaRail } from '@/components/MediaRail'
 import { PageHeader } from '@/components/PageHeader'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import {
   backdropURL,
+  followMember,
   getMemberProfile,
+  listMemberFollowers,
+  listMemberFollowing,
   posterURL,
+  unfollowMember,
   type MemberProfileResponse,
   type MemberRecentWatch,
+  type MemberSummary,
 } from '@/lib/api'
 import { SOCIAL_NETWORKS, socialUrl } from '@/lib/socialLinks'
 import { type Media } from '@/lib/types'
@@ -57,23 +62,82 @@ function watchedAgo(iso: string): string {
   return 'Watched ' + new Date(t).toLocaleDateString(undefined, { month: 'short', year: 'numeric' })
 }
 
-export default function UserProfileView({ username, onSelect }: {
+export default function UserProfileView({ username, onSelect, onOpenMember }: {
   username: string
   onSelect: (m: Media) => void
+  /** Navigate to another member's profile (follower/following rows). */
+  onOpenMember?: (username: string) => void
 }) {
   const [resp, setResp] = useState<MemberProfileResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Follow state lives locally once loaded so the button + count flip
+  // optimistically; server truth re-arrives on any refetch.
+  const [isFollowing, setIsFollowing] = useState(false)
+  const [followerCount, setFollowerCount] = useState(0)
+  const [followBusy, setFollowBusy] = useState(false)
+  // Which connections list is expanded, and its rows (fetched on expand).
+  const [expanded, setExpanded] = useState<'followers' | 'following' | null>(null)
+  const [connections, setConnections] = useState<MemberSummary[] | null>(null)
+  const [connError, setConnError] = useState(false)
+  // Monotonic token: only the LATEST expand's response may render, so a
+  // slow followers fetch can't land under the Following heading after a
+  // quick flip (PR-429 review). Cross-profile staleness is handled by the
+  // key={username} remount at the call site.
+  const connSeqRef = useRef(0)
+
+  const toggleFollow = async () => {
+    if (followBusy || !resp) return
+    setFollowBusy(true)
+    const next = !isFollowing
+    setIsFollowing(next)
+    setFollowerCount(c => c + (next ? 1 : -1))
+    try {
+      await (next ? followMember(username) : unfollowMember(username))
+    } catch {
+      setIsFollowing(!next)
+      setFollowerCount(c => c + (next ? -1 : 1))
+    } finally {
+      setFollowBusy(false)
+    }
+  }
+
+  const toggleConnections = (which: 'followers' | 'following') => {
+    if (expanded === which) {
+      setExpanded(null)
+      return
+    }
+    const seq = ++connSeqRef.current
+    setExpanded(which)
+    setConnections(null)
+    setConnError(false)
+    const fetcher = which === 'followers' ? listMemberFollowers : listMemberFollowing
+    fetcher(username)
+      .then(list => { if (connSeqRef.current === seq) setConnections(list) })
+      .catch(() => {
+        if (connSeqRef.current === seq) {
+          setConnections([])
+          setConnError(true)
+        }
+      })
+  }
 
   useEffect(() => {
     let cancelled = false
     setResp(null)
     setError(null)
+    setExpanded(null)
+    setConnections(null)
     // Same issue-#261 contract handleSelect follows: a profile opened from
     // a scrolled page must start at the top. Instant, not smooth — the
     // content is being replaced.
     window.scrollTo({ top: 0, behavior: 'auto' })
     getMemberProfile(username)
-      .then(r => { if (!cancelled) setResp(r) })
+      .then(r => {
+        if (cancelled) return
+        setResp(r)
+        setIsFollowing(r.is_following)
+        setFollowerCount(r.follower_count)
+      })
       .catch((e: unknown) => {
         if (cancelled) return
         // apiFetch surfaces the server's message ("member not found") —
@@ -127,10 +191,50 @@ export default function UserProfileView({ username, onSelect }: {
         <div className="flex flex-col sm:flex-row gap-6 items-start">
           <ProfileAvatar avatarUrl={profile.avatar_url} name={shownName} size={96} />
           <div className="min-w-0 flex-1">
-            <h2 className="text-white text-xl font-semibold truncate">{shownName}</h2>
+            <div className="flex items-start justify-between gap-4">
+              <h2 className="text-white text-xl font-semibold truncate">{shownName}</h2>
+              {!isMe && (
+                // No aria-pressed: the accessible name itself flips
+                // (Follow/Following) — pairing both makes readers announce
+                // the state twice.
+                <button
+                  type="button"
+                  onClick={toggleFollow}
+                  disabled={followBusy}
+                  className={`flex-none px-4 py-2 rounded-lg text-sm border transition-colors disabled:opacity-50 ${
+                    isFollowing
+                      ? 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
+                      : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/[0.08] text-white/75'
+                  }`}
+                >
+                  {isFollowing ? 'Following' : 'Follow'}
+                </button>
+              )}
+            </div>
             <p className="text-white/40 text-sm mt-0.5">
               @{profile.username} &middot; Member since {Number.isNaN(memberYear) ? '—' : memberYear}
             </p>
+            <div className="flex items-center gap-3 mt-2 text-sm">
+              <button
+                type="button"
+                onClick={() => toggleConnections('followers')}
+                aria-expanded={expanded === 'followers'}
+                aria-controls="member-connections"
+                className="text-white/60 hover:text-white transition-colors"
+              >
+                <span className="text-white font-medium">{followerCount}</span> follower{followerCount === 1 ? '' : 's'}
+              </button>
+              <span className="text-white/20">&middot;</span>
+              <button
+                type="button"
+                onClick={() => toggleConnections('following')}
+                aria-expanded={expanded === 'following'}
+                aria-controls="member-connections"
+                className="text-white/60 hover:text-white transition-colors"
+              >
+                <span className="text-white font-medium">{resp.following_count}</span> following
+              </button>
+            </div>
             {profile.bio && (
               // whitespace-pre-line: the bio is the one multi-line profile
               // field (the server preserves its newlines). break-words:
@@ -161,6 +265,41 @@ export default function UserProfileView({ username, onSelect }: {
             )}
           </div>
         </div>
+
+        {expanded && (
+          <div id="member-connections" className="mt-5 pt-5 border-t border-white/[0.06]">
+            <p className="text-white/50 text-xs uppercase tracking-wide font-semibold mb-3">
+              {expanded === 'followers' ? 'Followers' : 'Following'}
+            </p>
+            {connections === null && <p className="text-white/40 text-sm">Loading…</p>}
+            {connections !== null && connections.length === 0 && (
+              // A failed fetch must not masquerade as an empty list.
+              <p className="text-white/40 text-sm">
+                {connError
+                  ? 'Couldn’t load this list — try again.'
+                  : expanded === 'followers' ? 'No followers yet.' : 'Not following anyone yet.'}
+              </p>
+            )}
+            {connections !== null && connections.length > 0 && (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {connections.map(m => (
+                  <button
+                    key={m.user_id}
+                    type="button"
+                    onClick={() => onOpenMember?.(m.username)}
+                    className="flex items-center gap-3 min-w-0 text-left rounded-lg px-2 py-1.5 hover:bg-white/[0.05] transition-colors"
+                  >
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={m.display_name || m.username} size={32} />
+                    <span className="min-w-0">
+                      <span className="block text-white/85 text-sm truncate">{m.display_name || m.username}</span>
+                      <span className="block text-white/35 text-xs truncate">@{m.username}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="mt-8">

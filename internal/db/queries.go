@@ -334,7 +334,7 @@ func (q *Queries) UpdateLastLogin(ctx context.Context, id int64) error {
 //
 //	refresh_tokens, watch_progress, requests, profiles, libraries.owner_id,
 //	user_preferences, invite_codes.created_by, watch_party hosts,
-//	party_participants
+//	party_participants, user_follows (both directions — migration 050)
 //
 // SET NULL (data preserved, attribution cleared):
 //

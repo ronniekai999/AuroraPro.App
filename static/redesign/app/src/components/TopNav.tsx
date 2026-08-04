@@ -82,6 +82,7 @@ function AvatarMenu({
   onOpenNotifications,
   notifCount,
   onOpenMyProfile,
+  onOpenMembers,
 }: {
   user: ApiUser
   avatarUrl?: string
@@ -94,6 +95,8 @@ function AvatarMenu({
   /** Opens /user/:username (social phase 1). Optional so test renders
    *  without routing wired keep working; no row when absent. */
   onOpenMyProfile?: () => void
+  /** Opens the member directory (social phase 2). Same optionality. */
+  onOpenMembers?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -148,8 +151,9 @@ function AvatarMenu({
     }
     // Focus the first RENDERED row on open. `.filter(Boolean)` rather than
     // `itemRefs.current[0]`, because the row set is conditional — My Profile
-    // (slot 0) renders only when routing is wired, and Server Status (slot 1)
-    // is admin-only, so leading slots can be empty. The earlier
+    // (slot 0) and Members (slot 1) render only when routing is wired, and
+    // Server Status (slot 2) is admin-only, so leading slots can be empty.
+    // The earlier
     // version of this pass pinned `tabIndex={0}` to that same slot, which meant a
     // non-admin's open panel had ZERO tab stops; the rows are ordinary tab stops
     // now, so that particular hazard is gone, but the focus call still has to
@@ -294,9 +298,20 @@ function AvatarMenu({
               My Profile
             </button>
           )}
-          {onOpenServer && (
+          {onOpenMembers && (
             <button
               ref={el => { itemRefs.current[1] = el }}
+              type="button"
+              onClick={() => closeTo(onOpenMembers)}
+              className={itemCls}
+            >
+              <Icon name="users" size={14} className="text-white/50" />
+              Members
+            </button>
+          )}
+          {onOpenServer && (
+            <button
+              ref={el => { itemRefs.current[2] = el }}
               type="button"
               onClick={() => openPanel(onOpenServer)}
               className={itemCls}
@@ -306,7 +321,7 @@ function AvatarMenu({
             </button>
           )}
           <button
-              ref={el => { itemRefs.current[2] = el }}
+              ref={el => { itemRefs.current[3] = el }}
               type="button"
               onClick={() => openPanel(onOpenNotifications)}
               className={itemCls}
@@ -321,7 +336,7 @@ function AvatarMenu({
           </button>
           <div className="border-t border-white/[0.06] my-1" />
           <button
-              ref={el => { itemRefs.current[3] = el }}
+              ref={el => { itemRefs.current[4] = el }}
               type="button"
               onClick={() => go('settings')}
               className={itemCls}
@@ -331,7 +346,7 @@ function AvatarMenu({
           </button>
           {user.role === 'admin' && (
             <button
-              ref={el => { itemRefs.current[4] = el }}
+              ref={el => { itemRefs.current[5] = el }}
               type="button"
               onClick={() => go('admin')}
               className={itemCls}
@@ -342,7 +357,7 @@ function AvatarMenu({
           )}
           <div className="border-t border-white/[0.06] my-1" />
           <button
-            ref={el => { itemRefs.current[5] = el }}
+            ref={el => { itemRefs.current[6] = el }}
             type="button"
             // closeTo focuses the trigger before calling onSignOut, which is the
             // best that can be done from here — but it does NOT save this path, and
@@ -572,6 +587,8 @@ export interface TopNavProps {
   onSignOut: () => void
   /** Opens the signed-in user's own profile page (social phase 1). */
   onOpenMyProfile?: () => void
+  /** Opens the member directory (social phase 2). */
+  onOpenMembers?: () => void
 }
 
 export function TopNav({
@@ -602,6 +619,7 @@ export function TopNav({
   avatarUrl,
   onSignOut,
   onOpenMyProfile,
+  onOpenMembers,
 }: TopNavProps) {
   const isAdmin = user.role === 'admin'
   const tabs = useMemo(() => navTabsFor(user.role), [user.role])
@@ -823,6 +841,7 @@ export function TopNav({
           // Wrapped like go(): navigating from the dropdown must also
           // dismiss the mobile sheet if it's open behind it.
           onOpenMyProfile={onOpenMyProfile && (() => { setSheetOpen(false); onOpenMyProfile() })}
+          onOpenMembers={onOpenMembers && (() => { setSheetOpen(false); onOpenMembers() })}
         />
 
         {/* Menu button — below md only. */}

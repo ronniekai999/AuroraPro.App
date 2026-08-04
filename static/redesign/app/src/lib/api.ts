@@ -1791,6 +1791,61 @@ export interface MemberProfileResponse {
    *  recent_watches = shared but nothing completed yet. Distinct renders. */
   history_visible: boolean
   recent_watches: MemberRecentWatch[]
+  // Follow graph (social phase 2). is_following is viewer-relative.
+  follower_count: number
+  following_count: number
+  is_following: boolean
+}
+
+// ── Follows (social phase 2) ─────────────────────────────────────
+
+export interface MemberSummary {
+  user_id: number
+  username: string
+  display_name?: string
+  avatar_url?: string
+  /** Viewer-relative; populated by the directory endpoint. */
+  is_following: boolean
+}
+
+/** One "From People You Follow" feed row: a completed title plus who
+ *  (display name falling back to username) and when. Only followees who
+ *  opted into share_watch_history ever appear — re-checked server-side on
+ *  every read. */
+export interface FollowedWatch extends MemberRecentWatch {
+  watched_by: string
+  watched_by_username: string
+}
+
+export async function followMember(username: string): Promise<void> {
+  await apiFetch(`/api/members/${encodeURIComponent(username)}/follow`, { method: 'POST' })
+}
+
+export async function unfollowMember(username: string): Promise<void> {
+  await apiFetch(`/api/members/${encodeURIComponent(username)}/follow`, { method: 'DELETE' })
+}
+
+export async function listMembers(signal?: AbortSignal): Promise<MemberSummary[]> {
+  const res = await apiFetch<{ members: MemberSummary[] }>('/api/members', { signal })
+  return res.members || []
+}
+
+export async function listMemberFollowers(username: string, signal?: AbortSignal): Promise<MemberSummary[]> {
+  const res = await apiFetch<{ members: MemberSummary[] }>(`/api/members/${encodeURIComponent(username)}/followers`, { signal })
+  return res.members || []
+}
+
+export async function listMemberFollowing(username: string, signal?: AbortSignal): Promise<MemberSummary[]> {
+  const res = await apiFetch<{ members: MemberSummary[] }>(`/api/members/${encodeURIComponent(username)}/following`, { signal })
+  return res.members || []
+}
+
+export async function getFollowingRecent(profileId?: number, signal?: AbortSignal): Promise<FollowedWatch[]> {
+  // profile_id threads the viewing sub-profile so the server applies its
+  // parental ceiling to the feed — same contract as getAnchorRails.
+  const qs = profileId ? `?profile_id=${profileId}` : ''
+  const res = await apiFetch<{ items: FollowedWatch[] }>(`/api/me/following/recent${qs}`, { signal })
+  return res.items || []
 }
 
 export async function getMyProfile(signal?: AbortSignal): Promise<MemberProfile> {

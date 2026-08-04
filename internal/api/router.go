@@ -697,7 +697,16 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// panics on a sibling {username} wildcard at the same node.
 			r.Route("/api/members", func(r chi.Router) {
 				r.Use(middleware.Timeout(60 * time.Second))
+				// Directory + profile cards (phase 1), follow graph
+				// (phase 2). Follow/unfollow are idempotent; the privacy
+				// gate for feed content is share_watch_history on the
+				// followee, re-checked at read time.
+				r.Get("/", socialH.ListMembers)
 				r.Get("/{username}", socialH.MemberProfile)
+				r.Post("/{username}/follow", socialH.Follow)
+				r.Delete("/{username}/follow", socialH.Unfollow)
+				r.Get("/{username}/followers", socialH.Followers)
+				r.Get("/{username}/following", socialH.Following)
 			})
 
 			// Libraries
@@ -873,6 +882,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// /api/me timeout Discover needs is irrelevant here.
 				r.Get("/profile", socialH.MyProfile)
 				r.Put("/profile", socialH.UpdateMyProfile)
+				// "From People You Follow" home rail (social phase 2).
+				// One indexed query, no LLM — the wide timeout above is
+				// irrelevant here.
+				r.Get("/following/recent", socialH.FollowingRecent)
 			})
 
 			// Watch Progress
