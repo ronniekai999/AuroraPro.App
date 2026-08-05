@@ -30,6 +30,29 @@ func TestTimestampPrefixArgs_Remux(t *testing.T) {
 	}
 }
 
+func TestTimestampPrefixArgs_SeekAccuracyContract(t *testing.T) {
+	// #431 — on a resume (-ss), FFmpeg's default accurate seek trims decoded
+	// streams to the exact target but cannot trim copied streams. A remux
+	// session (video always copied, audio possibly re-encoded) therefore
+	// needs -noaccurate_seek so both streams restart at the keyframe seek
+	// point together; without it, a resumed EAC-3/DTS source played its
+	// audio track up to a GOP after the video track (constant A/V desync via
+	// hls.js, video-dev/hls.js#7432). Transcode sessions decode every
+	// stream, so accurate seek aligns them at exactly startSec — the flag
+	// must stay OFF there or the client's cue-shift math (issue #141)
+	// breaks.
+	for _, fmp4 := range []bool{false, true} {
+		remux := timestampPrefixArgs(&TranscodeSession{Remux: true, FMP4: fmp4})
+		if !slices.Contains(remux, "-noaccurate_seek") {
+			t.Errorf("remux (fmp4=%v) must include -noaccurate_seek (#431), got %v", fmp4, remux)
+		}
+		transcode := timestampPrefixArgs(&TranscodeSession{Remux: false, FMP4: fmp4})
+		if slices.Contains(transcode, "-noaccurate_seek") {
+			t.Errorf("transcode (fmp4=%v) must NOT include -noaccurate_seek (accurate seek aligns decoded streams at startSec), got %v", fmp4, transcode)
+		}
+	}
+}
+
 func TestTimestampPrefixArgs_TranscodeFMP4(t *testing.T) {
 	// Full transcode over fMP4 (the #348 path: EAC-3 promoted to transcode,
 	// Chrome/hls.js, play-from-start). Must anchor A/V with -copyts
