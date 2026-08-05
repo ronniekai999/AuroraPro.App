@@ -2758,7 +2758,26 @@ func timestampPrefixArgs(session *TranscodeSession) []string {
 		// Without -avoid_negative_ts disabled, the mpegts muxer (used by
 		// both -f hls and -f segment) adds ~1.4s initial PTS offset, which
 		// desynchronizes subtitle cue times from the video PTS timeline.
-		return []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", avoidNegTS}
+		//
+		// -noaccurate_seek (#431): FFmpeg's default accurate seek trims
+		// DECODED streams to the exact -ss target but cannot trim COPIED
+		// streams (no decode). On a remux resume with re-encoded audio
+		// (EAC-3/DTS/TrueHD → AAC), that split the two timelines: copied
+		// video restarted at the last keyframe ≤ startSec while decoded
+		// audio was trimmed to startSec exactly, so the audio track began
+		// up to a full GOP after the video track (measured 3.37s on a real
+		// resume). hls.js ignores an audio track's initial fMP4 offset
+		// (video-dev/hls.js#7432), turning that gap into a constant A/V
+		// desync for the whole session. -noaccurate_seek starts BOTH
+		// streams at the demuxer's keyframe seek point, which is also the
+		// contract the SPA already assumes for remux (VideoPlayer's
+		// sessionRemuxRef, issue #141: "remux can't accurate-seek so the
+		// stream's t=0 is the keyframe BEFORE startSec"). No-op when
+		// audio is copied too (nothing is decoded) or when startSec is 0
+		// (no -ss appended). Transcode sessions must NOT get this flag:
+		// there every stream is decoded, accurate seek aligns them all at
+		// exactly startSec, and the client's cue-shift math relies on it.
+		return []string{"-copyts", "-start_at_zero", "-avoid_negative_ts", avoidNegTS, "-noaccurate_seek"}
 	}
 
 	// Full transcode (remux promoted to transcode, or an explicit transcode).

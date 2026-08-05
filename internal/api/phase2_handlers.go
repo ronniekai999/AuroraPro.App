@@ -2048,9 +2048,15 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 	//
 	//   Remux:     input seek (-ss before -i) can't start mid-GOP, so
 	//              the stream's t=0 is the KEYFRAME at-or-before
-	//              startSec. The audio still begins ~startSec, but
-	//              hls.js anchors currentTime to the earliest PTS (the
-	//              video keyframe). Shift cues by that keyframe.
+	//              startSec. Since #431 (-noaccurate_seek on the remux
+	//              path) re-encoded audio ALSO starts at that keyframe
+	//              (before the fix it was trimmed to ~startSec, which
+	//              opened a GOP-sized A/V gap hls.js glued shut into a
+	//              constant desync). hls.js anchors currentTime to the
+	//              earliest PTS — now the audio packet a hair before
+	//              the video keyframe (~1 audio frame, <100ms; within
+	//              the skew already tolerated below). Shift cues by
+	//              the keyframe.
 	//   Transcode: the decoder accurate-seeks and discards up to
 	//              startSec, so t=0 ≈ startSec. Shift cues by startSec.
 	//
