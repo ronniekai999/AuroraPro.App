@@ -1843,6 +1843,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           // the plain vid.currentTime path instead of a rebuild. HLS time
           // 0 IS the requested position (server -ss'd), so force hls.js
           // to start there instead of guessing a live edge.
+          //
+          // Scope: this only covers the hls.js path. Native HLS (Safari /
+          // iOS / AirPlay, `usesNativeHls` above) hits the same
+          // no-ENDLIST-yet playlist through the browser's own HLS
+          // implementation, which has no equivalent client-side knob —
+          // still tracked separately, not fixed here.
           startPosition: 0,
           // 2026-06 streaming review (P2) — ABR tuning for a self-hosted,
           // LAN-dominant server:
@@ -2096,7 +2102,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               const refreshed = await forceTokenRefresh()
               if (cancelled) return
               if (refreshed) {
-                try { hls.startLoad() } catch { failPlayback('Playback failed — token refresh') }
+                // startLoad() with no argument is startLoad(-1), which
+                // re-arms hls.js's own live-edge start-position guess
+                // (see the startPosition:0 comment above) if this fires
+                // before the first fragment was ever requested. Passing
+                // the element's current time keeps the restart anchored
+                // where playback actually is.
+                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh') }
               } else {
                 failPlayback('Session expired. Please sign in again.')
               }
@@ -2163,7 +2175,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               return
             }
             networkRetryAttempts++
-            try { hls.startLoad() } catch {
+            // See the token-refresh recovery above: pass currentTime so a
+            // retry can't re-trigger the live-edge start-position guess.
+            try { hls.startLoad(vid.currentTime) } catch {
               failPlayback('Playback failed — network error')
             }
           } else {
