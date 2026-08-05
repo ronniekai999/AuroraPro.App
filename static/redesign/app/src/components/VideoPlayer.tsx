@@ -2739,6 +2739,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // Issue #436 — iPhone's native video-element fullscreen (see
     // handleFullscreenToggle) never sets document.fullscreenElement, so it
     // doesn't fire the listener above; it fires these on the <video> itself.
+    //
+    // KNOWN GAP (unverified on-device): WebKit's `webkitDisplayingFullscreen`
+    // is spec'd as "is the video in ANY non-inline presentation mode", which
+    // includes Picture-in-Picture, not just true fullscreen — and entering
+    // PiP from the native fullscreen player is expected to fire this same
+    // event. If so, `fullscreen` stays true while the page is visible again
+    // (PiP), briefly rendering fullscreen-only chrome in a windowed page
+    // until PiP ends. Self-heals; not reproducible in this headless
+    // environment to confirm or fix with confidence.
     const onVideoFullscreenChange = () => {
       setFullscreen(!!vid.webkitDisplayingFullscreen)
     }
