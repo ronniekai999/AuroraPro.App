@@ -3177,7 +3177,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     } else if (el.webkitRequestFullscreen) {
       el.webkitRequestFullscreen()
     } else if (vid?.webkitEnterFullscreen) {
-      vid.webkitEnterFullscreen()
+      // Unlike the div-fullscreen calls above, this one is SYNCHRONOUS and
+      // WebKit specifies it as THROWING (InvalidStateError) when the element
+      // can't enter fullscreen — no media player yet, or the gesture
+      // requirement unmet. Swallow it for the same reason #309 feature-detects
+      // rather than calling blind: an uncaught throw out of this handler is
+      // exactly the failure mode that crashed the player before.
+      try { vid.webkitEnterFullscreen() } catch { /* defensive — no fullscreen for you */ }
     }
   }
 
