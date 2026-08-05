@@ -1828,6 +1828,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
+          // Issue #433 — every seek past the buffer rebuilds the session
+          // (VideoPlayer.seekToRealSec -> onSeekRebuild), and the new
+          // session's playlist is served while FFmpeg is still writing it,
+          // so it has no #EXT-X-ENDLIST yet. hls.js flags any playlist
+          // without ENDLIST as `live` (EXT-X-PLAYLIST-TYPE:EVENT does NOT
+          // clear that) and defaults startPosition to the live edge —
+          // roughly (bufferedSoFar - 3 segments) into the NEW session,
+          // which is already anchored at the clicked time. On a fast
+          // remux (unpaced, can be tens of seconds ahead by the time the
+          // playlist is parsed) that put playback well past where the
+          // user clicked; a second click "corrected" it because the
+          // repeat seek stayed inside the already-buffered range and hit
+          // the plain vid.currentTime path instead of a rebuild. HLS time
+          // 0 IS the requested position (server -ss'd), so force hls.js
+          // to start there instead of guessing a live edge.
+          startPosition: 0,
           // 2026-06 streaming review (P2) — ABR tuning for a self-hosted,
           // LAN-dominant server:
           //  * abrEwmaDefaultEstimate: seed from the last measured session

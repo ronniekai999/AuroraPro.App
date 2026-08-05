@@ -3011,11 +3011,12 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// map directly to the video timeline with no offset needed.
 	//
 	// -hls_playlist_type event: tells HLS.js this is an EVENT playlist where
-	// segments are only appended (never removed). Without this, the playlist
-	// has no EXT-X-PLAYLIST-TYPE tag, causing HLS.js to treat it as a live
-	// stream with aggressive live-edge seeking and short timeouts — which
-	// causes spurious errors during remux when FFmpeg is still producing
-	// segments on the fly.
+	// segments are only appended (never removed), so a mid-stream refetch
+	// can't see segments vanish out from under it. Note this tag alone does
+	// NOT stop HLS.js from treating the stream as "live" — HLS.js only
+	// clears that flag on #EXT-X-ENDLIST, which FFmpeg only writes once it
+	// exits. The client (VideoPlayer.tsx) compensates with an explicit
+	// `startPosition: 0`; see the issue #433 comment there.
 	// 2026-05-16 P3 + audit H3 — on auto-restart from a mid-stream FFmpeg
 	// crash, FFmpeg needs to APPEND new entries to the existing stream.m3u8
 	// rather than overwriting it. Without +append_list, the new playlist
