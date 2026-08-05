@@ -172,6 +172,15 @@ declare global {
 
   // ---- WebKit AirPlay on HTMLVideoElement ----
   interface HTMLVideoElement {
+    // iPhone Safari fullscreen (issue #436). Unlike iPad/desktop Safari,
+    // iPhone implements neither the standard nor the webkit-prefixed
+    // Fullscreen API on arbitrary elements — `Element.webkitRequestFullscreen`
+    // is simply absent, so the div-based fullscreen used everywhere else
+    // silently does nothing. The only fullscreen surface iPhone exposes is
+    // this native video-element API (OS chrome, not ours).
+    webkitEnterFullscreen?: () => void
+    webkitExitFullscreen?: () => void
+    readonly webkitDisplayingFullscreen?: boolean
     // Available on Safari/WebKit. Pops the system AirPlay picker.
     webkitShowPlaybackTargetPicker?: () => void
     // True while the video is being mirrored to a wireless (AirPlay) target.
