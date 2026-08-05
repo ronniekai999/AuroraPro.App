@@ -783,6 +783,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         void document.exitFullscreen().catch(() => { /* defensive */ })
       } else if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
         document.webkitExitFullscreen()
+      } else if (videoRef.current?.webkitDisplayingFullscreen) {
+        // Issue #436 — iPhone's native video fullscreen isn't tracked by
+        // document.*fullscreenElement at all; check the <video> directly.
+        videoRef.current.webkitExitFullscreen?.()
       }
     }
   }, [remoteActive])
@@ -2732,6 +2736,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       const fsEl = document.fullscreenElement ?? document.webkitFullscreenElement
       setFullscreen(fsEl === overlayRootRef.current)
     }
+    // Issue #436 — iPhone's native video-element fullscreen (see
+    // handleFullscreenToggle) never sets document.fullscreenElement, so it
+    // doesn't fire the listener above; it fires these on the <video> itself.
+    //
+    // KNOWN GAP (unverified on-device): WebKit's `webkitDisplayingFullscreen`
+    // is spec'd as "is the video in ANY non-inline presentation mode", which
+    // includes Picture-in-Picture, not just true fullscreen — and entering
+    // PiP from the native fullscreen player is expected to fire this same
+    // event. If so, `fullscreen` stays true while the page is visible again
+    // (PiP), briefly rendering fullscreen-only chrome in a windowed page
+    // until PiP ends. Self-heals; not reproducible in this headless
+    // environment to confirm or fix with confidence.
+    const onVideoFullscreenChange = () => {
+      setFullscreen(!!vid.webkitDisplayingFullscreen)
+    }
     // Issue #177 — natural end of playback. Defer entirely to the
     // parent (auto-play-next decision lives there). 'ended' fires once
     // per playthrough; the parent re-targets on advance, which tears
@@ -2755,6 +2774,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     document.addEventListener('fullscreenchange', onFullscreenChange)
     // iOS Safari fires the webkit-prefixed event instead (issue #309).
     document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+    // iPhone-only native video fullscreen (issue #436).
+    vid.addEventListener('webkitbeginfullscreen', onVideoFullscreenChange)
+    vid.addEventListener('webkitendfullscreen', onVideoFullscreenChange)
     // Apply the persisted volume BEFORE hydrating state from the element,
     // so a fresh player doesn't open at the useState(1) default. Re-runs
     // on target change are no-ops: the element keeps its volume and the
@@ -2777,6 +2799,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.removeEventListener('ended', onEndedDom)
       document.removeEventListener('fullscreenchange', onFullscreenChange)
       document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+      vid.removeEventListener('webkitbeginfullscreen', onVideoFullscreenChange)
+      vid.removeEventListener('webkitendfullscreen', onVideoFullscreenChange)
       // Flush a pending debounced volume write so the last adjustment
       // before a close or episode-advance isn't lost.
       if (volumeSaveTimerRef.current != null) {
@@ -3137,19 +3161,38 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // `webkit`-prefixed names. Calling the standard method unconditionally
   // throws "requestFullscreen is not a function", which crashed the player
   // and could disrupt an in-flight AirPlay session. Feature-detect both.
+  //
+  // Issue #436 — on iPhone (unlike iPad/desktop) Safari exposes NEITHER of
+  // those on a <div> at all, so the button became a silent no-op there.
+  // iPhone's only fullscreen surface is native video-element fullscreen
+  // (OS chrome, not ours); fall back to it when div-fullscreen isn't
+  // available. `onVideoFullscreenChange` (below, in the playback-event
+  // effect) keeps `fullscreen` state in sync via the webkitbegin/end events
+  // this path fires instead of document-level fullscreenchange.
   const handleFullscreenToggle = () => {
     const el = overlayRootRef.current
     if (!el) return
+    const vid = videoRef.current
     if (document.fullscreenElement || document.webkitFullscreenElement) {
       if (document.exitFullscreen) {
         void document.exitFullscreen().catch(() => { /* defensive */ })
       } else if (document.webkitExitFullscreen) {
         document.webkitExitFullscreen()
       }
+    } else if (vid?.webkitDisplayingFullscreen) {
+      vid.webkitExitFullscreen?.()
     } else if (el.requestFullscreen) {
       void el.requestFullscreen().catch(() => { /* defensive */ })
     } else if (el.webkitRequestFullscreen) {
       el.webkitRequestFullscreen()
+    } else if (vid?.webkitEnterFullscreen) {
+      // Unlike the div-fullscreen calls above, this one is SYNCHRONOUS and
+      // WebKit specifies it as THROWING (InvalidStateError) when the element
+      // can't enter fullscreen — no media player yet, or the gesture
+      // requirement unmet. Swallow it for the same reason #309 feature-detects
+      // rather than calling blind: an uncaught throw out of this handler is
+      // exactly the failure mode that crashed the player before.
+      try { vid.webkitEnterFullscreen() } catch { /* defensive — no fullscreen for you */ }
     }
   }
 

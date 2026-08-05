@@ -4954,7 +4954,11 @@ export default function App() {
              walks it. The fullscreen element's own top-layer rendering is what
              hides it, and inerting the page behind a fullscreen element is the
              UA's job, not ours — but a user who tabs while fullscreen does move
-             focus into things they cannot see.
+             focus into things they cannot see. Issue #436 — iPhone's native
+             video-element fullscreen is the same story by a different
+             mechanism: there is no document.fullscreenElement at all, so
+             `theaterActive` is false there too, but the OS presentation layer
+             occludes the page just the same.
 
           `inert={x || undefined}` rather than `inert={x}` so the attribute is
           absent, not `inert="false"` — the HTML attribute is presence-based. */}
