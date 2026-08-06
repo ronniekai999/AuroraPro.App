@@ -3405,8 +3405,8 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 	// Containment (audit LOW): the playlist must resolve to a real path inside
 	// the canonical transcode base. FFmpeg writes stream.m3u8 itself so this is
 	// normally a no-op, but a symlink dropped into the output tree pointing
-	// outside the base is rejected with 404 rather than served. Guards both the
-	// token-rewrite read below and the http.ServeFile fall-through.
+	// outside the base is rejected with 404 rather than served. Guards the
+	// read+rewrite below.
 	if !pathWithinRoot(tm.baseDir, playlistPath) {
 		http.Error(w, "playlist not found", http.StatusNotFound)
 		return
@@ -3430,21 +3430,19 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		lines[i] = strings.TrimRight(line, "\r")
 	}
 
-	// Insert EXT-X-START right after the required #EXTM3U header tag (unconditionally
-	// — see the doc comment above). Every playlist FFmpeg writes here starts
-	// with #EXTM3U; the fallback prepend guards against a malformed/empty
-	// file rather than skipping the tag.
-	out := make([]string, 0, len(lines)+1)
-	inserted := false
-	for _, line := range lines {
-		out = append(out, line)
-		if !inserted && line == "#EXTM3U" {
-			out = append(out, "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
-			inserted = true
-		}
-	}
-	if !inserted {
-		out = append([]string{"#EXT-X-START:TIME-OFFSET=0,PRECISE=YES"}, out...)
+	// Insert EXT-X-START right after the required #EXTM3U header tag
+	// (unconditionally — see the doc comment above). Every playlist FFmpeg
+	// writes here starts with #EXTM3U; RFC 8216 4.3.1.1 requires it to be
+	// line 1, so if a read races a truncated/mid-write file and that line
+	// is missing, serve the body as-is rather than prepending the tag ahead
+	// of whatever the first line actually is — a client can retry a short
+	// read, but there's no recovering from a syntactically invalid playlist.
+	out := lines
+	if len(lines) > 0 && lines[0] == "#EXTM3U" {
+		out = make([]string, 0, len(lines)+1)
+		out = append(out, lines[0])
+		out = append(out, "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
+		out = append(out, lines[1:]...)
 	}
 
 	// For native HLS clients (Safari) and casters that pass auth via

@@ -654,6 +654,93 @@ func TestServeVariantPlaylist_StartTagPlainCookieAuth(t *testing.T) {
 	}
 }
 
+// TestServeVariantPlaylist_StartTagInjection covers the actual #435 bug
+// shape (an in-progress EVENT playlist with no #EXT-X-ENDLIST yet, FFmpeg
+// still running — the earlier tests only exercise a clean-completion,
+// already-static playlist) plus the malformed-file safety net: a playlist
+// that doesn't start with #EXTM3U must be served byte-for-byte unchanged
+// rather than gaining a prepended tag ahead of an invalid first line.
+func TestServeVariantPlaylist_StartTagInjection(t *testing.T) {
+	tests := []struct {
+		name         string
+		playlist     string
+		wantInjected bool
+	}{
+		{
+			name: "in-progress event playlist, no ENDLIST",
+			playlist: "#EXTM3U\n" +
+				"#EXT-X-VERSION:3\n" +
+				"#EXT-X-TARGETDURATION:6\n" +
+				"#EXT-X-PLAYLIST-TYPE:EVENT\n" +
+				"#EXT-X-MEDIA-SEQUENCE:0\n" +
+				"#EXTINF:6.0,\n" +
+				"seg_00000.ts\n",
+			wantInjected: true,
+		},
+		{
+			name:         "malformed playlist missing #EXTM3U",
+			playlist:     "#EXTINF:6.0,\nseg_00000.ts\n",
+			wantInjected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "ts"})
+			if err != nil {
+				t.Fatalf("new transcode manager: %v", err)
+			}
+			defer tm.Close()
+
+			varDir := filepath.Join(tm.baseDir, "sess-inprogress", "source")
+			if err := os.MkdirAll(varDir, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(varDir, "stream.m3u8"), []byte(tt.playlist), 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			ready := make(chan struct{})
+			close(ready)
+			v := &QualityVariant{
+				Profile:   QualityProfile{Name: "source"},
+				OutputDir: varDir,
+				Ready:     ready,
+				started:   true,
+				// exited stays false: FFmpeg is still running, mirroring the
+				// no-ENDLIST-yet state that produces the #435 overshoot.
+			}
+			s := &TranscodeSession{
+				ID:         "sess-inprogress",
+				OutputDir:  filepath.Join(tm.baseDir, "sess-inprogress"),
+				Variants:   map[string]*QualityVariant{"source": v},
+				Profiles:   []QualityProfile{{Name: "source"}},
+				LastAccess: time.Now(),
+				Remux:      true,
+			}
+			tm.mu.Lock()
+			tm.sessions[s.ID] = s
+			tm.mu.Unlock()
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/api/stream/hls/sess-inprogress/source/stream.m3u8", nil)
+			tm.ServeVariantPlaylist(rec, req, "sess-inprogress", "source", "")
+
+			body := rec.Body.String()
+			hasTag := strings.Contains(body, "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
+			if hasTag != tt.wantInjected {
+				t.Errorf("tag injected = %v, want %v:\n%s", hasTag, tt.wantInjected, body)
+			}
+			if !tt.wantInjected && body != tt.playlist {
+				t.Errorf("malformed playlist body altered:\ngot:  %q\nwant: %q", body, tt.playlist)
+			}
+			if tt.wantInjected && !strings.HasPrefix(body, "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n") {
+				t.Errorf("tag not placed immediately after #EXTM3U:\n%s", body)
+			}
+		})
+	}
+}
+
 func TestDecideStatic_ReviewB3(t *testing.T) {
 	// VP9 in MKV with no client caps: the old static path remuxed this into
 	// MPEG-TS, which FFmpeg muxes as a private data stream nothing can play.
