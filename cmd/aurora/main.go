@@ -827,6 +827,13 @@ func main() {
 	// Reel-ready notifications route through the dispatcher so they push
 	// to closed tabs like every other notification.
 	partyManager.SetDispatcher(dispatcher)
+	// Invites (migration 051): scheduled parties are promises that must
+	// survive the auto-updater's restarts. Reload active scheduled rows and
+	// re-arm their countdown + reminder timers before the listener starts
+	// taking joins; overdue ones fire immediately and go live.
+	if restored := partyManager.RehydrateScheduledParties(ctx); restored > 0 {
+		slog.Info("rehydrated scheduled watch parties", "count", restored)
+	}
 	// M9 — set the shutdown context BEFORE the cache dir so background
 	// goroutines (the reaper, in-flight ffmpeg renders) parent off it.
 	// On SIGTERM, ctx cancels and the renders unwind cleanly rather

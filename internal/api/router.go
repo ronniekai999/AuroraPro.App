@@ -495,6 +495,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// M3 — persistent rooms (long-lived join targets). Quick parties still
 	// route through partyH; roomH handles the "My Rooms" lifecycle.
 	roomH := NewRoomHandler(deps.PartyManager, deps.Queries, deps.Activity)
+	// Watch-party invites (migration 051) — member-to-member invite send,
+	// lobby roster, RSVP, and the caller's upcoming-invites feed. Delivery
+	// rides the shared dispatcher pipeline (bell + WS + web push).
+	partyInviteH := NewPartyInviteHandler(deps.PartyManager, deps.Queries, deps.Dispatcher)
 	// Phase 2 (share-to-story): the share-image handler renders + caches a
 	// 1080×1920 PNG per party for posting to social-media stories. Cache
 	// directory reuses the image proxy's cache root for filesystem locality;
@@ -1119,7 +1123,18 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Accepts {scheduled_start_at: rfc3339 | null}. Null clears
 				// the schedule; a future timestamp arms the timer.
 				r.Post("/{code}/schedule", partyH.Schedule)
+				// Invites (migration 051): host-only batch send; roster
+				// readable by host/invitees/participants.
+				r.Post("/{code}/invites", partyInviteH.SendInvites)
+				r.Get("/{code}/invites", partyInviteH.Roster)
 			})
+
+			// Invitee-side invite actions. Flat routes (not under the
+			// /api/me Route group) for the same reason as notifications:
+			// sub-millisecond DB work that must not inherit that group's
+			// long LLM timeout.
+			r.Post("/api/party-invites/{id}/rsvp", partyInviteH.RSVP)
+			r.Get("/api/me/party-invites", partyInviteH.MyInvites)
 
 			// Persistent Rooms (M3) — long-lived join targets that survive
 			// across sessions. Quick parties continue to use /api/parties;

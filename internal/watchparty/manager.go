@@ -454,6 +454,14 @@ type PartyState struct {
 	// concurrent fires — countdown timer racing a retry — to one, so
 	// clients can't receive duplicate "party-starting" broadcasts.
 	scheduleFiring bool
+	// reminderSentFor records the scheduled start the T-10 reminder was
+	// already sent for (migration 051 invites). Reminder goroutines carry
+	// no cancel hook — they self-validate at fire time against the
+	// CURRENT ScheduledStartAt, and this pointer collapses double-arms
+	// for the same target (e.g. CreateParty arming, then a same-time
+	// reschedule) to one send. Reschedules to a NEW time compare unequal
+	// and legitimately remind again.
+	reminderSentFor *time.Time
 }
 
 // Lock acquires the party-level mutex. Exported for cross-package use by handlers
@@ -1440,6 +1448,12 @@ func (m *Manager) startScheduleTimerLocked(ps *PartyState, scheduledStartAt time
 			return
 		}
 	}()
+
+	// Invites (migration 051): nudge the host + non-declined invitees
+	// shortly before showtime. Skips itself when the start is already
+	// inside the lead window, and self-validates at fire time, so it needs
+	// no cancel plumbing through the teardown paths.
+	m.armReminderLocked(ps, scheduledStartAt)
 }
 
 // cancelScheduleTimerLocked cancels any in-flight schedule timer. Caller

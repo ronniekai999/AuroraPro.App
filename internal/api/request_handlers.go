@@ -791,6 +791,11 @@ func bestTVDBMatch(results []metadata.TVDBSearchResult, year int) int {
 
 // broadcastRequestStatus sends a request_status WebSocket event to the requesting user.
 func (h *RequestHandler) broadcastRequestStatus(req *models.Request, status string) {
+	// Hub is nil in handler-level tests (and any headless embedding); the
+	// durable request row is the source of truth, the WS leg is best-effort.
+	if h.hub == nil {
+		return
+	}
 	h.hub.BroadcastToUser(req.UserID, ws.EventRequestStatus, map[string]interface{}{
 		"request_id": req.ID,
 		"title":      req.Title,
