@@ -175,6 +175,89 @@ func seedInviteUser(t *testing.T, pool *pgxpool.Pool, maxRating string) (int64, 
 	return id, username
 }
 
+// TestPartyInvites_RosterHidesDeclined pins the "declining is silent"
+// promise at the API layer (2026-08 review): the roster endpoint must not
+// ship other members' declined state — hiding it only in the lobby UI
+// left the raw JSON readable by the whole party.
+func TestPartyInvites_RosterHidesDeclined(t *testing.T) {
+	q, pool := requireInviteTestDB(t)
+	ctx := context.Background()
+
+	hostID, hostName := seedInviteUser(t, pool, "")
+	_, goingName := seedInviteUser(t, pool, "")
+	declID, declName := seedInviteUser(t, pool, "")
+
+	var libID, mediaID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO libraries (name, type, paths, owner_id) VALUES ($1, 'movie', $2, $3) RETURNING id`,
+		"invite_lib_"+socialTestSuffix(t), []string{"/tmp/invite_test"}, hostID,
+	).Scan(&libID); err != nil {
+		t.Fatalf("seed library: %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM libraries WHERE id = $1`, libID) })
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO media_items (library_id, type, title, sort_title, content_rating,
+		                          year, overview, rating, runtime_minutes)
+		 VALUES ($1, 'movie', 'Halloweentown', 'ht', 'PG', 1998, '', 0, 84) RETURNING id`,
+		libID,
+	).Scan(&mediaID); err != nil {
+		t.Fatalf("seed media: %v", err)
+	}
+
+	manager := watchparty.NewManager(q, nil)
+	ps, err := manager.CreateParty(ctx, hostID, hostName, mediaID, nil, "P", "Halloweentown", "", 10,
+		watchparty.PartySettings{AllowPause: true, AllowChat: true}, 0, nil)
+	if err != nil {
+		t.Fatalf("create party: %v", err)
+	}
+	code := ps.Code
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DELETE FROM watch_parties WHERE party_code = $1`, code) })
+
+	h := NewPartyInviteHandler(manager, q, nil)
+	body, _ := json.Marshal(map[string]interface{}{"usernames": []string{goingName, declName}})
+	if w := inviteDo(h.SendInvites, inviteReq(http.MethodPost, "/api/parties/"+code+"/invites",
+		string(body), map[string]string{"code": code}, hostID, hostName)); w.Code != http.StatusOK {
+		t.Fatalf("send: %d %s", w.Code, w.Body.String())
+	}
+
+	// The decliner answers via the handler (ownership-scoped).
+	var declInviteID int64
+	if err := pool.QueryRow(ctx,
+		`SELECT pi.id FROM party_invites pi JOIN watch_parties wp ON wp.id = pi.party_id
+		 WHERE wp.party_code = $1 AND pi.invitee_user_id = $2`, code, declID,
+	).Scan(&declInviteID); err != nil {
+		t.Fatalf("resolve invite: %v", err)
+	}
+	if w := inviteDo(h.RSVP, inviteReq(http.MethodPost, fmt.Sprintf("/api/party-invites/%d/rsvp", declInviteID),
+		`{"rsvp":"declined"}`, map[string]string{"id": fmt.Sprint(declInviteID)}, declID, declName)); w.Code != http.StatusOK {
+		t.Fatalf("decline: %d", w.Code)
+	}
+
+	// Host reads the roster: the decliner must be absent, not shown as
+	// declined.
+	w := inviteDo(h.Roster, inviteReq(http.MethodGet, "/api/parties/"+code+"/invites",
+		"", map[string]string{"code": code}, hostID, hostName))
+	if w.Code != http.StatusOK {
+		t.Fatalf("roster: %d", w.Code)
+	}
+	var resp struct {
+		Invites []models.PartyInviteRosterEntry `json:"invites"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("roster resp: %v", err)
+	}
+	if len(resp.Invites) != 1 || resp.Invites[0].Username != goingName {
+		t.Errorf("roster = %+v; want only %s (declined row filtered server-side)", resp.Invites, goingName)
+	}
+
+	// The decliner keeps read access (they can change their mind) — they
+	// just don't appear.
+	if w := inviteDo(h.Roster, inviteReq(http.MethodGet, "/api/parties/"+code+"/invites",
+		"", map[string]string{"code": code}, declID, declName)); w.Code != http.StatusOK {
+		t.Errorf("declined invitee lost roster access: %d", w.Code)
+	}
+}
+
 func TestPartyInvites_FullFlow(t *testing.T) {
 	q, pool := requireInviteTestDB(t)
 	ctx := context.Background()

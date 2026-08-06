@@ -1443,6 +1443,11 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
   }, [])
   // Don't offer to "join" a party you're already hosting.
   const joinable = parties.filter((p) => p.host_user_id !== currentUserId)
+  // Scheduled-not-started parties are in /api/parties/active by design
+  // (that's how the Calendar finds them) but they are NOT "live now" —
+  // label them by their start time and keep them out of the live badge.
+  const isScheduledLobby = (p: ActiveParty) => !!p.scheduled_start_at && !p.started_at
+  const liveCount = joinable.filter(p => !isScheduledLobby(p)).length
 
   const handleJoin = async (code: string) => {
     if (!onJoinParty || joining !== null) return
@@ -1463,9 +1468,9 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
       <div className="flex items-center gap-3 mt-9 mb-3.5">
         <Icon name="users" size={17} className="text-purple-300" />
         <h3 className="text-[16.5px] font-semibold">Watch together</h3>
-        {joinable.length > 0 && (
+        {liveCount > 0 && (
           <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
-            {joinable.length} live now
+            {liveCount} live now
           </span>
         )}
         <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
@@ -1492,10 +1497,14 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                 <div className="flex-1 min-w-[180px]">
                   <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
                   <div className="text-[12.5px] text-white/55 truncate">
-                    {p.media_title
-                      ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
-                      : 'In the lobby'}
-                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                    {isScheduledLobby(p)
+                      ? <>Starts <span className="text-white/75">{formatPartyTime(p.scheduled_start_at!, new Date())}</span>{p.media_title ? <> — <span className="text-white/75">{p.media_title}</span></> : null}</>
+                      : <>
+                          {p.media_title
+                            ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
+                            : 'In the lobby'}
+                          {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                        </>}
                   </div>
                 </div>
                 <button
@@ -1503,7 +1512,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                   disabled={!onJoinParty || joining !== null}
                   className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
                 >
-                  {joining === p.code ? 'Joining…' : 'Join'}
+                  {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
                 </button>
               </div>
             ))}
@@ -2374,17 +2383,22 @@ export default function App() {
   }, [notifOpen, refreshMyPartyInvites])
 
   const handleInviteRsvp = useCallback((inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => {
-    // Optimistic flip; refetch on failure to converge with the server.
+    // Optimistic flip; refetch on BOTH outcomes so a feed refresh that was
+    // already in flight when the user clicked can't leave a stale pressed
+    // state (2026-08 review) — the follow-up fetch converges on the
+    // server's answer.
     setMyPartyInvites(prev =>
       prev ? prev.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)) : prev)
-    rsvpPartyInvite(inviteId, rsvp).catch(err => {
-      refreshMyPartyInvites()
-      setToasts(prev => [...prev, {
-        id: nextToastId(),
-        message: err instanceof Error ? err.message : 'Failed to save RSVP',
-        type: 'error',
-      }])
-    })
+    rsvpPartyInvite(inviteId, rsvp)
+      .then(() => refreshMyPartyInvites())
+      .catch(err => {
+        refreshMyPartyInvites()
+        setToasts(prev => [...prev, {
+          id: nextToastId(),
+          message: err instanceof Error ? err.message : 'Failed to save RSVP',
+          type: 'error',
+        }])
+      })
   }, [refreshMyPartyInvites, nextToastId])
 
   // Join a party from a bell row / calendar chip — in-app, not a new tab.
@@ -4685,6 +4699,16 @@ export default function App() {
       const msg = err instanceof Error ? err.message : 'Failed to start party'
       // eslint-disable-next-line no-console
       console.error('[Aurora WatchParty] launchComposerParty threw', { createdCode, err })
+      // One-active-party-per-host guard (2026-08 review): the raw server
+      // message dead-ends the host with no pointer to the party they
+      // already have — which, for a scheduled booking they're not
+      // connected to, is invisible from this modal. Name the recovery.
+      if (!createdCode && /already have an active party/i.test(msg)) {
+        return {
+          ok: false,
+          error: 'You already have a party (it may be a scheduled one). Open it from the home "Watch together" card, your Calendar, or the bell — end it there first to book a new one.',
+        }
+      }
       return {
         ok: false,
         error: createdCode ? `Party ${createdCode} created but couldn't join: ${msg}` : msg,

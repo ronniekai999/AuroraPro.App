@@ -145,9 +145,15 @@ func (h *PartyInviteHandler) SendInvites(w http.ResponseWriter, r *http.Request)
 	// outlive the in-memory state and the ceiling check needs the stored
 	// content rating.
 	party, err := h.queries.GetWatchPartyByCode(r.Context(), code)
-	if err != nil || party == nil {
+	if err != nil {
 		slog.Error("send invites: party row lookup failed", "code", code, "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to send invites")
+		return
+	}
+	if party == nil {
+		// Ended between the manager check and here (endPartyInternal flips
+		// the row before the map delete) — a 404, not a server fault.
+		writeError(w, http.StatusNotFound, "party not found or has ended")
 		return
 	}
 	item, err := h.queries.GetMediaItem(r.Context(), mediaItemID)
@@ -161,7 +167,14 @@ func (h *PartyInviteHandler) SendInvites(w http.ResponseWriter, r *http.Request)
 	skipped := []skippedInvite{}
 	for _, username := range usernames {
 		invitee, err := h.queries.GetUserByUsername(r.Context(), username)
-		if err != nil || invitee == nil {
+		if err != nil {
+			// Infra error ≠ "no such member" — a transient DB blip must not
+			// tell the host their friend doesn't exist (2026-08 review).
+			slog.Error("send invites: user lookup failed", "username", username, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to send invites")
+			return
+		}
+		if invitee == nil {
 			skipped = append(skipped, skippedInvite{Username: username, Reason: "not_found"})
 			continue
 		}
@@ -283,12 +296,22 @@ func (h *PartyInviteHandler) Roster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for i := range invites {
-		invites[i].AvatarURL = memberSafeAvatar(invites[i].AvatarURL)
+	// Declining is silent — the promise is "no 'Kyle said no' wall", and
+	// it must hold at the API, not just in the lobby's rendering (2026-08
+	// review). Filter AFTER the auth check so a declined invitee keeps
+	// read access to the roster (they can still change their mind from
+	// the bell); their row simply isn't shipped to anyone.
+	visible := make([]models.PartyInviteRosterEntry, 0, len(invites))
+	for _, inv := range invites {
+		if inv.RSVP == "declined" {
+			continue
+		}
+		inv.AvatarURL = memberSafeAvatar(inv.AvatarURL)
+		visible = append(visible, inv)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"invites": invites,
+		"invites": visible,
 	})
 }
 

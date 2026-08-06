@@ -38,12 +38,14 @@ func (q *Queries) CreatePartyInvite(ctx context.Context, partyID, inviterUserID,
 	return tag.RowsAffected() > 0, nil
 }
 
-// ListInvitesForParty returns the member-visible invite roster for a party,
-// hosts first in creation order. Avatar resolution matches memberSummaryCols
-// (default sub-profile avatar, NULLIF-guarded, falling back to the account
-// avatar) so the lobby renders the same face as /members. The handler still
-// runs avatars through memberSafeAvatar before serializing — this query
-// returns whatever is stored.
+// ListInvitesForParty returns ALL invite rows for a party (including
+// declined — the reminder query and the roster handler's authorization
+// check both need the full set), in creation order. Avatar resolution
+// matches memberSummaryCols (default sub-profile avatar, NULLIF-guarded,
+// falling back to the account avatar) so the lobby renders the same face
+// as /members. The ROSTER handler is responsible for the member-visible
+// shape: it runs avatars through memberSafeAvatar and filters declined
+// rows out before serializing (declining is silent).
 func (q *Queries) ListInvitesForParty(ctx context.Context, partyID int64) ([]models.PartyInviteRosterEntry, error) {
 	rows, err := q.pool.Query(ctx,
 		`SELECT pi.id, u.id, u.username, u.display_name,

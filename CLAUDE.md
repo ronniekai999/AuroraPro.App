@@ -85,11 +85,22 @@ Invariants to preserve here:
   invite row was actually created — that created-flag is the notification
   dedup layer (invite notifications carry no `request_id`, so the
   notifications table's dedup index does not apply).
-- **Parental ceilings are enforced at send time** against the invitee's
+- **Parental ceilings are checked at SEND time** against the invitee's
   DEFAULT sub-profile (`rating_restricted` skip; unrated titles excluded
   under any restriction). Kids sub-profiles are structurally unreachable.
+  Known limit: the check is point-in-time — party JOIN carries no rating
+  gate at all (pre-existing, whole watchparty package) and a media swap
+  after sending isn't re-checked. Gating join on the joiner's ceiling is
+  the open follow-up; don't advertise stronger enforcement than this.
 - **Rosters are member-visible surfaces**: username/display/avatar only,
-  avatars through `memberSafeAvatar`; declines stay private to the decliner.
+  avatars through `memberSafeAvatar`; declines stay private to the
+  decliner — the roster ENDPOINT filters `declined` rows out (not just the
+  lobby UI), while declined invitees keep roster read access.
+- **Scheduled-but-unstarted parties are exempt from every reaper** (empty-
+  party cleanup, host-disconnect grace, host explicit leave) until the
+  scheduled start has passed by the staleness window — a booking must
+  survive its host closing the laptop. After an auto-start with an empty
+  room, staleness anchors on `StartedAt`, giving showtime joiners ~5 min.
 - **Scheduled parties must survive restarts**: the manager rehydrates
   active+scheduled+unstarted rows at boot and re-arms countdown/reminder
   timers (the box auto-deploys, so restarts are routine). Reminder timers

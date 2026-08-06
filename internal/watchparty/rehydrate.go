@@ -37,7 +37,10 @@ const reminderLead = 10 * time.Minute
 // armReminderLocked spawns the reminder goroutine for a scheduled start.
 // Caller must hold ps.mu (same contract as startScheduleTimerLocked, its
 // only call site). No-op when showtime is already inside the lead window —
-// a just-sent invite is its own reminder.
+// a just-sent invite is its own reminder. That same rule means a server
+// restart landing INSIDE the lead window skips the reminder entirely
+// (reminderSentFor is not persisted, so re-arming could double-send;
+// skipping is the chosen trade-off — the countdown still fires on time).
 func (m *Manager) armReminderLocked(ps *PartyState, scheduledStartAt time.Time) {
 	delay := time.Until(scheduledStartAt.Add(-reminderLead))
 	if delay <= 0 {
@@ -81,7 +84,12 @@ func (m *Manager) fireScheduledReminder(code string, target time.Time) {
 		return
 	}
 
+	// Read the dispatcher under m.mu like notifyReelReady does —
+	// SetDispatcher writes it under the same lock, and this goroutine may
+	// outlive boot wiring by hours.
+	m.mu.RLock()
 	dispatcher := m.dispatcher
+	m.mu.RUnlock()
 	if dispatcher == nil || dbID <= 0 {
 		return
 	}
@@ -180,30 +188,19 @@ func (m *Manager) RehydrateScheduledParties(ctx context.Context) int {
 			ps.roomDBID = *row.RoomID
 		}
 
-		// Register under the same duplicate guards CreateParty enforces:
-		// one party per code, one active party per host. Collisions here
-		// mean the DB and a concurrently created in-memory party disagree
-		// — prefer the live one and leave the row for the next boot.
+		// Register guarding only against code collisions. Deliberately NO
+		// one-party-per-host guard here (2026-08 review): CreateParty
+		// enforces it, but StartPartyInRoom does not, so a host can
+		// legitimately hold two scheduled parties before a restart —
+		// skipping the second here would strand it as a permanent DB
+		// zombie (active row, invites and calendars pointing at a code
+		// the manager never serves again). Rehydration's job is to
+		// restore reality as persisted, not to re-litigate creation
+		// rules.
 		m.mu.Lock()
 		if _, exists := m.parties[ps.Code]; exists {
 			m.mu.Unlock()
 			slog.Warn("rehydrate: code already live; skipping row", "code", ps.Code)
-			continue
-		}
-		hostBusy := false
-		for _, existing := range m.parties {
-			existing.mu.Lock()
-			if existing.HostUserID == ps.HostUserID {
-				hostBusy = true
-			}
-			existing.mu.Unlock()
-			if hostBusy {
-				break
-			}
-		}
-		if hostBusy {
-			m.mu.Unlock()
-			slog.Warn("rehydrate: host already has a live party; skipping row", "code", ps.Code, "host", ps.HostUserID)
 			continue
 		}
 		m.parties[ps.Code] = ps

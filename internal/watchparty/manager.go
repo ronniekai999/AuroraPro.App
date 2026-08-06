@@ -2975,9 +2975,32 @@ func (m *Manager) cleanupOnce() {
 	var staleCodes []string
 	for _, ref := range refs {
 		ref.ps.mu.Lock()
+		// Invites (2026-08 review, critical finding): a scheduled-but-
+		// unstarted party is LEGITIMATELY empty and idle for hours or
+		// days before showtime — the host books it, closes the tab, and
+		// the invites/calendar point at its code the whole time. Reaping
+		// it here (or via the host-disconnect grace in sync_v3.go, which
+		// carries the same exemption) silently broke every scheduled
+		// party whose host didn't babysit a tab. Exempt until the
+		// scheduled start has passed by the normal staleness window; an
+		// overdue-unstarted party (fire blocked, nobody ever came) then
+		// ages out through the ordinary rules below.
+		if ref.ps.StartedAt == nil && ref.ps.ScheduledStartAt != nil &&
+			now.Before(ref.ps.ScheduledStartAt.Add(staleParticipantTimeout)) {
+			ref.ps.mu.Unlock()
+			continue
+		}
+		// For empty parties the staleness anchor is the LATER of creation
+		// and actual start: an auto-started scheduled party (countdown
+		// fired, nobody in the room yet) gets a fresh window from
+		// showtime, not from a CreatedAt that may be days old.
+		emptyAnchor := ref.ps.CreatedAt
+		if ref.ps.StartedAt != nil && ref.ps.StartedAt.After(emptyAnchor) {
+			emptyAnchor = *ref.ps.StartedAt
+		}
 		allStale := true
 		if len(ref.ps.Participants) == 0 {
-			if now.Sub(ref.ps.CreatedAt) > staleParticipantTimeout {
+			if now.Sub(emptyAnchor) > staleParticipantTimeout {
 				staleCodes = append(staleCodes, ref.code)
 			}
 		} else {

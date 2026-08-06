@@ -722,8 +722,12 @@ function GridView({
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[12.5px] font-semibold">{cell.getUTCDate()}</span>
-                {hasEpisodes && (
-                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length}</span>
+                {/* Count covers episodes + parties: below sm the chips are
+                    hidden, so this badge is the ONLY visible signal a day
+                    has anything — a party-only day must not render blank
+                    on a phone (2026-08 review). */}
+                {(hasEpisodes || cellParties.length > 0) && (
+                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length + cellParties.length}</span>
                 )}
               </div>
               {/* Episode chips — up to 3, then "+N more".

@@ -193,6 +193,15 @@ func TestRehydrateScheduledParties_RestartSurvival(t *testing.T) {
 		t.Errorf("second rehydrate restored %d parties; want 0 (code already live)", restored)
 	}
 
+	// 2026-08 review (critical): the stale-party reaper runs 60s after
+	// boot, and a rehydrated party is empty with an old CreatedAt — the
+	// scheduled exemption is what keeps rehydration from being a
+	// one-minute stay of execution.
+	m2.cleanupOnce()
+	if m2.GetPartyState(code) == nil {
+		t.Fatal("cleanupOnce reaped the rehydrated scheduled party; rehydration must survive the reaper")
+	}
+
 	// A started party stays dead: mark it started, restart again, gone.
 	if err := q.MarkPartyStarted(ctx, partyDBID(t, pool, code), time.Now()); err != nil {
 		t.Fatalf("mark started: %v", err)
