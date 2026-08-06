@@ -42,6 +42,7 @@ import { ReactionPicker } from './ReactionOverlay'
 import { CinematicChatTicker } from './CinematicChatTicker'
 import { VoicePill } from './VoicePill'
 import { MiniDock } from './MiniDock'
+import { PartyLobbyCard } from './PartyLobbyCard'
 
 interface PartyPanelProps {
   state: PartyState
@@ -80,6 +81,13 @@ interface PartyPanelProps {
   // Optional: when absent, the hand-off dialog simply omits the "End
   // for everyone" option.
   onEndParty?: () => void
+  // Invites feature — scheduled-party lobby controls (rail-only; the
+  // minimal face is a during-playback surface and a scheduled party
+  // hasn't started). Host early start = useParty.requestPlay: the server
+  // cancels the countdown on first play. Reschedule wraps
+  // schedulePartyStart + a toast in App.
+  onStartNow?: () => void
+  onReschedule?: (iso: string) => void
 }
 
 export function PartyPanel({
@@ -91,6 +99,8 @@ export function PartyPanel({
   onToggleVariant,
   onInvite,
   onEndParty,
+  onStartNow,
+  onReschedule,
 }: PartyPanelProps) {
   const [draft, setDraft] = useState('')
   const chatRef = useRef<HTMLDivElement | null>(null)
@@ -324,6 +334,19 @@ export function PartyPanel({
         <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs">
           {state.error}
         </div>
+      )}
+
+      {/* Scheduled-party lobby: countdown + RSVP roster + host controls.
+          Visible until the countdown fires (party-starting clears
+          scheduledStartAt) or the host starts early (isPlaying). */}
+      {state.code && state.scheduledStartAt && !state.startedAt && !state.isPlaying && (
+        <PartyLobbyCard
+          code={state.code}
+          scheduledStartAt={state.scheduledStartAt}
+          isHost={isHost}
+          onStartNow={isHost ? onStartNow : undefined}
+          onReschedule={isHost ? onReschedule : undefined}
+        />
       )}
 
       {/* Members */}

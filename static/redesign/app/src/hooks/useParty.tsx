@@ -121,6 +121,12 @@ export interface PartyState {
   // while playback sync is being re-established. False when sync is
   // connected OR after we've exhausted MAX_RECONNECT_ATTEMPTS.
   syncReconnecting: boolean
+  // Countdown lobby (invites feature). scheduledStartAt set + startedAt
+  // null ⇒ pre-start lobby: PartyPanel renders the countdown instead of
+  // playback chrome. Sourced from party-state on join and kept fresh by
+  // the party-scheduled / party-starting room events. ISO strings.
+  scheduledStartAt: string | null
+  startedAt: string | null
   // UI-facing: did the last operation fail? Cleared on next action.
   error: string | null
 }
@@ -139,6 +145,8 @@ const INITIAL_STATE: PartyState = {
   syncConnected: false,
   reconnecting: false,
   syncReconnecting: false,
+  scheduledStartAt: null,
+  startedAt: null,
   error: null,
 }
 
@@ -505,6 +513,8 @@ export function useParty(currentUserId?: number): UseParty {
           isPlaying: inner.is_playing,
           currentTimeMs: inner.current_time_ms,
           rev: inner.revision ?? 0,
+          scheduledStartAt: inner.scheduled_start_at ?? null,
+          startedAt: inner.started_at ?? null,
           error: null,
           recentReactions:
             prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
@@ -626,6 +636,22 @@ export function useParty(currentUserId?: number): UseParty {
         for (const cb of mediaChangeSubsRef.current) {
           try { cb({ media_item_id: p.media_item_id, episode_id: p.episode_id }) } catch { /* defensive */ }
         }
+        break
+      }
+      case 'party-scheduled': {
+        // Host (re)booked or cleared the countdown. Null clears — the
+        // lobby reverts to "host plays manually".
+        setStatePatch({ scheduledStartAt: msg.payload.scheduled_start_at })
+        break
+      }
+      case 'party-starting': {
+        // The countdown fired (or the host started early): leave the
+        // lobby state. isPlaying/anchor flow in via the sync socket's
+        // own events; this just flips the panel out of countdown mode.
+        setStatePatch({
+          scheduledStartAt: null,
+          startedAt: new Date(msg.payload.started_at_ms).toISOString(),
+        })
         break
       }
       case 'party-ended': {

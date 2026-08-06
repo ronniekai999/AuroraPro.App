@@ -110,6 +110,12 @@ export interface PartyStateInnerParty {
   // payloads on the sync socket). Both refer to the same monotonic
   // state revision; the handler maps revision → rev internally.
   revision?: number
+  // Countdown fields (migration 019, surfaced for the invites lobby).
+  // scheduled_start_at non-null + started_at null ⇒ the party is a lobby
+  // waiting on its countdown; the server fires 'party-starting' at the
+  // scheduled moment.
+  scheduled_start_at?: string | null
+  started_at?: string | null
 }
 
 export interface PartyStatePayload {
@@ -234,6 +240,12 @@ export type InboundRoomMessage =
   | { type: 'ready-changed'; payload: { user_id: number; ready: boolean } }
   | { type: 'party-ended' }
   | { type: 'error'; payload: { error: string } }
+  // Countdown lifecycle (migration 019 events, consumed since the invites
+  // lobby). party-scheduled fires on every (re)schedule — null clears the
+  // countdown; party-starting fires once when the scheduled start engages
+  // playback (also after a manual early start of a scheduled party).
+  | { type: 'party-scheduled'; payload: { scheduled_start_at: string | null; server_now_ms: number } }
+  | { type: 'party-starting'; payload: { started_at_ms: number; server_now_ms: number } }
   // Phase 5 — host advanced the party's media (TV episode auto-
   // advance or manual swap). Server reset its anchor; client must
   // tear down current player + re-init for the new media.

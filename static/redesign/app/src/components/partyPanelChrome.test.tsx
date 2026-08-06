@@ -53,6 +53,8 @@ const state: PartyState = {
   syncConnected: true,
   reconnecting: false,
   syncReconnecting: false,
+  scheduledStartAt: null,
+  startedAt: null,
   error: null,
 }
 
