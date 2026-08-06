@@ -306,9 +306,11 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
         {historyVisible ? (
           watches.length > 0 ? (
             <MediaRail
-              title="Recently Watched"
-              subtitle={isMe && !profile.share_watch_history
-                ? 'Only you can see this — sharing is off in Settings'
+              title="Recently Finished"
+              subtitle={isMe
+                ? (!profile.share_watch_history
+                    ? 'Only you can see this — sharing is off in Settings'
+                    : 'Finished titles only — in-progress watches stay in Continue Watching')
                 : undefined}
               items={watches.map(mapWatchToMedia)}
               aspect="poster"
@@ -317,7 +319,9 @@ export default function UserProfileView({ username, onSelect, onOpenMember }: {
             />
           ) : (
             <p className="text-white/40 text-sm">
-              {isMe ? 'Nothing completed yet — finished titles show up here.' : 'No completed titles yet.'}
+              {isMe
+                ? 'Nothing finished yet — titles show up here once you finish them. In-progress watches stay in Continue Watching.'
+                : 'No finished titles yet.'}
             </p>
           )
         ) : (
