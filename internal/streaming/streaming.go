@@ -3332,6 +3332,13 @@ func (tm *TranscodeManager) ServeMasterPlaylist(w http.ResponseWriter, r *http.R
 // starting the FFmpeg process on-demand if needed.
 // If queryToken is non-empty, segment URLs are rewritten to include ?token=
 // for native HLS clients (Safari).
+// Every playlist is also rewritten to carry #EXT-X-START:TIME-OFFSET=0 (see
+// #435): a seek rebuilds the session anchored server-side at the requested
+// time, so HLS time 0 is always the correct playback start, but the fresh
+// playlist has no #EXT-X-ENDLIST yet and native HLS (Safari/iOS/AirPlay)
+// otherwise guesses a live-edge start position instead. hls.js is unaffected
+// — it only consults this tag when its own startPosition is -1, and
+// VideoPlayer.tsx always passes a literal 0 (the #434 fix).
 func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.Request, sessionID, profileName, queryToken string) {
 	s, ok := tm.sessionForRequest(r, sessionID)
 	if !ok {
@@ -3408,46 +3415,61 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	// For native HLS clients (Safari) that pass auth via ?token=,
-	// rewrite segment URLs to include the token so they can authenticate.
-	if queryToken != "" {
-		data, err := os.ReadFile(playlistPath)
-		if err != nil {
-			http.Error(w, "playlist not found", http.StatusNotFound)
-			return
-		}
-		// Append ?token= to segment lines (not to #EXT directives) — both
-		// .ts (legacy MPEG-TS mode) and .m4s (fMP4/CMAF mode). The fMP4
-		// playlist additionally references the init segment via
-		// `#EXT-X-MAP:URI="init.mp4"`; native/cast receivers fetch that URI
-		// with no Authorization header, so the token must be injected
-		// INSIDE the quoted URI attribute too.
-		// Trim \r from EVERY line — FFmpeg may produce playlists with
-		// \r\n line endings on some platforms, and stripping only the
-		// rewritten lines would produce a mixed-ending output (rewritten
-		// segment lines get \n, EXT directives keep \r\n). HLS clients
-		// tolerate either but mixed endings are sloppy and have
-		// occasionally tripped third-party parsers. Normalize to \n
-		// throughout for a clean, consistent body.
-		tokenSuffix := "?token=" + queryToken
-		lines := strings.Split(string(data), "\n")
-		for i, line := range lines {
-			trimmed := strings.TrimRight(line, "\r")
-			switch {
-			case strings.HasSuffix(trimmed, ".ts") || strings.HasSuffix(trimmed, ".m4s"):
-				lines[i] = trimmed + tokenSuffix
-			case strings.HasPrefix(trimmed, "#EXT-X-MAP:") && strings.Contains(trimmed, `URI="init.mp4"`):
-				lines[i] = strings.Replace(trimmed, `URI="init.mp4"`, `URI="init.mp4`+tokenSuffix+`"`, 1)
-			default:
-				lines[i] = trimmed
-			}
-		}
-		if _, err := w.Write([]byte(strings.Join(lines, "\n"))); err != nil {
-			slog.Debug("write variant playlist", "session_id", sessionID, "error", err)
-		}
+	data, err := os.ReadFile(playlistPath)
+	if err != nil {
+		http.Error(w, "playlist not found", http.StatusNotFound)
 		return
 	}
-	http.ServeFile(w, r, playlistPath)
+	// Trim \r from EVERY line — FFmpeg may produce playlists with \r\n line
+	// endings on some platforms, and stripping only some lines would produce
+	// a mixed-ending output. HLS clients tolerate either but mixed endings
+	// are sloppy and have occasionally tripped third-party parsers.
+	// Normalize to \n throughout for a clean, consistent body.
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, "\r")
+	}
+
+	// Insert EXT-X-START right after the required #EXTM3U header tag (unconditionally
+	// — see the doc comment above). Every playlist FFmpeg writes here starts
+	// with #EXTM3U; the fallback prepend guards against a malformed/empty
+	// file rather than skipping the tag.
+	out := make([]string, 0, len(lines)+1)
+	inserted := false
+	for _, line := range lines {
+		out = append(out, line)
+		if !inserted && line == "#EXTM3U" {
+			out = append(out, "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES")
+			inserted = true
+		}
+	}
+	if !inserted {
+		out = append([]string{"#EXT-X-START:TIME-OFFSET=0,PRECISE=YES"}, out...)
+	}
+
+	// For native HLS clients (Safari) and casters that pass auth via
+	// ?token=, rewrite segment URLs to include the token so they can
+	// authenticate. Append ?token= to segment lines (not to #EXT
+	// directives) — both .ts (legacy MPEG-TS mode) and .m4s (fMP4/CMAF
+	// mode). The fMP4 playlist additionally references the init segment
+	// via `#EXT-X-MAP:URI="init.mp4"`; native/cast receivers fetch that
+	// URI with no Authorization header, so the token must be injected
+	// INSIDE the quoted URI attribute too.
+	if queryToken != "" {
+		tokenSuffix := "?token=" + queryToken
+		for i, line := range out {
+			switch {
+			case strings.HasSuffix(line, ".ts") || strings.HasSuffix(line, ".m4s"):
+				out[i] = line + tokenSuffix
+			case strings.HasPrefix(line, "#EXT-X-MAP:") && strings.Contains(line, `URI="init.mp4"`):
+				out[i] = strings.Replace(line, `URI="init.mp4"`, `URI="init.mp4`+tokenSuffix+`"`, 1)
+			}
+		}
+	}
+
+	if _, err := w.Write([]byte(strings.Join(out, "\n"))); err != nil {
+		slog.Debug("write variant playlist", "session_id", sessionID, "error", err)
+	}
 }
 
 // ServeHLSSegment serves a media segment from a specific quality variant:

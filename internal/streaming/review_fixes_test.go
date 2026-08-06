@@ -586,6 +586,72 @@ func TestServeVariantPlaylist_FMP4TokenRewrite(t *testing.T) {
 	if strings.Contains(body, "\r") {
 		t.Error("playlist line endings not normalized to LF")
 	}
+	wantHeader := "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"
+	if !strings.HasPrefix(body, wantHeader) {
+		t.Errorf("EXT-X-START not injected immediately after #EXTM3U:\n%s", body)
+	}
+}
+
+// TestServeVariantPlaylist_StartTagPlainCookieAuth covers the plain-cookie
+// path (no ?token=, e.g. hls.js over cookie auth) — #435 extended the
+// EXT-X-START injection here too, replacing the old http.ServeFile
+// fall-through so every variant playlist gets the tag, not just the
+// cast-token/native-HLS one.
+func TestServeVariantPlaylist_StartTagPlainCookieAuth(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentFormat: "ts"})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	varDir := filepath.Join(tm.baseDir, "sess-plain", "source")
+	if err := os.MkdirAll(varDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	playlist := "#EXTM3U\n" +
+		"#EXT-X-VERSION:3\n" +
+		"#EXTINF:6.0,\n" +
+		"seg_00000.ts\n"
+	if err := os.WriteFile(filepath.Join(varDir, "stream.m3u8"), []byte(playlist), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	ready := make(chan struct{})
+	close(ready)
+	v := &QualityVariant{
+		Profile:   QualityProfile{Name: "source"},
+		OutputDir: varDir,
+		Ready:     ready,
+		started:   true,
+		exited:    true,
+	}
+	s := &TranscodeSession{
+		ID:         "sess-plain",
+		OutputDir:  filepath.Join(tm.baseDir, "sess-plain"),
+		Variants:   map[string]*QualityVariant{"source": v},
+		Profiles:   []QualityProfile{{Name: "source"}},
+		LastAccess: time.Now(),
+		Remux:      true,
+	}
+	tm.mu.Lock()
+	tm.sessions[s.ID] = s
+	tm.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/stream/hls/sess-plain/source/stream.m3u8", nil)
+	tm.ServeVariantPlaylist(rec, req, "sess-plain", "source", "")
+
+	body := rec.Body.String()
+	wantHeader := "#EXTM3U\n#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"
+	if !strings.HasPrefix(body, wantHeader) {
+		t.Errorf("EXT-X-START not injected on plain-cookie path:\n%s", body)
+	}
+	if strings.Contains(body, "?token=") {
+		t.Error("no token was supplied, playlist should not gain a ?token= suffix")
+	}
+	if !strings.Contains(body, "seg_00000.ts\n") {
+		t.Errorf("segment line unexpectedly altered:\n%s", body)
+	}
 }
 
 func TestDecideStatic_ReviewB3(t *testing.T) {
