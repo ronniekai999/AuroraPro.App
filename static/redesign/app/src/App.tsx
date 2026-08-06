@@ -37,6 +37,11 @@ import {
   mapContinueToMedia,
   searchMedia,
   createQuickParty,
+  sendPartyInvites,
+  listMyPartyInvites,
+  rsvpPartyInvite,
+  schedulePartyStart,
+  type MyPartyInvite,
   login as apiLogin,
   logout as apiLogout,
   posterURL,
@@ -77,6 +82,8 @@ import { VideoPlayer, pickFile, type PlayTarget } from '@/components/VideoPlayer
 import { PartyPanel } from '@/components/PartyPanel'
 import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
+import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
+import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
 import { HeroSection } from '@/components/HeroSection'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
@@ -1436,6 +1443,11 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
   }, [])
   // Don't offer to "join" a party you're already hosting.
   const joinable = parties.filter((p) => p.host_user_id !== currentUserId)
+  // Scheduled-not-started parties are in /api/parties/active by design
+  // (that's how the Calendar finds them) but they are NOT "live now" —
+  // label them by their start time and keep them out of the live badge.
+  const isScheduledLobby = (p: ActiveParty) => !!p.scheduled_start_at && !p.started_at
+  const liveCount = joinable.filter(p => !isScheduledLobby(p)).length
 
   const handleJoin = async (code: string) => {
     if (!onJoinParty || joining !== null) return
@@ -1456,9 +1468,9 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
       <div className="flex items-center gap-3 mt-9 mb-3.5">
         <Icon name="users" size={17} className="text-purple-300" />
         <h3 className="text-[16.5px] font-semibold">Watch together</h3>
-        {joinable.length > 0 && (
+        {liveCount > 0 && (
           <span className="text-[11px] font-semibold text-indigo-300 bg-indigo-500/15 border border-indigo-400/25 rounded-full px-2 py-0.5">
-            {joinable.length} live now
+            {liveCount} live now
           </span>
         )}
         <span className="flex-1 h-px bg-gradient-to-r from-white/10 to-transparent" />
@@ -1485,10 +1497,14 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                 <div className="flex-1 min-w-[180px]">
                   <div className="text-[15px] font-semibold truncate">{p.party_name?.trim() || 'Watch party'}</div>
                   <div className="text-[12.5px] text-white/55 truncate">
-                    {p.media_title
-                      ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
-                      : 'In the lobby'}
-                    {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                    {isScheduledLobby(p)
+                      ? <>Starts <span className="text-white/75">{formatPartyTime(p.scheduled_start_at!, new Date())}</span>{p.media_title ? <> — <span className="text-white/75">{p.media_title}</span></> : null}</>
+                      : <>
+                          {p.media_title
+                            ? <>{p.is_playing ? 'Watching' : 'Paused on'} <span className="text-white/75">{p.media_title}</span></>
+                            : 'In the lobby'}
+                          {' · '}{p.participant_count}{p.max_participants > 0 ? `/${p.max_participants}` : ''} watching
+                        </>}
                   </div>
                 </div>
                 <button
@@ -1496,7 +1512,7 @@ function WatchTogetherCard({ onStartParty, onJoinParty, currentUserId }: {
                   disabled={!onJoinParty || joining !== null}
                   className="px-4 py-2 rounded-xl bg-indigo-500/25 hover:bg-indigo-500/35 disabled:opacity-50 disabled:cursor-default text-indigo-50 border border-indigo-400/40 font-semibold text-[13.5px] transition-colors flex-none"
                 >
-                  {joining === p.code ? 'Joining…' : 'Join'}
+                  {joining === p.code ? 'Joining…' : isScheduledLobby(p) ? 'Open lobby' : 'Join'}
                 </button>
               </div>
             ))}
@@ -1675,6 +1691,11 @@ const notifLine = (n: AppNotification): string =>
   : n.type === 'party_reel_ready' ? `Highlight reel ready: ${n.title}`
   : n.type === 'admin_new_request' ? `New request awaiting review: ${n.title}`
   : n.type === 'scan_complete' ? `Library scan — ${n.title}`
+  // Invite titles are server-composed sentences ("Ronnie invited you —
+  // Halloweentown", "Mel is in — …"); pass them through untouched.
+  : n.type === 'party_invite' ? n.title
+  : n.type === 'party_rsvp' ? n.title
+  : n.type === 'party_reminder' ? `Starting soon — ${n.title}`
   : `${n.title} is now available`
 
 // Render a notification's link only when it is a same-origin path. The
@@ -1687,12 +1708,19 @@ const safeNotifLink = (link?: string): string | undefined =>
 // NotificationPanel surfaces recent admin activity log entries.
 // Real-time WS-driven notifications are TODO; non-admins see an
 // empty state.
-function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRead }: {
+function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRead, partyInvites, onRsvp, onJoinParty }: {
   open: boolean
   isAdmin: boolean
   onClose: () => void
   notifications: AppNotification[]
   onMarkAllRead: () => void
+  // Invites feature — the caller's open invites (null while loading).
+  // Party-invite notification rows cross-reference this by party code to
+  // render inline RSVP; an invite missing from the feed means the party
+  // ended, so the row degrades to a dim "ended" line.
+  partyInvites: MyPartyInvite[] | null
+  onRsvp: (inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => void
+  onJoinParty: (code: string) => void
 }) {
   const [entries, setEntries] = useState<ActivityEntry[]>([])
   const [loading, setLoading] = useState(false)
@@ -1765,31 +1793,98 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
             <p className="text-white/30 text-xs mt-2">You'll be notified when a request is ready to watch.</p>
           </div>
         )}
-        {notifications.map(n => (
-          <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
-            <span
-              className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${n.type === 'request_failed' ? 'bg-red-400' : 'bg-emerald-400'}`}
-              aria-hidden="true"
-            />
-            <div className="min-w-0">
-              {/* Same-origin <a href> so the httpOnly auth cookie rides along
-                  (the highlight-reel MP4 is an authenticated endpoint). */}
-              {safeNotifLink(n.link) ? (
-                <a
-                  href={safeNotifLink(n.link)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-white/90 hover:text-white text-sm font-medium truncate block underline decoration-white/20 underline-offset-2"
-                >
-                  {notifLine(n)}
-                </a>
-              ) : (
-                <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
-              )}
-              <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
+        {notifications.map(n => {
+          const isPartyType = n.type === 'party_invite' || n.type === 'party_reminder' || n.type === 'party_rsvp'
+          const partyCode = isPartyType ? inviteCodeFromLink(n.link) : null
+          // The invite row (RSVP + note + time) only renders for
+          // party_invite; reminders/rsvp-pings just get a Join button.
+          const invite = n.type === 'party_invite' && partyCode && partyInvites
+            ? partyInvites.find(i => i.party_code === partyCode)
+            : undefined
+          const inviteGone = n.type === 'party_invite' && partyCode && partyInvites && !invite
+          const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-purple-400' : 'bg-emerald-400'
+          return (
+            <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
+              <span
+                className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${dot}`}
+                aria-hidden="true"
+              />
+              <div className="min-w-0 flex-1">
+                {/* Same-origin <a href> so the httpOnly auth cookie rides along
+                    (the highlight-reel MP4 is an authenticated endpoint).
+                    Party rows join in-app instead — a new tab would spawn a
+                    second SPA session just to run party.join. */}
+                {safeNotifLink(n.link) && !isPartyType ? (
+                  <a
+                    href={safeNotifLink(n.link)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-white/90 hover:text-white text-sm font-medium truncate block underline decoration-white/20 underline-offset-2"
+                  >
+                    {notifLine(n)}
+                  </a>
+                ) : (
+                  <h4 className="text-white/90 text-sm font-medium truncate">{notifLine(n)}</h4>
+                )}
+
+                {invite && (
+                  <>
+                    {(invite.scheduled_start_at || invite.note) && (
+                      <p className="text-white/45 text-xs mt-1 truncate">
+                        {invite.scheduled_start_at ? formatPartyTime(invite.scheduled_start_at, new Date()) : ''}
+                        {invite.scheduled_start_at && invite.note ? ' · ' : ''}
+                        {invite.note ? `“${invite.note}”` : ''}
+                      </p>
+                    )}
+                    <div className="flex gap-1.5 mt-2 flex-wrap">
+                      {([['going', "I'm in"], ['maybe', 'Maybe'], ['declined', "Can't make it"]] as const).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => onRsvp(invite.invite_id, value)}
+                          aria-pressed={invite.rsvp === value}
+                          className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                            invite.rsvp === value
+                              ? value === 'going'
+                                ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-200'
+                                : value === 'maybe'
+                                  ? 'bg-amber-500/15 border-amber-400/45 text-amber-200'
+                                  : 'bg-white/[0.08] border-white/[0.2] text-white/80'
+                              : 'bg-white/[0.03] border-white/[0.09] text-white/55 hover:text-white/85 hover:border-white/[0.2]'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                      {partyCode && invite.rsvp !== 'declined' && (
+                        <button
+                          type="button"
+                          onClick={() => onJoinParty(partyCode)}
+                          className="px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                        >
+                          {invite.started_at || !invite.scheduled_start_at ? 'Join' : 'Open lobby'}
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+                {inviteGone && (
+                  <p className="text-white/35 text-xs mt-1">This party has ended.</p>
+                )}
+                {isPartyType && n.type !== 'party_invite' && partyCode && (
+                  <button
+                    type="button"
+                    onClick={() => onJoinParty(partyCode)}
+                    className="mt-2 px-2.5 py-1 rounded-md text-xs font-medium bg-purple-600/25 border border-purple-500/50 text-purple-100 hover:bg-purple-600/40 transition-colors"
+                  >
+                    Join
+                  </button>
+                )}
+                <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
 
         {/* Admin activity log, kept below the user's own notifications. */}
         {isAdmin && (
@@ -2272,6 +2367,62 @@ export default function App() {
     return `t${toastIdCounter.current}`
   }, [])
 
+  // Invites feature — the caller's open party invites (bell RSVP rows +
+  // Calendar chips). null = never loaded. Refreshed when the bell opens
+  // and when a live party notification arrives; RSVP flips optimistically.
+  // Declared here, before useRealtime, whose onNotification references
+  // refreshMyPartyInvites.
+  const [myPartyInvites, setMyPartyInvites] = useState<MyPartyInvite[] | null>(null)
+  const refreshMyPartyInvites = useCallback(() => {
+    listMyPartyInvites()
+      .then(setMyPartyInvites)
+      .catch(() => { /* non-fatal — bell rows degrade to plain lines */ })
+  }, [])
+  useEffect(() => {
+    if (notifOpen) refreshMyPartyInvites()
+  }, [notifOpen, refreshMyPartyInvites])
+
+  const handleInviteRsvp = useCallback((inviteId: number, rsvp: 'going' | 'maybe' | 'declined') => {
+    // Optimistic flip; refetch on BOTH outcomes so a feed refresh that was
+    // already in flight when the user clicked can't leave a stale pressed
+    // state (2026-08 review) — the follow-up fetch converges on the
+    // server's answer.
+    setMyPartyInvites(prev =>
+      prev ? prev.map(i => (i.invite_id === inviteId ? { ...i, rsvp } : i)) : prev)
+    rsvpPartyInvite(inviteId, rsvp)
+      .then(() => refreshMyPartyInvites())
+      .catch(err => {
+        refreshMyPartyInvites()
+        setToasts(prev => [...prev, {
+          id: nextToastId(),
+          message: err instanceof Error ? err.message : 'Failed to save RSVP',
+          type: 'error',
+        }])
+      })
+  }, [refreshMyPartyInvites, nextToastId])
+
+  // Join a party from a bell row / calendar chip — in-app, not a new tab.
+  const handleJoinInviteParty = useCallback(async (code: string) => {
+    if (party.state.code === code) {
+      setNotifOpen(false)
+      setPartyPanelOpen(true)
+      return
+    }
+    if (party.state.code && !window.confirm(`Leave your current party and join ${code}?`)) return
+    if (party.state.code) party.leave()
+    const r = await party.join(code)
+    if (r.ok) {
+      setNotifOpen(false)
+      setPartyPanelOpen(true)
+    } else {
+      setToasts(prev => [...prev, {
+        id: nextToastId(),
+        message: r.error || 'Failed to join the party',
+        type: 'error',
+      }])
+    }
+  }, [party, nextToastId])
+
   // M10 Phase 2 — Browse views. Lists fetch lazily on first visit
   // to the tab and stay cached for the session. The null sentinel
   // doubles as the loading indicator (rendered as a skeleton grid
@@ -2556,6 +2707,11 @@ export default function App() {
         notifLine(n) + (n.type === 'party_reel_ready' ? ' — see Notifications' : ''),
         n.type === 'request_failed' ? 'error' : 'success',
       )
+      // Party notifications reference the invites feed (RSVP state, times)
+      // — refresh it so the bell row is actionable the moment it opens.
+      if (n.type === 'party_invite' || n.type === 'party_reminder' || n.type === 'party_rsvp') {
+        refreshMyPartyInvites()
+      }
     },
     onDiscoverReady: (ev) => {
       // The LLM finished building this profile's Discover rails. Re-fetch the
@@ -4454,12 +4610,29 @@ export default function App() {
   //      we don't need to verify it exists via a separate GET.
   //   2. Log + toast on EVERY exit path (success, join-fail, throw)
   //      so the user always sees something — no more silent state.
-  const handleStartParty = useCallback(async (m: Media, episodeId?: number) => {
+  // Invites feature — the detail page's Party action now opens the
+  // composer ("Right now" preselected, so the classic instant start is
+  // one more click) instead of creating a party immediately.
+  const [partyComposer, setPartyComposer] = useState<{ media: Media; episodeId?: number } | null>(null)
+
+
+  const handleStartParty = useCallback((m: Media, episodeId?: number) => {
     if (party.state.code) {
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: 'Leave the current party first.', type: 'info' }])
       return
     }
+    setPartyComposer({ media: m, episodeId })
+  }, [party.state.code, nextToastId])
+
+  // The composer's launch sequence: create (live or scheduled) → send
+  // invites → join as host → open the panel. Returns {ok,error} so the
+  // modal can stay open with an inline error on failure. Toast copy
+  // reports what actually happened, including per-invitee skips (rating
+  // ceiling, unknown name) the server reported.
+  const launchComposerParty = useCallback(async (
+    m: Media, episodeId: number | undefined, launch: PartyComposerLaunch,
+  ): Promise<{ ok: boolean; error?: string }> => {
     let createdCode: string | null = null
     try {
       const resp = await createQuickParty({
@@ -4469,43 +4642,77 @@ export default function App() {
         // Strip ANY image-proxy size variant prefix to avoid
         // double-proxying (e.g. `/api/images/w500//api/images/...`).
         media_poster: String(m.poster || '').replace(/^\/api\/images\/[^/]+\//, ''),
+        scheduled_start_at: launch.scheduledStartAt ?? undefined,
       })
       createdCode = resp.code
+
+      let sentCount = 0
+      let skippedMsg = ''
+      if (launch.usernames.length > 0) {
+        // Invite failures don't abort the launch — the party exists and
+        // the host is about to land in it; report and carry on.
+        try {
+          const result = await sendPartyInvites(resp.code, launch.usernames, launch.note || undefined)
+          sentCount = result.sent.length
+          if (result.skipped.length > 0) {
+            skippedMsg = result.skipped
+              .map(s => `${s.username} (${skipReasonCopy(s.reason)})`)
+              .join(', ')
+          }
+        } catch (err) {
+          skippedMsg = err instanceof Error ? err.message : 'invites failed to send'
+        }
+      }
+
       const joinResult = await party.join(resp.code, { skipPreflight: true })
       if (joinResult.ok) {
         setPartyPanelOpen(true)
-        const id = nextToastId()
+        const when = launch.scheduledStartAt
+          ? `scheduled — ${formatPartyTime(launch.scheduledStartAt, new Date())}`
+          : 'started'
+        const invited = sentCount > 0 ? ` · ${sentCount} invite${sentCount === 1 ? '' : 's'} sent` : ''
         setToasts(prev => [...prev, {
-          id,
-          message: `Party started — share code ${resp.code}`,
+          id: nextToastId(),
+          message: `Party ${when} — code ${resp.code}${invited}`,
           type: 'success',
         }])
-      } else {
-        // Server created the party but we couldn't join it. Surface
-        // the error so the admin knows the party exists. Used to be
-        // possible to silently end up here with `joinResult.error`
-        // empty string — guard with a non-empty fallback.
-        const id = nextToastId()
-        setToasts(prev => [...prev, {
-          id,
-          message: `Party ${resp.code} created but join failed: ${joinResult.error || 'no error message returned (check console)'}`,
-          type: 'error',
-        }])
-        // eslint-disable-next-line no-console
-        console.error('[Aurora WatchParty] join failed after create', { code: resp.code, joinResult })
+        if (skippedMsg) {
+          setToasts(prev => [...prev, {
+            id: nextToastId(),
+            message: `Not invited: ${skippedMsg}`,
+            type: 'info',
+          }])
+        }
+        return { ok: true }
+      }
+      // Server created the party but we couldn't join it. Surface
+      // the error so the admin knows the party exists. Used to be
+      // possible to silently end up here with `joinResult.error`
+      // empty string — guard with a non-empty fallback.
+      // eslint-disable-next-line no-console
+      console.error('[Aurora WatchParty] join failed after create', { code: resp.code, joinResult })
+      return {
+        ok: false,
+        error: `Party ${resp.code} created but join failed: ${joinResult.error || 'no error message returned (check console)'}`,
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to start party'
-      const id = nextToastId()
-      setToasts(prev => [...prev, {
-        id,
-        message: createdCode
-          ? `Party ${createdCode} created but couldn't join: ${msg}`
-          : msg,
-        type: 'error',
-      }])
       // eslint-disable-next-line no-console
-      console.error('[Aurora WatchParty] handleStartParty threw', { createdCode, err })
+      console.error('[Aurora WatchParty] launchComposerParty threw', { createdCode, err })
+      // One-active-party-per-host guard (2026-08 review): the raw server
+      // message dead-ends the host with no pointer to the party they
+      // already have — which, for a scheduled booking they're not
+      // connected to, is invisible from this modal. Name the recovery.
+      if (!createdCode && /already have an active party/i.test(msg)) {
+        return {
+          ok: false,
+          error: 'You already have a party (it may be a scheduled one). Open it from the home "Watch together" card, your Calendar, or the bell — end it there first to book a new one.',
+        }
+      }
+      return {
+        ok: false,
+        error: createdCode ? `Party ${createdCode} created but couldn't join: ${msg}` : msg,
+      }
     }
   }, [party, nextToastId])
 
@@ -4899,6 +5106,9 @@ export default function App() {
         isAdmin={user.role === 'admin'}
         onClose={() => setNotifOpen(false)}
         notifications={notifications}
+        partyInvites={myPartyInvites}
+        onRsvp={handleInviteRsvp}
+        onJoinParty={code => void handleJoinInviteParty(code)}
         onMarkAllRead={() => {
           if (unreadCount === 0) return
           setUnreadCount(0)
@@ -5461,6 +5671,8 @@ export default function App() {
                     description: '',
                   })
                 }}
+                currentUserId={user.id}
+                onJoinParty={code => void handleJoinInviteParty(code)}
               />
             </ViewSuspense>
           )}
@@ -5680,6 +5892,26 @@ export default function App() {
           onLeaveVoice={party.leaveVoice}
           onToggleVoiceMute={party.toggleVoiceMute}
           onSendReady={party.sendReady}
+          onStartNow={party.requestPlay}
+          onReschedule={iso => {
+            const code = party.state.code
+            if (!code) return
+            schedulePartyStart(code, iso)
+              .then(() => {
+                setToasts(prev => [...prev, {
+                  id: nextToastId(),
+                  message: `Party moved to ${formatPartyTime(iso, new Date())} — everyone in the lobby sees the new countdown`,
+                  type: 'success',
+                }])
+              })
+              .catch(err => {
+                setToasts(prev => [...prev, {
+                  id: nextToastId(),
+                  message: err instanceof Error ? err.message : 'Failed to reschedule',
+                  type: 'error',
+                }])
+              })
+          }}
         />
       )}
 
@@ -5809,6 +6041,19 @@ export default function App() {
             }
             return r
           }}
+        />
+      )}
+
+      {/* Watch-party invite composer — "Plan a Watch Party" (now or
+          scheduled + people picker). Opened by the detail page's Party
+          action; the launch sequence lives in launchComposerParty. */}
+      {partyComposer && user && typeof user === 'object' && (
+        <PartyComposerModal
+          mediaTitle={partyComposer.media.title}
+          mediaType={partyComposer.media.type}
+          currentUsername={user.username}
+          onClose={() => setPartyComposer(null)}
+          onLaunch={launch => launchComposerParty(partyComposer.media, partyComposer.episodeId, launch)}
         />
       )}
 

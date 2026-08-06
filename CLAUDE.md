@@ -67,3 +67,44 @@ Invariants to preserve when touching this area:
 - `/api/members/*` is the member-visible namespace — the admin-gated
   `/api/users` subtree must stay admin-only (and chi can't mix `{id}` /
   `{username}` wildcards at one node anyway).
+
+## Watch-party invites (migration 051)
+
+Member-to-member invites — send now or scheduled — with bell RSVP, a lobby
+countdown, and calendar chips. Code: migration 051,
+`internal/db/queries_party_invites.go`, `internal/api/party_invite_handlers.go`,
+`internal/watchparty/rehydrate.go` (+ tests), SPA `PartyComposerModal` /
+`PartyLobbyCard` / `lib/partyInvites` + bell/calendar wiring in `App.tsx` and
+`CalendarView`.
+
+Invariants to preserve here:
+
+- **Sending is host-only and post-hoc by code** (composes with both create
+  paths). A re-invite is a no-op that must never reset the invitee's RSVP.
+- **Delivery goes through `notify.Dispatcher` only**, and only when the
+  invite row was actually created — that created-flag is the notification
+  dedup layer (invite notifications carry no `request_id`, so the
+  notifications table's dedup index does not apply).
+- **Parental ceilings are checked at SEND time** against the invitee's
+  DEFAULT sub-profile (`rating_restricted` skip; unrated titles excluded
+  under any restriction). Kids sub-profiles are structurally unreachable.
+  Known limit: the check is point-in-time — party JOIN carries no rating
+  gate at all (pre-existing, whole watchparty package) and a media swap
+  after sending isn't re-checked. Gating join on the joiner's ceiling is
+  the open follow-up; don't advertise stronger enforcement than this.
+- **Rosters are member-visible surfaces**: username/display/avatar only,
+  avatars through `memberSafeAvatar`; declines stay private to the
+  decliner — the roster ENDPOINT filters `declined` rows out (not just the
+  lobby UI), while declined invitees keep roster read access.
+- **Scheduled-but-unstarted parties are exempt from every reaper** (empty-
+  party cleanup, host-disconnect grace, host explicit leave) until the
+  scheduled start has passed by the staleness window — a booking must
+  survive its host closing the laptop. After an auto-start with an empty
+  room, staleness anchors on `StartedAt`, giving showtime joiners ~5 min.
+- **Scheduled parties must survive restarts**: the manager rehydrates
+  active+scheduled+unstarted rows at boot and re-arms countdown/reminder
+  timers (the box auto-deploys, so restarts are routine). Reminder timers
+  carry no cancel hooks — they self-validate against the CURRENT
+  `ScheduledStartAt` at fire time and dedupe via `reminderSentFor`.
+- Calendar: party chips group by the viewer's **local** date; episode air
+  dates stay UTC-keyed. Don't unify them.

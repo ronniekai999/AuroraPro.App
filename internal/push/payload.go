@@ -58,6 +58,12 @@ func bodyFor(notifType string) string {
 		return "New media request awaiting review."
 	case models.NotificationScanComplete:
 		return "Library scan finished with new items."
+	case models.NotificationPartyInvite:
+		return "You're invited to a watch party."
+	case models.NotificationPartyRSVP:
+		return "An invitee accepted your watch party invite."
+	case models.NotificationPartyReminder:
+		return "Your watch party starts in about 10 minutes."
 	case NotificationTest:
 		return "Push notifications are working on this device."
 	default:

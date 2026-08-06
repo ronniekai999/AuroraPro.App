@@ -1086,6 +1086,21 @@ const (
 	// added items. No table-level dedupe (no request_id) — producers only
 	// fire it on the new_files>0 terminal transition, once per scan run.
 	NotificationScanComplete = "scan_complete"
+	// NotificationPartyInvite tells a member they were invited to a watch
+	// party (migration 051). Carries the /p/{CODE} deep-join link. No
+	// table-level dedupe (no request_id) — the party_invites unique index
+	// is the guard: the sender only notifies when the invite row was
+	// actually created (re-invites are a no-op).
+	NotificationPartyInvite = "party_invite"
+	// NotificationPartyRSVP tells a host an invitee accepted ("is in").
+	// Fired only on the pending→going transition so flip-flopping an RSVP
+	// can't spam the host.
+	NotificationPartyRSVP = "party_rsvp"
+	// NotificationPartyReminder nudges the host + non-declined invitees
+	// ~10 minutes before a scheduled party starts. Fired by the manager's
+	// reminder timer; self-validates against reschedules, so a stale timer
+	// is a silent no-op rather than a wrong-time ping.
+	NotificationPartyReminder = "party_reminder"
 )
 
 // Notification is a durable, per-user in-app notification backing the bell +
@@ -1246,4 +1261,52 @@ type PartyInfo struct {
 	MaxParticipants  int    `json:"max_participants"`
 	IsPlaying        bool   `json:"is_playing"`
 	CurrentTimeMs    int64  `json:"current_time_ms"`
+}
+
+// PartyInvite is one row of party_invites (migration 051): a member invited
+// to a watch party, carrying their RSVP. Durable on purpose — a scheduled
+// party's roster must survive server restarts and render before anyone has
+// opened a WebSocket, so this never lives in the watchparty Manager.
+type PartyInvite struct {
+	ID            int64      `json:"id"`
+	PartyID       int64      `json:"party_id"`
+	InviterUserID int64      `json:"inviter_user_id"`
+	InviteeUserID int64      `json:"invitee_user_id"`
+	RSVP          string     `json:"rsvp"` // pending | going | maybe | declined
+	Note          string     `json:"note,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	RespondedAt   *time.Time `json:"responded_at,omitempty"`
+}
+
+// PartyInviteRosterEntry is the member-visible roster row for a party's
+// invite list (lobby "who's coming"). Deliberately mirrors MemberSummary's
+// field set — username/display/avatar only, avatar filtered through
+// memberSafeAvatar at the handler; no email/role/auth fields ever.
+type PartyInviteRosterEntry struct {
+	InviteID    int64      `json:"invite_id"`
+	UserID      int64      `json:"user_id"`
+	Username    string     `json:"username"`
+	DisplayName string     `json:"display_name,omitempty"`
+	AvatarURL   string     `json:"avatar_url,omitempty"`
+	RSVP        string     `json:"rsvp"`
+	RespondedAt *time.Time `json:"responded_at,omitempty"`
+}
+
+// MyPartyInvite is one entry of the caller's invite feed
+// (GET /api/me/party-invites): the invite joined with enough party context
+// to render a bell RSVP row or a calendar chip without a second fetch.
+// Only parties that are still active appear; ended parties drop out with
+// is_active=false.
+type MyPartyInvite struct {
+	InviteID         int64      `json:"invite_id"`
+	PartyCode        string     `json:"party_code"`
+	PartyName        string     `json:"party_name,omitempty"`
+	MediaTitle       string     `json:"media_title"`
+	MediaPoster      string     `json:"media_poster,omitempty"`
+	HostUsername     string     `json:"host_username"`
+	RSVP             string     `json:"rsvp"`
+	Note             string     `json:"note,omitempty"`
+	ScheduledStartAt *time.Time `json:"scheduled_start_at,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
 }

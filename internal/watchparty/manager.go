@@ -454,6 +454,14 @@ type PartyState struct {
 	// concurrent fires — countdown timer racing a retry — to one, so
 	// clients can't receive duplicate "party-starting" broadcasts.
 	scheduleFiring bool
+	// reminderSentFor records the scheduled start the T-10 reminder was
+	// already sent for (migration 051 invites). Reminder goroutines carry
+	// no cancel hook — they self-validate at fire time against the
+	// CURRENT ScheduledStartAt, and this pointer collapses double-arms
+	// for the same target (e.g. CreateParty arming, then a same-time
+	// reschedule) to one send. Reschedules to a NEW time compare unequal
+	// and legitimately remind again.
+	reminderSentFor *time.Time
 }
 
 // Lock acquires the party-level mutex. Exported for cross-package use by handlers
@@ -1440,6 +1448,12 @@ func (m *Manager) startScheduleTimerLocked(ps *PartyState, scheduledStartAt time
 			return
 		}
 	}()
+
+	// Invites (migration 051): nudge the host + non-declined invitees
+	// shortly before showtime. Skips itself when the start is already
+	// inside the lead window, and self-validates at fire time, so it needs
+	// no cancel plumbing through the teardown paths.
+	m.armReminderLocked(ps, scheduledStartAt)
 }
 
 // cancelScheduleTimerLocked cancels any in-flight schedule timer. Caller
@@ -2961,9 +2975,32 @@ func (m *Manager) cleanupOnce() {
 	var staleCodes []string
 	for _, ref := range refs {
 		ref.ps.mu.Lock()
+		// Invites (2026-08 review, critical finding): a scheduled-but-
+		// unstarted party is LEGITIMATELY empty and idle for hours or
+		// days before showtime — the host books it, closes the tab, and
+		// the invites/calendar point at its code the whole time. Reaping
+		// it here (or via the host-disconnect grace in sync_v3.go, which
+		// carries the same exemption) silently broke every scheduled
+		// party whose host didn't babysit a tab. Exempt until the
+		// scheduled start has passed by the normal staleness window; an
+		// overdue-unstarted party (fire blocked, nobody ever came) then
+		// ages out through the ordinary rules below.
+		if ref.ps.StartedAt == nil && ref.ps.ScheduledStartAt != nil &&
+			now.Before(ref.ps.ScheduledStartAt.Add(staleParticipantTimeout)) {
+			ref.ps.mu.Unlock()
+			continue
+		}
+		// For empty parties the staleness anchor is the LATER of creation
+		// and actual start: an auto-started scheduled party (countdown
+		// fired, nobody in the room yet) gets a fresh window from
+		// showtime, not from a CreatedAt that may be days old.
+		emptyAnchor := ref.ps.CreatedAt
+		if ref.ps.StartedAt != nil && ref.ps.StartedAt.After(emptyAnchor) {
+			emptyAnchor = *ref.ps.StartedAt
+		}
 		allStale := true
 		if len(ref.ps.Participants) == 0 {
-			if now.Sub(ref.ps.CreatedAt) > staleParticipantTimeout {
+			if now.Sub(emptyAnchor) > staleParticipantTimeout {
 				staleCodes = append(staleCodes, ref.code)
 			}
 		} else {

@@ -563,6 +563,20 @@ func (m *Manager) reapExpiredHostGrace(code string, expectedPS *PartyState, expe
 	}
 
 	if m.promoteSuccessorLocked(ps, staleHostID, staleHostName, "disconnected") == nil {
+		// Invites (2026-08 review, critical finding): a scheduled party
+		// that hasn't started is a standing appointment, not an abandoned
+		// room — the booking must survive its host closing the laptop.
+		// Leave it registered (HostUserID still names the departed host,
+		// so their rejoin via /p/{code} reclaims the crown) and let the
+		// countdown timer fire on schedule; cleanupOnce carries the same
+		// exemption and ages out overdue-unstarted parties.
+		if ps.StartedAt == nil && ps.ScheduledStartAt != nil &&
+			time.Now().Before(ps.ScheduledStartAt.Add(staleParticipantTimeout)) {
+			ps.mu.Unlock()
+			closeStaleConns(staleRoomConn, staleSyncConn)
+			slog.Info("v3: host left the scheduled lobby; party stays booked until showtime", "code", code)
+			return
+		}
 		ps.mu.Unlock()
 		closeStaleConns(staleRoomConn, staleSyncConn)
 		slog.Info("v3: host grace period expired without reconnect, ending party", "code", code)
@@ -648,14 +662,27 @@ func (m *Manager) LeavePartyV3Room(code string, userID int64) error {
 
 	if isHost {
 		if m.promoteSuccessorLocked(ps, userID, username, "left") == nil {
-			ps.mu.Unlock()
-			slog.Info("v3: host left with no successor, ending party", "code", code)
-			return m.endPartyInternal(code, ps, 0)
+			// Invites (2026-08 review): a scheduled-but-unstarted party is
+			// a standing appointment — the host stepping out of the lobby
+			// must not cancel the booking (the deliberate cancel is End
+			// Party). Same exemption as the disconnect-grace reaper and
+			// cleanupOnce; the departed host reclaims the crown on rejoin
+			// via /p/{code}. Fall through so any remaining companions
+			// still hear participant-left.
+			isScheduledLobby := ps.StartedAt == nil && ps.ScheduledStartAt != nil &&
+				time.Now().Before(ps.ScheduledStartAt.Add(staleParticipantTimeout))
+			if !isScheduledLobby {
+				ps.mu.Unlock()
+				slog.Info("v3: host left with no successor, ending party", "code", code)
+				return m.endPartyInternal(code, ps, 0)
+			}
+			slog.Info("v3: host left the scheduled lobby; party stays booked until showtime", "code", code)
 		}
-		// Promoted — fall through to the normal leaver bookkeeping below.
-		// Note the order the room pool sees: host-changed + a fresh
-		// party-state (inside promoteSuccessorLocked, sans the departed
-		// host — their entry was deleted above), then participant-left.
+		// Promoted (or scheduled-lobby exemption) — fall through to the
+		// normal leaver bookkeeping below. Note the order the room pool
+		// sees on promotion: host-changed + a fresh party-state (inside
+		// promoteSuccessorLocked, sans the departed host — their entry
+		// was deleted above), then participant-left.
 	}
 
 	// Announce departure on the room socket.
@@ -829,6 +856,21 @@ func (m *Manager) HandleRequestPlay(code string, userID int64) error {
 					slog.Warn("mark party started failed", "id", id, "error", err)
 				}
 			}(ps.dbID, now)
+		}
+		// Invites (2026-08 review): a manual early start of a SCHEDULED
+		// party must tell lobby clients the countdown is over — only the
+		// timer path used to broadcast this, so every client kept its
+		// local scheduledStartAt and the lobby card resurrected on the
+		// first pause with a countdown to a cancelled timer. Same payload
+		// shape as fireScheduledStart's broadcast.
+		if ps.ScheduledStartAt != nil {
+			m.broadcastToPartyLocked(ps, map[string]interface{}{
+				"type": "party-starting",
+				"payload": map[string]interface{}{
+					"started_at_ms": now.UnixMilli(),
+					"server_now_ms": now.UnixMilli(),
+				},
+			})
 		}
 	}
 

@@ -2169,6 +2169,12 @@ export interface ActiveParty {
   participant_count: number
   max_participants: number
   is_playing: boolean
+  // Scheduled parties (invites feature) are active-but-not-started: they
+  // appear here with scheduled_start_at set and started_at null, so the
+  // Calendar can chip the host's own booked parties and "Watch together"
+  // can label them "starts at 8:00 PM" instead of "watching now".
+  scheduled_start_at?: string | null
+  started_at?: string | null
 }
 
 export async function listActiveParties(signal?: AbortSignal): Promise<ActiveParty[]> {
@@ -2752,10 +2758,18 @@ export interface CreatePartyRequest {
   media_title: string
   media_poster?: string
   initial_position_ms?: number
+  party_name?: string
+  // Schedules the party instead of going live on join: the server arms a
+  // countdown and fires "party-starting" at this moment (RFC 3339; must be
+  // in the future — the API 400s past timestamps). Omit for the classic
+  // "start instantly" behavior.
+  scheduled_start_at?: string
 }
 
 export interface CreatePartyResponse {
   code: string
+  scheduled_start_at?: string | null
+  started_at?: string | null
 }
 
 // V1 also handles persistent-room creation via /api/rooms/{id}/parties;
@@ -2770,6 +2784,94 @@ export async function createQuickParty(
     body,
     signal,
   })
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Watch-party invites (migration 051) — send now or scheduled, RSVP,
+// lobby roster, and the invitee's upcoming feed. Server: internal/api/
+// party_invite_handlers.go. Delivery lands as a 'party_invite' bell
+// notification carrying a /p/{CODE} deep link; these endpoints are the
+// durable state the bell rows, lobby, and Calendar read.
+
+// schedulePartyStart re-books (or, with null, clears) a party's scheduled
+// start. Host-only server-side.
+export async function schedulePartyStart(
+  code: string,
+  scheduledStartAt: string | null,
+): Promise<void> {
+  await apiFetch(`/api/parties/${encodeURIComponent(code)}/schedule`, {
+    method: 'POST',
+    body: { scheduled_start_at: scheduledStartAt },
+  })
+}
+
+export interface SendPartyInvitesResult {
+  sent: { user_id: number; username: string }[]
+  // Stable reasons: not_found | self | rating_restricted | already_invited.
+  skipped: { username: string; reason: string }[]
+}
+
+export async function sendPartyInvites(
+  code: string,
+  usernames: string[],
+  note?: string,
+): Promise<SendPartyInvitesResult> {
+  return apiFetch<SendPartyInvitesResult>(
+    `/api/parties/${encodeURIComponent(code)}/invites`,
+    { method: 'POST', body: { usernames, note: note || undefined } },
+  )
+}
+
+export interface PartyInviteRosterEntry {
+  invite_id: number
+  user_id: number
+  username: string
+  display_name?: string
+  avatar_url?: string
+  rsvp: 'pending' | 'going' | 'maybe' | 'declined'
+  responded_at?: string | null
+}
+
+export async function getPartyInviteRoster(
+  code: string,
+  signal?: AbortSignal,
+): Promise<PartyInviteRosterEntry[]> {
+  const res = await apiFetch<{ invites?: PartyInviteRosterEntry[] }>(
+    `/api/parties/${encodeURIComponent(code)}/invites`,
+    { signal },
+  )
+  return res.invites ?? []
+}
+
+export async function rsvpPartyInvite(
+  inviteID: number,
+  rsvp: 'going' | 'maybe' | 'declined',
+): Promise<void> {
+  await apiFetch(`/api/party-invites/${inviteID}/rsvp`, {
+    method: 'POST',
+    body: { rsvp },
+  })
+}
+
+export interface MyPartyInvite {
+  invite_id: number
+  party_code: string
+  party_name?: string
+  media_title: string
+  media_poster?: string
+  host_username: string
+  rsvp: 'pending' | 'going' | 'maybe' | 'declined'
+  note?: string
+  scheduled_start_at?: string | null
+  started_at?: string | null
+  created_at: string
+}
+
+// listMyPartyInvites — invites whose party is still active (scheduled, in
+// the lobby, or playing). Ended parties drop out server-side.
+export async function listMyPartyInvites(signal?: AbortSignal): Promise<MyPartyInvite[]> {
+  const res = await apiFetch<{ invites?: MyPartyInvite[] }>('/api/me/party-invites', { signal })
+  return res.invites ?? []
 }
 
 // Token in query-string form for native-element URLs that can't set

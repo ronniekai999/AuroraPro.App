@@ -14,12 +14,57 @@
 // mode uses).
 
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
-import { getCalendar, posterURL, type UpcomingEpisode } from '@/lib/api'
+import {
+  getCalendar, posterURL, listMyPartyInvites, listActiveParties,
+  type UpcomingEpisode,
+} from '@/lib/api'
+import { localDateKey } from '@/lib/partyInvites'
 import { PageHeader } from '@/components/PageHeader'
 import { Icon } from '@/components/Icon'
 
 interface Props {
   onOpenMedia: (id: number) => void
+  // Invites feature — scheduled watch parties render as chips beside
+  // episode premieres. currentUserId identifies the caller's own hosted
+  // parties in /api/parties/active; onJoinParty joins in-app (App's
+  // bell-join path). Both optional so the view still works standalone.
+  currentUserId?: number
+  onJoinParty?: (code: string) => void
+}
+
+// One scheduled watch party on the calendar: an invite the caller
+// accepted (going/maybe) or a party they're hosting.
+interface PartyCalEntry {
+  code: string
+  title: string
+  hostUsername?: string
+  startIso: string
+  role: 'host' | 'invitee'
+  rsvp?: string
+}
+
+// Party start times are real instants, so they group by the viewer's
+// LOCAL date — unlike episode air dates, which are calendar-ish data and
+// keep their historical UTC keying. An 8 PM EDT party grouped by UTC
+// would land on tomorrow's cell.
+function usePartyGroups(entries: PartyCalEntry[]): Map<string, PartyCalEntry[]> {
+  return useMemo(() => {
+    const map = new Map<string, PartyCalEntry[]>()
+    for (const e of entries) {
+      const key = localDateKey(e.startIso)
+      const arr = map.get(key) || []
+      arr.push(e)
+      map.set(key, arr)
+    }
+    for (const arr of map.values()) {
+      arr.sort((a, b) => a.startIso.localeCompare(b.startIso))
+    }
+    return map
+  }, [entries])
+}
+
+function partyClock(iso: string): string {
+  return new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
 }
 
 const LIST_WINDOW_DAYS = 30
@@ -85,7 +130,7 @@ function formatGroupDate(iso: string): string {
   return `${relative} · ${monthDay}`
 }
 
-export default function CalendarView({ onOpenMedia }: Props) {
+export default function CalendarView({ onOpenMedia, currentUserId, onJoinParty }: Props) {
   // Preference-loaded view mode. Defaults to 'list' on first visit;
   // localStorage round-trip persists across sessions per browser.
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
@@ -152,8 +197,58 @@ export default function CalendarView({ onOpenMedia }: Props) {
     try { localStorage.setItem(LS_VIEW_MODE_KEY, viewMode) } catch { /* private mode */ }
   }, [viewMode])
 
+  // Scheduled watch parties: invites the caller answered going/maybe,
+  // plus parties they host. Fetched once per mount — parties are sparse
+  // and the view is short-lived; the bell keeps live state elsewhere.
+  // Both requests are best-effort: the calendar's episode content never
+  // waits on (or breaks from) the party layer.
+  const [partyEntries, setPartyEntries] = useState<PartyCalEntry[]>([])
+  useEffect(() => {
+    let cancelled = false
+    const ac = new AbortController()
+    Promise.allSettled([listMyPartyInvites(ac.signal), listActiveParties(ac.signal)])
+      .then(([invitesRes, activeRes]) => {
+        if (cancelled) return
+        const out: PartyCalEntry[] = []
+        const seen = new Set<string>()
+        if (invitesRes.status === 'fulfilled') {
+          for (const i of invitesRes.value) {
+            if (!i.scheduled_start_at) continue
+            if (i.rsvp !== 'going' && i.rsvp !== 'maybe') continue
+            if (seen.has(i.party_code)) continue
+            seen.add(i.party_code)
+            out.push({
+              code: i.party_code,
+              title: i.media_title,
+              hostUsername: i.host_username,
+              startIso: i.scheduled_start_at,
+              role: 'invitee',
+              rsvp: i.rsvp,
+            })
+          }
+        }
+        if (activeRes.status === 'fulfilled' && currentUserId) {
+          for (const p of activeRes.value) {
+            if (p.host_user_id !== currentUserId) continue
+            if (!p.scheduled_start_at || p.started_at) continue
+            if (seen.has(p.code)) continue
+            seen.add(p.code)
+            out.push({
+              code: p.code,
+              title: p.media_title || p.party_name,
+              startIso: p.scheduled_start_at,
+              role: 'host',
+            })
+          }
+        }
+        setPartyEntries(out)
+      })
+    return () => { cancelled = true; ac.abort() }
+  }, [currentUserId])
+
   // Group episodes by UTC date key (YYYY-MM-DD) — used by both views.
   const groups = useMemoGroups(episodes)
+  const partyGroups = usePartyGroups(partyEntries)
 
   if (error) return <p className="text-red-300 p-8">{error}</p>
 
@@ -226,16 +321,20 @@ export default function CalendarView({ onOpenMedia }: Props) {
         <ListView
           episodes={episodes}
           groups={groups}
+          partyGroups={partyGroups}
           onOpenMedia={onOpenMedia}
+          onJoinParty={onJoinParty}
         />
       ) : (
         <GridView
           cursorMonth={cursorMonth}
           setCursorMonth={setCursorMonth}
           groups={groups}
+          partyGroups={partyGroups}
           selectedDay={selectedDay}
           setSelectedDay={setSelectedDay}
           onOpenMedia={onOpenMedia}
+          onJoinParty={onJoinParty}
         />
       )}
     </div>
@@ -262,13 +361,15 @@ function useMemoGroups(episodes: UpcomingEpisode[] | null): Map<string, Upcoming
 // ─────────────────────── List View ───────────────────────
 
 function ListView({
-  episodes, groups, onOpenMedia,
+  episodes, groups, partyGroups, onOpenMedia, onJoinParty,
 }: {
   episodes: UpcomingEpisode[]
   groups: Map<string, UpcomingEpisode[]>
+  partyGroups: Map<string, PartyCalEntry[]>
   onOpenMedia: (id: number) => void
+  onJoinParty?: (code: string) => void
 }) {
-  if (episodes.length === 0) {
+  if (episodes.length === 0 && partyGroups.size === 0) {
     return (
       <div className="text-center py-20">
         <p className="text-white/60 text-lg">Nothing scheduled.</p>
@@ -278,15 +379,18 @@ function ListView({
       </div>
     )
   }
-  const orderedKeys = [...groups.keys()].sort()
+  // Union of episode days and party days — a party on a no-airings day
+  // still needs its date section.
+  const orderedKeys = [...new Set([...groups.keys(), ...partyGroups.keys()])].sort()
   return (
     // Tighter than the old space-y-8: the mockup's date groups are 18px
     // apart, which lets three or four days sit on screen at once. Eight
     // units (32px) meant a week of episodes took two scrolls to scan.
     <div className="space-y-[18px]">
       {orderedKeys.map((key) => {
-        const eps = groups.get(key)!
-        const { relative, monthDay, isToday } = groupDateParts(eps[0].air_date)
+        const eps = groups.get(key) ?? []
+        const parties = partyGroups.get(key) ?? []
+        const { relative, monthDay, isToday } = groupDateParts(key)
         return (
           <section key={key}>
             {/* .stage-caldate — the mockup's group header: a small purple
@@ -302,10 +406,14 @@ function ListView({
                 ? <><span className="today">Today</span>{monthDay}</>
                 : <>{relative} · {monthDay}</>}
               <small className="text-white/55 font-medium">
-                · {eps.length} episode{eps.length === 1 ? '' : 's'}
+                {eps.length > 0 && <>· {eps.length} episode{eps.length === 1 ? '' : 's'}</>}
+                {parties.length > 0 && <>{eps.length > 0 ? ' ' : ''}· {parties.length} watch part{parties.length === 1 ? 'y' : 'ies'}</>}
               </small>
             </h2>
             <div className="space-y-1.5">
+              {parties.map(p => (
+                <PartyCalRow key={p.code} entry={p} onJoinParty={onJoinParty} />
+              ))}
               {eps.map((ep) => (
                 <EpisodeRow key={`${ep.media_item_id}-${ep.episode_id}`} ep={ep} onOpenMedia={onOpenMedia} />
               ))}
@@ -314,6 +422,40 @@ function ListView({
         )
       })}
     </div>
+  )
+}
+
+// A scheduled watch party in the list / day panel. The whole row joins
+// (opens the lobby) when onJoinParty is wired.
+function PartyCalRow({ entry, onJoinParty }: { entry: PartyCalEntry; onJoinParty?: (code: string) => void }) {
+  const sub = [
+    partyClock(entry.startIso),
+    entry.role === 'host' ? 'you host' : entry.hostUsername ? `hosted by ${entry.hostUsername}` : '',
+    entry.rsvp === 'maybe' ? "you said maybe" : '',
+  ].filter(Boolean).join(' · ')
+  return (
+    <button
+      type="button"
+      onClick={onJoinParty ? () => onJoinParty(entry.code) : undefined}
+      className="stage-calrow w-full text-left flex items-center !border-purple-500/35 bg-purple-600/[0.07]"
+      title={`Open the watch-party lobby (code ${entry.code})`}
+    >
+      <span className="w-[44px] h-[44px] rounded-md flex-shrink-0 bg-purple-600/20 border border-purple-500/40 flex items-center justify-center" aria-hidden="true">
+        <Icon name="play" size={16} className="text-purple-200" />
+      </span>
+      <span className="flex-1 min-w-0">
+        <span className="flex items-center gap-2.5 flex-wrap">
+          <span className="stage-eptag !bg-purple-500/20 !text-purple-100">Watch party</span>
+          <span className="text-white text-sm font-semibold min-w-0 truncate">{entry.title}</span>
+        </span>
+        <span className="block text-white/45 text-xs mt-1">{sub}</span>
+      </span>
+      {onJoinParty && (
+        <span className="flex-none px-3 py-1.5 rounded-lg bg-purple-600/25 border border-purple-500/50 text-purple-100 text-xs font-medium">
+          Open lobby
+        </span>
+      )}
+    </button>
   )
 }
 
@@ -426,7 +568,7 @@ function gridTrailDays(monthEnd: Date): number {
 }
 
 function GridView({
-  cursorMonth, setCursorMonth, groups, selectedDay, setSelectedDay, onOpenMedia,
+  cursorMonth, setCursorMonth, groups, partyGroups, selectedDay, setSelectedDay, onOpenMedia, onJoinParty,
 }: {
   cursorMonth: Date
   // Audit H4 fix (Phase 8) — accept React's full Dispatch shape so
@@ -439,9 +581,11 @@ function GridView({
   // correctly: click → +1, click → +2, click → +3.
   setCursorMonth: Dispatch<SetStateAction<Date>>
   groups: Map<string, UpcomingEpisode[]>
+  partyGroups: Map<string, PartyCalEntry[]>
   selectedDay: string | null
   setSelectedDay: Dispatch<SetStateAction<string | null>>
   onOpenMedia: (id: number) => void
+  onJoinParty?: (code: string) => void
 }) {
   // Build the 7×N grid of UTC dates. Leads with the locale's
   // first-of-week on/before the 1st of cursorMonth; trails with
@@ -486,6 +630,7 @@ function GridView({
   }
 
   const selectedEpisodes = selectedDay ? (groups.get(selectedDay) ?? []) : []
+  const selectedParties = selectedDay ? (partyGroups.get(selectedDay) ?? []) : []
 
   return (
     <div className="space-y-6">
@@ -541,6 +686,7 @@ function GridView({
         {grid.map((cell) => {
           const cellISO = toISODate(cell)
           const cellEpisodes = groups.get(cellISO) ?? []
+          const cellParties = partyGroups.get(cellISO) ?? []
           const inMonth = cell.getUTCMonth() === currentMonthIdx
           const isToday = cellISO === todayISO
           const isSelected = cellISO === selectedDay
@@ -572,12 +718,16 @@ function GridView({
               // otherwise appears below all 42 cells with nothing announced.
               aria-expanded={isSelected}
               aria-controls={isSelected ? 'cal-day-panel' : undefined}
-              aria-label={`${cell.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })}${hasEpisodes ? `, ${cellEpisodes.length} episode${cellEpisodes.length === 1 ? '' : 's'}` : ''}`}
+              aria-label={`${cell.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' })}${hasEpisodes ? `, ${cellEpisodes.length} episode${cellEpisodes.length === 1 ? '' : 's'}` : ''}${cellParties.length > 0 ? `, ${cellParties.length} watch part${cellParties.length === 1 ? 'y' : 'ies'}` : ''}`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[12.5px] font-semibold">{cell.getUTCDate()}</span>
-                {hasEpisodes && (
-                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length}</span>
+                {/* Count covers episodes + parties: below sm the chips are
+                    hidden, so this badge is the ONLY visible signal a day
+                    has anything — a party-only day must not render blank
+                    on a phone (2026-08 review). */}
+                {(hasEpisodes || cellParties.length > 0) && (
+                  <span className="text-[9.5px] text-purple-200 font-bold">{cellEpisodes.length + cellParties.length}</span>
                 )}
               </div>
               {/* Episode chips — up to 3, then "+N more".
@@ -590,24 +740,40 @@ function GridView({
                   the honest signal there; tapping the day opens the panel with
                   the full titles. */}
               <div className="space-y-1 hidden sm:block">
-                {cellEpisodes.slice(0, 3).map((ep, i) => (
+                {/* Watch-party chips lead — a booked party is the day's
+                    headline event, and there is at most one or two. */}
+                {cellParties.slice(0, 2).map(p => (
+                  <div
+                    key={p.code}
+                    className="stage-calchip stage-calchip-p block !border-purple-400/60"
+                    title={`Watch party — ${p.title} · ${partyClock(p.startIso)}`}
+                  >
+                    ▶ {partyClock(p.startIso)} {p.title}
+                  </div>
+                ))}
+                {cellEpisodes.slice(0, cellParties.length > 0 ? 2 : 3).map((ep, i) => (
                   <div
                     key={`${ep.media_item_id}-${ep.episode_id}`}
                     // .stage-calchip-p (purple) on the first chip only, so a
                     // day with several airings still reads as one day rather
                     // than a solid purple block — the mockup alternates the
-                    // two fills for the same reason.
-                    className={`stage-calchip block ${i === 0 ? 'stage-calchip-p' : ''}`}
+                    // two fills for the same reason. When a party chip is
+                    // already carrying the purple, episodes all stay neutral.
+                    className={`stage-calchip block ${i === 0 && cellParties.length === 0 ? 'stage-calchip-p' : ''}`}
                     title={`S${ep.season_number}E${ep.episode_number} ${ep.show_title}${ep.episode_title ? ' — ' + ep.episode_title : ''}`}
                   >
                     S{ep.season_number}E{ep.episode_number} {ep.show_title}
                   </div>
                 ))}
-                {cellEpisodes.length > 3 && (
-                  <div className="text-[9.5px] text-white/55 pl-1">
-                    +{cellEpisodes.length - 3} more
-                  </div>
-                )}
+                {(() => {
+                  const shown = Math.min(cellEpisodes.length, cellParties.length > 0 ? 2 : 3)
+                  const hidden = cellEpisodes.length - shown + Math.max(0, cellParties.length - 2)
+                  return hidden > 0 ? (
+                    <div className="text-[9.5px] text-white/55 pl-1">
+                      +{hidden} more
+                    </div>
+                  ) : null
+                })()}
               </div>
             </button>
           )
@@ -617,17 +783,20 @@ function GridView({
       {/* Selected-day expand panel. The id is the target of the selected
           cell's aria-controls; role="region" + aria-label so it is reachable as
           a landmark rather than only by tabbing past every remaining cell. */}
-      {selectedDay && selectedEpisodes.length > 0 && (
+      {selectedDay && (selectedEpisodes.length > 0 || selectedParties.length > 0) && (
         <section
           id="cal-day-panel"
           role="region"
-          aria-label={`Episodes on ${formatGroupDate(`${selectedDay}T00:00:00Z`)}`}
+          aria-label={`Events on ${formatGroupDate(`${selectedDay}T00:00:00Z`)}`}
           className="pt-4 border-t border-white/[0.06]"
         >
           <h3 className="text-white/85 text-lg font-semibold mb-4">
             {formatGroupDate(`${selectedDay}T00:00:00Z`)}
           </h3>
           <div className="space-y-2">
+            {selectedParties.map(p => (
+              <PartyCalRow key={p.code} entry={p} onJoinParty={onJoinParty} />
+            ))}
             {selectedEpisodes.map((ep) => (
               <EpisodeRow key={`${ep.media_item_id}-${ep.episode_id}`} ep={ep} onOpenMedia={onOpenMedia} />
             ))}
