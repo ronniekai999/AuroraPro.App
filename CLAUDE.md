@@ -44,6 +44,47 @@ Relevant code/scripts: `scripts/server-test-loop.sh`,
 `scripts/aurora_smoke_test.sh`, `scripts/aurora-update.sh`,
 `internal/api/system_handlers.go` (update trigger/status endpoints).
 
+## AI/LLM stack (providers: local Ollama, Ollama Cloud, Anthropic, OpenAI)
+
+All AI features (semantic search, hero/Discover recommendations, recaps, AI
+file matching, listwise rerank) call one client: `internal/llm`. Consumers
+use `ChatJSON(With)` / `EmbedBatch` / `Rerank` and never branch on provider.
+Code: `internal/llm/{client,provider,anthropic,openai,llmschema,rerank}.go`,
+boot resolution in `cmd/aurora/main.go` (`applyLLMOverrides`), admin surface
+`GET/PUT /api/admin/llm` + `POST /api/admin/llm/test`, SPA `AdminLLMTab`.
+
+Invariants to preserve when touching this area:
+
+- **Provider routing lives entirely inside `internal/llm`.** `Config.Provider`
+  (chat: local | ollama_cloud | anthropic | openai) and `Config.EmbedProvider`
+  (local | openai — Anthropic has no embeddings API) select adapters behind
+  the existing entry points; the `structured` flag only picks between Ollama
+  transports and is ignored for hosted providers.
+- **Hosted base URLs are compile-time constants** (env-overridable for
+  gateways, NEVER admin-editable) and **keys are per-host**: the Ollama
+  bearer, Anthropic key, and OpenAI key each ride only to their own host
+  (`setAnthropicAuth`/`setOpenAIAuth`; `sendAuth` gating for Ollama). The
+  admin test endpoint may probe with a posted key ONLY because those hosts
+  are fixed.
+- **No sampling params to hosted providers** (current Claude models and the
+  gpt-5 family reject temperature) — the Ollama /v1 path keeps its pinned
+  0.1. Schemas pass through `sanitizeStructuredSchema` (allowlist + forced
+  `additionalProperties:false`); the `llmjson` tolerant parser stays the
+  safety net everywhere.
+- **`EmbedSpaceID` format is load-bearing**: bare model name for
+  Ollama-family embeds (matches every existing install's
+  `llm_embed_model_active` marker — qualifying it would null all vectors on
+  upgrade), `"openai/<model>"` otherwise. Space change ⇒ marker reset ⇒
+  null + full re-embed via the existing backfill. OpenAI embeds request
+  `dimensions=768` to fit `vector(768)` — no migration.
+- **`CheckProviderCombo` is the single policy source** (admin save 400s,
+  boot warns). Settings keys `llm_anthropic_api_key` / `llm_openai_api_key`
+  end in `_api_key` so `isSecretSettingKey` masks them for free; keys are
+  plaintext at rest like every other credential (documented trade-off).
+- The admin PUT writes provider selectors LAST (partial-save safety); the
+  PUT returns `{ok, restart_required}` — the SPA re-fetches settings after
+  save (don't `setS(ack)`).
+
 ## Social features (member profiles + follows, PRs #428/#429)
 
 Member-visible profiles (`/user/:name`, bio/socials/recent watches), a

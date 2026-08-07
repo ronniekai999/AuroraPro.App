@@ -38,12 +38,12 @@ Aurora is a media server written in Go with a React single-page app on top. It s
 - **QR / link invites** to pull friends into a room in seconds
 - Admin **Rooms** panel to see and manage active parties
 
-### 🧠 AI, running locally (optional)
-- **Semantic search** — describe what you want in plain English; pgvector embeddings + a local chat model turn it into results, with classic trigram search as the always-on fallback
+### 🧠 AI, local or bring-your-own-key (optional)
+- **Semantic search** — describe what you want in plain English; pgvector embeddings + a chat model turn it into results, with classic trigram search as the always-on fallback
 - **AI file matching** — uncertain filename→metadata matches get flagged into an admin review queue instead of silently mis-filing
 - **Personalized home** — hero picks and discover rows tuned by your watch history, with a taste-onboarding flow for new accounts
 - **Catch Me Up** — episode recaps so you can rejoin a show without rewatching
-- All of it runs on **your** hardware through [Ollama](https://ollama.com) — no cloud calls, and Aurora works fine with it switched off
+- Runs on **your** hardware through [Ollama](https://ollama.com) by default — no cloud calls — or plug in an **Anthropic (Claude)** or **OpenAI (ChatGPT)** API key to run the same features on hosted models. Aurora works fine with all of it switched off
 
 ### 📚 A library that stays organized
 - Multi-path libraries with **filesystem watching** and scheduled auto-scans
@@ -150,6 +150,17 @@ sudo systemctl restart aurora
 
 The installer writes `LLM_OLLAMA_URL=http://localhost:11434` into your config and every install run ends with a **preflight** that tells you whether Ollama is reachable and the models are pulled. Without Ollama, search quietly falls back to keyword/trigram matching — everything else works. Set `LLM_ENABLED=false` to switch the AI stack off explicitly.
 
+### ☁️ Cloud AI providers (Anthropic / OpenAI)
+
+Every AI feature can run on hosted models instead of (or alongside) local Ollama. In **Admin → LLM**, pick **Anthropic (Claude)** or **OpenAI (ChatGPT)** as the provider, paste the API key, hit **Test connection** (it validates the key and lists the models your key can use), save, and restart. Defaults are quality-first — Claude runs `claude-sonnet-5` for fast surfaces and `claude-opus-5` for Discover curation; OpenAI runs `gpt-5.6-terra` / `gpt-5.6-sol` — all editable.
+
+Worth knowing before you flip the switch:
+
+- **Embeddings**: Anthropic has no embeddings API, so with Claude chat your vector search still embeds on local Ollama (the default) — or set the **Embedding Provider** to OpenAI (`text-embedding-3-small` at 768 dims) for a fully cloud, zero-Ollama install. **Changing the embedding provider or model clears stored vectors and re-embeds your whole library on the next restart** (API cost applies on OpenAI).
+- **Key storage**: keys are stored in Aurora's Postgres settings table like every other integration credential (Radarr/Sonarr, SMTP, OAuth secrets) — masked in every admin read, but **plaintext at rest**. Use a dedicated key with a spend limit rather than a broadly-scoped account key.
+- **Fixed endpoints**: chat/embed calls go only to `api.anthropic.com` / `api.openai.com` — the hosts are compiled in, not admin-editable, so a stored key can never be redirected from the settings UI. Gateway users can override via env (`LLM_ANTHROPIC_BASE_URL` / `LLM_OPENAI_BASE_URL`).
+- **Cost levers**: the frequent surfaces (hero rerank, search parsing) use the *Fast Model*; the heavy Discover curation is cached for 24h. Set *Reasoning effort* to `low` to cut latency and spend, and pick cheaper models from the Test-connection dropdowns any time.
+
 <a id="configuration"></a>
 ## ⚙️ Configuration
 
@@ -163,6 +174,9 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | `LLM_ENABLED` | AI stack on/off (default on) |
 | `LLM_OLLAMA_URL` | Ollama endpoint (installer pins `http://localhost:11434`) |
 | `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `qwen3-embedding:0.6b`, `qwen3:4b-instruct`) |
+| `LLM_PROVIDER` / `LLM_EMBED_PROVIDER` | Chat / embedding backends: `local`, `ollama_cloud`, `anthropic`, `openai` for chat; `local`, `openai` for embeds. Usually set from **Admin → LLM** (DB settings override env) |
+| `LLM_ANTHROPIC_API_KEY` / `LLM_OPENAI_API_KEY` | Hosted-provider keys for env-only deployments (the admin UI stores them in the DB instead) |
+| `LLM_ANTHROPIC_BASE_URL` / `LLM_OPENAI_BASE_URL` | Gateway/proxy overrides for the hosted providers (env-only on purpose — never admin-editable) |
 | `REQUESTS_ENABLED` + `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` | Requests integrations |
 | `AURORA_ALLOWED_ORIGINS` | CORS / WebSocket origins (same-origin always allowed) |
 | `AURORA_SECURE_COOKIES` | Force the `Secure` flag on auth cookies — set automatically when a domain fronts the install (TLS terminates at nginx, so the Go server can't infer it) |
