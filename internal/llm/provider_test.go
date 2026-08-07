@@ -51,24 +51,41 @@ func TestIsOllamaProvider(t *testing.T) {
 
 func TestCheckProviderCombo(t *testing.T) {
 	cases := []struct {
-		name             string
-		provider         string
-		key, chat, embed string
-		wantSubstr       string // "" = no violations expected
+		name       string
+		combo      ProviderCombo
+		wantSubstr string // "" = no violations expected
 	}{
-		{"unset provider judges nothing", "", "", "http://localhost:11434", "", ""},
-		{"local coherent", ProviderLocal, "", "http://localhost:11434", "", ""},
-		{"local with key allowed (auth proxy)", ProviderLocal, "sk-x", "https://ollama.lan.example", "", ""},
-		{"local pointing at cloud rejected", ProviderLocal, "", "https://ollama.com", "", "ollama.com"},
-		{"cloud coherent", ProviderCloud, "sk-x", "https://ollama.com", "http://localhost:11434", ""},
-		{"cloud coherent empty embed", ProviderCloud, "sk-x", "https://ollama.com", "", ""},
-		{"cloud missing key", ProviderCloud, "", "https://ollama.com", "", "API key"},
-		{"cloud non-https chat", ProviderCloud, "sk-x", "http://localhost:11434", "", "https"},
-		{"cloud embed on cloud", ProviderCloud, "sk-x", "https://ollama.com", "https://ollama.com", "embed_url"},
+		// Pre-provider-split rows, preserved verbatim (EmbedProvider "").
+		{"unset provider judges nothing", ProviderCombo{ChatURL: "http://localhost:11434"}, ""},
+		{"local coherent", ProviderCombo{Provider: ProviderLocal, ChatURL: "http://localhost:11434"}, ""},
+		{"local with key allowed (auth proxy)", ProviderCombo{Provider: ProviderLocal, APIKey: "sk-x", ChatURL: "https://ollama.lan.example"}, ""},
+		{"local pointing at cloud rejected", ProviderCombo{Provider: ProviderLocal, ChatURL: "https://ollama.com"}, "ollama.com"},
+		{"cloud coherent", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "https://ollama.com", EmbedURL: "http://localhost:11434"}, ""},
+		{"cloud coherent empty embed", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "https://ollama.com"}, ""},
+		{"cloud missing key", ProviderCombo{Provider: ProviderCloud, ChatURL: "https://ollama.com"}, "API key"},
+		{"cloud non-https chat", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "http://localhost:11434"}, "https"},
+		{"cloud embed on cloud", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "https://ollama.com", EmbedURL: "https://ollama.com"}, "embed_url"},
+
+		// Hosted chat providers.
+		{"anthropic coherent", ProviderCombo{Provider: ProviderAnthropic, AnthropicKey: "sk-ant-x"}, ""},
+		{"anthropic missing key", ProviderCombo{Provider: ProviderAnthropic}, "Anthropic API key"},
+		{"anthropic ignores ollama key", ProviderCombo{Provider: ProviderAnthropic, APIKey: "sk-x"}, "Anthropic API key"},
+		{"anthropic with local embeds needs no ollama key", ProviderCombo{Provider: ProviderAnthropic, AnthropicKey: "sk-ant-x", EmbedProvider: ProviderLocal, EmbedURL: "http://localhost:11434"}, ""},
+		{"openai coherent", ProviderCombo{Provider: ProviderOpenAI, OpenAIKey: "sk-oai-x"}, ""},
+		{"openai missing key", ProviderCombo{Provider: ProviderOpenAI}, "OpenAI API key"},
+
+		// Embed provider rules — independent of the chat provider.
+		{"openai embeds with key", ProviderCombo{Provider: ProviderLocal, ChatURL: "http://localhost:11434", EmbedProvider: ProviderOpenAI, OpenAIKey: "sk-oai-x"}, ""},
+		{"openai embeds missing key", ProviderCombo{Provider: ProviderLocal, ChatURL: "http://localhost:11434", EmbedProvider: ProviderOpenAI}, "embed provider openai requires"},
+		{"anthropic chat + openai embeds needs both keys", ProviderCombo{Provider: ProviderAnthropic, AnthropicKey: "sk-ant-x", EmbedProvider: ProviderOpenAI}, "embed provider openai requires"},
+		{"all-cloud coherent", ProviderCombo{Provider: ProviderAnthropic, AnthropicKey: "sk-ant-x", EmbedProvider: ProviderOpenAI, OpenAIKey: "sk-oai-x"}, ""},
+		{"embed provider anthropic impossible", ProviderCombo{EmbedProvider: ProviderAnthropic}, "no embeddings API"},
+		{"embed provider unknown", ProviderCombo{EmbedProvider: "voyage"}, "unknown embed provider"},
+		{"openai embeds skip the ollama.com embed rule", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "https://ollama.com", EmbedProvider: ProviderOpenAI, OpenAIKey: "sk-oai-x", EmbedURL: "https://ollama.com"}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := CheckProviderCombo(c.provider, c.key, c.chat, c.embed)
+			got := CheckProviderCombo(c.combo)
 			if c.wantSubstr == "" {
 				if len(got) != 0 {
 					t.Fatalf("want no violations, got %v", got)

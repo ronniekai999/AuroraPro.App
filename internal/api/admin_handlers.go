@@ -210,6 +210,7 @@ var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
 	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
 	RerankModel, RerankURL, RepeatWindowHours, TasteCentroids              string
+	EmbedProvider, AnthropicAPIKey, OpenAIAPIKey                           string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -226,6 +227,12 @@ var llmSettingKeys = struct {
 	RerankURL:         "llm_reranker_url",
 	RepeatWindowHours: "recommender_repeat_window_hours",
 	TasteCentroids:    "recommender_taste_centroids",
+	// Hosted providers. The two key rows end in _api_key ON PURPOSE — that
+	// suffix is what gets them masked automatically by isSecretSettingKey on
+	// every generic settings read.
+	EmbedProvider:   "llm_embed_provider",
+	AnthropicAPIKey: "llm_anthropic_api_key",
+	OpenAIAPIKey:    "llm_openai_api_key",
 }
 
 // validReasoningEffort reports whether v is an accepted gpt-oss /v1
@@ -309,9 +316,12 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 // is what lets DebugLog flips return restart_required:false.
 type llmUpdateRequest struct {
 	Provider          *string `json:"provider,omitempty"`
+	EmbedProvider     *string `json:"embed_provider,omitempty"`
 	OllamaURL         *string `json:"ollama_url,omitempty"`
 	EmbedURL          *string `json:"embed_url,omitempty"`
-	APIKey            *string `json:"api_key,omitempty"` // empty string clears; absence leaves alone
+	APIKey            *string `json:"api_key,omitempty"`           // empty string clears; absence leaves alone
+	AnthropicAPIKey   *string `json:"anthropic_api_key,omitempty"` // same clear/keep contract as api_key
+	OpenAIAPIKey      *string `json:"openai_api_key,omitempty"`
 	ChatModel         *string `json:"chat_model,omitempty"`
 	EmbedModel        *string `json:"embed_model,omitempty"`
 	ChatModelFast     *string `json:"chat_model_fast,omitempty"`
@@ -349,11 +359,15 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 	// otherwise — a sparse save can't sneak a broken half-config past it.
 	// Note a key with provider=local is deliberately ALLOWED: operators
 	// legitimately front LAN Ollama with bearer-checking reverse proxies.
-	if req.Provider != nil {
-		if !llm.ValidProvider(*req.Provider) {
-			writeError(w, http.StatusBadRequest, `provider must be empty, "local", or "ollama_cloud"`)
-			return
-		}
+	if req.Provider != nil && !llm.ValidProvider(*req.Provider) {
+		writeError(w, http.StatusBadRequest, `provider must be empty, "local", "ollama_cloud", "anthropic", or "openai"`)
+		return
+	}
+	if req.EmbedProvider != nil && !llm.ValidEmbedProvider(*req.EmbedProvider) {
+		writeError(w, http.StatusBadRequest, `embed_provider must be empty, "local", or "openai" — Anthropic has no embeddings API`)
+		return
+	}
+	if req.Provider != nil || req.EmbedProvider != nil {
 		effective := func(posted *string, dbKey string) string {
 			if posted != nil {
 				return strings.TrimSpace(*posted)
@@ -361,11 +375,15 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 			v, _, _ := h.queries.GetSettingExists(r.Context(), dbKey)
 			return strings.TrimSpace(v)
 		}
-		if violations := llm.CheckProviderCombo(*req.Provider,
-			effective(req.APIKey, llmSettingKeys.APIKey),
-			effective(req.OllamaURL, llmSettingKeys.OllamaURL),
-			effective(req.EmbedURL, llmSettingKeys.EmbedURL),
-		); len(violations) > 0 {
+		if violations := llm.CheckProviderCombo(llm.ProviderCombo{
+			Provider:      effective(req.Provider, llmSettingKeys.Provider),
+			EmbedProvider: effective(req.EmbedProvider, llmSettingKeys.EmbedProvider),
+			APIKey:        effective(req.APIKey, llmSettingKeys.APIKey),
+			AnthropicKey:  effective(req.AnthropicAPIKey, llmSettingKeys.AnthropicAPIKey),
+			OpenAIKey:     effective(req.OpenAIAPIKey, llmSettingKeys.OpenAIAPIKey),
+			ChatURL:       effective(req.OllamaURL, llmSettingKeys.OllamaURL),
+			EmbedURL:      effective(req.EmbedURL, llmSettingKeys.EmbedURL),
+		}); len(violations) > 0 {
 			writeError(w, http.StatusBadRequest, violations[0])
 			return
 		}
@@ -420,13 +438,13 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		restartRequired = true
 		return nil
 	}
-	// Provider is written LAST on purpose: the SetSetting calls are
-	// individual autocommit writes (no transaction), so a mid-loop failure
-	// leaves a partial save. With provider last, its prerequisites (key,
-	// URLs) always land BEFORE the provider flip that makes them
-	// load-bearing — a partial failure leaves the OLD provider with some
-	// new field values (harmless), never a new provider missing the fields
-	// validation demanded.
+	// The provider selectors are written LAST on purpose: the SetSetting
+	// calls are individual autocommit writes (no transaction), so a mid-loop
+	// failure leaves a partial save. With embed_provider second-to-last and
+	// provider last, their prerequisites (keys, URLs) always land BEFORE the
+	// selector flips that make them load-bearing — a partial failure leaves
+	// the OLD provider with some new field values (harmless), never a new
+	// provider missing the fields validation demanded.
 	for _, p := range []struct {
 		key string
 		val *string
@@ -434,6 +452,8 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.OllamaURL, req.OllamaURL},
 		{llmSettingKeys.EmbedURL, req.EmbedURL},
 		{llmSettingKeys.APIKey, req.APIKey},
+		{llmSettingKeys.AnthropicAPIKey, req.AnthropicAPIKey},
+		{llmSettingKeys.OpenAIAPIKey, req.OpenAIAPIKey},
 		{llmSettingKeys.ChatModel, req.ChatModel},
 		{llmSettingKeys.EmbedModel, req.EmbedModel},
 		{llmSettingKeys.ChatModelFast, req.ChatModelFast},
@@ -441,6 +461,7 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.ReasoningEffort, req.ReasoningEffort},
 		{llmSettingKeys.RerankModel, req.RerankModel},
 		{llmSettingKeys.RerankURL, req.RerankURL},
+		{llmSettingKeys.EmbedProvider, req.EmbedProvider},
 		{llmSettingKeys.Provider, req.Provider},
 	} {
 		if err := apply(p.key, p.val); err != nil {

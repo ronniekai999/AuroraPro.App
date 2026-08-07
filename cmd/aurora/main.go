@@ -1380,7 +1380,15 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 			slog.Warn("llm_provider=ollama_cloud with no embed URL and no local pre-override URL — embeddings will fail until llm_embed_url points at a local Ollama")
 		}
 	}
-	for _, violation := range llm.CheckProviderCombo(cfg.Provider, cfg.APIKey, cfg.BaseURL, cfg.EmbedURL) {
+	for _, violation := range llm.CheckProviderCombo(llm.ProviderCombo{
+		Provider:      cfg.Provider,
+		EmbedProvider: cfg.EmbedProvider,
+		APIKey:        cfg.APIKey,
+		AnthropicKey:  cfg.AnthropicAPIKey,
+		OpenAIKey:     cfg.OpenAIAPIKey,
+		ChatURL:       cfg.BaseURL,
+		EmbedURL:      cfg.EmbedURL,
+	}) {
 		slog.Warn("LLM provider config incoherent (fix in Admin → LLM)", "provider", cfg.Provider, "problem", violation)
 	}
 	if cfg.NumCtx > 0 && (cfg.StructuredOutputs || hostedChat) {
