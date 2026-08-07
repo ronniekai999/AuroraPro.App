@@ -7,13 +7,43 @@ import (
 
 // Provider values persisted in the llm_provider server setting. Empty means
 // "unset" (legacy installs / env-only config) and implies no enforcement.
+// anthropic and openai are hosted chat providers with compile-time base URLs
+// (see anthropic.go / openai.go) — the Ollama URL settings don't apply to them.
 const (
-	ProviderLocal = "local"
-	ProviderCloud = "ollama_cloud"
+	ProviderLocal     = "local"
+	ProviderCloud     = "ollama_cloud"
+	ProviderAnthropic = "anthropic"
+	ProviderOpenAI    = "openai"
 )
 
-// ValidProvider reports whether p is a recognized provider value.
+// ValidProvider reports whether p is a recognized chat-provider value.
 func ValidProvider(p string) bool {
+	switch p {
+	case "", ProviderLocal, ProviderCloud, ProviderAnthropic, ProviderOpenAI:
+		return true
+	}
+	return false
+}
+
+// ValidEmbedProvider reports whether p is a recognized embedding-provider
+// value ("" = legacy/unset, behaves as local). The set is deliberately
+// narrower than ValidProvider: Anthropic has no embeddings API, and
+// ollama_cloud does not host the embedding models Aurora uses — Ollama-family
+// embeds always run on the local box (EmbedURL/BaseURL), so "local" covers
+// them.
+func ValidEmbedProvider(p string) bool {
+	switch p {
+	case "", ProviderLocal, ProviderOpenAI:
+		return true
+	}
+	return false
+}
+
+// isOllamaProvider reports whether p routes chat through an Ollama endpoint
+// (the pre-provider-split behavior). Empty means "unset" and has always meant
+// Ollama, so it groups here — the hosted-provider branches only engage on an
+// explicit anthropic/openai selection.
+func isOllamaProvider(p string) bool {
 	return p == "" || p == ProviderLocal || p == ProviderCloud
 }
 

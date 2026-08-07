@@ -6,14 +6,45 @@ import (
 )
 
 func TestValidProvider(t *testing.T) {
-	for _, ok := range []string{"", ProviderLocal, ProviderCloud} {
+	// "openai"/"anthropic" moved from the invalid list to the valid one when
+	// hosted providers landed — a deliberate contract flip, not an accident.
+	for _, ok := range []string{"", ProviderLocal, ProviderCloud, ProviderAnthropic, ProviderOpenAI} {
 		if !ValidProvider(ok) {
 			t.Errorf("%q should be valid", ok)
 		}
 	}
-	for _, bad := range []string{"cloud", "LOCAL", "ollama", "openai"} {
+	for _, bad := range []string{"cloud", "LOCAL", "ollama", "OpenAI", "claude", "chatgpt"} {
 		if ValidProvider(bad) {
 			t.Errorf("%q should be invalid", bad)
+		}
+	}
+}
+
+func TestValidEmbedProvider(t *testing.T) {
+	for _, ok := range []string{"", ProviderLocal, ProviderOpenAI} {
+		if !ValidEmbedProvider(ok) {
+			t.Errorf("%q should be valid", ok)
+		}
+	}
+	// anthropic is a valid CHAT provider but can never embed (no embeddings
+	// API); ollama_cloud embeds are already forbidden by the combo rules and
+	// the selector never offers it.
+	for _, bad := range []string{ProviderAnthropic, ProviderCloud, "OpenAI", "voyage"} {
+		if ValidEmbedProvider(bad) {
+			t.Errorf("%q should be invalid", bad)
+		}
+	}
+}
+
+func TestIsOllamaProvider(t *testing.T) {
+	for _, ok := range []string{"", ProviderLocal, ProviderCloud} {
+		if !isOllamaProvider(ok) {
+			t.Errorf("%q should be ollama-family", ok)
+		}
+	}
+	for _, not := range []string{ProviderAnthropic, ProviderOpenAI} {
+		if isOllamaProvider(not) {
+			t.Errorf("%q should not be ollama-family", not)
 		}
 	}
 }

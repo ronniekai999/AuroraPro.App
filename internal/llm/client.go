@@ -30,11 +30,32 @@ const maxLoggedBody = 8 * 1024 * 1024
 // Config controls how the client talks to Ollama. All fields have sensible
 // defaults applied by NewClient when zero — callers only set what they want.
 type Config struct {
-	BaseURL    string // e.g. "http://localhost:11434" or "https://ollama.com"
-	EmbedURL   string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
-	APIKey     string // optional bearer token for Ollama Cloud
-	EmbedModel string // e.g. "qwen3-embedding:0.6b"
-	ChatModel  string // e.g. "qwen3:4b-instruct", "gemma3:12b", "gpt-oss:20b"
+	// Provider selects the CHAT backend: "" | "local" | "ollama_cloud" (Ollama
+	// endpoints at BaseURL, the pre-split behavior) or "anthropic" | "openai"
+	// (hosted APIs at compile-time base URLs; BaseURL is not consulted for
+	// chat). EmbedProvider selects the EMBEDDING backend independently — "" |
+	// "local" keeps Ollama at EmbedURL/BaseURL, "openai" uses the OpenAI
+	// embeddings API — because Anthropic has no embeddings API, so a Claude
+	// chat setup still needs Ollama or OpenAI for vectors.
+	Provider      string
+	EmbedProvider string
+	BaseURL       string // e.g. "http://localhost:11434" or "https://ollama.com"
+	EmbedURL      string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
+	APIKey        string // optional bearer token for Ollama Cloud
+	// Per-provider credentials. Key isolation is structural: each key is only
+	// ever attached by its own provider's adapter to that provider's fixed
+	// host — APIKey (Ollama Cloud) never reaches api.anthropic.com/api.openai.com
+	// and vice versa, extending the sendAuth discipline in rerank.go.
+	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	// Base-URL escape hatches for the hosted providers, for gateway/proxy
+	// deployments and httptest fakes. Env/test only — deliberately NOT
+	// admin-editable, so a stored key can never be steered to an
+	// attacker-supplied host from the settings UI.
+	AnthropicBaseURL string
+	OpenAIBaseURL    string
+	EmbedModel       string // e.g. "qwen3-embedding:0.6b"
+	ChatModel        string // e.g. "qwen3:4b-instruct", "gemma3:12b", "gpt-oss:20b"
 	// Per-surface routing (Phase A). Empty → fall back to ChatModel, so a
 	// deployment that sets none behaves exactly as before. Fast = frequent,
 	// latency-sensitive surfaces (hero rerank, rail reasons); Smart = the
@@ -85,14 +106,43 @@ func NewClient(cfg Config) *Client {
 	// (trivially pasted into the admin form) otherwise silently breaks model
 	// lookup with a confusing "model not found" / reranker "unreachable" error —
 	// observed 2026-06-08 with "dengcao/Qwen3-Reranker-8B:Q3_K_M ".
+	cfg.Provider = strings.TrimSpace(cfg.Provider)
+	cfg.EmbedProvider = strings.TrimSpace(cfg.EmbedProvider)
 	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
 	cfg.EmbedURL = strings.TrimSpace(cfg.EmbedURL)
+	cfg.AnthropicBaseURL = strings.TrimSpace(cfg.AnthropicBaseURL)
+	cfg.OpenAIBaseURL = strings.TrimSpace(cfg.OpenAIBaseURL)
 	cfg.RerankURL = strings.TrimSpace(cfg.RerankURL)
 	cfg.ChatModel = strings.TrimSpace(cfg.ChatModel)
 	cfg.ChatModelFast = strings.TrimSpace(cfg.ChatModelFast)
 	cfg.ChatModelSmart = strings.TrimSpace(cfg.ChatModelSmart)
 	cfg.EmbedModel = strings.TrimSpace(cfg.EmbedModel)
 	cfg.RerankModel = strings.TrimSpace(cfg.RerankModel)
+
+	// Provider-aware model defaults, applied BEFORE the generic Ollama
+	// fallbacks below so a hosted-provider Config with empty model fields
+	// lands on that provider's models, not on qwen. Quality-first tiers per
+	// the feature decision: fast rides ChatModel via the ChatModelFast()
+	// fallback; smart gets the flagship.
+	switch cfg.Provider {
+	case ProviderAnthropic:
+		if cfg.ChatModel == "" {
+			cfg.ChatModel = anthropicDefaultChatModel
+		}
+		if cfg.ChatModelSmart == "" {
+			cfg.ChatModelSmart = anthropicDefaultSmartModel
+		}
+	case ProviderOpenAI:
+		if cfg.ChatModel == "" {
+			cfg.ChatModel = openaiDefaultChatModel
+		}
+		if cfg.ChatModelSmart == "" {
+			cfg.ChatModelSmart = openaiDefaultSmartModel
+		}
+	}
+	if cfg.EmbedProvider == ProviderOpenAI && cfg.EmbedModel == "" {
+		cfg.EmbedModel = openaiDefaultEmbedModel
+	}
 
 	// Fallback defaults for a zero Config. Keep these IN SYNC with the
 	// canonical defaults in internal/config (Load's LLMConfig block) — the
@@ -201,6 +251,31 @@ func (c *Client) ChatModel() string { return c.cfg.ChatModel }
 
 // EmbedModel returns the currently configured embedding model name.
 func (c *Client) EmbedModel() string { return c.cfg.EmbedModel }
+
+// Provider returns the configured chat provider ("" = unset/legacy Ollama).
+func (c *Client) Provider() string { return c.cfg.Provider }
+
+// EmbedProviderName returns the configured embedding provider ("" = local
+// Ollama, the legacy behavior).
+func (c *Client) EmbedProviderName() string { return c.cfg.EmbedProvider }
+
+// EmbedSpaceID identifies the embedding vector space for the model-space
+// marker (embedding.ensureModelSpace): vectors from different spaces must
+// never share the pgvector column, and a space change nulls + re-embeds the
+// whole library.
+//
+// FORMAT IS LOAD-BEARING: for Ollama-family embeds this returns the bare
+// model name because that is what every existing install's marker row
+// (llm_embed_model_active) already holds — qualifying it would make marker !=
+// effective on first boot after upgrade and spuriously null every install's
+// vectors. Only non-Ollama spaces get a provider prefix; the "/" is
+// unambiguous because Ollama model tags use ":" not "/" for variants.
+func (c *Client) EmbedSpaceID() string {
+	if c.cfg.EmbedProvider == ProviderOpenAI {
+		return "openai/" + c.cfg.EmbedModel
+	}
+	return c.cfg.EmbedModel
+}
 
 // Dims reports the target embedding dimensionality — used by callers (e.g. the
 // pgvector formatter) to validate they're inserting the right shape.
