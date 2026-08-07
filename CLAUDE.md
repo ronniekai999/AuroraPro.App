@@ -84,6 +84,13 @@ Invariants to preserve when touching this area:
 - The admin PUT writes provider selectors LAST (partial-save safety); the
   PUT returns `{ok, restart_required}` — the SPA re-fetches settings after
   save (don't `setS(ack)`).
+- **GET keeps editable and display fields separate**: `chat_model` /
+  `embed_model` carry exactly what is STORED (blank = provider default);
+  live-resolved values ride `effective_chat_model`/`effective_embed_model`.
+  Never backfill live models into the editable fields — that round-trip
+  persisted stale Ollama tags on a provider switch (hosted chat 404s;
+  embeds null vectors then fail re-embed). The SPA blanks model fields
+  when the provider FAMILY changes and restores loaded values on return.
 
 ## Social features (member profiles + follows, PRs #428/#429)
 

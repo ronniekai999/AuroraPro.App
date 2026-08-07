@@ -209,9 +209,15 @@ type LLMSettings struct {
 	// single averaged centroid). Pointer+omitempty so "no row" → the UI's `?? 3`
 	// default, distinguishable from an explicit value. Restart-required.
 	TasteCentroids *int `json:"taste_centroids,omitempty"`
-	DebugLog       bool `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog   bool `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded   bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	DebugLog     bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	// Effective models the RUNNING client resolved (DB > env > defaults) —
+	// display only. Deliberately separate from the editable fields above:
+	// backfilling live values into chat_model/embed_model is what let a
+	// provider switch persist stale Ollama tags (see GetLLMSettings).
+	EffectiveChatModel  string `json:"effective_chat_model,omitempty"`
+	EffectiveEmbedModel string `json:"effective_embed_model,omitempty"`
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -319,12 +325,16 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.llmClient != nil {
 		out.LiveDebugLog = h.llmClient.Debug()
-		if out.ChatModel == "" {
-			out.ChatModel = h.llmClient.ChatModel()
-		}
-		if out.EmbedModel == "" {
-			out.EmbedModel = h.llmClient.EmbedModel()
-		}
+		// Live-resolved models go in the effective_* DISPLAY fields, never
+		// into the editable chat_model/embed_model — the old backfill leaked
+		// the running Ollama tags into the form, and saving after a provider
+		// switch then persisted them as explicit choices: hosted chat 404ed
+		// on "qwen3:4b-instruct" after restart, and the embed path nulled
+		// every vector and re-embedded against a model OpenAI doesn't serve.
+		// Editable fields carry exactly what is stored; blank = provider
+		// default, which the placeholders explain.
+		out.EffectiveChatModel = h.llmClient.ChatModel()
+		out.EffectiveEmbedModel = h.llmClient.EmbedModel()
 	}
 	writeJSON(w, http.StatusOK, out)
 }

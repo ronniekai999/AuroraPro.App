@@ -108,6 +108,15 @@ func CheckProviderCombo(c ProviderCombo) []string {
 		if strings.TrimSpace(c.OpenAIKey) == "" {
 			v = append(v, "provider openai requires an OpenAI API key")
 		}
+	default:
+		// "" = unset, judges nothing. Anything else is a typo'd env/row
+		// (LLM_PROVIDER=antropic): chat would silently fall back to Ollama
+		// while rerank errors "not routable" — name it here so boot's
+		// warn-only pass surfaces the half-degraded state (admin saves
+		// already 400 earlier via ValidProvider).
+		if c.Provider != "" {
+			v = append(v, "unknown provider "+strconv.Quote(c.Provider))
+		}
 	}
 	switch c.EmbedProvider {
 	case "", ProviderLocal:

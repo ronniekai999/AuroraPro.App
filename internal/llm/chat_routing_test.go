@@ -74,6 +74,12 @@ func TestChatJSONWithStructured(t *testing.T) {
 	if m, _ := gotBody["model"].(string); m != "default-model" {
 		t.Errorf("empty model should fall back to default; got %q", m)
 	}
+	// Temperature became *float64 so the api.openai.com path can omit it; the
+	// Ollama /v1 path must keep pinning 0.1 (the historical wire bytes) —
+	// dropping the assignment would silently change every Cloud install.
+	if temp, ok := gotBody["temperature"].(float64); !ok || temp != 0.1 {
+		t.Errorf("Ollama /v1 path must pin temperature 0.1, got %v (body=%v)", gotBody["temperature"], gotBody)
+	}
 	if !strings.Contains(out, "ok") {
 		t.Errorf("content = %q", out)
 	}

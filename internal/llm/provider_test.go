@@ -81,6 +81,7 @@ func TestCheckProviderCombo(t *testing.T) {
 		{"all-cloud coherent", ProviderCombo{Provider: ProviderAnthropic, AnthropicKey: "sk-ant-x", EmbedProvider: ProviderOpenAI, OpenAIKey: "sk-oai-x"}, ""},
 		{"embed provider anthropic impossible", ProviderCombo{EmbedProvider: ProviderAnthropic}, "no embeddings API"},
 		{"embed provider unknown", ProviderCombo{EmbedProvider: "voyage"}, "unknown embed provider"},
+		{"chat provider unknown (env typo)", ProviderCombo{Provider: "antropic", AnthropicKey: "sk-ant-x"}, "unknown provider"},
 		{"openai embeds skip the ollama.com embed rule", ProviderCombo{Provider: ProviderCloud, APIKey: "sk-x", ChatURL: "https://ollama.com", EmbedProvider: ProviderOpenAI, OpenAIKey: "sk-oai-x", EmbedURL: "https://ollama.com"}, ""},
 	}
 	for _, c := range cases {

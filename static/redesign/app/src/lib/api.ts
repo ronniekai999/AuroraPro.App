@@ -1585,6 +1585,11 @@ export interface LLMSettings {
   debug_log: boolean
   live_debug_log: boolean
   client_loaded: boolean
+  // Live-resolved models (DB > env > defaults) — display only. The editable
+  // chat_model/embed_model fields carry exactly what is stored; blank means
+  // "provider default applies".
+  effective_chat_model?: string
+  effective_embed_model?: string
 }
 export async function getAdminLLM(signal?: AbortSignal): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { signal })

@@ -1316,9 +1316,12 @@ function AdminLLMTab() {
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<LLMTestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  // Last server-confirmed settings — the restore source when the operator
+  // switches providers back and forth before saving.
+  const loadedRef = useRef<LLMSettings | null>(null)
   useEffect(() => {
     const ac = new AbortController()
-    getAdminLLM(ac.signal).then(setS).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
+    getAdminLLM(ac.signal).then(next => { loadedRef.current = next; setS(next) }).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
     return () => ac.abort()
   }, [])
   if (err) return <p className="text-red-300 text-sm">{err}</p>
@@ -1327,9 +1330,38 @@ function AdminLLMTab() {
   const openaiEmbeds = s.embed_provider === 'openai'
   const showAnthropicKey = s.provider === 'anthropic'
   const showOpenAIKey = s.provider === 'openai' || openaiEmbeds
-  const chatPlaceholder = s.provider === 'anthropic' ? 'blank = claude-sonnet-5' : s.provider === 'openai' ? 'blank = gpt-5.6-terra' : 'e.g. qwen3:4b-instruct'
+  // Model names only make sense within a provider family. When the operator
+  // switches families, carrying the old family's tags forward would persist
+  // them on save — hosted chat then 404s on an Ollama tag after restart, and
+  // the embed path re-embeds against a model the provider doesn't serve. So:
+  // crossing families blanks the model fields (blank = the new provider's
+  // default, which the placeholders spell out); returning to the loaded
+  // family restores the server-confirmed values.
+  const chatFamily = (p: string) => (p === 'anthropic' || p === 'openai') ? p : 'ollama'
+  const embedFamily = (p: string) => p === 'openai' ? 'openai' : 'ollama'
+  const changeProvider = (p: string) => {
+    const next = { ...s, provider: p }
+    if (chatFamily(p) !== chatFamily(s.provider)) {
+      const loaded = loadedRef.current
+      if (loaded && chatFamily(p) === chatFamily(loaded.provider)) {
+        next.chat_model = loaded.chat_model; next.chat_model_fast = loaded.chat_model_fast; next.chat_model_smart = loaded.chat_model_smart
+      } else {
+        next.chat_model = ''; next.chat_model_fast = ''; next.chat_model_smart = ''
+      }
+    }
+    setS(next)
+  }
+  const changeEmbedProvider = (p: string) => {
+    const next = { ...s, embed_provider: p }
+    if (embedFamily(p) !== embedFamily(s.embed_provider)) {
+      const loaded = loadedRef.current
+      next.embed_model = (loaded && embedFamily(p) === embedFamily(loaded.embed_provider)) ? loaded.embed_model : ''
+    }
+    setS(next)
+  }
+  const chatPlaceholder = s.provider === 'anthropic' ? 'blank = claude-sonnet-5' : s.provider === 'openai' ? 'blank = gpt-5.6-terra' : (s.effective_chat_model ? `blank = ${s.effective_chat_model}` : 'e.g. qwen3:4b-instruct')
   const smartPlaceholder = s.provider === 'anthropic' ? 'Discover curation · blank = claude-opus-5' : s.provider === 'openai' ? 'Discover curation · blank = gpt-5.6-sol' : 'Discover curation · blank = Chat Model'
-  const embedPlaceholder = openaiEmbeds ? 'blank = text-embedding-3-small' : 'e.g. qwen3-embedding:0.6b'
+  const embedPlaceholder = openaiEmbeds ? 'blank = text-embedding-3-small' : (s.effective_embed_model ? `blank = ${s.effective_embed_model}` : 'e.g. qwen3-embedding:0.6b')
   const chatAvailable = testResult?.endpoints.find(ep => ep.role === 'chat')?.available ?? []
   const embedAvailable = testResult?.endpoints.find(ep => ep.role === 'embed')?.available ?? []
   return (
@@ -1338,7 +1370,7 @@ function AdminLLMTab() {
       <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
-          <select value={s.provider} onChange={e => setS({ ...s, provider: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+          <select value={s.provider} onChange={e => changeProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
             <option value="">Default (env config)</option>
             <option value="ollama_cloud">Ollama Cloud</option>
             <option value="local">Local (Ollama)</option>
@@ -1347,7 +1379,7 @@ function AdminLLMTab() {
           </select>
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embedding Provider</span>
-          <select value={s.embed_provider} onChange={e => setS({ ...s, embed_provider: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+          <select value={s.embed_provider} onChange={e => changeEmbedProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
             <option value="">Local (Ollama)</option>
             <option value="openai">OpenAI</option>
           </select>
@@ -1443,6 +1475,7 @@ function AdminLLMTab() {
               // The PUT returns an ack, not the settings — re-fetch so the
               // form reflects what was persisted (masked keys, SET badges).
               const next = await getAdminLLM()
+              loadedRef.current = next
               setS(next); setApiKeyEdit(''); setAnthropicKeyEdit(''); setOpenaiKeyEdit('')
               window.alert(ack.restart_required ? 'LLM settings saved. Restart Aurora to apply them.' : 'LLM settings saved.')
             } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
