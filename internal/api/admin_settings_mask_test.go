@@ -10,6 +10,7 @@ import "testing"
 func TestIsSecretSettingKey(t *testing.T) {
 	mustMask := []string{
 		"llm_api_key", "radarr_api_key", "sonarr_4k_api_key", "tmdb_api_key",
+		"llm_anthropic_api_key", "llm_openai_api_key", // hosted-provider keys
 		"oauth_google_client_secret",   // the H7 leak
 		"oauth_discord_client_secret",  // the H7 leak
 		"oauth_twitch_client_secret",   // the H7 leak
@@ -29,6 +30,7 @@ func TestIsSecretSettingKey(t *testing.T) {
 		"requests_enabled", "radarr_url", "sonarr_4k_url",
 		"oauth_google_client_id", // public client id, not a secret
 		"oauth_google_enabled",
+		"llm_provider", "llm_embed_provider", // selectors, not credentials
 	}
 	for _, k := range mustNotMask {
 		if isSecretSettingKey(k) {
