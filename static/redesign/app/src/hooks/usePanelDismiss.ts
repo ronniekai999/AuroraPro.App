@@ -14,6 +14,14 @@
 // declaring `aria-modal` would tell assistive tech the rest of the page is inert
 // when it is not, which is a worse lie than the current silence. The APG contract
 // for a non-modal dialog is: move focus in, let Escape dismiss, put focus back.
+//
+// Issue #445 — "dismiss" was only ever half implemented. Escape-while-focused and
+// the X button closed these panels; clicking anywhere else on the page did not,
+// which is the one gesture every user reaches for first. The outside-click half
+// lives here rather than in either panel so both inherit it, and it stays a
+// document listener: NO full-screen backdrop element, because a backdrop would
+// re-introduce exactly the inertness these panels' z-45 layering was chosen to
+// avoid (BUG-005 again).
 
 import { useEffect, useRef, type RefObject } from 'react'
 
@@ -48,6 +56,18 @@ export function usePanelDismiss(
     // <body> on EVERY close. The hook's headline promise never once happened.
     const node = ref.current
 
+    // Cleared by the outside-pointer path below, and by nothing else. A pointer
+    // dismissal aimed at inert background should leave focus where the pointer
+    // put it — yanking a focus ring back onto the bell is not what the user
+    // asked for. ProfileSwitcher's own outside-click handler documents the same
+    // policy ("a click outside is a pointer interaction, so don't yank focus
+    // back to the trigger"). Keyboard/Escape/X-button closes are untouched: they
+    // still restore, which is the whole APG contract this hook exists to honour.
+    //
+    // A local, not a ref, so it resets for free on every open — the effect
+    // re-runs on `open` and gets a fresh one.
+    let restoreFocus = true
+
     // Focus the panel itself rather than its first control. The first control in
     // both of these is the Close button, and landing there announces "Close" as
     // the panel's opening word — the container, which carries the aria-label, is
@@ -68,9 +88,56 @@ export function usePanelDismiss(
     }
     document.addEventListener('keydown', onKey)
 
+    // Does `start` sit inside the control that OWNS this panel? Derived from the
+    // ARIA wiring TopNav already publishes — each trigger carries
+    // `aria-controls={open ? '<panel id>' : undefined}` — so the hook needs no
+    // second ref threaded down from the call sites and no knowledge of TopNav.
+    //
+    // This guard is load-bearing, not defensive. Both triggers are TOGGLES
+    // (`onClick={() => setNotifOpen(!notifOpen)}`), and mousedown precedes
+    // click: without it, pressing the bell to close would close on mousedown and
+    // the very next click — now seeing a CLOSED panel — would re-open it, so the
+    // panel would look stuck open and the whole fix would look like it did
+    // nothing. (The dismissal listens on mousedown to match every other
+    // outside-click site here — AdminView's UserRowMenu, TopNav's AvatarMenu,
+    // ProfileSwitcher — which is also what makes a drag that starts inside the
+    // panel and ends outside it not count as a dismissal.)
+    const ownsThisPanel = (start: Node | null): boolean => {
+      // Anonymous panels (no id) can't be claimed by any trigger; skip rather
+      // than match `aria-controls=""` on everything.
+      if (!node?.id) return false
+      let el: Element | null = start && start.nodeType === 1
+        ? (start as Element)
+        : (start?.parentElement ?? null)
+      for (; el; el = el.parentElement) {
+        // `aria-controls` is a space-separated ID list per ARIA, even though
+        // every trigger here names exactly one panel.
+        const controls = el.getAttribute('aria-controls')
+        if (controls && controls.split(/\s+/).includes(node.id)) return true
+      }
+      return false
+    }
+
+    // Bubble phase, like every other outside-click site in this codebase. The
+    // listener only exists while the panel is open (the effect returns early
+    // otherwise), so there is no separate `open` check to make here.
+    const onPointerDown = (e: MouseEvent) => {
+      if (!node) return
+      const target = e.target as Node | null
+      // Inside the panel — including its own scrollbar, whose mousedown targets
+      // the scrollable element itself. This is the case a backdrop element
+      // handles for you and why click-outside is easy to get wrong.
+      if (target && node.contains(target)) return
+      if (ownsThisPanel(target)) return
+      restoreFocus = false
+      onCloseRef.current()
+    }
+    document.addEventListener('mousedown', onPointerDown)
+
     return () => {
       cancelAnimationFrame(raf)
       document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onPointerDown)
       // Restore when the opener is still around AND focus either is still inside
       // the panel, or has been LOST — `<body>` or nothing.
       //
@@ -87,9 +154,18 @@ export function usePanelDismiss(
       // direction: if the user closed the panel by clicking some other control,
       // focus is on THAT control — neither inside the panel nor lost — so we leave
       // it alone rather than yanking it back to the trigger.
+      //
+      // `restoreFocus` is the third exception, added with the outside-click
+      // dismissal. That path tears the panel out from under the element that
+      // held focus, so `focusLost` is true and the restore would otherwise fire
+      // — dragging a focus ring onto the trigger the user just pointed away
+      // from. Where the outside target takes focus itself the browser corrects
+      // that a moment later, but where it deliberately does not (SearchPalette
+      // preventDefaults mousedown on its options to keep focus in the input)
+      // the stolen focus simply stays stolen.
       const active = document.activeElement
       const focusLost = !active || active === document.body
-      if (opener?.isConnected && (node?.contains(active) || focusLost)) {
+      if (restoreFocus && opener?.isConnected && (node?.contains(active) || focusLost)) {
         opener.focus({ preventScroll: true })
       }
     }
