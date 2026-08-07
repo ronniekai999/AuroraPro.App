@@ -1562,11 +1562,16 @@ export async function listFlaggedItems(signal?: AbortSignal): Promise<ServerMedi
 }
 
 export interface LLMSettings {
-  provider: string
+  provider: string // '' | 'local' | 'ollama_cloud' | 'anthropic' | 'openai'
+  embed_provider: string // '' | 'local' | 'openai' (Anthropic has no embeddings API)
   ollama_url: string
   embed_url: string
   api_key_masked: string
   has_api_key: boolean
+  anthropic_api_key_masked: string
+  has_anthropic_api_key: boolean
+  openai_api_key_masked: string
+  has_openai_api_key: boolean
   chat_model: string
   embed_model: string
   chat_model_fast?: string
@@ -1584,11 +1589,21 @@ export interface LLMSettings {
 export async function getAdminLLM(signal?: AbortSignal): Promise<LLMSettings> {
   return apiFetch<LLMSettings>('/api/admin/llm', { signal })
 }
+export interface LLMUpdateResult {
+  ok: boolean
+  restart_required: boolean
+}
+// NOTE: the server returns an ack ({ok, restart_required}), NOT the updated
+// settings — callers must re-fetch getAdminLLM for fresh form state. (The old
+// Promise<LLMSettings> typing here made AdminLLMTab blank its form after save.)
 export async function updateAdminLLM(body: Partial<{
   provider: string
+  embed_provider: string
   ollama_url: string
   embed_url: string
   api_key: string
+  anthropic_api_key: string
+  openai_api_key: string
   chat_model: string
   embed_model: string
   chat_model_fast: string
@@ -1600,28 +1615,36 @@ export async function updateAdminLLM(body: Partial<{
   repeat_window_hours: number
   taste_centroids: number
   debug_log: boolean
-}>): Promise<LLMSettings> {
-  return apiFetch<LLMSettings>('/api/admin/llm', { method: 'PUT', body })
+}>): Promise<LLMUpdateResult> {
+  return apiFetch<LLMUpdateResult>('/api/admin/llm', { method: 'PUT', body })
 }
 export interface LLMTestEndpoint {
   role: 'chat' | 'embed' | 'rerank'
+  provider?: string // '' / absent = an Ollama endpoint; 'anthropic' | 'openai' = hosted
   url: string
   reachable: boolean
   error?: string
   models?: Record<string, boolean>
+  available?: string[] // the endpoint's model catalog (sorted, capped) — datalist source
 }
 export interface LLMTestResult {
   ok: boolean
   endpoints: LLMTestEndpoint[]
 }
-// Probes the (possibly unsaved) form values: is each Ollama endpoint
-// reachable, and does it serve the configured models. Omitted fields fall
-// back server-side to stored settings, then the live client.
+// Probes the (possibly unsaved) form values: is each endpoint (Ollama box or
+// hosted provider) reachable, and does it serve the configured models.
+// Omitted fields fall back server-side to stored settings, then the live
+// client. Hosted-provider keys may be posted pre-save — safe because their
+// hosts are fixed server-side, never taken from this request.
 export async function testAdminLLM(body: Partial<{
+  provider: string
+  embed_provider: string
   ollama_url: string
   embed_url: string
   chat_model: string
   embed_model: string
+  anthropic_api_key: string
+  openai_api_key: string
 }>): Promise<LLMTestResult> {
   return apiFetch<LLMTestResult>('/api/admin/llm/test', { method: 'POST', body })
 }
