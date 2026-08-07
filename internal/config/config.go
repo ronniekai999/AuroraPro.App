@@ -67,14 +67,33 @@ type BugReportConfig struct {
 // natural-language query parsing. When Enabled is false the rest of the
 // system falls back to the existing trigram path; nothing else needs to know.
 type LLMConfig struct {
-	Enabled         bool
-	OllamaURL       string        // e.g. http://localhost:11434
-	EmbedModel      string        // Ollama tag for the embedding model
-	ChatModel       string        // Ollama tag for the query-parser / reranker
-	EmbedDims       int           // target vector dimensionality (must match migration)
-	BackfillWorkers int           // parallel backfill goroutines
-	BackfillBatch   int           // items per Ollama batch
-	HTTPTimeout     time.Duration // per-request budget
+	Enabled bool
+	// Provider / EmbedProvider select the chat and embedding backends
+	// independently ("" = legacy Ollama behavior). Values mirror
+	// internal/llm: local | ollama_cloud | anthropic | openai for chat,
+	// local | openai for embeds (Anthropic has no embeddings API). Envs
+	// LLM_PROVIDER / LLM_EMBED_PROVIDER; usually set from the admin UI via
+	// server_settings, which overrides these at boot (applyLLMOverrides).
+	Provider      string
+	EmbedProvider string
+	// Hosted-provider API keys (LLM_ANTHROPIC_API_KEY / LLM_OPENAI_API_KEY,
+	// or the llm_*_api_key settings rows). Each key only ever rides to its
+	// own provider's fixed host — see internal/llm key-isolation notes.
+	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	// Env-only base-URL overrides for gateway/proxy deployments
+	// (LLM_ANTHROPIC_BASE_URL / LLM_OPENAI_BASE_URL). Deliberately NOT
+	// admin-editable: a stored key must never be steerable to an
+	// operator-form-supplied host.
+	AnthropicBaseURL string
+	OpenAIBaseURL    string
+	OllamaURL        string        // e.g. http://localhost:11434
+	EmbedModel       string        // Ollama tag for the embedding model
+	ChatModel        string        // Ollama tag for the query-parser / reranker
+	EmbedDims        int           // target vector dimensionality (must match migration)
+	BackfillWorkers  int           // parallel backfill goroutines
+	BackfillBatch    int           // items per Ollama batch
+	HTTPTimeout      time.Duration // per-request budget
 	// NumCtx (env LLM_NUM_CTX) is sent as options.num_ctx on native
 	// /api/chat calls when > 0. Ollama's default context (4096) silently
 	// truncates over-long prompts; our prompt caps are tuned to stay
@@ -1062,6 +1081,27 @@ func applyEnvOverrides(cfg *Config) {
 	// LLM / semantic search — see internal/llm and internal/embedding.
 	if v := os.Getenv("LLM_ENABLED"); v != "" {
 		cfg.LLM.Enabled = v == "true" || v == "1" || v == "yes"
+	}
+	// Provider selection + hosted-provider credentials. The historical Ollama
+	// Cloud bearer (llm_api_key) is DB-only; these get env vars so an env-only
+	// deployment can run a hosted provider without ever opening the admin UI.
+	if v := os.Getenv("LLM_PROVIDER"); v != "" {
+		cfg.LLM.Provider = v
+	}
+	if v := os.Getenv("LLM_EMBED_PROVIDER"); v != "" {
+		cfg.LLM.EmbedProvider = v
+	}
+	if v := os.Getenv("LLM_ANTHROPIC_API_KEY"); v != "" {
+		cfg.LLM.AnthropicAPIKey = v
+	}
+	if v := os.Getenv("LLM_OPENAI_API_KEY"); v != "" {
+		cfg.LLM.OpenAIAPIKey = v
+	}
+	if v := os.Getenv("LLM_ANTHROPIC_BASE_URL"); v != "" {
+		cfg.LLM.AnthropicBaseURL = v
+	}
+	if v := os.Getenv("LLM_OPENAI_BASE_URL"); v != "" {
+		cfg.LLM.OpenAIBaseURL = v
 	}
 	if v := os.Getenv("LLM_OLLAMA_URL"); v != "" {
 		cfg.LLM.OllamaURL = v
