@@ -29,6 +29,8 @@ func TestIsLLMServerError(t *testing.T) {
 		{"500 typed", &llm.StatusError{Op: "chat", Status: 500, Body: `{"error":"Internal Server Error"}`}, true},
 		{"502 typed", &llm.StatusError{Op: "chat", Status: 502, Body: "bad gateway"}, true},
 		{"503 wrapped once", fmt.Errorf("rerank: %w", &llm.StatusError{Op: "chat", Status: 503, Body: "maintenance"}), true},
+		{"529 overloaded (anthropic)", &llm.StatusError{Op: "anthropic chat", Status: 529, Body: "overloaded"}, true},
+		{"429 rate limit (hosted providers — retry)", &llm.StatusError{Op: "openai chat", Status: 429, Body: "rate limited"}, true},
 		{"400 typed (no retry)", &llm.StatusError{Op: "chat", Status: 400, Body: "malformed"}, false},
 		{"401 typed (no retry)", &llm.StatusError{Op: "chat", Status: 401, Body: "unauthorized"}, false},
 		{"string lookalike (no retry)", errors.New("ollama chat: status 500: not actually typed"), false},
