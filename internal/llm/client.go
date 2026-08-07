@@ -222,6 +222,22 @@ func newGuardedHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		// Credential containment on redirects (same pattern as the imageproxy
+		// and party_share clients): Go's client strips Authorization on a
+		// cross-host redirect but FORWARDS custom headers — including the
+		// Anthropic x-api-key — so an endpoint 302ing to another host would
+		// otherwise carry the key along. LLM endpoints (Ollama boxes, vendor
+		// APIs) have no legitimate cross-host redirects; refuse them outright.
+		// Same-host redirects (http→https, path moves) stay allowed, capped.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("llm: too many redirects")
+			}
+			if req.URL.Host != via[0].URL.Host {
+				return fmt.Errorf("llm: refusing cross-host redirect from %s to %s (credential containment)", via[0].URL.Host, req.URL.Host)
+			}
+			return nil
+		},
 	}
 }
 

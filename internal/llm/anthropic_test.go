@@ -270,3 +270,32 @@ func TestListAnthropicModels(t *testing.T) {
 		t.Errorf("ids = %v", ids)
 	}
 }
+
+// TestCrossHostRedirectRefused pins credential containment on redirects:
+// Go's http.Client strips Authorization on a cross-host hop but FORWARDS
+// custom headers like x-api-key, so the guarded client must refuse the hop
+// outright. The attacker host must never be dialed with the key.
+func TestCrossHostRedirectRefused(t *testing.T) {
+	var attackerHit bool
+	var attackerSawKey string
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attackerHit = true
+		attackerSawKey = r.Header.Get("x-api-key")
+		_, _ = io.WriteString(w, anthropicOKBody)
+	}))
+	defer attacker.Close()
+	// Different host:port than the attacker server → cross-host redirect.
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, attacker.URL+"/v1/messages", http.StatusFound)
+	}))
+	defer vendor.Close()
+
+	c := newAnthropicClient(vendor.URL, "")
+	_, err := c.ChatJSONWith(context.Background(), "m", "s", "u", nil, false)
+	if err == nil || !strings.Contains(err.Error(), "cross-host redirect") {
+		t.Fatalf("want cross-host-redirect refusal, got %v", err)
+	}
+	if attackerHit {
+		t.Fatalf("redirect target was dialed (x-api-key seen: %q) — credential containment broken", attackerSawKey)
+	}
+}
