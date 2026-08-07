@@ -1311,68 +1311,132 @@ function AdminLLMTab() {
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [apiKeyEdit, setApiKeyEdit] = useState('')
+  const [anthropicKeyEdit, setAnthropicKeyEdit] = useState('')
+  const [openaiKeyEdit, setOpenaiKeyEdit] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<LLMTestResult | null>(null)
   const [testError, setTestError] = useState<string | null>(null)
+  // Last server-confirmed settings — the restore source when the operator
+  // switches providers back and forth before saving.
+  const loadedRef = useRef<LLMSettings | null>(null)
   useEffect(() => {
     const ac = new AbortController()
-    getAdminLLM(ac.signal).then(setS).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
+    getAdminLLM(ac.signal).then(next => { loadedRef.current = next; setS(next) }).catch(e => { if (e.name !== 'AbortError') setErr(e.message) })
     return () => ac.abort()
   }, [])
   if (err) return <p className="text-red-300 text-sm">{err}</p>
   if (!s) return <p className="text-white/40 text-sm">Loading…</p>
+  const hostedChat = s.provider === 'anthropic' || s.provider === 'openai'
+  const openaiEmbeds = s.embed_provider === 'openai'
+  const showAnthropicKey = s.provider === 'anthropic'
+  const showOpenAIKey = s.provider === 'openai' || openaiEmbeds
+  // Model names only make sense within a provider family. When the operator
+  // switches families, carrying the old family's tags forward would persist
+  // them on save — hosted chat then 404s on an Ollama tag after restart, and
+  // the embed path re-embeds against a model the provider doesn't serve. So:
+  // crossing families blanks the model fields (blank = the new provider's
+  // default, which the placeholders spell out); returning to the loaded
+  // family restores the server-confirmed values.
+  const chatFamily = (p: string) => (p === 'anthropic' || p === 'openai') ? p : 'ollama'
+  const embedFamily = (p: string) => p === 'openai' ? 'openai' : 'ollama'
+  const changeProvider = (p: string) => {
+    const next = { ...s, provider: p }
+    if (chatFamily(p) !== chatFamily(s.provider)) {
+      const loaded = loadedRef.current
+      if (loaded && chatFamily(p) === chatFamily(loaded.provider)) {
+        next.chat_model = loaded.chat_model; next.chat_model_fast = loaded.chat_model_fast; next.chat_model_smart = loaded.chat_model_smart
+      } else {
+        next.chat_model = ''; next.chat_model_fast = ''; next.chat_model_smart = ''
+      }
+    }
+    setS(next)
+  }
+  const changeEmbedProvider = (p: string) => {
+    const next = { ...s, embed_provider: p }
+    if (embedFamily(p) !== embedFamily(s.embed_provider)) {
+      const loaded = loadedRef.current
+      next.embed_model = (loaded && embedFamily(p) === embedFamily(loaded.embed_provider)) ? loaded.embed_model : ''
+    }
+    setS(next)
+  }
+  const chatPlaceholder = s.provider === 'anthropic' ? 'blank = claude-sonnet-5' : s.provider === 'openai' ? 'blank = gpt-5.6-terra' : (s.effective_chat_model ? `blank = ${s.effective_chat_model}` : 'e.g. qwen3:4b-instruct')
+  const smartPlaceholder = s.provider === 'anthropic' ? 'Discover curation · blank = claude-opus-5' : s.provider === 'openai' ? 'Discover curation · blank = gpt-5.6-sol' : 'Discover curation · blank = Chat Model'
+  const embedPlaceholder = openaiEmbeds ? 'blank = text-embedding-3-small' : (s.effective_embed_model ? `blank = ${s.effective_embed_model}` : 'e.g. qwen3-embedding:0.6b')
+  const chatAvailable = testResult?.endpoints.find(ep => ep.role === 'chat')?.available ?? []
+  const embedAvailable = testResult?.endpoints.find(ep => ep.role === 'embed')?.available ?? []
   return (
     <div className="glass-panel rounded-2xl p-5 space-y-3">
       <h2 className="text-white font-semibold mb-2">LLM (Search + Recommendations)</h2>
-      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box (an API key is optional, for bearer-checking proxies); Ollama Cloud runs chat on ollama.com (API key + https URL required — embeddings stay local). Enable/disable the whole stack via LLM_ENABLED.</p>
+      <p className="text-white/40 text-xs mb-3">Configures the LLM used for natural-language search and recommendation reranking. Local runs chat on your own box; Ollama Cloud runs chat on ollama.com; Anthropic (Claude) and OpenAI (ChatGPT) run chat on their hosted APIs with your API key. Embeddings run on local Ollama by default, or on OpenAI — Anthropic has no embeddings API. Enable/disable the whole stack via LLM_ENABLED.</p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Provider</span>
-          <select value={s.provider} onChange={e => setS({ ...s, provider: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+          <select value={s.provider} onChange={e => changeProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
             <option value="">Default (env config)</option>
             <option value="ollama_cloud">Ollama Cloud</option>
             <option value="local">Local (Ollama)</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI (ChatGPT)</option>
           </select>
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama URL</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embedding Provider</span>
+          <select value={s.embed_provider} onChange={e => changeEmbedProvider(e.target.value)} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
+            <option value="">Local (Ollama)</option>
+            <option value="openai">OpenAI</option>
+          </select>
+          <span className="block text-[10px] text-amber-300/80 mt-1">Changing the embedding provider or model clears stored vectors and re-embeds the whole library on restart{openaiEmbeds ? ' (OpenAI API cost applies)' : ''}.</span>
+        </label>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
           <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed URL (optional)</span>
           <input value={s.embed_url} onChange={e => setS({ ...s, embed_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Chat Model</span>
-          <input value={s.chat_model} onChange={e => setS({ ...s, chat_model: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input value={s.chat_model} onChange={e => setS({ ...s, chat_model: e.target.value })} placeholder={chatPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed Model</span>
-          <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input value={s.embed_model} onChange={e => setS({ ...s, embed_model: e.target.value })} placeholder={embedPlaceholder} list="llm-embed-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Fast Model (optional)</span>
-          <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input value={s.chat_model_fast ?? ''} onChange={e => setS({ ...s, chat_model_fast: e.target.value })} placeholder="hero rerank + rail reasons · blank = Chat Model" list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Smart Model (optional)</span>
-          <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder="Discover curation · blank = Chat Model" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input value={s.chat_model_smart ?? ''} onChange={e => setS({ ...s, chat_model_smart: e.target.value })} placeholder={smartPlaceholder} list="llm-chat-models" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
-        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+        <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama API Key {s.has_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
           <input type="password" data-screenshot-exclude="true" value={apiKeyEdit} onChange={e => setApiKeyEdit(e.target.value)} placeholder={s.api_key_masked || 'leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
         </label>
+        {showAnthropicKey && (
+          <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Anthropic API Key {s.has_anthropic_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+            <input type="password" data-screenshot-exclude="true" value={anthropicKeyEdit} onChange={e => setAnthropicKeyEdit(e.target.value)} placeholder={s.anthropic_api_key_masked || 'sk-ant-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          </label>
+        )}
+        {showOpenAIKey && (
+          <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">OpenAI API Key {s.has_openai_api_key && <span className="text-emerald-300 text-[10px]">SET</span>}</span>
+            <input type="password" data-screenshot-exclude="true" value={openaiKeyEdit} onChange={e => setOpenaiKeyEdit(e.target.value)} placeholder={s.openai_api_key_masked || 'sk-… · leave empty to keep existing'} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          </label>
+        )}
       </div>
+      <datalist id="llm-chat-models">{chatAvailable.map(m => <option key={m} value={m} />)}</datalist>
+      <datalist id="llm-embed-models">{embedAvailable.map(m => <option key={m} value={m} />)}</datalist>
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
         <input type="checkbox" checked={s.debug_log} onChange={e => setS({ ...s, debug_log: e.target.checked })} />
         Debug log <span className="text-white/40 text-xs">(verbose LLM call traces — adds disk I/O)</span>
       </label>
-      <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
-        <input type="checkbox" checked={s.structured_outputs ?? false} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
-        Structured outputs <span className="text-white/40 text-xs">(OpenAI json_schema path for the hero rerank — restart required)</span>
+      <label className={`flex items-center gap-2 mt-2 text-sm ${hostedChat ? 'text-white/30' : 'text-white/70'}`} title={hostedChat ? 'Always on for Anthropic/OpenAI — they enforce schemas natively' : undefined}>
+        <input type="checkbox" disabled={hostedChat} checked={hostedChat ? true : (s.structured_outputs ?? false)} onChange={e => setS({ ...s, structured_outputs: e.target.checked })} />
+        Structured outputs <span className="text-white/40 text-xs">{hostedChat ? '(always on for Anthropic/OpenAI)' : '(OpenAI json_schema path for the hero rerank — restart required)'}</span>
       </label>
       <label className="flex items-center gap-2 mt-2 text-sm text-white/70">
         Reasoning effort
         <select value={s.reasoning_effort ?? ''} onChange={e => setS({ ...s, reasoning_effort: e.target.value })} className="px-2 py-1 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm">
           <option value="">Default (model decides)</option>
-          <option value="low">Low — fastest, recommended for gpt-oss</option>
+          <option value="low">Low — fastest{hostedChat ? '' : ', recommended for gpt-oss'}</option>
           <option value="medium">Medium</option>
           <option value="high">High</option>
           <option value="none">None</option>
         </select>
-        <span className="text-white/40 text-xs">gpt-oss · structured /v1 path · restart required</span>
+        <span className="text-white/40 text-xs">{s.provider === 'anthropic' ? 'maps to Claude output effort' : s.provider === 'openai' ? 'sent as reasoning_effort' : 'gpt-oss · structured /v1 path'} · restart required</span>
       </label>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Reranker Model (optional)</span>
@@ -1395,7 +1459,8 @@ function AdminLLMTab() {
             setSaving(true)
             try {
               const body: Record<string, unknown> = {
-                provider: s.provider, ollama_url: s.ollama_url, embed_url: s.embed_url,
+                provider: s.provider, embed_provider: s.embed_provider,
+                ollama_url: s.ollama_url, embed_url: s.embed_url,
                 chat_model: s.chat_model, embed_model: s.embed_model, debug_log: s.debug_log,
                 chat_model_fast: s.chat_model_fast ?? '', chat_model_smart: s.chat_model_smart ?? '',
                 structured_outputs: s.structured_outputs ?? false, reasoning_effort: s.reasoning_effort ?? '',
@@ -1404,9 +1469,15 @@ function AdminLLMTab() {
                 taste_centroids: s.taste_centroids ?? 3,
               }
               if (apiKeyEdit) body.api_key = apiKeyEdit
-              const next = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
-              setS(next); setApiKeyEdit('')
-              window.alert('LLM settings saved.')
+              if (anthropicKeyEdit) body.anthropic_api_key = anthropicKeyEdit
+              if (openaiKeyEdit) body.openai_api_key = openaiKeyEdit
+              const ack = await updateAdminLLM(body as Parameters<typeof updateAdminLLM>[0])
+              // The PUT returns an ack, not the settings — re-fetch so the
+              // form reflects what was persisted (masked keys, SET badges).
+              const next = await getAdminLLM()
+              loadedRef.current = next
+              setS(next); setApiKeyEdit(''); setAnthropicKeyEdit(''); setOpenaiKeyEdit('')
+              window.alert(ack.restart_required ? 'LLM settings saved. Restart Aurora to apply them.' : 'LLM settings saved.')
             } catch (e) { window.alert('Save failed: ' + (e instanceof Error ? e.message : 'unknown')) }
             finally { setSaving(false) }
           }}
@@ -1419,10 +1490,16 @@ function AdminLLMTab() {
           onClick={async () => {
             setTesting(true); setTestResult(null); setTestError(null)
             try {
-              setTestResult(await testAdminLLM({
+              const body: Parameters<typeof testAdminLLM>[0] = {
+                provider: s.provider, embed_provider: s.embed_provider,
                 ollama_url: s.ollama_url, embed_url: s.embed_url,
                 chat_model: s.chat_model, embed_model: s.embed_model,
-              }))
+              }
+              // Unsaved keys ride the probe (fixed vendor hosts server-side);
+              // omitted = test the stored key.
+              if (anthropicKeyEdit) body.anthropic_api_key = anthropicKeyEdit
+              if (openaiKeyEdit) body.openai_api_key = openaiKeyEdit
+              setTestResult(await testAdminLLM(body))
             } catch (e) { setTestError(e instanceof Error ? e.message : 'test failed') }
             finally { setTesting(false) }
           }}
@@ -1435,8 +1512,8 @@ function AdminLLMTab() {
       {testResult && (
         <div className="mt-2 space-y-1 text-xs">
           {testResult.endpoints.map(ep => (
-            <div key={ep.role + ep.url} className="text-white/70">
-              <span className="uppercase text-white/40 mr-1">{ep.role}</span>
+            <div key={ep.role + (ep.provider ?? '') + ep.url} className="text-white/70">
+              <span className="uppercase text-white/40 mr-1">{ep.role}{ep.provider ? ` · ${ep.provider}` : ''}</span>
               <span className="mr-2">{ep.url}</span>
               {ep.reachable ? (
                 <span className="text-emerald-300">reachable</span>
@@ -1445,7 +1522,7 @@ function AdminLLMTab() {
               )}
               {ep.models && Object.entries(ep.models).map(([m, ok]) => (
                 <span key={m} className={ok ? 'ml-2 text-emerald-300' : 'ml-2 text-amber-300'}>
-                  {m}: {ok ? 'found' : 'missing — ollama pull ' + m}
+                  {m}: {ok ? 'found' : ep.provider ? 'not available to this API key' : 'missing — ollama pull ' + m}
                 </span>
               ))}
             </div>

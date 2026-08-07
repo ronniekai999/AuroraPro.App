@@ -87,3 +87,10 @@ func (c *Client) BaseURL() string { return c.cfg.BaseURL }
 // full resolution — including the Cloud→local embed coercion — which is why
 // the handler prefers it over re-deriving the fallback.
 func (c *Client) EmbedBaseURL() string { return c.embedURL() }
+
+// AnthropicURL / OpenAIURL expose the effective hosted-provider endpoints
+// (env override when set, else the vendor constant) for the admin test
+// handler — mirroring BaseURL()/EmbedBaseURL() for the Ollama endpoints, and
+// letting the test probe inherit a gateway override from the live client.
+func (c *Client) AnthropicURL() string { return c.anthropicBaseURL() }
+func (c *Client) OpenAIURL() string    { return c.openaiBaseURL() }

@@ -30,11 +30,32 @@ const maxLoggedBody = 8 * 1024 * 1024
 // Config controls how the client talks to Ollama. All fields have sensible
 // defaults applied by NewClient when zero — callers only set what they want.
 type Config struct {
-	BaseURL    string // e.g. "http://localhost:11434" or "https://ollama.com"
-	EmbedURL   string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
-	APIKey     string // optional bearer token for Ollama Cloud
-	EmbedModel string // e.g. "qwen3-embedding:0.6b"
-	ChatModel  string // e.g. "qwen3:4b-instruct", "gemma3:12b", "gpt-oss:20b"
+	// Provider selects the CHAT backend: "" | "local" | "ollama_cloud" (Ollama
+	// endpoints at BaseURL, the pre-split behavior) or "anthropic" | "openai"
+	// (hosted APIs at compile-time base URLs; BaseURL is not consulted for
+	// chat). EmbedProvider selects the EMBEDDING backend independently — "" |
+	// "local" keeps Ollama at EmbedURL/BaseURL, "openai" uses the OpenAI
+	// embeddings API — because Anthropic has no embeddings API, so a Claude
+	// chat setup still needs Ollama or OpenAI for vectors.
+	Provider      string
+	EmbedProvider string
+	BaseURL       string // e.g. "http://localhost:11434" or "https://ollama.com"
+	EmbedURL      string // optional; override for embeddings only (used when chat is on Cloud but embed is local)
+	APIKey        string // optional bearer token for Ollama Cloud
+	// Per-provider credentials. Key isolation is structural: each key is only
+	// ever attached by its own provider's adapter to that provider's fixed
+	// host — APIKey (Ollama Cloud) never reaches api.anthropic.com/api.openai.com
+	// and vice versa, extending the sendAuth discipline in rerank.go.
+	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	// Base-URL escape hatches for the hosted providers, for gateway/proxy
+	// deployments and httptest fakes. Env/test only — deliberately NOT
+	// admin-editable, so a stored key can never be steered to an
+	// attacker-supplied host from the settings UI.
+	AnthropicBaseURL string
+	OpenAIBaseURL    string
+	EmbedModel       string // e.g. "qwen3-embedding:0.6b"
+	ChatModel        string // e.g. "qwen3:4b-instruct", "gemma3:12b", "gpt-oss:20b"
 	// Per-surface routing (Phase A). Empty → fall back to ChatModel, so a
 	// deployment that sets none behaves exactly as before. Fast = frequent,
 	// latency-sensitive surfaces (hero rerank, rail reasons); Smart = the
@@ -85,14 +106,43 @@ func NewClient(cfg Config) *Client {
 	// (trivially pasted into the admin form) otherwise silently breaks model
 	// lookup with a confusing "model not found" / reranker "unreachable" error —
 	// observed 2026-06-08 with "dengcao/Qwen3-Reranker-8B:Q3_K_M ".
+	cfg.Provider = strings.TrimSpace(cfg.Provider)
+	cfg.EmbedProvider = strings.TrimSpace(cfg.EmbedProvider)
 	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
 	cfg.EmbedURL = strings.TrimSpace(cfg.EmbedURL)
+	cfg.AnthropicBaseURL = strings.TrimSpace(cfg.AnthropicBaseURL)
+	cfg.OpenAIBaseURL = strings.TrimSpace(cfg.OpenAIBaseURL)
 	cfg.RerankURL = strings.TrimSpace(cfg.RerankURL)
 	cfg.ChatModel = strings.TrimSpace(cfg.ChatModel)
 	cfg.ChatModelFast = strings.TrimSpace(cfg.ChatModelFast)
 	cfg.ChatModelSmart = strings.TrimSpace(cfg.ChatModelSmart)
 	cfg.EmbedModel = strings.TrimSpace(cfg.EmbedModel)
 	cfg.RerankModel = strings.TrimSpace(cfg.RerankModel)
+
+	// Provider-aware model defaults, applied BEFORE the generic Ollama
+	// fallbacks below so a hosted-provider Config with empty model fields
+	// lands on that provider's models, not on qwen. Quality-first tiers per
+	// the feature decision: fast rides ChatModel via the ChatModelFast()
+	// fallback; smart gets the flagship.
+	switch cfg.Provider {
+	case ProviderAnthropic:
+		if cfg.ChatModel == "" {
+			cfg.ChatModel = anthropicDefaultChatModel
+		}
+		if cfg.ChatModelSmart == "" {
+			cfg.ChatModelSmart = anthropicDefaultSmartModel
+		}
+	case ProviderOpenAI:
+		if cfg.ChatModel == "" {
+			cfg.ChatModel = openaiDefaultChatModel
+		}
+		if cfg.ChatModelSmart == "" {
+			cfg.ChatModelSmart = openaiDefaultSmartModel
+		}
+	}
+	if cfg.EmbedProvider == ProviderOpenAI && cfg.EmbedModel == "" {
+		cfg.EmbedModel = openaiDefaultEmbedModel
+	}
 
 	// Fallback defaults for a zero Config. Keep these IN SYNC with the
 	// canonical defaults in internal/config (Load's LLMConfig block) — the
@@ -172,6 +222,22 @@ func newGuardedHTTPClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		// Credential containment on redirects (same pattern as the imageproxy
+		// and party_share clients): Go's client strips Authorization on a
+		// cross-host redirect but FORWARDS custom headers — including the
+		// Anthropic x-api-key — so an endpoint 302ing to another host would
+		// otherwise carry the key along. LLM endpoints (Ollama boxes, vendor
+		// APIs) have no legitimate cross-host redirects; refuse them outright.
+		// Same-host redirects (http→https, path moves) stay allowed, capped.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("llm: too many redirects")
+			}
+			if req.URL.Host != via[0].URL.Host {
+				return fmt.Errorf("llm: refusing cross-host redirect from %s to %s (credential containment)", via[0].URL.Host, req.URL.Host)
+			}
+			return nil
+		},
 	}
 }
 
@@ -202,16 +268,50 @@ func (c *Client) ChatModel() string { return c.cfg.ChatModel }
 // EmbedModel returns the currently configured embedding model name.
 func (c *Client) EmbedModel() string { return c.cfg.EmbedModel }
 
+// Provider returns the configured chat provider ("" = unset/legacy Ollama).
+func (c *Client) Provider() string { return c.cfg.Provider }
+
+// EmbedProviderName returns the configured embedding provider ("" = local
+// Ollama, the legacy behavior).
+func (c *Client) EmbedProviderName() string { return c.cfg.EmbedProvider }
+
+// EmbedSpaceID identifies the embedding vector space for the model-space
+// marker (embedding.ensureModelSpace): vectors from different spaces must
+// never share the pgvector column, and a space change nulls + re-embeds the
+// whole library.
+//
+// FORMAT IS LOAD-BEARING: for Ollama-family embeds this returns the bare
+// model name because that is what every existing install's marker row
+// (llm_embed_model_active) already holds — qualifying it would make marker !=
+// effective on first boot after upgrade and spuriously null every install's
+// vectors. Only non-Ollama spaces get a provider prefix; the "/" is
+// unambiguous because Ollama model tags use ":" not "/" for variants.
+func (c *Client) EmbedSpaceID() string {
+	if c.cfg.EmbedProvider == ProviderOpenAI {
+		return "openai/" + c.cfg.EmbedModel
+	}
+	return c.cfg.EmbedModel
+}
+
 // Dims reports the target embedding dimensionality — used by callers (e.g. the
 // pgvector formatter) to validate they're inserting the right shape.
 func (c *Client) Dims() int { return c.cfg.Dims }
 
-// Ping verifies Ollama is reachable. Use this from main.go to fail fast or to
-// degrade gracefully (skip embedding init) if the sidecar is down. We use
-// /api/tags on the embed URL (local Ollama) so a Cloud-only chat config still
-// pings the local box where embeddings actually live. Delegates to ListModels
-// (probe.go) so there is exactly one /api/tags implementation.
+// Ping verifies the EMBEDDING backend is reachable — that's the dependency
+// main.go degrades on (skip embedding init) when it's down. For Ollama-family
+// embeds we use /api/tags on the embed URL (local Ollama) so a Cloud-only
+// chat config still pings the local box where embeddings actually live,
+// delegating to ListModels (probe.go) so there is exactly one /api/tags
+// implementation. With EmbedProvider=openai the probe goes to api.openai.com
+// instead — an all-cloud config (anthropic/openai chat + openai embeds) must
+// boot cleanly on a box with no Ollama at all.
 func (c *Client) Ping(ctx context.Context) error {
+	if c.cfg.EmbedProvider == ProviderOpenAI {
+		if _, err := c.ListOpenAIModels(ctx); err != nil {
+			return fmt.Errorf("openai ping: %w", err)
+		}
+		return nil
+	}
 	if _, err := c.ListModels(ctx, c.embedURL(), false); err != nil {
 		return fmt.Errorf("ollama ping: %w", err)
 	}
@@ -259,6 +359,17 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		}
 	}
 
+	// Hosted embedding provider takes over the transport; the shaping tail
+	// (truncate/normalize/dims guard) is shared so both paths enforce the
+	// same pgvector contract.
+	if c.cfg.EmbedProvider == ProviderOpenAI {
+		vectors, err := c.embedOpenAI(ctx, cleaned)
+		if err != nil {
+			return nil, err
+		}
+		return c.shapeEmbeddings(texts, vectors, "openai embed")
+	}
+
 	body, err := json.Marshal(embedRequest{Model: c.cfg.EmbedModel, Input: cleaned})
 	if err != nil {
 		return nil, err
@@ -300,8 +411,16 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		return nil, fmt.Errorf("ollama embed: got %d vectors for %d inputs", len(out.Embeddings), len(texts))
 	}
 
-	result := make([][]float32, len(out.Embeddings))
-	for i, v := range out.Embeddings {
+	return c.shapeEmbeddings(texts, out.Embeddings, "ollama embed")
+}
+
+// shapeEmbeddings is the provider-neutral tail of EmbedBatch: empty inputs
+// map to nil vectors, everything else is truncated to cfg.Dims and
+// L2-normalized so pgvector's cosine distance reduces to a dot product. op
+// prefixes errors so an operator can tell which backend produced them.
+func (c *Client) shapeEmbeddings(texts []string, embeddings [][]float32, op string) ([][]float32, error) {
+	result := make([][]float32, len(embeddings))
+	for i, v := range embeddings {
 		if texts[i] == "" {
 			result[i] = nil
 			continue
@@ -314,7 +433,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 		// would re-fetch and hot-spin the same rows forever. Fail loudly here
 		// instead: the backfill wave errors → backs off → gives up cleanly.
 		if len(result[i]) != c.cfg.Dims {
-			return nil, fmt.Errorf("ollama embed: model %q produced %d dims, want %d (llm_embed_model / EmbedDims must match the embedding column)", c.cfg.EmbedModel, len(result[i]), c.cfg.Dims)
+			return nil, fmt.Errorf("%s: model %q produced %d dims, want %d (llm_embed_model / EmbedDims must match the embedding column)", op, c.cfg.EmbedModel, len(result[i]), c.cfg.Dims)
 		}
 	}
 	return result, nil
@@ -366,9 +485,13 @@ type chatResponse struct {
 // 500s on nested schemas — see discover.go). This is the foundation Phase C
 // will reuse to re-enable enforced schemas on Discover.
 type oaiChatRequest struct {
-	Model           string             `json:"model"`
-	Messages        []ChatMessage      `json:"messages"`
-	Temperature     float64            `json:"temperature"`
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	// Temperature is a pointer so the two consumers of this shape can differ
+	// on the wire: the Ollama /v1 path pins 0.1 (deterministic curation, the
+	// historical bytes), while the api.openai.com path leaves it nil/omitted —
+	// gpt-5-family reasoning models 400 on non-default temperature values.
+	Temperature     *float64           `json:"temperature,omitempty"`
 	ReasoningEffort string             `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *oaiResponseFormat `json:"response_format,omitempty"`
 }
@@ -427,19 +550,32 @@ func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) 
 }
 
 // ChatJSONWith sends a structured-output chat request on an explicit model.
-// When structured it uses the OpenAI-compatible /v1/chat/completions path
-// (response_format=json_schema when schema != nil, otherwise a plain /v1 call);
-// when not structured it uses Ollama's native /api/chat `format` field. The /v1
-// path is also where reasoning_effort is applied, so a *schemaless* /v1 call is
-// how Discover suppresses gpt-oss's runaway reasoning. An empty model falls back
-// to the configured default. Cloud models can ignore the schema on EITHER path,
-// so callers MUST still run a tolerant parser on the returned string.
 //
-// Temperature is fixed low (0.1) — curation/parsing should be deterministic,
-// not creative.
+// Hosted providers (anthropic/openai) are routed first and IGNORE the
+// structured flag — each always takes its own native schema path
+// (output_config.format / response_format), because the flag only exists to
+// pick between two Ollama transports. Consumers that hardcode structured=false
+// (rail reasons, recaps) therefore still get real schema enforcement on a
+// hosted provider, with the tolerant parser unchanged as the safety net.
+//
+// For Ollama-family providers: when structured it uses the OpenAI-compatible
+// /v1/chat/completions path (response_format=json_schema when schema != nil,
+// otherwise a plain /v1 call); when not structured it uses Ollama's native
+// /api/chat `format` field. The /v1 path is also where reasoning_effort is
+// applied, so a *schemaless* /v1 call is how Discover suppresses gpt-oss's
+// runaway reasoning. An empty model falls back to the configured default.
+// Cloud models can ignore the schema on EITHER path, so callers MUST still
+// run a tolerant parser on the returned string.
+//
+// Temperature on the Ollama paths is fixed low (0.1) — curation/parsing
+// should be deterministic, not creative. The hosted providers omit it (their
+// current models reject explicit sampling parameters).
 func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, schema any, structured bool) (string, error) {
 	if model == "" {
 		model = c.cfg.ChatModel
+	}
+	if out, handled, err := c.chatViaProvider(ctx, model, system, user, schema); handled {
+		return out, err
 	}
 	if structured {
 		// OpenAI-compatible /v1 path. The schema is OPTIONAL here: when it's nil
@@ -452,6 +588,22 @@ func (c *Client) ChatJSONWith(ctx context.Context, model, system, user string, s
 		return c.chatOpenAISchema(ctx, c.cfg.BaseURL, true, model, system, user, schema)
 	}
 	return c.chatNative(ctx, c.cfg.BaseURL, true, model, system, user, schema)
+}
+
+// chatViaProvider routes a chat call to the configured hosted provider.
+// handled=false means an Ollama-family provider is configured and the caller
+// should run the existing native-vs-/v1 selection. Shared by ChatJSONWith and
+// Rerank so a hosted provider carries every chat surface, reranking included.
+func (c *Client) chatViaProvider(ctx context.Context, model, system, user string, schema any) (out string, handled bool, err error) {
+	switch c.cfg.Provider {
+	case ProviderAnthropic:
+		out, err = c.chatAnthropic(ctx, model, system, user, schema)
+		return out, true, err
+	case ProviderOpenAI:
+		out, err = c.chatOpenAI(ctx, model, system, user, schema)
+		return out, true, err
+	}
+	return "", false, nil
 }
 
 // chatNative is the Ollama-native /api/chat path (the original ChatJSON body,
@@ -542,13 +694,14 @@ func (c *Client) chatOpenAISchema(ctx context.Context, baseURL string, sendAuth 
 			JSONSchema: oaiJSONSchema{Name: "result", Schema: schema, Strict: false},
 		}
 	}
+	temp := 0.1
 	body, err := json.Marshal(oaiChatRequest{
 		Model: model,
 		Messages: []ChatMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		Temperature:     0.1,
+		Temperature:     &temp,                 // pinned 0.1 on the Ollama /v1 path — historical wire bytes
 		ReasoningEffort: c.cfg.ReasoningEffort, // omitempty when unset
 		ResponseFormat:  responseFormat,        // nil → omitted; Discover sends no schema
 	})
@@ -644,15 +797,25 @@ func (c *Client) logResponseEmbed(reqID string, status int, body []byte) {
 		"body", redactEmbeddings(body))
 }
 
-// redactEmbeddings rewrites the inner `[[...]]` array to a one-line summary.
-// Best-effort: on parse failure we just return the raw bytes so debug logs
-// don't disappear silently.
+// redactEmbeddings rewrites the vector payload to a one-line summary —
+// handling both the Ollama shape ({"embeddings":[[...]]}) and the OpenAI
+// shape ({"data":[{"index","embedding":[...]}]}). Best-effort: on parse
+// failure we just return the raw bytes so debug logs don't disappear
+// silently.
 func redactEmbeddings(body []byte) string {
 	var parsed struct {
 		Embeddings [][]float32 `json:"embeddings"`
+		Data       []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil || len(parsed.Embeddings) == 0 {
+	if err := json.Unmarshal(body, &parsed); err != nil || (len(parsed.Embeddings) == 0 && len(parsed.Data) == 0) {
 		return snippet(body, 512)
+	}
+	if len(parsed.Embeddings) == 0 {
+		for _, d := range parsed.Data {
+			parsed.Embeddings = append(parsed.Embeddings, d.Embedding)
+		}
 	}
 	var b strings.Builder
 	b.WriteString(`{"embeddings":[`)

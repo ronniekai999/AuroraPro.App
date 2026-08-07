@@ -649,15 +649,18 @@ func chatJSONWithRetryOn5xx(
 	return callChat(ctx)
 }
 
-// isLLMServerError detects 5xx errors from the LLM client via the typed
+// isLLMServerError detects retryable errors from the LLM client via the typed
 // *llm.StatusError (errors.As unwraps through any fmt.Errorf %w wrapping the
-// call sites add). 5xx is the only class worth retrying — a 4xx is a
-// client-side bug (auth, malformed request) that a retry would just repeat.
-// This replaced the old `strings.Contains(err, "ollama chat: status 5")`
-// check, whose failure mode on message drift was silently never retrying.
+// call sites add). The retryable class is 5xx plus 429: with hosted providers
+// (Anthropic/OpenAI) a 429 is a per-minute token bucket that routinely clears
+// inside the 1s backoff, and Anthropic's 529 overloaded is already ≥500.
+// Other 4xx are client-side bugs (auth, malformed request) that a retry would
+// just repeat. This replaced the old `strings.Contains(err, "ollama chat:
+// status 5")` check, whose failure mode on message drift was silently never
+// retrying.
 func isLLMServerError(err error) bool {
 	var se *llm.StatusError
-	return errors.As(err, &se) && se.IsServerError()
+	return errors.As(err, &se) && se.IsRetryable()
 }
 
 // buildDiscoverPrompt formats the user-side message: anchors, then the

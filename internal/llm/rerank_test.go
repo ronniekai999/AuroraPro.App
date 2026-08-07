@@ -200,3 +200,69 @@ func TestNewClientTrimsConfig(t *testing.T) {
 		t.Errorf("spaces-only ChatModel should default, got %q", got)
 	}
 }
+
+// TestRerankHostedProviderRidesProviderChat: a hosted chat provider with no
+// explicit RerankURL runs the listwise rerank on that provider's chat path —
+// reranking is just a chat call and must follow the provider like every other
+// surface.
+func TestRerankHostedProviderRidesProviderChat(t *testing.T) {
+	var gotPath, gotXAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotXAPIKey = r.Header.Get("x-api-key")
+		_, _ = io.WriteString(w, `{"content":[{"type":"text","text":"{\"scores\":[{\"index\":1,\"score\":90},{\"index\":2,\"score\":10}]}"}],"stop_reason":"end_turn"}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{
+		Provider:         ProviderAnthropic,
+		AnthropicBaseURL: srv.URL,
+		AnthropicAPIKey:  "sk-ant-test",
+		BaseURL:          "http://127.0.0.1:1", // Ollama must never be dialed
+		RerankModel:      "claude-sonnet-5",
+	})
+	scores, scored, err := c.Rerank(context.Background(), "q", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotPath != "/v1/messages" {
+		t.Errorf("rerank path = %q, want the provider chat path /v1/messages", gotPath)
+	}
+	if gotXAPIKey != "sk-ant-test" {
+		t.Errorf("rerank must authenticate as the provider; x-api-key = %q", gotXAPIKey)
+	}
+	if scored != 2 || !approxEq(scores[0], 0.9) || !approxEq(scores[1], 0.1) {
+		t.Errorf("scores=%v scored=%d", scores, scored)
+	}
+}
+
+// TestRerankExplicitURLKeepsOllamaPath: an explicit RerankURL still means "a
+// separate/local Ollama box" even when chat is on a hosted provider — the call
+// takes the native path there, and NO credential rides along (neither the
+// hosted key nor the Ollama bearer, since rerankBaseURL != BaseURL).
+func TestRerankExplicitURLKeepsOllamaPath(t *testing.T) {
+	var gotPath, gotAuthz, gotXAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthz = r.Header.Get("Authorization")
+		gotXAPIKey = r.Header.Get("x-api-key")
+		_, _ = io.WriteString(w, `{"message":{"content":"{\"scores\":[{\"index\":1,\"score\":70}]}"}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{
+		Provider:        ProviderAnthropic,
+		AnthropicAPIKey: "sk-ant-test",
+		APIKey:          "sk-ollama-test",
+		BaseURL:         "http://127.0.0.1:1",
+		RerankURL:       srv.URL,
+		RerankModel:     "qwen3:4b-instruct",
+	})
+	if _, _, err := c.Rerank(context.Background(), "q", []string{"a"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotPath != "/api/chat" {
+		t.Errorf("explicit RerankURL path = %q, want native /api/chat", gotPath)
+	}
+	if gotAuthz != "" || gotXAPIKey != "" {
+		t.Errorf("no credential may ride to a separate rerank box; Authorization=%q x-api-key=%q", gotAuthz, gotXAPIKey)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -170,13 +171,22 @@ func (h *AdminHandler) SetAIBackfill(c AIBackfillController) {
 // which can drift from DebugLog (the persisted DB setting) between a write
 // and the next reload. The UI renders both: persisted (saved) vs live (now).
 type LLMSettings struct {
-	Provider     string `json:"provider"`       // "ollama_cloud" | "local" | "" (env-controlled)
-	OllamaURL    string `json:"ollama_url"`     // for chat endpoint
-	EmbedURL     string `json:"embed_url"`      // optional override for local embeddings
-	APIKeyMasked string `json:"api_key_masked"` // never the raw key
-	HasAPIKey    bool   `json:"has_api_key"`
-	ChatModel    string `json:"chat_model"`
-	EmbedModel   string `json:"embed_model"`
+	Provider string `json:"provider"` // "" (env-controlled) | "local" | "ollama_cloud" | "anthropic" | "openai"
+	// EmbedProvider selects the embedding backend independently of chat:
+	// "" | "local" (Ollama at embed_url/ollama_url) | "openai". Anthropic has
+	// no embeddings API, so it is never a valid value here.
+	EmbedProvider string `json:"embed_provider"`
+	OllamaURL     string `json:"ollama_url"`     // for chat endpoint (Ollama-family providers)
+	EmbedURL      string `json:"embed_url"`      // optional override for local embeddings
+	APIKeyMasked  string `json:"api_key_masked"` // never the raw key
+	HasAPIKey     bool   `json:"has_api_key"`
+	// Hosted-provider keys, same masked+has contract as the Ollama bearer.
+	AnthropicAPIKeyMasked string `json:"anthropic_api_key_masked"`
+	HasAnthropicAPIKey    bool   `json:"has_anthropic_api_key"`
+	OpenAIAPIKeyMasked    string `json:"openai_api_key_masked"`
+	HasOpenAIAPIKey       bool   `json:"has_openai_api_key"`
+	ChatModel             string `json:"chat_model"`
+	EmbedModel            string `json:"embed_model"`
 	// Phase A per-surface routing. Empty fast/smart ⇒ fall back to ChatModel.
 	// Restart-required (the client captures Config at NewClient), like ChatModel.
 	ChatModelFast     string `json:"chat_model_fast"`
@@ -199,9 +209,15 @@ type LLMSettings struct {
 	// single averaged centroid). Pointer+omitempty so "no row" → the UI's `?? 3`
 	// default, distinguishable from an explicit value. Restart-required.
 	TasteCentroids *int `json:"taste_centroids,omitempty"`
-	DebugLog       bool `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog   bool `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded   bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	DebugLog     bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	// Effective models the RUNNING client resolved (DB > env > defaults) —
+	// display only. Deliberately separate from the editable fields above:
+	// backfilling live values into chat_model/embed_model is what let a
+	// provider switch persist stale Ollama tags (see GetLLMSettings).
+	EffectiveChatModel  string `json:"effective_chat_model,omitempty"`
+	EffectiveEmbedModel string `json:"effective_embed_model,omitempty"`
 }
 
 // llmSettingKeys is the canonical list of server_settings rows we read/write.
@@ -210,6 +226,7 @@ var llmSettingKeys = struct {
 	Provider, OllamaURL, EmbedURL, APIKey, ChatModel, EmbedModel, DebugLog string
 	ChatModelFast, ChatModelSmart, StructuredOutputs, ReasoningEffort      string
 	RerankModel, RerankURL, RepeatWindowHours, TasteCentroids              string
+	EmbedProvider, AnthropicAPIKey, OpenAIAPIKey                           string
 }{
 	Provider:          "llm_provider",
 	OllamaURL:         "llm_ollama_url",
@@ -226,6 +243,12 @@ var llmSettingKeys = struct {
 	RerankURL:         "llm_reranker_url",
 	RepeatWindowHours: "recommender_repeat_window_hours",
 	TasteCentroids:    "recommender_taste_centroids",
+	// Hosted providers. The two key rows end in _api_key ON PURPOSE — that
+	// suffix is what gets them masked automatically by isSecretSettingKey on
+	// every generic settings read.
+	EmbedProvider:   "llm_embed_provider",
+	AnthropicAPIKey: "llm_anthropic_api_key",
+	OpenAIAPIKey:    "llm_openai_api_key",
 }
 
 // validReasoningEffort reports whether v is an accepted gpt-oss /v1
@@ -260,6 +283,7 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 		byKey[s.Key] = s.Value
 	}
 	out.Provider = byKey[llmSettingKeys.Provider]
+	out.EmbedProvider = byKey[llmSettingKeys.EmbedProvider]
 	out.OllamaURL = byKey[llmSettingKeys.OllamaURL]
 	out.EmbedURL = byKey[llmSettingKeys.EmbedURL]
 	out.ChatModel = byKey[llmSettingKeys.ChatModel]
@@ -291,14 +315,26 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 		out.HasAPIKey = true
 		out.APIKeyMasked = maskAPIKey(key)
 	}
+	if key := byKey[llmSettingKeys.AnthropicAPIKey]; key != "" {
+		out.HasAnthropicAPIKey = true
+		out.AnthropicAPIKeyMasked = maskAPIKey(key)
+	}
+	if key := byKey[llmSettingKeys.OpenAIAPIKey]; key != "" {
+		out.HasOpenAIAPIKey = true
+		out.OpenAIAPIKeyMasked = maskAPIKey(key)
+	}
 	if h.llmClient != nil {
 		out.LiveDebugLog = h.llmClient.Debug()
-		if out.ChatModel == "" {
-			out.ChatModel = h.llmClient.ChatModel()
-		}
-		if out.EmbedModel == "" {
-			out.EmbedModel = h.llmClient.EmbedModel()
-		}
+		// Live-resolved models go in the effective_* DISPLAY fields, never
+		// into the editable chat_model/embed_model — the old backfill leaked
+		// the running Ollama tags into the form, and saving after a provider
+		// switch then persisted them as explicit choices: hosted chat 404ed
+		// on "qwen3:4b-instruct" after restart, and the embed path nulled
+		// every vector and re-embedded against a model OpenAI doesn't serve.
+		// Editable fields carry exactly what is stored; blank = provider
+		// default, which the placeholders explain.
+		out.EffectiveChatModel = h.llmClient.ChatModel()
+		out.EffectiveEmbedModel = h.llmClient.EmbedModel()
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -309,9 +345,12 @@ func (h *AdminHandler) GetLLMSettings(w http.ResponseWriter, r *http.Request) {
 // is what lets DebugLog flips return restart_required:false.
 type llmUpdateRequest struct {
 	Provider          *string `json:"provider,omitempty"`
+	EmbedProvider     *string `json:"embed_provider,omitempty"`
 	OllamaURL         *string `json:"ollama_url,omitempty"`
 	EmbedURL          *string `json:"embed_url,omitempty"`
-	APIKey            *string `json:"api_key,omitempty"` // empty string clears; absence leaves alone
+	APIKey            *string `json:"api_key,omitempty"`           // empty string clears; absence leaves alone
+	AnthropicAPIKey   *string `json:"anthropic_api_key,omitempty"` // same clear/keep contract as api_key
+	OpenAIAPIKey      *string `json:"openai_api_key,omitempty"`
 	ChatModel         *string `json:"chat_model,omitempty"`
 	EmbedModel        *string `json:"embed_model,omitempty"`
 	ChatModelFast     *string `json:"chat_model_fast,omitempty"`
@@ -349,11 +388,15 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 	// otherwise — a sparse save can't sneak a broken half-config past it.
 	// Note a key with provider=local is deliberately ALLOWED: operators
 	// legitimately front LAN Ollama with bearer-checking reverse proxies.
-	if req.Provider != nil {
-		if !llm.ValidProvider(*req.Provider) {
-			writeError(w, http.StatusBadRequest, `provider must be empty, "local", or "ollama_cloud"`)
-			return
-		}
+	if req.Provider != nil && !llm.ValidProvider(*req.Provider) {
+		writeError(w, http.StatusBadRequest, `provider must be empty, "local", "ollama_cloud", "anthropic", or "openai"`)
+		return
+	}
+	if req.EmbedProvider != nil && !llm.ValidEmbedProvider(*req.EmbedProvider) {
+		writeError(w, http.StatusBadRequest, `embed_provider must be empty, "local", or "openai" — Anthropic has no embeddings API`)
+		return
+	}
+	if req.Provider != nil || req.EmbedProvider != nil {
 		effective := func(posted *string, dbKey string) string {
 			if posted != nil {
 				return strings.TrimSpace(*posted)
@@ -361,11 +404,15 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 			v, _, _ := h.queries.GetSettingExists(r.Context(), dbKey)
 			return strings.TrimSpace(v)
 		}
-		if violations := llm.CheckProviderCombo(*req.Provider,
-			effective(req.APIKey, llmSettingKeys.APIKey),
-			effective(req.OllamaURL, llmSettingKeys.OllamaURL),
-			effective(req.EmbedURL, llmSettingKeys.EmbedURL),
-		); len(violations) > 0 {
+		if violations := llm.CheckProviderCombo(llm.ProviderCombo{
+			Provider:      effective(req.Provider, llmSettingKeys.Provider),
+			EmbedProvider: effective(req.EmbedProvider, llmSettingKeys.EmbedProvider),
+			APIKey:        effective(req.APIKey, llmSettingKeys.APIKey),
+			AnthropicKey:  effective(req.AnthropicAPIKey, llmSettingKeys.AnthropicAPIKey),
+			OpenAIKey:     effective(req.OpenAIAPIKey, llmSettingKeys.OpenAIAPIKey),
+			ChatURL:       effective(req.OllamaURL, llmSettingKeys.OllamaURL),
+			EmbedURL:      effective(req.EmbedURL, llmSettingKeys.EmbedURL),
+		}); len(violations) > 0 {
 			writeError(w, http.StatusBadRequest, violations[0])
 			return
 		}
@@ -420,13 +467,13 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		restartRequired = true
 		return nil
 	}
-	// Provider is written LAST on purpose: the SetSetting calls are
-	// individual autocommit writes (no transaction), so a mid-loop failure
-	// leaves a partial save. With provider last, its prerequisites (key,
-	// URLs) always land BEFORE the provider flip that makes them
-	// load-bearing — a partial failure leaves the OLD provider with some
-	// new field values (harmless), never a new provider missing the fields
-	// validation demanded.
+	// The provider selectors are written LAST on purpose: the SetSetting
+	// calls are individual autocommit writes (no transaction), so a mid-loop
+	// failure leaves a partial save. With embed_provider second-to-last and
+	// provider last, their prerequisites (keys, URLs) always land BEFORE the
+	// selector flips that make them load-bearing — a partial failure leaves
+	// the OLD provider with some new field values (harmless), never a new
+	// provider missing the fields validation demanded.
 	for _, p := range []struct {
 		key string
 		val *string
@@ -434,6 +481,8 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.OllamaURL, req.OllamaURL},
 		{llmSettingKeys.EmbedURL, req.EmbedURL},
 		{llmSettingKeys.APIKey, req.APIKey},
+		{llmSettingKeys.AnthropicAPIKey, req.AnthropicAPIKey},
+		{llmSettingKeys.OpenAIAPIKey, req.OpenAIAPIKey},
 		{llmSettingKeys.ChatModel, req.ChatModel},
 		{llmSettingKeys.EmbedModel, req.EmbedModel},
 		{llmSettingKeys.ChatModelFast, req.ChatModelFast},
@@ -441,6 +490,7 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 		{llmSettingKeys.ReasoningEffort, req.ReasoningEffort},
 		{llmSettingKeys.RerankModel, req.RerankModel},
 		{llmSettingKeys.RerankURL, req.RerankURL},
+		{llmSettingKeys.EmbedProvider, req.EmbedProvider},
 		{llmSettingKeys.Provider, req.Provider},
 	} {
 		if err := apply(p.key, p.val); err != nil {
@@ -526,42 +576,60 @@ func (h *AdminHandler) UpdateLLMSettings(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// llmTestEndpoint is one probed Ollama endpoint in the TestLLMConnection
-// response. Models maps each configured model name expected at this endpoint
-// to whether the endpoint actually serves it.
+// llmTestEndpoint is one probed endpoint in the TestLLMConnection response.
+// Models maps each configured model name expected at this endpoint to whether
+// the endpoint actually serves it. Available carries the endpoint's model
+// catalog (sorted, capped) so the UI can offer real IDs in datalists —
+// especially load-bearing for the hosted providers, whose catalogs churn.
 type llmTestEndpoint struct {
-	Role      string          `json:"role"` // "chat" | "embed" | "rerank"
+	Role      string          `json:"role"`               // "chat" | "embed" | "rerank"
+	Provider  string          `json:"provider,omitempty"` // "" (Ollama endpoint) | "anthropic" | "openai"
 	URL       string          `json:"url"`
 	Reachable bool            `json:"reachable"`
 	Error     string          `json:"error,omitempty"`
 	Models    map[string]bool `json:"models,omitempty"`
+	Available []string        `json:"available,omitempty"`
 }
 
-// TestLLMConnection probes the configured (or posted, pre-save) Ollama
-// endpoints: is each reachable, and does it serve the models Aurora is
+// llmTestAvailableCap bounds the Available list per endpoint — the OpenAI
+// catalog is large and the datalist doesn't need every dated snapshot.
+const llmTestAvailableCap = 250
+
+// TestLLMConnection probes the configured (or posted, pre-save) LLM
+// endpoints — Ollama boxes and/or the hosted providers: is each reachable
+// (does the key authenticate), and does it serve the models Aurora is
 // configured to use. ARR-test parity for the LLM stack — previously the only
 // signals were a startup log line and semantic search silently degrading to
 // keyword matching.
 //
-// POST /api/admin/llm/test with an optional sparse body
-// {ollama_url, embed_url, chat_model, embed_model}. A POSTED field is the
-// form state and therefore exactly what saving would persist — it wins even
-// when empty (blanking a field clears the row, and the probe must describe
-// the config the operator is about to save, not a stored row that blank
-// would replace). An OMITTED field falls back to the stored setting, then
-// the live client — so an empty body tests the running config.
+// POST /api/admin/llm/test with an optional sparse body {provider,
+// embed_provider, ollama_url, embed_url, chat_model, embed_model,
+// anthropic_api_key, openai_api_key}. A POSTED field is the form state and
+// therefore exactly what saving would persist — it wins even when empty
+// (blanking a field clears the row, and the probe must describe the config
+// the operator is about to save, not a stored row that blank would replace).
+// An OMITTED field falls back to the stored setting, then the live client —
+// so an empty body tests the running config.
 //
-// SECURITY: the stored API key never travels to a request-supplied URL — an
-// admin session could otherwise exfiltrate it with a single POST pointing
-// ollama_url at an attacker host. The bearer rides only to the PERSISTED
-// chat endpoint (the URL save-time validation approved and real traffic
-// already uses), and the key is never echoed in the response.
+// SECURITY: the stored Ollama bearer never travels to a request-supplied URL
+// — an admin session could otherwise exfiltrate it with a single POST
+// pointing ollama_url at an attacker host. The bearer rides only to the
+// PERSISTED chat endpoint (the URL save-time validation approved and real
+// traffic already uses), and no key is ever echoed in the response. The
+// hosted-provider keys (posted or stored) are safe to use in the probe ONLY
+// because their hosts are compile-time constants (env-overridable, never
+// request-supplied): there is no URL in this request body that could steer
+// them anywhere else.
 func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OllamaURL  *string `json:"ollama_url,omitempty"`
-		EmbedURL   *string `json:"embed_url,omitempty"`
-		ChatModel  *string `json:"chat_model,omitempty"`
-		EmbedModel *string `json:"embed_model,omitempty"`
+		Provider        *string `json:"provider,omitempty"`
+		EmbedProvider   *string `json:"embed_provider,omitempty"`
+		OllamaURL       *string `json:"ollama_url,omitempty"`
+		EmbedURL        *string `json:"embed_url,omitempty"`
+		ChatModel       *string `json:"chat_model,omitempty"`
+		EmbedModel      *string `json:"embed_model,omitempty"`
+		AnthropicAPIKey *string `json:"anthropic_api_key,omitempty"`
+		OpenAIAPIKey    *string `json:"openai_api_key,omitempty"`
 	}
 	// Empty body = "test what's configured": tolerate the EOF decodeJSON
 	// surfaces for it (still 1MB-capped like every other handler).
@@ -599,14 +667,22 @@ func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request)
 		return liveVal
 	}
 
-	provider := stored(llmSettingKeys.Provider)
+	provider := resolve(req.Provider, llmSettingKeys.Provider, live(func() string { return h.llmClient.Provider() }))
+	embedProvider := resolve(req.EmbedProvider, llmSettingKeys.EmbedProvider, live(func() string { return h.llmClient.EmbedProviderName() }))
+	if !llm.ValidProvider(provider) || !llm.ValidEmbedProvider(embedProvider) {
+		writeError(w, http.StatusBadRequest, "unknown provider / embed_provider")
+		return
+	}
+	hostedChat := provider == llm.ProviderAnthropic || provider == llm.ProviderOpenAI
+	openaiEmbeds := embedProvider == llm.ProviderOpenAI
+
 	chatURL := resolve(req.OllamaURL, llmSettingKeys.OllamaURL, live(func() string { return h.llmClient.BaseURL() }))
-	if chatURL == "" {
+	if chatURL == "" && !hostedChat {
 		writeError(w, http.StatusServiceUnavailable, "no Ollama URL configured to test (LLM disabled?)")
 		return
 	}
 	embedURL := resolve(req.EmbedURL, llmSettingKeys.EmbedURL, "")
-	if embedURL == "" {
+	if embedURL == "" && !openaiEmbeds {
 		// Blank embed = "follow the runtime fallback". The live client
 		// embodies boot's resolution (including the Cloud→local-embed
 		// coercion) when the field wasn't posted; a posted blank mirrors
@@ -620,8 +696,23 @@ func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request)
 		default:
 			embedURL = chatURL
 		}
+		if embedURL == "" {
+			// Hosted chat + local embeds with no Ollama URL anywhere.
+			writeError(w, http.StatusServiceUnavailable, "no local Ollama URL configured for embeddings — set embed_url, or switch the embed provider")
+			return
+		}
 	}
-	for name, u := range map[string]string{"ollama_url": chatURL, "embed_url": embedURL} {
+	// Validate only the Ollama URLs the probe will actually dial — the
+	// hosted-provider hosts are compile-time constants and never come from
+	// this request.
+	urlsToCheck := map[string]string{}
+	if !hostedChat {
+		urlsToCheck["ollama_url"] = chatURL
+	}
+	if !openaiEmbeds {
+		urlsToCheck["embed_url"] = embedURL
+	}
+	for name, u := range urlsToCheck {
 		if err := validateLLMURL(u); err != nil {
 			writeError(w, http.StatusBadRequest, name+": "+err.Error())
 			return
@@ -630,76 +721,138 @@ func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request)
 
 	chatModel := resolve(req.ChatModel, llmSettingKeys.ChatModel, live(func() string { return h.llmClient.ChatModel() }))
 	embedModel := resolve(req.EmbedModel, llmSettingKeys.EmbedModel, live(func() string { return h.llmClient.EmbedModel() }))
+	if openaiEmbeds && req.EmbedModel == nil && stored(llmSettingKeys.EmbedModel) == "" && os.Getenv("LLM_EMBED_MODEL") == "" {
+		// Mirror boot's coercion (applyLLMOverrides): a default-following
+		// embed model on the openai embed provider lands on the openai
+		// default, not the live client's Ollama tag — otherwise the probe
+		// would flag a mismatch a restart would never actually hit.
+		embedModel = ""
+	}
 	fastModel := stored(llmSettingKeys.ChatModelFast)
 	smartModel := stored(llmSettingKeys.ChatModelSmart)
 	rerankModel := resolve(nil, llmSettingKeys.RerankModel, live(func() string { return h.llmClient.RerankModelName() }))
-	rerankURL := stored(llmSettingKeys.RerankURL)
+	rerankURLSetting := stored(llmSettingKeys.RerankURL)
+	rerankURL := rerankURLSetting
 	if rerankURL == "" {
 		rerankURL = chatURL // mirror client.rerankBaseURL()
 	}
 
-	// The bearer target: the PERSISTED chat endpoint only (see the security
-	// note in the doc comment). When the posted chat URL differs, the probe
-	// of that unsaved URL runs unauthenticated — a Cloud endpoint will show
-	// a 401, which is still an honest "reachable, save first to test with
-	// auth" signal, and infinitely better than key exfiltration.
+	// The Ollama bearer target: the PERSISTED chat endpoint only (see the
+	// security note in the doc comment). When the posted chat URL differs,
+	// the probe of that unsaved URL runs unauthenticated — a Cloud endpoint
+	// will show a 401, which is still an honest "reachable, save first to
+	// test with auth" signal, and infinitely better than key exfiltration.
 	persistedChatURL := stored(llmSettingKeys.OllamaURL)
 	if persistedChatURL == "" {
 		persistedChatURL = live(func() string { return h.llmClient.BaseURL() })
 	}
 	storedKey := byKey[llmSettingKeys.APIKey]
+	anthropicKey := resolve(req.AnthropicAPIKey, llmSettingKeys.AnthropicAPIKey, "")
+	openaiKey := resolve(req.OpenAIAPIKey, llmSettingKeys.OpenAIAPIKey, "")
 
 	// Throwaway probe client: same SSRF-guarded transport as real traffic,
 	// short per-request timeout so a black-holed URL can't eat the admin
-	// route budget.
+	// route budget. Provider fields included so NewClient applies the
+	// hosted-provider model defaults — the "models" check then reflects what
+	// a restart would actually run, and the effective hosted endpoints
+	// inherit any env gateway override via the live client.
 	probe := llm.NewClient(llm.Config{
-		BaseURL:     chatURL,
-		APIKey:      storedKey,
-		HTTPTimeout: 10 * time.Second,
+		Provider:         provider,
+		EmbedProvider:    embedProvider,
+		BaseURL:          chatURL,
+		APIKey:           storedKey,
+		AnthropicAPIKey:  anthropicKey,
+		OpenAIAPIKey:     openaiKey,
+		AnthropicBaseURL: live(func() string { return h.llmClient.AnthropicURL() }),
+		OpenAIBaseURL:    live(func() string { return h.llmClient.OpenAIURL() }),
+		ChatModel:        chatModel,
+		ChatModelFast:    fastModel,
+		ChatModelSmart:   smartModel,
+		EmbedModel:       embedModel,
+		HTTPTimeout:      10 * time.Second,
 	})
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
+	// Effective models come back off the probe so hosted-provider defaults
+	// (applied by NewClient when fields are empty) are what gets checked.
+	chatModels := dedupeNonEmpty(probe.ChatModel(), probe.ChatModelFast(), probe.ChatModelSmart())
+	effectiveEmbedModel := probe.EmbedModel()
+
 	type roleSpec struct {
-		role   string
-		url    string
-		models []string
+		role     string
+		provider string // "" = Ollama endpoint at url
+		url      string
+		models   []string
 	}
-	specs := []roleSpec{
-		{role: "chat", url: chatURL, models: dedupeNonEmpty(chatModel, fastModel, smartModel)},
-		{role: "embed", url: embedURL, models: dedupeNonEmpty(embedModel)},
+	var specs []roleSpec
+	if hostedChat {
+		chatSpec := roleSpec{role: "chat", provider: provider, models: chatModels}
+		if provider == llm.ProviderAnthropic {
+			chatSpec.url = probe.AnthropicURL()
+		} else {
+			chatSpec.url = probe.OpenAIURL()
+		}
+		if rerankModel != "" && rerankURLSetting == "" {
+			// Rerank rides the provider chat path (client.Rerank) — check its
+			// model against the same catalog instead of probing an Ollama URL
+			// that reranking will never touch.
+			chatSpec.models = dedupeNonEmpty(append(chatSpec.models, rerankModel)...)
+		}
+		specs = append(specs, chatSpec)
+	} else {
+		specs = append(specs, roleSpec{role: "chat", url: chatURL, models: chatModels})
 	}
-	if rerankModel != "" {
+	if openaiEmbeds {
+		specs = append(specs, roleSpec{role: "embed", provider: llm.ProviderOpenAI, url: probe.OpenAIURL(), models: dedupeNonEmpty(effectiveEmbedModel)})
+	} else {
+		specs = append(specs, roleSpec{role: "embed", url: embedURL, models: dedupeNonEmpty(effectiveEmbedModel)})
+	}
+	if rerankModel != "" && !(hostedChat && rerankURLSetting == "") {
 		specs = append(specs, roleSpec{role: "rerank", url: rerankURL, models: []string{rerankModel}})
 	}
 
-	// One probe per DISTINCT URL, all in PARALLEL: split configs (Cloud chat
-	// + local embed + separate rerank box) are exactly when multiple URLs
-	// exist, and serial probes would stack their 10s timeouts into the 30s
-	// budget when boxes are down.
+	// One probe per DISTINCT (provider, URL), all in PARALLEL: split configs
+	// (Cloud chat + local embed + separate rerank box; anthropic chat +
+	// openai embeds) are exactly when multiple targets exist, and serial
+	// probes would stack their 10s timeouts into the 30s budget when boxes
+	// are down.
 	type probeOutcome struct {
 		tags []string
 		err  error
 	}
-	outcomes := make(map[string]*probeOutcome, len(specs))
+	outcomeKey := func(s roleSpec) string { return s.provider + "|" + s.url }
+	scheduled := make(map[string]roleSpec, len(specs))
 	for _, s := range specs {
-		outcomes[s.url] = &probeOutcome{}
+		if _, ok := scheduled[outcomeKey(s)]; !ok {
+			scheduled[outcomeKey(s)] = s
+		}
 	}
+	outcomes := make(map[string]*probeOutcome, len(scheduled))
 	var wg sync.WaitGroup
-	for u, out := range outcomes {
+	for k, s := range scheduled {
+		out := &probeOutcome{}
+		outcomes[k] = out
 		wg.Add(1)
-		go func(u string, out *probeOutcome) {
+		go func(s roleSpec, out *probeOutcome) {
 			defer wg.Done()
-			out.tags, out.err = probe.ListModels(ctx, u, u == persistedChatURL && storedKey != "")
-		}(u, out)
+			switch s.provider {
+			case llm.ProviderAnthropic:
+				out.tags, out.err = probe.ListAnthropicModels(ctx)
+			case llm.ProviderOpenAI:
+				out.tags, out.err = probe.ListOpenAIModels(ctx)
+			default:
+				out.tags, out.err = probe.ListModels(ctx, s.url, s.url == persistedChatURL && storedKey != "")
+			}
+		}(s, out)
 	}
 	wg.Wait()
 
 	results := make([]llmTestEndpoint, 0, len(specs))
 	allFound := true
 	for _, s := range specs {
-		out := outcomes[s.url]
-		ep := llmTestEndpoint{Role: s.role, URL: s.url}
+		out := outcomes[outcomeKey(s)]
+		ep := llmTestEndpoint{Role: s.role, Provider: s.provider, URL: s.url}
 		if out.err != nil {
 			ep.Error = out.err.Error()
 			allFound = false
@@ -713,6 +866,12 @@ func (h *AdminHandler) TestLLMConnection(w http.ResponseWriter, r *http.Request)
 					allFound = false
 				}
 			}
+			available := append([]string(nil), out.tags...)
+			sort.Strings(available)
+			if len(available) > llmTestAvailableCap {
+				available = available[:llmTestAvailableCap]
+			}
+			ep.Available = available
 		}
 		results = append(results, ep)
 	}

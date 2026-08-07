@@ -74,6 +74,12 @@ func TestChatJSONWithStructured(t *testing.T) {
 	if m, _ := gotBody["model"].(string); m != "default-model" {
 		t.Errorf("empty model should fall back to default; got %q", m)
 	}
+	// Temperature became *float64 so the api.openai.com path can omit it; the
+	// Ollama /v1 path must keep pinning 0.1 (the historical wire bytes) —
+	// dropping the assignment would silently change every Cloud install.
+	if temp, ok := gotBody["temperature"].(float64); !ok || temp != 0.1 {
+		t.Errorf("Ollama /v1 path must pin temperature 0.1, got %v (body=%v)", gotBody["temperature"], gotBody)
+	}
 	if !strings.Contains(out, "ok") {
 		t.Errorf("content = %q", out)
 	}
@@ -242,6 +248,76 @@ func TestChatJSONWithStructuredEmptyContent(t *testing.T) {
 	c := NewClient(Config{BaseURL: srv.URL, ChatModel: "m"})
 	if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, true); err == nil || !strings.Contains(err.Error(), "empty content") {
 		t.Errorf("want 'empty content' error, got %v", err)
+	}
+}
+
+// TestChatJSONWithHostedProviderIgnoresStructuredFlag: with a hosted provider
+// configured, BOTH structured values route to that provider's native path —
+// the flag only exists to pick between the two Ollama transports, and
+// consumers that hardcode structured=false (rail reasons, recap) must still
+// land on the provider.
+func TestChatJSONWithHostedProviderIgnoresStructuredFlag(t *testing.T) {
+	for _, structured := range []bool{true, false} {
+		t.Run("anthropic", func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				_, _ = io.WriteString(w, anthropicOKBody)
+			}))
+			defer srv.Close()
+			c := NewClient(Config{Provider: ProviderAnthropic, AnthropicBaseURL: srv.URL, AnthropicAPIKey: "k", BaseURL: "http://127.0.0.1:1"})
+			if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, structured); err != nil {
+				t.Fatalf("structured=%v err: %v", structured, err)
+			}
+			if gotPath != "/v1/messages" {
+				t.Errorf("structured=%v path = %q, want /v1/messages", structured, gotPath)
+			}
+		})
+		t.Run("openai", func(t *testing.T) {
+			var gotPath string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				_, _ = io.WriteString(w, openaiOKBody)
+			}))
+			defer srv.Close()
+			c := NewClient(Config{Provider: ProviderOpenAI, OpenAIBaseURL: srv.URL, OpenAIAPIKey: "k", BaseURL: "http://127.0.0.1:1"})
+			if _, err := c.ChatJSONWith(context.Background(), "m", "s", "u", map[string]any{"type": "object"}, structured); err != nil {
+				t.Fatalf("structured=%v err: %v", structured, err)
+			}
+			if gotPath != "/v1/chat/completions" {
+				t.Errorf("structured=%v path = %q, want /v1/chat/completions", structured, gotPath)
+			}
+		})
+	}
+}
+
+// TestOllamaPathKeyIsolation: a Config carrying all three keys making an
+// Ollama-family call sends ONLY the Ollama bearer — the hosted-provider keys
+// must never ride to an Ollama endpoint (and no x-api-key header appears).
+func TestOllamaPathKeyIsolation(t *testing.T) {
+	var gotAuthz, gotXAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthz = r.Header.Get("Authorization")
+		gotXAPIKey = r.Header.Get("x-api-key")
+		_, _ = io.WriteString(w, `{"message":{"content":"{}"}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(Config{
+		Provider:        ProviderCloud,
+		BaseURL:         srv.URL,
+		APIKey:          "sk-ollama-test",
+		AnthropicAPIKey: "sk-ant-test",
+		OpenAIAPIKey:    "sk-openai-test",
+		ChatModel:       "m",
+	})
+	if _, err := c.chatNative(context.Background(), c.cfg.BaseURL, true, "m", "s", "u", nil); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if gotAuthz != "Bearer sk-ollama-test" {
+		t.Errorf("Authorization = %q, want the Ollama bearer only", gotAuthz)
+	}
+	if gotXAPIKey != "" {
+		t.Errorf("x-api-key must never reach an Ollama endpoint, got %q", gotXAPIKey)
 	}
 }
 

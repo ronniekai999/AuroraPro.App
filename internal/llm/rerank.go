@@ -87,6 +87,23 @@ func (c *Client) Rerank(ctx context.Context, query string, docs []string) ([]flo
 	}
 	user := buildListwiseRerankPrompt(query, docs)
 
+	// Hosted chat provider + no explicit RerankURL → the rerank rides that
+	// provider's chat path like every other surface (it's just a chat call).
+	// An explicit RerankURL still means "a separate/local Ollama box" and
+	// keeps the Ollama path below regardless of chat provider — and only the
+	// Ollama key can ever ride there, so a hosted-provider key can't leak to
+	// an operator-supplied URL.
+	if !isOllamaProvider(c.cfg.Provider) && c.cfg.RerankURL == "" {
+		raw, handled, err := c.chatViaProvider(ctx, c.cfg.RerankModel, rerankListwiseSystem, user, rerankListwiseSchema)
+		if !handled {
+			return nil, 0, fmt.Errorf("rerank: provider %q not routable", c.cfg.Provider)
+		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("rerank: %w", err)
+		}
+		return parseListwiseScores(raw, len(docs))
+	}
+
 	// Same /v1-gate rule as the hero/discover surfaces (shouldUseStructuredV1 in
 	// the recommender pkg, replicated here to avoid an import): take the OpenAI
 	// /v1 path only when structured outputs are ON *and* a reasoning_effort is

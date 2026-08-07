@@ -356,17 +356,24 @@ func main() {
 		// DB row (existing, even if empty) > env > yaml default. The "existing
 		// but empty" case is an intentional explicit clear from the admin UI.
 		llmCfg := llm.Config{
-			BaseURL:     cfg.LLM.OllamaURL,
-			EmbedModel:  cfg.LLM.EmbedModel,
-			ChatModel:   cfg.LLM.ChatModel,
-			Dims:        cfg.LLM.EmbedDims,
-			HTTPTimeout: cfg.LLM.HTTPTimeout,
-			NumCtx:      cfg.LLM.NumCtx,
+			Provider:         cfg.LLM.Provider,
+			EmbedProvider:    cfg.LLM.EmbedProvider,
+			AnthropicAPIKey:  cfg.LLM.AnthropicAPIKey,
+			OpenAIAPIKey:     cfg.LLM.OpenAIAPIKey,
+			AnthropicBaseURL: cfg.LLM.AnthropicBaseURL,
+			OpenAIBaseURL:    cfg.LLM.OpenAIBaseURL,
+			BaseURL:          cfg.LLM.OllamaURL,
+			EmbedModel:       cfg.LLM.EmbedModel,
+			ChatModel:        cfg.LLM.ChatModel,
+			Dims:             cfg.LLM.EmbedDims,
+			HTTPTimeout:      cfg.LLM.HTTPTimeout,
+			NumCtx:           cfg.LLM.NumCtx,
 		}
 		applyLLMOverrides(ctx, queries, &llmCfg)
 		llmClient = llm.NewClient(llmCfg)
-		// Best-effort liveness check — do not block startup if Ollama is slow
-		// to come up; the backfill goroutine will retry on its own.
+		// Best-effort liveness check — do not block startup if the embedding
+		// backend (local Ollama, or OpenAI when llm_embed_provider=openai) is
+		// slow to come up; the backfill goroutine will retry on its own.
 		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 		if err := llmClient.Ping(pingCtx); err != nil {
 			// Use llmCfg (post-DB-override values) so the log reflects what the
@@ -375,11 +382,12 @@ func main() {
 			// cfg.LLM here would show the stale env baseline (e.g. the Docker
 			// hostname `http://ollama:11434`) even after the admin pointed the
 			// client at Ollama Cloud, which made operators chase phantom bugs.
-			slog.Warn("ollama not reachable at startup; semantic search will activate when it comes up",
-				"url", llmCfg.BaseURL, "error", err)
+			slog.Warn("LLM embedding backend not reachable at startup; semantic search will activate when it comes up",
+				"embed_provider", llmCfg.EmbedProvider, "url", llmCfg.BaseURL, "error", err)
 		} else {
-			slog.Info("ollama reachable", "url", llmCfg.BaseURL,
-				"embed_url", llmCfg.EmbedURL,
+			slog.Info("llm backends reachable", "provider", llmCfg.Provider,
+				"embed_provider", llmCfg.EmbedProvider,
+				"url", llmCfg.BaseURL, "embed_url", llmCfg.EmbedURL,
 				"embed_model", llmCfg.EmbedModel, "chat_model", llmCfg.ChatModel,
 				"rerank_model", llmCfg.RerankModel)
 		}
@@ -1304,9 +1312,11 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	}
 
 	// Provider is MECHANICAL as of Phase E4 (it used to be a log-only label,
-	// which meant flipping it in the admin UI silently did nothing). The
-	// policy itself lives in llm.CheckProviderCombo — ONE rule source shared
-	// with UpdateLLMSettings, which 400s violations at save time; boot only
+	// which meant flipping it in the admin UI silently did nothing) and now
+	// writes straight into cfg.Provider, where internal/llm routes every
+	// chat call (anthropic/openai adapters vs the Ollama paths). The policy
+	// itself lives in llm.CheckProviderCombo — ONE rule source shared with
+	// UpdateLLMSettings, which 400s violations at save time; boot only
 	// warns (below) so a legacy row can't brick startup. The one boot-side
 	// MECHANIC is the Cloud embed coercion: our embedding models aren't
 	// hosted on Ollama Cloud, so with provider=ollama_cloud and no embed
@@ -1314,13 +1324,15 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 	// here BEFORE the DB overrides rewrite BaseURL to the Cloud endpoint —
 	// provided that URL actually looks local (an env chain that sets
 	// LLM_OLLAMA_URL=https://ollama.com must not be "coerced" to itself).
-	var provider string
-	get("llm_provider", &provider)
+	get("llm_provider", &cfg.Provider)
+	get("llm_embed_provider", &cfg.EmbedProvider)
 	localBaseURL := cfg.BaseURL // env/default URL, pre-override
 
 	get("llm_ollama_url", &cfg.BaseURL)
 	get("llm_embed_url", &cfg.EmbedURL)
 	get("llm_api_key", &cfg.APIKey)
+	get("llm_anthropic_api_key", &cfg.AnthropicAPIKey)
+	get("llm_openai_api_key", &cfg.OpenAIAPIKey)
 	get("llm_chat_model", &cfg.ChatModel)
 	get("llm_embed_model", &cfg.EmbedModel)
 	// Phase A per-surface routing (optional). Empty → ChatModel, so a
@@ -1341,13 +1353,26 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 		cfg.Debug = v == "true"
 	}
 
-	if provider == llm.ProviderCloud && cfg.EmbedURL == "" {
+	hostedChat := cfg.Provider == llm.ProviderAnthropic || cfg.Provider == llm.ProviderOpenAI
+
+	if cfg.EmbedProvider == llm.ProviderOpenAI {
+		// The config-layer embed-model default (qwen3-embedding) is an Ollama
+		// tag; an OpenAI embed provider with no EXPLICIT model choice (no DB
+		// row, no env) gets the OpenAI default instead — cleared here so
+		// llm.NewClient applies its openai default, keeping that value in one
+		// place. An explicit choice (env or DB row, even an empty clear) is
+		// respected as-is.
+		if _, embedModelPinned, _ := queries.GetSettingExists(ctx, "llm_embed_model"); !embedModelPinned && os.Getenv("LLM_EMBED_MODEL") == "" {
+			cfg.EmbedModel = ""
+		}
+	} else if cfg.Provider == llm.ProviderCloud && cfg.EmbedURL == "" {
 		// Cloud chat, local embeddings: without this, /api/embed calls would
 		// hit ollama.com, where our embedding models don't run. Only coerce
 		// when the pre-override URL is plausibly a local box — otherwise
 		// (env itself points at Cloud) there is no local endpoint to route
 		// to, and pretending otherwise would send the operator down the
-		// wrong debugging path.
+		// wrong debugging path. Skipped entirely for openai embeds above —
+		// there is no local endpoint in that shape to route to.
 		if !strings.HasPrefix(localBaseURL, "https://") {
 			slog.Info("llm_provider=ollama_cloud with no embed URL — routing embeddings to the pre-override URL", "embed_url", localBaseURL)
 			cfg.EmbedURL = localBaseURL
@@ -1355,21 +1380,34 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 			slog.Warn("llm_provider=ollama_cloud with no embed URL and no local pre-override URL — embeddings will fail until llm_embed_url points at a local Ollama")
 		}
 	}
-	for _, violation := range llm.CheckProviderCombo(provider, cfg.APIKey, cfg.BaseURL, cfg.EmbedURL) {
-		slog.Warn("LLM provider config incoherent (fix in Admin → LLM)", "provider", provider, "problem", violation)
+	for _, violation := range llm.CheckProviderCombo(llm.ProviderCombo{
+		Provider:      cfg.Provider,
+		EmbedProvider: cfg.EmbedProvider,
+		APIKey:        cfg.APIKey,
+		AnthropicKey:  cfg.AnthropicAPIKey,
+		OpenAIKey:     cfg.OpenAIAPIKey,
+		ChatURL:       cfg.BaseURL,
+		EmbedURL:      cfg.EmbedURL,
+	}) {
+		slog.Warn("LLM provider config incoherent (fix in Admin → LLM)", "provider", cfg.Provider, "problem", violation)
 	}
-	if cfg.NumCtx > 0 && cfg.StructuredOutputs {
+	if cfg.NumCtx > 0 && (cfg.StructuredOutputs || hostedChat) {
 		// num_ctx rides Ollama's native /api/chat options; the OpenAI-compat
-		// /v1 path (structured outputs) has no options field, so the knob is
+		// /v1 path (structured outputs) has no options field, and the hosted
+		// providers (anthropic/openai) never see it either — the knob is
 		// inert exactly on the big-prompt surfaces it was set for. Warn loud.
-		slog.Warn("LLM_NUM_CTX is ignored on the structured-outputs (/v1) path — surfaces using it fall back to the model's default context",
+		slog.Warn("LLM_NUM_CTX is ignored on the structured-outputs (/v1) path and on hosted providers — surfaces using it fall back to the model's default context",
 			"num_ctx", cfg.NumCtx)
 	}
 
-	if provider != "" {
-		slog.Info("LLM config loaded from DB overrides", "provider", provider,
+	if cfg.Provider != "" || cfg.EmbedProvider != "" {
+		slog.Info("LLM config loaded from DB overrides",
+			"provider", cfg.Provider, "embed_provider", cfg.EmbedProvider,
 			"chat_model", cfg.ChatModel, "embed_model", cfg.EmbedModel,
 			"rerank_model", cfg.RerankModel,
-			"has_api_key", cfg.APIKey != "", "debug", cfg.Debug)
+			"has_api_key", cfg.APIKey != "",
+			"has_anthropic_key", cfg.AnthropicAPIKey != "",
+			"has_openai_key", cfg.OpenAIAPIKey != "",
+			"debug", cfg.Debug)
 	}
 }

@@ -137,7 +137,13 @@ func decideMarkerAction(marker string, markerExists bool, effective string, pinn
 // Best-effort: on read/write errors we log and skip (returning true) rather
 // than block embedding entirely — the next boot retries.
 func (e *Embedder) ensureModelSpace(ctx context.Context) {
-	effective := e.llm.EmbedModel()
+	// EmbedSpaceID, not EmbedModel: the space is provider-qualified for
+	// hosted embedding providers ("openai/text-embedding-3-small") so
+	// flipping the embed provider — even to a same-named model — resets the
+	// space. For Ollama-family embeds it returns the bare model name, which
+	// is exactly what every existing install's marker row already holds, so
+	// upgrades see marker == effective and keep their vectors.
+	effective := e.llm.EmbedSpaceID()
 	marker, exists, err := e.q.GetSettingExists(ctx, markerKey)
 	if err != nil {
 		slog.Warn("embedding: model-marker read failed; skipping space check this boot", "error", err)
@@ -413,9 +419,15 @@ func (e *Embedder) RunBackfill(ctx context.Context) {
 			// past them).
 			failures++
 			if failures >= maxFailures {
+				hint := "if the error is model-not-found, run: ollama pull " + e.llm.EmbedModel()
+				if e.llm.EmbedProviderName() == "openai" {
+					// No ollama pull on a hosted provider — the usual causes
+					// there are a bad key or a model this key can't access.
+					hint = "check the OpenAI API key and embed model in Admin → LLM (Test connection lists the models this key can use)"
+				}
 				slog.Error("embedding backfill: too many embed failures, giving up",
 					"failures", failures, "embedded", done, "last_error", waveErr,
-					"hint", "if the error is model-not-found, run: ollama pull "+e.llm.EmbedModel())
+					"hint", hint)
 				return
 			}
 			wait := backoffDelay()
