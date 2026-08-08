@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { buildAppWsUrl } from '@/lib/party'
 import type { AppNotification, MediaRequest } from '@/lib/api'
 
@@ -41,7 +41,10 @@ export interface RealtimeHandlers {
 // NOT reconnect the socket — only `enabled` drives connect/teardown.
 export function useRealtime(handlers: RealtimeHandlers): void {
   const handlersRef = useRef(handlers)
-  handlersRef.current = handlers
+
+  useLayoutEffect(() => {
+    handlersRef.current = handlers
+  }, [handlers])
 
   const enabled = handlers.enabled
 

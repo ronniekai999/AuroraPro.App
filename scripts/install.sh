@@ -46,7 +46,7 @@ set -euo pipefail
 # ── Constants ──────────────────────────────────────────────────────
 # GO_VERSION must be ≥ the `go` directive in go.mod. Bumping go.mod's
 # minor version requires bumping this string too.
-GO_VERSION="1.26.3"
+GO_VERSION="1.26.5"
 AURORA_USER="aurora"
 AURORA_GROUP="aurora"
 INSTALL_BIN="/usr/local/bin/aurora"
@@ -103,7 +103,7 @@ rand_string() {
     printf '%s' "${raw:0:${1:-64}}"
 }
 
-# Portable version compare: version_gte "1.26.3" "1.23" → true.
+# Portable version compare: version_gte "1.26.5" "1.23" → true.
 version_gte() {
     local IFS=.
     local -a v1=($1) v2=($2)

@@ -138,7 +138,7 @@ func (c *Client) chatAnthropic(ctx context.Context, model, system, user string, 
 	url := c.anthropicBaseURL() + "/v1/messages"
 	reqID := c.newReqID()
 	start := time.Now()
-	c.logRequest(reqID, url, model, body)
+	c.logRequest(ctx, reqID, url, model, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -154,7 +154,7 @@ func (c *Client) chatAnthropic(ctx context.Context, model, system, user string, 
 	defer resp.Body.Close()
 
 	raw, capErr := readCappedBody(resp.Body)
-	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+	c.logResponseChat(ctx, reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", &StatusError{Op: "anthropic chat", Status: resp.StatusCode, Body: snippet(raw, 512)}

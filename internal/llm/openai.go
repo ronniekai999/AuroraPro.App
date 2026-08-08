@@ -88,7 +88,7 @@ func (c *Client) chatOpenAI(ctx context.Context, model, system, user string, sch
 	url := c.openaiBaseURL() + "/v1/chat/completions"
 	reqID := c.newReqID()
 	start := time.Now()
-	c.logRequest(reqID, url, model, body)
+	c.logRequest(ctx, reqID, url, model, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -104,7 +104,7 @@ func (c *Client) chatOpenAI(ctx context.Context, model, system, user string, sch
 	defer resp.Body.Close()
 
 	raw, capErr := readCappedBody(resp.Body)
-	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+	c.logResponseChat(ctx, reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", &StatusError{Op: "openai chat", Status: resp.StatusCode, Body: snippet(raw, 512)}
@@ -157,7 +157,7 @@ func (c *Client) embedOpenAI(ctx context.Context, cleaned []string) ([][]float32
 	}
 	url := c.openaiBaseURL() + "/v1/embeddings"
 	reqID := c.newReqID()
-	c.logRequest(reqID, url, c.cfg.EmbedModel, body)
+	c.logRequest(ctx, reqID, url, c.cfg.EmbedModel, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
