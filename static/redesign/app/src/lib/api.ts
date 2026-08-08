@@ -306,7 +306,7 @@ export function backdropURL(p?: string): string {
 // ──────────────────────────────────────────────────────────────────
 // Core fetch with auto-refresh on 401
 
-class APIError extends Error {
+export class APIError extends Error {
   status: number
   body: unknown
   constructor(status: number, message: string, body: unknown) {
@@ -1152,16 +1152,123 @@ export interface RecapResponse {
   available: boolean
   reason?: string
   recap?: string
-  up_to?: { season: number; episode: number; title?: string }
+  suggested_questions?: string[]
+  up_to?: RecapUpTo
   cached?: boolean
+  has_ask_history?: boolean
 }
+
+export interface RecapStatusResponse {
+  available: boolean
+  reason?: string
+  has_ask_history: boolean
+}
+
+export interface RecapUpTo {
+  episode_id?: number
+  season: number
+  episode: number
+  title?: string
+}
+
+export interface RecapConversationTurn {
+  id: number
+  request_id: string
+  question: string
+  answer: string
+  up_to: RecapUpTo
+  mode: 'grounded' | 'season-closure' | 'caught-up'
+  created_at: string
+}
+
+export interface RecapConversationResponse {
+  available: boolean
+  can_ask: boolean
+  reason?: string
+  turns: RecapConversationTurn[]
+  current_up_to?: RecapUpTo
+  hidden_turn_count: number
+  highest_hidden_up_to?: RecapUpTo
+  next_before_turn_id?: number
+}
+
+export interface AskPreviouslyResponse {
+  turn: RecapConversationTurn
+  current_up_to: RecapUpTo
+}
+
+function recapProfileQuery(profileId?: number): URLSearchParams {
+  const params = new URLSearchParams()
+  if (profileId) params.set('profile_id', String(profileId))
+  return params
+}
+
 export async function getRecap(
   mediaId: number,
   profileId?: number,
   signal?: AbortSignal,
 ): Promise<RecapResponse> {
-  const qs = profileId ? `?profile_id=${profileId}` : ''
+  const params = recapProfileQuery(profileId)
+  const query = params.toString()
+  const qs = query ? `?${query}` : ''
   return apiFetch<RecapResponse>(`/api/media/${mediaId}/recap${qs}`, { signal })
+}
+
+export async function getRecapStatus(
+  mediaId: number,
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<RecapStatusResponse> {
+  const params = recapProfileQuery(profileId)
+  const query = params.toString()
+  const qs = query ? `?${query}` : ''
+  return apiFetch<RecapStatusResponse>(`/api/media/${mediaId}/recap/status${qs}`, { signal })
+}
+
+export async function getRecapConversation(
+  mediaId: number,
+  profileId?: number,
+  beforeTurnId?: number,
+  signal?: AbortSignal,
+): Promise<RecapConversationResponse> {
+  const params = recapProfileQuery(profileId)
+  params.set('limit', '20')
+  if (beforeTurnId) params.set('before_turn_id', String(beforeTurnId))
+  return apiFetch<RecapConversationResponse>(
+    `/api/media/${mediaId}/recap/conversation?${params}`,
+    { signal },
+  )
+}
+
+export async function askPreviously(
+  mediaId: number,
+  requestId: string,
+  question: string,
+  profileId?: number,
+  signal?: AbortSignal,
+): Promise<AskPreviouslyResponse> {
+  const params = recapProfileQuery(profileId)
+  const query = params.toString()
+  const qs = query ? `?${query}` : ''
+  return apiFetch<AskPreviouslyResponse>(`/api/media/${mediaId}/recap/conversation/turns${qs}`, {
+    method: 'POST',
+    body: { request_id: requestId, question },
+    signal,
+  })
+}
+
+export async function clearRecapConversation(mediaId: number, profileId?: number, signal?: AbortSignal): Promise<void> {
+  const params = recapProfileQuery(profileId)
+  const query = params.toString()
+  const qs = query ? `?${query}` : ''
+  await apiFetch(`/api/media/${mediaId}/recap/conversation${qs}`, { method: 'DELETE', signal })
+}
+
+export async function clearUnsafeRecapTurns(mediaId: number, profileId?: number, signal?: AbortSignal): Promise<void> {
+  const params = recapProfileQuery(profileId)
+  const query = params.toString()
+  const qs = query ? `?${query}` : ''
+  await apiFetch(`/api/media/${mediaId}/recap/conversation/unsafe-turns${qs}`, { method: 'DELETE', signal })
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1181,10 +1288,15 @@ export interface MarkWatchedResult {
   message?: string
   achievements_unlocked?: AchievementDef[]
 }
-export async function markWatched(mediaItemId: number): Promise<MarkWatchedResult> {
+export async function markWatched(
+  mediaItemId: number,
+  options?: { episode_id?: number; profile_id?: number },
+  signal?: AbortSignal,
+): Promise<MarkWatchedResult> {
   return apiFetch<MarkWatchedResult>(`/api/progress/${mediaItemId}/watched`, {
     method: 'POST',
-    body: {},
+    body: options || {},
+    signal,
   })
 }
 export async function clearProgress(mediaItemId: number): Promise<void> {

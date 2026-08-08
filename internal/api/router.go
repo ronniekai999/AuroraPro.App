@@ -754,6 +754,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/{id}/next-episode", tvH.GetNextEpisode)
 				// "Previously" — spoiler-safe AI recap for the resumed series.
 				r.Get("/{id}/recap", recapH.Get)
+				r.Get("/{id}/recap/status", recapH.Status)
+				r.Get("/{id}/recap/conversation", recapH.Conversation)
+				r.Post("/{id}/recap/conversation/turns", recapH.AskTurn)
+				r.Delete("/{id}/recap/conversation", recapH.ClearConversation)
+				r.Delete("/{id}/recap/conversation/unsafe-turns", recapH.ClearUnsafeTurns)
 
 				// Episode files (used by watch party auto-play)
 				r.Get("/episodes/{episodeId}/files", tvH.GetEpisodeFiles)

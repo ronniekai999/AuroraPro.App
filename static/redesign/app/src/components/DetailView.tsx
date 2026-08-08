@@ -6,7 +6,7 @@
 // App state) and are threaded in as props — NOT moved here. DetailViewProps
 // is module-private. DetailView fetches its own "Previously" recap (getRecap)
 // so the recap modal stays presentational.
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { DetailHero } from '@/components/detail/DetailHero'
 import { DetailRail } from '@/components/detail/DetailRail'
 import { TrailerModal } from '@/components/detail/TrailerModal'
@@ -18,7 +18,7 @@ import { MediaInfoPanel } from '@/components/detail/MediaInfoPanel'
 import { CastGrid } from '@/components/detail/CastGrid'
 import { deriveQualityChips, episodeWatchState, episodeProgressPct, episodeVersions, secondaryResolutionLabels, formatReleaseDate } from '@/lib/detail'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
-import { getRecap, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
+import { getRecap, getRecapStatus, getUserRating, setUserRating, posterURL, backdropURL, type Episode as ApiEpisode, type MediaDetail, type MediaFile, type ContinueWatchingItem, type RecapResponse, type RecapStatusResponse, type AudioTrack, type SubtitleTrack } from '@/lib/api'
 import { type Media } from '@/lib/types'
 
 interface DetailViewProps {
@@ -114,14 +114,84 @@ export default function DetailView({
   // "Previously" recap modal. DetailView owns the fetch so the modal stays
   // presentational; one fetch per open (the server caches across opens).
   const [recapOpen, setRecapOpen] = useState(false)
-  const [recapState, setRecapState] = useState<{ loading: boolean; data?: RecapResponse; error?: string }>({ loading: false })
+  const recapIdentity = `${media.id}:${profileId ?? 'default'}`
+  const [recapState, setRecapState] = useState<{
+    identity: string
+    loading: boolean
+    data?: RecapResponse
+    error?: string
+  }>({ identity: recapIdentity, loading: false })
+  const [recapStatusState, setRecapStatusState] = useState<{
+    identity: string
+    status?: RecapStatusResponse
+  }>()
+  const recapStatus = recapStatusState?.identity === recapIdentity ? recapStatusState.status : undefined
+  const recapFetchSequence = useRef(0)
+  const recapStatusSequence = useRef(0)
+  const recapIdentityRef = useRef(recapIdentity)
+  useLayoutEffect(() => {
+    recapIdentityRef.current = recapIdentity
+  }, [recapIdentity])
+  useEffect(() => {
+    const controller = new AbortController()
+    const sequence = ++recapStatusSequence.current
+    getRecapStatus(media.id, profileId ?? undefined, controller.signal)
+      .then(status => {
+        if (!controller.signal.aborted && sequence === recapStatusSequence.current) {
+          setRecapStatusState({ identity: recapIdentity, status })
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted && sequence === recapStatusSequence.current) {
+          setRecapStatusState({ identity: recapIdentity })
+        }
+      })
+    return () => controller.abort()
+  }, [media.id, profileId, recapIdentity])
+  const refreshRecap = useCallback(async () => {
+    const identity = `${media.id}:${profileId ?? 'default'}`
+    if (identity !== recapIdentityRef.current) return
+    const sequence = ++recapFetchSequence.current
+    setRecapState({ identity, loading: true })
+    try {
+      const data = await getRecap(media.id, profileId ?? undefined)
+      if (identity !== recapIdentityRef.current || sequence !== recapFetchSequence.current) return
+      setRecapState({ identity, loading: false, data })
+      ++recapStatusSequence.current
+      setRecapStatusState({
+        identity,
+        status: { available: data.available, reason: data.reason, has_ask_history: !!data.has_ask_history },
+      })
+    } catch (caught) {
+      if (identity !== recapIdentityRef.current || sequence !== recapFetchSequence.current) return
+      setRecapState({
+        identity,
+        loading: false,
+        error: caught instanceof Error ? caught.message : 'Failed to load recap',
+      })
+    }
+  }, [media.id, profileId])
+  const handleAskHistoryChanged = useCallback((hasHistory: boolean) => {
+    ++recapStatusSequence.current
+    setRecapStatusState(previous => {
+      const current = previous?.identity === recapIdentity ? previous.status : undefined
+      return {
+        identity: recapIdentity,
+        status: current
+          ? { ...current, has_ask_history: hasHistory }
+          : { available: false, has_ask_history: hasHistory },
+      }
+    })
+    setRecapState(previous => previous.identity === recapIdentity && previous.data
+      ? { ...previous, data: { ...previous.data, has_ask_history: hasHistory } }
+      : previous)
+  }, [recapIdentity])
   const openRecap = useCallback(() => {
     setRecapOpen(true)
-    setRecapState({ loading: true })
-    getRecap(media.id, profileId ?? undefined)
-      .then((data) => setRecapState({ loading: false, data }))
-      .catch((e) => setRecapState({ loading: false, error: e instanceof Error ? e.message : 'Failed to load recap' }))
-  }, [media.id, profileId])
+  }, [])
+  useEffect(() => {
+    if (recapOpen) void refreshRecap()
+  }, [recapOpen, refreshRecap])
   // "My Rating" star widget. DetailView owns the fetch + submit (like the
   // recap) so App's involvement is one optional onRated callback. null = not
   // yet loaded — clicks no-op until the server value arrives so they can't
@@ -250,7 +320,10 @@ export default function DetailView({
   // Rail Resume mapping — reuse the existing resume formatters.
   const resumeShown = !!resume && isResumable(resume.item)
   const ri = resume?.item
-  const hasWatchedEpisodes = (apiEpisodes ?? []).some(ep => ep.progress?.completed)
+  const hasPreviously = !!recapStatus && (recapStatus.available || recapStatus.has_ask_history)
+  const currentRecapState = recapState.identity === recapIdentity
+    ? recapState
+    : { identity: recapIdentity, loading: true }
   const railResumeFraction = resumeShown && ri && ri.duration_ms
     ? Math.min(1, ri.position_ms / ri.duration_ms)
     : undefined
@@ -435,7 +508,7 @@ export default function DetailView({
             secondaryLabel={resumeShown ? 'Play from start' : undefined}
             onSecondary={resumeShown ? () => onPlay(media) : undefined}
             onWatchTrailer={detail?.trailer_key ? () => setTrailerOpen(true) : undefined}
-            onPrevious={isShow && hasWatchedEpisodes ? openRecap : undefined}
+            onPrevious={isShow && hasPreviously ? openRecap : undefined}
             inLibrary={inLibrary}
             onToggleLibrary={() => onToggleLib(media)}
             onAddToList={onAddToWatchlist ? () => onAddToWatchlist(media) : undefined}
@@ -469,14 +542,21 @@ export default function DetailView({
           )}
           {recapOpen && (
             <RecapModal
+              mediaId={media.id}
+              profileId={profileId ?? undefined}
               title={media.title}
-              loading={recapState.loading}
-              error={recapState.error}
-              recap={recapState.data?.available ? recapState.data.recap : undefined}
-              upTo={recapState.data?.up_to}
-              unavailableReason={recapState.data && !recapState.data.available ? recapState.data.reason : undefined}
+              loading={currentRecapState.loading}
+              error={currentRecapState.error}
+              recap={currentRecapState.data?.available ? currentRecapState.data.recap : undefined}
+              suggestedQuestions={currentRecapState.data?.available ? currentRecapState.data.suggested_questions : undefined}
+              upTo={currentRecapState.data?.up_to}
+              unavailableReason={currentRecapState.data && !currentRecapState.data.available ? currentRecapState.data.reason : undefined}
+              hasAskHistory={currentRecapState.data?.has_ask_history ?? recapStatus?.has_ask_history}
               onClose={() => setRecapOpen(false)}
               onStart={resumeShown && ri ? () => { setRecapOpen(false); resume!.onPlay(ri) } : undefined}
+              resumeLabel={ri?.season_number && ri.episode_number ? `Resume S${ri.season_number} · E${ri.episode_number}` : undefined}
+              onRefreshRecap={refreshRecap}
+              onHistoryChanged={handleAskHistoryChanged}
             />
           )}
 

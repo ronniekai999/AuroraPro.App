@@ -27,7 +27,7 @@
 // (the existing WebRTC mesh — mute-by-default, ~4-peer cap). We do NOT
 // build an SFU here.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   buildCompanionWsUrl,
   type ChatMessageEvent,
@@ -153,18 +153,26 @@ export function useCompanion(): UseCompanion {
   const [voiceState, setVoiceState] = useState<VoiceState>({
     enabled: false, muted: true, peers: [], selfSpeaking: false, status: 'Off',
   })
-  if (!voiceRef.current) {
-    voiceRef.current = createVoiceController({
+
+  useEffect(() => {
+    const voice = createVoiceController({
       send: (msg) => {
         const ws = roomWsRef.current
         if (!ws || ws.readyState !== WebSocket.OPEN) return false
         try { ws.send(JSON.stringify(msg)); return true } catch { return false }
       },
     })
-    voiceRef.current.subscribe(() => {
-      setVoiceState(voiceRef.current!.getState())
+    voiceRef.current = voice
+    const unsubscribe = voice.subscribe(() => {
+      setVoiceState(voice.getState())
     })
-  }
+
+    return () => {
+      unsubscribe()
+      voice.leave(/*emitLeave=*/false)
+      if (voiceRef.current === voice) voiceRef.current = null
+    }
+  }, [])
 
   const stopHeartbeat = useCallback(() => {
     if (heartbeatTimerRef.current) {
@@ -414,7 +422,15 @@ export function useCompanion(): UseCompanion {
   }, [handleRoomMessage, setStatePatch, stopHeartbeat])
 
   // Keep the ref pointed at the latest closure so onclose can recurse.
-  openRoomSocketRef.current = openRoomSocket
+  // Updating after commit avoids mutating refs during React's render phase.
+  useLayoutEffect(() => {
+    openRoomSocketRef.current = openRoomSocket
+    return () => {
+      if (openRoomSocketRef.current === openRoomSocket) {
+        openRoomSocketRef.current = null
+      }
+    }
+  }, [openRoomSocket])
 
   const join = useCallback((rawCode: string): { ok: boolean; error?: string } => {
     const code = rawCode.trim().toUpperCase()

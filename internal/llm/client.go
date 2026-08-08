@@ -376,7 +376,7 @@ func (c *Client) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 	}
 	url := c.embedURL() + "/api/embed"
 	reqID := c.newReqID()
-	c.logRequest(reqID, url, c.cfg.EmbedModel, body)
+	c.logRequest(ctx, reqID, url, c.cfg.EmbedModel, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -549,6 +549,20 @@ func (c *Client) ChatJSON(ctx context.Context, system, user string, schema any) 
 	return c.ChatJSONWith(ctx, c.cfg.ChatModel, system, user, schema, false)
 }
 
+type privatePayloadContextKey struct{}
+
+// WithPrivatePayload keeps the shared AI client's debug logs useful while
+// suppressing raw request and response bodies for conversational surfaces.
+// Provider, model, status, and latency remain visible for diagnostics.
+func WithPrivatePayload(ctx context.Context) context.Context {
+	return context.WithValue(ctx, privatePayloadContextKey{}, true)
+}
+
+func isPrivatePayload(ctx context.Context) bool {
+	private, _ := ctx.Value(privatePayloadContextKey{}).(bool)
+	return private
+}
+
 // ChatJSONWith sends a structured-output chat request on an explicit model.
 //
 // Hosted providers (anthropic/openai) are routed first and IGNORE the
@@ -633,7 +647,7 @@ func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, 
 	url := baseURL + "/api/chat"
 	reqID := c.newReqID()
 	start := time.Now()
-	c.logRequest(reqID, url, model, body)
+	c.logRequest(ctx, reqID, url, model, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -651,7 +665,7 @@ func (c *Client) chatNative(ctx context.Context, baseURL string, sendAuth bool, 
 	defer resp.Body.Close()
 
 	raw, capErr := readCappedBody(resp.Body)
-	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+	c.logResponseChat(ctx, reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", &StatusError{Op: "chat", Status: resp.StatusCode, Body: snippet(raw, 512)}
@@ -711,7 +725,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, baseURL string, sendAuth 
 	url := baseURL + "/v1/chat/completions"
 	reqID := c.newReqID()
 	start := time.Now()
-	c.logRequest(reqID, url, model, body)
+	c.logRequest(ctx, reqID, url, model, body)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -729,7 +743,7 @@ func (c *Client) chatOpenAISchema(ctx context.Context, baseURL string, sendAuth 
 	defer resp.Body.Close()
 
 	raw, capErr := readCappedBody(resp.Body)
-	c.logResponseChat(reqID, resp.StatusCode, time.Since(start), raw)
+	c.logResponseChat(ctx, reqID, resp.StatusCode, time.Since(start), raw)
 
 	if resp.StatusCode != http.StatusOK {
 		return "", &StatusError{Op: "chat", Status: resp.StatusCode, Body: snippet(raw, 512)}
@@ -769,16 +783,26 @@ func (c *Client) newReqID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func (c *Client) logRequest(reqID, url, model string, body []byte) {
+func (c *Client) logRequest(ctx context.Context, reqID, url, model string, body []byte) {
 	if !c.debug.Load() {
+		return
+	}
+	if isPrivatePayload(ctx) {
+		slog.Info("ollama →", "req_id", reqID, "endpoint", url, "model", model,
+			"body_redacted", true)
 		return
 	}
 	slog.Info("ollama →", "req_id", reqID, "endpoint", url, "model", model,
 		"body", string(body))
 }
 
-func (c *Client) logResponseChat(reqID string, status int, elapsed time.Duration, body []byte) {
+func (c *Client) logResponseChat(ctx context.Context, reqID string, status int, elapsed time.Duration, body []byte) {
 	if !c.debug.Load() {
+		return
+	}
+	if isPrivatePayload(ctx) {
+		slog.Info("ollama ←", "req_id", reqID, "status", status,
+			"latency_ms", elapsed.Milliseconds(), "body_redacted", true)
 		return
 	}
 	slog.Info("ollama ←", "req_id", reqID, "status", status,
