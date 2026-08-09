@@ -223,7 +223,7 @@ func TestOutputAudioCodec(t *testing.T) {
 }
 
 func TestHLSCodecStringEAC3(t *testing.T) {
-	got := hlsCodecString(1080, "eac3")
+	got := hlsCodecString(1080, "eac3", 0)
 	if !strings.Contains(got, "ec-3") {
 		t.Errorf("hlsCodecString(1080, eac3) = %q, want ec-3 audio part", got)
 	}
@@ -231,10 +231,10 @@ func TestHLSCodecStringEAC3(t *testing.T) {
 		t.Errorf("hlsCodecString(1080, eac3) = %q must not advertise AAC", got)
 	}
 	// ac3 and default mappings unchanged.
-	if got := hlsCodecString(720, "ac3"); !strings.Contains(got, "ac-3") {
+	if got := hlsCodecString(720, "ac3", 0); !strings.Contains(got, "ac-3") {
 		t.Errorf("hlsCodecString(720, ac3) = %q, want ac-3", got)
 	}
-	if got := hlsCodecString(720, ""); !strings.Contains(got, "mp4a.40.2") {
+	if got := hlsCodecString(720, "", 0); !strings.Contains(got, "mp4a.40.2") {
 		t.Errorf("hlsCodecString(720, \"\") = %q, want mp4a.40.2", got)
 	}
 }

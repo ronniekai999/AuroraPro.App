@@ -164,8 +164,8 @@ func (h HWAccelInfo) decodeInputArgs(fullGPU bool) []string {
 // -hwaccel_output_format. Bitrate control, keyframe forcing and audio args
 // are appended by the caller exactly as for the CPU-chain path. Only NVENC
 // and VAAPI have a Tier 2 (QSV/AMF encode from system memory).
-func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool) []string {
-	level := h264Level(height)
+func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool, fps float64) []string {
+	level := h264Level(height, fps)
 	profile := h264Profile(height)
 	switch h.Type {
 	case HWAccelNVENC:
@@ -300,7 +300,7 @@ func ProbeHWDecode(info *HWAccelInfo, workDir string) {
 	// its own probe and its own capability bit.
 	tier2Cycle := func(sample string, hdr bool) bool {
 		args := append(append([]string{"-hide_banner"}, base...), "-i", sample)
-		args = append(args, info.FullGPUEncoderArgs(96, 54, hdr)...)
+		args = append(args, info.FullGPUEncoderArgs(96, 54, hdr, 0)...)
 		args = append(args, "-frames:v", "2", "-f", "null", "-")
 		return runProbeFFmpeg(args)
 	}

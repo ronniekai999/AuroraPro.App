@@ -71,7 +71,7 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 		SELECT mf.id, mf.media_item_id, mf.path, mf.size_bytes, mf.container,
 		       mf.video_codec, mf.audio_codec, mf.resolution, mf.bitrate,
 		       mf.duration_ms, mf.file_hash, mf.scanned_at, mf.audio_tracks,
-		       mf.subtitle_tracks, mf.version_tag, mf.video_profile, mf.video_pix_fmt, mf.color_transfer, mf.color_primaries,
+		       mf.subtitle_tracks, mf.version_tag, mf.video_profile, mf.video_pix_fmt, mf.color_transfer, mf.color_primaries, mf.video_fps,
 		       l.name AS library_name
 		FROM media_files mf
 		JOIN media_items mi ON mi.id = mf.media_item_id
@@ -93,7 +93,7 @@ func (q *Queries) GetCrossLibraryFiles(ctx context.Context, mediaItemID int64) (
 		var libName string
 		if err := rows.Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 			&libName); err != nil {
 			return nil, nil, fmt.Errorf("scan cross-library file: %w", err)
 		}
@@ -134,7 +134,7 @@ func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int
 		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
 		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
 		       ef.duration_ms, ef.file_hash, ef.scanned_at, ef.audio_tracks,
-		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries,
+		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries, ef.video_fps,
 		       l.name AS library_name
 		FROM episode_files ef
 		JOIN tv_episodes e ON e.id = ef.episode_id
@@ -160,7 +160,7 @@ func (q *Queries) GetCrossLibraryEpisodeFiles(ctx context.Context, episodeID int
 		var libName string
 		if err := rows.Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 			&libName); err != nil {
 			return nil, nil, fmt.Errorf("scan cross-library episode file: %w", err)
 		}
@@ -190,7 +190,7 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 		SELECT ef.id, ef.episode_id, ef.path, ef.size_bytes, ef.container,
 		       ef.video_codec, ef.audio_codec, ef.resolution, ef.bitrate,
 		       ef.duration_ms, ef.file_hash, ef.scanned_at, ef.audio_tracks,
-		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries,
+		       ef.subtitle_tracks, ef.version_tag, ef.video_profile, ef.video_pix_fmt, ef.color_transfer, ef.color_primaries, ef.video_fps,
 		       l.name AS library_name,
 		       src_ep.id AS src_episode_id
 		FROM tv_episodes src_ep
@@ -218,7 +218,7 @@ func (q *Queries) GetCrossLibraryEpisodeFilesBatch(ctx context.Context, episodeI
 		var srcEpID int64
 		if err := rows.Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 			&libName, &srcEpID); err != nil {
 			return nil, nil, fmt.Errorf("scan batch episode file: %w", err)
 		}

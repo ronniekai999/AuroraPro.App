@@ -623,6 +623,7 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 			ef.VideoPixFmt = probeResult.VideoPixFmt
 			ef.ColorTransfer = probeResult.ColorTransfer
 			ef.ColorPrimaries = probeResult.ColorPrimaries
+			ef.VideoFPS = probeResult.VideoFPS
 		} else if parsed.Resolution != "" {
 			ef.Resolution = parsed.Resolution
 		}
@@ -672,6 +673,7 @@ func (s *Scanner) processFile(ctx context.Context, lib *models.Library, filePath
 			mf.VideoPixFmt = probeResult.VideoPixFmt
 			mf.ColorTransfer = probeResult.ColorTransfer
 			mf.ColorPrimaries = probeResult.ColorPrimaries
+			mf.VideoFPS = probeResult.VideoFPS
 		} else if parsed.Resolution != "" {
 			mf.Resolution = parsed.Resolution
 		}
