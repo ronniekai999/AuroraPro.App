@@ -12,7 +12,7 @@ flowchart TD
     D --> E["⚙️ Build & test<br/>go build ./... · go test ./..."]
     E --> F{green?}
     F -- no --> D
-    F -- yes --> G["🤖 Deep-debug agent review<br/>multi-agent adversarial review of the diff"]
+    F -- yes --> G["🤖 Independent deep-debug review<br/>fresh-context, non-author agent reviews the final diff"]
     G --> H{verdict}
     H -- "FIX-FIRST<br/>(high/critical found)" --> D
     H -- "clean / lows only" --> I["✅ Commit + open PR"]
@@ -46,10 +46,19 @@ flowchart TD
    Without it the gate fails at the final step with Playwright's own message
    telling you to run exactly that. Set `CHROMIUM_PATH` to override the binary
    before review. Loop back on failure.
-5. **Deep-debug agent review** — a multi-agent adversarial review of *the diff*:
-   does each change actually close its issue, and did it introduce any regression
-   or second-order bug? (This is the step that caught the H4 "permanently failed"
-   defect in PR #146 before it could ship.)
+5. **Independent deep-debug agent review** — dispatch a separate, fresh-context
+   agent to adversarially review *the complete current diff*. The implementing
+   agent's self-review does not satisfy this gate. The reviewer is read-only and
+   asks: does each change actually close its issue, and did it introduce any
+   regression, race, contract mismatch, lifecycle bug, or second-order failure?
+   Findings cite exact file/line locations and are ordered by severity. This is
+   the step that caught the H4 "permanently failed" defect in PR #146 before it
+   could ship.
+
+   Resolve every high/critical finding and independently review the resulting
+   final diff again. Any substantive code change after a clean verdict invalidates
+   that verdict. If no independent agent is available, mark the gate incomplete;
+   never substitute or relabel a self-review.
 6. **Merge gate** —
    - **Clean** (no unresolved high/critical; lows/nits noted) → squash-merge to
      `main` and delete the merged branch.

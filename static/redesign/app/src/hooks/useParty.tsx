@@ -34,7 +34,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   buildWsUrl,
+  partyPauseRequest,
+  partySeekRequest,
   participantFromJoinEvent,
+  receivedSeekFromHello,
+  shouldAcceptPartyRevision,
   type ChatMessageEvent,
   type CodeInfo,
   type HostChangedEvent,
@@ -44,6 +48,7 @@ import {
   type OutboundSyncMessage,
   type PartyParticipant,
   type ReactionEvent,
+  type ReceivedSeekPayload,
   type TickPayload,
 } from '@/lib/party'
 import { apiFetch, getStoredUser, refreshAccessToken } from '@/lib/api'
@@ -208,6 +213,10 @@ export interface UseParty {
   // Live sync values for the player effect. Refs avoid causing
   // re-renders on every tick (which fires at 1-2 Hz).
   tickRef: React.MutableRefObject<TickPayload | null>
+  // Explicit host seek frames are separate from ticks so a guest can rebase
+  // a sequential HLS session exactly once instead of mistaking normal drift
+  // near the buffered edge for a scrub.
+  seekRef: React.MutableRefObject<ReceivedSeekPayload | null>
   helloAbsMsRef: React.MutableRefObject<number>
   // 2026-05-25 — NTP-style clock offset from server, in ms.
   // Use as: serverTime ≈ Date.now() + clockOffsetRef.current
@@ -239,6 +248,18 @@ export function useParty(currentUserId?: number): UseParty {
   const roomWsRef = useRef<WebSocket | null>(null)
   const syncWsRef = useRef<WebSocket | null>(null)
   const tickRef = useRef<TickPayload | null>(null)
+  const seekRef = useRef<ReceivedSeekPayload | null>(null)
+  const seekSequenceRef = useRef(0)
+  // Room and sync events share a server revision but travel over independent
+  // WebSockets. This ref orders them synchronously before React state commits.
+  const latestAcceptedRevRef = useRef(0)
+  const acceptRevision = useCallback((incomingRev: number | undefined): boolean => {
+    if (!shouldAcceptPartyRevision(latestAcceptedRevRef.current, incomingRev)) return false
+    if (incomingRev !== undefined) {
+      latestAcceptedRevRef.current = Math.max(latestAcceptedRevRef.current, incomingRev)
+    }
+    return true
+  }, [])
   const helloAbsMsRef = useRef<number>(0)
   // 2026-05-25 — clock-offset estimation via repeated time-syncs.
   // EMA-smoothed across samples (newest weighted 30%) so a single
@@ -448,6 +469,8 @@ export function useParty(currentUserId?: number): UseParty {
     closeSockets()
     setState(INITIAL_STATE)
     tickRef.current = null
+    seekRef.current = null
+    latestAcceptedRevRef.current = 0
     helloAbsMsRef.current = 0
     // Audit H1 (P4) — clear any buffered sync intents so a stale
     // play/pause/seek from the previous party doesn't replay against
@@ -493,6 +516,7 @@ export function useParty(currentUserId?: number): UseParty {
         // sends `revision` here vs `rev` elsewhere; we map both.
         const p = msg.payload
         const inner = p.party || {}
+        const acceptsSnapshot = acceptRevision(inner.revision)
         // Audit MED-3 (Phase 4.5 final) — clear recentReactions when
         // the party's mediaItemId changes vs. our current state.
         // Phase 4 doesn't handle media-change broadcasts yet, but
@@ -501,25 +525,27 @@ export function useParty(currentUserId?: number): UseParty {
         // Without this, reactions from the previous movie keep
         // floating on screen after the swap.
         setStatePatch(prev => ({
-          code: inner.code,
-          partyName: inner.party_name,
-          mediaTitle: inner.media_title,
-          mediaPoster: inner.media_poster,
-          mediaItemId: inner.media_item_id,
-          episodeId: inner.episode_id,
-          hostUserId: inner.host_user_id,
           participants: p.participants ?? [],
           chat: (p.chat_history ?? []).slice(-MAX_CHAT),
-          isPlaying: inner.is_playing,
-          currentTimeMs: inner.current_time_ms,
-          rev: inner.revision ?? 0,
-          scheduledStartAt: inner.scheduled_start_at ?? null,
-          startedAt: inner.started_at ?? null,
           error: null,
-          recentReactions:
-            prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
-              ? []
-              : prev.recentReactions,
+          ...(acceptsSnapshot ? {
+            code: inner.code,
+            partyName: inner.party_name,
+            mediaTitle: inner.media_title,
+            mediaPoster: inner.media_poster,
+            mediaItemId: inner.media_item_id,
+            episodeId: inner.episode_id,
+            hostUserId: inner.host_user_id,
+            isPlaying: inner.is_playing,
+            currentTimeMs: inner.current_time_ms,
+            rev: inner.revision ?? prev.rev,
+            scheduledStartAt: inner.scheduled_start_at ?? null,
+            startedAt: inner.started_at ?? null,
+            recentReactions:
+              prev.mediaItemId && prev.mediaItemId !== inner.media_item_id
+                ? []
+                : prev.recentReactions,
+          } : {}),
         }))
         // 2026-05-25 — refresh the last-party cache with the
         // server-authoritative values. This catches the "user
@@ -530,7 +556,7 @@ export function useParty(currentUserId?: number): UseParty {
         // truth.
         {
           const userId = currentUserIdRef.current
-          if (userId && inner.code) {
+          if (acceptsSnapshot && userId && inner.code) {
             cacheLastParty({
               userId,
               code: inner.code,
@@ -614,6 +640,7 @@ export function useParty(currentUserId?: number): UseParty {
       }
       case 'media-change': {
         const p = msg.payload
+        if (!acceptRevision(p.rev)) break
         // Update party state to reflect the new media. The reaction
         // overlay clear (M5) already triggers on mediaItemId change
         // via the party-state setter pattern — apply it here too.
@@ -630,6 +657,7 @@ export function useParty(currentUserId?: number): UseParty {
         // Reset sync refs — the next hello on the sync socket will
         // arrive with the new media's anchor.
         tickRef.current = null
+        seekRef.current = null
         helloAbsMsRef.current = 0
         // Fan out to consumers (App.tsx will re-emit playerTarget
         // for the new episode).
@@ -664,6 +692,10 @@ export function useParty(currentUserId?: number): UseParty {
         setTimeout(() => {
           activeCodeRef.current = null
           closeSockets()
+          tickRef.current = null
+          seekRef.current = null
+          latestAcceptedRevRef.current = 0
+          helloAbsMsRef.current = 0
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -677,7 +709,7 @@ export function useParty(currentUserId?: number): UseParty {
   // would let us add it to deps, but the ref-pattern is overkill for
   // a function that already has stable identity through closure.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setStatePatch, closeSockets, cancelSyncReconnect])
+  }, [setStatePatch, closeSockets, cancelSyncReconnect, acceptRevision])
 
   const handleSyncMessage = useCallback((raw: string) => {
     let msg: InboundSyncMessage
@@ -686,6 +718,8 @@ export function useParty(currentUserId?: number): UseParty {
     switch (msg.type) {
       case 'hello': {
         const p = msg.payload
+        if (!acceptRevision(p.rev)) break
+        const receivedAtMs = Date.now()
         helloAbsMsRef.current = p.abs_ms
         setStatePatch({
           hlsStartSec: p.hls_start_sec ?? 0,
@@ -693,11 +727,20 @@ export function useParty(currentUserId?: number): UseParty {
           currentTimeMs: p.abs_ms,
           rev: p.rev ?? 0,
         })
-        // Treat hello as the initial tick for the player.
-        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: p.server_now_ms, running: p.running, rev: p.rev, receivedAtMs: Date.now() }
+        // Treat hello as both the initial tick and a one-shot rebase. A guest
+        // reconnecting after a host seek never saw the original `seek` frame;
+        // without this signal its old sequential HLS window cannot serve the
+        // new absolute position and a raw currentTime assignment stalls.
+        seekRef.current = receivedSeekFromHello(
+          p,
+          receivedAtMs,
+          ++seekSequenceRef.current,
+        )
+        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: p.server_now_ms, running: p.running, rev: p.rev, receivedAtMs }
         break
       }
       case 'tick': {
+        if (!acceptRevision(msg.payload.rev)) break
         tickRef.current = { ...msg.payload, receivedAtMs: Date.now() }
         setStatePatch({
           isPlaying: msg.payload.running !== false,
@@ -708,6 +751,7 @@ export function useParty(currentUserId?: number): UseParty {
       }
       case 'pause': {
         const p = msg.payload
+        if (!acceptRevision(p.rev)) break
         setStatePatch(prev =>
           (p.rev ?? 0) < prev.rev
             ? {}
@@ -718,12 +762,19 @@ export function useParty(currentUserId?: number): UseParty {
       }
       case 'seek': {
         const p = msg.payload
+        if (!acceptRevision(p.rev)) break
+        const receivedAtMs = Date.now()
         setStatePatch(prev =>
           (p.rev ?? 0) < prev.rev
             ? {}
             : { currentTimeMs: p.abs_ms, isPlaying: p.running ?? prev.isPlaying, rev: p.rev ?? prev.rev }
         )
-        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: Date.now(), running: p.running, rev: p.rev, receivedAtMs: Date.now() }
+        seekRef.current = {
+          ...p,
+          receivedAtMs,
+          sequence: ++seekSequenceRef.current,
+        }
+        tickRef.current = { abs_ms: p.abs_ms, server_now_ms: receivedAtMs, running: p.running, rev: p.rev, receivedAtMs }
         break
       }
       case 'party-ended':
@@ -731,6 +782,10 @@ export function useParty(currentUserId?: number): UseParty {
         setTimeout(() => {
           activeCodeRef.current = null
           closeSockets()
+          tickRef.current = null
+          seekRef.current = null
+          latestAcceptedRevRef.current = 0
+          helloAbsMsRef.current = 0
           setState(INITIAL_STATE)
         }, 50)
         break
@@ -767,7 +822,7 @@ export function useParty(currentUserId?: number): UseParty {
         setStatePatch({ error: msg.payload.error })
         break
     }
-  }, [setStatePatch, closeSockets])
+  }, [setStatePatch, closeSockets, acceptRevision])
 
   // 2026-05-25 — opens the room WebSocket and wires up:
   //   - onopen: send `join-party`, start heartbeat interval, mark
@@ -959,14 +1014,14 @@ export function useParty(currentUserId?: number): UseParty {
       }
       if (pending.playPause) {
         // 2026-06 review — when BOTH a seek and a pause are buffered, the
-        // pause's captured abs_ms predates the seek (the slots don't
+        // pause's captured at_ms predates the seek (the slots don't
         // record order), so sending it verbatim would yank the party back
-        // to the pre-seek position. abs_ms:-1 tells the server "pause at
+        // to the pre-seek position. at_ms:-1 tells the server "pause at
         // the current canonical position", which after the seek above is
         // exactly the seek target.
         let out = pending.playPause
         if (pending.seek && out.type === 'request-pause') {
-          out = { type: 'request-pause', payload: { abs_ms: -1 } }
+          out = partyPauseRequest(-1)
         }
         try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
       }
@@ -1107,6 +1162,10 @@ export function useParty(currentUserId?: number): UseParty {
     activeCodeRef.current = null
     closeSockets()
     setState({ ...INITIAL_STATE, joining: true })
+    tickRef.current = null
+    seekRef.current = null
+    latestAcceptedRevRef.current = 0
+    helloAbsMsRef.current = 0
     // Preflight: distinguish a live party from a persistent-room
     // code. We don't deeply use the response yet (Phase 4.5 will
     // render an "offline room" panel) but we use the success/404 to
@@ -1217,10 +1276,10 @@ export function useParty(currentUserId?: number): UseParty {
     sendOrBuffer({ type: 'request-play' })
   }, [sendOrBuffer])
   const requestPause = useCallback((absMs: number) => {
-    sendOrBuffer({ type: 'request-pause', payload: { abs_ms: absMs } })
+    sendOrBuffer(partyPauseRequest(absMs))
   }, [sendOrBuffer])
   const requestSeek = useCallback((absMs: number) => {
-    sendOrBuffer({ type: 'request-seek', payload: { abs_ms: absMs } })
+    sendOrBuffer(partySeekRequest(absMs))
   }, [sendOrBuffer])
 
   // Tear down on unmount — without this, navigating away from V2
@@ -1283,6 +1342,8 @@ export function useParty(currentUserId?: number): UseParty {
     closeSockets()
     setState(INITIAL_STATE)
     tickRef.current = null
+    seekRef.current = null
+    latestAcceptedRevRef.current = 0
     helloAbsMsRef.current = 0
     // Same Audit H1 (P4) guard leave() carries: no stale intents may
     // replay against a future party's sync socket.
@@ -1305,6 +1366,7 @@ export function useParty(currentUserId?: number): UseParty {
     requestPause,
     requestSeek,
     tickRef,
+    seekRef,
     helloAbsMsRef,
     clockOffsetRef,
     rttRef,

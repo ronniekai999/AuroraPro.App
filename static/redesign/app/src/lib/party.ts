@@ -53,8 +53,11 @@ export type OutboundRoomMessage =
 export type OutboundSyncMessage =
   | { type: 'join-party'; payload: { party_code: string } }
   | { type: 'request-play' }
-  | { type: 'request-pause'; payload: { abs_ms: number } }
-  | { type: 'request-seek'; payload: { abs_ms: number } }
+  // Keep these names aligned with party_ws_v3_sync.go. Unknown JSON fields
+  // are ignored by Go's decoder, so sending the old `abs_ms` silently turned
+  // every seek into the zero-value `to_ms: 0` (issue #448).
+  | { type: 'request-pause'; payload: { at_ms: number } }
+  | { type: 'request-seek'; payload: { to_ms: number } }
   | { type: 'heartbeat'; payload: { abs_ms: number; buffering?: boolean } }
   // 2026-05-25 — server's actual protocol is `time-sync` (not
   // `time-sync-request`), and the round-trip carries server_recv + server_send
@@ -64,6 +67,27 @@ export type OutboundSyncMessage =
   // measured_* fields let the client report its computed RTT/offset back to
   // the server for observability (see manager.RecordRTT) — purely diagnostic.
   | { type: 'time-sync'; payload: { client_send_ms: number; measured_rtt_ms?: number; measured_offset_ms?: number } }
+
+export function partyPauseRequest(absMs: number): Extract<OutboundSyncMessage, { type: 'request-pause' }> {
+  return { type: 'request-pause', payload: { at_ms: absMs } }
+}
+
+export function partySeekRequest(absMs: number): Extract<OutboundSyncMessage, { type: 'request-seek' }> {
+  return { type: 'request-seek', payload: { to_ms: absMs } }
+}
+
+/**
+ * The room and sync channels are independent WebSockets, but their revision is
+ * one shared monotonic sequence. Once a versioned frame has been accepted,
+ * unversioned legacy frames are no longer safe to apply across that boundary.
+ */
+export function shouldAcceptPartyRevision(
+  latestAcceptedRev: number,
+  incomingRev: number | undefined,
+): boolean {
+  if (incomingRev === undefined) return latestAcceptedRev === 0
+  return incomingRev >= latestAcceptedRev
+}
 
 // ──────────────────────────────────────────────────────────────────
 // Wire types — inbound (server → client)
@@ -201,6 +225,16 @@ export interface PauseSeekPayload {
   abs_ms: number
   rev?: number
   running?: boolean
+  by?: number
+}
+
+// Client-local enrichment of an explicit server `seek` frame. Unlike the
+// high-frequency tickRef, this ref lets VideoPlayer distinguish a deliberate
+// host scrub (which may require every sequential HLS session to rebase) from
+// ordinary drift correction near the produced edge.
+export interface ReceivedSeekPayload extends PauseSeekPayload {
+  receivedAtMs: number
+  sequence: number
 }
 
 export interface HelloPayload {
@@ -214,6 +248,25 @@ export interface HelloPayload {
   // started transcoding from (may differ from the requested resume
   // position by up to one GOP, ~2-4s).
   hls_start_sec?: number
+}
+
+/**
+ * A sync-socket hello is also a one-shot absolute rebase instruction. This is
+ * load-bearing on reconnect: the explicit seek that moved the party may have
+ * happened while this client was offline.
+ */
+export function receivedSeekFromHello(
+  payload: HelloPayload,
+  receivedAtMs: number,
+  sequence: number,
+): ReceivedSeekPayload {
+  return {
+    abs_ms: payload.abs_ms,
+    running: payload.running,
+    rev: payload.rev,
+    receivedAtMs,
+    sequence,
+  }
 }
 
 // 2026-08 — host succession. The previous host left (reason 'left') or
