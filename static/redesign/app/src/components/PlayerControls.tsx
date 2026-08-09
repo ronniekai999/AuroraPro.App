@@ -179,10 +179,13 @@ export function PlayerControls(props: PlayerControlsProps) {
       }`}
       aria-hidden={!visible}
       // Marks this as an auto-hiding region. VideoPlayer's hide timer refuses
-      // to fire while focus is inside one — going `inert` under a focused
-      // element triggers the HTML focus-fixup rule and dumps activeElement to
-      // <body>, so a keyboard user parked on the scrub bar used to lose their
-      // place after three idle seconds.
+      // to fire while KEYBOARD focus is inside one — going `inert` under a
+      // keyboard-focused element triggers the HTML focus-fixup rule and dumps
+      // activeElement to <body>, so a keyboard user parked on the scrub bar
+      // used to lose their place after three idle seconds (WCAG 2.4.3). The
+      // guard is modality-gated (lib/chromeFocus): mouse click-focus, like
+      // the fullscreen button keeping focus after activation, does NOT pin
+      // the chrome — that was the 2026-08-09 stuck-visible-controls bug.
       data-player-chrome=""
       // 2026-05-20 — React 19 supports `inert` as a proper boolean
       // prop. The previous code used `{inert: '' | undefined}` as a
