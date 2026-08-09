@@ -687,6 +687,7 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 		SourceHDR:         src.SourceHDR,
 		SourceVideoCodec:  src.SourceVideoCodec,
 		SourceVideoPixFmt: src.SourceVideoPixFmt,
+		SourceFPS:         src.SourceFPS,
 		StartSec:          src.StartSec,
 		// SubtitleTracks intentionally omitted: the Chromecast Default Media
 		// Receiver (Shaka) stalls after loadMedia resolves when the master
@@ -1088,6 +1089,12 @@ type TranscodeSession struct {
 	// HWAccelInfo.PlanDecode to gate hardware decode per source (Hi10P
 	// H.264 and 10-bit-on-8-bit-only-hardware must stay on CPU decode).
 	SourceVideoPixFmt string `json:"-"`
+	// SourceFPS is the source average frame rate from the library's probe
+	// data (0 = unknown — files scanned before migration 053). Feeds the
+	// fps-aware H.264 level table so >30fps content stamps truthful levels
+	// (1080p60 → 4.2, 2160p60 → 5.2) in both the encoder args and the
+	// master playlist CODECS attribute.
+	SourceFPS float64 `json:"-"`
 	// swDecodeFallback forces every variant launch of THIS SESSION to run
 	// WITHOUT hardware decode (2026-07): if a file that slipped past the
 	// startup decode probes kills FFmpeg, the retry — and every other ABR
@@ -1315,6 +1322,22 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 
 	hwAccel := DetectHWAccel(tcCfg.HWAccel)
 
+	// Software-encoder preset (transcode.software_preset): only the
+	// realtime-capable x264 presets are accepted — anything slower than
+	// "medium" cannot keep up with on-demand transcoding on this class of
+	// hardware, and an unknown value must fail SAFE to the default rather
+	// than reach FFmpeg as a misspelled preset (which libx264 rejects,
+	// killing every software transcode at encoder init).
+	switch strings.ToLower(strings.TrimSpace(tcCfg.SoftwarePreset)) {
+	case "", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
+		// valid ("" = default "veryfast", applied in VideoEncoderArgs)
+	default:
+		slog.Warn("unknown transcode software_preset, using veryfast",
+			"configured", tcCfg.SoftwarePreset)
+		tcCfg.SoftwarePreset = ""
+	}
+	hwAccel.SWPreset = strings.ToLower(strings.TrimSpace(tcCfg.SoftwarePreset))
+
 	// Decode-side acceleration (2026-07): probed ASYNCHRONOUSLY unless
 	// configured off — the probe is a handful of bounded FFmpeg runs, but on
 	// a box with a wedged GPU driver each can hang to its timeout, and this
@@ -1396,6 +1419,7 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		"max_sessions_per_user", effectiveMaxSessionsPerUser(tcCfg.MaxSessionsPerUser),
 		"profiles", tcCfg.Profiles,
 		"segment_format", segFormat,
+		"software_preset", hwAccel.SWPreset,
 		"readrate_pacing", tm.readrateOK,
 	)
 
@@ -1850,7 +1874,10 @@ type SessionOpts struct {
 	// SourceVideoPixFmt is the source pixel format from the library's OWN
 	// probe data (never a client echo) — see TranscodeSession.SourceVideoPixFmt.
 	SourceVideoPixFmt string
-	StartSec          int // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
+	// SourceFPS is the source average frame rate from the library's OWN probe
+	// data (never a client echo) — see TranscodeSession.SourceFPS.
+	SourceFPS float64
+	StartSec  int // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
 	// SubtitleTracks lists text-based subtitle tracks to extract inline via
 	// the HLS pipeline. Each track gets its own WebVTT segmented output chain
 	// appended to the FFmpeg command, piggybacking on the same file I/O as
@@ -1995,18 +2022,20 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		session.SourceHDR = o.SourceHDR
 		session.SourceVideoCodec = strings.ToLower(o.SourceVideoCodec)
 		session.SourceVideoPixFmt = strings.ToLower(o.SourceVideoPixFmt)
+		session.SourceFPS = o.SourceFPS
 		session.swDecodeFallback = o.DisableHWDecode
 		session.StartSec = o.StartSec
 		session.SubtitleTracks = o.SubtitleTracks
 	}
 
 	// Set HLS CODECS string on profiles for the master playlist.
-	// Transcode: H.264 Baseline + AAC-LC. The H.264 level varies by resolution
-	// to comply with the spec: 1080p needs Level 4.0+, 720p needs Level 3.1.
+	// Transcode: H.264 High + the session's audio codec. The H.264 level
+	// varies by resolution AND source frame rate (h264LevelIDC — 1080p60
+	// needs 4.2, 2160p60 needs 5.2; unknown fps keeps the ≤30fps choice).
 	// Remux: codec string is unknown at creation time (omitted, valid per HLS spec).
 	if !session.Remux {
 		for i := range profiles {
-			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut)
+			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS)
 		}
 		session.Profiles = profiles
 	}
@@ -2651,14 +2680,14 @@ func segmentNumberPart(name string) (string, bool) {
 //   - Audio: AAC-LC (mp4a.40.2) by default, AC-3 (ac-3) when
 //     audioCodec=="ac3" (re-encoded surround OR fMP4 copy), or E-AC-3 (ec-3)
 //     when audioCodec=="eac3" (fMP4 passthrough only).
-func hlsCodecString(height int, audioCodec string) string {
+func hlsCodecString(height int, audioCodec string, fps float64) string {
 	// Level derives from the same h264LevelIDC table the encoders use
 	// (hwaccel.go) — one source of truth, so the CODECS attribute can never
 	// disagree with the actual -level constraint. Tier choice rationale
 	// (incl. the Chromecast gen-1/2 4.1 and Chromecast-with-Google-TV 5.1
-	// receiver ceilings that pin the 1080p/2160p rungs) lives on
-	// h264LevelIDC.
-	level := h264LevelHex(height)
+	// receiver ceilings that pin the 1080p/2160p rungs, and the >30fps
+	// bumps) lives on h264LevelIDC.
+	level := h264LevelHex(height, fps)
 
 	audio := "mp4a.40.2" // AAC-LC
 	switch audioCodec {
@@ -2945,13 +2974,13 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			// would splice CPU-only filters into a hardware-frame graph.
 			// Bitrate control, keyframe forcing and audio args below are
 			// shared with the CPU path.
-			args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap)...)
+			args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
 		} else {
 			// Video encoder (hardware-accelerated or software). When
 			// PlanDecode chose Tier 1, the frames were hardware-DECODED but
 			// arrive in system memory, so this CPU filter chain applies
 			// unchanged.
-			encoderArgs := tm.hwAccel.VideoEncoderArgs(p.Width, p.Height)
+			encoderArgs := tm.hwAccel.VideoEncoderArgs(p.Width, p.Height, session.SourceFPS)
 
 			// HDR-to-SDR tonemapping: inject before subtitle burn-in so tonemap
 			// operates on the raw decoded frames, then subtitles overlay the SDR output.

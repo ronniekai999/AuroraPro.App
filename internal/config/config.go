@@ -271,7 +271,14 @@ type TranscodeConfig struct {
 	// pipeline). Decode offload is what removes the dominant CPU cost of
 	// the 4K-HEVC→H.264 transcode; see streaming.ProbeHWDecode.
 	HWDecode string
-	Profiles []string
+	// SoftwarePreset is the libx264 preset for SOFTWARE transcodes (the
+	// HWAccelNone path — hardware encoders have their own speed/quality
+	// knobs). Default "veryfast". "faster" buys ~5-8% quality at ~30%
+	// more CPU for operators who prefer quality over warmup speed.
+	// Validated against the x264 realtime-capable presets in
+	// NewTranscodeManager; unknown values fall back to "veryfast".
+	SoftwarePreset string
+	Profiles       []string
 	// MaxCacheBytes bounds the total on-disk size of the transcode output
 	// tree (HLS EVENT playlists keep every segment of a title so seek-back
 	// works, so long/concurrent transcodes can grow it without bound). When
@@ -337,6 +344,7 @@ type yamlConfig struct {
 		SessionTimeoutSec  int      `yaml:"session_timeout_sec"`
 		SegmentDuration    int      `yaml:"segment_duration"`
 		SegmentFormat      string   `yaml:"segment_format"`
+		SoftwarePreset     string   `yaml:"software_preset"`
 		Profiles           []string `yaml:"profiles"`
 		MaxCacheGB         int      `yaml:"max_cache_gb"`
 	} `yaml:"transcode"`
@@ -473,6 +481,9 @@ func Load() (*Config, error) {
 			// fMP4 for HEVC, and hls.js skips its TS→fMP4 remux entirely.
 			// Set "ts" to roll back to the legacy MPEG-TS pipeline.
 			SegmentFormat: "fmp4",
+			// libx264 preset for software transcodes. "faster" is the
+			// quality-first alternative (~5-8% better, ~30% more CPU).
+			SoftwarePreset: "veryfast",
 			// 2160p included so 4K sources can be offered at full resolution
 			// when transcoding is unavoidable. It sits at the TOP of the ABR
 			// ladder and variants start on-demand, so low-bandwidth clients
@@ -752,6 +763,9 @@ func loadYAML(cfg *Config) error {
 	}
 	if yc.Transcode.HWDecode != "" {
 		cfg.Transcode.HWDecode = yc.Transcode.HWDecode
+	}
+	if yc.Transcode.SoftwarePreset != "" {
+		cfg.Transcode.SoftwarePreset = yc.Transcode.SoftwarePreset
 	}
 	if yc.Transcode.MaxSessionsPerUser > 0 {
 		cfg.Transcode.MaxSessionsPerUser = yc.Transcode.MaxSessionsPerUser
