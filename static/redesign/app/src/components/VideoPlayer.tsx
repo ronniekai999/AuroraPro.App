@@ -61,6 +61,19 @@ import {
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
+import {
+  needsHlsSessionRebuild,
+  pauseIntentForReplacementSeek,
+  resolvePlaybackBootPause,
+  shouldApplyExplicitPartySeek,
+  shouldRebuildSeekBeforeDeliveryReady,
+  shouldReplaceUnreadyTargetForExplicitSeek,
+  shouldPreservePauseForBoot,
+  shouldPreservePauseForLocalSeekRebuild,
+  shouldPreservePauseOnSeekRebuild,
+  type PlaybackDeliveryMode,
+} from '@/lib/partyPlayer'
+import type { ReceivedSeekPayload } from '@/lib/party'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -75,12 +88,16 @@ import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSampl
 // (the 2026-05-15 seek-storm fix in aurora_pro.html ~line 6517).
 export interface PartySync {
   isHost: boolean
+  currentUserId: number
   // Live refs the player polls each second. tick.abs_ms is in
   // SOURCE coordinates; player adds back hello.hls_start_sec via
   // helloAbsMsRef → 0 mapping to map to hls.js currentTime.
   // receivedAtMs is client-local (Date.now() at frame receipt, stamped by
   // useParty) — the drift loop's clock-skew-free staleness signal.
   tickRef: React.MutableRefObject<{ abs_ms: number; server_now_ms: number; running?: boolean; rev?: number; receivedAtMs?: number } | null>
+  // Most recent explicit host seek, enriched client-side with a monotonic
+  // sequence. Guests use this to rebase sequential HLS exactly once.
+  seekRef: React.MutableRefObject<ReceivedSeekPayload | null>
   helloAbsMsRef: React.MutableRefObject<number>
   // Server-reported hls_start_sec (FFmpeg -ss snapped offset). Tick
   // abs_ms minus this gives hls.js-relative seconds.
@@ -88,6 +105,10 @@ export interface PartySync {
   // The server's last-known isPlaying. Drives guest-side play/pause
   // mirroring when no recent tick has arrived to disambiguate.
   isPlaying: boolean
+  // Shared monotonic room/sync revision. A seek boot captures this so a newer
+  // canonical Pause/Play received while the stream resolves can supersede the
+  // point-in-time seek intent without letting same-revision React lag win.
+  rev: number
   // Audit H3 (Phase 4.5 final-6) — the party's authoritative
   // mediaItemId. Mirror only fires when this matches the player's
   // current target.mediaItemId; otherwise we'd seek the wrong
@@ -145,6 +166,13 @@ export interface PlayTarget {
   // remux fails with MEDIA_ERROR (the browser can't decode the
   // source codecs even with container rewrap).
   forceTranscode?: boolean
+  // One-shot token assigned when party recovery auto-opens a player while the
+  // canonical room is Paused. VideoPlayer consumes each token once so later
+  // audio/fallback/seek target mutations do not become permanently paused.
+  pauseOnBootToken?: number
+  // Marks targets created by party auto-open/media-change resolution. Those
+  // network-bound boots re-check canonical play/pause state when they finish.
+  partyRecoveryBoot?: boolean
 }
 
 interface VideoPlayerProps {
@@ -180,11 +208,11 @@ interface VideoPlayerProps {
   // the player asks the parent to tear down + re-create the HLS
   // session anchored at the new `start_sec` (mirroring the
   // onChangeAudioTrack path), so the user can scrub anywhere. The
-  // parent should NOT wire this when in a watch party (party seek
-  // broadcasts assume same-session timing; a unilateral session
-  // rebuild on the host would drift the guests). Argument is in real-
-  // file seconds (the absolute media position, NOT video element
-  // currentTime), matching what the scrubber emits to onSeek.
+  // In a watch party the host broadcasts the absolute seek before using this
+  // callback; guests consume that explicit frame and invoke the same callback
+  // for their independent sessions. Argument is in real-file seconds (the
+  // absolute media position, NOT video element currentTime), matching what the
+  // scrubber emits to onSeek.
   onSeekRebuild?: (newStartSec: number) => void
   // Issue #177 — fires once when playback reaches the natural end of
   // the media: the local <video> 'ended' event, OR (when casting) the
@@ -213,6 +241,11 @@ interface VideoPlayerProps {
   // writes through admin-only endpoints, so the UI only mounts for
   // admins).
   isAdmin?: boolean
+}
+
+interface SeekBootIntent {
+  preservePause: boolean
+  partyRevision: number | null
 }
 
 // Pick a file to play from the available list.
@@ -415,6 +448,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   onEndedRef.current = onEnded
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  // sessionId=null means both "native direct play" and "an HLS target is
+  // still resolving". Keep the delivery state explicit so a second rapid seek
+  // replaces the pending HLS target instead of touching a detached video node.
+  const deliveryModeRef = useRef<PlaybackDeliveryMode>('idle')
   const startSecRef = useRef<number>(0)
   // Per-play listener cleanup for <video> event handlers registered by ANY
   // delivery path — direct play's error/resume/subtitle listeners AND the
@@ -432,6 +469,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // currentTime=0 / startSec=0 boot window can't propagate abs_ms=0 to the
   // party (which would yank every other participant to the start).
   const playerReadyRef = useRef<boolean>(false)
+  // Set immediately before a seek-triggered session replacement when the
+  // authoritative state is Paused. The next delivery-path boot consumes it
+  // without calling play(), so a synthetic boot event cannot resume a party.
+  const pauseAfterSeekRebuildRef = useRef<SeekBootIntent | null>(null)
+  // The detached video element reports `paused=true` while a replacement
+  // target is still resolving. Retain the intended state separately so a
+  // second rapid seek does not mistake teardown for a user pause.
+  const inFlightPauseIntentRef = useRef<SeekBootIntent | null>(null)
+  const consumedPauseOnBootTokenRef = useRef<number | undefined>(undefined)
   // Issue #141 — true when the active HLS session is REMUXING (-c:v
   // copy), false when full-transcoding. Drives the subtitle cue-shift
   // offset: remux can't accurate-seek so the stream's t=0 is the
@@ -478,6 +524,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // vid.currentTime / vid.buffered.end directly.
   const [currentSec, setCurrentSec] = useState(0)
   const [bufferedSec, setBufferedSec] = useState(0)
+  // Party sync polls from a stable interval whose dependencies intentionally
+  // exclude high-frequency buffer updates. This ref gives an explicit remote
+  // seek the current absolute produced edge without tearing down that interval.
+  const bufferedSecRef = useRef(0)
   // realDurationSec is the source-file duration from streamInfo.
   // Falls back to vid.duration when not provided.
   const [realDurationSec, setRealDurationSec] = useState(0)
@@ -513,6 +563,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // resolves. Only the party path opts into attemptPlay's muted fallback.
   const partyActiveRef = useRef(false)
   partyActiveRef.current = Boolean(party)
+  const partySyncRef = useRef<PartySync | undefined>(party)
+  partySyncRef.current = party
+  const completePlaybackBoot = useCallback(async (
+    vid: HTMLVideoElement,
+    preservePause: boolean,
+  ) => {
+    if (preservePause) {
+      // Keep broadcasts gated while enforcing pause. Most browsers are already
+      // paused during boot, but native HLS may have begun autonomously.
+      try { if (!vid.paused) vid.pause() } catch { /* defensive */ }
+      playerReadyRef.current = true
+      return
+    }
+    playerReadyRef.current = true
+    await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
+  }, [])
   const [fullscreen, setFullscreen] = useState(false)
   // Controls visibility — true when paused, or recently
   // mouse-moved, or first 2s after mount. Auto-fades after 3s of
@@ -1296,6 +1362,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
     const sid = sessionIdRef.current
     sessionIdRef.current = null
+    deliveryModeRef.current = 'idle'
     if (sid) {
       // Best-effort — no await, just fire and forget. The server
       // GCs idle sessions anyway, so a missed DELETE costs at most
@@ -1321,7 +1388,46 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // re-open of the SAME file starts a fresh playback (dismissals
       // and the next-up lifecycle are per-playback, not per-file-ever).
       skipStateFileRef.current = null
+      pauseAfterSeekRebuildRef.current = null
+      inFlightPauseIntentRef.current = null
+      deliveryModeRef.current = 'idle'
       return
+    }
+    // A seek-rebuild writes this immediately before replacing `target`. Consume
+    // it at effect setup so a cancelled callback from the prior target cannot
+    // steal the pause intent meant for this new session.
+    const preserveTargetPause = shouldPreservePauseForBoot(
+      target.pauseOnBootToken,
+      consumedPauseOnBootTokenRef.current,
+    )
+    if (preserveTargetPause) {
+      consumedPauseOnBootTokenRef.current = target.pauseOnBootToken
+    }
+    const seekBootIntent = pauseAfterSeekRebuildRef.current
+    const preservePauseAfterBoot = seekBootIntent?.preservePause ?? preserveTargetPause
+    pauseAfterSeekRebuildRef.current = null
+    inFlightPauseIntentRef.current = {
+      preservePause: preservePauseAfterBoot,
+      partyRevision: seekBootIntent?.partyRevision ?? partySyncRef.current?.rev ?? null,
+    }
+    const completeTargetPlaybackBoot = (vid: HTMLVideoElement) => {
+      const liveParty = partySyncRef.current
+      const partyControlsMedia = Boolean(liveParty) &&
+        (liveParty?.partyMediaItemId === undefined || liveParty.partyMediaItemId === target.mediaItemId)
+      const resolvedPause = resolvePlaybackBootPause(
+        preservePauseAfterBoot,
+        seekBootIntent !== null,
+        target.partyRecoveryBoot === true,
+        partyControlsMedia,
+        liveParty?.isPlaying ?? null,
+        seekBootIntent?.partyRevision ?? null,
+        liveParty?.rev ?? null,
+      )
+      inFlightPauseIntentRef.current = {
+        preservePause: resolvedPause,
+        partyRevision: liveParty?.rev ?? seekBootIntent?.partyRevision ?? null,
+      }
+      return completePlaybackBoot(vid, resolvedPause)
     }
     let cancelled = false
     const ac = new AbortController()
@@ -1329,6 +1435,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     setStatus('Loading…')
     setErrorMsg(null)
     sessionIdRef.current = null
+    deliveryModeRef.current = 'resolving'
     startSecRef.current = 0
     // Suppress host party-broadcasts until this session has (re)booted —
     // see playerReadyRef. Set true right before each vid.play() below.
@@ -1340,6 +1447,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // visible "scrub bar flies to wrong position then snaps back"
     // glitch during the ~half-second transition between sessions.
     setCurrentSec(0)
+    bufferedSecRef.current = 0
     setBufferedSec(0)
     setRealDurationSec(0)
     setPlaying(false)
@@ -1487,6 +1595,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           }
           vid.src = directSrc
           vid.load()
+          deliveryModeRef.current = 'direct'
           // Wait for canplay so the resume seek lands inside a buffered
           // range — seeking before the metadata is parsed is a no-op on
           // most browsers. Declared unconditionally so the cleanup below
@@ -1576,10 +1685,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             vid.removeEventListener('loadedmetadata', onLoadedMetadata)
             vid.removeEventListener('canplay', onCanPlayResume)
           }
-          // Booted: re-enable host broadcasts. The deferred resume seek + play
-          // below are the host's intended state, safe to propagate.
-          playerReadyRef.current = true
-          await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
+          // Booted: either preserve a seek-rebuild pause or re-enable host
+          // broadcasts immediately before the intended play.
+          await completeTargetPlaybackBoot(vid)
           // A direct-play target has no castable HLS session; bump anyway so a
           // pending cast auto-advance resolves (loadCurrent finds no media and
           // stops the cast — direct-play can't be cast to Chromecast).
@@ -1626,6 +1734,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           return
         }
         sessionIdRef.current = session.session_id
+        deliveryModeRef.current = 'hls'
         startSecRef.current = session.start_sec ?? 0
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
         // already folds in forceTranscode). The subtitle endpoint uses
@@ -1824,8 +1933,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             vid.removeEventListener('canplay', onCanPlaySeekNative)
           }
 
-          playerReadyRef.current = true
-          await attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
+          await completeTargetPlaybackBoot(vid)
           return
         }
 
@@ -1957,13 +2065,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           if (subToRestore >= 0 && newSubsHls.some(s => s.index === subToRestore)) {
             applySubtitle(subToRestore)
           }
-          // Booted: manifest parsed + start_sec applied. Re-enable host
-          // broadcasts so the play below (and later host seeks) propagate,
-          // while the transient boot seeks stayed suppressed. Guard against a
-          // superseded target (defensive — hls.destroy() also detaches this).
+          // Booted: manifest parsed + start_sec applied. completePlaybackBoot
+          // either preserves a seek-rebuild pause or re-enables broadcasts for
+          // the intended play; transient boot seeks stayed suppressed. Guard
+          // against a superseded target (hls.destroy() also detaches this).
           if (cancelled) return
-          playerReadyRef.current = true
-          void attemptPlay(vid, partyActiveRef.current, () => setAutoStartedMuted(true))
+          void completeTargetPlaybackBoot(vid)
         })
 
         // Belt-and-suspenders: if hls.js fires SUBTITLE_TRACKS_UPDATED
@@ -2191,6 +2298,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       } catch (err) {
         if (cancelled) return
         if (err && (err as Error).name === 'AbortError') return
+        deliveryModeRef.current = 'idle'
         const msg = err instanceof Error ? err.message : 'Failed to start playback'
         setErrorMsg(msg)
         // If a cast auto-advance was waiting on this boot, it just failed
@@ -2212,7 +2320,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // currentSubIndex is read once to restore subtitles across target changes;
     // adding it as a dependency would restart playback when the user toggles subs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, closeAndCleanup])
+  }, [target, closeAndCleanup, completePlaybackBoot])
 
   // Keepalive ticker — runs while a session is active. V1 uses 10s.
   // setInterval re-creates per session because sessionIdRef is a ref
@@ -2336,6 +2444,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const extendSuppression = (ms = 150) => {
     applyingRemoteUntilRef.current = Math.max(applyingRemoteUntilRef.current, Date.now() + ms)
   }
+  // A host seek is broadcast from the UI intent before the browser can emit
+  // `seeked` (which may be delayed by a session rebuild). Ignore that later
+  // DOM echo so it cannot reset the running party clock to the same, now-stale
+  // absolute second after guests have already started from the new anchor.
+  const locallyBroadcastSeekUntilRef = useRef<number>(0)
+  // An explicit server seek remains in useParty.seekRef until the next seek.
+  // Remember the client-local sequence so a guest applies/rebases it once,
+  // including across the target change caused by a session rebuild.
+  const lastAppliedPartySeekSequenceRef = useRef(0)
   // 2026-05-25 deep-debug (High #3) — gate PR #81's race-recovery
   // requestPlay() so it fires at most once per player-bind. Reset
   // below in a target-identity useEffect when fileId/mediaItemId
@@ -2429,11 +2546,96 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
     const id = window.setInterval(() => {
       const dbg = isSyncDebugEnabled()
-      // Host doesn't pull from server tick (it IS the source of truth).
-      if (party.isHost) return
+      const explicitSeek = party.seekRef.current
+      if (explicitSeek && !shouldApplyExplicitPartySeek(explicitSeek.by, party.currentUserId)) {
+        // The sync socket echoes a host's own request. Consume it even after a
+        // role hand-off so the former host cannot replay that stale frame as a
+        // newly-demoted guest.
+        lastAppliedPartySeekSequenceRef.current = Math.max(
+          lastAppliedPartySeekSequenceRef.current,
+          explicitSeek.sequence,
+        )
+      }
+      // Host doesn't pull from server tick (it IS the source of truth). Consume
+      // any persisted hello/rebase sequence before returning so a later role
+      // hand-off cannot replay that old position after this user is demoted.
+      if (party.isHost) {
+        if (explicitSeek) {
+          lastAppliedPartySeekSequenceRef.current = Math.max(
+            lastAppliedPartySeekSequenceRef.current,
+            explicitSeek.sequence,
+          )
+        }
+        return
+      }
       // Audit H3 — bail out if the local player isn't showing the
       // party's media. Avoids cross-content seeks.
       if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
+
+      // An explicit host scrub is qualitatively different from ordinary
+      // clock drift. Sequential HLS cannot jump outside this participant's
+      // independently produced window, so every guest whose session cannot
+      // serve the new absolute position rebuilds at that anchor. The server
+      // seek frame supplies a client-local sequence, making this exactly-once
+      // even though the ref persists through the target change/reboot.
+      if (explicitSeek &&
+          explicitSeek.sequence !== lastAppliedPartySeekSequenceRef.current) {
+        const targetAbsSec = Math.max(0, explicitSeek.abs_ms / 1000)
+        const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
+        if (shouldReplaceUnreadyTargetForExplicitSeek(
+          playerReadyRef.current,
+          Boolean(rebuild),
+        ) && rebuild) {
+          // Seek B supersedes a still-booting seek A. Replacing the target now
+          // avoids waiting for A to finish (or fail) before moving to B.
+          lastAppliedPartySeekSequenceRef.current = explicitSeek.sequence
+          const preservePause = shouldPreservePauseOnSeekRebuild(
+            explicitSeek.running ?? party.isPlaying,
+            vid.paused,
+          )
+          const bootIntent = {
+            preservePause,
+            partyRevision: explicitSeek.rev ?? party.rev,
+          }
+          pauseAfterSeekRebuildRef.current = bootIntent
+          inFlightPauseIntentRef.current = bootIntent
+          extendSuppression(500)
+          setStatus('Syncing to latest party position…')
+          rebuild(targetAbsSec)
+          return
+        }
+        // Direct/in-window application needs a live media element. Leave the
+        // sequence pending until the current delivery path finishes booting.
+        if (!playerReadyRef.current) return
+
+        lastAppliedPartySeekSequenceRef.current = explicitSeek.sequence
+        if (sessionIdRef.current !== null && rebuild && needsHlsSessionRebuild(
+          targetAbsSec,
+          startSecRef.current ?? 0,
+          bufferedSecRef.current,
+        )) {
+          const preservePause = shouldPreservePauseOnSeekRebuild(
+            explicitSeek.running ?? party.isPlaying,
+            vid.paused,
+          )
+          const bootIntent = {
+            preservePause,
+            partyRevision: explicitSeek.rev ?? party.rev,
+          }
+          pauseAfterSeekRebuildRef.current = bootIntent
+          inFlightPauseIntentRef.current = bootIntent
+          extendSuppression(500)
+          setStatus('Syncing to party…')
+          rebuild(targetAbsSec)
+          return
+        }
+
+        // Direct play, or a target already inside this HLS session's window.
+        // Apply it locally; the normal play/pause mirror below preserves the
+        // server's running state on the same interval turn.
+        extendSuppression(300)
+        try { vid.currentTime = absMsToHlsSec(explicitSeek.abs_ms) } catch { /* defensive */ }
+      }
       const t = party.tickRef.current
       if (!t) {
         if (dbg) recordSyncSample({ ms: Date.now(), decision: 'no-tick', readyState: vid.readyState, bufferedAheadSec: bufferedAheadOf(vid) })
@@ -2578,6 +2780,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
     const onSeeked = () => {
       if (!hostShouldBroadcast()) return
+      if (Date.now() < locallyBroadcastSeekUntilRef.current) return
       const absMs = Math.round((vid.currentTime + (startSecRef.current ?? 0)) * 1000)
       party.requestSeek(absMs)
     }
@@ -2699,7 +2902,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       for (let i = 0; i < b.length; i++) {
         if (b.start(i) <= t && b.end(i) > bestEnd) bestEnd = b.end(i)
       }
-      setBufferedSec(bestEnd + (startSecRef.current ?? 0))
+      const absoluteEnd = bestEnd + (startSecRef.current ?? 0)
+      bufferedSecRef.current = absoluteEnd
+      setBufferedSec(absoluteEnd)
     }
     const onDurationChange = () => {
       // Audit H2 fix — when the server supplied an authoritative
@@ -2905,90 +3110,108 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // currentTime by subtracting the session's startSec offset.
     const vid = videoRef.current
     if (!vid) return
-    const localSec = sec - (startSecRef.current ?? 0)
-    // DIRECT PLAY (no server session): the browser seeks natively via
+    const targetSec = Math.max(0, sec)
+    const localSec = targetSec - (startSecRef.current ?? 0)
+    const isPartyControllingThisMedia = !!party &&
+      (party.partyMediaItemId === undefined || target?.mediaItemId === party.partyMediaItemId)
+
+    // Guests mirror the host. Letting a guest scrub locally either causes a
+    // brief snap-back inside the current buffer or stalls outside it, and the
+    // server rejects their request-seek anyway. Give one honest response.
+    if (isPartyControllingThisMedia && party && !party.isHost) {
+      setStatus('Only the party host can seek')
+      return
+    }
+    const broadcastHostPartySeek = () => {
+      if (!isPartyControllingThisMedia || !party?.isHost) return
+      // Broadcast from the user intent itself. Depending solely on the DOM
+      // `seeked` echo is racy: hls.js may snap an out-of-window assignment
+      // back before that event, leaving the canonical party position behind.
+      // Suppress the delayed DOM echo too: repeating the fixed target after
+      // the party clock has advanced would briefly rewind every participant.
+      locallyBroadcastSeekUntilRef.current = Date.now() + 10_000
+      party.requestSeek(Math.round(targetSec * 1000))
+    }
+    const rebuildAtTarget = (): boolean => {
+      if (!onSeekRebuild) return false
+      const liveParty = partySyncRef.current
+      const livePartyControlsMedia = Boolean(liveParty) &&
+        (liveParty?.partyMediaItemId === undefined || liveParty.partyMediaItemId === target?.mediaItemId)
+      const inFlightIntent = inFlightPauseIntentRef.current
+      const localPauseIntent = pauseIntentForReplacementSeek(
+        playerReadyRef.current,
+        vid.paused,
+        inFlightIntent?.preservePause ?? null,
+        inFlightIntent?.partyRevision ?? null,
+        livePartyControlsMedia,
+        liveParty?.isPlaying ?? null,
+        liveParty?.rev ?? null,
+      )
+      const preservePause = shouldPreservePauseForLocalSeekRebuild(
+        livePartyControlsMedia,
+        liveParty?.isHost ?? false,
+        liveParty?.isPlaying ?? false,
+        localPauseIntent,
+      )
+      const bootIntent = {
+        preservePause,
+        partyRevision: livePartyControlsMedia ? liveParty?.rev ?? null : null,
+      }
+      pauseAfterSeekRebuildRef.current = bootIntent
+      inFlightPauseIntentRef.current = bootIntent
+      broadcastHostPartySeek()
+      onSeekRebuild(targetSec)
+      return true
+    }
+
+    // A target replacement clears sessionId before stream-info/createSession
+    // finish. That is not direct play: a second rapid seek must supersede the
+    // pending target or the host boots at the first target after broadcasting
+    // the second one to everyone else.
+    if (shouldRebuildSeekBeforeDeliveryReady(deliveryModeRef.current)) {
+      if (rebuildAtTarget()) return
+      setStatus('Player is still loading — try again in a moment')
+      return
+    }
+
+    // DIRECT PLAY: the browser seeks natively via
     // byte-range requests, so the buffered-edge / session-rebuild logic
     // below — which exists for SEQUENTIAL TRANSCODES whose future
     // segments aren't on disk yet — must not run. Before this guard,
     // every jump past the (small) native buffer paid a full session
     // teardown + stream-info + reload; the skip-marker path already had
     // exactly this exemption (2026-07 review).
-    if (sessionIdRef.current === null) {
-      try { vid.currentTime = Math.max(0, localSec) } catch { /* defensive */ }
-      return
-    }
-    // Party gate is shared by both the backward-seek and forward-seek
-    // rebuild paths below; compute it once here.
-    const isPartySyncingThisMedia = !!party
-      && party.partyMediaItemId !== undefined
-      && target?.mediaItemId === party.partyMediaItemId
-    // Backward-seek BEFORE the session's start_sec offset requires a
-    // session rebuild — FFmpeg can't rewind a sequential transcode.
-    // Use the same rebuild gate as the forward-seek path: if
-    // onSeekRebuild is wired and we're not party-syncing, kick off a
-    // new session anchored at the requested position. Otherwise clamp
-    // to the local timeline start (legacy fallback).
-    if (localSec < 0) {
-      if (onSeekRebuild && !isPartySyncingThisMedia) {
-        onSeekRebuild(Math.max(0, sec))
-      } else {
-        try { vid.currentTime = 0 } catch { /* defensive */ }
-      }
-      return
-    }
-    // Audit H3 fix — forward-seek past the buffered range stalls
-    // hls.js indefinitely (the transcoder is sequential; segments
-    // past the current FFmpeg output position aren't on disk yet).
-    // Two paths:
-    //
-    // 2026-05-27 (preferred) — if onSeekRebuild is wired AND this
-    // player isn't participating in a watch-party sync for THIS media,
-    // ask the parent to tear down + re-create the session anchored at
-    // the requested seconds. The play effect handles teardown /
-    // re-init the same way it does for audio-track switches. This is
-    // the Plex / Jellyfin pattern.
-    //
-    // The party gate (deep-debug M1) is intentionally narrow: blocked
-    // ONLY when the local target IS the party-tracked media. A user
-    // who joined a party but is currently watching something else
-    // locally can still rebuild — no guest is mirroring this stream
-    // so there's nothing to drift.
-    //
-    // Deep-debug H2 — boundary tolerance: a 0.5s slack ensures
-    // near-edge clicks (where users intend a forward jump but click
-    // exactly on the buffered edge) still trigger the rebuild instead
-    // of landing on the stall point.
-    //
-    // Fallback (legacy) — clamp the seek to the buffered edge and
-    // toast a status hint. Reachable in two cases now: (a) when no
-    // onSeekRebuild handler is wired (defensive — App always wires it
-    // today), and (b) when party-sync is active for this media (host
-    // rebuild would desync guests; tracked as a follow-up). See
-    // App.tsx where the player is mounted for the rebuild wiring.
-    const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
-    if (safeBufferedEnd > 0 && localSec >= safeBufferedEnd - 0.5) {
-      if (onSeekRebuild && !isPartySyncingThisMedia) {
-        // No interim status — the play effect's teardown immediately
-        // re-sets status to 'Loading…' (deep-debug M2: 'Jumping to
-        // that point…' would only flash for one render frame because
-        // both setStatus calls batch together, so it's not worth
-        // setting).
-        onSeekRebuild(sec)
-        return
-      }
+    if (deliveryModeRef.current === 'direct') {
       try {
-        // Land 1s back from the buffered edge to avoid landing right
-        // at the boundary where hls.js stalls waiting for the next
-        // segment.
-        vid.currentTime = Math.max(0, safeBufferedEnd - 1)
+        vid.currentTime = localSec
+        broadcastHostPartySeek()
       } catch { /* defensive */ }
-      setStatus(isPartySyncingThisMedia
-        ? 'Forward-seek past buffer blocked while syncing with the party'
-        : 'Still transcoding to that point — try again in a moment')
+      return
+    }
+    // Sequential HLS can seek only inside the session's produced window.
+    // Rebase for either direction outside it. In a party the host first moves
+    // the canonical server anchor; every guest receives that explicit seek and
+    // independently rebuilds its own session in the sync interval above.
+    if (needsHlsSessionRebuild(
+      targetSec,
+      startSecRef.current ?? 0,
+      bufferedSec,
+    )) {
+      if (rebuildAtTarget()) return
+
+      // Defensive legacy fallback when a parent omits the rebuild callback.
+      // Rewinds clamp to the session anchor; forward jumps land just behind
+      // the produced edge rather than assigning an impossible currentTime.
+      const safeBufferedEnd = bufferedSec - (startSecRef.current ?? 0)
+      try {
+        vid.currentTime = localSec < 0 ? 0 : Math.max(0, safeBufferedEnd - 1)
+      } catch { /* defensive */ }
+      setStatus('Still transcoding to that point — try again in a moment')
       return
     }
     try {
       vid.currentTime = localSec
+      broadcastHostPartySeek()
     } catch { /* defensive */ }
   }, [bufferedSec, party, target, onSeekRebuild])
 

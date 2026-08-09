@@ -1,5 +1,56 @@
 import { describe, it, expect } from 'vitest'
-import { participantFromJoinEvent } from './party'
+import {
+  participantFromJoinEvent,
+  partyPauseRequest,
+  partySeekRequest,
+  receivedSeekFromHello,
+  shouldAcceptPartyRevision,
+} from './party'
+
+describe('party sync wire requests', () => {
+  it('uses the Go endpoint\'s to_ms field for an absolute seek', () => {
+    expect(partySeekRequest(13 * 60_000 + 11_000)).toEqual({
+      type: 'request-seek',
+      payload: { to_ms: 791_000 },
+    })
+  })
+
+  it('uses the Go endpoint\'s at_ms field for an absolute pause', () => {
+    expect(partyPauseRequest(482_500)).toEqual({
+      type: 'request-pause',
+      payload: { at_ms: 482_500 },
+    })
+  })
+})
+
+describe('cross-socket party revision ordering', () => {
+  it('rejects an old sync frame after a newer room event', () => {
+    expect(shouldAcceptPartyRevision(12, 11)).toBe(false)
+    expect(shouldAcceptPartyRevision(12, 12)).toBe(true)
+    expect(shouldAcceptPartyRevision(12, 13)).toBe(true)
+  })
+
+  it('accepts legacy unversioned frames only before a versioned boundary', () => {
+    expect(shouldAcceptPartyRevision(0, undefined)).toBe(true)
+    expect(shouldAcceptPartyRevision(1, undefined)).toBe(false)
+  })
+})
+
+describe('sync reconnect rebase', () => {
+  it('turns hello into the explicit one-shot seek a reconnecting guest missed', () => {
+    expect(receivedSeekFromHello(
+      { abs_ms: 791_000, server_now_ms: 100_000, running: true, rev: 14 },
+      100_250,
+      3,
+    )).toEqual({
+      abs_ms: 791_000,
+      running: true,
+      rev: 14,
+      receivedAtMs: 100_250,
+      sequence: 3,
+    })
+  })
+})
 
 // participantFromJoinEvent — every field the participant-join event
 // carries must land in the optimistic patch. The `companion` case is the

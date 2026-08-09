@@ -84,6 +84,12 @@ import { PartyInvite } from '@/components/PartyInvite'
 import { PartyHubModal } from '@/components/PartyHubModal'
 import { PartyComposerModal, type PartyComposerLaunch } from '@/components/PartyComposerModal'
 import { formatPartyTime, skipReasonCopy, inviteCodeFromLink } from '@/lib/partyInvites'
+import {
+  isPlaybackResolutionCurrent,
+  partyPlayerDismissalKeyOnClose,
+  shouldAutoOpenPartyPlayer,
+  shouldClosePlayerOnPathChange,
+} from '@/lib/partyPlayer'
 import { HeroSection } from '@/components/HeroSection'
 import { AuroraWordmark } from '@/components/AuroraWordmark'
 import { MediaRail } from '@/components/MediaRail'
@@ -2074,6 +2080,50 @@ export default function App() {
   // inside such a callback would capture a stale snapshot.
   const partyStateRef = useRef(party.state)
   partyStateRef.current = party.state
+  // Manual player dismissal is scoped to one party/media/role lifecycle. It
+  // prevents the auto-open recovery effect from immediately recreating a
+  // player the user just closed, while a new episode or promotion to host can
+  // still re-arm recovery. The generation counters also cancel in-flight
+  // recovery and media-change resolvers before either can resurrect it.
+  const partyPlayerDismissedKeyRef = useRef<string | null>(null)
+  const partyAutoOpenGenRef = useRef(0)
+  const partyAutoOpenPendingGenRef = useRef<number | null>(null)
+  const mediaChangeGenRef = useRef(0)
+  const mediaChangePendingGenRef = useRef<number | null>(null)
+  const partyPauseOnBootTokenRef = useRef(0)
+  // Every ordinary (non-party) async playback resolver shares one ownership
+  // token and abort controller. Close/navigation invalidates both so a late
+  // files/episodes response cannot resurrect the player on another route.
+  const playbackResolutionGenRef = useRef(0)
+  const playbackResolutionRequestRef = useRef<AbortController | null>(null)
+  const closePlayer = useCallback((dismissPendingResolution = false) => {
+    const liveUserId = user && typeof user === 'object' ? user.id : null
+    const liveParty = partyStateRef.current
+    const liveTarget = playerTargetRef.current
+    const hasPendingResolution = dismissPendingResolution && (
+      partyAutoOpenPendingGenRef.current !== null ||
+      mediaChangePendingGenRef.current !== null ||
+      playbackResolutionRequestRef.current !== null
+    )
+    if (liveUserId != null) {
+      const dismissedKey = partyPlayerDismissalKeyOnClose(
+        liveParty,
+        liveUserId,
+        !!liveTarget,
+        hasPendingResolution,
+      )
+      if (dismissedKey) partyPlayerDismissedKeyRef.current = dismissedKey
+    }
+    partyAutoOpenGenRef.current++
+    partyAutoOpenPendingGenRef.current = null
+    mediaChangeGenRef.current++
+    mediaChangePendingGenRef.current = null
+    playbackResolutionGenRef.current++
+    playbackResolutionRequestRef.current?.abort()
+    playbackResolutionRequestRef.current = null
+    setPlayerLoading(false)
+    setPlayerTarget(null)
+  }, [user])
   const [partyPanelOpen, setPartyPanelOpen] = useState(false)
   // 2026-05-30 — Cinematic Overlay (Feature 2). Which face the on-screen
   // party surface shows: 'rail' (the full floating glass panel) or
@@ -2091,6 +2141,11 @@ export default function App() {
   // would open in stale minimal mode. Mirrors PartyPanel onClose/onLeave.
   useEffect(() => {
     if (!party.state.code) {
+      partyPlayerDismissedKeyRef.current = null
+      partyAutoOpenGenRef.current++
+      partyAutoOpenPendingGenRef.current = null
+      mediaChangeGenRef.current++
+      mediaChangePendingGenRef.current = null
       setPartyVariant('rail')
       setPartyInviteOpen(false)
     }
@@ -2593,6 +2648,7 @@ export default function App() {
 
   const navigate = useNavigate()
   const location = useLocation()
+  const previousPathnameRef = useRef(location.pathname)
 
   // QA BUG-001 — sync URL → view on mount and on every pathname
   // change (browser back/forward, bookmarks, direct loads). Without
@@ -2601,6 +2657,18 @@ export default function App() {
   // when in-app handleNavigate triggers a pathname change, this
   // effect just confirms the same view we already set.
   useEffect(() => {
+    const previousPathname = previousPathnameRef.current
+    previousPathnameRef.current = location.pathname
+    if (shouldClosePlayerOnPathChange(
+      previousPathname,
+      location.pathname,
+      playerMinimizedRef.current,
+    )) {
+      // Covers browser Back/Forward and direct router navigation. Passing true
+      // also dismisses a party lifecycle whose async resolver has not produced
+      // a player target yet.
+      closePlayer(true)
+    }
     const target = pathToView(location.pathname)
     if (target !== view) {
       setView(target)
@@ -2619,7 +2687,7 @@ export default function App() {
     // call (which IS desired sometimes, but we have explicit
     // navigation back from detail via handleBack).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname])
+  }, [location.pathname, closePlayer])
 
 
   // security — bounce a non-admin who lands on /admin (typed URL,
@@ -2802,9 +2870,9 @@ export default function App() {
     // active cast. The widget (rendered as a root-level sibling, outside the
     // swapped <main> view) persists and the receiver keeps playing until the
     // user stops it or the media ends. Mirrors the Escape gate above.
-    if (!playerMinimizedRef.current) setPlayerTarget(null)
+    if (!playerMinimizedRef.current) closePlayer(true)
     navigate(`/${v}`)
-  }, [view, navigate])
+  }, [view, navigate, closePlayer])
 
   const handleSelect = useCallback((m: Media) => {
     setSelectedMedia(m)
@@ -2837,6 +2905,10 @@ export default function App() {
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
     }
+    const myGen = ++playbackResolutionGenRef.current
+    playbackResolutionRequestRef.current?.abort()
+    const ac = new AbortController()
+    playbackResolutionRequestRef.current = ac
     setPlayerLoading(true)
     try {
       // Phase 5 — quality preference. Read from the same aurora_prefs
@@ -2860,11 +2932,13 @@ export default function App() {
         // shows that had a later season added before an earlier one,
         // or for shows starting at season 0 (specials). Same sort
         // applied to episodes for the same reason.
-        const seasonsRaw = await getSeasons(m.id)
+        const seasonsRaw = await getSeasons(m.id, ac.signal)
+        if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         if (seasonsRaw.length === 0) throw new Error('No seasons available')
         const seasons = [...seasonsRaw].sort((a, b) => a.season_number - b.season_number)
         const firstSeason = seasons[0]
-        const episodesRaw = await getEpisodes(m.id, firstSeason.season_number)
+        const episodesRaw = await getEpisodes(m.id, firstSeason.season_number, ac.signal)
+        if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         if (episodesRaw.length === 0) throw new Error('No episodes available')
         const episodes = [...episodesRaw].sort((a, b) => a.episode_number - b.episode_number)
         const ep = episodes[0]
@@ -2886,7 +2960,8 @@ export default function App() {
         })
       } else {
         // Movie → quality-preferred file.
-        const files = await getMediaFiles(m.id)
+        const files = await getMediaFiles(m.id, ac.signal)
+        if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         const file = pickFile(files, preferQuality)
         if (!file) throw new Error('No file available to play')
         setPlayerTarget({
@@ -2898,11 +2973,17 @@ export default function App() {
         })
       }
     } catch (err) {
+      if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted) ||
+          (err && (err as Error).name === 'AbortError')) return
       const msg = err instanceof Error ? err.message : 'Failed to start playback'
       const id = nextToastId()
       setToasts(prev => [...prev, { id, message: msg, type: 'error' }])
     } finally {
-      setPlayerLoading(false)
+      if (playbackResolutionRequestRef.current === ac &&
+          isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) {
+        setPlayerLoading(false)
+        playbackResolutionRequestRef.current = null
+      }
     }
   }, [nextToastId])
 
@@ -3035,7 +3116,7 @@ export default function App() {
         // While the player is minimized to the cast/AirPlay widget, Escape
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
-        if (playerTarget && !playerMinimizedRef.current) setPlayerTarget(null)
+        if ((playerTarget || playerLoading) && !playerMinimizedRef.current) closePlayer(true)
         else if (searchOpen) setSearchOpen(false)
         else if (view === 'detail') handleBack()
       }
@@ -3068,7 +3149,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen])
+  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -3128,10 +3209,10 @@ export default function App() {
   // party's media. The generation counter prevents a slow earlier
   // resolve (e.g. ep5 in season 12 → many sequential getEpisodes
   // calls) from overwriting a fast later resolve.
-  const mediaChangeGenRef = useRef(0)
   useEffect(() => {
     return party.onMediaChange((p) => {
       const myGen = ++mediaChangeGenRef.current
+      mediaChangePendingGenRef.current = myGen
       void (async () => {
         try {
           if (p.episode_id) {
@@ -3164,6 +3245,10 @@ export default function App() {
               episodeNumber: foundEp.episode_number,
               title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
               subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
+              partyRecoveryBoot: true,
+              pauseOnBootToken: partyStateRef.current.isPlaying
+                ? undefined
+                : ++partyPauseOnBootTokenRef.current,
             })
           } else {
             // Movie — fetch files + play first.
@@ -3178,10 +3263,18 @@ export default function App() {
               fileId: file.id,
               fileType: 'media',
               title: titleDetail?.title ?? 'Untitled',
+              partyRecoveryBoot: true,
+              pauseOnBootToken: partyStateRef.current.isPlaying
+                ? undefined
+                : ++partyPauseOnBootTokenRef.current,
             })
           }
         } catch (err) {
           console.warn('[Aurora] media-change auto-resolve failed', err)
+        } finally {
+          if (mediaChangePendingGenRef.current === myGen) {
+            mediaChangePendingGenRef.current = null
+          }
         }
       })()
     })
@@ -3223,46 +3316,34 @@ export default function App() {
   // party that was ALREADY playing" case — party-state arrives with
   // isPlaying=true and the effect fires immediately.
   //
-  // We deliberately do NOT auto-open GUESTS if isPlaying is false — the
-  // lobby (with the I'm Ready button, chat, reactions) should remain
-  // visible until the host actually starts. (The HOST additionally
-  // opens when a mid-movie party is paused — see the succession note
-  // inside the effect.) Closing the player manually mid-party will
-  // allow this to re-fire on the next tick (state.isPlaying is sampled
-  // live), which is the desired "pop me back into the player" UX.
-  const guestAutoOpenGenRef = useRef(0)
+  // Guests still wait for actual playback; a promoted host also opens on a
+  // paused mid-movie party so the room has transport controls. A deliberate
+  // Close is different from an absent player: closePlayer records a scoped
+  // dismissal, preventing the recovery loop reported in issue #449. New media
+  // or a guest→host promotion changes the key and safely re-arms auto-open.
   useEffect(() => {
+    // Invalidate any older async resolver on every policy-input change, even
+    // when this render decides not to open (manual close / another target).
+    const myGen = ++partyAutoOpenGenRef.current
+    partyAutoOpenPendingGenRef.current = null
     if (!user) return
-    if (!party.state.code) return
-    if (!party.state.mediaItemId) return
-    // 2026-05-25 — require hostUserId to actually be set before
-    // making the host vs guest decision. Without this null-check,
-    // a transient render where state.code/mediaItemId/isPlaying are
-    // populated but state.hostUserId is briefly undefined would
-    // evaluate `undefined === user.id` as false, slip past the host
-    // guard, and auto-open the host's player as if they were a
-    // guest. Fix: bail if hostUserId hasn't arrived yet.
-    if (party.state.hostUserId == null) return
-    // 2026-08 — host succession removed the old `we ARE the host` early
-    // return. A host can now EXIST without a player: succession promotes
-    // a guest who may never have opened one (the lobby, or a mid-party
-    // handoff), and transport controls live only inside the player — a
-    // Running party whose host has no player is a party NOBODY can
-    // pause. So the host auto-opens like a guest, at the party position
-    // (which also keeps their first pause/seek from re-anchoring the
-    // room to a stale personal offset). Hosts additionally open when the
-    // party is PAUSED mid-movie (currentTimeMs > 0, read from the ref so
-    // ticks don't churn this effect): a playerless host of a paused
-    // party is the only one who can resume it. Guests keep the
-    // isPlaying-only rule — the pre-start lobby stays visible, and a
-    // paused-mid-movie guest who closed their player may stay out.
-    const iAmHost = party.state.hostUserId === user.id
-    if (!party.state.isPlaying &&
-        !(iAmHost && partyStateRef.current.currentTimeMs > 0)) return
-    if (playerTarget) return // already has player open
-    const myGen = ++guestAutoOpenGenRef.current
+    if (!shouldAutoOpenPartyPlayer(
+      {
+        code: party.state.code,
+        mediaItemId: party.state.mediaItemId,
+        episodeId: party.state.episodeId,
+        hostUserId: party.state.hostUserId,
+        isPlaying: party.state.isPlaying,
+        currentTimeMs: partyStateRef.current.currentTimeMs,
+      },
+      user.id,
+      !!playerTarget,
+      partyPlayerDismissedKeyRef.current,
+    )) return
+    if (party.state.mediaItemId == null) return // narrowed by policy; TS guard
     const mediaItemId = party.state.mediaItemId
     const episodeId = party.state.episodeId
+    partyAutoOpenPendingGenRef.current = myGen
     void (async () => {
       try {
         if (episodeId) {
@@ -3276,11 +3357,11 @@ export default function App() {
             if (ep) { foundEp = ep; foundSeasonNum = s.season_number; break }
           }
           if (!foundEp) return
-          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          if (myGen !== partyAutoOpenGenRef.current) return // stale
           const file = pickFile(foundEp.files)
           if (!file) return
           const titleDetail = await getMedia(mediaItemId).catch(() => null)
-          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          if (myGen !== partyAutoOpenGenRef.current) return // stale
           setPlayerTarget({
             mediaItemId,
             fileId: file.id,
@@ -3290,16 +3371,20 @@ export default function App() {
             episodeNumber: foundEp.episode_number,
             title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
             subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
+            partyRecoveryBoot: true,
             // Watch-party rejoin sync: open AT the party's current position
             // so a returning guest doesn't start at 0:00 and rely on the drift
             // loop to catch up. partyStateRef holds the freshest position.
             resumePositionMs: partyStateRef.current.currentTimeMs > 0
               ? partyStateRef.current.currentTimeMs
               : undefined,
+            pauseOnBootToken: party.state.isPlaying
+              ? undefined
+              : ++partyPauseOnBootTokenRef.current,
           })
         } else {
           const files = await getMediaFiles(mediaItemId)
-          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          if (myGen !== partyAutoOpenGenRef.current) return // stale
           const file = pickFile(files)
           if (!file) {
             // Empty file list for a show means episode_id was missing from
@@ -3311,20 +3396,28 @@ export default function App() {
             return
           }
           const titleDetail = await getMedia(mediaItemId).catch(() => null)
-          if (myGen !== guestAutoOpenGenRef.current) return // stale
+          if (myGen !== partyAutoOpenGenRef.current) return // stale
           setPlayerTarget({
             mediaItemId,
             fileId: file.id,
             fileType: 'media',
             title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
+            partyRecoveryBoot: true,
             // Watch-party rejoin sync: open AT the party's current position.
             resumePositionMs: partyStateRef.current.currentTimeMs > 0
               ? partyStateRef.current.currentTimeMs
               : undefined,
+            pauseOnBootToken: party.state.isPlaying
+              ? undefined
+              : ++partyPauseOnBootTokenRef.current,
           })
         }
       } catch (err) {
         console.warn('[Aurora] guest auto-open resolve failed', err)
+      } finally {
+        if (partyAutoOpenPendingGenRef.current === myGen) {
+          partyAutoOpenPendingGenRef.current = null
+        }
       }
     })()
   }, [
@@ -3458,7 +3551,7 @@ export default function App() {
     setDetailSeasons([])
     setDetailSelectedSeason(null)
     currentEpisodesSeasonRef.current = null
-    setPlayerTarget(null)
+    closePlayer()
     setPartyPanelOpen(false)
     setView('home')
     // QA BUG-001 follow-up — also drop the URL back to root.
@@ -3469,7 +3562,7 @@ export default function App() {
     // were admin) before our auth checks fired. Server-side guards
     // prevent data leakage, but the UX reads as a permissions bug.
     navigate('/')
-  }, [navigate])
+  }, [navigate, closePlayer])
 
   // Cross-tab logout. A logout in another tab clears aurora_token
   // and fires a `storage` event here; we tear down the watch party
@@ -4225,12 +4318,9 @@ export default function App() {
   // episode_id branch fetches the episode's file (the CW response
   // doesn't carry it inline).
   //
-  // continueRequestRef holds the latest in-flight AbortController so a
-  // second click (or a route change) aborts the previous request before
-  // it can call setPlayerTarget on a stale promise. Without this, a
-  // slow getEpisodes / getMediaFiles can pop the player AFTER the user
-  // navigated away.
-  const continueRequestRef = useRef<AbortController | null>(null)
+  // The shared playback resolver token/controller makes a second Play/Resume
+  // click or any close/route change cancel ownership before a late response can
+  // call setPlayerTarget on the destination page.
   const handlePlayContinue = useCallback(async (c: ContinueWatchingItem) => {
     // Don't start a new playback while a cast/AirPlay session is active (see
     // handlePlay) — make the user stop the cast from the widget first.
@@ -4241,9 +4331,10 @@ export default function App() {
     }
     // Cancel any previous in-flight resume request (rapid double-click
     // or route change mid-load).
-    continueRequestRef.current?.abort()
+    const myGen = ++playbackResolutionGenRef.current
+    playbackResolutionRequestRef.current?.abort()
     const ac = new AbortController()
-    continueRequestRef.current = ac
+    playbackResolutionRequestRef.current = ac
     setPlayerLoading(true)
     try {
       let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
@@ -4284,7 +4375,7 @@ export default function App() {
           throw new Error('SHOW_MISSING_EPISODE_INFO')
         }
         const eps = await getEpisodes(c.media_item_id, c.season_number, ac.signal)
-        if (ac.signal.aborted) return
+        if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         const ep = eps.find(e => e.id === c.episode_id)
         if (!ep) {
           // Episode was deleted between the CW snapshot and now. Clear
@@ -4312,7 +4403,7 @@ export default function App() {
       } else {
         // Movie — same path as handlePlay but with resume position.
         const files = await getMediaFiles(c.media_item_id, ac.signal)
-        if (ac.signal.aborted) return
+        if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) return
         const file = pickFile(files, preferQuality)
         if (!file) throw new Error('NO_FILE_AVAILABLE')
         setPlayerTarget({
@@ -4327,7 +4418,8 @@ export default function App() {
     } catch (err) {
       // Aborts are expected when a second click supersedes the first;
       // don't toast them.
-      if (err && (err as Error).name === 'AbortError') return
+      if (!isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted) ||
+          (err && (err as Error).name === 'AbortError')) return
       // Map known error codes to friendly user-facing strings. Raw
       // err.message could leak server response bodies otherwise.
       const code = err instanceof Error ? err.message : ''
@@ -4348,9 +4440,10 @@ export default function App() {
       // Only clear loading if this is still the active request — a
       // newer click may have superseded us, in which case the newer
       // call owns the loading state.
-      if (continueRequestRef.current === ac) {
+      if (playbackResolutionRequestRef.current === ac &&
+          isPlaybackResolutionCurrent(myGen, playbackResolutionGenRef.current, ac.signal.aborted)) {
         setPlayerLoading(false)
-        continueRequestRef.current = null
+        playbackResolutionRequestRef.current = null
       }
     }
   }, [nextToastId])
@@ -4410,6 +4503,7 @@ export default function App() {
       }
     } catch { /* malformed prefs — keep defaults (autoplay ON) */ }
     if (!autoplay && !opts?.force) return false
+    const resolutionGen = playbackResolutionGenRef.current
 
     const mediaItemId = ended.mediaItemId
     const curSeason = ended.seasonNumber
@@ -4446,7 +4540,8 @@ export default function App() {
       }
 
       // Bail if the player moved on while we were resolving.
-      if (playerTargetRef.current?.episodeId !== endedEpisodeId) return false
+      if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false) ||
+          playerTargetRef.current?.episodeId !== endedEpisodeId) return false
       if (!nextEp || !nextFile) return false // series end / nothing playable — park on final frame
 
       const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
@@ -4466,6 +4561,7 @@ export default function App() {
       setCwReloadNonce(n => n + 1)
       return true
     } catch (err) {
+      if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false)) return false
       console.warn('[Aurora] auto-advance to next episode failed', err)
       return false
     }
@@ -4490,6 +4586,10 @@ export default function App() {
       setToasts(prev => [...prev, { id, message: 'Stop casting to play something else', type: 'info' }])
       return
     }
+    playbackResolutionGenRef.current++
+    playbackResolutionRequestRef.current?.abort()
+    playbackResolutionRequestRef.current = null
+    setPlayerLoading(false)
     setPlayerTarget({
       mediaItemId: m.id,
       fileId,
@@ -4758,6 +4858,10 @@ export default function App() {
       setToasts(prev => [...prev, { id, message: 'This episode has no playable file.', type: 'error' }])
       return
     }
+    playbackResolutionGenRef.current++
+    playbackResolutionRequestRef.current?.abort()
+    playbackResolutionRequestRef.current = null
+    setPlayerLoading(false)
     setPlayerTarget({
       mediaItemId: selectedMedia.id,
       fileId: file.id,
@@ -5726,7 +5830,7 @@ export default function App() {
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onSurfaceChange={setPlayerSurface}
         onClose={() => {
-          setPlayerTarget(null)
+          closePlayer()
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after
           // the player closes so the Resume CTA on detail picks up the
           // new position_ms. Without this, after the user watches for
@@ -5771,11 +5875,10 @@ export default function App() {
           // effect inside VideoPlayer and creates a new HLS session
           // anchored at the new position.
           //
-          // This handler is a pure target-mutator — the player has
-          // already gated invocation on the party-sync check
-          // (refined in deep-debug M1 to "is this exact media being
-          // party-synced"). Any future caller that invokes this
-          // handler outside the player must apply its own gate.
+          // This remains a pure target-mutator. VideoPlayer owns policy:
+          // ordinary playback rebases locally; a party host broadcasts the
+          // absolute seek first, and each guest rebases independently after
+          // receiving the explicit server seek frame.
           setPlayerTarget(prev => prev ? {
             ...prev,
             resumePositionMs: Math.max(0, Math.floor(newStartSec * 1000)),
@@ -5783,10 +5886,13 @@ export default function App() {
         }}
         party={party.state.code ? {
           isHost: party.state.hostUserId === user.id,
+          currentUserId: user.id,
           tickRef: party.tickRef,
+          seekRef: party.seekRef,
           helloAbsMsRef: party.helloAbsMsRef,
           hlsStartSec: party.state.hlsStartSec,
           isPlaying: party.state.isPlaying,
+          rev: party.state.rev,
           // Thread the party's mediaItemId so the player can refuse
           // to mirror when local content doesn't match.
           partyMediaItemId: party.state.mediaItemId,
