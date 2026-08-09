@@ -865,6 +865,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// comfortably under the wider bound.
 				r.Use(middleware.Timeout(90 * time.Second))
 				r.Get("/hero", heroH.Get)
+				r.Post("/recommendation-exposure", heroH.Exposure)
 				r.Get("/recommendations", heroH.Rail)
 				r.Get("/discover", heroH.Discover)
 				// Phase 3: anchor-pinned "Because You Watched X" rails.

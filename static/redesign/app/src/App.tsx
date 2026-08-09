@@ -732,6 +732,9 @@ interface HomeViewProps {
   // to its derived rating-based estimate.
   heroMatch?: number
   heroScore?: number
+  heroSlateToken?: string
+  heroPosition?: number
+  activeProfileId?: number
   onSurprise?: () => void
   onHeroPauseChange?: (paused: boolean) => void
   // Cold-start hint info — passed through from the /api/me/hero response.
@@ -797,7 +800,7 @@ interface HomeViewProps {
   onRefreshRecs?: () => void
   recsRefreshing?: boolean
 }
-function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
+function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error, onRetry, onCardContext, heroReason, heroIsCatalogFallback, heroMatch, heroScore, heroSlateToken, heroPosition, activeProfileId, onSurprise, onNextPick, onHeroPauseChange, heroPersonalization, libraryIds, onToggleLib, onNavigate, heroResume, cwResume, user, pickCount, libraryTotal, onOpenParty, onJoinParty, onConversationalSearch, onRefreshRecs, recsRefreshing }: HomeViewProps) {
   // Do NOT fall back to mock rails: their IDs collide with real
   // media IDs and silently route Play to the wrong title. Empty
   // rails during the load window are correct.
@@ -911,6 +914,9 @@ function HomeView({ onSelect, onPlay, hero, rails, loading, convoLoading, error,
         isCatalogFallback={heroIsCatalogFallback}
         match={heroMatch}
         score={heroScore}
+        slateToken={heroSlateToken}
+        slatePosition={heroPosition}
+        profileId={activeProfileId}
         onNextPick={onNextPick}
         onPauseChange={onHeroPauseChange}
         personalization={heroPersonalization ?? null}
@@ -2609,6 +2615,7 @@ export default function App() {
   // popular-unwatched fallback with no LLM blurbs — drives a UI hint
   // explaining why nothing's curated yet.
   const [heroPersonalization, setHeroPersonalization] = useState<HeroPersonalization | null>(null)
+  const [heroSlateToken, setHeroSlateToken] = useState<string | undefined>()
   // Ref to read latest heroPool from the home-rails effect without
   // adding it to deps (which would re-fetch rails on every rotate).
   const heroPoolRef = useRef<HeroPick[]>([])
@@ -3517,6 +3524,7 @@ export default function App() {
     setHeroPool([])
     setHeroIndex(0)
     setHeroPaused(false)
+    setHeroSlateToken(undefined)
     heroPoolRef.current = []
     // Same leak class for the follow feed (PR-429 review): the ref
     // survives the auth swap, and a warm-cache Discover resolving first
@@ -4930,6 +4938,7 @@ export default function App() {
       heroPoolRef.current = resp.picks
       setHeroPool(resp.picks)
       setHeroPersonalization(resp.personalization)
+      setHeroSlateToken(resp.slateToken)
       setHeroIndex(0)
       if (resp.picks.length > 0) { setHomeHero(resp.picks[0].media); setHomeHeroIsFallback(false) }
       // Empty pool: leave homeHero/flag as-is. On first load the hero
@@ -4944,6 +4953,7 @@ export default function App() {
       heroPoolRef.current = []
       setHeroPool([])
       setHeroPersonalization(null)
+      setHeroSlateToken(undefined)
     }
   }, [user, activeProfileId])
   // homeReloadNonce is deliberately a dependency (trigger-only, like the
@@ -5417,6 +5427,9 @@ export default function App() {
               heroIsCatalogFallback={homeHeroIsFallback}
               heroMatch={heroPool[heroIndex]?.match}
               heroScore={heroPool[heroIndex]?.score}
+              heroSlateToken={heroSlateToken}
+              heroPosition={heroIndex}
+              activeProfileId={activeProfileId ?? undefined}
               // "Surprise me" — play a random recommended pick (not the one shown).
               onSurprise={onSurprise}
               onConversationalSearch={runConversational}
