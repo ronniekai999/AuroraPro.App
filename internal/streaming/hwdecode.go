@@ -190,6 +190,27 @@ func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool, fps 
 	return nil
 }
 
+// FullGPUHEVCEncoderArgs is the Tier-2 zero-copy counterpart of
+// HEVCEncoderArgs (2026-08): decode, scale (and VAAPI HDR tonemap) all run
+// on GPU frames. HEVC output sessions carry the same -tag:v hvc1
+// requirement as the CPU chain (Apple rejects the default hev1 brand).
+func (h HWAccelInfo) FullGPUHEVCEncoderArgs(width, height int, hdrTonemap bool, fps float64) []string {
+	level := hevcLevel(height, fps)
+	switch h.Type {
+	case HWAccelNVENC:
+		vf := fmt.Sprintf("scale_cuda=%d:-2:format=yuv420p", width)
+		return []string{"-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+			"-profile:v", "main", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
+	case HWAccelVAAPI:
+		vf := fmt.Sprintf("scale_vaapi=w=%d:h=-2:format=nv12", width)
+		if hdrTonemap {
+			vf = fmt.Sprintf("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709,scale_vaapi=w=%d:h=-2", width)
+		}
+		return []string{"-c:v", "hevc_vaapi", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
+	}
+	return nil
+}
+
 // ============================================================
 // Startup probing
 // ============================================================

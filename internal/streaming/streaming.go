@@ -149,6 +149,13 @@ type ClientCaps struct {
 	// hardware decoders; DecidePlayback gates 10-bit HEVC sources on this
 	// instead. 2026-07 review.
 	HEVCMain10 bool
+	// HEVCEncode is NOT parsed from the client caps string — it is set by
+	// the SERVER (from TranscodeManager.HEVCEncodeEnabled) before calling
+	// DecidePlayback, like FMP4. It reports that this host has a working
+	// HEVC OUTPUT encoder (hevc_nvenc/qsv/vaapi/amf/libx265), so a full
+	// transcode may emit HEVC instead of H.264 for clients that can decode
+	// it. 2026-08 review item #5.
+	HEVCEncode bool
 }
 
 // PlaybackDecision is the result of analyzing a file against client capabilities.
@@ -165,6 +172,12 @@ type PlaybackDecision struct {
 	// AudioCodecOut so the master-playlist CODECS attribute and the cast
 	// stereo-clone guard reflect copied audio, not just re-encoded audio.
 	AudioCodec string
+	// VideoCodecOut is the codec a TRANSCODE session's video output carries:
+	// "h264" (default) or "hevc" (2026-08 — when the server has an HEVC
+	// encoder, segments are fMP4, and the client decodes HEVC; see the
+	// full-transcode branch of DecidePlayback). Empty on non-transcode
+	// decisions (remux copies the source codec; direct play has no output).
+	VideoCodecOut string
 }
 
 var knownVideoCodecs = map[string]bool{
@@ -472,7 +485,31 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		AudioNeedsRecode: !copySafe,
 		AudioPassthrough: copySafe,
 		AudioCodec:       bestCodec,
+		VideoCodecOut:    chooseVideoCodecOut(clientCaps),
 	}
+}
+
+// chooseVideoCodecOut picks the transcode session's video OUTPUT codec
+// (2026-08 review item #5). "hevc" requires ALL of:
+//   - the server has a probed HEVC encoder (caps.HEVCEncode, server-set);
+//   - fMP4 segments (caps.FMP4, server-set): Apple's HLS spec requires
+//     HEVC in fMP4, and HEVC-in-TS adds nothing here — in TS mode H.264
+//     output is strictly more compatible;
+//   - the client decodes 8-bit Main HEVC (the "hevc" cap, probed by the
+//     frontend with an hvc1.1.6.* string — exactly the profile we emit).
+//     Note this deliberately does NOT require HEVCMain10: a 10-bit HEVC
+//     source on a Main-only decoder transcodes to 8-bit HEVC and keeps
+//     the HEVC efficiency win; Main10 would only matter for an
+//     HDR-preserving 10-bit output mode (follow-up).
+//
+// HEVC at the same ladder bitrates is visibly better than H.264
+// (~40-50% more compression efficiency), so bandwidth-policy stays
+// unchanged and the win is taken as quality.
+func chooseVideoCodecOut(caps *ClientCaps) string {
+	if caps != nil && caps.HEVCEncode && caps.FMP4 && caps.VideoCodecs["hevc"] {
+		return "hevc"
+	}
+	return "h264"
 }
 
 // RemuxAudioCopySafe is the "may this audio codec be COPIED into HLS segments
@@ -618,13 +655,16 @@ func CastNeedsStereoClone(audioCodecOut string) bool {
 }
 
 // castVideoCodecOut returns the video codec the session's output actually
-// carries: "h264" for transcode sessions (always encode to H.264), or the
-// source codec for remux sessions (video is copied unchanged).
+// carries: the session's output codec for transcode sessions (H.264, or
+// HEVC for 2026-08 HEVC-output sessions — CastNeedsVideoTranscode then
+// forces an H.264 clone, since the Default Media Receiver only reliably
+// decodes H.264 over HLS), or the source codec for remux sessions (video
+// is copied unchanged).
 func castVideoCodecOut(src *TranscodeSession) string {
 	if src.Remux {
 		return src.SourceVideoCodec
 	}
-	return "h264"
+	return src.VideoCodecOut
 }
 
 // CastNeedsVideoTranscode reports whether casting a session with the given
@@ -663,9 +703,10 @@ func CastRemuxNeedsTranscode(remux bool) bool {
 
 // castCloneOpts builds the SessionOpts for a cast-safe clone of src.
 // Audio is always forced to stereo AAC. When needsVideoTranscode is true
-// (source video is non-H.264 remux), Remux is disabled so FFmpeg transcodes
-// the video to H.264 — the only codec the Default Media Receiver reliably
-// supports over HLS.
+// (source video is non-H.264 remux, or the source session's output is
+// HEVC), Remux is disabled AND VideoCodecOut is forced to "h264" so FFmpeg
+// transcodes the video to H.264 — the only codec the Default Media
+// Receiver reliably supports over HLS.
 func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode bool) SessionOpts {
 	opts := SessionOpts{
 		// A source session that already fell back to software decode reads
@@ -673,9 +714,10 @@ func castCloneOpts(src *TranscodeSession, needsVideoTranscode, disableHWDecode b
 		// CloneForCast (which reads the flag under src.variantMu).
 		DisableHWDecode:  disableHWDecode,
 		Remux:            src.Remux && !needsVideoTranscode,
-		RemuxAudioCopy:   false, // force a re-encode, never copy Dolby audio
-		AudioPassthrough: false, // force a re-encode, never copy
-		AudioCodecOut:    "aac", // stereo AAC — universally decodable
+		RemuxAudioCopy:   false,  // force a re-encode, never copy Dolby audio
+		AudioPassthrough: false,  // force a re-encode, never copy
+		AudioCodecOut:    "aac",  // stereo AAC — universally decodable
+		VideoCodecOut:    "h264", // never inherit an HEVC output — DMR is H.264-only
 		AudioTrackIndex:  src.AudioTrackIndex,
 		AudioChannels:    src.AudioChannels,
 		// HDRTonemap mirrors the source session, but SourceHDR rides along so
@@ -1095,6 +1137,14 @@ type TranscodeSession struct {
 	// (1080p60 → 4.2, 2160p60 → 5.2) in both the encoder args and the
 	// master playlist CODECS attribute.
 	SourceFPS float64 `json:"-"`
+	// VideoCodecOut is the video codec this session's TRANSCODE output
+	// carries: "h264" (default) or "hevc" (2026-08 review item #5, gated
+	// server-side on a probed HEVC encoder + fMP4 segments). Drives the
+	// encoder selection in startVariantImpl and the master playlist's
+	// CODECS attribute (hlsCodecString), and is what castVideoCodecOut
+	// reports so a Chromecast clone of an HEVC session correctly
+	// re-transcodes to H.264.
+	VideoCodecOut string `json:"-"`
 	// swDecodeFallback forces every variant launch of THIS SESSION to run
 	// WITHOUT hardware decode (2026-07): if a file that slipped past the
 	// startup decode probes kills FFmpeg, the retry — and every other ABR
@@ -1338,6 +1388,13 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	}
 	hwAccel.SWPreset = strings.ToLower(strings.TrimSpace(tcCfg.SoftwarePreset))
 
+	// HEVC output encoder (2026-08 review item #5): probe the hevc_*
+	// counterpart of the detected backend (libx265 on software boxes).
+	// transcode.hevc_output: off skips probing — the rollback knob. Empty
+	// result means the decision engine never selects HEVC output and every
+	// transcode stays on the H.264 path, exactly as before.
+	hwAccel.HEVCEncoder = ProbeHEVCEncoder(hwAccel, tcCfg.HEVCOutput)
+
 	// Decode-side acceleration (2026-07): probed ASYNCHRONOUSLY unless
 	// configured off — the probe is a handful of bounded FFmpeg runs, but on
 	// a box with a wedged GPU driver each can hang to its timeout, and this
@@ -1431,6 +1488,14 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 // engine knows which codecs the segment container can legally carry.
 func (tm *TranscodeManager) FMP4Enabled() bool {
 	return tm.fmp4
+}
+
+// HEVCEncodeEnabled reports whether this host has a probed HEVC OUTPUT
+// encoder (2026-08). The API layer feeds this into ClientCaps.HEVCEncode
+// so the decision engine may choose HEVC transcode output for clients
+// that decode it.
+func (tm *TranscodeManager) HEVCEncodeEnabled() bool {
+	return tm.hwAccel.HEVCEncoder != ""
 }
 
 // ffmpegSupportsReadrate reports whether the ffmpeg on PATH is >= 5.0, the
@@ -1877,7 +1942,13 @@ type SessionOpts struct {
 	// SourceFPS is the source average frame rate from the library's OWN probe
 	// data (never a client echo) — see TranscodeSession.SourceFPS.
 	SourceFPS float64
-	StartSec  int // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
+	// VideoCodecOut requests the transcode video output codec: "h264"
+	// (default) or "hevc" (2026-08). Clamped by CreateSession — "hevc"
+	// only sticks when the manager has a probed HEVC encoder AND the
+	// session's segments are fMP4; anything else becomes "h264". Never a
+	// client-echo trust decision: the clamp re-derives validity here.
+	VideoCodecOut string
+	StartSec      int // resume position: FFmpeg -ss seek offset in seconds (0 = start from beginning)
 	// SubtitleTracks lists text-based subtitle tracks to extract inline via
 	// the HLS pipeline. Each track gets its own WebVTT segmented output chain
 	// appended to the FFmpeg command, piggybacking on the same file I/O as
@@ -2023,19 +2094,35 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		session.SourceVideoCodec = strings.ToLower(o.SourceVideoCodec)
 		session.SourceVideoPixFmt = strings.ToLower(o.SourceVideoPixFmt)
 		session.SourceFPS = o.SourceFPS
+		session.VideoCodecOut = strings.ToLower(strings.TrimSpace(o.VideoCodecOut))
 		session.swDecodeFallback = o.DisableHWDecode
 		session.StartSec = o.StartSec
 		session.SubtitleTracks = o.SubtitleTracks
 	}
 
+	// VideoCodecOut trust boundary (2026-08): "hevc" is honored ONLY when
+	// the manager has a probed HEVC encoder AND this session's segments
+	// are fMP4 (Apple's HLS spec requires HEVC in fMP4; HEVC-in-TS output
+	// buys nothing over H.264). Everything else — empty, unknown values,
+	// stale SPA echoes, crafted requests — normalizes to "h264", the only
+	// other output the pipeline knows how to build. Remux sessions ignore
+	// it entirely (video is copied).
+	if session.VideoCodecOut != "" && session.VideoCodecOut != "h264" && session.VideoCodecOut != "hevc" {
+		slog.Warn("unknown video_codec_out, using h264", "configured", session.VideoCodecOut)
+	}
+	if session.VideoCodecOut != "hevc" || tm.hwAccel.HEVCEncoder == "" || !session.FMP4 {
+		session.VideoCodecOut = "h264"
+	}
+
 	// Set HLS CODECS string on profiles for the master playlist.
-	// Transcode: H.264 High + the session's audio codec. The H.264 level
-	// varies by resolution AND source frame rate (h264LevelIDC — 1080p60
-	// needs 4.2, 2160p60 needs 5.2; unknown fps keeps the ≤30fps choice).
+	// Transcode: the session's output video codec (H.264 High, or HEVC Main
+	// when VideoCodecOut resolved to hevc) + the session's audio codec. The
+	// level varies by resolution AND source frame rate (h264LevelIDC /
+	// hevcLevelIDC; unknown fps keeps the default choice).
 	// Remux: codec string is unknown at creation time (omitted, valid per HLS spec).
 	if !session.Remux {
 		for i := range profiles {
-			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS)
+			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
 		}
 		session.Profiles = profiles
 	}
@@ -2680,14 +2767,22 @@ func segmentNumberPart(name string) (string, bool) {
 //   - Audio: AAC-LC (mp4a.40.2) by default, AC-3 (ac-3) when
 //     audioCodec=="ac3" (re-encoded surround OR fMP4 copy), or E-AC-3 (ec-3)
 //     when audioCodec=="eac3" (fMP4 passthrough only).
-func hlsCodecString(height int, audioCodec string, fps float64) string {
-	// Level derives from the same h264LevelIDC table the encoders use
-	// (hwaccel.go) — one source of truth, so the CODECS attribute can never
-	// disagree with the actual -level constraint. Tier choice rationale
-	// (incl. the Chromecast gen-1/2 4.1 and Chromecast-with-Google-TV 5.1
-	// receiver ceilings that pin the 1080p/2160p rungs, and the >30fps
-	// bumps) lives on h264LevelIDC.
-	level := h264LevelHex(height, fps)
+func hlsCodecString(height int, audioCodec string, fps float64, videoOut ...string) string {
+	// Video part. The level derives from the same table the encoders use
+	// (h264LevelIDC / hevcLevelIDC in hwaccel.go) — one source of truth, so
+	// the CODECS attribute can never disagree with the actual -level
+	// constraint. H.264: High profile (64=0x64) at every resolution — must
+	// stay in sync with h264Profile(). HEVC (2026-08): Main profile,
+	// main tier — hvc1.1.6.L{idc}.B0 — matching the 8-bit Main output
+	// HEVCEncoderArgs builds and the frontend's "hevc" cap probe string.
+	videoOutCodec := "h264"
+	if len(videoOut) > 0 && videoOut[0] == "hevc" {
+		videoOutCodec = "hevc"
+	}
+	video := fmt.Sprintf("avc1.6400%s", h264LevelHex(height, fps))
+	if videoOutCodec == "hevc" {
+		video = fmt.Sprintf("hvc1.1.6.L%d.B0", hevcLevelIDC(height, fps))
+	}
 
 	audio := "mp4a.40.2" // AAC-LC
 	switch audioCodec {
@@ -2698,8 +2793,7 @@ func hlsCodecString(height int, audioCodec string, fps float64) string {
 		// passthrough path (TranscodeAudioCopySafe); never a re-encode target.
 		audio = "ec-3"
 	}
-	// High profile (6400) at all resolutions.
-	return fmt.Sprintf("avc1.6400%s,%s", level, audio)
+	return fmt.Sprintf("%s,%s", video, audio)
 }
 
 // audioEncodeArgs returns the FFmpeg audio-encoding flags for a transcode/remux
@@ -2965,6 +3059,12 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}
 	} else {
 		// ── Full transcode mode ──
+		// HEVC output (2026-08 review item #5): VideoCodecOut was resolved
+		// and clamped at session-create (probed encoder + fMP4 gate) and
+		// selects the encoder family here; filter chains, bitrate control,
+		// keyframe forcing and audio args below are codec-agnostic, shared
+		// with the H.264 path.
+		hevcOut := session.VideoCodecOut == "hevc"
 		if decodeFullGPU {
 			// Tier-2 zero-copy (2026-07): decode, scale (and VAAPI HDR
 			// tonemap) all operate on GPU frames delivered by
@@ -2974,13 +3074,22 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			// would splice CPU-only filters into a hardware-frame graph.
 			// Bitrate control, keyframe forcing and audio args below are
 			// shared with the CPU path.
-			args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
+			if hevcOut {
+				args = append(args, tm.hwAccel.FullGPUHEVCEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
+			} else {
+				args = append(args, tm.hwAccel.FullGPUEncoderArgs(p.Width, p.Height, session.HDRTonemap, session.SourceFPS)...)
+			}
 		} else {
 			// Video encoder (hardware-accelerated or software). When
 			// PlanDecode chose Tier 1, the frames were hardware-DECODED but
 			// arrive in system memory, so this CPU filter chain applies
 			// unchanged.
-			encoderArgs := tm.hwAccel.VideoEncoderArgs(p.Width, p.Height, session.SourceFPS)
+			var encoderArgs []string
+			if hevcOut {
+				encoderArgs = tm.hwAccel.HEVCEncoderArgs(p.Width, p.Height, session.SourceFPS)
+			} else {
+				encoderArgs = tm.hwAccel.VideoEncoderArgs(p.Width, p.Height, session.SourceFPS)
+			}
 
 			// HDR-to-SDR tonemapping: inject before subtitle burn-in so tonemap
 			// operates on the raw decoded frames, then subtitles overlay the SDR output.

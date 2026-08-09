@@ -663,6 +663,7 @@ type StreamInfo struct {
 	AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // Frontend should send audio_passthrough:true
 	AudioChannels    int    `json:"audio_channels,omitempty"`    // Source audio channel count for bitrate scaling
 	AudioCodecOut    string `json:"audio_codec_out,omitempty"`   // Re-encode target: "aac" (stereo) or "ac3" (5.1 surround); frontend echoes it to the session
+	VideoCodecOut    string `json:"video_codec_out,omitempty"`   // Transcode output: "h264" (default) or "hevc" (2026-08, when server+client both support it); frontend echoes it to the session
 	HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // Frontend should send hdr_tonemap:true to session
 }
 
