@@ -157,6 +157,27 @@ func main() {
 
 	// Services
 	queries := db.NewQueries(pool)
+	// Match v2 impressions are sensitive profile history. Sweep immediately at
+	// boot and daily thereafter so the 90-day retention policy is a real bound,
+	// even when no profile requests another hero response.
+	bgWorker(func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			pctx, pcancel := context.WithTimeout(ctx, 30*time.Second)
+			if n, err := queries.PruneRecommendationImpressions(pctx, db.RecommendationImpressionRetention); err != nil {
+				slog.Warn("recommendation impression retention sweep failed", "error", err)
+			} else if n > 0 {
+				slog.Info("pruned recommendation impression slates", "count", n)
+			}
+			pcancel()
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				return
+			}
+		}
+	})
 	authSvc := auth.NewService(cfg.Auth)
 	scanner := library.NewScanner(cfg.Scanner, queries)
 	hub := ws.NewHub(cfg.OriginAllowed)
@@ -1225,7 +1246,11 @@ func (a heroAdapter) PoolFor(ctx context.Context, profileID int64) ([]api.HeroPi
 	}
 	out := make([]api.HeroPick, len(picks))
 	for i, p := range picks {
-		out[i] = api.HeroPick{Item: p.Item, Reason: p.Reason, Score: p.Score, Match: p.Match}
+		out[i] = api.HeroPick{
+			Item: p.Item, Reason: p.Reason, Score: p.Score, Match: p.Match,
+			MatchConfidence: p.MatchConfidence, MatchModelVersion: p.MatchModelVersion,
+			MatchSimilarity: p.MatchSimilarity, MatchEvidence: p.MatchEvidence,
+		}
 	}
 	return out, nil
 }

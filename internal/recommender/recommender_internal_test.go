@@ -943,38 +943,38 @@ func TestChatJSONWithRetryOn5xx_NilOnRetryHook(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// matchDisplay — per-user similarity → personal "% for you"
+// Match v2 — absolute similarity + evidence → personal "% for you"
 // --------------------------------------------------------------------------
 
-// TestMatchDisplay covers the taste-vector similarity → integer personal
-// "match %" mapping that drives the hero ring for personalized picks. It
-// standardizes a similarity against the profile's candidate distribution
-// (mean/std) then applies a logistic, replacing the old fixed-anchor
-// calibrateMatch.
-func TestMatchDisplay(t *testing.T) {
+// TestPersonalMatchV2 covers the pool-invariant bootstrap mapping that drives
+// the hero ring. Evidence shrinkage keeps sparse profiles conservative.
+func TestPersonalMatchV2(t *testing.T) {
 	// Cold-start / no centroid → 0 (the frontend shows the global Aurora Score).
-	if got := matchDisplay(0, 0.8, 0.05); got != 0 {
+	if got := matchDisplayV2(0, 20); got != 0 {
 		t.Errorf("sim<=0 should be 0, got %d", got)
 	}
-	// Degenerate distribution (σ≈0): a strong similarity still reads high via
-	// the direct-band fallback rather than a meaningless 50.
-	if got := matchDisplay(0.9, 0.9, 0); got < 70 {
-		t.Errorf("degenerate σ: a 0.9 sim should still read high, got %d", got)
-	}
-	// Standardized: the distribution mean reads ~50; above-mean reads higher.
-	mean, std := 0.80, 0.05
-	if got := matchDisplay(mean, mean, std); got < 45 || got > 55 {
-		t.Errorf("at the mean, expected ~50, got %d", got)
-	}
-	if !(matchDisplay(mean+std, mean, std) > matchDisplay(mean, mean, std)) {
-		t.Error("an above-mean similarity should read higher than the mean")
+	if got := matchDisplayV2(0.9, 0); got != 0 {
+		t.Errorf("no evidence should suppress personal Match, got %d", got)
 	}
 
-	// Bounded [0,100] and monotonic in sim for a fixed distribution — a higher
+	// More independent evidence moves a strong semantic match farther from the
+	// uninformative 50% prior, never toward it.
+	sparse := matchDisplayV2(0.9, 3)
+	mature := matchDisplayV2(0.9, 20)
+	if !(mature > sparse && sparse > 50) {
+		t.Fatalf("strong sim should gain confidence: sparse=%d mature=%d", sparse, mature)
+	}
+	weakSparse := matchDisplayV2(0.5, 3)
+	weakMature := matchDisplayV2(0.5, 20)
+	if !(weakMature < weakSparse && weakSparse < 50) {
+		t.Fatalf("weak sim should fall with confidence: sparse=%d mature=%d", weakSparse, weakMature)
+	}
+
+	// Bounded [0,100] and monotonic in sim for fixed evidence — a higher
 	// similarity can never produce a lower match %.
 	prev := -1
 	for s := 0.0; s <= 1.0001; s += 0.01 {
-		got := matchDisplay(s, mean, std)
+		got := matchDisplayV2(s, 20)
 		if got < 0 || got > 100 {
 			t.Fatalf("out of range at sim=%.2f: %d", s, got)
 		}
@@ -982,6 +982,20 @@ func TestMatchDisplay(t *testing.T) {
 			t.Fatalf("non-monotonic at sim=%.2f: %d < previous %d", s, got, prev)
 		}
 		prev = got
+	}
+}
+
+func TestApplyPersonalMatch_PoolInvariant(t *testing.T) {
+	item := &models.MediaItem{ID: 7, MatchScore: 0.84}
+	picksA := []HeroPick{{Item: item}}
+	picksB := []HeroPick{{Item: item}}
+	applyPersonalMatch(picksA, 12)
+	applyPersonalMatch(picksB, 12)
+	if picksA[0].Match != picksB[0].Match {
+		t.Fatalf("same evidence changed match: %d vs %d", picksA[0].Match, picksB[0].Match)
+	}
+	if picksA[0].MatchModelVersion != matchModelVersion || picksA[0].MatchConfidence <= 0 {
+		t.Fatalf("missing audit metadata: %+v", picksA[0])
 	}
 }
 

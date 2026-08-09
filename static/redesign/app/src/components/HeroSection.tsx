@@ -3,11 +3,11 @@
 // Phase 2.4) so the lazy BrowseView chunk can reuse it alongside HomeView.
 // heroMatchScore (the cold-start "match %" fallback) is module-private here
 // — only HeroSection uses it.
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Icon } from '@/components/Icon'
 import { isResumable, formatResumeTime, formatResumeAriaLabel, formatResumeLabel } from '@/lib/format'
 import { type Media } from '@/lib/types'
-import { type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
+import { recordRecommendationExposure, type ContinueWatchingItem, type HeroPersonalization } from '@/lib/api'
 
 // Stable, deterministic "match %" for the hero ring — the COLD-START
 // FALLBACK only. The recommender now returns a real Aurora Score
@@ -31,7 +31,7 @@ function heroMatchScore(media: { id: number; rating?: number }): number {
 // When `hero` is absent we render a NEUTRAL placeholder rather than
 // falling back to a mock entry — the mock id collided with a real
 // database id and Play would stream the wrong title.
-export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2' }: {
+export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, score, onNextPick, onPauseChange, personalization, resume, libraryIds, onToggleLib, isCatalogFallback, compact = false, eyebrow, countLabel, pageTitle, titleAs = 'h2', slateToken, slatePosition = 0, profileId }: {
   hero?: Media
   onPlay: (m: Media) => void
   onInfo: (m: Media) => void
@@ -79,6 +79,9 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
    * otherwise left those pages with no h1 at all and an h2-without-h1 gap.
    * Home stays 'h2' (its greeting owns the h1). */
   titleAs?: 'h1' | 'h2'
+  slateToken?: string
+  slatePosition?: number
+  profileId?: number
   // "Not tonight" — advance to the next pick in the loaded hero pool
   // (instant, no refetch). When absent (e.g. BrowseView's reused hero)
   // the button doesn't render.
@@ -103,6 +106,39 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   // useState MUST be called before any conditional return so hook
   // ordering stays stable across renders (Rules of Hooks).
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
+  const sectionRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!heroProp || !slateToken || compact || isCatalogFallback) return
+    const el = sectionRef.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let sent = false
+    let intersecting = false
+    const send = () => {
+      if (sent) return
+      sent = true
+      const input = { slateToken, mediaItemId: heroProp.id, position: slatePosition, visibleMs: 1500, profileId }
+      void recordRecommendationExposure(input).then(recorded => {
+        if (!recorded) setTimeout(() => { void recordRecommendationExposure(input).catch(() => undefined) }, 2000)
+      }).catch(() => undefined)
+    }
+    const syncTimer = () => {
+      const visible = intersecting && document.visibilityState === 'visible'
+      if (visible && !timer) timer = setTimeout(send, 1500)
+      if (!visible && timer) { clearTimeout(timer); timer = undefined }
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      intersecting = !!entry?.isIntersecting && entry.intersectionRatio >= 0.5
+      syncTimer()
+    }, { threshold: [0.5] })
+    observer.observe(el)
+    document.addEventListener('visibilitychange', syncTimer)
+    return () => {
+      if (timer) clearTimeout(timer)
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', syncTimer)
+    }
+  }, [compact, heroProp, isCatalogFallback, profileId, slatePosition, slateToken])
   if (!heroProp) {
     return (
       // 2026-07-25 (Aurora Stage Phase 4, review fix) — matches the real
@@ -153,6 +189,7 @@ export function HeroSection({ hero: heroProp, onPlay, onInfo, reason, match, sco
   return (
     <>
     <section
+      ref={sectionRef}
       // 2026-06-05 (Home redesign A/B) — the redesign frames the hero as
       // a rounded, INSET card (matching the mockup + the new greeting
       // band, which is also inset). Dropped the former full-bleed

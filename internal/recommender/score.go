@@ -119,10 +119,17 @@ const (
 	// −1σ→29. Bigger k = more contrast. This is the spread-tuning knob.
 	auroraLogisticK = 0.9
 
-	// matchLogisticK is auroraLogisticK's counterpart for the personal Match:
-	// the steepness of the per-user similarity→% curve. 1.0 → a candidate at
-	// +1σ ≈ 73, +2σ ≈ 88 within the user's own recommendation pool.
-	matchLogisticK = 1.0
+	// Match v2 bootstrap manifest. Unlike the old pool-relative z-score, this
+	// mapping is absolute: identical profile evidence + cosine produces the same
+	// value regardless of which other candidates happened to be recalled.
+	// These constants are deliberately versioned together (see matchModelVersion)
+	// so later outcome-calibrated manifests can replace them atomically.
+	matchSemanticSlope    = 11.0
+	matchSemanticMidpoint = 0.72
+	matchPriorProbability = 0.50
+	matchPriorSupport     = 5.0
+	matchProbabilityFloor = 0.05
+	matchProbabilityCeil  = 0.95
 
 	// neutralRatingMean is the Bayesian prior used only when the library stats
 	// can't be computed yet (empty/error). 7.0 mirrors TMDB's global mean.
@@ -240,46 +247,34 @@ func auroraDisplay(core, mean, std float64) int {
 	return clampInt(int(math.Round(p*100)), 1, 100)
 }
 
-// meanStd returns the mean and population standard deviation of xs. An empty
-// slice yields (0,0); a single element yields (x,0). Used to standardize a
-// profile's candidate similarities for the personal Match.
-func meanStd(xs []float64) (mean, std float64) {
-	n := len(xs)
-	if n == 0 {
+const matchModelVersion = "match-v2-bootstrap-1"
+
+// personalMatchV2 maps absolute taste-vector similarity plus the amount of
+// independent profile evidence to a conservative [0,1] estimate. The semantic
+// curve is shrunk toward an uninformative 0.5 prior by rho=n/(n+k): three setup
+// picks cannot produce the same confidence as a mature profile. This is the
+// checked-in bootstrap manifest, not a claim of empirical calibration; the
+// version and evidence strength are exposed/logged so future outcome fitting can
+// be evaluated without confusing model generations.
+func personalMatchV2(sim float64, evidence int) (probability, confidence float64) {
+	if sim <= 0 || evidence <= 0 || math.IsNaN(sim) {
 		return 0, 0
 	}
-	var sum float64
-	for _, x := range xs {
-		sum += x
+	if sim > 1 {
+		sim = 1
 	}
-	mean = sum / float64(n)
-	var ss float64
-	for _, x := range xs {
-		d := x - mean
-		ss += d * d
-	}
-	return mean, math.Sqrt(ss / float64(n))
+	semantic := 1 / (1 + math.Exp(-matchSemanticSlope*(sim-matchSemanticMidpoint)))
+	confidence = float64(evidence) / (float64(evidence) + matchPriorSupport)
+	probability = matchPriorProbability + confidence*(semantic-matchPriorProbability)
+	probability = math.Max(matchProbabilityFloor, math.Min(matchProbabilityCeil, probability))
+	return probability, confidence
 }
 
-// matchDisplay maps a taste-vector similarity to the personal "match %"
-// (0..100) by standardizing it against the distribution of the profile's own
-// candidate similarities (mean/std) then applying a logistic. This replaces the
-// old fixed calibrateMatch anchors: the spread auto-calibrates per user and
-// library instead of being hand-tuned. sim<=0 returns 0 (cold-start, no
-// centroid). A degenerate distribution (one candidate, or all identical) falls
-// back to a direct map of the typical recommendation band so a lone strong pick
-// still reads high rather than a meaningless 50.
-func matchDisplay(sim, mean, std float64) int {
-	if sim <= 0 {
+func matchDisplayV2(sim float64, evidence int) int {
+	p, _ := personalMatchV2(sim, evidence)
+	if p == 0 {
 		return 0
 	}
-	if std <= 1e-9 {
-		// cos ~0.70..0.95 (the band real recommendations live in) → ~60..96.
-		p := (sim - 0.70) / 0.25
-		return clampInt(int(math.Round(60+p*36)), 1, 100)
-	}
-	z := (sim - mean) / std
-	p := 1.0 / (1.0 + math.Exp(-matchLogisticK*z))
 	return clampInt(int(math.Round(p*100)), 1, 100)
 }
 
