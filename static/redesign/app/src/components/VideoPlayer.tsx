@@ -691,10 +691,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // so a dismissed picker does not waste a token. Watch parties
   // currently disable casting (the receiver runs an independent
   // playback timeline that won't stay in sync with the party).
+  //
+  // castTokenExpRef records the minted token's expiry (Unix seconds)
+  // so resumeCast can tell when the URL the receiver holds has gone
+  // stale during a long pause (see below).
+  const castTokenExpRef = useRef(0)
   const castLoadGetter = useCallback(async () => {
     const sid = sessionIdRef.current
     if (!sid || !target) return null
     const resp = await createCastToken(sid)
+    castTokenExpRef.current = resp.expires_at
     // Defense-in-depth: confirm the server actually gave us a
     // cast-scoped JWT before we hand its URL to a receiver. A future
     // bug that wired this path to a different token-mint endpoint
@@ -730,6 +736,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
   const cast = useCast(castLoadGetter)
+  // Cast token renewal on resume (2026-08 review fix). The session-scoped
+  // cast token baked into the receiver's playlist URL expires after
+  // auth.cast_token_hours (default 4h). A receiver paused LONGER than that
+  // 401s on every segment fetch the moment it resumes — and the Default
+  // Media Receiver surfaces that as an indefinite buffer, not an error.
+  // So: resuming a paused cast whose token has expired re-loads the media
+  // with a freshly-minted token instead of issuing a bare play command.
+  // The resume position is the RECEIVER's timeline (cast.remote.currentTime)
+  // — the local <video> froze when the cast began, so its currentTime would
+  // jump the receiver backwards. loadCurrent re-mints via castLoadGetter,
+  // which also refreshes castTokenExpRef.
+  const resumeCast = () => {
+    const exp = castTokenExpRef.current
+    const tokenExpired = exp > 0 && Date.now() / 1000 >= exp
+    if (cast.remote.isPaused && tokenExpired) {
+      void cast.loadCurrent(cast.remote.currentTime).catch((err) => {
+        flashCastError(`Cast resume failed: ${err instanceof Error ? err.message : String(err)}`)
+      })
+      return
+    }
+    cast.playOrPause()
+  }
   const [airplayActive, setAirplayActive] = useState(false)
   const [airplayAvailable, setAirplayAvailable] = useState(false)
   const [minimized, setMinimized] = useState(false)
@@ -3619,7 +3647,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const widgetCurSec = cast.status.connected ? cast.remote.currentTime : currentSec
   const widgetDurSec = cast.status.connected ? cast.remote.duration : realDurationSec
   const widgetToggle = () => {
-    if (cast.status.connected) { cast.playOrPause(); return }
+    if (cast.status.connected) { resumeCast(); return }
     const v = videoRef.current
     if (!v) return
     if (v.paused) void v.play().catch(() => { /* defensive */ })
@@ -4341,7 +4369,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 onPlayPause={() => {
                   // While Chromecasting, the play/pause control drives the
                   // RECEIVER (the local <video> is held paused as the surface).
-                  if (cast.status.connected) { cast.playOrPause(); return }
+                  // resumeCast renews an expired cast token before resuming.
+                  if (cast.status.connected) { resumeCast(); return }
                   const vid = videoRef.current
                   if (!vid) return
                   if (vid.paused) void vid.play().catch(() => { /* defensive */ })

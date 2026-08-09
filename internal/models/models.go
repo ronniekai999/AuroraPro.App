@@ -312,8 +312,12 @@ type MediaFile struct {
 	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
 	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
 	// Empty = unknown (treat as non-HDR, safer default).
-	ColorTransfer  string          `json:"color_transfer,omitempty"`
-	ColorPrimaries string          `json:"color_primaries,omitempty"`
+	ColorTransfer  string `json:"color_transfer,omitempty"`
+	ColorPrimaries string `json:"color_primaries,omitempty"`
+	// VideoFPS is the probed average frame rate (0 = unknown — files
+	// scanned before migration 053). Used to stamp a truthful H.264
+	// level for >30fps content (1080p60 → 4.2, 2160p60 → 5.2).
+	VideoFPS       float64         `json:"video_fps,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
@@ -363,8 +367,12 @@ type EpisodeFile struct {
 	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
 	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
 	// Empty = unknown (treat as non-HDR, safer default).
-	ColorTransfer  string          `json:"color_transfer,omitempty"`
-	ColorPrimaries string          `json:"color_primaries,omitempty"`
+	ColorTransfer  string `json:"color_transfer,omitempty"`
+	ColorPrimaries string `json:"color_primaries,omitempty"`
+	// VideoFPS is the probed average frame rate (0 = unknown — files
+	// scanned before migration 053). Used to stamp a truthful H.264
+	// level for >30fps content (1080p60 → 4.2, 2160p60 → 5.2).
+	VideoFPS       float64         `json:"video_fps,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`

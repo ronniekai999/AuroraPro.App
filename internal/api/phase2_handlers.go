@@ -1000,6 +1000,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		streaming.SessionOpts{
 			SourceVideoCodec:  file.VideoCodec,
 			SourceVideoPixFmt: file.VideoPixFmt,
+			SourceFPS:         file.VideoFPS,
 			SourceHDR:         streaming.IsHDRColorTransfer(file.ColorTransfer),
 		})
 	if err != nil {
@@ -1099,6 +1100,7 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 		streaming.SessionOpts{
 			SourceVideoCodec:  file.VideoCodec,
 			SourceVideoPixFmt: file.VideoPixFmt,
+			SourceFPS:         file.VideoFPS,
 			SourceHDR:         streaming.IsHDRColorTransfer(file.ColorTransfer),
 		})
 	if err != nil {
@@ -1270,8 +1272,19 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// HLS — other codecs cause an indefinite spinner (video) or silent playback
 	// (Dolby audio) with no sender-side error. CloneForCast creates a cast-safe
 	// H.264+AAC clone when needed; returns the original session when it's already
-	// safe. If the clone can't be created (e.g. session limit) we fall back to
-	// the original session — no worse than the pre-guard behavior.
+	// safe.
+	//
+	// Clone failure handling (2026-08 review fix): a QUOTA failure
+	// (ErrSessionLimit / ErrUserSessionLimit) now surfaces to the sender as a
+	// 429 instead of silently casting the original — a cast-safe-incompatible
+	// original (Dolby audio, non-H.264 video) fails on the receiver in ways
+	// the sender cannot detect (silent audio, indefinite spinner), so the
+	// "no worse than pre-guard" fallback was actually worse than an honest,
+	// actionable error. NON-quota clone failures keep the logged fallback:
+	// those are transient/unexpected (disk, FFmpeg), the original session
+	// may well be cast-safe anyway (clone not needed for H.264+AAC), and
+	// failing the whole cast on an unexpected clone error would regress
+	// sessions that previously worked.
 	//
 	// Exception — for_airplay=true: this is an AirPlay / native-HLS token
 	// request (pre-baking a URL for vid.src so Apple TV can authenticate HLS
@@ -1285,6 +1298,12 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	castSessionID := sessionID
 	if r.URL.Query().Get("for_airplay") != "true" {
 		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
+			if errors.Is(cloneErr, streaming.ErrUserSessionLimit) || errors.Is(cloneErr, streaming.ErrSessionLimit) {
+				slog.Warn("cast: clone hit session quota — refusing to silently cast the incompatible original",
+					"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
+				writeSessionCreateError(w, claims.UserID, cloneErr)
+				return
+			}
 			slog.Warn("cast: clone failed, casting original session",
 				"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
 		} else {
@@ -1355,6 +1374,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	var filePath, resolution, fileAudioCodec, fileColorTransfer string
 	var fileVideoCodec, fileVideoPixFmt string
+	var fileVideoFPS float64
 	var fileAudioTracks []models.AudioTrack
 	if req.FileType == "episode" {
 		f, err := h.queries.GetEpisodeFileByID(r.Context(), req.FileID)
@@ -1369,6 +1389,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		fileColorTransfer = f.ColorTransfer
 		fileVideoCodec = f.VideoCodec
 		fileVideoPixFmt = f.VideoPixFmt
+		fileVideoFPS = f.VideoFPS
 	} else {
 		f, err := h.queries.GetMediaFileByID(r.Context(), req.FileID)
 		if err != nil {
@@ -1382,6 +1403,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		fileColorTransfer = f.ColorTransfer
 		fileVideoCodec = f.VideoCodec
 		fileVideoPixFmt = f.VideoPixFmt
+		fileVideoFPS = f.VideoFPS
 	}
 
 	srcW, srcH := parseResolution(resolution)
@@ -1429,6 +1451,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		// client echo (it describes the exact file FFmpeg will read; a stale
 		// echo would mis-gate hw decode and remux BSF selection alike).
 		SourceVideoPixFmt: fileVideoPixFmt,
+		SourceFPS:         fileVideoFPS,
 		StartSec:          req.StartSec,
 	}
 	if fileVideoCodec != "" {
