@@ -278,7 +278,12 @@ type TranscodeConfig struct {
 	// Validated against the x264 realtime-capable presets in
 	// NewTranscodeManager; unknown values fall back to "veryfast".
 	SoftwarePreset string
-	Profiles       []string
+	// HEVCOutput controls HEVC transcode OUTPUT (2026-08): "auto"
+	// (default — probe the hevc_* counterpart of the detected encoder,
+	// emit HEVC for HEVC-capable clients) or "off" (every transcode stays
+	// on H.264, the pre-2026-08 behavior).
+	HEVCOutput string
+	Profiles   []string
 	// MaxCacheBytes bounds the total on-disk size of the transcode output
 	// tree (HLS EVENT playlists keep every segment of a title so seek-back
 	// works, so long/concurrent transcodes can grow it without bound). When
@@ -345,6 +350,7 @@ type yamlConfig struct {
 		SegmentDuration    int      `yaml:"segment_duration"`
 		SegmentFormat      string   `yaml:"segment_format"`
 		SoftwarePreset     string   `yaml:"software_preset"`
+		HEVCOutput         string   `yaml:"hevc_output"`
 		Profiles           []string `yaml:"profiles"`
 		MaxCacheGB         int      `yaml:"max_cache_gb"`
 	} `yaml:"transcode"`
@@ -484,6 +490,10 @@ func Load() (*Config, error) {
 			// libx264 preset for software transcodes. "faster" is the
 			// quality-first alternative (~5-8% better, ~30% more CPU).
 			SoftwarePreset: "veryfast",
+			// HEVC transcode output for HEVC-capable clients (probe the
+			// hevc_* counterpart of the detected encoder). "off" keeps
+			// every transcode on H.264.
+			HEVCOutput: "auto",
 			// 2160p included so 4K sources can be offered at full resolution
 			// when transcoding is unavoidable. It sits at the TOP of the ABR
 			// ladder and variants start on-demand, so low-bandwidth clients
@@ -766,6 +776,9 @@ func loadYAML(cfg *Config) error {
 	}
 	if yc.Transcode.SoftwarePreset != "" {
 		cfg.Transcode.SoftwarePreset = yc.Transcode.SoftwarePreset
+	}
+	if yc.Transcode.HEVCOutput != "" {
+		cfg.Transcode.HEVCOutput = yc.Transcode.HEVCOutput
 	}
 	if yc.Transcode.MaxSessionsPerUser > 0 {
 		cfg.Transcode.MaxSessionsPerUser = yc.Transcode.MaxSessionsPerUser

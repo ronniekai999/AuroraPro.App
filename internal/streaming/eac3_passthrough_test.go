@@ -262,10 +262,20 @@ func TestCastNeedsVideoTranscode(t *testing.T) {
 }
 
 func TestCastVideoCodecOut(t *testing.T) {
-	// Transcode session always outputs H.264 regardless of source.
-	transcode := &TranscodeSession{Remux: false, SourceVideoCodec: "hevc"}
+	// Transcode session reports its OUTPUT codec (CreateSession normalizes
+	// it to "h264" or "hevc"; remux passes the source codec through).
+	transcode := &TranscodeSession{Remux: false, SourceVideoCodec: "hevc", VideoCodecOut: "h264"}
 	if got := castVideoCodecOut(transcode); got != "h264" {
-		t.Errorf("castVideoCodecOut(transcode/hevc) = %q, want h264", got)
+		t.Errorf("castVideoCodecOut(transcode/h264-out) = %q, want h264", got)
+	}
+	// HEVC-output transcode session (2026-08): reports hevc, which
+	// CastNeedsVideoTranscode then flags for an H.264 clone.
+	transcodeHEVC := &TranscodeSession{Remux: false, SourceVideoCodec: "av1", VideoCodecOut: "hevc"}
+	if got := castVideoCodecOut(transcodeHEVC); got != "hevc" {
+		t.Errorf("castVideoCodecOut(transcode/hevc-out) = %q, want hevc", got)
+	}
+	if !CastNeedsVideoTranscode(castVideoCodecOut(transcodeHEVC)) {
+		t.Error("HEVC-output session must need an H.264 transcode clone for cast")
 	}
 	// Remux session passes through source codec unchanged.
 	remuxHEVC := &TranscodeSession{Remux: true, SourceVideoCodec: "hevc"}
@@ -299,6 +309,11 @@ func TestCastCloneOptsVideoTranscode(t *testing.T) {
 	}
 	if opts.AudioCodecOut != "aac" {
 		t.Errorf("castCloneOpts: AudioCodecOut = %q, want aac", opts.AudioCodecOut)
+	}
+	// The clone's video OUTPUT is always H.264 (DMR-only codec), even when
+	// the source session was a 2026-08 HEVC-output transcode.
+	if opts.VideoCodecOut != "h264" {
+		t.Errorf("castCloneOpts: VideoCodecOut = %q, want h264", opts.VideoCodecOut)
 	}
 	// SourceHDR must ride along so CreateSession's HDR re-derivation can turn
 	// tonemapping on for the (always video-re-encoding) clone.

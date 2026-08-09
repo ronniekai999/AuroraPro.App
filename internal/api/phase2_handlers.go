@@ -1360,6 +1360,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		AudioTrackIndex  *int   `json:"audio_track_index,omitempty"` // 0-based audio track; nil = FFmpeg default
 		AudioChannels    int    `json:"audio_channels,omitempty"`    // source audio channel count for bitrate scaling
 		AudioCodecOut    string `json:"audio_codec_out,omitempty"`   // re-encode target: "aac" (stereo) or "ac3" (5.1 surround)
+		VideoCodecOut    string `json:"video_codec_out,omitempty"`   // transcode output: "h264" (default) or "hevc"; clamped server-side
 		HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // apply HDR-to-SDR tonemapping
 		VideoCodec       string `json:"video_codec,omitempty"`       // source video codec for BSF selection in remux
 		StartSec         int    `json:"start_sec,omitempty"`         // resume position: FFmpeg -ss seek offset in seconds
@@ -1452,6 +1453,7 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		// echo would mis-gate hw decode and remux BSF selection alike).
 		SourceVideoPixFmt: fileVideoPixFmt,
 		SourceFPS:         fileVideoFPS,
+		VideoCodecOut:     req.VideoCodecOut, // echoed stream-info decision; CreateSession clamps it
 		StartSec:          req.StartSec,
 	}
 	if fileVideoCodec != "" {
@@ -1766,6 +1768,10 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		// Apple requires for HEVC remux on native players — or legacy
 		// MPEG-TS. See ClientCaps.FMP4.
 		clientCaps.FMP4 = h.transcode.FMP4Enabled()
+		// Same server-side delivery context for HEVC transcode OUTPUT
+		// (2026-08 review item #5): the decision engine may only choose
+		// "hevc" when this host actually has a working HEVC encoder.
+		clientCaps.HEVCEncode = h.transcode.HEVCEncodeEnabled()
 	}
 
 	var filePath, container, videoCodec, audioCodec, resolution, videoPixFmt string
@@ -1910,6 +1916,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		AudioPassthrough: pd.AudioPassthrough,
 		AudioChannels:    audioChannels,
 		AudioCodecOut:    audioCodecOut,
+		VideoCodecOut:    pd.VideoCodecOut,
 		HDRTonemap:       hdrTonemap,
 	}
 

@@ -42,6 +42,15 @@ type HWAccelInfo struct {
 	// (transcode.software_preset). Empty means "veryfast". Not part of the
 	// admin-facing JSON: it's a config knob, not a detected capability.
 	SWPreset string `json:"-"`
+
+	// HEVCEncoder is the probed HEVC encoder for OUTPUT transcodes
+	// (2026-08, review item #5): hevc_nvenc / hevc_qsv / hevc_vaapi /
+	// hevc_amf for the detected hardware, libx265 for software boxes.
+	// Empty = HEVC output unavailable (encoder missing from the FFmpeg
+	// build, test encode failed, or transcode.hevc_output: off) — the
+	// decision engine then keeps every transcode on H.264. Probed by
+	// ProbeHEVCEncoder at TranscodeManager construction.
+	HEVCEncoder string `json:"hevc_encoder,omitempty"`
 }
 
 type hwProbe struct {
@@ -490,4 +499,156 @@ func h264Level(height int, fps float64) string {
 // avc1.PPCC LL CODECS attribute (e.g. 40 → "28").
 func h264LevelHex(height int, fps float64) string {
 	return fmt.Sprintf("%02x", h264LevelIDC(height, fps))
+}
+
+// ============================================================
+// HEVC Output (2026-08, review item #5)
+// ============================================================
+
+// hevcEncoderForType maps a detected HW accel backend to its HEVC encoder
+// candidate. Software boxes get libx265.
+func hevcEncoderForType(t HWAccelType) string {
+	switch t {
+	case HWAccelNVENC:
+		return "hevc_nvenc"
+	case HWAccelQSV:
+		return "hevc_qsv"
+	case HWAccelVAAPI:
+		return "hevc_vaapi"
+	case HWAccelAMF:
+		return "hevc_amf"
+	default:
+		return "libx265"
+	}
+}
+
+// ProbeHEVCEncoder determines the HEVC OUTPUT encoder for this host,
+// mirroring the H.264 ladder's gating: the FFmpeg build must LIST the
+// encoder (so a missing build feature is distinguished from a broken
+// device) and a 1-frame test encode must succeed. Returns "" when
+// unavailable — the decision engine then never selects HEVC output and
+// every transcode stays on the H.264 path.
+//
+// forceType "off"/"none"/"disabled" (transcode.hevc_output) skips probing
+// entirely — the operator rollback knob.
+func ProbeHEVCEncoder(h HWAccelInfo, forceType string) string {
+	switch strings.ToLower(strings.TrimSpace(forceType)) {
+	case "off", "none", "disabled", "false", "0":
+		slog.Info("HEVC output disabled by config")
+		return ""
+	}
+	enc := hevcEncoderForType(h.Type)
+	if !encoderAvailable(enc) {
+		slog.Info("HEVC output unavailable: FFmpeg build lacks the encoder — transcodes stay on H.264",
+			"ffmpeg_encoder", enc)
+		return ""
+	}
+	var args []string
+	if h.Type == HWAccelVAAPI {
+		dev := h.DevicePath
+		if dev == "" {
+			dev = findDRIDevice()
+		}
+		args = []string{"-vaapi_device", dev, "-vf", "format=nv12,hwupload", "-c:v", enc}
+	} else {
+		args = []string{"-c:v", enc}
+	}
+	if reason, err := runTestEncode(args); err != nil {
+		slog.Warn("HEVC encoder present but its test encode failed — transcodes stay on H.264",
+			"ffmpeg_encoder", enc, "error", err, "ffmpeg_stderr", reason)
+		return ""
+	}
+	slog.Info("HEVC output available", "ffmpeg_encoder", enc)
+	return enc
+}
+
+// hevcLevelIDC returns the HEVC level_idc (level × 30) for a given output
+// height and source frame rate — the HEVC counterpart of h264LevelIDC,
+// feeding both the encoder -level flags and the master playlist's
+// hvc1.1.6.L{idc}.B0 CODECS attribute (one table, no drift).
+//
+// HEVC levels have far more macroblock-rate headroom than H.264's, so the
+// mapping is coarser:
+//
+//	480p and below → 3.0 (90):  covers 480p60 (~25 Mluma/s vs L3.0's 27.6M).
+//	720p           → 3.1 (93):  covers past 720p100 (L3.1 = 98.3 Mluma/s).
+//	1080p          → 4.0 (120): covers 1080p63; >60fps bumps to 4.1 (123)
+//	                 for the truthful-stamp principle (see h264LevelIDC).
+//	2160p          → 5.1 (153): covers 2160p60 (L5.1 = 534.6 Mluma/s);
+//	                 >60fps bumps to 5.2 (156).
+//
+// fps <= 0 = unknown (unscanned library): pick the ≤60fps tier, which is
+// what virtually all content needs — HEVC levels rarely constrain.
+func hevcLevelIDC(height int, fps float64) int {
+	switch {
+	case height > 1080:
+		if fps > 60.1 {
+			return 156 // 5.2
+		}
+		return 153 // 5.1
+	case height > 720:
+		if fps > 60.1 {
+			return 123 // 4.1
+		}
+		return 120 // 4.0
+	case height > 480:
+		return 93 // 3.1
+	default:
+		return 90 // 3.0
+	}
+}
+
+// hevcLevel renders the level in the dotted form ("4.0") accepted by
+// libx265/NVENC/VAAPI/AMF. QSV gets the raw idc integer (no named dotted
+// constants — same quirk as h264_qsv).
+func hevcLevel(height int, fps float64) string {
+	idc := hevcLevelIDC(height, fps)
+	return fmt.Sprintf("%d.%d", idc/30, (idc%30)/3)
+}
+
+// HEVCEncoderArgs builds the FFmpeg video encoder flags for an HEVC OUTPUT
+// transcode (8-bit Main profile — HDR sources are tonemapped to SDR by the
+// same filter chain the H.264 path uses; 10-bit/HDR-preserving output is a
+// documented follow-up). Mirrors VideoEncoderArgs per backend, with two
+// HEVC-specific requirements:
+//
+//   - `-tag:v hvc1`: Apple's players reject FFmpeg's default hev1 sample
+//     entry (parameter sets in-band); the HLS Authoring Specification
+//     requires hvc1. Same rule the HEVC remux path already follows.
+//   - HEVC output is only ever selected in fMP4 segment mode (the
+//     DecidePlayback / CreateSession gates), so no Annex B concerns apply.
+func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
+	scale := fmt.Sprintf("scale=%d:-2,format=yuv420p", width)
+	level := hevcLevel(height, fps)
+	switch h.Type {
+	case HWAccelNVENC:
+		return []string{"-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+			"-profile:v", "main", "-level", level, "-vf", scale, "-tag:v", "hvc1"}
+	case HWAccelQSV:
+		return []string{"-c:v", "hevc_qsv", "-preset", "faster",
+			"-profile:v", "main", "-level", strconv.Itoa(hevcLevelIDC(height, fps)), "-vf", scale, "-tag:v", "hvc1"}
+	case HWAccelVAAPI:
+		dev := h.DevicePath
+		if dev == "" {
+			dev = findDRIDevice()
+		}
+		vf := fmt.Sprintf("format=nv12,hwupload,scale_vaapi=w=%d:h=-2", width)
+		return []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "hevc_vaapi",
+			"-level", level, "-tag:v", "hvc1"}
+	case HWAccelAMF:
+		return []string{"-c:v", "hevc_amf", "-quality", "speed",
+			"-profile:v", "main", "-level", level, "-vf", scale, "-tag:v", "hvc1"}
+	default:
+		// libx265: no explicit -profile — the forced yuv420p (8-bit) input
+		// makes x265 emit Main automatically, and the wrapper's profile
+		// option naming differs from x264's. Preset honors
+		// transcode.software_preset like the H.264 path. x265 picks its
+		// own level from the input dimensions/rate.
+		preset := h.SWPreset
+		if preset == "" {
+			preset = "veryfast"
+		}
+		return []string{"-c:v", "libx265", "-preset", preset,
+			"-vf", scale, "-tag:v", "hvc1"}
+	}
 }

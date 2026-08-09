@@ -49,6 +49,7 @@ transcode:
   hw_accel: "auto"              # auto, nvenc, qsv, vaapi, amf, none
   hw_decode: "auto"             # auto (probe GPU decode at startup), off (encode-side accel only)
   # software_preset: "veryfast" # libx264 preset for SOFTWARE transcodes: ultrafast..medium ("faster" = quality-first)
+  # hevc_output: "auto"           # auto (emit HEVC for HEVC-capable clients when an encoder is available), off (H.264 only)
   session_timeout_sec: 120
   segment_duration: 6
   profiles:
