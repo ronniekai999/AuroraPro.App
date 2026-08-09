@@ -42,6 +42,7 @@ import {
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import { playerSurface } from '@/lib/playerSurface'
+import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
 import { writePrefKey } from '@/lib/appearance'
 import {
   buildSessionRequest,
@@ -427,16 +428,11 @@ async function attemptPlay(
   }
 }
 
-/**
- * True when focus currently sits inside a region that auto-hides with the
- * controls. Module scope so showControlsTemporarily can stay a zero-dep
- * useCallback — the DOM is the state here, not React's.
- */
-function focusInChrome(): boolean {
-  const el = document.activeElement
-  if (!el || el === document.body) return false
-  return !!(el as Element).closest?.('[data-player-chrome]')
-}
+// focusInChrome now lives in lib/chromeFocus, gated on input MODALITY:
+// only keyboard-originated focus pins the chrome. The pre-2026-08-09 version
+// read focus alone, so a mouse click on any chrome control (the fullscreen
+// button being the usual last click before sitting back) stranded focus
+// inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
 export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange,
   onSurfaceChange, isAdmin }: VideoPlayerProps) {
@@ -611,6 +607,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // the video's onClick without participating in the closure dance.
   const audioMenuOpenRef = useRef(false)
   const subsMenuOpenRef = useRef(false)
+  // 2026-08-09 — the auto-hide timer also reads these (plus the two
+  // popovers below) so an OPEN picker can't be faded out mid-read.
+  // Until the modality gate went in, menus staying open piggybacked on
+  // the stuck-focus bug: clicking the trigger pinned the chrome. With
+  // that gone, open popovers need an explicit pin.
+  const markersMenuOpenRef = useRef(false)
+  const reactionPickerOpenRef = useRef(false)
   // Active <track> ref for cleanup when switching subs. Aurora exposes
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
@@ -3047,6 +3050,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
 
+  // True while any popover inside the chrome is open (audio / subtitle /
+  // markers pickers, reaction picker). Read by showControlsTemporarily at
+  // both schedule and fire time so an open menu can't be auto-hidden out
+  // from under a reading user. Ref-based so the zero-dep useCallback below
+  // always sees current state.
+  const chromePopoverOpen = () =>
+    audioMenuOpenRef.current || subsMenuOpenRef.current ||
+    markersMenuOpenRef.current || reactionPickerOpenRef.current
+
   // Audit H1 fix — stable showControlsTemporarily reads playingRef
   // (not the captured `playing` value). The useCallback has empty
   // deps so its identity is stable across renders; effects and
@@ -3081,14 +3093,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       window.clearTimeout(hideTimerRef.current)
       hideTimerRef.current = null
     }
-    // Only schedule the auto-hide when:
-    //   - playingRef.current is true — hiding during pause is just
-    //     hostile UX; the user is contemplating their next move
-    //   - lastInBottomZoneRef.current is false — the user's cursor
-    //     is NOT in the seek-bar/buttons region; pinning visible
-    //     when they're clearly aiming at controls matches
-    //     Netflix / YouTube / Plex behavior
-    if (playingRef.current && !lastInBottomZoneRef.current && !focusInChrome()) {
+    const scheduleHide = () => {
       hideTimerRef.current = window.setTimeout(() => {
         // Re-check at FIRE time, not only at schedule time. Focus can move into
         // the controls during the 3s window (Tab from the video surface onto the
@@ -3097,17 +3102,50 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // focus-fixup rule — the focused element is unfocused and
         // document.activeElement becomes <body>. So a keyboard user who paused
         // on the seek bar to read the timestamp lost their place entirely
-        // (WCAG 2.4.3). Reschedule instead; the pointer path is unaffected
-        // because a mouse user has nothing focused inside the chrome.
-        if (focusInChrome()) {
-          hideTimerRef.current = null
+        // (WCAG 2.4.3). Re-arm instead; the pointer path is unaffected because
+        // a mouse user has nothing focused inside the chrome (and since
+        // 2026-08-09 focusInChrome only counts keyboard-originated focus,
+        // incidental click-focus can't strand the timer either).
+        //
+        // An open popover (audio/subs/markers picker, reaction picker) also
+        // re-arms: the user is reading a list, and fading the chrome would
+        // yank the menu off screen mid-read.
+        //
+        // RE-ARM, not drop: before 2026-08-09 this branch nulled the timer and
+        // returned, contradicting the comment above it — if focus entered the
+        // chrome mid-window, auto-hide silently died until some later event
+        // happened to re-arm it. Re-arming every 3s while a keyboard user
+        // stays parked costs one sleeping timeout and keeps the hide correct
+        // the moment they Tab back out.
+        if (focusInChrome() || chromePopoverOpen()) {
+          scheduleHide()
           return
         }
         setControlsVisible(false)
         hideTimerRef.current = null
       }, 3000)
     }
+    // Only schedule the auto-hide when:
+    //   - playingRef.current is true — hiding during pause is just
+    //     hostile UX; the user is contemplating their next move
+    //   - lastInBottomZoneRef.current is false — the user's cursor
+    //     is NOT in the seek-bar/buttons region; pinning visible
+    //     when they're clearly aiming at controls matches
+    //     Netflix / YouTube / Plex behavior
+    //   - no chrome popover is open — an open audio/subs/markers/reaction
+    //     picker means the user is mid-read; Netflix/YouTube keep the
+    //     chrome up in exactly this state
+    if (playingRef.current && !lastInBottomZoneRef.current && !focusInChrome() && !chromePopoverOpen()) {
+      scheduleHide()
+    }
   }, [])
+
+  // Input-modality tracking for focusInChrome (2026-08-09). Capture-phase
+  // listeners on window record whether the last input was keyboard or
+  // pointer; the hide timer's chrome-focus guard only trusts keyboard
+  // focus. Without this, clicking the fullscreen button left mouse-focus
+  // stranded inside the chrome and auto-hide never scheduled again.
+  useEffect(() => bindInputModalityTracking(window), [])
 
   // Phase 7 — controls visibility timer driven by play/pause flip.
   // Pause → instantly visible (no timer). Play → visible + schedule
@@ -3304,6 +3342,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // dismiss path (audit M4).
   useEffect(() => { audioMenuOpenRef.current = audioMenuOpen }, [audioMenuOpen])
   useEffect(() => { subsMenuOpenRef.current = subsMenuOpen }, [subsMenuOpen])
+  useEffect(() => { markersMenuOpenRef.current = markersMenuOpen }, [markersMenuOpen])
 
   // Phase 7 — document-level keyboard shortcuts while the player is
   // open. Space=play/pause, ArrowLeft/Right=seek±10s, ArrowUp/Down
@@ -3780,7 +3819,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             picture. A mouse-move / touch reveals it again with the controls. */}
         <div
           // data-player-chrome marks every auto-hiding region, so the hide
-          // timer can refuse to fire while focus is inside one. See
+          // timer can refuse to fire while KEYBOARD focus is inside one
+          // (lib/chromeFocus gates the guard on input modality — pointer
+          // click-focus must not suppress auto-hide). See
           // showControlsTemporarily.
           data-player-chrome=""
           // `pointer-events-none` alone hid this from the MOUSE and left it in
@@ -4019,7 +4060,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             {onSendReaction && (
               // vertical="down" — top-bar trigger; opening upward would
               // clip against the windowed card's overflow-hidden (#98).
-              <ReactionPicker onSend={onSendReaction} vertical="down" />
+              <ReactionPicker
+                onSend={onSendReaction}
+                vertical="down"
+                // Pin the auto-hide timer while the picker is open so the
+                // emoji row can't fade out mid-choice (fullscreen chrome
+                // auto-hides; this trigger lives in it).
+                onOpenChange={(o) => { reactionPickerOpenRef.current = o }}
+              />
             )}
             <button
               onClick={remoteActive ? () => setMinimized(true) : onClose}
