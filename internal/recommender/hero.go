@@ -139,12 +139,21 @@ type HeroPick struct {
 	// personal fit). Populated once in build() before caching.
 	Score int `json:"score,omitempty"`
 	// Match is the integer PERSONAL "% for you" (0-100): the item's taste-vector
-	// similarity standardized against this profile's candidate distribution
-	// (applyPersonalMatch → matchDisplay). >0 only for the personalized pool;
+	// similarity mapped on an absolute, versioned curve and conservatively
+	// shrunk toward 50 by profile evidence (applyPersonalMatch). >0 only for the personalized pool;
 	// the cold-start popular pool has no centroid so Match stays 0 and the
 	// frontend shows the global Score instead. This is the honest split — Score
 	// is "how good", Match is "how much it's for you" (Netflix-style).
 	Match int `json:"match,omitempty"`
+	// MatchConfidence is the evidence shrinkage rho used by Match v2, not a
+	// second probability. MatchModelVersion makes cached/API observations
+	// auditable when calibration manifests evolve.
+	MatchConfidence   float64 `json:"match_confidence,omitempty"`
+	MatchModelVersion string  `json:"match_model_version,omitempty"`
+	// Raw inputs stay server-internal but travel through the API adapter so the
+	// delivery logger can persist a reproducible feature snapshot.
+	MatchSimilarity float64 `json:"-"`
+	MatchEvidence   int     `json:"-"`
 }
 
 // Hero is the per-profile recommender. Construct once at startup and reuse;
@@ -630,10 +639,15 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 		// ordering inside rerankWithBlurbs.
 		candScores := h.auroraScores(ctx, candidates)
 		picks, quality = h.rerankWithBlurbs(ctx, profileID, candidates, candScores)
-		// Personal "% for you", standardized against this profile's own
-		// candidate-similarity distribution (replaces the fixed-anchor
-		// calibrateMatch). Cold-start (Tier 2) skips this — Match stays 0.
-		applyPersonalMatch(picks, candidates)
+		// Personal Match v2: absolute cosine mapping + evidence shrinkage.
+		// Candidate-pool composition cannot move the displayed value. Cold-start
+		// (Tier 2) skips this — Match stays 0.
+		evidence, evidenceErr := h.q.PersonalizationHistoryCount(ctx, profileID)
+		if evidenceErr != nil {
+			slog.Warn("hero: match evidence count failed; suppressing personal match",
+				"profile", profileID, "error", evidenceErr)
+		}
+		applyPersonalMatch(picks, evidence)
 		// A weak match must not carry personal-pick framing: drop the blurb
 		// so the frontend renders plain "Featured" instead of "Aurora picked
 		// this for you" over a 32% ring (2026-07-20 screenshot).
@@ -933,24 +947,22 @@ func assembleHeroPicks(parsedPicks []heroRerankPick, candidates []*models.MediaI
 	return picks
 }
 
-// applyPersonalMatch sets each pick's Match — the personal "% for you" — by
-// standardizing the item's taste-vector similarity against the distribution of
-// THIS profile's candidate pool, then squashing through a logistic
-// (matchDisplay). It replaces the old fixed-anchor calibrateMatch: the spread
-// auto-calibrates per user and library instead of being hand-tuned. Only the
-// personalized tier calls this; cold-start picks (MatchScore==0) keep Match=0,
-// so the frontend shows the global Aurora Score instead.
-func applyPersonalMatch(picks []HeroPick, candidates []*models.MediaItem) {
-	sims := make([]float64, 0, len(candidates))
-	for _, c := range candidates {
-		if c != nil && c.MatchScore > 0 {
-			sims = append(sims, c.MatchScore)
-		}
+// applyPersonalMatch sets the personal Match v2 from absolute cosine similarity
+// and profile evidence. Candidate-pool composition is intentionally absent: a
+// title's percentage must not change because a different neighbor entered the
+// recall pool. Only the personalized tier calls this; cold-start picks remain 0.
+func applyPersonalMatch(picks []HeroPick, evidence int) {
+	if evidence <= 0 {
+		return
 	}
-	mean, std := meanStd(sims)
 	for i := range picks {
 		if it := picks[i].Item; it != nil && it.MatchScore > 0 {
-			picks[i].Match = matchDisplay(it.MatchScore, mean, std)
+			p, confidence := personalMatchV2(it.MatchScore, evidence)
+			picks[i].Match = clampInt(int(math.Round(p*100)), 1, 100)
+			picks[i].MatchConfidence = confidence
+			picks[i].MatchModelVersion = matchModelVersion
+			picks[i].MatchSimilarity = it.MatchScore
+			picks[i].MatchEvidence = evidence
 		}
 	}
 }
@@ -960,17 +972,13 @@ func applyPersonalMatch(picks []HeroPick, candidates []*models.MediaItem) {
 //
 // The floor is deliberately keyed to the DISPLAYED Match — the ring rendered
 // right next to the badge — not to absolute cosine quality. Match is a
-// pool-relative z-score (matchDisplay centers the pool mean at ~50), so this
-// is a framing-consistency rule, not a quality bar: "Aurora picked this for
+// absolute Match v2 estimate, so this is a framing-consistency rule, not a
+// hard quality bar: "Aurora picked this for
 // you" over a sub-45 ring is incoherent whatever the underlying similarity
 // was, because the sub-45 ring is what the user sees (the 2026-07-20
 // screenshots featured 32-40%% "picked for you" heroes). Known calibration
-// caveats, accepted: a uniformly-strong tight pool can standardize a genuinely
-// good pick low (its blurb is suppressed — a cosmetic loss consistent with the
-// low ring it displays), and the degenerate single-candidate branch of
-// matchDisplay maps sim<~0.60 below the floor (a lone WEAK pick loses its
-// blurb — also consistent). Screenshot calibration: 48 keeps its blurb, 40/32
-// (the absurd pairings) are suppressed.
+// caveats are explicit: sparse evidence shrinks toward 50, so this threshold is
+// about avoiding contradictory UI framing rather than rejecting the title.
 const heroReasonMatchFloor = 45
 
 // suppressWeakMatchReasons clears the Reason on personalized picks whose Match

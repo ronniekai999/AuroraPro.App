@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -53,6 +55,20 @@ type HubBroadcaster interface {
 // "empty" status as terminal and hides the Discover section.
 const discoverEmptyTTL = 60 * time.Second
 
+// recommendationImpressionConcurrency caps best-effort analytics writes so
+// cache-hit traffic can never create an unbounded goroutine/pool backlog. When
+// both slots are occupied the snapshot is deliberately dropped.
+const recommendationImpressionConcurrency = 2
+
+func newRecommendationSlateToken() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		slog.Error("hero: crypto/rand failed for slate token", "error", err)
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // discoverBuilds tracks background /api/me/discover builds so the non-blocking
 // handler can report status ("building"/"empty") without re-kicking work the
 // recommender's singleflight is already collapsing.
@@ -98,20 +114,25 @@ type EngagementRail struct {
 // profile's taste-vector similarity; 0/omitted for the cold-start popular pool,
 // where the frontend shows Score instead.
 type HeroPick struct {
-	Item   *models.MediaItem `json:"item"`
-	Reason string            `json:"reason,omitempty"`
-	Score  int               `json:"score,omitempty"`
-	Match  int               `json:"match,omitempty"`
+	Item              *models.MediaItem `json:"item"`
+	Reason            string            `json:"reason,omitempty"`
+	Score             int               `json:"score,omitempty"`
+	Match             int               `json:"match,omitempty"`
+	MatchConfidence   float64           `json:"match_confidence,omitempty"`
+	MatchModelVersion string            `json:"match_model_version,omitempty"`
+	MatchSimilarity   float64           `json:"-"`
+	MatchEvidence     int               `json:"-"`
 }
 
 // HeroHandler serves the personalized "Featured" rail. When no provider is
 // attached, the endpoint returns 503 and the frontend falls back to its
 // existing top-rated/recent pool.
 type HeroHandler struct {
-	queries *db.Queries
-	hero    HeroProvider
-	hub     HubBroadcaster
-	builds  *discoverBuilds
+	queries         *db.Queries
+	hero            HeroProvider
+	hub             HubBroadcaster
+	builds          *discoverBuilds
+	impressionSlots chan struct{}
 }
 
 func NewHeroHandler(queries *db.Queries) *HeroHandler {
@@ -121,6 +142,7 @@ func NewHeroHandler(queries *db.Queries) *HeroHandler {
 			inflight:  make(map[int64]bool),
 			emptyTill: make(map[int64]time.Time),
 		},
+		impressionSlots: make(chan struct{}, recommendationImpressionConcurrency),
 	}
 }
 
@@ -193,15 +215,90 @@ func (h *HeroHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	threshold := db.PersonalizationThreshold()
 	coldStart := historyCount < threshold
+	slateToken := newRecommendationSlateToken()
+
+	// Queue a best-effort snapshot of the slate selected for this successful API
+	// response, including cache hits. Persistence is detached and tightly bounded
+	// so analytics can never add database latency to the hero response. It is an
+	// API-delivery proxy, not proof the browser painted or the viewer saw the row.
+	impressions := make([]db.RecommendationImpression, 0, len(picks))
+	for position, pick := range picks {
+		if pick.Item == nil {
+			continue
+		}
+		impressions = append(impressions, db.RecommendationImpression{
+			MediaItemID: pick.Item.ID, Position: position,
+			Match: pick.Match, Confidence: pick.MatchConfidence,
+			ModelVersion: pick.MatchModelVersion, Similarity: pick.MatchSimilarity,
+			Evidence: pick.MatchEvidence,
+		})
+	}
+	select {
+	case h.impressionSlots <- struct{}{}:
+		go func() {
+			defer func() { <-h.impressionSlots }()
+			ictx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+			defer cancel()
+			if err := h.queries.RecordRecommendationImpressions(ictx, profileID, "hero", slateToken, impressions); err != nil {
+				slog.Warn("hero: impression recording failed (non-fatal)", "profile", profileID, "error", err)
+			}
+		}()
+	default:
+		// Measurement is explicitly lossy under backpressure. Do not log here:
+		// repeated traffic while the DB is degraded would create its own flood.
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"picks": picks,
+		"picks":       picks,
+		"slate_token": slateToken,
 		"personalization": map[string]any{
 			"cold_start":    coldStart,
 			"history_count": historyCount,
 			"threshold":     threshold,
 		},
 	})
+}
+
+// Exposure records that one hero from a selected slate remained at least half
+// visible in a foreground tab. It is intentionally separate from Get: an API
+// response containing five rotating picks is not five user impressions.
+func (h *HeroHandler) Exposure(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	profileID, ok := h.resolveProfileID(w, r, claims.UserID)
+	if !ok {
+		return
+	}
+	var req struct {
+		SlateToken  string `json:"slate_token"`
+		MediaItemID int64  `json:"media_item_id"`
+		Position    int    `json:"position"`
+		VisibleMs   int    `json:"visible_ms"`
+	}
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.SlateToken) != 32 || req.MediaItemID <= 0 || req.Position < 0 || req.VisibleMs < 1500 || req.VisibleMs > 24*60*60*1000 {
+		writeError(w, http.StatusBadRequest, "invalid exposure")
+		return
+	}
+	updated, err := h.queries.MarkRecommendationVisible(r.Context(), profileID, req.SlateToken, req.MediaItemID, req.Position, req.VisibleMs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record exposure")
+		return
+	}
+	if !updated {
+		// The bounded async selection write may still be in flight. 202 tells the
+		// browser a single delayed retry is worthwhile without treating lossy
+		// analytics as a user-facing error.
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Rail returns a longer list of personalized recommendations for a "More

@@ -1048,9 +1048,32 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 	}
 
 	// Convert zero ProfileID to nil for nullable DB column
-	var profileID interface{}
-	if p.ProfileID > 0 {
-		profileID = p.ProfileID
+	resolvedProfileID := p.ProfileID
+	if resolvedProfileID <= 0 {
+		if err := q.pool.QueryRow(ctx, `
+			SELECT id FROM user_profiles
+			WHERE user_id=$1 AND is_default=TRUE
+			LIMIT 1`, p.UserID).Scan(&resolvedProfileID); err != nil {
+			return false, fmt.Errorf("resolve watch progress profile: %w", err)
+		}
+	}
+	var profileID interface{} = resolvedProfileID
+
+	// Transition detection and its immutable event must observe one serial
+	// history per playback row. A transaction-scoped advisory lock is taken
+	// before the statement obtains its snapshot, preventing concurrent
+	// heartbeats from emitting the same transition twice.
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin watch progress upsert: %w", err)
+	}
+	defer tx.Rollback(ctx) // no-op after Commit
+	lockKey := fmt.Sprintf("watch-progress:%d:%d:%d", p.UserID, p.MediaItemID, resolvedProfileID)
+	if p.EpisodeID != nil {
+		lockKey = fmt.Sprintf("watch-progress:%d:episode:%d:%d", p.UserID, *p.EpisodeID, resolvedProfileID)
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return false, fmt.Errorf("lock watch progress: %w", err)
 	}
 
 	// The CTE captures the row's PRIOR completed state (before the upsert) so we
@@ -1060,9 +1083,9 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 	// use RETURNING (xmax=0) here because an UPDATE that flips completed must also
 	// count — only a re-update of an already-completed row must be suppressed.
 	if p.EpisodeID != nil {
-		err = q.pool.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			WITH prior AS (
-			    SELECT completed FROM watch_progress
+			    SELECT completed, position_ms, duration_ms FROM watch_progress
 			    WHERE user_id = $1 AND episode_id = $3
 			      AND profile_id = COALESCE($7, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
 			),
@@ -1076,16 +1099,49 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 			                 completed_at = CASE WHEN EXCLUDED.completed AND NOT watch_progress.completed THEN NOW() ELSE watch_progress.completed_at END,
 			                 updated_at = NOW()
 			    RETURNING completed
+			), event_insert AS (
+			    INSERT INTO recommendation_watch_events
+			      (profile_id, media_item_id, episode_id, event_type, progress)
+			    SELECT COALESCE($7, (SELECT id FROM user_profiles WHERE user_id=$1 AND is_default=TRUE LIMIT 1)),
+			           $2, $3,
+			           CASE
+			             WHEN $6 AND COALESCE((SELECT completed FROM prior), FALSE) THEN 'rewatch_completed'
+			             WHEN $6 THEN 'completed'
+			             WHEN $5 > 0 AND $4::float8/$5::float8 < 0.20 THEN 'started'
+			             ELSE 'engaged'
+			           END,
+			           CASE WHEN $5 > 0 THEN LEAST(1.0, GREATEST(0.0, $4::float8/$5::float8))
+			                WHEN $6 THEN 1.0 ELSE 0.0 END
+			    WHERE ($6 AND NOT COALESCE((SELECT completed FROM prior), FALSE))
+			       OR ($6 AND COALESCE((SELECT completed FROM prior), FALSE)
+			              AND COALESCE((SELECT duration_ms FROM prior), 0) > 0
+			              AND COALESCE((SELECT position_ms::float8/NULLIF(duration_ms,0) FROM prior), 0) < 0.90)
+			       OR (NOT $6 AND $5 > 0 AND $4::float8/$5::float8 >= 0.20
+			              AND COALESCE((SELECT position_ms::float8/NULLIF(duration_ms,0) FROM prior), 0) < 0.20)
+			       OR (NOT $6 AND $5 > 0 AND $4 > 0 AND $4::float8/$5::float8 < 0.20
+			              AND (NOT EXISTS (SELECT 1 FROM prior) OR $4 < (SELECT position_ms FROM prior)
+			                   OR NOT EXISTS (
+			                     SELECT 1 FROM recommendation_watch_events recent
+			                     WHERE recent.profile_id=COALESCE($7, (SELECT id FROM user_profiles WHERE user_id=$1 AND is_default=TRUE LIMIT 1))
+			                       AND recent.media_item_id=$2 AND recent.episode_id=$3
+			                       AND recent.event_type='started' AND recent.occurred_at > NOW()-INTERVAL '5 minutes'
+			                   )))
 			)
 			SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)
 			FROM upsert`,
 			p.UserID, p.MediaItemID, p.EpisodeID, p.PositionMs, p.DurationMs, p.Completed, profileID).Scan(&newlyCompleted)
-		return newlyCompleted, err
+		if err != nil {
+			return false, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit watch progress: %w", err)
+		}
+		return newlyCompleted, nil
 	}
 
-	err = q.pool.QueryRow(ctx, `
-		WITH prior AS (
-		    SELECT completed FROM watch_progress
+	err = tx.QueryRow(ctx, `
+	WITH prior AS (
+	    SELECT completed, position_ms, duration_ms FROM watch_progress
 		    WHERE user_id = $1 AND media_item_id = $2 AND episode_id IS NULL
 		      AND profile_id = COALESCE($6, (SELECT id FROM user_profiles WHERE user_id = $1 AND is_default = TRUE LIMIT 1))
 		),
@@ -1098,12 +1154,45 @@ func (q *Queries) UpsertWatchProgress(ctx context.Context, p *models.WatchProgre
 		                 completed = (watch_progress.completed OR EXCLUDED.completed),
 		                 completed_at = CASE WHEN EXCLUDED.completed AND NOT watch_progress.completed THEN NOW() ELSE watch_progress.completed_at END,
 		                 updated_at = NOW()
-		    RETURNING completed
-		)
+	    RETURNING completed
+	), event_insert AS (
+	    INSERT INTO recommendation_watch_events
+	      (profile_id, media_item_id, episode_id, event_type, progress)
+	    SELECT COALESCE($6, (SELECT id FROM user_profiles WHERE user_id=$1 AND is_default=TRUE LIMIT 1)),
+	           $2, NULL,
+	           CASE
+	             WHEN $5 AND COALESCE((SELECT completed FROM prior), FALSE) THEN 'rewatch_completed'
+	             WHEN $5 THEN 'completed'
+	             WHEN $4 > 0 AND $3::float8/$4::float8 < 0.20 THEN 'started'
+	             ELSE 'engaged'
+	           END,
+	           CASE WHEN $4 > 0 THEN LEAST(1.0, GREATEST(0.0, $3::float8/$4::float8))
+	                WHEN $5 THEN 1.0 ELSE 0.0 END
+	    WHERE ($5 AND NOT COALESCE((SELECT completed FROM prior), FALSE))
+	       OR ($5 AND COALESCE((SELECT completed FROM prior), FALSE)
+	              AND COALESCE((SELECT duration_ms FROM prior), 0) > 0
+	              AND COALESCE((SELECT position_ms::float8/NULLIF(duration_ms,0) FROM prior), 0) < 0.90)
+	       OR (NOT $5 AND $4 > 0 AND $3::float8/$4::float8 >= 0.20
+	              AND COALESCE((SELECT position_ms::float8/NULLIF(duration_ms,0) FROM prior), 0) < 0.20)
+	       OR (NOT $5 AND $4 > 0 AND $3 > 0 AND $3::float8/$4::float8 < 0.20
+	              AND (NOT EXISTS (SELECT 1 FROM prior) OR $3 < (SELECT position_ms FROM prior)
+	                   OR NOT EXISTS (
+	                     SELECT 1 FROM recommendation_watch_events recent
+	                     WHERE recent.profile_id=COALESCE($6, (SELECT id FROM user_profiles WHERE user_id=$1 AND is_default=TRUE LIMIT 1))
+	                       AND recent.media_item_id=$2 AND recent.episode_id IS NULL
+	                       AND recent.event_type='started' AND recent.occurred_at > NOW()-INTERVAL '5 minutes'
+	                   )))
+	)
 		SELECT upsert.completed AND NOT COALESCE((SELECT completed FROM prior), FALSE)
 		FROM upsert`,
 		p.UserID, p.MediaItemID, p.PositionMs, p.DurationMs, p.Completed, profileID).Scan(&newlyCompleted)
-	return newlyCompleted, err
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit watch progress: %w", err)
+	}
+	return newlyCompleted, nil
 }
 
 // GetWatchProgress returns progress for a specific item/episode, scoped to the

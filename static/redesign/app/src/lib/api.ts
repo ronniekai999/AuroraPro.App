@@ -674,10 +674,13 @@ export interface HeroPick {
   // Global Aurora Score (0-100): how feature-worthy the title is, the same for
   // everyone. The hero ring shows this when there's no personal match.
   score?: number
-  // Personal "% for you" (0-100) from the recommender's taste-vector
-  // similarity. Undefined / 0 for the cold-start popular pool (no centroid),
-  // in which case the ring shows `score` (or a derived estimate as a last resort).
+  // Personal "% for you" (0-100) from Match v2's absolute taste similarity
+  // curve, conservatively shrunk by evidence. Undefined / 0 for cold start.
   match?: number
+  // Evidence shrinkage rho, not a probability. Retained for diagnostics and
+  // future confidence-aware copy without changing the current ring.
+  matchConfidence?: number
+  matchModelVersion?: string
 }
 export interface HeroPersonalization {
   coldStart: boolean
@@ -687,6 +690,7 @@ export interface HeroPersonalization {
 export interface HeroPoolResponse {
   picks: HeroPick[]
   personalization: HeroPersonalization
+  slateToken?: string
 }
 export async function getHeroPool(
   refresh = false,
@@ -698,13 +702,24 @@ export async function getHeroPool(
   if (profileId) params.set('profile_id', String(profileId))
   const qs = params.toString()
   const resp = await apiFetch<{
-    picks: { item: ServerMediaItem; reason?: string; score?: number; match?: number }[],
+    picks: {
+      item: ServerMediaItem
+      reason?: string
+      score?: number
+      match?: number
+      match_confidence?: number
+      match_model_version?: string
+    }[],
+    slate_token?: string,
     personalization?: { cold_start?: boolean; history_count?: number; threshold?: number },
   }>(
     qs ? `/api/me/hero?${qs}` : '/api/me/hero', { signal },
   )
   return {
-    picks: (resp.picks || []).map(p => ({ media: mapMedia(p.item), reason: p.reason, score: p.score, match: p.match })),
+    picks: (resp.picks || []).map(p => ({
+      media: mapMedia(p.item), reason: p.reason, score: p.score, match: p.match,
+      matchConfidence: p.match_confidence, matchModelVersion: p.match_model_version,
+    })),
     // Defaults preserve the pre-personalization-field behavior for any
     // server older than this change (cold_start=false hides the hint).
     personalization: {
@@ -712,7 +727,33 @@ export async function getHeroPool(
       historyCount: resp.personalization?.history_count ?? 0,
       threshold:    resp.personalization?.threshold ?? 3,
     },
+    slateToken: resp.slate_token,
   }
+}
+
+export async function recordRecommendationExposure(input: {
+  slateToken: string
+  mediaItemId: number
+  position: number
+  visibleMs: number
+  profileId?: number
+}): Promise<boolean> {
+  const params = new URLSearchParams()
+  if (input.profileId) params.set('profile_id', String(input.profileId))
+  const qs = params.toString()
+  const res = await apiFetchResponse(`/api/me/recommendation-exposure${qs ? `?${qs}` : ''}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      slate_token: input.slateToken,
+      media_item_id: input.mediaItemId,
+      position: input.position,
+      visible_ms: input.visibleMs,
+    }),
+  })
+  if (res.status === 202) return false
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return true
 }
 
 // Phase 5.3 — LLM-curated Discover rails. Returns up to ~6 themed
