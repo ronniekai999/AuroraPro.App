@@ -209,9 +209,9 @@ type LLMSettings struct {
 	// single averaged centroid). Pointer+omitempty so "no row" → the UI's `?? 3`
 	// default, distinguishable from an explicit value. Restart-required.
 	TasteCentroids *int `json:"taste_centroids,omitempty"`
-	DebugLog     bool `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog bool `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	DebugLog       bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog   bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded   bool `json:"client_loaded"`  // false when LLM is disabled at startup
 	// Effective models the RUNNING client resolved (DB > env > defaults) —
 	// display only. Deliberately separate from the editable fields above:
 	// backfilling live values into chat_model/embed_model is what let a

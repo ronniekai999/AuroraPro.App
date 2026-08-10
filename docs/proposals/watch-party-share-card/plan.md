@@ -222,20 +222,38 @@ scheduled-success state and the lobby card. Tests above.
 **Phase 2 — reach.** Square + OG variants, Web Share API file path, `LIVE NOW`
 treatment.
 
-**Phase 3 — unfurl.** `og:image` / `og:title` / `twitter:card` on `/p/{CODE}`.
-This one has prerequisites worth surfacing early: Aurora ships **no Open Graph
-tags anywhere** today, and `robots.txt` disallows everything (`router.go`, added
-deliberately after 1,139 crawler 404s). Making links unfurl means serving a
-small crawler-facing HTML shell for `/p/{CODE}` and carving that one path out of
-the disallow — a deliberate change to "Aurora is not indexed", and the reason
-it's phased separately rather than folded into Phase 1.
+**Phase 3 — unfurl.** `og:image` / `og:title` / `og:description` /
+`twitter:card` on `/p/{CODE}`, so a pasted party link renders as artwork in
+Discord, Slack, X, iMessage and WhatsApp.
 
-## Open decisions
+Aurora ships **no Open Graph tags anywhere** today, and `robots.txt` disallows
+everything (`router.go`, added deliberately after 1,139 crawler 404s). So this
+phase serves a small crawler-facing HTML shell for `/p/{CODE}` and adds
+`Allow: /p/` above the existing blanket disallow — that one path, nothing else.
 
-1. **Literal "EST" vs. the true abbreviation.** Plan assumes true (`EDT` in
-   summer). Say the word and it prints "EST" year-round.
-2. **Retire `share-image.png`?** It has no consumer. Recommend: alias for one
-   release, then delete.
-3. **Phase 3 at all** — it's the strongest viral mechanism (every pasted link
-   becomes artwork) but it's also the first crack in "nothing here gets
-   crawled". Worth a separate yes.
+The shell must not become an information leak: it carries only what the card
+already shows (media title, Eastern start time, host display name, the OG image
+URL with its token) and redirects a real browser straight into the SPA. No
+roster, no invitee names, no party state beyond the card's own contents. A
+`{code}` with no matching party renders a generic Aurora page, not a 404 that
+confirms which codes exist.
+
+## Locked decisions — 2026-08-10
+
+These are settled. Implementers should treat them as requirements, not options.
+
+1. **Timezone label: the true abbreviation.** Format via
+   `t.In(nyc).Format("3:04 PM MST")`, which yields `EDT` March–November and
+   `EST` November–March. Do not hardcode "EST".
+2. **Card access: HMAC token, public route.** `?t=` is required; a wrong or
+   absent tag returns **404**, never 403. Minted only by an authenticated host
+   through `card-links`.
+3. **Phase 3 is approved, with a narrow carve-out.** `robots.txt` gains
+   `Allow: /p/` above the existing `Disallow: /` — that one path and nothing
+   else. Every other route stays uncrawlable.
+4. **Phases ship sequentially**, each built on the merged result of the last:
+   Phase 1 → Phase 2 → Phase 3. All three land on
+   `claude/aurora-watch-party-share-25zwqe` (PR #459).
+
+Still open, and not blocking: whether to delete `share-image.png` after an alias
+release. It has no consumer. Recommend alias for one release, then remove.

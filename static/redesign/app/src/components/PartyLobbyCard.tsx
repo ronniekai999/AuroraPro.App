@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getPartyInviteRoster, type PartyInviteRosterEntry } from '@/lib/api'
 import { countdownLabel, formatPartyTime } from '@/lib/partyInvites'
+import { PartyShareCardModal } from './PartyShareCardModal'
 
 const ROSTER_POLL_MS = 30_000
 
@@ -60,6 +61,12 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
     }
     return g
   }, [roster])
+
+  // Share card — host-only, and available any time before showtime.
+  // Re-opening after a reschedule regenerates against the new time: the
+  // server's cache key carries the schedule, so a moved party can never
+  // hand out a poster advertising the old one.
+  const [shareOpen, setShareOpen] = useState(false)
 
   const [rescheduleOpen, setRescheduleOpen] = useState(false)
   const [rescheduleValue, setRescheduleValue] = useState('')
@@ -123,6 +130,13 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
               {rescheduleOpen ? 'Keep current time' : 'Change time'}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => setShareOpen(true)}
+            className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-purple-500/20 to-cyan-400/[0.18] border border-purple-300/45 text-white text-xs font-semibold transition-colors hover:from-purple-500/30 hover:to-cyan-400/25"
+          >
+            Share card
+          </button>
         </div>
       ) : (
         <p className="mt-3 text-white/40 text-[11px] leading-relaxed">
@@ -158,6 +172,14 @@ export function PartyLobbyCard({ code, scheduledStartAt, isHost, onStartNow, onR
             </button>
           </div>
         </div>
+      )}
+
+      {shareOpen && (
+        <PartyShareCardModal
+          code={code}
+          subtitle={formatPartyTime(scheduledStartAt, new Date(nowMs))}
+          onClose={() => setShareOpen(false)}
+        />
       )}
     </div>
   )
