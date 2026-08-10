@@ -521,19 +521,24 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// and the secure-cookie hint so minted URLs get the right scheme
 	// behind a TLS-terminating proxy.
 	//
-	// The manager is nil-normalized into the interface first: a nil
-	// *watchparty.Manager stored in a non-nil interface still passes
-	// `!= nil` and panics on the first method call. That never mattered
-	// while every card route sat behind an HMAC tag, but the Phase 3
-	// unfurl shell at /p/{code} is reachable with no token at all, so it
-	// has to degrade to "no party" rather than take the process down when
-	// a caller builds a router without a party manager.
+	// Both dependencies are nil-normalized into their interfaces first: a
+	// nil *watchparty.Manager (or *db.Queries) stored in a non-nil
+	// interface still passes `!= nil` and panics on the first method call,
+	// which makes the handler's own `== nil` guards inert. That never
+	// mattered while every card route sat behind an HMAC tag, but the
+	// Phase 3 unfurl shell at /p/{code} is reachable with no token at all,
+	// so it has to degrade to "no party" rather than take the process down
+	// when a caller builds a router without one of them.
 	var partyLookup partyStateLookup
 	if deps.PartyManager != nil {
 		partyLookup = deps.PartyManager
 	}
+	var cardQ cardQueries
+	if deps.Queries != nil {
+		cardQ = deps.Queries
+	}
 	partyShareH := NewPartyShareHandler(
-		partyLookup, deps.Queries, deps.Cfg.Cache.ImageDir,
+		partyLookup, cardQ, deps.Cfg.Cache.ImageDir,
 		cfg.Auth.JWTSecret, cfg.Server.SecureCookies,
 	)
 	// Close the follow-up manager.go:2780 recorded: the manager had no way

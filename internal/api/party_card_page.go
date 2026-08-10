@@ -109,13 +109,6 @@ const (
 	// what Aurora watch parties are and nothing about any party.
 	partyPageGenericDesc = "Watch together on Aurora. " + cardTagline
 
-	// partyPageBrandImage is the og:image for the generic page: the PWA
-	// icon Vite copies into the build. Deliberately NOT used for a valid
-	// code that names no party — those keep the card URL so a page for a
-	// code that exists and one for a code that doesn't are the same shape.
-	partyPageBrandImage    = "/v2/icon-512.png"
-	partyPageBrandImageDim = 512
-
 	// Clamps for the two attacker-influenced strings. Crawlers truncate
 	// long values anyway (X around 70/200, Discord 256), and an unbounded
 	// title would be an unbounded response body on a public route.
@@ -169,6 +162,11 @@ type partyPageData struct {
 	ImageW      int
 	ImageH      int
 	ImageAlt    string
+	// TwitterCard is "summary_large_image" when there is a card to show
+	// and "summary" when there is not. A summary_large_image with no
+	// fetchable image renders as a blank-topped card, so the generic page
+	// downgrades rather than promising art it cannot supply.
+	TwitterCard string
 	SPAPath     string
 }
 
@@ -186,21 +184,23 @@ const partyPageHTML = `<!doctype html>
 <title>{{.Title}}</title>
 <meta name="description" content="{{.Description}}">
 <link rel="canonical" href="{{.PageURL}}">
+<meta name="robots" content="noindex, nofollow">
 <meta property="og:site_name" content="` + partyPageBrand + `">
 <meta property="og:type" content="website">
 <meta property="og:title" content="{{.Title}}">
 <meta property="og:description" content="{{.Description}}">
 <meta property="og:url" content="{{.PageURL}}">
-<meta property="og:image" content="{{.ImageURL}}">
+{{if .ImageURL}}<meta property="og:image" content="{{.ImageURL}}">
 <meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="{{.ImageW}}">
 <meta property="og:image:height" content="{{.ImageH}}">
 <meta property="og:image:alt" content="{{.ImageAlt}}">
-<meta name="twitter:card" content="summary_large_image">
+{{end}}<meta name="twitter:card" content="{{.TwitterCard}}">
 <meta name="twitter:title" content="{{.Title}}">
 <meta name="twitter:description" content="{{.Description}}">
-<meta name="twitter:image" content="{{.ImageURL}}">
+{{if .ImageURL}}<meta name="twitter:image" content="{{.ImageURL}}">
 <meta name="twitter:image:alt" content="{{.ImageAlt}}">
+{{end}}
 <meta name="theme-color" content="#050505">
 <style>
 :root{color-scheme:dark}
@@ -260,10 +260,15 @@ func (h *PartyShareHandler) ServePartyPage(w http.ResponseWriter, r *http.Reques
 		Title:       partyPageGenericTitle,
 		Description: partyPageGenericDesc,
 		PageURL:     base + "/",
-		ImageURL:    base + partyPageBrandImage,
-		ImageW:      partyPageBrandImageDim,
-		ImageH:      partyPageBrandImageDim,
-		ImageAlt:    partyPageGenericTitle,
+		// No og:image. The only brand asset available is the PWA icon
+		// under /v2/, which the same robots.txt still disallows — the
+		// crawlers that honour the file (X's most explicitly) would skip
+		// it and render an image-less large card. Omitting the image and
+		// downgrading to `summary` unfurls cleanly instead. Valid codes
+		// that name no party are unaffected: they keep the card URL, so
+		// a page for a code that exists and one that doesn't stay the
+		// same shape.
+		TwitterCard: "summary",
 		// Forward the segment as received. The SPA's magic-link matcher
 		// is case-insensitive and upper-cases the code itself, so this
 		// reproduces the old 302 byte for byte — including for junk,
@@ -281,6 +286,8 @@ func (h *PartyShareHandler) ServePartyPage(w http.ResponseWriter, r *http.Reques
 		d.PageURL = base + "/p/" + code
 		d.ImageURL = cardPageImageURL(base, code, h.cardToken(code))
 		d.ImageW, d.ImageH = ogLayout.Width, ogLayout.Height
+		d.ImageAlt = partyPageGenericTitle
+		d.TwitterCard = "summary_large_image"
 
 		if ps := h.lookupParty(code); ps != nil {
 			ps.Lock()

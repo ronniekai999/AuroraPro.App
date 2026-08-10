@@ -718,3 +718,58 @@ func TestRouter_UnfurlRoutesAreWired(t *testing.T) {
 		t.Errorf("/r/{code} = %d %q, want the original 302", rec.Code, rec.Header().Get("Location"))
 	}
 }
+
+// The unfurl carve-out (`Allow: /p/`) makes this Aurora's first crawlable
+// path, so the shell has to tell an INDEXER to stay out while still
+// feeding the unfurl clients. Discord, Slack, X, iMessage and WhatsApp
+// read og: tags and ignore a robots meta; Google and Bing honour it. So
+// noindex costs the feature nothing and keeps a host's name, the title
+// and the start time out of permanent search results when a party link is
+// pasted somewhere public.
+func TestServePartyPage_IsNotIndexable(t *testing.T) {
+	sched := time.Date(2026, 8, 16, 0, 0, 0, 0, time.UTC)
+	h := unfurlHandler(t, map[string]*watchparty.PartyState{
+		"7K2QD9": cardTestParty("7K2QD9", 7, &sched),
+	})
+
+	// Every shape of request: a real party, a valid code naming none, and
+	// a malformed code. None of them may be indexable.
+	for _, code := range []string{"7K2QD9", "ZZZZZZ", "junk"} {
+		rec := servePage(t, h, code, "aurora.example.com")
+		meta, _ := parseMeta(t, rec.Body.String())
+		got := meta["robots"]
+		if !strings.Contains(got, "noindex") {
+			t.Errorf("code %q: robots = %q, want it to contain noindex", code, got)
+		}
+	}
+}
+
+// A summary_large_image card whose image the crawler refuses to fetch
+// renders as a blank-topped card. The generic page has no artwork it can
+// legally advertise — the only brand asset is under /v2/, which robots.txt
+// still disallows — so it must downgrade to `summary` and emit no image
+// rather than promise one. A valid code keeps the large card.
+func TestServePartyPage_GenericPageDowngradesTheTwitterCard(t *testing.T) {
+	h := unfurlHandler(t, nil)
+
+	malformed, _ := parseMeta(t, servePage(t, h, "junk", "aurora.example.com").Body.String())
+	if got := malformed["twitter:card"]; got != "summary" {
+		t.Errorf("malformed code: twitter:card = %q, want summary", got)
+	}
+	for _, k := range []string{"og:image", "twitter:image", "og:image:width"} {
+		if got, ok := malformed[k]; ok && got != "" {
+			t.Errorf("malformed code: %s = %q, want it absent — the only brand asset is robots-disallowed", k, got)
+		}
+	}
+
+	// A syntactically valid code always carries the card, whether or not a
+	// party answers to it — that is what keeps known and unknown codes the
+	// same shape.
+	valid, _ := parseMeta(t, servePage(t, h, "ZZZZZZ", "aurora.example.com").Body.String())
+	if got := valid["twitter:card"]; got != "summary_large_image" {
+		t.Errorf("valid code: twitter:card = %q, want summary_large_image", got)
+	}
+	if valid["og:image"] == "" {
+		t.Error("valid code: og:image missing — every valid code must carry the card URL")
+	}
+}

@@ -344,7 +344,7 @@ func (h *PartyShareHandler) ServeShareImage(w http.ResponseWriter, r *http.Reque
 	// Cache miss — look up the party in live state. If not active, 404.
 	// We don't fall back to the DB for ended parties; sharing a closed
 	// party is a non-goal and would create stale-image confusion.
-	ps := h.manager.GetPartyState(code)
+	ps := h.lookupParty(code)
 	if ps == nil {
 		writeError(w, http.StatusNotFound, "party not found or has ended")
 		return
