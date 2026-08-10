@@ -188,3 +188,23 @@ func TestAdminActivity_EmptyIsArrayNotNull(t *testing.T) {
 		t.Errorf("empty activity should serialize as \"data\":[], got: %s", body)
 	}
 }
+
+// TestAdminActivity_HugePageDoesNotOverflow pins the page clamp. Without it
+// (page-1)*per_page overflows int in GetActivityPaginated, Postgres rejects the
+// negative OFFSET, and the endpoint 500s on a query param — reachable by any
+// admin hand-editing a URL. Review follow-up; the shared paginate() helper caps
+// page for exactly this reason.
+func TestAdminActivity_HugePageDoesNotOverflow(t *testing.T) {
+	q, pool := requireActivityTestDB(t)
+	eventType := seedActivity(t, q, pool, 1)
+	h := &AdminHandler{queries: q}
+
+	env, _ := getActivity(t, h, "type="+eventType+"&page=9223372036854775807&per_page=100")
+
+	if len(env.Data) != 0 {
+		t.Errorf("a page far past the end should be empty, got %d entries", len(env.Data))
+	}
+	if env.TotalItems != 1 {
+		t.Errorf("total_items = %d, want 1 (the count ignores paging)", env.TotalItems)
+	}
+}

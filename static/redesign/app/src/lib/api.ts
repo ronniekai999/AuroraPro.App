@@ -1555,6 +1555,12 @@ export async function listAdminActivity(
   // canonical `.data` envelope; `items` stays accepted so a bundle running
   // against an older binary still renders rows instead of silently blanking.
   if (Array.isArray(resp)) return resp
+  // Bail before the `in` checks: apiFetch hands back a STRING for any non-JSON
+  // 200 (its parseBody falls through to res.text()) and null when JSON parsing
+  // fails, and `in` throws a TypeError on a primitive. A reverse proxy with a
+  // lapsed SSO session answering the API call with an HTML login page — 200,
+  // text/html, redirect-followed — hits exactly this.
+  if (!resp || typeof resp !== 'object') return []
   if ('data' in resp && Array.isArray(resp.data)) return resp.data
   if ('items' in resp && Array.isArray(resp.items)) return resp.items
   return []

@@ -76,6 +76,40 @@ describe('listAdminActivity', () => {
 
     fetchMock.mockResolvedValue(jsonResponse({ unexpected: true }))
     expect(await listAdminActivity()).toEqual([])
+
+    // Envelope present but the payload isn't an array — the pre-fix unwrap
+    // returned these straight through to `activity.map(…)` in AdminView.
+    fetchMock.mockResolvedValue(jsonResponse({ data: null }))
+    expect(await listAdminActivity()).toEqual([])
+    fetchMock.mockResolvedValue(jsonResponse({ data: { nope: 1 } }))
+    expect(await listAdminActivity()).toEqual([])
+  })
+
+  // apiFetch returns a STRING for any non-JSON 200 and null when JSON parsing
+  // fails, so the unwrap must not reach an `in` check on a primitive. A proxy
+  // with a lapsed SSO session serving an HTML login page is the realistic
+  // trigger; it must degrade to the empty state, not a TypeError banner.
+  it('returns [] for non-object bodies instead of throwing', async () => {
+    const { listAdminActivity } = await import('./api')
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html' }),
+      json: async () => { throw new Error('not json') },
+      text: async () => '<!doctype html><title>Sign in</title>',
+    } as unknown as Response)
+    await expect(listAdminActivity()).resolves.toEqual([])
+
+    // Content-typed JSON that fails to parse → apiFetch yields null.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => { throw new Error('bad json') },
+      text: async () => 'oops',
+    } as unknown as Response)
+    await expect(listAdminActivity()).resolves.toEqual([])
   })
 
   it('passes the requested page size through', async () => {

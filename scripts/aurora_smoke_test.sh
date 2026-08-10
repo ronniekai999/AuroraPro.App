@@ -173,7 +173,12 @@ section "11. Admin (requires admin role)"
 if [ "$IS_ADMIN" = "1" ] || [ "$HAS_JQ" = "0" ]; then
   check_get "GET /api/admin/dashboard"               /api/admin/dashboard               200 yes ''
   check_get "GET /api/admin/sessions"                /api/admin/sessions                200 yes ''
-  check_get "GET /api/admin/activity"                /api/admin/activity                200 yes ''
+  # Assert the ENVELOPE, not just the status. A 200 alone passed happily while
+  # the handler answered with `{items:…}` and the SPA — which reads `.data` —
+  # rendered an empty Activity tab on a busy log. The Go envelope tests are
+  # TEST_DATABASE_URL-gated, so this is the only always-running check on that
+  # wire contract.
+  check_get "GET /api/admin/activity"                /api/admin/activity                200 yes '.data | type | select(. == "array")'
   check_get "GET /api/admin/settings"                /api/admin/settings                200 yes ''
   check_get "GET /api/admin/llm"                     /api/admin/llm                     200 yes '.provider // "none"'
   check_get "  → provider configured (ollama_cloud or local)" /api/admin/llm  200 yes 'select(.provider == "ollama_cloud" or .provider == "local") | "ok"'

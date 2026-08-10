@@ -1046,6 +1046,14 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 		if page < 1 {
 			page = 1
 		}
+		// Same cap the shared paginate() helper applies, for the same
+		// reason: (page-1)*perPage is computed as an int in
+		// GetActivityPaginated, so ?page=9223372036854775807 overflows to a
+		// negative OFFSET and Postgres 500s the request. At max perPage
+		// that still reaches 1M rows.
+		if page > 10000 {
+			page = 10000
+		}
 		if perPage < 1 || perPage > 100 {
 			perPage = 50
 		}
@@ -1062,11 +1070,11 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Canonical paginated envelope — `{data, page, per_page, total_items,
-	// total_pages}`, same as every other paginated endpoint. This used to
-	// hand-roll `{items, total, ...}`, which no client ever read: the SPA
-	// unwraps `.data` and fell through to its `|| []` fallback on every
-	// call, so the admin Activity tab rendered "No recent activity."
-	// however busy the log was.
+	// total_pages}`, the shape paginatedResponse gives every genuinely
+	// paginated endpoint. This used to hand-roll `{items, total, ...}`,
+	// which no client ever read: the SPA unwraps `.data` and fell through
+	// to its `|| []` fallback on every call, so the admin Activity tab
+	// rendered "No recent activity." however busy the log was.
 	writeJSON(w, http.StatusOK, paginatedResponse(entries, total, params))
 }
 
