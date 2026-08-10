@@ -3044,13 +3044,24 @@ export async function sendPartyInvites(
   )
 }
 
-// Watch-party share card (Phase 1). Host-only: the server 403s anyone
-// else, because the card carries the HOST's name and the host pressing
-// the button is the consent event for publishing it.
+// Watch-party share card. Host-only: the server 403s anyone else, because
+// the card carries the HOST's name and the host pressing the button is the
+// consent event for publishing it.
+//
+// One signed URL per crop, all carrying the same HMAC tag (it is over the
+// CODE, not the variant) and differing only in `?v=`. The keys match
+// `CardFormat` in ./partyShare, which is what lets the share modal index
+// this by the selected format; PartyCardLinks there requires an entry for
+// every format, so a crop added to the union without a field here is a
+// compile error rather than an undefined preview.
 export interface PartyCardLinksResponse {
   code: string
   /** Signed 1080×1920 PNG URL — public, but unguessable without the tag. */
   story: string
+  /** Signed 1080×1080 PNG URL — feeds, Discord drops. */
+  square: string
+  /** Signed 1200×630 PNG URL — the crop a link unfurl reads. */
+  og: string
   /** The party's /p/{CODE} deep link. */
   page: string
 }

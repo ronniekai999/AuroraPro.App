@@ -1,8 +1,8 @@
 // Aurora V2 — PartyShareCardModal (watch-party share card)
 //
-// The host taps "Share card" and gets the poster: a 1080×1920 PNG of the
-// artwork, the Eastern start time, who's hosting, and a QR + six-character
-// code that gets a friend into the room.
+// The host taps "Share card" and gets the poster: a PNG of the artwork,
+// the Eastern start time (or LIVE NOW), who's hosting, and a QR +
+// six-character code that gets a friend into the room.
 //
 // The image is rendered and cached SERVER-side (internal/api/party_card.go)
 // — this component only fetches the signed URLs, previews the result, and
@@ -10,10 +10,10 @@
 // real URL a social crawler can fetch, which a canvas render in the tab
 // could never be.
 //
-// Phase 1 offers Download and Copy link. The format tabs render with a
-// single option today; `square` / `og` and the Web Share API file path
-// land with Phase 2, which is why the tab strip exists now rather than
-// being retrofitted around a lone button.
+// Three crops off one composition — Story for a story tray, Square for a
+// feed or a Discord drop, Link preview for the 1200×630 an unfurl reads.
+// Share… hands the PNG to the OS share sheet on a phone and saves it
+// everywhere else; Download and Copy link are always there.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getPartyCardLinks } from '@/lib/api'
@@ -22,6 +22,7 @@ import {
   cardFormatLabel,
   copyToClipboard,
   downloadCard,
+  shareCard,
   type CardFormat,
   type PartyCardLinks,
 } from '@/lib/partyShare'
@@ -35,15 +36,18 @@ export interface PartyShareCardModalProps {
   onClose: () => void
 }
 
-// Phase 1 renders one crop. The array (not a bare constant) is the seam
-// Phase 2 widens.
-const FORMATS: CardFormat[] = ['story']
+// Tab order is the order a host is likely to want them: the one people
+// post, then the feed crop, then the one that only matters when a link
+// gets pasted somewhere.
+const FORMATS: CardFormat[] = ['story', 'square', 'og']
 
 export function PartyShareCardModal({ code, title, subtitle, onClose }: PartyShareCardModalProps) {
   const [links, setLinks] = useState<PartyCardLinks | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [format, setFormat] = useState<CardFormat>('story')
-  const [busy, setBusy] = useState(false)
+  // Which action is in flight, so the button that started it is the one
+  // whose label changes — a share must not make Download say "Saving…".
+  const [busy, setBusy] = useState<null | 'download' | 'share'>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [imageReady, setImageReady] = useState(false)
 
@@ -81,12 +85,30 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
 
   const onDownload = useCallback(async () => {
     if (!imageURL || busy) return
-    setBusy(true)
+    setBusy('download')
     setError(null)
     const res = await downloadCard(imageURL, code, format)
-    setBusy(false)
+    setBusy(null)
     if (res.ok) flash('Saved to your downloads')
     else setError(res.error ?? 'Download failed')
+  }, [imageURL, busy, code, format, flash])
+
+  // Share… opens the OS sheet with the PNG attached where the browser
+  // takes files, and saves it where it does not. A host who opens the
+  // sheet and closes it again has decided something, not hit an error:
+  // that path deliberately says nothing at all.
+  const onShare = useCallback(async () => {
+    if (!imageURL || busy) return
+    setBusy('share')
+    setError(null)
+    const res = await shareCard(imageURL, code, format)
+    setBusy(null)
+    if (!res.ok) {
+      setError(res.error ?? 'Could not share the card')
+      return
+    }
+    if (res.outcome === 'shared') flash('Shared')
+    else if (res.outcome === 'downloaded') flash('Saved to your downloads')
   }, [imageURL, busy, code, format, flash])
 
   const onCopyLink = useCallback(async () => {
@@ -129,8 +151,8 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
         </div>
         {subtitle && <p className="text-white/45 text-xs mt-1">{subtitle}</p>}
 
-        {/* Format tabs. One option in Phase 1 — square and OG join it
-            with the Phase 2 renderer. */}
+        {/* Format tabs. Switching one re-points the preview at a
+            different signed URL; the token is the same for all three. */}
         <div role="tablist" aria-label="Card format" className="flex gap-1.5 mt-3 p-1 rounded-xl bg-white/[0.04]">
           {FORMATS.map(f => (
             <button
@@ -181,11 +203,22 @@ export function PartyShareCardModal({ code, title, subtitle, onClose }: PartySha
         <div className="mt-4 flex gap-2 flex-wrap">
           <button
             type="button"
-            disabled={!imageURL || busy}
+            disabled={!imageURL || busy !== null}
             onClick={() => void onDownload()}
             className="px-3 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {busy ? 'Saving…' : 'Download PNG'}
+            {busy === 'download' ? 'Saving…' : 'Download PNG'}
+          </button>
+          {/* Secondary, not primary, deliberately: on a desktop browser
+              this button saves the file, and the predictable action
+              should be the one that looks predictable. */}
+          <button
+            type="button"
+            disabled={!imageURL || busy !== null}
+            onClick={() => void onShare()}
+            className="px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/[0.1] text-white/75 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {busy === 'share' ? 'Sharing…' : 'Share…'}
           </button>
           <button
             type="button"
