@@ -37,6 +37,7 @@ import {
   partyPauseRequest,
   partySeekRequest,
   participantFromJoinEvent,
+  changeMediaRequest,
   receivedSeekFromHello,
   shouldAcceptPartyRevision,
   type ChatMessageEvent,
@@ -204,6 +205,10 @@ export interface UseParty {
   sendChat: (message: string) => void
   sendReaction: (emoji: string, absMs?: number) => void
   sendReady: (ready: boolean) => void
+  // Issue #460 — host-only party-wide media swap (next-episode advance).
+  // Returns false when the room socket isn't OPEN so the caller can keep
+  // its card armed instead of pretending the advance happened.
+  changeMedia: (p: { mediaItemId: number; episodeId?: number; mediaTitle: string; mediaPoster: string }) => boolean
   // Sync-socket actions — used by the VideoPlayer when the user is
   // the host. Guests' player events do NOT broadcast (host is the
   // sync authority).
@@ -1254,6 +1259,24 @@ export function useParty(currentUserId?: number): UseParty {
     try { ws.send(JSON.stringify(out)) } catch { /* defensive */ }
   }, [])
 
+  // Issue #460 — host advances the whole party to the next episode.
+  // Deliberately NOT buffered like the sync-socket request* helpers: a
+  // replayed advance after a reconnect could jump the room an episode
+  // ahead of what the host is looking at. A failed send reports false and
+  // the caller re-offers the button.
+  //
+  // No local state is patched here. The server echoes `media-change` to
+  // every room conn INCLUDING this one, so the host re-points through the
+  // same onMediaChange resolver as guests — one code path, and the host
+  // never gets ahead of a swap the server rejected (e.g. host-only check
+  // lost to a succession race).
+  const changeMedia = useCallback((p: { mediaItemId: number; episodeId?: number; mediaTitle: string; mediaPoster: string }) => {
+    const ws = roomWsRef.current
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    try { ws.send(JSON.stringify(changeMediaRequest(p))) } catch { return false }
+    return true
+  }, [])
+
   // Audit H1 (P4) — request* methods buffer the intent when the sync
   // socket isn't OPEN yet (it opens lazily after party-state arrives
   // on the room socket — typically 100-300ms after the user joins).
@@ -1362,6 +1385,7 @@ export function useParty(currentUserId?: number): UseParty {
     sendChat,
     sendReaction,
     sendReady,
+    changeMedia,
     requestPlay,
     requestPause,
     requestSeek,

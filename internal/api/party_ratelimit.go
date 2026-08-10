@@ -124,6 +124,30 @@ type changeMediaPayload struct {
 	MediaPoster string `json:"media_poster"`
 }
 
+// partyMediaTextMaxRunes caps the client-supplied strings on
+// changeMediaPayload. parties.media_title / media_poster are VARCHAR(500)
+// (migration 013) and Postgres counts CHARACTERS, so the cap is in runes:
+// a byte-length check would both allow a 500-rune multi-byte title to
+// overflow the column and risk slicing a rune in half. Every other path
+// that sets these derives them server-side from the DB; change-media is
+// the only one that takes them from the wire.
+const partyMediaTextMaxRunes = 500
+
+// truncateRunes clamps s to at most max runes without splitting one.
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	n := 0
+	for i := range s {
+		n++
+		if n > max {
+			return s[:i]
+		}
+	}
+	return s
+}
+
 // trackChangePayload broadcasts the host's audio or subtitle selection
 // to all participants. Indexes are HLS-playlist-relative and stable
 // across all clients of the same party (everyone watches the same

@@ -2727,6 +2727,11 @@ func (m *Manager) broadcastToRoomPeersExcludeLocked(ps *PartyState, excludeUserI
 // Media Change (TV episode auto-advance + manual swap)
 // ============================================================
 
+// changeMediaValidateTimeout bounds the existence check ChangeMedia runs
+// before mutating. Short on purpose: it is a single indexed EXISTS, and a
+// slow database must not hold up a host's episode advance.
+const changeMediaValidateTimeout = 2 * time.Second
+
 // ChangeMedia swaps the party's media to a new item/episode. Used primarily
 // for TV episode auto-advance when the host's video reaches its end —
 // the host's client resolves the next episode via the existing /next-episode
@@ -2750,6 +2755,36 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	m.mu.RUnlock()
 	if !exists {
 		return errUser("party not found")
+	}
+
+	// Issue #460 — both ids come straight off the wire, and until the
+	// next-episode button nothing ever sent this message. Reject a pair
+	// that doesn't exist (or an episode belonging to another show) BEFORE
+	// mutating: the in-memory swap used to succeed while the matching FK
+	// failed inside UpdatePartyMedia's fire-and-forget goroutine, leaving
+	// the room playing one thing and the row saying another until a
+	// restart rehydrated the stale value.
+	//
+	// Deliberately outside ps.mu: this is the party-wide lock that ticks
+	// and broadcasts take, and a DB round-trip under it would stall the
+	// room. That does mean a non-host reaches the query before the
+	// host check below — acceptable, since it's one indexed EXISTS behind
+	// the room socket's 30/min limiter, and authorization itself is
+	// unchanged. Skipped when queries is nil (tests build the manager
+	// without a pool).
+	if m.queries != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), changeMediaValidateTimeout)
+		ok, err := m.queries.PartyMediaTargetExists(ctx, newMediaItemID, newEpisodeID)
+		cancel()
+		if err != nil {
+			// Don't strand the room on a transient DB hiccup: log and let
+			// the swap through, exactly as the persist path already
+			// tolerates a failed write.
+			slog.Warn("party: media-change validation failed, allowing swap",
+				"code", code, "media_item_id", newMediaItemID, "error", err)
+		} else if !ok {
+			return errUser("unknown media for this party")
+		}
 	}
 
 	ps.mu.Lock()
