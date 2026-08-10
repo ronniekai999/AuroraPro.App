@@ -946,6 +946,23 @@ html[data-glow="subtle"] .stage-topnav {
   border-radius: 6px;
   padding: 2px 6px;
 }
+/* Replaces the ⌘K kbd hint once there's a query to clear (both the
+   desktop pill and the mobile drawer's duplicate field). */
+.stage-navsearch-clear {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.5);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.stage-navsearch-clear:hover,
+.stage-navsearch-clear:focus-visible {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.85);
+}
 
 /* Circular icon control in the nav right cluster (party, bell, menu). */
 .stage-iconbtn {

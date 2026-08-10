@@ -396,6 +396,7 @@ function MobileSheet({
   onOpenProfilesGate,
   searchQuery,
   onSearchQueryChange,
+  onSearchClose,
 }: {
   tabs: NavTab[]
   currentView: string
@@ -412,6 +413,9 @@ function MobileSheet({
   onOpenProfilesGate?: () => void
   searchQuery: string
   onSearchQueryChange: (v: string) => void
+  /** Clears the query and drops back to Home if it was driving the
+   *  search view — the X button next to the field. */
+  onSearchClose: () => void
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const firstItemRef = useRef<HTMLButtonElement | null>(null)
@@ -498,6 +502,16 @@ function MobileSheet({
             value={searchQuery}
             onChange={(e) => onSearchQueryChange(e.target.value)}
           />
+          {searchQuery && (
+            <button
+              type="button"
+              className="stage-navsearch-clear"
+              onClick={onSearchClose}
+              aria-label="Clear search"
+            >
+              <Icon name="x" size={14} />
+            </button>
+          )}
         </div>
         {profiles.length > 0 && (
           <div className="px-2 pt-1 pb-2.5 mb-1 border-b border-white/[0.06]">
@@ -556,6 +570,10 @@ export interface TopNavProps {
   searchQuery: string
   onSearchQueryChange: (v: string) => void
   onSearchFocus: () => void
+  /** Clears the query and drops back to Home if it was driving the
+   *  search view — the X button, an outside click, and Escape all
+   *  route through this. */
+  onSearchClose: () => void
   searchInputRef: React.RefObject<HTMLInputElement | null>
   /** Opens the ⌘K palette. Below md this is the whole search affordance. */
   onOpenPalette: () => void
@@ -598,6 +616,7 @@ export function TopNav({
   searchQuery,
   onSearchQueryChange,
   onSearchFocus,
+  onSearchClose,
   searchInputRef,
   onOpenPalette,
   partyActive,
@@ -626,6 +645,7 @@ export function TopNav({
   const [sheetOpen, setSheetOpen] = useState(false)
   const stripRef = useRef<HTMLDivElement | null>(null)
   const menuBtnRef = useRef<HTMLButtonElement | null>(null)
+  const searchPillRef = useRef<HTMLDivElement | null>(null)
 
   // Stable identity: MobileSheet keys its document listeners on onClose, and
   // TopNav re-renders on every notification poll / party tick / keystroke.
@@ -633,6 +653,25 @@ export function TopNav({
     setSheetOpen(false)
     menuBtnRef.current?.focus()
   }, [])
+
+  // Click outside the desktop search pill closes it, same as the X button.
+  // Only armed while there's a query to close — an empty, unfocused pill has
+  // nothing to dismiss. Bails on clicks inside the search RESULTS grid
+  // (SearchView, a page-level sibling — not a DOM descendant of the pill):
+  // this listener fires on `mousedown`, which lands before the result
+  // card's own `click`, so without the exemption every result click would
+  // clear the query and swap the view back to Home out from under it.
+  useEffect(() => {
+    if (!searchQuery) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node
+      if (searchPillRef.current?.contains(target)) return
+      if ((target as Element).closest?.('[data-search-results]')) return
+      onSearchClose()
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [searchQuery, onSearchClose])
 
   // Navigating from anywhere in the nav dismisses the sheet. The brand and
   // the avatar dropdown's rows are reachable while the sheet is open (its
@@ -719,7 +758,7 @@ export function TopNav({
         {/* Search. The real input on md+ (preserves type-to-open-results);
             an icon button below md that opens the palette, which is a far
             better search surface on a phone than a 120px pill. */}
-        <div className="stage-navsearch hidden md:flex w-[176px] lg:w-[196px]">
+        <div ref={searchPillRef} className="stage-navsearch hidden md:flex w-[176px] lg:w-[196px]">
           <Icon name="search" size={15} className="text-white/35 flex-none" />
           <input
             ref={searchInputRef}
@@ -730,7 +769,20 @@ export function TopNav({
             onChange={(e) => onSearchQueryChange(e.target.value)}
             onFocus={onSearchFocus}
           />
-          <kbd aria-hidden="true">⌘K</kbd>
+          {/* Swap the ⌘K hint for a clear button once there's a query to
+              clear — the pill is too narrow at 176px to show both. */}
+          {searchQuery ? (
+            <button
+              type="button"
+              className="stage-navsearch-clear"
+              onClick={onSearchClose}
+              aria-label="Clear search"
+            >
+              <Icon name="x" size={13} />
+            </button>
+          ) : (
+            <kbd aria-hidden="true">⌘K</kbd>
+          )}
         </div>
         <button
           type="button"
@@ -874,6 +926,7 @@ export function TopNav({
         onOpenProfilesGate={onOpenProfilesGate}
         searchQuery={searchQuery}
         onSearchQueryChange={onSearchQueryChange}
+        onSearchClose={onSearchClose}
       />
     )}
     </>
