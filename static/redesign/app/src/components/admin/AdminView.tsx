@@ -2411,6 +2411,10 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
     if (tab !== 'activity' || activity !== null) return
     const ac = new AbortController()
     setActivityLoading(true)
+    // Clear a prior failure before retrying, like the logs effect below.
+    // Without this a transient error stayed pinned above the rows for the
+    // life of the mount, even once a later load succeeded.
+    setActivityErr(null)
     listAdminActivity(50, ac.signal)
       .then(a => setActivity(a))
       .catch(err => {
