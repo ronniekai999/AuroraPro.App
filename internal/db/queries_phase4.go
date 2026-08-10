@@ -148,13 +148,22 @@ func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshToken
 
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the
 // session identified by refreshTokenID (issue #462). Returns false if no
-// matching, non-revoked row exists for userID — the caller has already
-// validated profileID ownership separately, so this only fails when the
-// session itself is gone (e.g. concurrent logout).
+// matching row exists for userID at all — the caller has already validated
+// profileID ownership separately, so this only fails when the row was never
+// created for this account (or a forged/foreign id).
+//
+// Deliberately does NOT filter on `NOT revoked`, matching
+// ResolveActingProfile's read side: the access token minted alongside this
+// refresh_tokens row stays valid — and gets presented — for up to its own
+// 15-minute TTL after the row is revoked (rotation). Filtering here would
+// make a switch silently fail to take (a 409 the SPA's fire-and-forget call
+// swallows) for that whole window, and in the unsafe direction: the session
+// stays on whatever LOOSER profile it already had instead of picking up a
+// stricter one.
 func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, userID, profileID int64) (bool, error) {
 	tag, err := q.pool.Exec(ctx,
 		`UPDATE refresh_tokens SET active_profile_id = $1
-		 WHERE id = $2 AND user_id = $3 AND NOT revoked`,
+		 WHERE id = $2 AND user_id = $3`,
 		profileID, refreshTokenID, userID,
 	)
 	if err != nil {
