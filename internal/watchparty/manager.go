@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -540,6 +541,20 @@ type Manager struct {
 	// once even if SetHighlightCacheDir is called multiple times.
 	reaperOnce sync.Once
 
+	// shareCacheInvalidator drops a party's cached share artwork (the
+	// legacy share image and every fingerprinted share-card variant).
+	// Wired from the API layer at boot via SetShareCacheInvalidator,
+	// because the renderer and its cache directory live on the HTTP
+	// handler and the manager must not learn about either. Unset is fine
+	// — the 30-day reaper is still the backstop.
+	//
+	// Held in an atomic rather than under m.mu deliberately: the call
+	// sites (ChangeMedia, endPartyInternal) run while ps.mu is held, and
+	// reaching for m.mu there would invert this file's one-way
+	// m.mu → ps.mu nesting and can deadlock against any writer waiting
+	// on m.mu.
+	shareCacheInvalidator atomic.Pointer[func(code string)]
+
 	// M9/M1 — server-lifecycle context for parent-of background work
 	// (highlight-reel ffmpeg jobs, daily reaper). On SIGTERM this
 	// context cancels, in-flight goroutines unwind cleanly rather than
@@ -562,6 +577,34 @@ func (m *Manager) SetDispatcher(d *notify.Dispatcher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dispatcher = d
+}
+
+// SetShareCacheInvalidator wires the share-image / share-card cache
+// dropper. Called once at boot from NewRouter. Optional: without it the
+// only cleanup is the daily reaper, which is how the system behaved
+// before this hook existed.
+func (m *Manager) SetShareCacheInvalidator(fn func(code string)) {
+	if fn == nil {
+		m.shareCacheInvalidator.Store(nil)
+		return
+	}
+	m.shareCacheInvalidator.Store(&fn)
+}
+
+// invalidateShareCache fires the hook, if one is wired.
+//
+// Runs on its own goroutine: cache eviction is filesystem work and must
+// never stall a party teardown or a media change. That also means the
+// eviction can, in principle, land just after a concurrent request has
+// re-rendered and written a fresh card — the glob would delete the new
+// file too. Harmless: the cache is an optimisation, and the next request
+// simply re-renders.
+func (m *Manager) invalidateShareCache(code string) {
+	fn := m.shareCacheInvalidator.Load()
+	if fn == nil {
+		return
+	}
+	go (*fn)(code)
 }
 
 // SetShutdownContext wires the server-lifecycle context for background
@@ -1921,6 +1964,11 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	delete(m.parties, code)
 	m.mu.Unlock()
 
+	// The party is gone, so its cards can never be regenerated (the image
+	// route resolves against live manager state) — the cached PNGs are now
+	// pure dead weight.
+	m.invalidateShareCache(code)
+
 	slog.Info("watch party ended", "code", code, "room_persistent", isRoomPersistent)
 	return nil
 }
@@ -2807,12 +2855,12 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	ps.StateRevision++
 	m.stopTickLoopLocked(ps)
 
-	// Note: the cached share image (party-share/{code}.png) is now stale —
-	// it shows the old episode poster + code. We don't have a manager-level
-	// invalidator wired today (party_share.go's InvalidateCache lives on the
-	// HTTP handler and the manager has no reference to it). The 30-day
-	// share-image reaper handles long-term cleanup; for immediate freshness,
-	// wiring InvalidateCache into the manager is a small follow-up.
+	// The cached share artwork is now stale — it shows the old episode's
+	// poster. Drop it. The share CARD additionally fingerprints its cache
+	// key on (schedule | title | poster | host | code), so a media change
+	// already renders to a different file; this eviction is what reclaims
+	// the superseded one instead of leaving it for the 30-day reaper.
+	m.invalidateShareCache(code)
 
 	// Persist the new media to DB so reconnects + share-image lookups
 	// see the updated values. Best-effort: a transient DB hiccup

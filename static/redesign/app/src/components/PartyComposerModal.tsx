@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { listMembers, type MemberSummary } from '@/lib/api'
 import { buildQuickChips, formatPartyTime } from '@/lib/partyInvites'
+import { PartyShareCardModal } from './PartyShareCardModal'
 import { ProfileAvatar } from './ProfileAvatar'
 
 export interface PartyComposerLaunch {
@@ -32,7 +33,11 @@ export interface PartyComposerModalProps {
   onClose: () => void
   // Performs create (+ invites + join). Resolve { ok: true } to close;
   // { ok: false, error } keeps the modal open with the error inline.
-  onLaunch: (launch: PartyComposerLaunch) => Promise<{ ok: boolean; error?: string }>
+  //
+  // `code` comes back on success so a SCHEDULED booking can hand straight
+  // off to the share card — the moment the host has just decided when
+  // everyone is watching is the moment they want the poster.
+  onLaunch: (launch: PartyComposerLaunch) => Promise<{ ok: boolean; error?: string; code?: string }>
 }
 
 export function PartyComposerModal({
@@ -62,6 +67,11 @@ export function PartyComposerModal({
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Set once a SCHEDULED party is booked: the composer hands off to the
+  // share card instead of just closing. "Right now" parties skip this —
+  // the host is about to be in the room, not posting about it.
+  const [booked, setBooked] = useState<{ code: string; iso: string; invited: number } | null>(null)
 
   useEffect(() => {
     const ac = new AbortController()
@@ -133,6 +143,10 @@ export function PartyComposerModal({
       setError(result.error ?? 'Failed to start the party')
       return
     }
+    if (mode === 'schedule' && effectiveIso && result.code) {
+      setBooked({ code: result.code, iso: effectiveIso, invited: selected.size })
+      return
+    }
     onClose()
   }
 
@@ -141,6 +155,22 @@ export function PartyComposerModal({
   useEffect(() => {
     if (members && members.length > 0) searchRef.current?.focus()
   }, [members])
+
+  // Booked: the success state IS the share card. Same component the
+  // lobby opens, so the two entry points can never drift.
+  if (booked) {
+    const invited = booked.invited > 0
+      ? ` · ${booked.invited} ${booked.invited === 1 ? 'person' : 'people'} invited`
+      : ''
+    return (
+      <PartyShareCardModal
+        code={booked.code}
+        title="Party booked 🎉"
+        subtitle={`${formatPartyTime(booked.iso, new Date())}${invited}`}
+        onClose={onClose}
+      />
+    )
+  }
 
   return (
     <div

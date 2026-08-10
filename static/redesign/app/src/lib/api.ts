@@ -3044,6 +3044,27 @@ export async function sendPartyInvites(
   )
 }
 
+// Watch-party share card (Phase 1). Host-only: the server 403s anyone
+// else, because the card carries the HOST's name and the host pressing
+// the button is the consent event for publishing it.
+export interface PartyCardLinksResponse {
+  code: string
+  /** Signed 1080×1920 PNG URL — public, but unguessable without the tag. */
+  story: string
+  /** The party's /p/{CODE} deep link. */
+  page: string
+}
+
+export async function getPartyCardLinks(
+  code: string,
+  signal?: AbortSignal,
+): Promise<PartyCardLinksResponse> {
+  return apiFetch<PartyCardLinksResponse>(
+    `/api/parties/${encodeURIComponent(code)}/card-links`,
+    { signal },
+  )
+}
+
 export interface PartyInviteRosterEntry {
   invite_id: number
   user_id: number

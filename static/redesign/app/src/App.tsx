@@ -4897,7 +4897,9 @@ export default function App() {
   // ceiling, unknown name) the server reported.
   const launchComposerParty = useCallback(async (
     m: Media, episodeId: number | undefined, launch: PartyComposerLaunch,
-  ): Promise<{ ok: boolean; error?: string }> => {
+    // `code` rides back on success so the composer's scheduled-success
+    // state can hand straight off to the share card.
+  ): Promise<{ ok: boolean; error?: string; code?: string }> => {
     let createdCode: string | null = null
     try {
       const resp = await createQuickParty({
@@ -4948,7 +4950,7 @@ export default function App() {
             type: 'info',
           }])
         }
-        return { ok: true }
+        return { ok: true, code: resp.code }
       }
       // Server created the party but we couldn't join it. Surface
       // the error so the admin knows the party exists. Used to be

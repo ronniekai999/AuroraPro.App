@@ -152,10 +152,16 @@ type RouterDeps struct {
 	//   RefreshLimiter       — POST /api/auth/refresh + /logout (session-lifecycle churn; roomier)
 	//   ChangePasswordLimiter — POST /api/auth/change-password (authed, Argon2id-gated; modest cap)
 	//   RequestLimiter       — POST /api/requests (per-IP media-request flood cap)
+	//   PartyCardLimiter     — GET /api/parties/{code}/card.png. The one
+	//     PUBLIC route that runs a compositor, and the one whose HMAC tag
+	//     an attacker would have to guess: the cap both bounds brute force
+	//     and stops the renderer being used as a CPU sink. Optional — nil
+	//     registers the route unlimited (tests).
 	LoginLimiter          *auth.RateLimiter
 	RefreshLimiter        *auth.RateLimiter
 	ChangePasswordLimiter *auth.RateLimiter
 	RequestLimiter        *auth.RateLimiter
+	PartyCardLimiter      *auth.RateLimiter
 	Watcher               *library.Watcher
 	Enricher              *metadata.Enricher
 	ImgProxy              *metadata.ImageProxy
@@ -503,7 +509,22 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// 1080×1920 PNG per party for posting to social-media stories. Cache
 	// directory reuses the image proxy's cache root for filesystem locality;
 	// generated images live under <root>/party-share/<code>.png.
-	partyShareH := NewPartyShareHandler(deps.PartyManager, deps.Cfg.Cache.ImageDir)
+	// The same handler now also serves the watch-party SHARE CARD
+	// (party_card.go): GET card.png (public, HMAC-tagged) and card-links
+	// (authed, host-only). It needs queries for the host's member-visible
+	// identity and the meta line, the JWT secret to key the card token,
+	// and the secure-cookie hint so minted URLs get the right scheme
+	// behind a TLS-terminating proxy.
+	partyShareH := NewPartyShareHandler(
+		deps.PartyManager, deps.Queries, deps.Cfg.Cache.ImageDir,
+		cfg.Auth.JWTSecret, cfg.Server.SecureCookies,
+	)
+	// Close the follow-up manager.go:2780 recorded: the manager had no way
+	// to drop a party's cached artwork, so a media swap or a party ending
+	// left a stale poster until the 30-day reaper. It does now.
+	if deps.PartyManager != nil {
+		deps.PartyManager.SetShareCacheInvalidator(partyShareH.InvalidateCache)
+	}
 	// Feature 1 (mobile companion): renders the companion-join QR code
 	// (PNG of <scheme>://<host>/join/{CODE}). Auth + party-membership gated;
 	// secureCookies threads through so the encoded URL's scheme is https
@@ -599,6 +620,20 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// Cached on disk so repeated social-media-crawler hits don't
 		// re-render the image.
 		r.Get("/api/parties/{code}/share-image.png", partyShareH.ServeShareImage)
+
+		// Watch-party SHARE CARD (public, HMAC-tagged). Unauthenticated
+		// because a social crawler unfurling a pasted link cannot log in;
+		// gated on ?t=, a stateless HMAC over the code that only an
+		// authenticated host can mint via /card-links. Every rejection is
+		// a 404 — a 403 would confirm the code names a real party. Rate
+		// limited per IP so the tag can't be brute-forced and the
+		// compositor can't be used as a CPU sink.
+		if deps.PartyCardLimiter != nil {
+			r.With(deps.PartyCardLimiter.Middleware).
+				Get("/api/parties/{code}/card.png", partyShareH.ServeCardPNG)
+		} else {
+			r.Get("/api/parties/{code}/card.png", partyShareH.ServeCardPNG)
+		}
 
 		// Bug-report attachments (public — the filename is a 128-bit
 		// random hex string which serves as the access token, same
@@ -1175,6 +1210,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// (this group) + party-membership gated inside the handler,
 			// same policy as reactions/highlight above.
 			r.Get("/api/parties/{code}/qr.png", partyQRH.ServeQR)
+			// Share-card links — HOST-ONLY (403 for anyone else). The
+			// host generating and sharing the image IS the consent event
+			// for putting their name and their evening on a public URL,
+			// so nobody else can mint it.
+			r.Get("/api/parties/{code}/card-links", partyShareH.CardLinks)
 		})
 
 		// HLS playlist + segment routes — sibling of the RequireAuth
