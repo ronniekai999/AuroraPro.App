@@ -8,6 +8,8 @@ package db
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -16,12 +18,18 @@ import (
 
 // seedRefreshToken inserts a minimal refresh_tokens row and returns its id,
 // so tests can exercise ResolveActingProfile/SetActiveProfileForToken
-// without going through the full auth HTTP flow.
+// without going through the full auth HTTP flow. token is randomized —
+// refresh_tokens.token is unique-indexed, so a fixed literal would collide
+// the moment a second caller (or a retry) seeds one.
 func seedRefreshToken(t *testing.T, q *Queries, userID int64) int64 {
 	t.Helper()
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
 	rt := &models.RefreshToken{
 		UserID:    userID,
-		Token:     "rating-ceiling-test-token",
+		Token:     "rating-ceiling-test-" + hex.EncodeToString(b),
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	if err := q.CreateRefreshToken(context.Background(), rt); err != nil {

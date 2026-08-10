@@ -336,8 +336,18 @@ func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if _, err := h.queries.SetActiveProfileForToken(r.Context(), claims.RefreshTokenID, claims.UserID, profileID); err != nil {
+	bound, err := h.queries.SetActiveProfileForToken(r.Context(), claims.RefreshTokenID, claims.UserID, profileID)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to activate profile")
+		return
+	}
+	if !bound {
+		// The session (refresh_tokens row) itself is gone — revoked by a
+		// concurrent logout/refresh between this request's auth check and
+		// this write. Reporting success here would silently leave
+		// enforcement on the account default; the caller should re-auth
+		// and retry rather than believe the switch took.
+		writeError(w, http.StatusConflict, "session no longer active; please refresh and retry")
 		return
 	}
 

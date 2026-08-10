@@ -753,6 +753,27 @@ func (h *StreamHandler) resolveFilePath(ctx context.Context, fileID int64, fileT
 	}
 }
 
+// resolveFileWithType is resolveFilePath plus the resolved "media"/"episode"
+// type — needed wherever a caller must know which table matched (the
+// rating-ceiling check and the direct-play registry both key on it) but
+// only has an optional/ambiguous fileType hint, same media-then-episode
+// fallback order as resolveFilePath.
+func (h *StreamHandler) resolveFileWithType(ctx context.Context, fileID int64, fileType string) (path, resolvedType string, err error) {
+	path, err = h.resolveFilePath(ctx, fileID, fileType)
+	if err != nil {
+		return "", "", err
+	}
+	resolvedType = fileType
+	if resolvedType != "media" && resolvedType != "episode" {
+		if _, ferr := h.queries.GetMediaFileByID(ctx, fileID); ferr == nil {
+			resolvedType = "media"
+		} else {
+			resolvedType = "episode"
+		}
+	}
+	return path, resolvedType, nil
+}
+
 // mediaRoots returns the configured library paths, EvalSymlinks-resolved, for the
 // direct-play symlink-containment guard in streaming.ServeFile. Best-effort: on a
 // libraries-lookup error it returns nil, which makes ServeFile skip containment
@@ -940,25 +961,13 @@ func (h *StreamHandler) CreateDirectCastToken(w http.ResponseWriter, r *http.Req
 // (RequireAuth: browser cookies/bearer) and ServeDirectCastFile
 // (RequireStreamAuth: also file-bound cast tokens).
 func (h *StreamHandler) serveDirectFile(w http.ResponseWriter, r *http.Request, fileID int64, fileType string) {
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, ft, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
 	}
 
 	claims := auth.GetClaims(r.Context())
-
-	// Resolve which table actually matched (mirrors resolveFilePath's own
-	// media-then-episode fallback) ONCE, reused below for both the rating
-	// check and the direct-play registry entry.
-	ft := fileType
-	if ft != "media" && ft != "episode" {
-		if _, err := h.queries.GetMediaFileByID(r.Context(), fileID); err == nil {
-			ft = "media"
-		} else {
-			ft = "episode"
-		}
-	}
 
 	// Rating-ceiling enforcement (issue #462). Skipped for cast-scoped
 	// tokens: ServeDirectCastFile's caller already validated the exact
@@ -2100,6 +2109,10 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 
 // GetSubtitles lists available subtitle tracks for a media file.
 func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid file id")
@@ -2109,9 +2122,17 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 	// Resolve file path using the type hint to avoid ID collisions
 	// between media_files and episode_files (separate BIGSERIAL sequences)
 	fileType := r.URL.Query().Get("type") // "media" or "episode"
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, resolvedType, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462) — a subtitle track's dialogue
+	// is as much "the content" as the video for this purpose (full
+	// transcript of an over-ceiling title), same read-path gate as
+	// StreamMediaFile/StreamEpisodeFile.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, resolvedType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
 		return
 	}
 
@@ -2161,6 +2182,10 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 //     VTT is cached separately from the raw extracted VTT keyed by
 //     (fileID, trackIdx, start).
 func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid file id")
@@ -2174,9 +2199,14 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve file path using type hint to avoid ID collisions
 	fileType := r.URL.Query().Get("type")
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, resolvedType, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462) — see GetSubtitles.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, resolvedType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
 		return
 	}
 

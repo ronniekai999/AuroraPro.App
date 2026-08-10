@@ -100,11 +100,27 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 // (and now discovery) rating-ceiling enforcement should get an acting
 // profile from — never a client-supplied profile_id/max_rating, which was
 // a full bypass (the ceiling was entirely client-elective).
+//
+// Deliberately does NOT filter the refresh_tokens lookup on `NOT revoked`:
+// Refresh() rotates the row (revoking the old one) on every renewal, but the
+// OLD access token stays valid — and gets presented — for up to its own
+// 15-minute TTL afterward. Filtering on revoked would make that token's
+// requests silently fall through to the account default (typically
+// unrestricted) for the rest of its lifetime, undermining the enforcement
+// this function exists for. Ownership (`user_id = $2`) is still checked.
+//
+// Contract: whenever err == nil, the returned profile is NEVER nil — on the
+// documented (and real: see phase2_handlers.go's ProgressHandler comment)
+// edge case where an account has no default profile row yet, a synthetic
+// unrestricted profile is returned rather than nil, so every caller can
+// dereference the result without a separate nil check. This matches the
+// existing "prof == nil means unrestricted" convention in
+// party_invite_handlers.go's send-time ceiling check.
 func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error) {
 	if refreshTokenID != 0 {
 		var profileID *int64
 		err := q.pool.QueryRow(ctx,
-			`SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2 AND NOT revoked`,
+			`SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2`,
 			refreshTokenID, userID,
 		).Scan(&profileID)
 		if err != nil && err != pgx.ErrNoRows {
@@ -120,7 +136,14 @@ func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshToken
 			}
 		}
 	}
-	return q.GetDefaultProfile(ctx, userID)
+	p, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return &models.UserProfile{UserID: userID}, nil
+	}
+	return p, nil
 }
 
 // SetActiveProfileForToken binds profileID as the acting sub-profile for the

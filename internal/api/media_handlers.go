@@ -541,7 +541,6 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
 		slog.Warn("resolve acting profile for media list failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
 	} else {
-		filter.MaxRating = profile.MaxAgeRating
 		filter.AllowedRatings = db.AllowedRatingsForMax(profile.MaxAgeRating)
 	}
 

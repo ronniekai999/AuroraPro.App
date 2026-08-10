@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -103,17 +105,33 @@ func newRCFixture(t *testing.T) *rcFixture {
 	}
 
 	suffix := reqTestSuffix(t)
-	lib := &models.Library{Name: "rc_lib_" + suffix, Type: models.LibraryType("movie"), Paths: []string{"/tmp/rc_" + suffix}, ScanInterval: 60, OwnerID: userID}
+	// A real directory with real bytes on disk — not just DB rows — so the
+	// "unrestricted profile" control case in the streaming tests can
+	// actually exercise streaming.ServeFile end to end (200 + body) rather
+	// than coincidentally 404ing the same way a blocked request would (a
+	// missing file and a rating-blocked file are NOT distinguishable by
+	// status code alone, so a control case that never reads real bytes
+	// wouldn't prove the check runs first).
+	mediaDir := t.TempDir()
+	lib := &models.Library{Name: "rc_lib_" + suffix, Type: models.LibraryType("movie"), Paths: []string{mediaDir}, ScanInterval: 60, OwnerID: userID}
 	if err := q.CreateLibrary(ctx, lib); err != nil {
 		t.Fatalf("create library: %v", err)
 	}
 	t.Cleanup(func() { _, _ = q.DeleteLibrary(ctx, lib.ID) })
 
+	writeMediaFile := func(name string) string {
+		p := filepath.Join(mediaDir, name)
+		if err := os.WriteFile(p, []byte("not a real video, just needs to exist"), 0o644); err != nil {
+			t.Fatalf("write fixture file %s: %v", name, err)
+		}
+		return p
+	}
+
 	movie := &models.MediaItem{LibraryID: lib.ID, Type: models.MediaMovie, Title: "RC Movie " + suffix, SortTitle: "rc movie", ContentRating: "R"}
 	if err := q.UpsertMediaItem(ctx, movie); err != nil {
 		t.Fatalf("seed movie: %v", err)
 	}
-	movieFile := &models.MediaFile{MediaItemID: movie.ID, Path: "/tmp/rc_" + suffix + "/movie.mp4", FileHash: "h", Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}
+	movieFile := &models.MediaFile{MediaItemID: movie.ID, Path: writeMediaFile("movie.mp4"), FileHash: "h", Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}
 	if err := q.UpsertMediaFile(ctx, movieFile); err != nil {
 		t.Fatalf("seed movie file: %v", err)
 	}
@@ -130,7 +148,7 @@ func newRCFixture(t *testing.T) *rcFixture {
 	if err != nil {
 		t.Fatalf("seed episode: %v", err)
 	}
-	episodeFile := &models.EpisodeFile{EpisodeID: episodeID, Path: "/tmp/rc_" + suffix + "/e1.mp4", FileHash: "h", Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}
+	episodeFile := &models.EpisodeFile{EpisodeID: episodeID, Path: writeMediaFile("e1.mp4"), FileHash: "h", Container: "mp4", VideoCodec: "h264", AudioCodec: "aac"}
 	if err := q.UpsertEpisodeFile(ctx, episodeFile); err != nil {
 		t.Fatalf("seed episode file: %v", err)
 	}
@@ -191,19 +209,34 @@ func TestGetEnriched_RatingCeiling(t *testing.T) {
 
 // TestStreamMediaFile_RatingCeiling pins the actual playback-bypass the
 // issue reported: hitting the stream route directly by file id, with no
-// discovery step in between. The block must fire before any filesystem or
-// transcode-manager access (StreamHandler is built with nil transcode/hub —
-// a passing blocked assertion here proves the check runs first).
+// discovery step in between. Both the blocked AND the allowed case must be
+// asserted — a missing/unreadable file also 404s (streaming.ServeFile),
+// so a blocked-only assertion can't distinguish "the ceiling check fired"
+// from "the fixture's file doesn't exist"; the fixture writes a real file
+// to disk specifically so the unrestricted-profile case can prove it
+// actually served bytes (200 + body), not just "didn't 404 either".
 func TestStreamMediaFile_RatingCeiling(t *testing.T) {
 	f := newRCFixture(t)
 	h := NewStreamHandler(f.q, nil, nil, "", nil, nil, nil)
 
-	r := rcRouteReq(http.MethodGet, "/api/stream/media/x", map[string]string{"fileID": i64(f.movieFileID)})
-	r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+	req := func(refreshID int64) *http.Request {
+		r := rcRouteReq(http.MethodGet, "/api/stream/media/x", map[string]string{"fileID": i64(f.movieFileID)})
+		return rcClaimsCtx(r, f.userID, refreshID)
+	}
+
 	rr := httptest.NewRecorder()
-	h.StreamMediaFile(rr, r)
+	h.StreamMediaFile(rr, req(f.restrictedRefreshID))
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("restricted profile: StreamMediaFile status = %d, want 404 (R movie exceeds PG ceiling)", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	h.StreamMediaFile(rr, req(f.unrestrictedRefreshID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unrestricted profile: StreamMediaFile status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() == 0 {
+		t.Error("unrestricted profile: StreamMediaFile returned 200 with an empty body — control case didn't actually serve the file")
 	}
 }
 
@@ -211,13 +244,97 @@ func TestStreamEpisodeFile_RatingCeiling(t *testing.T) {
 	f := newRCFixture(t)
 	h := NewStreamHandler(f.q, nil, nil, "", nil, nil, nil)
 
-	r := rcRouteReq(http.MethodGet, "/api/stream/episode/x", map[string]string{"fileID": i64(f.episodeFileID)})
-	r = rcClaimsCtx(r, f.userID, f.restrictedRefreshID)
+	req := func(refreshID int64) *http.Request {
+		r := rcRouteReq(http.MethodGet, "/api/stream/episode/x", map[string]string{"fileID": i64(f.episodeFileID)})
+		return rcClaimsCtx(r, f.userID, refreshID)
+	}
+
 	rr := httptest.NewRecorder()
-	h.StreamEpisodeFile(rr, r)
+	h.StreamEpisodeFile(rr, req(f.restrictedRefreshID))
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("restricted profile: StreamEpisodeFile status = %d, want 404 (TV-MA episode exceeds PG ceiling)", rr.Code)
 	}
+
+	rr = httptest.NewRecorder()
+	h.StreamEpisodeFile(rr, req(f.unrestrictedRefreshID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unrestricted profile: StreamEpisodeFile status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() == 0 {
+		t.Error("unrestricted profile: StreamEpisodeFile returned 200 with an empty body — control case didn't actually serve the file")
+	}
+}
+
+// TestServeDirectFile_RatingCeiling covers the shared serveDirectFile core
+// via its RequireAuth entry point (ServeDirectFile) — ServeDirectCastFile is
+// the same core reached via a cast token instead, already covered indirectly
+// by the trust-boundary reasoning around CreateDirectCastToken.
+func TestServeDirectFile_RatingCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	h := NewStreamHandler(f.q, nil, nil, "", nil, nil, nil)
+
+	req := func(refreshID int64) *http.Request {
+		r := rcRouteReq(http.MethodGet, "/api/stream/x/direct?type=media", map[string]string{"fileID": i64(f.movieFileID)})
+		return rcClaimsCtx(r, f.userID, refreshID)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeDirectFile(rr, req(f.restrictedRefreshID))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("restricted profile: ServeDirectFile status = %d, want 404 (R movie exceeds PG ceiling)", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeDirectFile(rr, req(f.unrestrictedRefreshID))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unrestricted profile: ServeDirectFile status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+	}
+	if rr.Body.Len() == 0 {
+		t.Error("unrestricted profile: ServeDirectFile returned 200 with an empty body")
+	}
+}
+
+// TestSubtitleEndpoints_RatingCeiling pins the fix for a gap the initial
+// #462 patch missed: subtitle tracks carry the full dialogue of a title, so
+// they need the same read-path gate as the video/audio itself.
+func TestSubtitleEndpoints_RatingCeiling(t *testing.T) {
+	f := newRCFixture(t)
+	h := NewStreamHandler(f.q, nil, nil, t.TempDir(), nil, nil, nil)
+
+	t.Run("GetSubtitles", func(t *testing.T) {
+		req := func(refreshID int64) *http.Request {
+			r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles?type=media", map[string]string{"fileID": i64(f.movieFileID)})
+			return rcClaimsCtx(r, f.userID, refreshID)
+		}
+		rr := httptest.NewRecorder()
+		h.GetSubtitles(rr, req(f.restrictedRefreshID))
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("restricted profile: GetSubtitles status = %d, want 404", rr.Code)
+		}
+		rr = httptest.NewRecorder()
+		h.GetSubtitles(rr, req(f.unrestrictedRefreshID))
+		if rr.Code != http.StatusOK {
+			t.Errorf("unrestricted profile: GetSubtitles status = %d, want 200 (body %q)", rr.Code, rr.Body.String())
+		}
+	})
+
+	t.Run("ServeSubtitle", func(t *testing.T) {
+		req := func(refreshID int64) *http.Request {
+			r := rcRouteReq(http.MethodGet, "/api/stream/x/subtitles/0?type=media", map[string]string{"fileID": i64(f.movieFileID), "trackIdx": "0"})
+			return rcClaimsCtx(r, f.userID, refreshID)
+		}
+		rr := httptest.NewRecorder()
+		h.ServeSubtitle(rr, req(f.restrictedRefreshID))
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("restricted profile: ServeSubtitle status = %d, want 404", rr.Code)
+		}
+		// Not asserting the unrestricted-profile case here: past the ceiling
+		// check, ServeSubtitle shells out to ffprobe/ffmpeg to extract track
+		// 0 from a fixture file that isn't a real video, which fails for
+		// reasons unrelated to this fix. The blocked assertion above is what
+		// pins the security property; GetSubtitles' control case already
+		// proves the same ceiling helper allows an in-range profile through.
+	})
 }
 
 // TestCreateSession_RatingCeiling pins the transcode-session mint point:
