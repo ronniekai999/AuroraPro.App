@@ -124,19 +124,25 @@ export const PARTY_NEXT_UP_LEAD_SEC = 120
  * are optional and issue #460 asks for the button on any episode.
  * Whichever threshold comes first wins.
  *
- * durationSec must exceed the lead-in for the duration rule to apply: it is
- * 0 until stream info resolves, and without that floor every episode would
- * arm at second 0 while its real length was still unknown. An episode
- * shorter than the lead-in gets no duration trigger (a marker still arms it).
+ * The duration rule needs a duration that is actually FIXED, which is what
+ * durationTrusted asserts (the server's ffprobe value). Without it the
+ * player falls back to the media element's duration, and for an HLS EVENT
+ * playlist that GROWS as the transcode produces segments — so
+ * `duration - 120` would trail just behind the playhead for the whole
+ * episode and arm the card minutes in. durationSec must also exceed the
+ * lead-in: it is 0 until stream info resolves, and an episode shorter than
+ * the lead-in would otherwise arm before it began. A credits marker still
+ * arms either of those cases.
  */
 export function nextUpArmSecond(args: {
   creditsStartSec: number | null
   durationSec: number
+  durationTrusted: boolean
   partyHost: boolean
 }): number | null {
   const candidates: number[] = []
   if (args.creditsStartSec != null) candidates.push(args.creditsStartSec)
-  if (args.partyHost && args.durationSec > PARTY_NEXT_UP_LEAD_SEC) {
+  if (args.partyHost && args.durationTrusted && args.durationSec > PARTY_NEXT_UP_LEAD_SEC) {
     candidates.push(args.durationSec - PARTY_NEXT_UP_LEAD_SEC)
   }
   return candidates.length ? Math.min(...candidates) : null

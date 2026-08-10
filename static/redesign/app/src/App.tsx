@@ -4627,6 +4627,14 @@ export default function App() {
     // bailing here keeps a demoted host from firing a doomed swap and
     // reporting success to the card.
     if (!user || party.state.hostUserId !== user.id) return 'failed'
+    // The player must be showing the party's OWN media. A host can hold a
+    // party while watching something else — a scheduled lobby that hasn't
+    // started, or a party player they closed — and advancing from that
+    // target would push the room into an unrelated series carrying the
+    // party's old title. The player-side gate already refuses to arm the
+    // card there; this is the authority check behind it, since the server
+    // validates only that the sender is the host.
+    if (party.state.mediaItemId !== cur.mediaItemId) return 'failed'
 
     let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
     try {
@@ -4651,6 +4659,7 @@ export default function App() {
           playerTargetRef.current?.episodeId !== fromEpisodeId) return 'failed'
       if (partyStateRef.current.code !== code) return 'failed'
       if (!user || partyStateRef.current.hostUserId !== user.id) return 'failed'
+      if (partyStateRef.current.mediaItemId !== cur.mediaItemId) return 'failed'
       if (!next) return 'end' // series end — the card shows its finale notice
 
       const sent = partyChangeMedia({
@@ -4674,7 +4683,7 @@ export default function App() {
       console.warn('[Aurora] party advance to next episode failed', err)
       return 'failed'
     }
-  }, [party.state.code, party.state.hostUserId, partyChangeMedia, user, addToast, resolveNextEpisode])
+  }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
   // identity unless continueItems OR handlePlayContinue changes (both

@@ -299,6 +299,13 @@ export function pickFile(
   return files[0]
 }
 
+// Issue #460 — how long the host's card waits for a sent party swap to
+// come back as a `media-change` broadcast before re-offering the button.
+// Generous: it covers a server round-trip plus the guest-side episode
+// resolve, and the only cost of waiting is a card that lingers on a room
+// that already moved (the file change clears it the moment it lands).
+const PARTY_SWAP_WATCHDOG_MS = 12_000
+
 // Smart Skip — read the "Auto-play next episode" preference straight
 // from the aurora_prefs localStorage bucket, the same cross-component
 // source of truth App.tsx's handlePlay / handlePlaybackEnded use.
@@ -653,6 +660,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // succeeded — gates the <video> 'ended' DOM handler so reaching the
   // real end of the credits can't double-advance past TWO episodes.
   const advanceFiredRef = useRef(false)
+  // Issue #460 — pending re-offer for a party swap that went out but never
+  // landed. `changeMedia` only reports that the frame left the socket; the
+  // server can still reject it (host succession racing the send, party
+  // gone) and its error frame never reaches this card. Since 'spent' is
+  // otherwise terminal until the FILE changes, a rejection would strand
+  // the host with no button on a room that never moved.
+  const swapWatchdogRef = useRef<number | null>(null)
+  const clearSwapWatchdog = useCallback(() => {
+    if (swapWatchdogRef.current !== null) {
+      window.clearTimeout(swapWatchdogRef.current)
+      swapWatchdogRef.current = null
+    }
+  }, [])
+  useEffect(() => clearSwapWatchdog, [clearSwapWatchdog])
   // Identity of the file the skip state belongs to. Audio-track
   // switches and forward-seek session rebuilds change the TARGET
   // identity (the play effect re-runs) but not the file — and a
@@ -1510,6 +1531,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         setNextUpPhase('idle')
         setNextUpSecs(5)
         advanceFiredRef.current = false
+        // A new file IS the party swap landing (or any other re-target),
+        // so the pending re-offer is moot.
+        clearSwapWatchdog()
       }
     }
 
@@ -3590,7 +3614,24 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     ? skipMarkers.find(m => m.kind === 'credits' && m.end_ms > m.start_ms) ?? null
     : null
 
-  const partyAdvanceHost = !!party?.isHost && !!onPartyAdvance
+  // The card may only advance a party that is actually watching THIS
+  // media. A host can hold a party while the player shows something else
+  // — a scheduled lobby that hasn't started, or a party player they
+  // closed — and arming there would shove the whole room into an
+  // unrelated series still labelled with the party's old title.
+  //
+  // Strict equality on purpose. seekToRealSec's sibling check treats an
+  // undefined partyMediaItemId as "controlling", which is the safe
+  // default for BLOCKING a guest seek; here the same guess would push
+  // content at everyone, so an unknown party media means don't touch it.
+  //
+  // Season/episode numbers are required too: without them the parent's
+  // resolve can't run, and the host would be left clicking a live-looking
+  // button that silently does nothing.
+  const partyAdvanceHost = !!party?.isHost && !!onPartyAdvance &&
+    party.partyMediaItemId !== undefined &&
+    party.partyMediaItemId === target?.mediaItemId &&
+    target?.seasonNumber != null && target?.episodeNumber != null
   // fireAdvance carries no deps (the countdown effect depends on its
   // identity), so the party branch reads through a ref.
   const partyAdvanceHostRef = useRef(false)
@@ -3601,13 +3642,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // any episode in a party, so the host also arms on "under 2 minutes
   // left". Whichever comes first wins.
   //
-  // The duration floor matters: realDurationSec is 0 until streamInfo
-  // lands, and without the guard every episode would arm at t=0 while
-  // the duration is still unknown. Episodes shorter than the lead-in
-  // simply don't get the duration trigger (a marker still arms them).
+  // serverDurationRef is read during render rather than tracked as state
+  // because it only ever changes in lockstep with the realDurationSec
+  // state update beside it (see the stream-info boot), so a render that
+  // sees one always sees the other.
   const nextUpArmSec = target?.fileType !== 'episode' ? null : nextUpArmSecond({
     creditsStartSec: creditsMarker ? creditsMarker.start_ms / 1000 : null,
     durationSec: realDurationSec,
+    durationTrusted: serverDurationRef.current,
     partyHost: partyAdvanceHost,
   })
 
@@ -3623,7 +3665,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       try {
         outcome = (await onPartyAdvanceRef.current?.()) ?? 'failed'
       } catch { /* treated as 'failed' — re-offer below */ }
-      if (outcome === 'advanced') return // stays 'spent'; the broadcast re-points us
+      if (outcome === 'advanced') {
+        // Stays 'spent' — the server's broadcast is what re-points us, and
+        // the resulting file change resets this state (clearing the
+        // watchdog with it). If neither happens the swap was rejected, so
+        // hand the button back rather than leave a dead card.
+        clearSwapWatchdog()
+        swapWatchdogRef.current = window.setTimeout(() => {
+          swapWatchdogRef.current = null
+          advanceFiredRef.current = false
+          setNextUpPhase('prompt')
+        }, PARTY_SWAP_WATCHDOG_MS)
+        return
+      }
       advanceFiredRef.current = false
       setNextUpPhase(outcome === 'end' ? 'finale' : 'prompt')
       return
@@ -3640,7 +3694,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       advanceFiredRef.current = false
       setNextUpPhase('finale')
     }
-  }, [])
+  }, [clearSwapWatchdog])
 
   useEffect(() => {
     if (nextUpPhase !== 'idle' || nextUpArmSec == null) return
@@ -3672,13 +3726,22 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // a "wait, I'm not done" signal; resuming resumes the count).
   useEffect(() => {
     if (nextUpPhase !== 'countdown' || !playing) return
+    // Issue #460 — "no passive advance in a party" has to hold at FIRE
+    // time, not just when the card arms. A solo viewer can arm a
+    // countdown, pause, join or create a party, and resume: the timer
+    // survives all of that, and firing it would move a room nobody asked
+    // to move. Demote to the explicit-button card instead of ticking.
+    if (party) {
+      setNextUpPhase('prompt')
+      return
+    }
     if (nextUpSecs <= 0) {
       void fireAdvance(false)
       return
     }
     const id = window.setTimeout(() => setNextUpSecs(s => s - 1), 1000)
     return () => window.clearTimeout(id)
-  }, [nextUpPhase, nextUpSecs, playing, fireAdvance])
+  }, [nextUpPhase, nextUpSecs, playing, party, fireAdvance])
 
   // Finale notice auto-dismisses to 'spent' (terminal for this
   // playback) after a few seconds.
@@ -4464,7 +4527,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               {/* Series end: the advance found nothing to play. Brief
                   honest feedback (auto-dismisses) instead of a card
                   that promised a next episode and silently vanished. */}
-              {nextUpPhase === 'finale' && (
+              {nextUpPhase === 'finale' && (!party || partyAdvanceHost) && (
+                // Same party gate as the card above: a guest who armed
+                // this while watching alone and then joined a party must
+                // not be told the series ended on the host's behalf.
                 <div
                   role="status"
                   className="absolute bottom-28 right-6 z-[55] rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl px-4 py-3"

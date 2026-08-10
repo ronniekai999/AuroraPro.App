@@ -120,7 +120,7 @@ describe('changeMediaRequest', () => {
 // extra "under two minutes" rule issue #460 asked for.
 describe('nextUpArmSecond', () => {
   it('arms a solo viewer at the credits onset only', () => {
-    expect(nextUpArmSecond({ creditsStartSec: 1290, durationSec: 1400, partyHost: false }))
+    expect(nextUpArmSecond({ creditsStartSec: 1290, durationSec: 1400, durationTrusted: true, partyHost: false }))
       .toBe(1290)
   })
 
@@ -128,39 +128,71 @@ describe('nextUpArmSecond', () => {
     // The 2-minute rule is party-only — adding it for solo playback would
     // change shipped behavior, and with autoplay on it would pull every
     // viewer forward two minutes early.
-    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 1400, partyHost: false }))
+    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 1400, durationTrusted: true, partyHost: false }))
       .toBeNull()
   })
 
   it('arms a party host on an unmarked episode with 2 minutes left', () => {
-    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 1400, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 1400, durationTrusted: true, partyHost: true }))
       .toBe(1400 - PARTY_NEXT_UP_LEAD_SEC)
   })
 
   it('prefers whichever threshold comes first', () => {
     // 23:20 episode, so the duration rule lands at 21:20 (1280). A credits
     // marker at 21:30 is later, so the duration rule wins...
-    expect(nextUpArmSecond({ creditsStartSec: 1290, durationSec: 1400, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: 1290, durationSec: 1400, durationTrusted: true, partyHost: true }))
       .toBe(1280)
     // ...but a long credits sequence starting at 19:00 wins instead, so a
     // host on a marked episode still gets the card when solo viewers do.
-    expect(nextUpArmSecond({ creditsStartSec: 1140, durationSec: 1400, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: 1140, durationSec: 1400, durationTrusted: true, partyHost: true }))
       .toBe(1140)
   })
 
   it('ignores the duration rule until the real duration is known', () => {
     // realDurationSec is 0 until stream info resolves. Without the floor
     // the card would arm at second 0 on every episode in a party.
-    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 0, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 0, durationTrusted: true, partyHost: true }))
       .toBeNull()
   })
 
   it('skips the duration rule for episodes shorter than the lead-in', () => {
     // A 90-second episode would otherwise arm before it started.
-    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 90, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: null, durationSec: 90, durationTrusted: true, partyHost: true }))
       .toBeNull()
     // A marker still arms it.
-    expect(nextUpArmSecond({ creditsStartSec: 75, durationSec: 90, partyHost: true }))
+    expect(nextUpArmSecond({ creditsStartSec: 75, durationSec: 90, durationTrusted: true, partyHost: true }))
       .toBe(75)
+  })
+})
+
+// The durationTrusted gate — the review catch that mattered most. Without
+// a server-probed duration, realDurationSec tracks the media element, and
+// for an HLS EVENT playlist that value GROWS as the transcode produces
+// segments (VideoPlayer's onDurationChange documents exactly this). The
+// duration rule would then sit permanently ~2 minutes behind the playhead
+// and let a host advance the whole room three minutes into an episode.
+describe('nextUpArmSecond — untrusted duration', () => {
+  it('refuses the duration rule when the duration is not server-probed', () => {
+    expect(nextUpArmSecond({
+      creditsStartSec: null, durationSec: 1400, durationTrusted: false, partyHost: true,
+    })).toBeNull()
+  })
+
+  it('still honors a credits marker on an unprobed file', () => {
+    // Markers are stored data, unaffected by how duration was derived.
+    expect(nextUpArmSecond({
+      creditsStartSec: 1140, durationSec: 1400, durationTrusted: false, partyHost: true,
+    })).toBe(1140)
+  })
+
+  it('does not let a growing playlist length arm the card early', () => {
+    // Mid-transcode the element reports only what has been produced. Each
+    // of these would otherwise arm at playlistLen-120, which trails the
+    // playhead for the entire episode.
+    for (const playlistLen of [180, 400, 900]) {
+      expect(nextUpArmSecond({
+        creditsStartSec: null, durationSec: playlistLen, durationTrusted: false, partyHost: true,
+      })).toBeNull()
+    }
   })
 })
