@@ -1080,6 +1080,26 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, paginatedResponse(entries, total, params))
 }
 
+// ActivityTypes returns the distinct event types present in the activity log,
+// with counts, to populate the admin Activity tab's filter. The filtering
+// itself is server-side via Activity's existing ?type= param — filtering the
+// loaded page in the browser would only ever search the newest 50 rows.
+//
+// Not paginated (there are ~24 possible types, bounded by the call sites that
+// write them), so this uses the flat `{items: […]}` shape the other
+// non-paginated list endpoints use rather than the paginated envelope.
+func (h *AdminHandler) ActivityTypes(w http.ResponseWriter, r *http.Request) {
+	types, err := h.queries.GetActivityEventTypes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get activity types")
+		return
+	}
+	if types == nil {
+		types = []*models.ActivityEventType{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": types})
+}
+
 // Sessions returns active streams — transcode + direct-play —
 // as a flat array tagged with a `kind` discriminator so the admin
 // UI can render them in a single table. Direct-play sessions only

@@ -999,6 +999,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Use(auth.RequireAdmin)
 				r.Get("/dashboard", adminH.Dashboard)
 				r.Get("/activity", adminH.Activity)
+				// Distinct event types for the Activity tab's filter. Static
+				// subpath, so it can't collide with /activity itself.
+				r.Get("/activity/types", adminH.ActivityTypes)
 				r.Get("/sessions", adminH.Sessions)
 				r.Get("/sessions/{sessionID}/diagnose", adminH.DiagnoseSession)
 				r.Get("/settings", adminH.GetSettings)

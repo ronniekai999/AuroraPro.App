@@ -121,4 +121,89 @@ describe('listAdminActivity', () => {
     await listAdminActivity(10)
     expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/activity?per_page=10')
   })
+
+  // The filter has to reach the SERVER. Filtering the resolved array would
+  // only ever search the newest `perPage` rows, so a rare event would read as
+  // empty while older matches sat one page back.
+  it('sends the event-type filter as ?type=', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      data: [entry(1, 'stream_started')],
+      page: 1, per_page: 50, total_items: 1, total_pages: 1,
+    }))
+    const { listAdminActivity } = await import('./api')
+
+    const rows = await listAdminActivity(50, { eventType: 'stream_started' })
+    expect(rows).toHaveLength(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/admin/activity?per_page=50&type=stream_started',
+    )
+  })
+
+  // '' is the "All activity" option — it must not become `?type=`, which the
+  // handler would read as an empty filter anyway but which muddies the URL.
+  it('omits ?type= when no filter is selected', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      data: [], page: 1, per_page: 50, total_items: 0, total_pages: 0,
+    }))
+    const { listAdminActivity } = await import('./api')
+
+    await listAdminActivity(50, { eventType: '' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/activity?per_page=50')
+  })
+
+  it('still accepts a signal alongside the filter', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      data: [], page: 1, per_page: 50, total_items: 0, total_pages: 0,
+    }))
+    const { listAdminActivity } = await import('./api')
+    const ac = new AbortController()
+
+    await listAdminActivity(50, { eventType: 'user_login', signal: ac.signal })
+    expect(fetchMock.mock.calls[0][1].signal).toBe(ac.signal)
+  })
+})
+
+describe('listAdminActivityTypes', () => {
+  it('unwraps the `items` envelope the endpoint returns', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({
+      items: [
+        { event_type: 'oauth_login', count: 12 },
+        { event_type: 'stream_started', count: 431 },
+      ],
+    }))
+    const { listAdminActivityTypes } = await import('./api')
+
+    const types = await listAdminActivityTypes()
+    expect(types.map(t => t.event_type)).toEqual(['oauth_login', 'stream_started'])
+    expect(types[1].count).toBe(431)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/activity/types')
+  })
+
+  // A dropdown that throws would take the whole Activity tab down with it;
+  // the rows are the point and the filter is an affordance.
+  it('degrades to [] for empty, unrecognised and non-object bodies', async () => {
+    const { listAdminActivityTypes } = await import('./api')
+
+    fetchMock.mockResolvedValue(jsonResponse({ items: [] }))
+    expect(await listAdminActivityTypes()).toEqual([])
+
+    fetchMock.mockResolvedValue(jsonResponse({ unexpected: true }))
+    expect(await listAdminActivityTypes()).toEqual([])
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/html' }),
+      json: async () => { throw new Error('not json') },
+      text: async () => '<!doctype html><title>Sign in</title>',
+    } as unknown as Response)
+    await expect(listAdminActivityTypes()).resolves.toEqual([])
+  })
+
+  it('accepts a bare array', async () => {
+    fetchMock.mockResolvedValue(jsonResponse([{ event_type: 'user_login', count: 1 }]))
+    const { listAdminActivityTypes } = await import('./api')
+
+    expect(await listAdminActivityTypes()).toHaveLength(1)
+  })
 })

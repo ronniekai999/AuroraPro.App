@@ -1540,13 +1540,18 @@ export async function deleteSkipMarker(
   )
 }
 
+// `eventType` filters SERVER-side via ?type=. Filtering the resolved array
+// instead would only ever search the newest `perPage` rows, so picking a rare
+// event would look empty while older matches sat one page back.
 export async function listAdminActivity(
   perPage = 50,
-  signal?: AbortSignal,
+  opts: { eventType?: string; signal?: AbortSignal } = {},
 ): Promise<ActivityEntry[]> {
+  const qs = new URLSearchParams({ per_page: String(perPage) })
+  if (opts.eventType) qs.set('type', opts.eventType)
   const resp = await apiFetch<
     PaginatedResponse<ActivityEntry> | { items?: ActivityEntry[] } | ActivityEntry[]
-  >(`/api/admin/activity?per_page=${perPage}`, { signal })
+  >(`/api/admin/activity?${qs}`, { signal: opts.signal })
   // /api/admin/activity returns a paginated envelope. Defensive unwrap
   // because the endpoint's response shape has drifted across versions in
   // Aurora's history (the M9 audit logged it) — and that drift is exactly
@@ -1562,6 +1567,30 @@ export async function listAdminActivity(
   // text/html, redirect-followed — hits exactly this.
   if (!resp || typeof resp !== 'object') return []
   if ('data' in resp && Array.isArray(resp.data)) return resp.data
+  if ('items' in resp && Array.isArray(resp.items)) return resp.items
+  return []
+}
+
+// One selectable option in the Activity tab's filter. Server-derived rather
+// than a constant here: event types are registered ad hoc across ~24 handler
+// call sites with no central registry, so a hardcoded list would drift.
+export interface ActivityEventType {
+  event_type: string
+  count: number
+}
+
+export async function listAdminActivityTypes(
+  signal?: AbortSignal,
+): Promise<ActivityEventType[]> {
+  const resp = await apiFetch<{ items?: ActivityEventType[] } | ActivityEventType[]>(
+    '/api/admin/activity/types',
+    { signal },
+  )
+  // Same unwrap discipline as listAdminActivity above — non-object bodies
+  // (an HTML login page from a lapsed proxy session) must degrade to an
+  // empty option list, not throw on an `in` check.
+  if (Array.isArray(resp)) return resp
+  if (!resp || typeof resp !== 'object') return []
   if ('items' in resp && Array.isArray(resp.items)) return resp.items
   return []
 }
