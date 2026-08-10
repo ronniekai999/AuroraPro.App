@@ -204,6 +204,74 @@ export function shouldPreservePauseForBoot(
   return pauseOnBootToken !== undefined && pauseOnBootToken !== consumedToken
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Chromecast receiver-driven party sync (issue #461 follow-up).
+//
+// Extracted so the receiver-sync effect in VideoPlayer.tsx (which polls
+// cast.remote instead of a local <video> element while a Chromecast
+// session is the active surface for a party's media) has the same
+// regression-testable, un-mounted-component coverage as the rest of the
+// party/player policy in this file.
+
+/** Whether the party's authoritative isPlaying and the Cast receiver's
+ * reported paused state disagree — the receiver-sync effect's guest branch
+ * uses this to decide whether to call cast.playOrPause() before checking
+ * drift (a paused receiver has nothing to drift-correct). */
+export function castPlayPauseMismatch(partyIsPlaying: boolean, receiverPaused: boolean): boolean {
+  return partyIsPlaying === receiverPaused
+}
+
+/** Whether a Cast receiver's reported currentTime jumped further between two
+ * poll samples than natural playback progression over that interval could
+ * explain — i.e. the receiver was scrubbed directly (the TV remote, another
+ * Cast-aware app, or our own minimized-widget controls) rather than just
+ * continuing to play. The receiver-sync effect's host branch polls
+ * cast.remote instead of subscribing to local <video> 'seeked' events (the
+ * CAF RemotePlayerController that would fire such an event is private to
+ * cast.ts's closure), so a host-initiated seek is detected this way instead. */
+export function isCastHostSeekJump(
+  nowSec: number,
+  prevSec: number,
+  elapsedSec: number,
+  toleranceSec: number,
+): boolean {
+  const expectedSec = prevSec + Math.max(0, elapsedSec)
+  return Math.abs(nowSec - expectedSec) > toleranceSec
+}
+
+/** Project the party's tick forward by elapsed wall-clock time, clamped to
+ * the tick's local receipt age (+ a small jitter margin) so residual
+ * client↔server clock skew can't inflate the target indefinitely. Mirrors
+ * the local guest-mirror loop's own extrapolation (VideoPlayer.tsx) so the
+ * receiver-sync effect's guest branch targets the exact same absolute
+ * position a local (non-casting) guest would. */
+export function projectPartyTickAbsMs(
+  tickAbsMs: number,
+  tickServerNowMs: number,
+  tickAgeMs: number,
+  clockOffsetMs: number,
+  nowMs: number,
+): number {
+  const correctedNow = nowMs + clockOffsetMs
+  const elapsedMs = Math.min(Math.max(0, correctedNow - tickServerNowMs), tickAgeMs + 500)
+  return tickAbsMs + elapsedMs
+}
+
+/** Whether a Cast receiver's reported position has drifted far enough from
+ * the party's projected target to warrant a corrective seek. Chromecast's
+ * remote-control surface exposes no usable playback-rate knob (unlike the
+ * local <video> loop's smooth rate-adjust catch-up) and meaningful command
+ * latency to a TV makes fine-grained chasing impractical anyway, so the
+ * caller is expected to pass a coarser tolerance than local drift
+ * correction uses. */
+export function shouldResyncCastReceiver(
+  receiverSec: number,
+  targetSec: number,
+  toleranceSec: number,
+): boolean {
+  return Math.abs(receiverSec - targetSec) >= toleranceSec
+}
+
 /** Resolve late party-state changes at the instant an async boot completes. */
 export function resolvePlaybackBootPause(
   capturedPreservePause: boolean,

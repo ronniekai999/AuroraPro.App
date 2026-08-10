@@ -465,7 +465,15 @@ export function useCast(
 
     const load = await Promise.resolve(loadRef.current?.())
     if (!load) throw new Error('no media to cast')
-    if (typeof startTimeSec === 'number' && startTimeSec > 0) {
+    // >= 0, not > 0 (2026-08 review fix, issue #461 follow-up): 0 is a valid
+    // explicit resume position (the party/receiver rewound to the very
+    // start), and every caller that passes this argument at all means it as
+    // an authoritative override — "no override intended" is conveyed by
+    // omitting the argument (undefined), which the typeof check already
+    // handles. The old `> 0` silently ignored an explicit 0 and fell back to
+    // the getter's default startTime (the local <video>'s frozen position,
+    // stale since the cast session began), reloading at the wrong spot.
+    if (typeof startTimeSec === 'number' && startTimeSec >= 0) {
       load.startTime = startTimeSec
     }
     // eslint-disable-next-line no-console
