@@ -4456,6 +4456,45 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // Issue #177 / #460 — "what comes after this episode?", shared by the
+  // solo auto-advance below and the party advance beneath it.
+  //
+  // Order: the next playable episode in the current season, else the
+  // first playable episode of the earliest later season. Fileless
+  // episodes are skipped (a gap in the library shouldn't dead-end the
+  // series). Returns null at the series end.
+  //
+  // Pure resolution — no state, no staleness guards. Callers own those,
+  // because "is this result still wanted?" differs between the two
+  // (solo re-checks the local player target; the party path re-checks
+  // that AND that the host is still the host).
+  const resolveNextEpisode = useCallback(async (
+    mediaItemId: number,
+    curSeason: number,
+    curEp: number,
+    preferQuality: 'auto' | '1080p' | '4k',
+  ): Promise<{ ep: ApiEpisode; file: NonNullable<ReturnType<typeof pickFile>>; season: number } | null> => {
+    const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
+      .sort((a, b) => a.episode_number - b.episode_number)
+    for (const e of sameSeason) {
+      if (e.episode_number <= curEp) continue
+      const f = pickFile(e.files, preferQuality)
+      if (f) return { ep: e, file: f, season: curSeason }
+    }
+    const laterSeasons = [...await getSeasons(mediaItemId)]
+      .sort((a, b) => a.season_number - b.season_number)
+      .filter(s => s.season_number > curSeason)
+    for (const s of laterSeasons) {
+      const eps = [...await getEpisodes(mediaItemId, s.season_number)]
+        .sort((a, b) => a.episode_number - b.episode_number)
+      for (const e of eps) {
+        const f = pickFile(e.files, preferQuality)
+        if (f) return { ep: e, file: f, season: s.season_number }
+      }
+    }
+    return null
+  }, [])
+
   // Issue #177 — auto-play the next episode when one finishes.
   //
   // The "Auto-play next episode" toggle in Settings has shipped since
@@ -4520,37 +4559,13 @@ export default function App() {
     const endedEpisodeId = ended.episodeId
 
     try {
-      // 1) Next playable episode in the current season.
-      let nextEp: ApiEpisode | null = null
-      let nextFile: ReturnType<typeof pickFile> = null
-      let nextSeason = curSeason
-      const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
-        .sort((a, b) => a.episode_number - b.episode_number)
-      for (const e of sameSeason) {
-        if (e.episode_number <= curEp) continue
-        const f = pickFile(e.files, preferQuality)
-        if (f) { nextEp = e; nextFile = f; break }
-      }
-      // 2) Else the first playable episode of the earliest later season.
-      if (!nextEp) {
-        const laterSeasons = [...await getSeasons(mediaItemId)]
-          .sort((a, b) => a.season_number - b.season_number)
-          .filter(s => s.season_number > curSeason)
-        for (const s of laterSeasons) {
-          const eps = [...await getEpisodes(mediaItemId, s.season_number)]
-            .sort((a, b) => a.episode_number - b.episode_number)
-          for (const e of eps) {
-            const f = pickFile(e.files, preferQuality)
-            if (f) { nextEp = e; nextFile = f; nextSeason = s.season_number; break }
-          }
-          if (nextEp) break
-        }
-      }
+      const resolved = await resolveNextEpisode(mediaItemId, curSeason, curEp, preferQuality)
 
       // Bail if the player moved on while we were resolving.
       if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false) ||
           playerTargetRef.current?.episodeId !== endedEpisodeId) return false
-      if (!nextEp || !nextFile) return false // series end / nothing playable — park on final frame
+      if (!resolved) return false // series end / nothing playable — park on final frame
+      const { ep: nextEp, file: nextFile, season: nextSeason } = resolved
 
       const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
       setPlayerTarget({
@@ -4573,7 +4588,93 @@ export default function App() {
       console.warn('[Aurora] auto-advance to next episode failed', err)
       return false
     }
-  }, [party.state.code, addToast])
+  }, [party.state.code, addToast, resolveNextEpisode])
+
+  // Issue #460 — advance the WHOLE PARTY to the next episode.
+  //
+  // The counterpart to handlePlaybackEnded's `party.state.code` bail:
+  // that path refuses to advance unilaterally because it would desync
+  // guests. This one is the sanctioned route — the host resolves the
+  // next episode locally, then hands it to the server via `change-media`.
+  // The server resets the anchor to Paused@0 and echoes `media-change`
+  // to every room conn (the host's included), so nobody — host or guest
+  // — re-points off anything but the server's broadcast. That's why this
+  // function never calls setPlayerTarget: doing so would race the
+  // onMediaChange resolver and give the host a second, conflicting boot.
+  //
+  // Host-only and explicit-click-only. The autoplay preference is
+  // deliberately NOT consulted: it governs what happens when a lone
+  // viewer does nothing, and silently yanking a room full of people to
+  // the next episode is a different act than doing it to yourself.
+  //
+  // Three outcomes, because the card renders each differently and
+  // collapsing them lies to the user: 'advanced' (intent is on the wire
+  // — the swap itself arrives via the broadcast), 'end' (no next episode
+  // exists, show the finale notice), 'failed' (couldn't send or the
+  // resolve went stale — re-offer the button rather than claim the
+  // series ended).
+  // Pulled out of `party` so the callback below can depend on the sender
+  // itself (stable — useCallback with no deps) instead of on the whole
+  // hook object, which is a fresh reference on every App render.
+  const partyChangeMedia = party.changeMedia
+  const handlePartyAdvance = useCallback(async (): Promise<'advanced' | 'end' | 'failed'> => {
+    const cur = playerTargetRef.current
+    if (!cur || cur.fileType !== 'episode') return 'failed'
+    if (cur.seasonNumber == null || cur.episodeNumber == null) return 'failed'
+    const code = party.state.code
+    if (!code) return 'failed'
+    // Host-only. The manager rejects a guest's change-media anyway, but
+    // bailing here keeps a demoted host from firing a doomed swap and
+    // reporting success to the card.
+    if (!user || party.state.hostUserId !== user.id) return 'failed'
+
+    let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+      if (raw && typeof raw === 'object') {
+        const q = (raw as Record<string, unknown>).preferred_quality
+        if (q === '4k') preferQuality = '4k'
+        else if (q === '1080p') preferQuality = '1080p'
+      }
+    } catch { /* malformed prefs — keep 'auto' */ }
+
+    const resolutionGen = playbackResolutionGenRef.current
+    const fromEpisodeId = cur.episodeId
+
+    try {
+      const next = await resolveNextEpisode(cur.mediaItemId, cur.seasonNumber, cur.episodeNumber, preferQuality)
+      // Re-check everything the resolve could have outlived: the player
+      // moving on, the episode changing under us, the party ending, and
+      // host succession (a disconnect mid-resolve promotes someone else,
+      // and the server would reject the swap anyway).
+      if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false) ||
+          playerTargetRef.current?.episodeId !== fromEpisodeId) return 'failed'
+      if (partyStateRef.current.code !== code) return 'failed'
+      if (!user || partyStateRef.current.hostUserId !== user.id) return 'failed'
+      if (!next) return 'end' // series end — the card shows its finale notice
+
+      const sent = partyChangeMedia({
+        mediaItemId: cur.mediaItemId,
+        episodeId: next.ep.id,
+        // Same show, so the party's own title/poster carry over. Passing
+        // the target's title as a fallback keeps a party that somehow
+        // never received them from being blanked by this swap.
+        mediaTitle: partyStateRef.current.mediaTitle || cur.title,
+        mediaPoster: partyStateRef.current.mediaPoster || '',
+      })
+      if (!sent) {
+        addToast("Couldn't advance the party — reconnecting. Try again in a moment.", 'error')
+        return 'failed'
+      }
+      // The finished episode has completed progress now; same nonce the
+      // solo path and player-close bump.
+      setCwReloadNonce(n => n + 1)
+      return 'advanced'
+    } catch (err) {
+      console.warn('[Aurora] party advance to next episode failed', err)
+      return 'failed'
+    }
+  }, [party.state.code, party.state.hostUserId, partyChangeMedia, user, addToast, resolveNextEpisode])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
   // identity unless continueItems OR handlePlayContinue changes (both
@@ -5839,6 +5940,7 @@ export default function App() {
       <VideoPlayer
         target={playerTarget}
         onEnded={handlePlaybackEnded}
+        onPartyAdvance={handlePartyAdvance}
         isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onSurfaceChange={setPlayerSurface}
