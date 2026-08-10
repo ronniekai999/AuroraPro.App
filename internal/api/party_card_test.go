@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/png"
 	"net/http"
@@ -298,7 +299,8 @@ func TestServeCardPNG_RejectionsAreIndistinguishable404s(t *testing.T) {
 		{"token for another code", "7K2QD9", "v=story&t=" + h.cardToken("QX48TM")},
 		{"unknown party, valid-shaped token", "QX48TM", "v=story&t=" + h.cardToken("QX48TM")},
 		{"malformed code", "abc", "v=story"},
-		{"phase-2 variant", "7K2QD9", "v=square&t=" + h.cardToken("7K2QD9")},
+		{"unknown variant", "7K2QD9", "v=banner&t=" + h.cardToken("7K2QD9")},
+		{"variant case does not fold", "7K2QD9", "v=Square&t=" + h.cardToken("7K2QD9")},
 		{"nonsense variant", "7K2QD9", "v=../../etc&t=" + h.cardToken("7K2QD9")},
 	}
 	var bodies []string
@@ -397,6 +399,133 @@ func TestCardLinks_HostOnly(t *testing.T) {
 	h.CardLinks(rec, cardRequest("7K2QD9", "", "aurora.example.com", nil))
 	if rec.Code == http.StatusOK {
 		t.Error("anonymous caller received card links")
+	}
+}
+
+// card-links mints one URL per crop the compositor can render. The tag is
+// over the CODE, so all three carry the same `t` and differ only in `?v=`
+// — and each one has to actually resolve, at its own size. A link the
+// modal shows but the server 404s is worse than no link at all.
+func TestCardLinks_MintsEveryVariantAndEachOneRenders(t *testing.T) {
+	sched := time.Date(2026, 8, 15, 20, 0, 0, 0, time.UTC)
+	mgr := &fakeCardManager{states: map[string]*watchparty.PartyState{
+		"7K2QD9": cardTestParty("7K2QD9", 7, &sched),
+	}}
+	h := newCardTestHandler(t, mgr, &fakeCardQueries{
+		profile: &models.MemberProfile{UserID: 7, Username: "ronnie", DisplayName: "Ronnie"},
+	})
+
+	rec := httptest.NewRecorder()
+	h.CardLinks(rec, cardRequest("7K2QD9", "", "aurora.example.com",
+		&auth.JWTClaims{UserID: 7, Username: "ronnie", Role: "user"}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp cardLinksResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The JSON keys are the contract the SPA indexes by format, and the
+	// one Phase 3's og:image tag reads.
+	var keys map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &keys); err != nil {
+		t.Fatalf("decode as map: %v", err)
+	}
+	for _, k := range []string{"code", "story", "square", "og", "page"} {
+		if keys[k] == "" {
+			t.Errorf("card-links response has no %q", k)
+		}
+	}
+
+	token := h.cardToken("7K2QD9")
+	for _, tc := range []struct {
+		variant CardVariant
+		url     string
+	}{
+		{CardVariantStory, resp.Story},
+		{CardVariantSquare, resp.Square},
+		{CardVariantOG, resp.OG},
+	} {
+		t.Run(string(tc.variant), func(t *testing.T) {
+			want := "http://aurora.example.com/api/parties/7K2QD9/card.png?v=" +
+				string(tc.variant) + "&t=" + token
+			if tc.url != want {
+				t.Fatalf("url = %q, want %q", tc.url, want)
+			}
+			// Follow the minted URL back through the image route.
+			rec := httptest.NewRecorder()
+			h.ServeCardPNG(rec, cardRequest("7K2QD9",
+				"v="+string(tc.variant)+"&t="+token, "aurora.example.com", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s → %d", tc.url, rec.Code)
+			}
+			L, _ := cardLayoutFor(tc.variant)
+			img := decodeCard(t, rec.Body.Bytes())
+			if b := img.Bounds(); b.Dx() != L.Width || b.Dy() != L.Height {
+				t.Errorf("served %dx%d, want %dx%d", b.Dx(), b.Dy(), L.Width, L.Height)
+			}
+			// Each crop gets its own cache entry — the variant is in the
+			// filename, so square must never be served for og.
+			fp := partyCardFingerprint("7K2QD9", "Jurassic World Dominion", "", "Ronnie", &sched) +
+				hostCacheTag("http://aurora.example.com")
+			if _, err := os.Stat(partyCardCachePath(h.cacheDir, "7K2QD9", tc.variant, fp)); err != nil {
+				t.Errorf("no cache entry for this variant: %v", err)
+			}
+		})
+	}
+	if resp.Story == resp.Square || resp.Square == resp.OG {
+		t.Error("two crops were minted to the same URL")
+	}
+}
+
+// A party with no scheduled start is the LIVE case: the renderer needs the
+// flag, and it must NOT be handed a date — printing today's would be a
+// claim the party never made.
+func TestBuildCardData_LiveWhenUnscheduled(t *testing.T) {
+	h := newCardTestHandler(t, &fakeCardManager{}, &fakeCardQueries{})
+	in := cardInputs{
+		Code: "7K2QD9", MediaTitle: "Dune", HostName: "Ronnie",
+		Base: "https://aurora.example.com",
+	}
+
+	live := h.buildCardData(context.Background(), in)
+	if !live.Live {
+		t.Error("unscheduled party did not set Live")
+	}
+	if live.DateCaps != "" || live.TimeText != "" {
+		t.Errorf("unscheduled party carries a schedule: %q / %q", live.DateCaps, live.TimeText)
+	}
+
+	sched := time.Date(2026, 8, 15, 20, 0, 0, 0, time.UTC)
+	in.Scheduled = &sched
+	booked := h.buildCardData(context.Background(), in)
+	if booked.Live {
+		t.Error("a scheduled party was marked Live")
+	}
+	if booked.DateCaps == "" || booked.TimeText == "" {
+		t.Errorf("scheduled party has no date/time: %q / %q", booked.DateCaps, booked.TimeText)
+	}
+}
+
+// End to end: an unscheduled party is served, not 404ed, on every crop.
+func TestServeCardPNG_UnscheduledPartyRendersLive(t *testing.T) {
+	mgr := &fakeCardManager{states: map[string]*watchparty.PartyState{
+		"7K2QD9": cardTestParty("7K2QD9", 7, nil),
+	}}
+	h := newCardTestHandler(t, mgr, &fakeCardQueries{
+		profile: &models.MemberProfile{UserID: 7, Username: "ronnie", DisplayName: "Ronnie"},
+	})
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		rec := httptest.NewRecorder()
+		h.ServeCardPNG(rec, cardRequest("7K2QD9",
+			"v="+string(v)+"&t="+h.cardToken("7K2QD9"), "aurora.example.com", nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: status = %d, want 200", v, rec.Code)
+			continue
+		}
+		if isFlatImage(decodeCard(t, rec.Body.Bytes())) {
+			t.Errorf("%s: live card is a single flat colour", v)
+		}
 	}
 }
 
@@ -653,12 +782,13 @@ func TestComposeCard_StorySmoke(t *testing.T) {
 	}
 }
 
-// An unscheduled (live) party renders without the date/time block rather
-// than 404ing. Filling that slot with LIVE NOW is Phase 2.
+// An unscheduled party renders rather than 404ing: the schedule slot
+// carries LIVE NOW instead of a date and a clock time. One code path for
+// both cases, as the plan's eligibility rule requires.
 func TestComposeCard_NoScheduleStillRenders(t *testing.T) {
 	d := cardData{
 		Code: "7K2QD9", MediaTitle: "Dune", HostName: "Ronnie", HostInitial: "R",
-		Tagline: cardTagline, JoinLabel: "Join at aurora.example.com",
+		Live: true, Tagline: cardTagline, JoinLabel: "Join at aurora.example.com",
 		JoinURL: "https://aurora.example.com/join/7K2QD9", Seed: 1,
 	}
 	raw, err := composeCard(CardVariantStory, d)
@@ -672,9 +802,10 @@ func TestComposeCard_NoScheduleStillRenders(t *testing.T) {
 	}
 }
 
-// Phase 2's variants must not silently render as story.
+// A variant string the compositor does not know must not silently render
+// as story — the image route turns the miss into a 404 instead.
 func TestComposeCard_UnknownVariantErrors(t *testing.T) {
-	for _, v := range []CardVariant{"square", "og", "", "STORY"} {
+	for _, v := range []CardVariant{"", "STORY", "Square", "banner", "og.png"} {
 		if _, err := composeCard(v, cardData{Code: "7K2QD9", MediaTitle: "Dune"}); err == nil {
 			t.Errorf("composeCard(%q) succeeded; want an error", v)
 		}
@@ -705,6 +836,337 @@ func TestComposeCard_LongTitleKeepsJoinBarOnCard(t *testing.T) {
 	if rowMean(img, storyLayout.Height-4) > rowMean(img, storyLayout.Height-40) {
 		t.Error("join bar appears to run off the bottom edge")
 	}
+}
+
+// ── The reflowed crops: square + og ─────────────────────────────────
+
+// sampleCardData is the mockup's own content, which is what the layout
+// tables were transcribed against.
+func sampleCardData() cardData {
+	return cardData{
+		Code: "7K2QD9", MediaTitle: "Jurassic World Dominion",
+		MetaLine: "2022 · Action Adventure · 2h 27m",
+		DateCaps: "Saturday, August 15", TimeText: "8:00 PM EDT",
+		HostName: "Ronnie", HostInitial: "R", Tagline: cardTagline,
+		JoinLabel: "Join at aurorapro.app",
+		JoinURL:   "https://aurorapro.app/join/7K2QD9",
+		Seed:      cardSeed("7K2QD9"),
+	}
+}
+
+func decodeCard(t *testing.T, raw []byte) image.Image {
+	t.Helper()
+	img, err := png.Decode(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("not a PNG: %v", err)
+	}
+	return img
+}
+
+// Each crop decodes at its declared size, actually draws something, and
+// renders byte-identically on a re-run — the disk cache can be dropped at
+// any moment, so two renders of one party must not differ.
+func TestComposeCard_EveryVariantSmoke(t *testing.T) {
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		t.Run(string(v), func(t *testing.T) {
+			L, ok := cardLayoutFor(v)
+			if !ok {
+				t.Fatalf("no layout for %q", v)
+			}
+			d := sampleCardData()
+			raw, err := composeCard(v, d)
+			if err != nil {
+				t.Fatalf("composeCard: %v", err)
+			}
+			img := decodeCard(t, raw)
+			if b := img.Bounds(); b.Dx() != L.Width || b.Dy() != L.Height {
+				t.Errorf("size = %dx%d, want %dx%d", b.Dx(), b.Dy(), L.Width, L.Height)
+			}
+			if isFlatImage(img) {
+				t.Error("rendered card is a single flat colour")
+			}
+			again, err := composeCard(v, d)
+			if err != nil {
+				t.Fatalf("second composeCard: %v", err)
+			}
+			if !bytes.Equal(raw, again) {
+				t.Error("composeCard is not deterministic for identical input")
+			}
+			// Different party, different sky.
+			d2 := d
+			d2.Code, d2.Seed = "QX48TM", cardSeed("QX48TM")
+			other, err := composeCard(v, d2)
+			if err != nil {
+				t.Fatalf("third composeCard: %v", err)
+			}
+			if bytes.Equal(raw, other) {
+				t.Error("two parties rendered byte-identical cards")
+			}
+		})
+	}
+}
+
+// The three crops are three compositions, not one image at three sizes.
+func TestComposeCard_VariantsAreDistinct(t *testing.T) {
+	seen := map[string]CardVariant{}
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		raw, err := composeCard(v, sampleCardData())
+		if err != nil {
+			t.Fatalf("composeCard(%q): %v", v, err)
+		}
+		key := string(raw)
+		if prev, dup := seen[key]; dup {
+			t.Errorf("%q rendered byte-identically to %q", v, prev)
+		}
+		seen[key] = v
+	}
+}
+
+// The reflow is the whole point of these two crops: the poster takes the
+// left, and every line of type sets flush left in the column beside it.
+//
+// Rendered WITHOUT key art on purpose — with the poster plate empty, any
+// bright pixel left of the column is type that escaped, and the assertion
+// is about where the type went rather than what the artwork looks like.
+func TestComposeCard_SideBySidePutsAllTypeBesideThePoster(t *testing.T) {
+	live := sampleCardData()
+	live.DateCaps, live.TimeText, live.Live = "", "", true
+
+	for _, v := range []CardVariant{CardVariantSquare, CardVariantOG} {
+		for _, tc := range []struct {
+			name string
+			d    cardData
+		}{{"scheduled", sampleCardData()}, {"live", live}} {
+			t.Run(string(v)+"/"+tc.name, func(t *testing.T) {
+				L, _ := cardLayoutFor(v)
+				colX := L.PadX + L.PosterW + L.ContentGap
+				raw, err := composeCard(v, tc.d)
+				if err != nil {
+					t.Fatalf("composeCard: %v", err)
+				}
+				img := decodeCard(t, raw)
+
+				// Type is set at or near full white; the curtain, the poster
+				// plate and the brightest starfield speck all stay well under.
+				const typeLevel = 0.85 * 65535
+				if got := maxLuma(img, image.Rect(0, 0, colX-4, L.Height)); got >= typeLevel {
+					t.Errorf("type appears left of the column (max luma %.0f at x<%d)", got, colX-4)
+				}
+				if got := maxLuma(img, image.Rect(colX, 0, L.Width, L.Height)); got < typeLevel {
+					t.Errorf("no type found in the text column (max luma %.0f)", got)
+				}
+				// And the poster plate really is drawn on the left: its centre
+				// must differ from the ground beside it.
+				mid := L.PadTop + (L.Height-L.PadTop-L.PadBottom)/2
+				if sameColour(img.At(L.PadX+L.PosterW/2, mid), img.At(L.Width-2, mid)) {
+					t.Error("poster plate is missing from the left column")
+				}
+			})
+		}
+	}
+}
+
+// The CTA must not slide off the bottom edge, on any crop, at content the
+// design was drawn for or well past it. Same shape of assertion as the
+// story's: the last scanline has to be quieter than the CTA's own.
+func TestComposeCard_CTAStaysOnTheCard(t *testing.T) {
+	long := sampleCardData()
+	long.MediaTitle = "Everything Everywhere All at Once: The Extended Multiverse Director's Cut"
+	long.HostName = "Bartholomew Featherstonehaugh-Wellington III"
+	long.MetaLine = "2022 · Action Adventure Science Fiction Comedy Drama · 2h 59m"
+	live := sampleCardData()
+	live.DateCaps, live.TimeText, live.Live = "", "", true
+
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		for _, tc := range []struct {
+			name string
+			d    cardData
+		}{{"designed", sampleCardData()}, {"overlong", long}, {"live", live}} {
+			t.Run(string(v)+"/"+tc.name, func(t *testing.T) {
+				L, _ := cardLayoutFor(v)
+				raw, err := composeCard(v, tc.d)
+				if err != nil {
+					t.Fatalf("composeCard: %v", err)
+				}
+				img := decodeCard(t, raw)
+				ctaH := L.JoinH
+				if ctaH == 0 {
+					ctaH = 2 * L.ChipPadY // the og crop's pill
+				}
+				if rowMean(img, L.Height-4) > rowMean(img, L.Height-L.PadBottom-ctaH/2) {
+					t.Error("the CTA appears to run off the bottom edge")
+				}
+			})
+		}
+	}
+}
+
+// LIVE NOW occupies the schedule slot: one row, taking the DATE row's
+// leading margin (it replaces the whole date+time block, not just the
+// time) and set at the TIME's size in the TIME's face.
+//
+// Asserted on the flow rather than on pixels, because the flow is where
+// the contract lives — a shorter column legitimately re-centres the whole
+// composition, so a pixel diff between a live and a scheduled card spans
+// every row and proves nothing.
+func TestCardColumn_LiveNowTakesTheScheduleSlot(t *testing.T) {
+	lib, err := cardFonts()
+	if err != nil {
+		t.Fatalf("cardFonts: %v", err)
+	}
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		t.Run(string(v), func(t *testing.T) {
+			L, _ := cardLayoutFor(v)
+			dst := image.NewRGBA(image.Rect(0, 0, L.Width, L.Height))
+			colW := L.Width - 2*L.PadX
+			schedule := func(d cardData) []cardBlock {
+				c := newCardColumn(dst, L, lib, d, L.PadX, colW, L.ContentGap == 0)
+				if err := c.addSchedule(); err != nil {
+					t.Fatalf("addSchedule: %v", err)
+				}
+				return c.blocks
+			}
+
+			live := sampleCardData()
+			live.DateCaps, live.TimeText, live.Live = "", "", true
+			liveBlocks := schedule(live)
+			if len(liveBlocks) != 1 {
+				t.Fatalf("live schedule produced %d rows, want 1", len(liveBlocks))
+			}
+			if got := liveBlocks[0].marginTop; got != L.DateMarginTop {
+				t.Errorf("live row margin-top = %d, want the date row's %d", got, L.DateMarginTop)
+			}
+
+			// Same label pushed through the TIME row proves the live row is
+			// set in the time's face at the time's size: identical height.
+			asTime := sampleCardData()
+			asTime.DateCaps, asTime.TimeText = "", cardLiveLabel
+			timeBlocks := schedule(asTime)
+			if len(timeBlocks) != 1 {
+				t.Fatalf("time-only schedule produced %d rows, want 1", len(timeBlocks))
+			}
+			if liveBlocks[0].height != timeBlocks[0].height {
+				t.Errorf("live row is %dpx tall, the time row is %dpx — different face or size",
+					liveBlocks[0].height, timeBlocks[0].height)
+			}
+			if liveBlocks[0].height <= 0 {
+				t.Error("live row has no height")
+			}
+
+			// A scheduled party still gets both rows, in order.
+			booked := schedule(sampleCardData())
+			if len(booked) != 2 {
+				t.Fatalf("scheduled party produced %d rows, want date + time", len(booked))
+			}
+			if booked[0].marginTop != L.DateMarginTop || booked[1].marginTop != L.TimeMarginTop {
+				t.Errorf("scheduled margins = %d/%d, want %d/%d",
+					booked[0].marginTop, booked[1].marginTop, L.DateMarginTop, L.TimeMarginTop)
+			}
+		})
+	}
+}
+
+// And end to end: the live treatment is really drawn — a card with the
+// flag set differs from one whose schedule fields are simply blank, on
+// every crop.
+func TestComposeCard_LiveNowIsDrawn(t *testing.T) {
+	for _, v := range []CardVariant{CardVariantStory, CardVariantSquare, CardVariantOG} {
+		t.Run(string(v), func(t *testing.T) {
+			blank := sampleCardData()
+			blank.DateCaps, blank.TimeText = "", ""
+			live := blank
+			live.Live = true
+
+			blankRaw, err := composeCard(v, blank)
+			if err != nil {
+				t.Fatalf("composeCard(blank): %v", err)
+			}
+			liveRaw, err := composeCard(v, live)
+			if err != nil {
+				t.Fatalf("composeCard(live): %v", err)
+			}
+			if bytes.Equal(blankRaw, liveRaw) {
+				t.Error("an unscheduled party rendered no LIVE NOW treatment")
+			}
+			booked, err := composeCard(v, sampleCardData())
+			if err != nil {
+				t.Fatalf("composeCard(scheduled): %v", err)
+			}
+			if bytes.Equal(booked, liveRaw) {
+				t.Error("the live card is indistinguishable from a scheduled one")
+			}
+			if isFlatImage(decodeCard(t, liveRaw)) {
+				t.Error("live card is a single flat colour")
+			}
+		})
+	}
+}
+
+// The layout tables ARE the spec (each is a transcription of one `.card-*`
+// block), so the arithmetic they have to satisfy is worth pinning: the
+// declared crop sizes, and enough room for both columns.
+func TestCardLayouts_GeometryHolds(t *testing.T) {
+	cases := []struct {
+		v             CardVariant
+		width, height int
+	}{
+		{CardVariantStory, 1080, 1920},
+		{CardVariantSquare, 1080, 1080},
+		{CardVariantOG, 1200, 630},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.v), func(t *testing.T) {
+			L, ok := cardLayoutFor(tc.v)
+			if !ok {
+				t.Fatalf("no layout registered for %q", tc.v)
+			}
+			if L.Variant != tc.v {
+				t.Errorf("layout self-identifies as %q", L.Variant)
+			}
+			if L.Width != tc.width || L.Height != tc.height {
+				t.Errorf("crop = %dx%d, want %dx%d", L.Width, L.Height, tc.width, tc.height)
+			}
+			if L.PosterH+L.PadTop+L.PadBottom > L.Height {
+				t.Errorf("poster (%d) does not fit between the vertical padding", L.PosterH)
+			}
+			if L.ContentGap == 0 {
+				return // story stacks; the checks below are for the reflow
+			}
+			colW := L.Width - 2*L.PadX - L.PosterW - L.ContentGap
+			if colW <= 0 {
+				t.Fatalf("text column has width %d", colW)
+			}
+			// A join bar has to hold its own text beside the QR; a code
+			// chip has to be narrower than the column it sets in.
+			if L.JoinH > 0 && colW <= 2*L.JoinPadX+L.QRSize+L.JoinTextGap {
+				t.Errorf("join bar leaves no room for the code beside the QR")
+			}
+			if L.JoinH == 0 && L.ChipLabelSize <= 0 {
+				t.Error("crop has neither a join bar nor a code chip — no CTA")
+			}
+		})
+	}
+}
+
+// maxLuma is the brightest pixel mean inside r.
+func maxLuma(img image.Image, r image.Rectangle) float64 {
+	r = r.Intersect(img.Bounds())
+	var max float64
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			cr, cg, cb, _ := img.At(x, y).RGBA()
+			if v := float64(cr+cg+cb) / 3; v > max {
+				max = v
+			}
+		}
+	}
+	return max
+}
+
+func sameColour(a, b color.Color) bool {
+	r1, g1, b1, a1 := a.RGBA()
+	r2, g2, b2, a2 := b.RGBA()
+	return r1 == r2 && g1 == g2 && b1 == b2 && a1 == a2
 }
 
 // ── Cache invalidation + reaper ─────────────────────────────────────
@@ -919,21 +1381,39 @@ func TestServeCardPNG_UnsafeHostDoesNotLeakExistence(t *testing.T) {
 // dark panel — produced a symbol the ZXing/OpenCV lineage refuses, so the
 // renderer plates it. Guard the plate: the QR's own footprint must be
 // dark-on-light.
+//
+// The square's bar carries the same symbol at 74px with a 6px quiet zone,
+// so the plating has to survive the smaller footprint too — that crop is
+// where a borderless symbol would fail first.
 func TestDrawJoinQR_IsDarkOnLight(t *testing.T) {
-	L := &storyLayout
-	img := image.NewRGBA(image.Rect(0, 0, L.QRSize, L.QRSize))
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: hexRGBA(tokenInk, 1)}, image.Point{}, draw.Src)
-	if err := drawJoinQR(img, L, "https://aurora.example.com/join/7K2QD9", 0, 0); err != nil {
-		t.Fatalf("drawJoinQR: %v", err)
-	}
-	// The plate's interior mean must be light; a light-on-dark symbol
-	// would sit well under half.
-	if mean := rowMean(img, L.QRSize/2); mean < 0.5*65535 {
-		t.Errorf("QR row mean = %.0f of 65535; the symbol is not on a light plate", mean)
-	}
-	// The quiet-zone corner must be plate, not module.
-	r, g, b, _ := img.At(2, L.QRSize/2).RGBA()
-	if float64(r+g+b)/3 < 0.7*65535 {
-		t.Error("no quiet zone inside the plate")
+	for _, L := range []*cardLayout{&storyLayout, &squareLayout} {
+		t.Run(string(L.Variant), func(t *testing.T) {
+			if L.QRSize == 0 {
+				t.Skip("crop has no QR")
+			}
+			img := image.NewRGBA(image.Rect(0, 0, L.QRSize, L.QRSize))
+			draw.Draw(img, img.Bounds(), &image.Uniform{C: hexRGBA(tokenInk, 1)}, image.Point{}, draw.Src)
+			if err := drawJoinQR(img, L, "https://aurora.example.com/join/7K2QD9", 0, 0); err != nil {
+				t.Fatalf("drawJoinQR: %v", err)
+			}
+			// The plate's interior mean must be light; a light-on-dark
+			// symbol would sit well under half.
+			if mean := rowMean(img, L.QRSize/2); mean < 0.5*65535 {
+				t.Errorf("QR row mean = %.0f of 65535; the symbol is not on a light plate", mean)
+			}
+			// The quiet-zone corner must be plate, not module.
+			r, g, b, _ := img.At(2, L.QRSize/2).RGBA()
+			if float64(r+g+b)/3 < 0.7*65535 {
+				t.Error("no quiet zone inside the plate")
+			}
+			// A quiet zone that swallowed the symbol is not a QR: some of
+			// the plate has to be dark modules.
+			if maxLuma(img, image.Rect(0, 0, L.QRSize, L.QRSize)) == 0 {
+				t.Error("nothing drawn")
+			}
+			if rowMean(img, L.QRSize/2) > 0.98*65535 {
+				t.Error("plate carries no modules — the symbol did not render")
+			}
+		})
 	}
 }

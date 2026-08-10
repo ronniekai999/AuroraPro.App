@@ -23,7 +23,8 @@ import (
 // Watch-party share card — HTTP surface
 // ============================================================
 //
-//	GET /api/parties/{code}/card.png?v=story&t={token}   public, HMAC-gated
+//	GET /api/parties/{code}/card.png?v={story|square|og}&t={token}
+//	                                                     public, HMAC-gated
 //	GET /api/parties/{code}/card-links                   authed, HOST-ONLY
 //
 // The image route has to stay unauthenticated — a crawler unfurling a
@@ -145,15 +146,29 @@ func partyCardCachePath(cacheDir, code string, variant CardVariant, fingerprint 
 		fmt.Sprintf("%s-%s-%s.png", code, variant, fingerprint))
 }
 
-// cardLinksResponse is what the SPA's share modal consumes.
+// cardLinksResponse is what the SPA's share modal consumes: one signed
+// URL per crop the compositor can render, plus the party's own page.
 //
-// Phase 1 mints the story URL only. Phase 2 adds `square` and `og` here
-// as it adds those variants to the compositor — emitting URLs today for
-// crops that 404 would be worse than omitting them.
+// The JSON keys match CardVariant's values, which is what lets the modal
+// index this object by the selected format instead of switching on it.
 type cardLinksResponse struct {
-	Code  string `json:"code"`
-	Story string `json:"story"`
-	Page  string `json:"page"`
+	Code   string `json:"code"`
+	Story  string `json:"story"`
+	Square string `json:"square"`
+	OG     string `json:"og"`
+	Page   string `json:"page"`
+}
+
+// cardImageURL builds the public URL for one crop.
+//
+// The HMAC tag is over the CODE alone, not the variant, so all three URLs
+// carry the same `t` and differ only in `?v=`. That is deliberate: a host
+// who has been given one crop's link has been given the party, and
+// per-variant tags would buy nothing but three times the surface.
+//
+// Phase 3's og:image tag wants exactly this call with CardVariantOG.
+func cardImageURL(base, code string, variant CardVariant, token string) string {
+	return fmt.Sprintf("%s/api/parties/%s/card.png?v=%s&t=%s", base, code, variant, token)
 }
 
 // CardLinks handles GET /api/parties/{code}/card-links.
@@ -192,10 +207,11 @@ func (h *PartyShareHandler) CardLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	token := h.cardToken(code)
 	writeJSON(w, http.StatusOK, cardLinksResponse{
-		Code: code,
-		Story: fmt.Sprintf("%s/api/parties/%s/card.png?v=%s&t=%s",
-			base, code, CardVariantStory, token),
-		Page: fmt.Sprintf("%s/p/%s", base, code),
+		Code:   code,
+		Story:  cardImageURL(base, code, CardVariantStory, token),
+		Square: cardImageURL(base, code, CardVariantSquare, token),
+		OG:     cardImageURL(base, code, CardVariantOG, token),
+		Page:   fmt.Sprintf("%s/p/%s", base, code),
 	})
 }
 
@@ -355,9 +371,15 @@ func (h *PartyShareHandler) buildCardData(ctx context.Context, in cardInputs) ca
 		Seed:        cardSeed(in.Code),
 	}
 	if in.Scheduled != nil {
-		// A live/unscheduled party simply leaves the slot empty in Phase
-		// 1; the LIVE NOW treatment that fills it is Phase 2.
 		d.DateCaps, d.TimeText = formatCardWhen(*in.Scheduled)
+	} else {
+		// No scheduled start means the room is open NOW. The schedule slot
+		// carries LIVE NOW in the time's own face, gradient and shadow
+		// rather than collapsing, so the composition keeps its shape
+		// instead of leaving a hole where the moment should be. DateCaps
+		// and TimeText stay empty: there is no date to print, and printing
+		// today's would be a claim the party never made.
+		d.Live = true
 	}
 	if in.MediaPoster != "" {
 		if img, err := h.fetchPosterImage(in.MediaPoster); err == nil {

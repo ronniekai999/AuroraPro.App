@@ -9,7 +9,7 @@
 //      nowhere else — "right now" means the host is about to be in the
 //      room, not posting about it.
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
@@ -33,24 +33,121 @@ import { PartyComposerModal } from './PartyComposerModal'
 const LINKS = {
   code: '7K2QD9',
   story: 'http://localhost:3000/api/parties/7K2QD9/card.png?v=story&t=abcdef0123456789',
+  square: 'http://localhost:3000/api/parties/7K2QD9/card.png?v=square&t=abcdef0123456789',
+  og: 'http://localhost:3000/api/parties/7K2QD9/card.png?v=og&t=abcdef0123456789',
   page: 'http://localhost:3000/p/7K2QD9',
 }
 
 const soon = () => new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString()
 
 describe('PartyShareCardModal', () => {
-  it('renders the signed preview and the Phase 1 actions', async () => {
+  it('renders the signed preview and every action', async () => {
     getPartyCardLinks.mockResolvedValueOnce(LINKS)
     render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
 
     const img = await screen.findByAltText('Watch party card for code 7K2QD9')
     expect(img).toHaveAttribute('src', LINKS.story)
     expect(screen.getByRole('button', { name: 'Download PNG' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Share…' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Copy link' })).toBeInTheDocument()
-    // Phase 1 ships one crop; the tab strip is the seam Phase 2 widens.
-    expect(screen.getAllByRole('tab')).toHaveLength(1)
+    // Three crops off one composition.
+    expect(screen.getAllByRole('tab').map(t => t.textContent)).toEqual(['Story', 'Square', 'Link preview'])
     // The privacy promise is stated on the surface that publishes it.
     expect(screen.getByText(/nobody\s+you invited is shown/i)).toBeInTheDocument()
+  })
+
+  it('re-points the preview at the selected crop, at that crop’s real size', async () => {
+    getPartyCardLinks.mockResolvedValueOnce(LINKS)
+    render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
+    await screen.findByAltText('Watch party card for code 7K2QD9')
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Square' }))
+    let img = screen.getByAltText('Watch party card for code 7K2QD9')
+    expect(img).toHaveAttribute('src', LINKS.square)
+    expect(img).toHaveAttribute('width', '1080')
+    expect(img).toHaveAttribute('height', '1080')
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Link preview' }))
+    img = screen.getByAltText('Watch party card for code 7K2QD9')
+    expect(img).toHaveAttribute('src', LINKS.og)
+    expect(img).toHaveAttribute('width', '1200')
+    expect(img).toHaveAttribute('height', '630')
+  })
+
+  // stubShare installs a Web Share capable navigator and a fetch that
+  // answers with a PNG. Hand-rolled, not `new Response(...)`: jsdom's Blob
+  // and the global fetch Response come from different implementations and
+  // do not interoperate.
+  const stubShare = (share: (data: ShareData) => Promise<void>) => {
+    Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true })
+    Object.defineProperty(window.navigator, 'share', { value: share, configurable: true })
+    return vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob(['png'], { type: 'image/png' }),
+    } as unknown as Response)
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window.navigator, 'canShare')
+    Reflect.deleteProperty(window.navigator, 'share')
+    vi.restoreAllMocks()
+  })
+
+  it('hands the selected crop to the OS share sheet', async () => {
+    getPartyCardLinks.mockResolvedValue(LINKS)
+    const share = vi.fn<(data: ShareData) => Promise<void>>(async () => {})
+    const fetchSpy = stubShare(share)
+
+    render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
+    await screen.findByAltText('Watch party card for code 7K2QD9')
+    await userEvent.click(screen.getByRole('tab', { name: 'Square' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Share…' }))
+
+    await waitFor(() => expect(share).toHaveBeenCalled())
+    // The crop the host is looking at is the crop that gets shared.
+    expect(fetchSpy).toHaveBeenCalledWith(LINKS.square, { credentials: 'same-origin' })
+    const payload = share.mock.calls[0][0]
+    expect(payload.files?.[0]?.name).toBe('aurora-watch-party-7K2QD9-square.png')
+    expect(await screen.findByText('Shared')).toBeInTheDocument()
+  })
+
+  it('says nothing at all when the host dismisses the share sheet', async () => {
+    // Backing out of the sheet is a decision, not a failure. No toast, no
+    // error line, and nothing saved behind their back.
+    getPartyCardLinks.mockResolvedValue(LINKS)
+    const share = vi.fn(async () => {
+      throw Object.assign(new Error('canceled'), { name: 'AbortError' })
+    })
+    stubShare(share)
+
+    render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
+    await screen.findByAltText('Watch party card for code 7K2QD9')
+    await userEvent.click(screen.getByRole('button', { name: 'Share…' }))
+
+    await waitFor(() => expect(share).toHaveBeenCalled())
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText(/could not share/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/saved to your downloads/i)).not.toBeInTheDocument()
+  })
+
+  it('falls back to a download where the browser will not take files', async () => {
+    getPartyCardLinks.mockResolvedValue(LINKS)
+    const share = vi.fn(async () => {})
+    Object.defineProperty(window.navigator, 'canShare', { value: () => false, configurable: true })
+    Object.defineProperty(window.navigator, 'share', { value: share, configurable: true })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true, status: 200, blob: async () => new Blob(['png'], { type: 'image/png' }),
+    } as unknown as Response)
+    globalThis.URL.createObjectURL = () => 'blob:fake'
+    globalThis.URL.revokeObjectURL = () => {}
+
+    render(<PartyShareCardModal code="7K2QD9" onClose={() => {}} />)
+    await screen.findByAltText('Watch party card for code 7K2QD9')
+    await userEvent.click(screen.getByRole('button', { name: 'Share…' }))
+
+    expect(await screen.findByText('Saved to your downloads')).toBeInTheDocument()
+    expect(share).not.toHaveBeenCalled()
   })
 
   it('surfaces a card-links failure instead of a broken preview', async () => {
