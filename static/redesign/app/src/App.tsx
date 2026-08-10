@@ -2086,6 +2086,14 @@ export default function App() {
   // inside such a callback would capture a stale snapshot.
   const partyStateRef = useRef(party.state)
   partyStateRef.current = party.state
+  // Issue #460 — set when THIS client sent the change-media that is about
+  // to come back as a media-change broadcast. Two things key off it in the
+  // resolver: the host's own player boots playing (so "Play for all"
+  // actually plays instead of parking the room at Paused@0), and the
+  // "host moved everyone" notice is suppressed for the person who did it.
+  // Consumed on the first media-change that arrives, so a rejected swap
+  // can't leave it armed for someone else's later change.
+  const partySelfAdvanceRef = useRef(false)
   // Manual player dismissal is scoped to one party/media/role lifecycle. It
   // prevents the auto-open recovery effect from immediately recreating a
   // player the user just closed, while a new episode or promotion to host can
@@ -3220,6 +3228,10 @@ export default function App() {
     return party.onMediaChange((p) => {
       const myGen = ++mediaChangeGenRef.current
       mediaChangePendingGenRef.current = myGen
+      // Consume synchronously: whoever sent the swap is decided now, not
+      // after an async resolve that a second broadcast could interleave with.
+      const selfAdvanced = partySelfAdvanceRef.current
+      partySelfAdvanceRef.current = false
       void (async () => {
         try {
           if (p.episode_id) {
@@ -3253,10 +3265,24 @@ export default function App() {
               title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
               subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
               partyRecoveryBoot: true,
-              pauseOnBootToken: partyStateRef.current.isPlaying
+              // Issue #460 — the host who asked for this advance boots
+              // PLAYING. ChangeMedia always parks the room at Paused@0, so
+              // the usual isPlaying check would pause the very person who
+              // just clicked "Play for all". Booting unpaused lets the
+              // player's existing host-broadcast recovery fire request-play,
+              // which resumes the whole room. Guests still boot paused and
+              // follow that broadcast, exactly as they do for any host play.
+              pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
             })
+            // Guests get no other signal that the room moved — the episode
+            // simply changes under them after a resolve that can take
+            // seconds on a long series. Host succession already toasts for
+            // a smaller disruption than this.
+            if (!selfAdvanced) {
+              addToast(`Host started S${foundSeasonNum}E${foundEp.episode_number}`, 'info')
+            }
           } else {
             // Movie — fetch files + play first.
             const files = await getMediaFiles(p.media_item_id)
@@ -3271,7 +3297,8 @@ export default function App() {
               fileType: 'media',
               title: titleDetail?.title ?? 'Untitled',
               partyRecoveryBoot: true,
-              pauseOnBootToken: partyStateRef.current.isPlaying
+              // Same self-advance rule as the episode branch above.
+              pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
             })
@@ -4675,15 +4702,35 @@ export default function App() {
         addToast("Couldn't advance the party — reconnecting. Try again in a moment.", 'error')
         return 'failed'
       }
-      // The finished episode has completed progress now; same nonce the
-      // solo path and player-close bump.
+      // Tell the host's own player to resume once the swap lands, so the
+      // one click that says "Play for all" actually plays. ChangeMedia
+      // parks the room at Paused@0 by design; without this the card
+      // vanishes, the next episode boots frozen, and someone has to hunt
+      // for play. Consumed by the onMediaChange resolver.
+      partySelfAdvanceRef.current = true
+
+      // Mark the outgoing episode watched. It is NOT complete on its own:
+      // completion is 95%, and the 2-minute rule fires at ~91% of a 22
+      // minute episode, so without this the episode the party just
+      // finished lingers in Continue Watching, resumes near the end, and —
+      // because history surfaces require completed_at — never reaches
+      // recent watches or the follow feed. Deliberate: choosing "next
+      // episode" IS finishing this one. Fire-and-forget; a failure costs
+      // a stale rail, not the advance.
+      if (fromEpisodeId != null) {
+        void markWatched(cur.mediaItemId, {
+          episode_id: fromEpisodeId,
+          profile_id: activeProfileId ?? undefined,
+        }).catch(() => { /* non-fatal — the swap already went out */ })
+      }
+      // Same nonce the solo path and player-close bump.
       setCwReloadNonce(n => n + 1)
       return 'advanced'
     } catch (err) {
       console.warn('[Aurora] party advance to next episode failed', err)
       return 'failed'
     }
-  }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode])
+  }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode, activeProfileId])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
   // identity unless continueItems OR handlePlayContinue changes (both

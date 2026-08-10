@@ -4485,7 +4485,17 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   <div className="p-[15px] pb-3.5">
                     {/* One polite announcement when the card appears, with no
                         number in it, so it never re-fires. */}
-                    <span className="sr-only" role="status">Next episode available</span>
+                    {/* Still number-free so it announces exactly once, but
+                        it has to carry the blast radius: the visible
+                        "plays for everyone" line sits outside the live
+                        region, so without this a screen-reader host hears
+                        precisely what a solo viewer hears before taking an
+                        action that moves the whole room. */}
+                    <span className="sr-only" role="status">
+                      {partyAdvanceHost
+                        ? 'Next episode available — playing it starts it for everyone in the party'
+                        : 'Next episode available'}
+                    </span>
                     <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
                     <p className="text-white text-[13.5px] font-semibold mt-1">Next episode</p>
                     {/* Issue #460 — name the blast radius. The host's click
