@@ -188,7 +188,7 @@ func (h *PartyShareHandler) CardLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ps := h.manager.GetPartyState(code)
+	ps := h.lookupParty(code)
 	if ps == nil {
 		writeError(w, http.StatusNotFound, "party not found or has ended")
 		return
@@ -270,7 +270,7 @@ func (h *PartyShareHandler) ServeCardPNG(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ps := h.manager.GetPartyState(code)
+	ps := h.lookupParty(code)
 	if ps == nil {
 		notFound()
 		return
