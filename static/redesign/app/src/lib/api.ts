@@ -2089,6 +2089,16 @@ export async function setDefaultProfile(id: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}/default`, { method: 'POST' })
 }
 
+// Binds `id` as this session's server-side acting profile (issue #462) —
+// distinct from setDefaultProfile's account-wide persistent default. The
+// server derives the parental rating ceiling from this, never from a
+// client-supplied value, so it must be called whenever the local active
+// profile changes. Best-effort by design: local switching (activeProfileId)
+// already works instantly regardless of this call's outcome.
+export async function activateProfile(id: number): Promise<void> {
+  await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST' })
+}
+
 export interface Watchlist {
   id: number
   profile_id: number

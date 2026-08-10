@@ -430,9 +430,9 @@ func (q *Queries) CreateFirstAdmin(ctx context.Context, username, email, passwor
 func (q *Queries) CreateRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
 	hashed := hashToken(rt.Token)
 	return q.pool.QueryRow(ctx,
-		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info)
-		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo,
+		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo, rt.ActiveProfileID,
 	).Scan(&rt.ID, &rt.CreatedAt)
 }
 
@@ -440,10 +440,10 @@ func (q *Queries) GetRefreshToken(ctx context.Context, token string) (*models.Re
 	hashed := hashToken(token)
 	rt := &models.RefreshToken{}
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')
+		`SELECT id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, ''), active_profile_id
 		 FROM refresh_tokens WHERE token = $1 AND NOT revoked AND expires_at > NOW()`,
 		hashed,
-	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo, &rt.ActiveProfileID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -467,9 +467,9 @@ func (q *Queries) RevokeAndGetRefreshToken(ctx context.Context, token string) (*
 	err := q.pool.QueryRow(ctx,
 		`UPDATE refresh_tokens SET revoked = TRUE
 		 WHERE token = $1 AND NOT revoked AND expires_at > NOW()
-		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')`,
+		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, ''), active_profile_id`,
 		hashed,
-	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo, &rt.ActiveProfileID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil

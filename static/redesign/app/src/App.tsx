@@ -49,6 +49,7 @@ import {
   getAdminDashboard,
   listAdminActivity,
   listProfiles,
+  activateProfile,
   setProfileMaturity,
   updateProfile,
   listWatchlists,
@@ -2186,6 +2187,16 @@ export default function App() {
       if (activeProfileId) localStorage.setItem('aurora_active_profile_id', String(activeProfileId))
       else localStorage.removeItem('aurora_active_profile_id')
     } catch { /* ignore */ }
+  }, [activeProfileId])
+  // Issue #462 — bind the switch server-side so parental-rating enforcement
+  // (which never trusts a client-supplied profile id) knows which profile is
+  // acting. Fire-and-forget: local switching above already works instantly
+  // regardless of this call's outcome, and a transient failure here just
+  // means enforcement uses the account default until the next successful
+  // switch or token refresh.
+  useEffect(() => {
+    if (!activeProfileId) return
+    void activateProfile(activeProfileId).catch(() => { /* best-effort */ })
   }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.

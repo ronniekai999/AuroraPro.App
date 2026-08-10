@@ -90,11 +90,41 @@ func NewTVHandler(queries *db.Queries) *TVHandler {
 	return &TVHandler{queries: queries}
 }
 
+// ratingCeilingBlocksMedia reports whether mediaID's content_rating exceeds
+// claims' acting sub-profile's rating ceiling (issue #462). Returns
+// blocked=false, err=nil when the media item doesn't exist at all — that's
+// a "nothing to protect" case, not a bypass, and existing callers already
+// degrade gracefully (empty seasons/episodes) for an unknown id. Fails
+// CLOSED on a genuine lookup/resolve error, same rationale as
+// StreamHandler.ratingCeilingBlocks: this is the security boundary.
+func (h *TVHandler) ratingCeilingBlocksMedia(ctx context.Context, claims *auth.JWTClaims, mediaID int64) (bool, error) {
+	item, err := h.queries.GetMediaItem(ctx, mediaID)
+	if err != nil {
+		return true, err
+	}
+	if item == nil {
+		return false, nil
+	}
+	profile, err := h.queries.ResolveActingProfile(ctx, claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		return true, err
+	}
+	return !db.RatingAllowed(profile.MaxAgeRating, item.ContentRating), nil
+}
+
 // GetSeasons returns all seasons for a TV show.
 func (h *TVHandler) GetSeasons(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	mediaID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
+		return
+	}
+	if blocked, err := h.ratingCeilingBlocksMedia(r.Context(), claims, mediaID); err != nil || blocked {
+		denyRatingCeiling(w, mediaID, err)
 		return
 	}
 
@@ -111,6 +141,10 @@ func (h *TVHandler) GetSeasons(w http.ResponseWriter, r *http.Request) {
 
 // GetEpisodes returns all episodes for a specific season.
 func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	mediaID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
@@ -119,6 +153,10 @@ func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
 	seasonNum, err := strconv.Atoi(chi.URLParam(r, "season"))
 	if err != nil || seasonNum < 0 {
 		writeError(w, http.StatusBadRequest, "invalid season number")
+		return
+	}
+	if blocked, err := h.ratingCeilingBlocksMedia(r.Context(), claims, mediaID); err != nil || blocked {
+		denyRatingCeiling(w, mediaID, err)
 		return
 	}
 
@@ -146,7 +184,6 @@ func (h *TVHandler) GetEpisodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Attach files and user progress for each episode
-	claims := auth.GetClaims(r.Context())
 	for i := range episodes {
 		if crossFiles, ok := crossFileMap[episodes[i].ID]; ok && len(crossFiles) > 0 {
 			for _, f := range crossFiles {
@@ -268,6 +305,10 @@ func NewMetadataHandler(queries *db.Queries, enricher *metadata.Enricher, imgPro
 
 // GetEnriched returns a media item with all TMDB-enriched data.
 func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid media id")
@@ -281,6 +322,17 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeError(w, http.StatusInternalServerError, "failed to get media item")
 		}
+		return
+	}
+
+	// Rating-ceiling enforcement (issue #462) — 404 (not distinguishable
+	// from true not-found) rather than exposing metadata for a title the
+	// acting profile can't see.
+	if profile, perr := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); perr != nil {
+		denyRatingCeiling(w, id, perr)
+		return
+	} else if !db.RatingAllowed(profile.MaxAgeRating, enriched.ContentRating) {
+		denyRatingCeiling(w, id, nil)
 		return
 	}
 
@@ -361,8 +413,7 @@ func (h *MetadataHandler) GetEnriched(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load user progress
-	claims := auth.GetClaims(r.Context())
-	if claims != nil {
+	{
 		progress, _ := h.queries.GetWatchProgress(r.Context(), claims.UserID, id, nil)
 		// For TV shows, episode progress is stored with episode_id (never show-level),
 		// so the above query returns nil. Fall back to the most recent in-progress episode.
@@ -702,6 +753,27 @@ func (h *StreamHandler) resolveFilePath(ctx context.Context, fileID int64, fileT
 	}
 }
 
+// resolveFileWithType is resolveFilePath plus the resolved "media"/"episode"
+// type — needed wherever a caller must know which table matched (the
+// rating-ceiling check and the direct-play registry both key on it) but
+// only has an optional/ambiguous fileType hint, same media-then-episode
+// fallback order as resolveFilePath.
+func (h *StreamHandler) resolveFileWithType(ctx context.Context, fileID int64, fileType string) (path, resolvedType string, err error) {
+	path, err = h.resolveFilePath(ctx, fileID, fileType)
+	if err != nil {
+		return "", "", err
+	}
+	resolvedType = fileType
+	if resolvedType != "media" && resolvedType != "episode" {
+		if _, ferr := h.queries.GetMediaFileByID(ctx, fileID); ferr == nil {
+			resolvedType = "media"
+		} else {
+			resolvedType = "episode"
+		}
+	}
+	return path, resolvedType, nil
+}
+
 // mediaRoots returns the configured library paths, EvalSymlinks-resolved, for the
 // direct-play symlink-containment guard in streaming.ServeFile. Best-effort: on a
 // libraries-lookup error it returns nil, which makes ServeFile skip containment
@@ -724,6 +796,46 @@ func (h *StreamHandler) mediaRoots(ctx context.Context) []string {
 		}
 	}
 	return roots
+}
+
+// ratingCeilingBlocks reports whether fileID (fileType "media" or "episode")
+// exceeds claims' acting sub-profile's rating ceiling (issue #462) — the
+// read/playback enforcement point that replaced the client-elective
+// max_rating/profile_id the discovery filter used to trust. claims must be
+// non-nil; every caller sits behind RequireAuth.
+//
+// Fails CLOSED on a lookup error (blocked=true) — unlike ChangeMedia's
+// fail-open existence check (a non-security convenience check where
+// straying couldn't leak content), this IS the security boundary, so a
+// transient DB hiccup must deny rather than silently fall back to
+// unrestricted.
+func (h *StreamHandler) ratingCeilingBlocks(ctx context.Context, claims *auth.JWTClaims, fileID int64, fileType string) (bool, error) {
+	var rating string
+	var err error
+	if fileType == "episode" {
+		rating, err = h.queries.GetContentRatingForEpisodeFile(ctx, fileID)
+	} else {
+		rating, err = h.queries.GetContentRatingForMediaFile(ctx, fileID)
+	}
+	if err != nil {
+		return true, err
+	}
+	profile, err := h.queries.ResolveActingProfile(ctx, claims.UserID, claims.RefreshTokenID)
+	if err != nil {
+		return true, err
+	}
+	return !db.RatingAllowed(profile.MaxAgeRating, rating), nil
+}
+
+// denyRatingCeiling writes the uniform "not found" response for a
+// rating-ceiling block or lookup failure — 404, not 403, so a restricted
+// profile probing file ids can't distinguish "exceeds your ceiling" from
+// "doesn't exist" (issue #462's suggested direction).
+func denyRatingCeiling(w http.ResponseWriter, fileID int64, err error) {
+	if err != nil {
+		slog.Error("rating ceiling check failed, denying by default", "file_id", fileID, "error", err)
+	}
+	writeError(w, http.StatusNotFound, "file not found")
 }
 
 // ServeDirectFile unconditionally serves a media file for direct playback.
@@ -819,6 +931,16 @@ func (h *StreamHandler) CreateDirectCastToken(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Rating-ceiling enforcement AT MINT time (issue #462): once issued,
+	// this cast token is a bearer capability for exactly one file with no
+	// further profile check (serveDirectFile skips its own live check for
+	// ScopeCast tokens) — so the check has to happen here, using the
+	// minting session's own acting profile, or it never happens at all.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, fileType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
+		return
+	}
+
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
 		claims.UserID, claims.Username, claims.Role, claims.TokenVersion,
 		directCastSessionID(fileType, fileID),
@@ -839,10 +961,25 @@ func (h *StreamHandler) CreateDirectCastToken(w http.ResponseWriter, r *http.Req
 // (RequireAuth: browser cookies/bearer) and ServeDirectCastFile
 // (RequireStreamAuth: also file-bound cast tokens).
 func (h *StreamHandler) serveDirectFile(w http.ResponseWriter, r *http.Request, fileID int64, fileType string) {
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, ft, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
 		return
+	}
+
+	claims := auth.GetClaims(r.Context())
+
+	// Rating-ceiling enforcement (issue #462). Skipped for cast-scoped
+	// tokens: ServeDirectCastFile's caller already validated the exact
+	// (fileType, fileID) binding above us, and CreateDirectCastToken checks
+	// the ceiling at MINT time using the minting session's acting profile —
+	// a cast token has no "current profile" of its own to re-check against,
+	// same trust model the existing SessionID binding already uses.
+	if claims != nil && claims.Scope != auth.ScopeCast {
+		if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, ft); err != nil || blocked {
+			denyRatingCeiling(w, fileID, err)
+			return
+		}
 	}
 
 	// Extend the write deadline for direct play: the default server WriteTimeout
@@ -851,7 +988,6 @@ func (h *StreamHandler) serveDirectFile(w http.ResponseWriter, r *http.Request, 
 	// one write, so we give it 4 hours — matching a typical feature-length film.
 	extendWriteDeadline(w, r, 4*time.Hour, "direct file")
 
-	claims := auth.GetClaims(r.Context())
 	// HEAD is a preflight, not playback: skip every side effect so probes
 	// don't create phantom "now streaming" entries or activity rows. One
 	// enclosing guard (2026-07 review) so future side effects can't forget
@@ -864,22 +1000,7 @@ func (h *StreamHandler) serveDirectFile(w http.ResponseWriter, r *http.Request, 
 		// Active Streams view can show this stream alongside transcodes.
 		// Range requests during playback keep calling this handler →
 		// touching extends LastAccess. Idle gaps > TTL expire the entry.
-		//
-		// fileType is whitelisted to prevent a malicious client from
-		// iterating arbitrary `?type=` strings against the same fileID
-		// and creating unbounded registry entries before TTL sweeps them.
 		if h.directPlay != nil {
-			ft := fileType
-			if ft != "media" && ft != "episode" {
-				// Match the resolveFilePath fallback above: media first,
-				// episode second. We use the same disambiguator (which
-				// table the lookup succeeded against) by re-checking.
-				if _, err := h.queries.GetMediaFileByID(r.Context(), fileID); err == nil {
-					ft = "media"
-				} else {
-					ft = "episode"
-				}
-			}
 			sid := h.directPlay.Touch(claims.UserID, claims.Username, ft, fileID, filepath.Base(filePath), "direct_play")
 			// Heartbeat the registry while the response is being written
 			// — http.ServeFile is synchronous and for single-range
@@ -940,6 +1061,21 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// This route sits behind RequireAuth, so claims is always populated in
+	// production; the nil check is defensive symmetry with the transcode
+	// branch below.
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462), before either the direct-play
+	// or transcode-fallback branch below can touch the file.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, "media"); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
+		return
+	}
+
 	// Check if direct play is possible
 	if streaming.CanDirectPlay(file.Container, file.VideoCodec, file.AudioCodec) {
 		// Extend write deadline for direct play (default 120s is too short for movies)
@@ -949,8 +1085,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		// broadcast. ONE enclosing guard so the next side effect added here
 		// can't forget its own clause and reintroduce phantom "now
 		// streaming" entries for player preflights.
-		claims := auth.GetClaims(r.Context())
-		if claims != nil && r.Method != http.MethodHead {
+		if r.Method != http.MethodHead {
 			// Log direct play stream start
 			if h.activity != nil {
 				h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
@@ -975,12 +1110,7 @@ func (h *StreamHandler) StreamMediaFile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Fall back to adaptive HLS transcode
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
+	// Fall back to adaptive HLS transcode.
 	// HEAD preflight: this route answers JSON (the HLS redirect shape) for
 	// non-direct-playable files. Report reachability without spawning a
 	// transcode session as a side effect.
@@ -1040,13 +1170,27 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// This route sits behind RequireAuth, so claims is always populated in
+	// production; the nil check is defensive symmetry with the transcode
+	// branch below.
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462), before either the direct-play
+	// or transcode-fallback branch below can touch the file.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, "episode"); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
+		return
+	}
+
 	if streaming.CanDirectPlay(file.Container, file.VideoCodec, file.AudioCodec) {
 		// Extend write deadline for direct play (default 120s is too short for episodes)
 		extendWriteDeadline(w, r, 4*time.Hour, "direct play episode")
 		// HEAD preflights skip every side effect — one enclosing guard, same
 		// rationale as StreamMediaFile.
-		claims := auth.GetClaims(r.Context())
-		if claims != nil && r.Method != http.MethodHead {
+		if r.Method != http.MethodHead {
 			// Log direct play stream start
 			if h.activity != nil {
 				h.activity.LogStreamStarted(r.Context(), claims.UserID, filepath.Base(file.Path), "direct_play")
@@ -1076,11 +1220,6 @@ func (h *StreamHandler) StreamEpisodeFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	claims := auth.GetClaims(r.Context())
-	if claims == nil {
-		writeError(w, http.StatusUnauthorized, "authentication required")
-		return
-	}
 	// HEAD preflight: this route answers JSON (the HLS redirect shape) for
 	// non-direct-playable files. Report reachability without spawning a
 	// transcode session as a side effect.
@@ -1405,6 +1544,14 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		fileVideoCodec = f.VideoCodec
 		fileVideoPixFmt = f.VideoPixFmt
 		fileVideoFPS = f.VideoFPS
+	}
+
+	// Rating-ceiling enforcement (issue #462) — this is the transcode-session
+	// mint point; a session (and the HLS playlist URL it hands back) must
+	// never be issued for content the acting profile can't see.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, req.FileID, req.FileType); err != nil || blocked {
+		denyRatingCeiling(w, req.FileID, err)
+		return
 	}
 
 	srcW, srcH := parseResolution(resolution)
@@ -1962,6 +2109,10 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 
 // GetSubtitles lists available subtitle tracks for a media file.
 func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid file id")
@@ -1971,9 +2122,17 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 	// Resolve file path using the type hint to avoid ID collisions
 	// between media_files and episode_files (separate BIGSERIAL sequences)
 	fileType := r.URL.Query().Get("type") // "media" or "episode"
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, resolvedType, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462) — a subtitle track's dialogue
+	// is as much "the content" as the video for this purpose (full
+	// transcript of an over-ceiling title), same read-path gate as
+	// StreamMediaFile/StreamEpisodeFile.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, resolvedType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
 		return
 	}
 
@@ -2023,6 +2182,10 @@ func (h *StreamHandler) GetSubtitles(w http.ResponseWriter, r *http.Request) {
 //     VTT is cached separately from the raw extracted VTT keyed by
 //     (fileID, trackIdx, start).
 func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	fileID, err := strconv.ParseInt(chi.URLParam(r, "fileID"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid file id")
@@ -2036,9 +2199,14 @@ func (h *StreamHandler) ServeSubtitle(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve file path using type hint to avoid ID collisions
 	fileType := r.URL.Query().Get("type")
-	filePath, resolveErr := h.resolveFilePath(r.Context(), fileID, fileType)
+	filePath, resolvedType, resolveErr := h.resolveFileWithType(r.Context(), fileID, fileType)
 	if resolveErr != nil {
 		writeError(w, http.StatusNotFound, "file not found")
+		return
+	}
+	// Rating-ceiling enforcement (issue #462) — see GetSubtitles.
+	if blocked, err := h.ratingCeilingBlocks(r.Context(), claims, fileID, resolvedType); err != nil || blocked {
+		denyRatingCeiling(w, fileID, err)
 		return
 	}
 

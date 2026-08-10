@@ -105,7 +105,7 @@ func TestHealth_BadToken_TreatedAsAnonymous(t *testing.T) {
 // A valid access token via the Authorization: Bearer header authenticates.
 func TestHealthCallerAuthed_BearerHeader(t *testing.T) {
 	svc := healthTestService()
-	tok, _, err := svc.GenerateAccessToken(1, "alice", "user", 0)
+	tok, _, err := svc.GenerateAccessToken(1, "alice", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestHealthCallerAuthed_BearerHeader(t *testing.T) {
 // cookie path must also count as authenticated.
 func TestHealthCallerAuthed_AccessCookie(t *testing.T) {
 	svc := healthTestService()
-	tok, _, err := svc.GenerateAccessToken(1, "alice", "user", 0)
+	tok, _, err := svc.GenerateAccessToken(1, "alice", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestHealthCallerAuthed_Negatives(t *testing.T) {
 	})
 	t.Run("non-bearer scheme", func(t *testing.T) {
 		svc := healthTestService()
-		tok, _, _ := svc.GenerateAccessToken(1, "alice", "user", 0)
+		tok, _, _ := svc.GenerateAccessToken(1, "alice", "user", 0, 0)
 		req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 		req.Header.Set("Authorization", "Basic "+tok) // valid token, wrong scheme
 		if healthCallerAuthed(req, svc, nil) {
@@ -161,7 +161,7 @@ func TestHealthCallerAuthed_Negatives(t *testing.T) {
 		}
 	})
 	t.Run("nil service", func(t *testing.T) {
-		tok, _, _ := svc.GenerateAccessToken(1, "alice", "user", 0)
+		tok, _, _ := svc.GenerateAccessToken(1, "alice", "user", 0, 0)
 		req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if healthCallerAuthed(req, nil, nil) {

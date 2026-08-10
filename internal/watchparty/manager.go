@@ -2797,7 +2797,11 @@ const changeMediaValidateTimeout = 2 * time.Second
 // each client (re-)opens it, OR the next tick / pause broadcast carries
 // the new anchor — but in practice clients teardown+reopen their sync
 // socket as part of the player re-init, so they receive a fresh hello.
-func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
+// callerUserID/callerRefreshTokenID identify whoever SENT the change-media
+// message, not necessarily the host — the host-only check below runs AFTER
+// the DB validation block (see that block's own comment for why), so
+// naming these "host*" would be misleading about what's verified when.
+func (m *Manager) ChangeMedia(code string, callerUserID int64, callerRefreshTokenID int64, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
@@ -2822,8 +2826,8 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	// without a pool).
 	if m.queries != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), changeMediaValidateTimeout)
+		defer cancel()
 		ok, err := m.queries.PartyMediaTargetExists(ctx, newMediaItemID, newEpisodeID)
-		cancel()
 		if err != nil {
 			// Don't strand the room on a transient DB hiccup: log and let
 			// the swap through, exactly as the persist path already
@@ -2833,6 +2837,32 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 		} else if !ok {
 			return errUser("unknown media for this party")
 		}
+
+		// Issue #462 — best-effort early rejection using the CALLER's own
+		// rating ceiling (not yet verified as the host — see below). This is
+		// deliberately NOT the security boundary (the real one is the
+		// read/playback path enforcement in internal/api/phase2_handlers.go,
+		// which every participant's player hits regardless of how it
+		// learned the media id) — it only covers a host swapping to
+		// something above their OWN ceiling, not a participant whose
+		// ceiling is lower than the host's. Party JOIN carries no per-
+		// participant rating gate at all (pre-existing, documented limit);
+		// closing that is separate follow-up work, not this fix. Fails OPEN
+		// on a lookup error, matching the existence check above — this
+		// check exists for a good error message, not enforcement.
+		//
+		// Running this before the host-only check below is safe: it only
+		// ever resolves and applies the CALLER's own ceiling (ownership-
+		// scoped by ResolveActingProfile), so a non-host learns nothing
+		// beyond "would this exceed MY OWN ceiling" — the same answer
+		// GetEnriched already gives them directly for any media id.
+		if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
+			if profile, perr := m.queries.ResolveActingProfile(ctx, callerUserID, callerRefreshTokenID); perr == nil && profile != nil {
+				if !db.RatingAllowed(profile.MaxAgeRating, item.ContentRating) {
+					return errUser("media exceeds this profile's content rating")
+				}
+			}
+		}
 	}
 
 	ps.mu.Lock()
@@ -2841,7 +2871,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	// Host-only — guests can't reroute the whole party to a different
 	// episode. (Future: allow with democratic vote if AllowPause-style
 	// settings expand.)
-	if ps.HostUserID != hostUserID {
+	if ps.HostUserID != callerUserID {
 		return errUser("only the host can change media")
 	}
 

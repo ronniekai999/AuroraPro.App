@@ -118,7 +118,7 @@ func TestVerifyPassword_InvalidFormat(t *testing.T) {
 func TestGenerateAccessToken_RoundTrip(t *testing.T) {
 	svc := newTestService()
 
-	tokenStr, expiresAt, err := svc.GenerateAccessToken(42, "testuser", "admin", 0)
+	tokenStr, expiresAt, err := svc.GenerateAccessToken(42, "testuser", "admin", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -151,6 +151,42 @@ func TestGenerateAccessToken_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestGenerateAccessToken_RefreshTokenIDRoundTrip pins issue #462's server-
+// authoritative acting-profile plumbing: the refresh_tokens row id minted
+// alongside an access token must survive the sign/parse round trip intact,
+// since db.ResolveActingProfile keys off this claim to find which sub-
+// profile is bound to the session — a lossy claim would silently reopen
+// the ceiling bypass by always falling back to the default profile.
+func TestGenerateAccessToken_RefreshTokenIDRoundTrip(t *testing.T) {
+	svc := newTestService()
+
+	tokenStr, _, err := svc.GenerateAccessToken(42, "testuser", "user", 0, 12345)
+	if err != nil {
+		t.Fatalf("GenerateAccessToken() error: %v", err)
+	}
+	claims, err := svc.ValidateAccessToken(tokenStr)
+	if err != nil {
+		t.Fatalf("ValidateAccessToken() error: %v", err)
+	}
+	if claims.RefreshTokenID != 12345 {
+		t.Errorf("claims.RefreshTokenID = %d, want 12345", claims.RefreshTokenID)
+	}
+
+	// Zero must round-trip as zero too (the "no session bound yet" case —
+	// pre-#462 tokens and any caller that hasn't adopted this feature).
+	tokenStr, _, err = svc.GenerateAccessToken(42, "testuser", "user", 0, 0)
+	if err != nil {
+		t.Fatalf("GenerateAccessToken() error: %v", err)
+	}
+	claims, err = svc.ValidateAccessToken(tokenStr)
+	if err != nil {
+		t.Fatalf("ValidateAccessToken() error: %v", err)
+	}
+	if claims.RefreshTokenID != 0 {
+		t.Errorf("claims.RefreshTokenID = %d, want 0", claims.RefreshTokenID)
+	}
+}
+
 func TestValidateAccessToken_Expired(t *testing.T) {
 	svc := NewService(config.AuthConfig{
 		JWTSecret:         "test-secret-key-that-is-at-least-32-chars-long-for-testing",
@@ -162,7 +198,7 @@ func TestValidateAccessToken_Expired(t *testing.T) {
 		Argon2KeyLength:   32,
 	})
 
-	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0)
+	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -179,7 +215,7 @@ func TestValidateAccessToken_Expired(t *testing.T) {
 func TestValidateAccessToken_Tampered(t *testing.T) {
 	svc := newTestService()
 
-	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0)
+	tokenStr, _, err := svc.GenerateAccessToken(1, "user", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -245,7 +281,7 @@ func TestValidateAccessToken_WrongSecret(t *testing.T) {
 		Argon2KeyLength:   32,
 	})
 
-	tokenStr, _, err := svc1.GenerateAccessToken(1, "user", "user", 0)
+	tokenStr, _, err := svc1.GenerateAccessToken(1, "user", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -388,7 +424,7 @@ func TestRefreshTokenExpiry(t *testing.T) {
 func TestTokenClaims_Subject(t *testing.T) {
 	svc := newTestService()
 
-	tokenStr, _, err := svc.GenerateAccessToken(123, "testuser", "user", 0)
+	tokenStr, _, err := svc.GenerateAccessToken(123, "testuser", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}
@@ -479,7 +515,7 @@ func TestValidateAccessToken_RejectsCastToken(t *testing.T) {
 // dedicated validator should require Scope == ScopeCast.
 func TestValidateCastToken_RejectsRegularToken(t *testing.T) {
 	svc := newCastTestService()
-	tok, _, err := svc.GenerateAccessToken(1, "u", "user", 0)
+	tok, _, err := svc.GenerateAccessToken(1, "u", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("GenerateAccessToken() error: %v", err)
 	}

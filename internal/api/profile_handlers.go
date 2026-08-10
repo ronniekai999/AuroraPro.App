@@ -297,6 +297,63 @@ func (h *ProfileHandler) SetDefault(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": "default profile updated"})
 }
 
+// ActivateProfile binds profileID as this SESSION's server-side acting
+// profile (issue #462) — the rating-ceiling source of truth for read/
+// playback enforcement, distinct from SetDefault's account-wide persistent
+// default. Called by the SPA's profile switcher alongside (not instead of)
+// its existing localStorage state, so switching still works instantly on
+// the client; this call is what makes the switch hold up server-side.
+func (h *ProfileHandler) ActivateProfile(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
+	profileID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid profile id")
+		return
+	}
+
+	profile, err := h.queries.GetProfile(r.Context(), profileID)
+	if err != nil || profile == nil {
+		writeError(w, http.StatusNotFound, "profile not found")
+		return
+	}
+	if profile.UserID != claims.UserID {
+		writeError(w, http.StatusForbidden, "access denied")
+		return
+	}
+
+	if claims.RefreshTokenID == 0 {
+		// This access token predates the session-binding feature (or is a
+		// scoped/cast token, which never carries one) — there's no
+		// refresh_tokens row to bind against yet. Not an error: the SPA's
+		// own localStorage switch still works for display, and enforcement
+		// falls back to the account default profile until this session's
+		// next token refresh mints a token that does carry one (access
+		// tokens are short-lived, so that's typically minutes away).
+		writeJSON(w, http.StatusOK, map[string]string{"message": "profile activated locally; will bind server-side after next token refresh"})
+		return
+	}
+
+	bound, err := h.queries.SetActiveProfileForToken(r.Context(), claims.RefreshTokenID, claims.UserID, profileID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to activate profile")
+		return
+	}
+	if !bound {
+		// The session (refresh_tokens row) itself is gone — revoked by a
+		// concurrent logout/refresh between this request's auth check and
+		// this write. Reporting success here would silently leave
+		// enforcement on the account default; the caller should re-auth
+		// and retry rather than believe the switch took.
+		writeError(w, http.StatusConflict, "session no longer active; please refresh and retry")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "profile activated"})
+}
+
 // ============================================================
 // Watchlist Handlers
 // ============================================================

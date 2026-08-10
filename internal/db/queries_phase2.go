@@ -1528,6 +1528,41 @@ func (q *Queries) GetEpisodeFileByID(ctx context.Context, id int64) (*models.Epi
 	return f, nil
 }
 
+// GetContentRatingForEpisodeFile returns the content_rating of the show that
+// owns episodeFileID, for parental-ceiling enforcement on the read/playback
+// path (issue #462) — content_rating lives on media_items, not per-episode.
+// Empty string (nil error) means unrated; callers must treat that as
+// EXCLUDED under any restriction, matching AllowedRatingsForMax/RatingAllowed.
+// A missing episodeFileID returns pgx.ErrNoRows, same as the file lookups.
+func (q *Queries) GetContentRatingForEpisodeFile(ctx context.Context, episodeFileID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(mi.content_rating, '')
+		FROM episode_files ef
+		JOIN tv_episodes e ON e.id = ef.episode_id
+		JOIN media_items mi ON mi.id = e.media_item_id
+		WHERE ef.id = $1`, episodeFileID).Scan(&rating)
+	if err != nil {
+		return "", err
+	}
+	return rating, nil
+}
+
+// GetContentRatingForMediaFile is the movie-file counterpart of
+// GetContentRatingForEpisodeFile (issue #462).
+func (q *Queries) GetContentRatingForMediaFile(ctx context.Context, mediaFileID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(mi.content_rating, '')
+		FROM media_files mf
+		JOIN media_items mi ON mi.id = mf.media_item_id
+		WHERE mf.id = $1`, mediaFileID).Scan(&rating)
+	if err != nil {
+		return "", err
+	}
+	return rating, nil
+}
+
 // ============================================================
 // Version Tag Queries
 // ============================================================
