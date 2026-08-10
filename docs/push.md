@@ -2,8 +2,11 @@
 
 Aurora delivers notifications to devices even when no tab is open: request
 ready/failed (to the requester), watch-party highlight reels (to the host),
-and two admin alerts — a new request awaiting review, and library scans that
-added items. Design: `do/pwa-push/IMPLEMENTATION.md` (Phase 2).
+watch-party invites / RSVPs / start reminders (migration 051), and two admin
+alerts — a new request awaiting review, and library scans that added items.
+Every type the dispatcher persists is also pushed; `push.Envelope` is the
+single place that maps a notification type to its title and body. Design:
+`do/pwa-push/IMPLEMENTATION.md` (Phase 2).
 
 ## Zero configuration
 
