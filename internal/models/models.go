@@ -175,6 +175,11 @@ type RefreshToken struct {
 	CreatedAt  time.Time `json:"created_at"`
 	Revoked    bool      `json:"revoked"`
 	DeviceInfo string    `json:"device_info,omitempty"`
+	// ActiveProfileID is the sub-profile currently bound to this session
+	// (issue #462) — set via ProfileHandler.ActivateProfile, consulted by
+	// db.ResolveActingProfile. nil = no explicit switch yet, falls back to
+	// the account default profile.
+	ActiveProfileID *int64 `json:"active_profile_id,omitempty"`
 }
 
 type InviteCode struct {

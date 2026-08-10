@@ -91,6 +91,55 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 	return p, nil
 }
 
+// ResolveActingProfile returns the sub-profile currently bound to
+// refreshTokenID (set via ProfileHandler.ActivateProfile), falling back to
+// the account's default profile when there's no binding — refreshTokenID is
+// 0 (a cast-scoped token, or an access token minted before this feature
+// shipped), the bound profile was deleted, or it no longer belongs to
+// userID. This is issue #462's fix: it is the ONLY place read/playback
+// (and now discovery) rating-ceiling enforcement should get an acting
+// profile from — never a client-supplied profile_id/max_rating, which was
+// a full bypass (the ceiling was entirely client-elective).
+func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error) {
+	if refreshTokenID != 0 {
+		var profileID *int64
+		err := q.pool.QueryRow(ctx,
+			`SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2 AND NOT revoked`,
+			refreshTokenID, userID,
+		).Scan(&profileID)
+		if err != nil && err != pgx.ErrNoRows {
+			return nil, fmt.Errorf("resolve acting profile: %w", err)
+		}
+		if profileID != nil {
+			p, err := q.GetProfile(ctx, *profileID)
+			if err != nil {
+				return nil, err
+			}
+			if p != nil && p.UserID == userID {
+				return p, nil
+			}
+		}
+	}
+	return q.GetDefaultProfile(ctx, userID)
+}
+
+// SetActiveProfileForToken binds profileID as the acting sub-profile for the
+// session identified by refreshTokenID (issue #462). Returns false if no
+// matching, non-revoked row exists for userID — the caller has already
+// validated profileID ownership separately, so this only fails when the
+// session itself is gone (e.g. concurrent logout).
+func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, userID, profileID int64) (bool, error) {
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE refresh_tokens SET active_profile_id = $1
+		 WHERE id = $2 AND user_id = $3 AND NOT revoked`,
+		profileID, refreshTokenID, userID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *models.UpdateProfileRequest) error {
 	setClauses := []string{}
 	args := []interface{}{}

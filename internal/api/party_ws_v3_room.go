@@ -314,7 +314,7 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			// server-side, so this is the only path that needs the guard.
 			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
 			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
-			if err := h.manager.ChangeMedia(code, claims.UserID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
+			if err := h.manager.ChangeMedia(code, claims.UserID, claims.RefreshTokenID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))
 			}
 

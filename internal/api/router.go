@@ -1019,6 +1019,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/{id}", profileH.UpdateProfile)
 				r.Delete("/{id}", profileH.DeleteProfile)
 				r.Post("/{id}/default", profileH.SetDefault)
+				// Session-bound acting profile (issue #462) — distinct from
+				// SetDefault's account-wide persistent default; this is what
+				// read/playback rating-ceiling enforcement consults.
+				r.Post("/{id}/activate", profileH.ActivateProfile)
 
 				// Watchlists (nested under profile)
 				r.Get("/{profileId}/watchlists", profileH.ListWatchlists)

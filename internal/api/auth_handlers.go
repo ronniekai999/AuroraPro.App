@@ -95,13 +95,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate tokens
-	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-
+	// Generate tokens. The refresh token row is created FIRST (issue #462)
+	// so its id is known and can ride the access token as the "rtid" claim —
+	// the server-side anchor for which sub-profile is currently acting.
 	refreshTokenStr, err := h.authSvc.GenerateRefreshToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
@@ -116,6 +112,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.queries.CreateRefreshToken(r.Context(), rt); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+		return
+	}
+
+	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion, rt.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
@@ -360,14 +362,8 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		_, _ = h.queries.DeleteUser(r.Context(), user.ID)
 	}
 
-	// Generate tokens for immediate login
-	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion)
-	if err != nil {
-		rollbackUser(err)
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-
+	// Generate tokens for immediate login. Refresh token row first (issue
+	// #462) so its id is known for the access token's "rtid" claim.
 	refreshTokenStr, err := h.authSvc.GenerateRefreshToken()
 	if err != nil {
 		rollbackUser(err)
@@ -383,6 +379,13 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if err := h.queries.CreateRefreshToken(r.Context(), rt); err != nil {
 		rollbackUser(err)
 		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+		return
+	}
+
+	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion, rt.ID)
+	if err != nil {
+		rollbackUser(err)
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 
@@ -471,12 +474,6 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-
 	newRefreshStr, err := h.authSvc.GenerateRefreshToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate refresh token")
@@ -487,9 +484,20 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		Token:      newRefreshStr,
 		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
 		DeviceInfo: r.UserAgent(),
+		// Carry the acting-profile binding forward across rotation (issue
+		// #462) — access tokens are short-lived (15 min) and refresh
+		// silently in the background, so without this the user's active
+		// profile would revert to the account default every rotation.
+		ActiveProfileID: rt.ActiveProfileID,
 	}
 	if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store refresh token")
+		return
+	}
+
+	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion, newRT.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
 		return
 	}
 

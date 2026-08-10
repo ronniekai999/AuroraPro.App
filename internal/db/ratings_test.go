@@ -65,6 +65,33 @@ func TestAllowedRatingsForMax(t *testing.T) {
 	}
 }
 
+// TestRatingAllowed pins issue #462's fail-closed contract for the
+// single check every read/playback and discovery gate now shares:
+// unrestricted profiles allow anything, restricted profiles allow only
+// their ladder, and — the actual security property — an empty/unrated
+// contentRating is EXCLUDED under any restriction, never treated as safe
+// by default.
+func TestRatingAllowed(t *testing.T) {
+	if !RatingAllowed("", "NC-17") {
+		t.Error(`RatingAllowed("", "NC-17") = false, want true (unrestricted profile)`)
+	}
+	if !RatingAllowed("", "") {
+		t.Error(`RatingAllowed("", "") = false, want true (unrestricted profile, unrated title)`)
+	}
+	if !RatingAllowed("PG-13", "PG") {
+		t.Error(`RatingAllowed("PG-13", "PG") = false, want true (within ceiling)`)
+	}
+	if RatingAllowed("PG-13", "R") {
+		t.Error(`RatingAllowed("PG-13", "R") = true, want false (exceeds ceiling)`)
+	}
+	if RatingAllowed("G", "") {
+		t.Error(`RatingAllowed("G", "") = true, want false — fail-closed: an unrated title must NOT be treated as safe for a restricted profile`)
+	}
+	if RatingAllowed("TV-Y7", "PG") {
+		t.Error(`RatingAllowed("TV-Y7", "PG") = true, want false (cross-system collision guard)`)
+	}
+}
+
 // TestRatingToneBuckets pins the ladder-derived tone buckets used by
 // internal/reasonguard: mature = R/TV-MA level and above, kid = TV-Y7 level
 // and below, everything else (teen middle, unknown, foreign, empty) in

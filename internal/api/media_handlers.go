@@ -514,6 +514,10 @@ func retryListQuery(ctx context.Context, fn func() ([]*models.MediaItem, int64, 
 }
 
 func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireClaims(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query()
 	filter := models.MediaFilter{
 		Type:   models.MediaType(q.Get("type")),
@@ -524,9 +528,21 @@ func (h *MediaHandler) List(w http.ResponseWriter, r *http.Request) {
 	if yearStr := q.Get("year"); yearStr != "" {
 		filter.Year, _ = strconv.Atoi(yearStr)
 	}
-	if maxRating := q.Get("max_rating"); maxRating != "" {
-		filter.MaxRating = maxRating
-		filter.AllowedRatings = allowedRatingsForMax(maxRating)
+	// Issue #462 — the rating ceiling used to come straight off the
+	// client-supplied max_rating query param (a full bypass: any client
+	// could ask for an unfiltered feed by simply omitting it). It's now
+	// derived server-side from the request's acting sub-profile, same
+	// mechanism the read/playback path enforces with. This endpoint is
+	// discovery/UX, not the security boundary (that's the playback path in
+	// phase2_handlers.go) — so on a profile-resolve error we log and fall
+	// back to unrestricted rather than fail the whole browse/search surface,
+	// matching this codebase's existing fail-open posture for non-security
+	// convenience checks (e.g. ChangeMedia's existence check).
+	if profile, err := h.queries.ResolveActingProfile(r.Context(), claims.UserID, claims.RefreshTokenID); err != nil {
+		slog.Warn("resolve acting profile for media list failed, defaulting to unrestricted", "user_id", claims.UserID, "error", err)
+	} else {
+		filter.MaxRating = profile.MaxAgeRating
+		filter.AllowedRatings = db.AllowedRatingsForMax(profile.MaxAgeRating)
 	}
 
 	params := paginate(r)
