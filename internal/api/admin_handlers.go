@@ -1061,18 +1061,13 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 		entries = []*models.ActivityEntry{}
 	}
 
-	totalPages := int(total) / params.PerPage
-	if int(total)%params.PerPage != 0 {
-		totalPages++
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items":       entries,
-		"total":       total,
-		"page":        params.Page,
-		"per_page":    params.PerPage,
-		"total_pages": totalPages,
-	})
+	// Canonical paginated envelope — `{data, page, per_page, total_items,
+	// total_pages}`, same as every other paginated endpoint. This used to
+	// hand-roll `{items, total, ...}`, which no client ever read: the SPA
+	// unwraps `.data` and fell through to its `|| []` fallback on every
+	// call, so the admin Activity tab rendered "No recent activity."
+	// however busy the log was.
+	writeJSON(w, http.StatusOK, paginatedResponse(entries, total, params))
 }
 
 // Sessions returns active streams — transcode + direct-play —

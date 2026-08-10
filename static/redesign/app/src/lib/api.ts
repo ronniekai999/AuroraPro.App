@@ -1544,14 +1544,20 @@ export async function listAdminActivity(
   perPage = 50,
   signal?: AbortSignal,
 ): Promise<ActivityEntry[]> {
-  const resp = await apiFetch<PaginatedResponse<ActivityEntry> | ActivityEntry[]>(
-    `/api/admin/activity?per_page=${perPage}`,
-    { signal },
-  )
-  // /api/admin/activity returns a paginated envelope. Defensive
-  // unwrap because the endpoint's response shape has drifted across
-  // versions in Aurora's history (the M9 audit logged it).
-  return Array.isArray(resp) ? resp : (resp.data || [])
+  const resp = await apiFetch<
+    PaginatedResponse<ActivityEntry> | { items?: ActivityEntry[] } | ActivityEntry[]
+  >(`/api/admin/activity?per_page=${perPage}`, { signal })
+  // /api/admin/activity returns a paginated envelope. Defensive unwrap
+  // because the endpoint's response shape has drifted across versions in
+  // Aurora's history (the M9 audit logged it) — and that drift is exactly
+  // what emptied this tab: the server hand-rolled `{items}` while this only
+  // read `.data`, so `|| []` swallowed every entry. The server now emits the
+  // canonical `.data` envelope; `items` stays accepted so a bundle running
+  // against an older binary still renders rows instead of silently blanking.
+  if (Array.isArray(resp)) return resp
+  if ('data' in resp && Array.isArray(resp.data)) return resp.data
+  if ('items' in resp && Array.isArray(resp.items)) return resp.items
+  return []
 }
 
 // Which slice of the server's in-memory log rings to read.
