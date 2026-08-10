@@ -514,6 +514,35 @@ func (q *Queries) GetActivityPaginated(ctx context.Context, params models.Pagina
 	return entries, total, err
 }
 
+// GetActivityEventTypes returns every distinct event_type currently present
+// in activity_log with its row count, ordered alphabetically so an option
+// keeps a stable position in the admin filter as counts move around.
+//
+// Grouping over the whole table is affordable here: activity_log is bounded
+// by the 90-day retention sweep and event_type is indexed
+// (idx_activity_log_type), so this is an index-only scan.
+func (q *Queries) GetActivityEventTypes(ctx context.Context) ([]*models.ActivityEventType, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT event_type, COUNT(*)
+		FROM activity_log
+		GROUP BY event_type
+		ORDER BY event_type ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var types []*models.ActivityEventType
+	for rows.Next() {
+		t := &models.ActivityEventType{}
+		if err := rows.Scan(&t.EventType, &t.Count); err != nil {
+			return nil, err
+		}
+		types = append(types, t)
+	}
+	return types, rows.Err()
+}
+
 func scanActivityRows(rows pgx.Rows) ([]*models.ActivityEntry, error) {
 	var entries []*models.ActivityEntry
 	for rows.Next() {

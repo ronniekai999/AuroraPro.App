@@ -936,6 +936,20 @@ type ActivityEntry struct {
 	Username  string                 `json:"username,omitempty"`
 }
 
+// ActivityEventType is one distinct event_type present in activity_log with
+// the number of rows carrying it. It backs the admin Activity tab's filter.
+//
+// The option list is derived from the DATA rather than a constant, because
+// event types are registered ad hoc at ~24 call sites across activity.go,
+// party_handlers.go, oauth_handlers.go and request_handlers.go with no
+// central registry — a hardcoded SPA list would silently drift the moment
+// anyone adds a type. Deriving it also means an instance only offers the
+// types it has actually recorded.
+type ActivityEventType struct {
+	EventType string `json:"event_type"`
+	Count     int64  `json:"count"`
+}
+
 type ServerStats struct {
 	Version            string  `json:"version"`
 	Uptime             string  `json:"uptime"`
