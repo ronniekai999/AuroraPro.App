@@ -161,6 +161,12 @@ func TestAdminActivity_LegacyLimitParam(t *testing.T) {
 	if env.TotalItems != 2 {
 		t.Errorf("total_items = %d, want 2", env.TotalItems)
 	}
+	// Pinning a pre-existing quirk, not endorsing it: the legacy branch
+	// hardcodes Page=1, so a multi-page ?limit= response advertises
+	// total_pages>1 with no way to reach page 2 — walking it re-fetches
+	// page 1 forever. Harmless today (no in-repo caller uses ?limit=); if
+	// that path is ever revived, give it a real page param rather than
+	// changing this expectation.
 	if env.TotalPages != 2 {
 		t.Errorf("total_pages = %d, want 2", env.TotalPages)
 	}

@@ -1046,11 +1046,13 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 		if page < 1 {
 			page = 1
 		}
-		// Same cap the shared paginate() helper applies, for the same
-		// reason: (page-1)*perPage is computed as an int in
-		// GetActivityPaginated, so ?page=9223372036854775807 overflows to a
-		// negative OFFSET and Postgres 500s the request. At max perPage
-		// that still reaches 1M rows.
+		// Same cap the shared paginate() helper applies, though for a
+		// different failure: paginate() caps to keep a huge OFFSET from
+		// hammering the DB, while here (page-1)*perPage is computed as an
+		// int in GetActivityPaginated, so ?page=9223372036854775807
+		// overflows to a NEGATIVE offset that Postgres rejects outright —
+		// a 500 on a query param. At max perPage the cap still reaches
+		// 1M rows.
 		if page > 10000 {
 			page = 10000
 		}
