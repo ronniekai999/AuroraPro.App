@@ -2282,6 +2282,16 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  // Shared "leave the nav search" routine — the X/clear button, an
+  // outside click, and Escape (below) all need to do the exact same
+  // thing: drop the query, fall back to Home if that's what the query
+  // was driving, and give the input back its resting (unfocused) look.
+  const closeSearch = useCallback(() => {
+    setSearchQuery('')
+    setSearchOpen(false)
+    setView(v => (v === 'search' ? 'home' : v))
+    searchInputRef.current?.blur()
+  }, [])
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
   // input stays for click-to-search flows).
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -3143,7 +3153,7 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if ((playerTarget || playerLoading) && !playerMinimizedRef.current) closePlayer(true)
-        else if (searchOpen) setSearchOpen(false)
+        else if (searchOpen) closeSearch()
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -3175,7 +3185,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer])
+  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer, closeSearch])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -5481,6 +5491,7 @@ export default function App() {
               }
             }}
             onSearchFocus={() => setSearchOpen(true)}
+            onSearchClose={closeSearch}
             searchInputRef={searchInputRef}
             onOpenPalette={() => setPaletteOpen(true)}
             // Party — M10 Phase 4. Click opens the panel if already in a
