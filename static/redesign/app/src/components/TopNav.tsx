@@ -656,17 +656,32 @@ export function TopNav({
 
   // Click outside the desktop search pill closes it, same as the X button.
   // Only armed while there's a query to close — an empty, unfocused pill has
-  // nothing to dismiss. Bails on clicks inside the search RESULTS grid
-  // (SearchView, a page-level sibling — not a DOM descendant of the pill):
-  // this listener fires on `mousedown`, which lands before the result
-  // card's own `click`, so without the exemption every result click would
-  // clear the query and swap the view back to Home out from under it.
+  // nothing to dismiss.
   useEffect(() => {
     if (!searchQuery) return
     const onDocMouseDown = (e: MouseEvent) => {
+      // Only the desktop pill needs this: below `md` it's `display:none`
+      // (no offsetParent), and the mobile drawer's search field — the
+      // ONLY route to search results on a phone — is a completely
+      // different DOM node the ref never covers. Without this guard every
+      // tap on the drawer (its scrim, its own search field, a nav row)
+      // read as "outside" and wiped the query mid-search.
+      if (!searchPillRef.current?.offsetParent) return
       const target = e.target as Node
-      if (searchPillRef.current?.contains(target)) return
-      if ((target as Element).closest?.('[data-search-results]')) return
+      if (searchPillRef.current.contains(target)) return
+      // A scrollbar drag targets <html>/<body>, not real page content.
+      if (target === document.documentElement || target === document.body) return
+      // Bails on the search RESULTS grid (SearchView, a page-level
+      // sibling — not a DOM descendant of the pill): this listener fires
+      // on `mousedown`, which lands before a result card's own `click`,
+      // so without the exemption every result click would clear the
+      // query and swap the view back to Home out from under it. Also
+      // bails on any dialog/menu overlay (ContextMenu, the add-to-list
+      // picker, ServerPanel, …) — those render as later App-level
+      // siblings too, so e.g. right-clicking a result and choosing "Add
+      // to Watchlist" would otherwise close search out from under the
+      // still-open menu.
+      if ((target as Element).closest?.('[data-search-results], [role="dialog"], [role="menu"]')) return
       onSearchClose()
     }
     document.addEventListener('mousedown', onDocMouseDown)
