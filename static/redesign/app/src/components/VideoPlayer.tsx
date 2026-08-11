@@ -42,6 +42,7 @@ import {
 import { ReactionPicker } from './ReactionOverlay'
 import { PlayerControls } from './PlayerControls'
 import { playerSurface } from '@/lib/playerSurface'
+import { bindInputModalityTracking, focusInChrome } from '@/lib/chromeFocus'
 import { writePrefKey } from '@/lib/appearance'
 import {
   buildSessionRequest,
@@ -62,8 +63,11 @@ import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
+  castPlayPauseMismatch,
+  isCastHostSeekJump,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
+  projectPartyTickAbsMs,
   resolvePlaybackBootPause,
   shouldApplyExplicitPartySeek,
   shouldRebuildSeekBeforeDeliveryReady,
@@ -71,9 +75,10 @@ import {
   shouldPreservePauseForBoot,
   shouldPreservePauseForLocalSeekRebuild,
   shouldPreservePauseOnSeekRebuild,
+  shouldResyncCastReceiver,
   type PlaybackDeliveryMode,
 } from '@/lib/partyPlayer'
-import type { ReceivedSeekPayload } from '@/lib/party'
+import { nextUpArmSecond, type ReceivedSeekPayload } from '@/lib/party'
 
 // M10 Phase 4 — party-sync handle. When provided, the player mirrors
 // the party's playback state (pause/play/seek) and, for the host,
@@ -228,6 +233,14 @@ interface VideoPlayerProps {
   // parent to advance even with the autoplay preference off — an
   // explicit click outranks the passive-behavior setting.
   onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
+  // Issue #460 — the next-up card's party counterpart. In a watch party
+  // the host's advance must move the ROOM, not this player, so the card
+  // routes here instead of onEnded (which refuses to advance in a party
+  // precisely because a unilateral re-point desyncs guests). The parent
+  // resolves the next episode and sends `change-media`; the resulting
+  // server broadcast is what actually re-points every client, host
+  // included. Only wired for the host — guests never see the card.
+  onPartyAdvance?: () => Promise<'advanced' | 'end' | 'failed'>
   // Reports whether the player has collapsed to the cast/AirPlay control
   // widget, so the parent can suppress Escape/back-to-close while casting.
   onMinimizedChange?: (minimized: boolean) => void
@@ -289,6 +302,13 @@ export function pickFile(
   }
   return files[0]
 }
+
+// Issue #460 — how long the host's card waits for a sent party swap to
+// come back as a `media-change` broadcast before re-offering the button.
+// Generous: it covers a server round-trip plus the guest-side episode
+// resolve, and the only cost of waiting is a card that lingers on a room
+// that already moved (the file change clears it the moment it lands).
+const PARTY_SWAP_WATCHDOG_MS = 12_000
 
 // Smart Skip — read the "Auto-play next episode" preference straight
 // from the aurora_prefs localStorage bucket, the same cross-component
@@ -427,18 +447,13 @@ async function attemptPlay(
   }
 }
 
-/**
- * True when focus currently sits inside a region that auto-hides with the
- * controls. Module scope so showControlsTemporarily can stay a zero-dep
- * useCallback — the DOM is the state here, not React's.
- */
-function focusInChrome(): boolean {
-  const el = document.activeElement
-  if (!el || el === document.body) return false
-  return !!(el as Element).closest?.('[data-player-chrome]')
-}
+// focusInChrome now lives in lib/chromeFocus, gated on input MODALITY:
+// only keyboard-originated focus pins the chrome. The pre-2026-08-09 version
+// read focus alone, so a mouse click on any chrome control (the fullscreen
+// button being the usual last click before sitting back) stranded focus
+// inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onMinimizedChange,
+export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
   onSurfaceChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -446,6 +461,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // callback without re-subscribing on every render.
   const onEndedRef = useRef(onEnded)
   onEndedRef.current = onEnded
+  // Issue #460 — same ref treatment for the party advance, read by
+  // fireAdvance (which holds no deps so the countdown effect stays stable).
+  const onPartyAdvanceRef = useRef(onPartyAdvance)
+  onPartyAdvanceRef.current = onPartyAdvance
   const hlsRef = useRef<Hls | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   // sessionId=null means both "native direct play" and "an HLS target is
@@ -611,6 +630,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // the video's onClick without participating in the closure dance.
   const audioMenuOpenRef = useRef(false)
   const subsMenuOpenRef = useRef(false)
+  // 2026-08-09 — the auto-hide timer also reads these (plus the two
+  // popovers below) so an OPEN picker can't be faded out mid-read.
+  // Until the modality gate went in, menus staying open piggybacked on
+  // the stuck-focus bug: clicking the trigger pinned the chrome. With
+  // that gone, open popovers need an explicit pin.
+  const markersMenuOpenRef = useRef(false)
+  const reactionPickerOpenRef = useRef(false)
   // Active <track> ref for cleanup when switching subs. Aurora exposes
   // sub extraction via /api/stream/{fileId}/subtitles/{index}.vtt
   // (V1's loadSubtitles path); we use the same.
@@ -638,6 +664,20 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // succeeded — gates the <video> 'ended' DOM handler so reaching the
   // real end of the credits can't double-advance past TWO episodes.
   const advanceFiredRef = useRef(false)
+  // Issue #460 — pending re-offer for a party swap that went out but never
+  // landed. `changeMedia` only reports that the frame left the socket; the
+  // server can still reject it (host succession racing the send, party
+  // gone) and its error frame never reaches this card. Since 'spent' is
+  // otherwise terminal until the FILE changes, a rejection would strand
+  // the host with no button on a room that never moved.
+  const swapWatchdogRef = useRef<number | null>(null)
+  const clearSwapWatchdog = useCallback(() => {
+    if (swapWatchdogRef.current !== null) {
+      window.clearTimeout(swapWatchdogRef.current)
+      swapWatchdogRef.current = null
+    }
+  }, [])
+  useEffect(() => clearSwapWatchdog, [clearSwapWatchdog])
   // Identity of the file the skip state belongs to. Audio-track
   // switches and forward-seek session rebuilds change the TARGET
   // identity (the play effect re-runs) but not the file — and a
@@ -654,6 +694,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // render its own AirPlay glyph + open the system picker. We add
   // no custom AirPlay button — a second one would be redundant
   // clutter that drives the same picker.
+  //
+  // Whether the party the user is in actually controls the media THIS
+  // player is showing right now — mirrors the same predicate already used
+  // for the seek-rebuild guard and the guest-mirror bail-out (H3 audit,
+  // ~needsHlsSessionRebuild call sites below). Merely being a member of a
+  // party room while watching unrelated solo content is NOT "party controls
+  // this media" — casting that content behaves exactly like solo playback.
+  // Cast/AirPlay gating keys off THIS, not off raw party membership: the
+  // old `!party` gates hid the buttons even for a user who joined a party
+  // but pressed Play on something else entirely (issue #461 follow-up).
+  const partyControlsMedia = !!party &&
+    (party.partyMediaItemId === undefined || party.partyMediaItemId === target?.mediaItemId)
   //
   // castError is a transient banner under the Cast button, NOT
   // the main errorMsg state — a cast failure should not tear down
@@ -691,10 +743,16 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // so a dismissed picker does not waste a token. Watch parties
   // currently disable casting (the receiver runs an independent
   // playback timeline that won't stay in sync with the party).
+  //
+  // castTokenExpRef records the minted token's expiry (Unix seconds)
+  // so resumeCast can tell when the URL the receiver holds has gone
+  // stale during a long pause (see below).
+  const castTokenExpRef = useRef(0)
   const castLoadGetter = useCallback(async () => {
     const sid = sessionIdRef.current
     if (!sid || !target) return null
     const resp = await createCastToken(sid)
+    castTokenExpRef.current = resp.expires_at
     // Defense-in-depth: confirm the server actually gave us a
     // cast-scoped JWT before we hand its URL to a receiver. A future
     // bug that wired this path to a different token-mint endpoint
@@ -730,15 +788,88 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
   const cast = useCast(castLoadGetter)
+  // Stable-identity access to the latest `cast` for the receiver-driven
+  // party-sync effect (below the local guest-mirror/host-broadcast effect).
+  // useCast's start/stop/playOrPause/seek/loadCurrent are plain closures
+  // recreated every render (not useCallback-wrapped) but internally read
+  // from refs (remotePlayerRef/remoteControllerRef), so calling a
+  // render-old copy through this ref is always equivalent to calling the
+  // latest one — the same trick partySyncRef already relies on for `party`.
+  // This lets that effect's deps stay coarse (status.connected, not the
+  // high-frequency `remote` object) without ever calling a function that
+  // captured stale internal state.
+  const castRef = useRef(cast)
+  castRef.current = cast
+  // Cast token renewal on resume (2026-08 review fix). The session-scoped
+  // cast token baked into the receiver's playlist URL expires after
+  // auth.cast_token_hours (default 4h). A receiver paused LONGER than that
+  // 401s on every segment fetch the moment it resumes — and the Default
+  // Media Receiver surfaces that as an indefinite buffer, not an error.
+  // So: resuming a paused cast whose token has expired re-loads the media
+  // with a freshly-minted token instead of issuing a bare play command.
+  // The resume position is the RECEIVER's timeline (cast.remote.currentTime)
+  // — the local <video> froze when the cast began, so its currentTime would
+  // jump the receiver backwards. loadCurrent re-mints via castLoadGetter,
+  // which also refreshes castTokenExpRef.
+  const isCastTokenExpired = () => {
+    const exp = castTokenExpRef.current
+    return exp > 0 && Date.now() / 1000 >= exp
+  }
+  // In-flight guard shared by every automatic (poll-driven) token-renewal
+  // reload — resumeCast's manual click doesn't need it (a human can't
+  // out-race a network round trip the way a 1s poll loop can), but the
+  // receiver-driven party-sync effect's automatic corrections can otherwise
+  // fire a SECOND loadCurrent() while the first is still in flight (2026-08
+  // review, issue #461 follow-up): castTokenExpRef isn't refreshed until the
+  // in-flight call resolves, so a slow network leaves every poll tick in
+  // between seeing the same stale "expired" token and racing another
+  // session.loadMedia() against the receiver.
+  const castReloadInFlightRef = useRef(false)
+  // Plain functions, not useCallback: everything they read (castTokenExpRef,
+  // castReloadInFlightRef, castRef) is a ref, so a "stale" closure captured
+  // by an effect at bind time is exactly as correct as a fresh one — the
+  // same equivalence useCast's own start/stop/seek/etc. rely on. No
+  // memoization needed, and it sidesteps having to thread these through
+  // dependency arrays anywhere they're used.
+  const reloadCastWithFreshToken = (targetSec: number) => {
+    if (castReloadInFlightRef.current) return // already refreshing — next poll retries if still needed
+    castReloadInFlightRef.current = true
+    void castRef.current.loadCurrent(targetSec)
+      .catch(() => { /* best-effort — next poll retries */ })
+      .finally(() => { castReloadInFlightRef.current = false })
+  }
+  const resumeCast = () => {
+    if (cast.remote.isPaused && isCastTokenExpired()) {
+      reloadCastWithFreshToken(cast.remote.currentTime)
+      return
+    }
+    cast.playOrPause()
+  }
+  // Seek the Cast receiver, renewing an expired session-scoped token first
+  // if needed (same reasoning as resumeCast — an expired token 401s every
+  // subsequent segment fetch, which the receiver surfaces as an indefinite
+  // buffer rather than an error). Shared by the receiver-driven party-sync
+  // effect's automatic drift correction below.
+  const seekCastSafely = (targetSec: number) => {
+    if (isCastTokenExpired()) { reloadCastWithFreshToken(targetSec); return }
+    castRef.current.seek(targetSec)
+  }
   const [airplayActive, setAirplayActive] = useState(false)
   const [airplayAvailable, setAirplayAvailable] = useState(false)
   const [minimized, setMinimized] = useState(false)
   // Playback is on a REMOTE surface — the Chromecast receiver OR an AirPlay
-  // target — rather than the local <video>. Gated on !party: casting is
-  // intentionally disabled in a watch party (the receiver runs an independent
-  // timeline the party can't sync), and an AirPlay target would desync it the
-  // same way, so the minimize/widget flow stays out of party mode entirely.
-  const remoteActive = !party && (cast.status.connected || airplayActive)
+  // target — rather than the local <video>. No longer gated on party
+  // membership: during a party this collapses to the widget exactly like
+  // solo casting, which is deliberate — the widget already reads/drives
+  // cast.remote.* correctly (see widgetPaused/widgetCurSec/widgetDurSec
+  // below), so reusing it avoids a second, parallel "party cast" UI that
+  // would need its own seek bar wired to the receiver instead of the
+  // (paused, frozen) local <video>. The full player stays MOUNTED while
+  // minimized (see the effect below), so the receiver-driven party-sync
+  // effect and AirPlay's local-<video>-mirroring keep running headless —
+  // only the chrome collapses, not the sync. PartyPanel (chat/participants)
+  // is rendered by App.tsx outside this component and is unaffected.
+  const remoteActive = cast.status.connected || airplayActive
   // "Minimized" only counts when there's actually a remote to control. This
   // collapses the 1-frame gap when a cast ends (remoteActive flips false the
   // same render, snapping the full player back in) and is the single source
@@ -1025,9 +1156,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   useEffect(() => {
     const was = castConnectedRef.current
     castConnectedRef.current = cast.status.connected
-    if (was && !cast.status.connected && !party) onClose()
+    // When the party controls this media, a cast ending is NOT the end of
+    // the viewing session — playback falls back to the local, party-synced
+    // <video> (the receiver-driven sync effect's cleanup + the local
+    // guest-mirror/host-broadcast effect's re-bind handle that automatically).
+    // Closing the player would also kick the user out of the party UI.
+    if (was && !cast.status.connected && !partyControlsMedia) onClose()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cast.status.connected, party])
+  }, [cast.status.connected, party, partyControlsMedia])
 
   // QA 2026-05-25 — disable every TextTrack on the <video>. Called
   // after a new HLS manifest or direct-play source loads so any
@@ -1467,6 +1603,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         setNextUpPhase('idle')
         setNextUpSecs(5)
         advanceFiredRef.current = false
+        // A new file IS the party swap landing (or any other re-target),
+        // so the pending re-offer is moot.
+        clearSwapWatchdog()
       }
     }
 
@@ -2467,6 +2606,19 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   }, [target?.fileId, target?.mediaItemId])
   useEffect(() => {
     if (!target || !party) return
+    // While a Chromecast receiver is the active surface for THIS party's
+    // media, the sibling receiver-driven sync effect below owns play/pause/
+    // seek mirroring and host broadcast — the local <video> is paused for
+    // the whole cast session (pausedByCastRef effect above) and would only
+    // fight that effect (attemptPlay() on every tick, a repaint's worth of
+    // spurious 'play' events immediately re-paused by the cast-connected
+    // effect). Bailing here is what lets that sibling effect exist without
+    // the two racing. The moment cast.status.connected goes false — user
+    // stops casting, session drops — this effect re-runs (it's in the dep
+    // array) and local-video sync resumes exactly where it left off.
+    // AirPlay is NOT part of this gate: the local <video> IS the AirPlay-
+    // mirrored source, so this effect keeps driving it during AirPlay too.
+    if (partyControlsMedia && cast.status.connected) return
     const vid = videoRef.current
     if (!vid) return
 
@@ -2856,9 +3008,216 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // handlers reference at event time — requestPlay/requestPause/
   // requestSeek (stable useCallbacks over a no-dep sendOrBuffer in
   // useParty) and tickRef/clockOffsetRef (stable useRefs) — keeps
-  // working across renders without a rebind.
+  // working across renders without a rebind. cast.status.connected is added
+  // so the local↔receiver handoff above (bail while cast owns sync) rebinds
+  // this effect at exactly the moment a cast session starts or ends —
+  // otherwise the bail check would only be re-evaluated on the next
+  // unrelated re-bind, briefly running both sync effects at once.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId])
+  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
+
+  // M10 Phase 4 (receiver extension, issue #461 follow-up) — party sync
+  // while a Chromecast receiver is the active playback surface. Mutually
+  // exclusive with the local-video sync effect above: that effect bails
+  // out under the identical `partyControlsMedia && cast.status.connected`
+  // condition, so exactly one of the two is ever bound.
+  //
+  // AirPlay needs none of this — the local <video> IS the AirPlay-mirrored
+  // source, so it stays covered by the (unmodified) local-video effect
+  // above the whole time AirPlay is active.
+  //
+  //   - Guest: every second, compares the party's projected tick position
+  //     against cast.remote.currentTime and corrects via cast.seek(). No
+  //     rate-adjust catch-up (unlike the local loop's playbackRate
+  //     nudging) — the Default Media Receiver's remote-control surface
+  //     doesn't expose a usable playback-rate knob, and round-trip latency
+  //     to a TV makes fine-grained chasing impractical anyway. Tolerance is
+  //     therefore coarser (2s) than the local loop's (150ms soft / 1.8s
+  //     hard) — appropriate for a TV that was never going to be
+  //     frame-synced with phones/laptops. Deliberately does NOT special-
+  //     case party.seekRef's explicit-seek frame the way the local loop
+  //     does: any seek shows up as ordinary drift on the very next poll,
+  //     which keeps this branch simple at the cost of up to ~1s of extra
+  //     latency after a host seek. Also deliberately does NOT attempt a
+  //     session rebuild for a seek past the current session's produced
+  //     edge — bufferedSecRef tracks the LOCAL <video>'s buffered ranges,
+  //     which stop advancing once local playback is paused for casting, so
+  //     it can't reliably describe what the receiver's independent fetch
+  //     has actually reached. A far-forward host seek during a cast
+  //     session is a known limitation (the receiver's own buffering is the
+  //     visible symptom) rather than something this effect silently
+  //     mishandles by guessing at a signal it doesn't have.
+  //   - Host: derives party broadcasts from OBSERVED cast.remote state
+  //     (polling, not an event subscription — the CAF RemotePlayerController
+  //     is private to cast.ts's closure) instead of local <video> events,
+  //     since the local element is paused for the whole cast session and
+  //     never fires them. Poll-based also means it doesn't matter whether
+  //     the state change came from our own widget, the physical TV remote,
+  //     or another Cast-aware app — the party sees it either way.
+  //   - Cast-token renewal reuses the same expiry check as resumeCast: a
+  //     correction after a long pause re-mints via loadCurrent instead of
+  //     issuing a seek the receiver's already-expired URL can't serve.
+  useEffect(() => {
+    if (!target || !party || !partyControlsMedia || !cast.status.connected) return
+
+    const GUEST_POLL_MS = 1000
+    const HOST_POLL_MS = 1000
+    const GUEST_DRIFT_RESYNC_SEC = 2
+    const HOST_SEEK_JUMP_TOLERANCE_SEC = 3
+    // Any position change while the receiver is paused can only be a scrub —
+    // nothing advances a paused receiver on its own — so this just needs to
+    // be bigger than CAF's currentTime reporting jitter, not a real
+    // progression tolerance like HOST_SEEK_JUMP_TOLERANCE_SEC.
+    const HOST_PAUSED_SCRUB_TOLERANCE_SEC = 1
+
+    const absMsToCastSec = (absMs: number) => Math.max(0, (absMs / 1000) - (startSecRef.current ?? 0))
+    const castSecToAbsMs = (sec: number) => Math.round((sec + (startSecRef.current ?? 0)) * 1000)
+
+    if (party.isHost) {
+      let lastSnapshot: { paused: boolean; sec: number; atMs: number } | null = null
+      const id = window.setInterval(() => {
+        const c = castRef.current
+        if (!c.status.connected || !c.remote.isMediaLoaded) return
+        const nowPaused = c.remote.isPaused
+        const nowSec = c.remote.currentTime
+        const prev = lastSnapshot
+        lastSnapshot = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        // First sample after (re)connect — nothing to compare against yet.
+        // Avoids broadcasting a spurious event off the transient state
+        // between loadMedia() resolving and the receiver reaching the
+        // requested startTime.
+        if (!prev) return
+
+        if (nowPaused !== prev.paused) {
+          if (nowPaused) {
+            party.requestPause(castSecToAbsMs(nowSec))
+          } else {
+            // 2026-08 review fix — the receiver may have been scrubbed WHILE
+            // paused (TV remote, another Cast app): correct the server's
+            // position before resuming, or the party resumes from the old
+            // pre-scrub spot instead of where the host's TV actually is.
+            if (Math.abs(nowSec - prev.sec) > HOST_PAUSED_SCRUB_TOLERANCE_SEC) {
+              party.requestSeek(castSecToAbsMs(nowSec))
+            }
+            party.requestPlay()
+          }
+          return
+        }
+        if (nowPaused) {
+          // Still paused. A position change here is, again, only possible via
+          // a direct scrub — re-broadcast the pause with the corrected
+          // position so a later resume starts from the right spot even if
+          // the user never presses play again before checking back in.
+          if (Math.abs(nowSec - prev.sec) > HOST_PAUSED_SCRUB_TOLERANCE_SEC) {
+            party.requestPause(castSecToAbsMs(nowSec))
+          }
+          return
+        }
+        // A jump bigger than natural playback progression over this poll
+        // window means the user (via our widget) or the TV remote scrubbed
+        // the receiver directly.
+        const elapsedSec = (Date.now() - prev.atMs) / 1000
+        if (isCastHostSeekJump(nowSec, prev.sec, elapsedSec, HOST_SEEK_JUMP_TOLERANCE_SEC)) {
+          party.requestSeek(castSecToAbsMs(nowSec))
+        }
+      }, HOST_POLL_MS)
+      return () => window.clearInterval(id)
+    }
+
+    // Guest branch.
+    const id = window.setInterval(() => {
+      const c = castRef.current
+      if (!c.status.connected || !c.remote.isMediaLoaded) return
+      // H3-equivalent guard: only mirror when this player is showing the
+      // same content the party is. Belt-and-suspenders — the whole effect
+      // is already gated on partyControlsMedia, which is reactive to the
+      // same fields via the dependency array below.
+      if (party.partyMediaItemId !== undefined && party.partyMediaItemId !== target.mediaItemId) return
+
+      const t = party.tickRef.current
+      if (!t) return
+
+      // Play/pause mirror first, same ordering as the local loop — no point
+      // drift-checking a receiver that isn't even running yet.
+      const nowPaused = c.remote.isPaused
+      if (castPlayPauseMismatch(party.isPlaying, nowPaused)) {
+        if (nowPaused) {
+          // About to resume — reuse the same token-expiry-safe path as the
+          // widget's own resume button (2026-08 review fix): a bare
+          // playOrPause() against an already-expired cast token just 401s on
+          // every segment fetch, which the receiver reports as an
+          // indefinite buffer rather than an error.
+          if (isCastTokenExpired()) {
+            reloadCastWithFreshToken(c.remote.currentTime)
+          } else {
+            castRef.current.playOrPause()
+          }
+        } else {
+          castRef.current.playOrPause()
+        }
+        return
+      }
+      if (t.running === false || !party.isPlaying || nowPaused) return
+
+      const tickAgeMs = Date.now() - (t.receivedAtMs ?? Date.now())
+      // Sync socket down / server stalled — free-run rather than chase a
+      // frozen target (same reasoning as the local loop).
+      if (tickAgeMs > 3000) return
+
+      const clockOffset = party.clockOffsetRef?.current ?? 0
+      const projectedAbsMs = projectPartyTickAbsMs(t.abs_ms, t.server_now_ms, tickAgeMs, clockOffset, Date.now())
+      const targetSec = absMsToCastSec(projectedAbsMs)
+      if (!shouldResyncCastReceiver(c.remote.currentTime, targetSec, GUEST_DRIFT_RESYNC_SEC)) return
+      seekCastSafely(targetSec)
+    }, GUEST_POLL_MS)
+    return () => window.clearInterval(id)
+  // Same coarse-dependency reasoning as the local-video sync effect above:
+  // party/cast internals are read live through castRef/party's own stable
+  // refs+callbacks, so the effect only needs to rebind on the handful of
+  // primitive signals that change its BEHAVIOR (host/guest role, party
+  // transitioning null↔active, the party's media changing, target
+  // identity, and the local↔receiver handoff itself).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target, Boolean(party), party?.isHost, party?.isPlaying, party?.partyMediaItemId, cast.status.connected])
+
+  // Host cast→local handoff (2026-08 review fix, issue #461 follow-up).
+  //
+  // When a HOST stops Chromecasting mid-party, the local <video> has been
+  // paused and frozen since the cast began — potentially a long time ago —
+  // and the local-video sync effect's `party.isHost` branch (which reclaims
+  // control the instant cast.status.connected goes false, per that effect's
+  // own bail condition) deliberately never plays or drift-corrects it: the
+  // host is normally assumed to BE the ground truth, so nothing else
+  // corrects their video. Without this, the host would have to notice and
+  // manually scrub back to the live position themselves, and their very
+  // next play/pause/seek would broadcast that stale position to every
+  // guest — silently teleporting the whole party backward.
+  //
+  // Rebuild the local session at the party's live position instead. The
+  // server already has it correct: the receiver-driven effect above kept
+  // broadcasting the host's actual (TV) position via requestPlay/Pause/Seek
+  // for the whole cast session, and party.tickRef is populated from server
+  // ticks for every participant regardless of role (useParty.tsx), so it
+  // reflects that live position here even though the host branch elsewhere
+  // never reads it for anything else.
+  const wasCastConnectedForHostHandoffRef = useRef(false)
+  useEffect(() => {
+    const was = wasCastConnectedForHostHandoffRef.current
+    wasCastConnectedForHostHandoffRef.current = cast.status.connected
+    if (!was || cast.status.connected) return // only a true→false transition
+    if (!target || !party || !party.isHost || !partyControlsMedia) return
+    const t = party.tickRef.current
+    if (!t) return
+    const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
+    if (!rebuild) return
+    const targetSec = Math.max(0, t.abs_ms / 1000)
+    const bootIntent = { preservePause: !party.isPlaying, partyRevision: party.rev }
+    pauseAfterSeekRebuildRef.current = bootIntent
+    inFlightPauseIntentRef.current = bootIntent
+    setStatus('Reconnecting local playback to the party…')
+    rebuild(targetSec)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cast.status.connected])
 
   // Phase 7 — sync custom-controls state with the <video> element.
   // We mirror playback events into React state so PlayerControls
@@ -3019,6 +3378,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     }
   }, [target])
 
+  // True while any popover inside the chrome is open (audio / subtitle /
+  // markers pickers, reaction picker). Read by showControlsTemporarily at
+  // both schedule and fire time so an open menu can't be auto-hidden out
+  // from under a reading user. Ref-based so the zero-dep useCallback below
+  // always sees current state.
+  const chromePopoverOpen = () =>
+    audioMenuOpenRef.current || subsMenuOpenRef.current ||
+    markersMenuOpenRef.current || reactionPickerOpenRef.current
+
   // Audit H1 fix — stable showControlsTemporarily reads playingRef
   // (not the captured `playing` value). The useCallback has empty
   // deps so its identity is stable across renders; effects and
@@ -3053,14 +3421,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       window.clearTimeout(hideTimerRef.current)
       hideTimerRef.current = null
     }
-    // Only schedule the auto-hide when:
-    //   - playingRef.current is true — hiding during pause is just
-    //     hostile UX; the user is contemplating their next move
-    //   - lastInBottomZoneRef.current is false — the user's cursor
-    //     is NOT in the seek-bar/buttons region; pinning visible
-    //     when they're clearly aiming at controls matches
-    //     Netflix / YouTube / Plex behavior
-    if (playingRef.current && !lastInBottomZoneRef.current && !focusInChrome()) {
+    const scheduleHide = () => {
       hideTimerRef.current = window.setTimeout(() => {
         // Re-check at FIRE time, not only at schedule time. Focus can move into
         // the controls during the 3s window (Tab from the video surface onto the
@@ -3069,17 +3430,50 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // focus-fixup rule — the focused element is unfocused and
         // document.activeElement becomes <body>. So a keyboard user who paused
         // on the seek bar to read the timestamp lost their place entirely
-        // (WCAG 2.4.3). Reschedule instead; the pointer path is unaffected
-        // because a mouse user has nothing focused inside the chrome.
-        if (focusInChrome()) {
-          hideTimerRef.current = null
+        // (WCAG 2.4.3). Re-arm instead; the pointer path is unaffected because
+        // a mouse user has nothing focused inside the chrome (and since
+        // 2026-08-09 focusInChrome only counts keyboard-originated focus,
+        // incidental click-focus can't strand the timer either).
+        //
+        // An open popover (audio/subs/markers picker, reaction picker) also
+        // re-arms: the user is reading a list, and fading the chrome would
+        // yank the menu off screen mid-read.
+        //
+        // RE-ARM, not drop: before 2026-08-09 this branch nulled the timer and
+        // returned, contradicting the comment above it — if focus entered the
+        // chrome mid-window, auto-hide silently died until some later event
+        // happened to re-arm it. Re-arming every 3s while a keyboard user
+        // stays parked costs one sleeping timeout and keeps the hide correct
+        // the moment they Tab back out.
+        if (focusInChrome() || chromePopoverOpen()) {
+          scheduleHide()
           return
         }
         setControlsVisible(false)
         hideTimerRef.current = null
       }, 3000)
     }
+    // Only schedule the auto-hide when:
+    //   - playingRef.current is true — hiding during pause is just
+    //     hostile UX; the user is contemplating their next move
+    //   - lastInBottomZoneRef.current is false — the user's cursor
+    //     is NOT in the seek-bar/buttons region; pinning visible
+    //     when they're clearly aiming at controls matches
+    //     Netflix / YouTube / Plex behavior
+    //   - no chrome popover is open — an open audio/subs/markers/reaction
+    //     picker means the user is mid-read; Netflix/YouTube keep the
+    //     chrome up in exactly this state
+    if (playingRef.current && !lastInBottomZoneRef.current && !focusInChrome() && !chromePopoverOpen()) {
+      scheduleHide()
+    }
   }, [])
+
+  // Input-modality tracking for focusInChrome (2026-08-09). Capture-phase
+  // listeners on window record whether the last input was keyboard or
+  // pointer; the hide timer's chrome-focus guard only trusts keyboard
+  // focus. Without this, clicking the fullscreen button left mouse-focus
+  // stranded inside the chrome and auto-hide never scheduled again.
+  useEffect(() => bindInputModalityTracking(window), [])
 
   // Phase 7 — controls visibility timer driven by play/pause flip.
   // Pause → instantly visible (no timer). Play → visible + schedule
@@ -3112,8 +3506,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     if (!vid) return
     const targetSec = Math.max(0, sec)
     const localSec = targetSec - (startSecRef.current ?? 0)
-    const isPartyControllingThisMedia = !!party &&
-      (party.partyMediaItemId === undefined || target?.mediaItemId === party.partyMediaItemId)
+    // Reuses the component-level partyControlsMedia rather than
+    // recomputing the same predicate (2026-08 review nit, issue #461
+    // follow-up) — both read the exact same party/target closure in the
+    // same render, so they're always value-equivalent; keeping just one
+    // copy means a future change to the match rule only needs one edit.
+    const isPartyControllingThisMedia = partyControlsMedia
 
     // Guests mirror the host. Letting a guest scrub locally either causes a
     // brief snap-back inside the current buffer or stalls outside it, and the
@@ -3162,6 +3560,43 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       broadcastHostPartySeek()
       onSeekRebuild(targetSec)
       return true
+    }
+
+    // While Chromecasting, the RECEIVER — not the frozen local <video>
+    // (pausedByCastRef holds it paused for the whole session) — is the
+    // actual playback surface. This is reachable even mid-party: the
+    // minimized-widget's "Expand player" button deliberately un-minimizes
+    // without stopping the cast (remoteActive stays true), which un-inerts
+    // the full player's seek bar / skip buttons / keyboard shortcuts.
+    //
+    // 2026-08 review fix (issue #461 follow-up): before this, every one of
+    // those controls fell through to the ordinary branches below, which
+    // assign vid.currentTime on the paused-and-frozen local element and (for
+    // a party host) broadcast THAT meaningless local position to every
+    // guest via broadcastHostPartySeek — corrupting the whole party's
+    // position while the host's own TV never actually moved.
+    //
+    // Routed through a full session rebuild rather than an in-window
+    // cast.seek(): bufferedSecRef/bufferedSec track the LOCAL element's
+    // buffered ranges, which stop advancing once local playback is paused
+    // for casting, so they can't reliably describe what the receiver's
+    // independent fetch has actually reached — an in-window-vs-rebuild
+    // decision here can't be trusted the way it can for local playback.
+    // Rebuilding unconditionally is a few seconds slower than an in-window
+    // seek would be, but it's the only option that's provably correct: a
+    // fresh session anchored exactly at targetSec, with the receiver
+    // re-pointed at it via castAdvancePendingRef + the existing
+    // castReloadEpoch reload effect — the same machinery next-episode
+    // auto-advance already uses to re-point a live receiver.
+    if (cast.status.connected) {
+      castAdvancePendingRef.current = true
+      if (rebuildAtTarget()) return
+      // Defensive — shouldn't happen for any delivery mode that supports
+      // casting at all (direct-play has no castable HLS session, so
+      // cast.status.connected implies onSeekRebuild is wired). Undo the arm
+      // and fall through to the ordinary paths below so the seek at least
+      // does SOMETHING rather than silently no-op.
+      castAdvancePendingRef.current = false
     }
 
     // A target replacement clears sessionId before stream-info/createSession
@@ -3213,7 +3648,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       vid.currentTime = localSec
       broadcastHostPartySeek()
     } catch { /* defensive */ }
-  }, [bufferedSec, party, target, onSeekRebuild])
+  }, [bufferedSec, party, target, onSeekRebuild, cast.status.connected, partyControlsMedia])
 
   // Med-fix (2026-05-29) — ref mirror of seekToRealSec so the
   // keyboard-shortcut effect (registered once per `target`, with an
@@ -3276,6 +3711,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // dismiss path (audit M4).
   useEffect(() => { audioMenuOpenRef.current = audioMenuOpen }, [audioMenuOpen])
   useEffect(() => { subsMenuOpenRef.current = subsMenuOpen }, [subsMenuOpen])
+  useEffect(() => { markersMenuOpenRef.current = markersMenuOpen }, [markersMenuOpen])
 
   // Phase 7 — document-level keyboard shortcuts while the player is
   // open. Space=play/pause, ArrowLeft/Right=seek±10s, ArrowUp/Down
@@ -3304,30 +3740,51 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       // (space/arrows) for the off-screen local player — the widget owns
       // control. Ref so this [target]-bound handler sees the live value.
       if (minimizedRef.current) return
+      // 2026-08 review fix (issue #461 follow-up) — while Chromecasting
+      // (reachable here even though minimizedRef normally blocks these keys:
+      // the widget's "Expand player" button un-minimizes without stopping
+      // the cast), vid is paused/frozen and isn't the actual playback
+      // surface. Same substitution as onPlayPause/onSeekRelative above.
+      //
+      // Deliberately re-reads everything through castRef/isCastTokenExpired
+      // /reloadCastWithFreshToken rather than calling the outer resumeCast()
+      // directly: this effect binds once per `target` (not per cast-state
+      // change — see the eslint-disable below), so a captured resumeCast
+      // closure could read a many-renders-stale cast.remote.isPaused and
+      // silently skip the token-refresh check it exists to perform. Those
+      // three all resolve through refs, so there's no equivalent staleness
+      // risk reading them here.
+      const c = castRef.current
+      const castConnectedNow = c.status.connected
       switch (e.key) {
         case ' ':
         case 'k':
           e.preventDefault()
+          if (castConnectedNow) {
+            if (c.remote.isPaused && isCastTokenExpired()) {
+              reloadCastWithFreshToken(c.remote.currentTime)
+            } else {
+              c.playOrPause()
+            }
+            break
+          }
           if (vid.paused) void vid.play().catch(() => { /* defensive */ })
           else vid.pause()
           break
         case 'ArrowLeft':
+        case 'ArrowRight': {
           e.preventDefault()
           // Med-fix (2026-05-29) — route through the shared seek path
           // (REAL-FILE seconds = local currentTime + startSec offset).
-          // Backward seeks just clamp; the rebuild branch is never hit
-          // going back, so this preserves the old -10s behavior.
-          seekToRealSecRef.current((vid.currentTime + (startSecRef.current ?? 0)) - 10)
+          // Backward seeks just clamp; forward seeks trigger a transcode
+          // rebuild when they land past the buffered head, matching the
+          // scrub bar — was a raw `vid.currentTime +=` that stalled hls.js
+          // on a sequential transcode.
+          const baseSec = castConnectedNow ? c.remote.currentTime : vid.currentTime
+          const delta = e.key === 'ArrowLeft' ? -10 : 10
+          seekToRealSecRef.current((baseSec + (startSecRef.current ?? 0)) + delta)
           break
-        case 'ArrowRight':
-          e.preventDefault()
-          // Med-fix (2026-05-29) — was a raw `vid.currentTime + 10`,
-          // which seeks past the FFmpeg output head and stalls hls.js
-          // on a sequential transcode. Routing through seekToRealSec
-          // triggers a transcode rebuild when the +10s jump lands past
-          // the buffered head, matching the scrub bar.
-          seekToRealSecRef.current((vid.currentTime + (startSecRef.current ?? 0)) + 10)
-          break
+        }
         case 'ArrowUp':
           e.preventDefault()
           vid.volume = Math.min(1, vid.volume + 0.05)
@@ -3500,17 +3957,85 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // explicit button when it's off. Both routes drive the SAME parent
   // advance path the <video> 'ended' event uses — the card just moves
   // the decision to the start of the credits instead of the end.
-  // Suppressed in watch parties (a unilateral advance would desync
-  // guests; same rule as the parent's 'ended' handling) and while
-  // casting (the receiver's IDLE transition owns end-of-media there).
+  // While casting the receiver's IDLE transition owns end-of-media, so
+  // the card stays suppressed there.
+  //
+  // Issue #460 — in a watch party the card is HOST-ONLY, and its button
+  // advances the ROOM (see onPartyAdvance) rather than this player. A
+  // guest still never gets it: their advance would either desync them or
+  // be rejected by the server's host-only check.
   const creditsMarker = target?.fileType === 'episode'
     ? skipMarkers.find(m => m.kind === 'credits' && m.end_ms > m.start_ms) ?? null
     : null
+
+  // The card may only advance a party that is actually watching THIS
+  // media. A host can hold a party while the player shows something else
+  // — a scheduled lobby that hasn't started, or a party player they
+  // closed — and arming there would shove the whole room into an
+  // unrelated series still labelled with the party's old title.
+  //
+  // Strict equality on purpose. seekToRealSec's sibling check treats an
+  // undefined partyMediaItemId as "controlling", which is the safe
+  // default for BLOCKING a guest seek; here the same guess would push
+  // content at everyone, so an unknown party media means don't touch it.
+  //
+  // Season/episode numbers are required too: without them the parent's
+  // resolve can't run, and the host would be left clicking a live-looking
+  // button that silently does nothing.
+  const partyAdvanceHost = !!party?.isHost && !!onPartyAdvance &&
+    party.partyMediaItemId !== undefined &&
+    party.partyMediaItemId === target?.mediaItemId &&
+    target?.seasonNumber != null && target?.episodeNumber != null
+  // fireAdvance carries no deps (the countdown effect depends on its
+  // identity), so the party branch reads through a ref.
+  const partyAdvanceHostRef = useRef(false)
+  partyAdvanceHostRef.current = partyAdvanceHost
+
+  // Where the card arms. Credits onset when the file has a marker —
+  // markers are optional, though, and issue #460 asks for the button on
+  // any episode in a party, so the host also arms on "under 2 minutes
+  // left". Whichever comes first wins.
+  //
+  // serverDurationRef is read during render rather than tracked as state
+  // because it only ever changes in lockstep with the realDurationSec
+  // state update beside it (see the stream-info boot), so a render that
+  // sees one always sees the other.
+  const nextUpArmSec = target?.fileType !== 'episode' ? null : nextUpArmSecond({
+    creditsStartSec: creditsMarker ? creditsMarker.start_ms / 1000 : null,
+    durationSec: realDurationSec,
+    durationTrusted: serverDurationRef.current,
+    partyHost: partyAdvanceHost,
+  })
 
   const fireAdvance = useCallback(async (force: boolean) => {
     if (advanceFiredRef.current) return
     advanceFiredRef.current = true
     setNextUpPhase('spent')
+    if (partyAdvanceHostRef.current) {
+      // Party: the parent reports which of the three outcomes happened,
+      // because "no next episode" and "the socket dropped" want opposite
+      // UI — a finale notice vs. the button back so the host can retry.
+      let outcome: 'advanced' | 'end' | 'failed' = 'failed'
+      try {
+        outcome = (await onPartyAdvanceRef.current?.()) ?? 'failed'
+      } catch { /* treated as 'failed' — re-offer below */ }
+      if (outcome === 'advanced') {
+        // Stays 'spent' — the server's broadcast is what re-points us, and
+        // the resulting file change resets this state (clearing the
+        // watchdog with it). If neither happens the swap was rejected, so
+        // hand the button back rather than leave a dead card.
+        clearSwapWatchdog()
+        swapWatchdogRef.current = window.setTimeout(() => {
+          swapWatchdogRef.current = null
+          advanceFiredRef.current = false
+          setNextUpPhase('prompt')
+        }, PARTY_SWAP_WATCHDOG_MS)
+        return
+      }
+      advanceFiredRef.current = false
+      setNextUpPhase(outcome === 'end' ? 'finale' : 'prompt')
+      return
+    }
     let advanced = false
     try {
       advanced = !!(await onEndedRef.current?.(force ? { force: true } : undefined))
@@ -3523,40 +4048,54 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       advanceFiredRef.current = false
       setNextUpPhase('finale')
     }
-  }, [])
+  }, [clearSwapWatchdog])
 
   useEffect(() => {
-    if (nextUpPhase !== 'idle' || !creditsMarker) return
+    if (nextUpPhase !== 'idle' || nextUpArmSec == null) return
     if (!playing) return // don't pop the card under a paused frame
-    if (party || cast.status.connected) return
-    if (currentSec < creditsMarker.start_ms / 1000) return
+    if (cast.status.connected) return
+    if (party && !partyAdvanceHost) return // guests never advance the room
+    if (currentSec < nextUpArmSec) return
     setNextUpSecs(5)
-    setNextUpPhase(readAutoplayPref() ? 'countdown' : 'prompt')
-  }, [nextUpPhase, creditsMarker, playing, party, cast.status.connected, currentSec])
+    // In a party the card is explicit-button-only. The autoplay pref
+    // governs what happens when a lone viewer does nothing; letting it
+    // silently pull a whole room into the next episode is a different
+    // act, and one nobody in the room opted into.
+    setNextUpPhase(party ? 'prompt' : (readAutoplayPref() ? 'countdown' : 'prompt'))
+  }, [nextUpPhase, nextUpArmSec, playing, party, partyAdvanceHost, cast.status.connected, currentSec])
 
-  // Seeking back OUT of the credits window (rewatching the final
-  // scene) cancels an armed card — without this the countdown keeps
-  // ticking and yanks the viewer to the next episode mid-rewatch.
-  // Back to 'idle' so re-crossing the onset arms it again.
+  // Seeking back OUT of the arming window (rewatching the final scene)
+  // cancels an armed card — without this the countdown keeps ticking and
+  // yanks the viewer to the next episode mid-rewatch. Back to 'idle' so
+  // re-crossing the threshold arms it again.
   useEffect(() => {
     if (nextUpPhase !== 'countdown' && nextUpPhase !== 'prompt') return
-    if (!creditsMarker) return
-    if (currentSec < creditsMarker.start_ms / 1000 - 1) {
+    if (nextUpArmSec == null) return
+    if (currentSec < nextUpArmSec - 1) {
       setNextUpPhase('idle')
     }
-  }, [nextUpPhase, creditsMarker, currentSec])
+  }, [nextUpPhase, nextUpArmSec, currentSec])
 
   // Countdown tick — freezes while paused (pausing mid-countdown is
   // a "wait, I'm not done" signal; resuming resumes the count).
   useEffect(() => {
     if (nextUpPhase !== 'countdown' || !playing) return
+    // Issue #460 — "no passive advance in a party" has to hold at FIRE
+    // time, not just when the card arms. A solo viewer can arm a
+    // countdown, pause, join or create a party, and resume: the timer
+    // survives all of that, and firing it would move a room nobody asked
+    // to move. Demote to the explicit-button card instead of ticking.
+    if (party) {
+      setNextUpPhase('prompt')
+      return
+    }
     if (nextUpSecs <= 0) {
       void fireAdvance(false)
       return
     }
     const id = window.setTimeout(() => setNextUpSecs(s => s - 1), 1000)
     return () => window.clearTimeout(id)
-  }, [nextUpPhase, nextUpSecs, playing, fireAdvance])
+  }, [nextUpPhase, nextUpSecs, playing, party, fireAdvance])
 
   // Finale notice auto-dismisses to 'spent' (terminal for this
   // playback) after a few seconds.
@@ -3619,7 +4158,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const widgetCurSec = cast.status.connected ? cast.remote.currentTime : currentSec
   const widgetDurSec = cast.status.connected ? cast.remote.duration : realDurationSec
   const widgetToggle = () => {
-    if (cast.status.connected) { cast.playOrPause(); return }
+    if (cast.status.connected) { resumeCast(); return }
     const v = videoRef.current
     if (!v) return
     if (v.paused) void v.play().catch(() => { /* defensive */ })
@@ -3752,7 +4291,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             picture. A mouse-move / touch reveals it again with the controls. */}
         <div
           // data-player-chrome marks every auto-hiding region, so the hide
-          // timer can refuse to fire while focus is inside one. See
+          // timer can refuse to fire while KEYBOARD focus is inside one
+          // (lib/chromeFocus gates the guard on input modality — pointer
+          // click-focus must not suppress auto-hide). See
           // showControlsTemporarily.
           data-player-chrome=""
           // `pointer-events-none` alone hid this from the MOUSE and left it in
@@ -3991,7 +4532,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             {onSendReaction && (
               // vertical="down" — top-bar trigger; opening upward would
               // clip against the windowed card's overflow-hidden (#98).
-              <ReactionPicker onSend={onSendReaction} vertical="down" />
+              <ReactionPicker
+                onSend={onSendReaction}
+                vertical="down"
+                // Pin the auto-hide timer while the picker is open so the
+                // emoji row can't fade out mid-choice (fullscreen chrome
+                // auto-hides; this trigger lives in it).
+                onOpenChange={(o) => { reactionPickerOpenRef.current = o }}
+              />
             )}
             <button
               onClick={remoteActive ? () => setMinimized(true) : onClose}
@@ -4109,9 +4657,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   on some networks, and YouTube/Netflix both show
                   the button even when no devices are yet visible
                   (the picker itself handles the "no devices"
-                  case). Hidden in watch parties because the
-                  receiver runs an independent playback timeline
-                  the party can't sync with.
+                  case).
+
+                  Available during a watch party too: when the party
+                  controls this media, a dedicated receiver-driven sync
+                  effect (below the local guest-mirror/host-broadcast
+                  effect) takes over — the receiver itself becomes the
+                  mirrored/broadcast surface instead of the local <video>.
+                  A party room playing UNRELATED solo content behaves
+                  exactly like solo casting (nothing to sync).
 
                   AirPlay deliberately has no custom button: Safari
                   renders its own native AirPlay glyph on the video
@@ -4125,8 +4679,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   Safari's native AirPlay glyph, so we surface our own button
                   that opens the system target picker. Shown only when a
                   wireless target is available (Chrome never fires availability,
-                  so it stays hidden there). */}
-              {!party && airplayAvailable && !cast.status.connected && (
+                  so it stays hidden there).
+
+                  AirPlay needs no special party-sync wiring at all: unlike
+                  Chromecast, the local <video> element IS the AirPlay-mirrored
+                  source (see the airplayActive effect above), so it stays
+                  driven by the ordinary, unmodified local guest-mirror /
+                  host-broadcast effect the whole time — full sync fidelity
+                  "for free." */}
+              {airplayAvailable && !cast.status.connected && (
                 <div
                   data-player-chrome=""
                   inert={!controlsVisible || undefined}
@@ -4145,7 +4706,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   </button>
                 </div>
               )}
-              {!party && cast.status.supported && (
+              {cast.status.supported && (
                 <div
                   data-player-chrome=""
                   inert={!controlsVisible || undefined}
@@ -4266,7 +4827,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   autoplay pref is on; explicit-button mode when off
                   (the click then forces the advance past the pref —
                   an explicit click outranks a passive setting). */}
-              {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (
+              {(nextUpPhase === 'countdown' || nextUpPhase === 'prompt') && (!party || partyAdvanceHost) && (
+                // Issue #460 — the party clause covers host succession: if
+                // the host is demoted while their card is up, it has to go.
+                // Without this the ex-host keeps a button that would fall
+                // through to the solo advance path, which refuses to move a
+                // party and reports "that's the last episode" instead.
+                //
                 // .stage-upnext. The mockup's card leads with a purple
                 // "UP NEXT" eyebrow and puts the countdown in the corner rather
                 // than in the body line, so the card reads the same whether the
@@ -4285,9 +4852,25 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   <div className="p-[15px] pb-3.5">
                     {/* One polite announcement when the card appears, with no
                         number in it, so it never re-fires. */}
-                    <span className="sr-only" role="status">Next episode available</span>
+                    {/* Still number-free so it announces exactly once, but
+                        it has to carry the blast radius: the visible
+                        "plays for everyone" line sits outside the live
+                        region, so without this a screen-reader host hears
+                        precisely what a solo viewer hears before taking an
+                        action that moves the whole room. */}
+                    <span className="sr-only" role="status">
+                      {partyAdvanceHost
+                        ? 'Next episode available — playing it starts it for everyone in the party'
+                        : 'Next episode available'}
+                    </span>
                     <p className="stage-upnext-eyebrow" aria-hidden="true">Up next</p>
                     <p className="text-white text-[13.5px] font-semibold mt-1">Next episode</p>
+                    {/* Issue #460 — name the blast radius. The host's click
+                        moves every person in the room, and a button that
+                        looks identical to the solo one hides that. */}
+                    {partyAdvanceHost && (
+                      <p className="text-white/60 text-[11px] mt-0.5">Plays for everyone in the party</p>
+                    )}
                     <div className="mt-2.5 flex items-center gap-2.5">
                       <button
                         type="button"
@@ -4295,7 +4878,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                         className="inline-flex items-center gap-1.5 h-[30px] px-3.5 rounded-lg bg-white hover:bg-white/90 text-[#0a0a0a] text-[11.5px] font-bold transition-colors"
                       >
                         <Play size={12} />
-                        Play now
+                        {partyAdvanceHost ? 'Play for all' : 'Play now'}
                       </button>
                       {nextUpPhase === 'countdown' && (
                         // aria-hidden: a per-second counter is information for
@@ -4321,7 +4904,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               {/* Series end: the advance found nothing to play. Brief
                   honest feedback (auto-dismisses) instead of a card
                   that promised a next episode and silently vanished. */}
-              {nextUpPhase === 'finale' && (
+              {nextUpPhase === 'finale' && (!party || partyAdvanceHost) && (
+                // Same party gate as the card above: a guest who armed
+                // this while watching alone and then joined a party must
+                // not be told the series ended on the host's behalf.
                 <div
                   role="status"
                   className="absolute bottom-28 right-6 z-[55] rounded-xl bg-[#1a1a22]/95 ring-1 ring-white/10 shadow-2xl px-4 py-3"
@@ -4329,11 +4915,31 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   <p className="text-white/80 text-sm">That's the last episode — you're all caught up.</p>
                 </div>
               )}
+              {/* 2026-08 review fix (issue #461 follow-up) — while
+                  Chromecasting (reachable via "Expand player" without
+                  stopping the cast, in or out of a party), playing/
+                  currentSec/bufferedSec are local-<video> state that
+                  pausedByCastRef holds paused/frozen for the whole cast
+                  session. onSeek/onSeekRelative/onPlayPause below already
+                  act on the receiver when casting — display what they'd
+                  actually act on too, or the scrub bar shows a frozen
+                  position/wrong icon that visibly jumps once touched.
+                  cast.remote.currentTime is receiver/session-relative (like
+                  local vid.currentTime), so it needs the same +startSecRef
+                  conversion used everywhere else in this file to become
+                  REAL-FILE absolute; cast.remote.duration is comparatively
+                  unreliable for a growing HLS transcode, so durationSec
+                  keeps using the already-absolute, receiver-independent
+                  realDurationSec regardless of cast state. There's no
+                  receiver-side "buffered ahead" concept to substitute for
+                  bufferedSec, so it just tracks the (also substituted)
+                  playhead — no buffered-ahead fill rather than a stale or
+                  fabricated one. */}
               <PlayerControls
-                playing={playing}
-                currentSec={currentSec}
+                playing={cast.status.connected ? !cast.remote.isPaused : playing}
+                currentSec={cast.status.connected ? cast.remote.currentTime + (startSecRef.current ?? 0) : currentSec}
                 durationSec={realDurationSec}
-                bufferedSec={bufferedSec}
+                bufferedSec={cast.status.connected ? cast.remote.currentTime + (startSecRef.current ?? 0) : bufferedSec}
                 volume={volume}
                 muted={muted}
                 fullscreen={fullscreen}
@@ -4341,7 +4947,8 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 onPlayPause={() => {
                   // While Chromecasting, the play/pause control drives the
                   // RECEIVER (the local <video> is held paused as the surface).
-                  if (cast.status.connected) { cast.playOrPause(); return }
+                  // resumeCast renews an expired cast token before resuming.
+                  if (cast.status.connected) { resumeCast(); return }
                   const vid = videoRef.current
                   if (!vid) return
                   if (vid.paused) void vid.play().catch(() => { /* defensive */ })
@@ -4362,9 +4969,18 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                   // Backward deltas flow through unchanged (the
                   // rebuild branch only fires near/past the buffered
                   // edge; going back just clamps).
-                  const vid = videoRef.current
-                  if (!vid) return
-                  seekToRealSec((vid.currentTime + (startSecRef.current ?? 0)) + delta)
+                  //
+                  // 2026-08 review fix (issue #461 follow-up) — while
+                  // Chromecasting, vid.currentTime is frozen wherever local
+                  // playback was paused when the cast began; basing a
+                  // relative skip off it would compute a target completely
+                  // disconnected from where the receiver's TV actually is.
+                  // Use the receiver's own live position instead.
+                  const baseSec = cast.status.connected
+                    ? cast.remote.currentTime
+                    : videoRef.current?.currentTime
+                  if (baseSec === undefined) return
+                  seekToRealSec((baseSec + (startSecRef.current ?? 0)) + delta)
                 }}
                 onVolumeChange={(v) => {
                   const vid = videoRef.current

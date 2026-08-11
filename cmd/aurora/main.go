@@ -17,6 +17,14 @@ import (
 	"syscall"
 	"time"
 
+	// The watch-party share card pins its date/time to America/New_York
+	// (internal/api/party_card.go) and prints whatever abbreviation the
+	// zone actually resolves to at that instant — EDT or EST. Nothing else
+	// in Aurora calls LoadLocation, so without the embedded IANA tables the
+	// binary would depend on the host having a zoneinfo database and would
+	// silently fall back to UTC on a minimal install. ~450 KB.
+	_ "time/tzdata"
+
 	"github.com/aurora-media/aurora/internal/api"
 	"github.com/aurora-media/aurora/internal/arr"
 	"github.com/aurora-media/aurora/internal/auth"
@@ -322,6 +330,13 @@ func main() {
 	// single client can't outrun admin triage of the approval queue.
 	requestLimiter := auth.NewRateLimiter(20, time.Minute)
 	defer requestLimiter.Stop()
+	// partyCardLimiter — GET /api/parties/{code}/card.png. Public and
+	// unauthenticated (a social crawler can't log in), gated only by an
+	// HMAC tag, and it runs a compositor. 30/min/IP is roomy for a host
+	// reloading a preview and for a crawler fetching one image, while
+	// making tag brute-force and render-flooding both pointless.
+	partyCardLimiter := auth.NewRateLimiter(30, time.Minute)
+	defer partyCardLimiter.Stop()
 
 	// Phase 2: TMDB metadata client
 	tmdbClient := metadata.NewTMDBClient(cfg.TMDB.APIKey, cfg.TMDB.Language)
@@ -922,6 +937,7 @@ func main() {
 		RefreshLimiter:        refreshLimiter,
 		ChangePasswordLimiter: pwChangeLimiter,
 		RequestLimiter:        requestLimiter,
+		PartyCardLimiter:      partyCardLimiter,
 		Watcher:               watcher,
 		Enricher:              enricher,
 		ImgProxy:              imgProxy,

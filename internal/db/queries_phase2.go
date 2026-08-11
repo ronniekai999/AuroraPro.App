@@ -952,7 +952,7 @@ func (q *Queries) GetEpisodes(ctx context.Context, mediaItemID int64, seasonNum 
 func (q *Queries) GetEpisodeFiles(ctx context.Context, episodeID int64) ([]*models.EpisodeFile, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM episode_files
 		WHERE episode_id = $1
 		ORDER BY CASE version_tag WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4 END, id`, episodeID)
@@ -967,7 +967,7 @@ func (q *Queries) GetEpisodeFiles(ctx context.Context, episodeID int64) ([]*mode
 		var audioJSON, subtitleJSON []byte
 		if err := rows.Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries); err != nil {
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS); err != nil {
 			return nil, err
 		}
 		// 2026-05-19 audit (BE-H1) — log corrupt JSONB rows instead
@@ -1494,11 +1494,11 @@ func (q *Queries) GetMediaFileByID(ctx context.Context, id int64) (*models.Media
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM media_files WHERE id = $1`, id).
 		Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries)
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS)
 	if err != nil {
 		return nil, err
 	}
@@ -1514,11 +1514,11 @@ func (q *Queries) GetEpisodeFileByID(ctx context.Context, id int64) (*models.Epi
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx, `
 		SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec,
-		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		       resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		FROM episode_files WHERE id = $1`, id).
 		Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container,
 			&f.VideoCodec, &f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs,
-			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries)
+			&f.FileHash, &f.ScannedAt, &audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS)
 	if err != nil {
 		return nil, err
 	}
@@ -1526,6 +1526,41 @@ func (q *Queries) GetEpisodeFileByID(ctx context.Context, id int64) (*models.Epi
 	unmarshalTracks(audioJSON, &f.AudioTracks, f.ID, "audio")
 	unmarshalTracks(subtitleJSON, &f.SubtitleTracks, f.ID, "subtitle")
 	return f, nil
+}
+
+// GetContentRatingForEpisodeFile returns the content_rating of the show that
+// owns episodeFileID, for parental-ceiling enforcement on the read/playback
+// path (issue #462) — content_rating lives on media_items, not per-episode.
+// Empty string (nil error) means unrated; callers must treat that as
+// EXCLUDED under any restriction, matching AllowedRatingsForMax/RatingAllowed.
+// A missing episodeFileID returns pgx.ErrNoRows, same as the file lookups.
+func (q *Queries) GetContentRatingForEpisodeFile(ctx context.Context, episodeFileID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(mi.content_rating, '')
+		FROM episode_files ef
+		JOIN tv_episodes e ON e.id = ef.episode_id
+		JOIN media_items mi ON mi.id = e.media_item_id
+		WHERE ef.id = $1`, episodeFileID).Scan(&rating)
+	if err != nil {
+		return "", err
+	}
+	return rating, nil
+}
+
+// GetContentRatingForMediaFile is the movie-file counterpart of
+// GetContentRatingForEpisodeFile (issue #462).
+func (q *Queries) GetContentRatingForMediaFile(ctx context.Context, mediaFileID int64) (string, error) {
+	var rating string
+	err := q.pool.QueryRow(ctx, `
+		SELECT COALESCE(mi.content_rating, '')
+		FROM media_files mf
+		JOIN media_items mi ON mi.id = mf.media_item_id
+		WHERE mf.id = $1`, mediaFileID).Scan(&rating)
+	if err != nil {
+		return "", err
+	}
+	return rating, nil
 }
 
 // ============================================================
@@ -1647,8 +1682,8 @@ func (q *Queries) UpsertEpisode(ctx context.Context, seasonID, mediaItemID int64
 func (q *Queries) UpsertEpisodeFile(ctx context.Context, f *models.EpisodeFile) error {
 	aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
 	return q.pool.QueryRow(ctx,
-		`INSERT INTO episode_files (episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		`INSERT INTO episode_files (episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, video_fps)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		 ON CONFLICT (path) DO UPDATE SET
 		   episode_id = EXCLUDED.episode_id,
 		   size_bytes = EXCLUDED.size_bytes, container = EXCLUDED.container,
@@ -1657,12 +1692,12 @@ func (q *Queries) UpsertEpisodeFile(ctx context.Context, f *models.EpisodeFile) 
 		   duration_ms = EXCLUDED.duration_ms, file_hash = EXCLUDED.file_hash,
 		   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
 		   version_tag = EXCLUDED.version_tag,
-		   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
+		   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt, video_fps = EXCLUDED.video_fps,
 		   scanned_at = NOW()
 		 RETURNING id, scanned_at`,
 		f.EpisodeID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
 		f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
-		f.VideoProfile, f.VideoPixFmt,
+		f.VideoProfile, f.VideoPixFmt, f.VideoFPS,
 	).Scan(&f.ID, &f.ScannedAt)
 }
 
@@ -1671,11 +1706,11 @@ func (q *Queries) GetEpisodeFileByPath(ctx context.Context, path string) (*model
 	f := &models.EpisodeFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		`SELECT id, episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM episode_files WHERE path = $1`, path,
 	).Scan(&f.ID, &f.EpisodeID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
 		&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
-		&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+		&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {

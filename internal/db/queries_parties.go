@@ -97,6 +97,47 @@ func (q *Queries) UpdatePartyMedia(ctx context.Context, partyID int64, mediaItem
 	return nil
 }
 
+// PartyMediaTargetExists reports whether a media item exists and, when
+// episodeID is non-nil, whether that episode genuinely belongs to it.
+//
+// Issue #460 — the `change-media` room message takes both ids straight off
+// the wire, and the only check before this was `media_item_id > 0`. An
+// inconsistent pair passed the in-memory state mutation and then failed the
+// FK inside UpdatePartyMedia's fire-and-forget goroutine, which only warns:
+// the party would play one thing while the row said another, and a restart
+// rehydrated the stale row. Validating before the swap keeps memory and disk
+// agreeing.
+//
+// The episode check constrains media_item_id on BOTH the episode and its
+// season, mirroring GetEpisodes' defense against a drifted season_id — an
+// episode row pointing at another show's season must not validate.
+func (q *Queries) PartyMediaTargetExists(ctx context.Context, mediaItemID int64, episodeID *int64) (bool, error) {
+	var exists bool
+	if episodeID == nil {
+		if err := q.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM media_items WHERE id = $1)`,
+			mediaItemID,
+		).Scan(&exists); err != nil {
+			return false, fmt.Errorf("check party media target: %w", err)
+		}
+		return exists, nil
+	}
+	if err := q.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+		     SELECT 1
+		       FROM tv_episodes e
+		       JOIN tv_seasons  s ON s.id = e.season_id
+		      WHERE e.id            = $1
+		        AND e.media_item_id = $2
+		        AND s.media_item_id = $2
+		 )`,
+		*episodeID, mediaItemID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check party episode target: %w", err)
+	}
+	return exists, nil
+}
+
 // UpdatePartyHost persists a host-succession handoff — the previous host
 // left (or timed out of the disconnect grace) and a remaining participant
 // inherited the party. Gated on is_active so a party that ended in the

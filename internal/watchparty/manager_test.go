@@ -1612,6 +1612,74 @@ func TestCleanupOnce_EmptyPartyStale(t *testing.T) {
 }
 
 // ============================================================
+// ChangeMedia Tests (issue #462 — hostRefreshTokenID param)
+// ============================================================
+
+func changeMediaParty() *PartyState {
+	return &PartyState{
+		Code:            "ABCDEF",
+		HostUserID:      1,
+		MediaItemID:     100,
+		MaxParticipants: 5,
+		Participants:    map[int64]*Participant{1: {UserID: 1, Username: "host", IsHost: true, LastSeen: time.Now()}},
+		roomConns:       make(map[int64]*SafeConn),
+		syncConns:       make(map[int64]*SafeConn),
+		ChatHistory:     make([]ChatMessage, 0),
+		Settings:        PartySettings{AllowChat: true, AllowPause: true, MaxParticipants: 5},
+		CreatedAt:       time.Now(),
+	}
+}
+
+// TestChangeMedia_NonHostRejected pins that the new hostRefreshTokenID
+// parameter didn't loosen the existing host-only authorization — a
+// non-host caller must still be rejected regardless of what it passes.
+func TestChangeMedia_NonHostRejected(t *testing.T) {
+	m := mockPartyManager()
+	ps := changeMediaParty()
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	err := m.ChangeMedia("ABCDEF", 2 /* not the host */, 0, 200, nil, "new title", "")
+	if err == nil {
+		t.Fatal("ChangeMedia should reject a non-host caller")
+	}
+	if !strings.Contains(err.Error(), "host") {
+		t.Errorf("error should mention host, got: %s", err.Error())
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.MediaItemID != 100 {
+		t.Error("rejected swap must not mutate party state")
+	}
+}
+
+// TestChangeMedia_NilQueriesSkipsValidation pins that m.queries == nil (the
+// existing "tests build the manager without a pool" contract) still lets a
+// host's swap through untouched — issue #462's rating-ceiling check hangs
+// off the SAME `if m.queries != nil` guard as the pre-existing existence
+// check, so it must not become a hard dependency on a DB being wired.
+func TestChangeMedia_NilQueriesSkipsValidation(t *testing.T) {
+	m := mockPartyManager() // queries is nil
+	ps := changeMediaParty()
+	m.mu.Lock()
+	m.parties["ABCDEF"] = ps
+	m.mu.Unlock()
+
+	if err := m.ChangeMedia("ABCDEF", 1, 0, 200, nil, "new title", "poster.jpg"); err != nil {
+		t.Fatalf("host swap with nil queries should succeed, got: %v", err)
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if ps.MediaItemID != 200 {
+		t.Errorf("MediaItemID = %d, want 200", ps.MediaItemID)
+	}
+	if ps.MediaTitle != "new title" {
+		t.Errorf("MediaTitle = %q, want %q", ps.MediaTitle, "new title")
+	}
+}
+
+// ============================================================
 // Concurrency Tests
 // ============================================================
 

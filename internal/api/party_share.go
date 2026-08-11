@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aurora-media/aurora/internal/models"
 	"github.com/aurora-media/aurora/internal/watchparty"
 	"github.com/go-chi/chi/v5"
 	xdraw "golang.org/x/image/draw"
@@ -98,8 +100,20 @@ const (
 // images of watch parties. Depends on the watch party manager (for live
 // party lookup) and a cache directory for disk-cached output PNGs.
 type PartyShareHandler struct {
-	manager  *watchparty.Manager
+	manager  partyStateLookup
 	cacheDir string
+
+	// The share-card surface (party_card.go) also hangs off this handler:
+	// it renders into the same cache root and reuses fetchPosterImage,
+	// which is the SSRF boundary and must not be forked.
+	//   queries       — host display name / avatar, and the meta line.
+	//   jwtSecret     — keys the stateless HMAC card token.
+	//   secureCookies — the proxy hint that decides http vs https in the
+	//                   absolute URLs card-links mints (same flag the auth
+	//                   cookies and the join QR use).
+	queries       cardQueries
+	jwtSecret     string
+	secureCookies bool
 
 	// Font faces are lazily initialized once on first use and reused
 	// across all renders. opentype.NewFace is non-trivially expensive
@@ -123,13 +137,35 @@ type PartyShareHandler struct {
 // ends) but if a party crashes or InvalidateCache is somehow missed,
 // the reaper bounds long-tail disk growth. Bug-bash May 14 L13 fix.
 // Runs once on startup then every partyShareReaperInterval.
-func NewPartyShareHandler(manager *watchparty.Manager, cacheDir string) *PartyShareHandler {
+func NewPartyShareHandler(manager partyStateLookup, queries cardQueries, cacheDir, jwtSecret string, secureCookies bool) *PartyShareHandler {
 	h := &PartyShareHandler{
-		manager:  manager,
-		cacheDir: cacheDir,
+		manager:       manager,
+		queries:       queries,
+		cacheDir:      cacheDir,
+		jwtSecret:     jwtSecret,
+		secureCookies: secureCookies,
 	}
 	go h.runReaper()
 	return h
+}
+
+// partyStateLookup is the one manager method these handlers need.
+// Declared as an interface (like party_qr.go's watchpartyManager) so the
+// card surface can be tested against a hand-built PartyState instead of a
+// live Manager + Postgres. *watchparty.Manager satisfies it.
+type partyStateLookup interface {
+	GetPartyState(code string) *watchparty.PartyState
+}
+
+// cardQueries is the slice of *db.Queries the share card needs. Declared
+// as an interface so the card handler can be unit-tested with a tiny fake
+// instead of standing up Postgres — the same trick party_qr.go plays with
+// watchpartyManager. *db.Queries satisfies it.
+type cardQueries interface {
+	GetMemberProfileByID(ctx context.Context, userID int64) (*models.MemberProfile, error)
+	GetMediaItem(ctx context.Context, id int64) (*models.MediaItem, error)
+	GetMediaGenres(ctx context.Context, mediaItemID int64) ([]string, error)
+	GetEpisodeNowPlayingInfo(ctx context.Context, episodeID int64) (showTitle string, seasonNum int, episodeNum int, episodeTitle string, err error)
 }
 
 // partyShareCacheMaxAge bounds how long a cached share image lives if
@@ -172,8 +208,19 @@ func (h *PartyShareHandler) runReaper() {
 
 // reapOnce performs a single sweep. Extracted so tests can call it
 // directly without waiting for the ticker.
+//
+// Sweeps BOTH cache namespaces: the legacy party-share/<code>.png images
+// and the fingerprinted party-card/<code>-<variant>-<fp>.png cards. The
+// card key deliberately changes whenever the party's inputs change, so
+// superseded files are unreachable rather than wrong — the reaper is what
+// eventually reclaims them.
 func (h *PartyShareHandler) reapOnce() {
-	dir := filepath.Join(h.cacheDir, "party-share")
+	for _, sub := range []string{"party-share", partyCardCacheSubdir} {
+		h.reapDir(filepath.Join(h.cacheDir, sub))
+	}
+}
+
+func (h *PartyShareHandler) reapDir(dir string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// Missing directory is not an error — it just means no
@@ -206,7 +253,7 @@ func (h *PartyShareHandler) reapOnce() {
 		reaped++
 	}
 	if reaped > 0 {
-		slog.Info("party share reaper: swept stale cache files", "count", reaped, "older_than", partyShareCacheMaxAge)
+		slog.Info("party share reaper: swept stale cache files", "dir", dir, "count", reaped, "older_than", partyShareCacheMaxAge)
 	}
 }
 
@@ -297,7 +344,7 @@ func (h *PartyShareHandler) ServeShareImage(w http.ResponseWriter, r *http.Reque
 	// Cache miss — look up the party in live state. If not active, 404.
 	// We don't fall back to the DB for ended parties; sharing a closed
 	// party is a non-goal and would create stale-image confusion.
-	ps := h.manager.GetPartyState(code)
+	ps := h.lookupParty(code)
 	if ps == nil {
 		writeError(w, http.StatusNotFound, "party not found or has ended")
 		return
@@ -543,13 +590,40 @@ func measureTextWidth(face font.Face, s string) int {
 	return w.Round()
 }
 
-// InvalidateCache removes the cached share image for a party. Called from
-// the party manager when a party ends (best-effort hook). Silently ignores
-// "file not found" — the file may never have been generated if no one
-// requested a share.
+// InvalidateCache removes every cached image for a party — the legacy
+// share image and all fingerprinted share-card variants. Wired into the
+// watch-party manager (SetShareCacheInvalidator) so a party that ends or
+// swaps media drops its artwork immediately instead of waiting on the
+// 30-day reaper; manager.go recorded that wiring as an open follow-up
+// until this change.
+//
+// Best-effort throughout: "file not found" is the normal case (nobody
+// asked for a card), and a failed unlink is a disk-space problem for the
+// reaper, not a reason to fail a party teardown.
 func (h *PartyShareHandler) InvalidateCache(code string) {
+	if !isValidPartyCode(strings.ToUpper(code)) {
+		// Defensive: `code` reaches filepath.Glob, and the glob pattern
+		// must never be attacker-shaped. Manager codes are generated from
+		// the fixed alphabet, so a miss here means a caller bug.
+		slog.Debug("party card cache invalidate: refusing non-canonical code", "code", code)
+		return
+	}
+	code = strings.ToUpper(code)
+
 	path := h.cachePath(code)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		slog.Debug("party share cache invalidate failed", "code", code, "error", err)
+	}
+
+	pattern := filepath.Join(h.cacheDir, partyCardCacheSubdir, code+"-*.png")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		slog.Debug("party card cache invalidate: glob failed", "pattern", pattern, "error", err)
+		return
+	}
+	for _, m := range matches {
+		if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+			slog.Debug("party card cache invalidate failed", "path", m, "error", err)
+		}
 	}
 }

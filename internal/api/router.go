@@ -152,10 +152,16 @@ type RouterDeps struct {
 	//   RefreshLimiter       — POST /api/auth/refresh + /logout (session-lifecycle churn; roomier)
 	//   ChangePasswordLimiter — POST /api/auth/change-password (authed, Argon2id-gated; modest cap)
 	//   RequestLimiter       — POST /api/requests (per-IP media-request flood cap)
+	//   PartyCardLimiter     — GET /api/parties/{code}/card.png. The one
+	//     PUBLIC route that runs a compositor, and the one whose HMAC tag
+	//     an attacker would have to guess: the cap both bounds brute force
+	//     and stops the renderer being used as a CPU sink. Optional — nil
+	//     registers the route unlimited (tests).
 	LoginLimiter          *auth.RateLimiter
 	RefreshLimiter        *auth.RateLimiter
 	ChangePasswordLimiter *auth.RateLimiter
 	RequestLimiter        *auth.RateLimiter
+	PartyCardLimiter      *auth.RateLimiter
 	Watcher               *library.Watcher
 	Enricher              *metadata.Enricher
 	ImgProxy              *metadata.ImageProxy
@@ -315,12 +321,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 				}
 				http.Redirect(w, r, dest, http.StatusFound)
 			})
-			// Magic-link entry points. /p/{code} and /r/{code}
-			// redirect to V2's deep-link routes; V2's BrowserRouter
-			// extracts the code from the URL path on load.
-			r.Get("/p/{code}", func(w http.ResponseWriter, r *http.Request) {
-				http.Redirect(w, r, "/v2/p/"+chi.URLParam(r, "code"), http.StatusFound)
-			})
+			// Magic-link entry points. /r/{code} redirects to V2's
+			// deep-link route; V2's BrowserRouter extracts the code
+			// from the URL path on load.
+			//
+			// /p/{code} used to be the same one-line 302. It is now the
+			// share card's unfurl shell (party_card_page.go) and is
+			// registered further down, next to the card image it points
+			// at — a browser still lands in the SPA, via the shell's
+			// location.replace rather than a Location header. See
+			// ServePartyPage for why the shell is served to everyone
+			// instead of sniffing User-Agent.
 			r.Get("/r/{code}", func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, "/v2/r/"+chi.URLParam(r, "code"), http.StatusFound)
 			})
@@ -503,7 +514,39 @@ func NewRouter(deps RouterDeps) http.Handler {
 	// 1080×1920 PNG per party for posting to social-media stories. Cache
 	// directory reuses the image proxy's cache root for filesystem locality;
 	// generated images live under <root>/party-share/<code>.png.
-	partyShareH := NewPartyShareHandler(deps.PartyManager, deps.Cfg.Cache.ImageDir)
+	// The same handler now also serves the watch-party SHARE CARD
+	// (party_card.go): GET card.png (public, HMAC-tagged) and card-links
+	// (authed, host-only). It needs queries for the host's member-visible
+	// identity and the meta line, the JWT secret to key the card token,
+	// and the secure-cookie hint so minted URLs get the right scheme
+	// behind a TLS-terminating proxy.
+	//
+	// Both dependencies are nil-normalized into their interfaces first: a
+	// nil *watchparty.Manager (or *db.Queries) stored in a non-nil
+	// interface still passes `!= nil` and panics on the first method call,
+	// which makes the handler's own `== nil` guards inert. That never
+	// mattered while every card route sat behind an HMAC tag, but the
+	// Phase 3 unfurl shell at /p/{code} is reachable with no token at all,
+	// so it has to degrade to "no party" rather than take the process down
+	// when a caller builds a router without one of them.
+	var partyLookup partyStateLookup
+	if deps.PartyManager != nil {
+		partyLookup = deps.PartyManager
+	}
+	var cardQ cardQueries
+	if deps.Queries != nil {
+		cardQ = deps.Queries
+	}
+	partyShareH := NewPartyShareHandler(
+		partyLookup, cardQ, deps.Cfg.Cache.ImageDir,
+		cfg.Auth.JWTSecret, cfg.Server.SecureCookies,
+	)
+	// Close the follow-up manager.go:2780 recorded: the manager had no way
+	// to drop a party's cached artwork, so a media swap or a party ending
+	// left a stale poster until the 30-day reaper. It does now.
+	if deps.PartyManager != nil {
+		deps.PartyManager.SetShareCacheInvalidator(partyShareH.InvalidateCache)
+	}
 	// Feature 1 (mobile companion): renders the companion-join QR code
 	// (PNG of <scheme>://<host>/join/{CODE}). Auth + party-membership gated;
 	// secureCookies threads through so the encoded URL's scheme is https
@@ -515,6 +558,40 @@ func NewRouter(deps RouterDeps) http.Handler {
 	partyWSHV3Sync := NewPartyWSHandlerV3Sync(deps.PartyManager, deps.AuthSvc, tokenVerStore, cfg.OriginAllowed)
 	partyWSHV3Room := NewPartyWSHandlerV3Room(deps.PartyManager, deps.AuthSvc, tokenVerStore, cfg.OriginAllowed)
 
+	// ── Watch-party link unfurl (share card, Phase 3) ──────────────────
+	//
+	// /p/{code} is the link a host pastes into a chat. It answers every
+	// caller with the same small HTML shell carrying og:/twitter: tags,
+	// and bounces browsers into the SPA from inside that page — see
+	// ServePartyPage for why this beats sniffing User-Agent, and what a
+	// human's path looks like now.
+	//
+	// /p/{code}/card.png is an ALIAS onto the same ServeCardPNG the API
+	// route exposes: same HMAC gate, same 404-for-everything, same cache.
+	// It exists so the og:image sits under the one prefix robots.txt
+	// allows — crawlers that honour robots (X's card crawler most
+	// explicitly) skip images the file disallows, and the locked decision
+	// is that the carve-out is `Allow: /p/` and nothing else.
+	//
+	// Both routes carry the card limiter: the shell is public, mints a
+	// card tag, and is the cheapest thing to hammer on the box. Both
+	// register HEAD as well as GET — crawlers preflight, and chi routes
+	// methods independently (a GET-only registration answers HEAD with
+	// 405). Gated on StaticDir for the same reason the old /p/ redirect
+	// was: with no SPA built there is nowhere for a browser to land.
+	if deps.StaticDir != "" {
+		r.Group(func(r chi.Router) {
+			r.Use(frontendHeaders)
+			if deps.PartyCardLimiter != nil {
+				r.Use(deps.PartyCardLimiter.Middleware)
+			}
+			r.Get("/p/{code}", partyShareH.ServePartyPage)
+			r.Head("/p/{code}", partyShareH.ServePartyPage)
+			r.Get("/p/{code}/card.png", partyShareH.ServeCardPNG)
+			r.Head("/p/{code}/card.png", partyShareH.ServeCardPNG)
+		})
+	}
+
 	// ── API routes (with restrictive security headers) ─────────────────
 	r.Group(func(r chi.Router) {
 		r.Use(securityHeaders)
@@ -523,10 +600,19 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// Aurora is a private media server: nothing here should be crawled or
 		// indexed, and the absence of this file meant every crawler probed
 		// paths individually and logged a 404 each time. Disallow everything.
+		//
+		// ONE carve-out (share card, Phase 3): `Allow: /p/`, the watch-party
+		// unfurl shell and the card image served under it. Without it the
+		// crawlers that honour this file — X's card crawler, Slack's and
+		// Discord's fetchers — refuse to render a pasted party link, which is
+		// the whole feature. It is written ABOVE the blanket rule so
+		// first-match parsers take it too; longest-match parsers (Google,
+		// Bing) prefer `/p/` over `/` either way. Nothing else moves: every
+		// other route on this server stays uncrawlable.
 		r.Get("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("Cache-Control", "public, max-age=86400")
-			_, _ = io.WriteString(w, "User-agent: *\nDisallow: /\n")
+			_, _ = io.WriteString(w, "User-agent: *\nAllow: /p/\nDisallow: /\n")
 		})
 
 		// sitemap.xml — 706 real 404s. A private server has no public site to
@@ -599,6 +685,20 @@ func NewRouter(deps RouterDeps) http.Handler {
 		// Cached on disk so repeated social-media-crawler hits don't
 		// re-render the image.
 		r.Get("/api/parties/{code}/share-image.png", partyShareH.ServeShareImage)
+
+		// Watch-party SHARE CARD (public, HMAC-tagged). Unauthenticated
+		// because a social crawler unfurling a pasted link cannot log in;
+		// gated on ?t=, a stateless HMAC over the code that only an
+		// authenticated host can mint via /card-links. Every rejection is
+		// a 404 — a 403 would confirm the code names a real party. Rate
+		// limited per IP so the tag can't be brute-forced and the
+		// compositor can't be used as a CPU sink.
+		if deps.PartyCardLimiter != nil {
+			r.With(deps.PartyCardLimiter.Middleware).
+				Get("/api/parties/{code}/card.png", partyShareH.ServeCardPNG)
+		} else {
+			r.Get("/api/parties/{code}/card.png", partyShareH.ServeCardPNG)
+		}
 
 		// Bug-report attachments (public — the filename is a 128-bit
 		// random hex string which serves as the access token, same
@@ -919,6 +1019,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Put("/{id}", profileH.UpdateProfile)
 				r.Delete("/{id}", profileH.DeleteProfile)
 				r.Post("/{id}/default", profileH.SetDefault)
+				// Session-bound acting profile (issue #462) — distinct from
+				// SetDefault's account-wide persistent default; this is what
+				// read/playback rating-ceiling enforcement consults.
+				r.Post("/{id}/activate", profileH.ActivateProfile)
 
 				// Watchlists (nested under profile)
 				r.Get("/{profileId}/watchlists", profileH.ListWatchlists)
@@ -999,6 +1103,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Use(auth.RequireAdmin)
 				r.Get("/dashboard", adminH.Dashboard)
 				r.Get("/activity", adminH.Activity)
+				// Distinct event types for the Activity tab's filter. Static
+				// subpath, so it can't collide with /activity itself.
+				r.Get("/activity/types", adminH.ActivityTypes)
 				r.Get("/sessions", adminH.Sessions)
 				r.Get("/sessions/{sessionID}/diagnose", adminH.DiagnoseSession)
 				r.Get("/settings", adminH.GetSettings)
@@ -1172,6 +1279,11 @@ func NewRouter(deps RouterDeps) http.Handler {
 			// (this group) + party-membership gated inside the handler,
 			// same policy as reactions/highlight above.
 			r.Get("/api/parties/{code}/qr.png", partyQRH.ServeQR)
+			// Share-card links — HOST-ONLY (403 for anyone else). The
+			// host generating and sharing the image IS the consent event
+			// for putting their name and their evening on a public URL,
+			// so nobody else can mint it.
+			r.Get("/api/parties/{code}/card-links", partyShareH.CardLinks)
 		})
 
 		// HLS playlist + segment routes — sibling of the RequireAuth

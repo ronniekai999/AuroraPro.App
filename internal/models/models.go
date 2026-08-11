@@ -175,6 +175,11 @@ type RefreshToken struct {
 	CreatedAt  time.Time `json:"created_at"`
 	Revoked    bool      `json:"revoked"`
 	DeviceInfo string    `json:"device_info,omitempty"`
+	// ActiveProfileID is the sub-profile currently bound to this session
+	// (issue #462) — set via ProfileHandler.ActivateProfile, consulted by
+	// db.ResolveActingProfile. nil = no explicit switch yet, falls back to
+	// the account default profile.
+	ActiveProfileID *int64 `json:"active_profile_id,omitempty"`
 }
 
 type InviteCode struct {
@@ -312,8 +317,12 @@ type MediaFile struct {
 	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
 	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
 	// Empty = unknown (treat as non-HDR, safer default).
-	ColorTransfer  string          `json:"color_transfer,omitempty"`
-	ColorPrimaries string          `json:"color_primaries,omitempty"`
+	ColorTransfer  string `json:"color_transfer,omitempty"`
+	ColorPrimaries string `json:"color_primaries,omitempty"`
+	// VideoFPS is the probed average frame rate (0 = unknown — files
+	// scanned before migration 053). Used to stamp a truthful H.264
+	// level for >30fps content (1080p60 → 4.2, 2160p60 → 5.2).
+	VideoFPS       float64         `json:"video_fps,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
@@ -363,8 +372,12 @@ type EpisodeFile struct {
 	// HLG / bt2020 primaries) from SDR 10-bit so the transcode
 	// pipeline doesn't mis-apply the HDR-to-SDR tonemap to SDR sources.
 	// Empty = unknown (treat as non-HDR, safer default).
-	ColorTransfer  string          `json:"color_transfer,omitempty"`
-	ColorPrimaries string          `json:"color_primaries,omitempty"`
+	ColorTransfer  string `json:"color_transfer,omitempty"`
+	ColorPrimaries string `json:"color_primaries,omitempty"`
+	// VideoFPS is the probed average frame rate (0 = unknown — files
+	// scanned before migration 053). Used to stamp a truthful H.264
+	// level for >30fps content (1080p60 → 4.2, 2160p60 → 5.2).
+	VideoFPS       float64         `json:"video_fps,omitempty"`
 	FileHash       string          `json:"file_hash"`
 	ScannedAt      time.Time       `json:"scanned_at"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
@@ -655,6 +668,7 @@ type StreamInfo struct {
 	AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // Frontend should send audio_passthrough:true
 	AudioChannels    int    `json:"audio_channels,omitempty"`    // Source audio channel count for bitrate scaling
 	AudioCodecOut    string `json:"audio_codec_out,omitempty"`   // Re-encode target: "aac" (stereo) or "ac3" (5.1 surround); frontend echoes it to the session
+	VideoCodecOut    string `json:"video_codec_out,omitempty"`   // Transcode output: "h264" (default) or "hevc" (2026-08, when server+client both support it); frontend echoes it to the session
 	HDRTonemap       bool   `json:"hdr_tonemap,omitempty"`       // Frontend should send hdr_tonemap:true to session
 }
 
@@ -925,6 +939,20 @@ type ActivityEntry struct {
 	IPAddress string                 `json:"ip_address,omitempty"`
 	CreatedAt time.Time              `json:"created_at"`
 	Username  string                 `json:"username,omitempty"`
+}
+
+// ActivityEventType is one distinct event_type present in activity_log with
+// the number of rows carrying it. It backs the admin Activity tab's filter.
+//
+// The option list is derived from the DATA rather than a constant, because
+// event types are registered ad hoc at ~24 call sites across activity.go,
+// party_handlers.go, oauth_handlers.go and request_handlers.go with no
+// central registry — a hardcoded SPA list would silently drift the moment
+// anyone adds a type. Deriving it also means an instance only offers the
+// types it has actually recorded.
+type ActivityEventType struct {
+	EventType string `json:"event_type"`
+	Count     int64  `json:"count"`
 }
 
 type ServerStats struct {

@@ -72,6 +72,11 @@ export interface StreamDecision {
   // 'aac'/'ac3'/'eac3' (E-AC-3 passthrough is fMP4-mode only). Echoed back to
   // createSession; the server re-validates it against its own track data.
   audio_codec_out?: string
+  // Codec a TRANSCODE session's video output carries: 'h264' (default) or
+  // 'hevc' (2026-08 — chosen server-side when the host has an HEVC encoder,
+  // segments are fMP4, and this browser decodes 8-bit Main HEVC). Echoed
+  // back to createSession; the server clamps it against its own state.
+  video_codec_out?: string
   hdr_tonemap?: boolean
 }
 
@@ -110,6 +115,7 @@ export interface CreateSessionRequest {
   audio_track_index?: number
   audio_channels?: number
   audio_codec_out?: string
+  video_codec_out?: string
   hdr_tonemap?: boolean
   video_codec?: string
   // FFmpeg -ss seek offset in WHOLE SECONDS (V1's playMedia floors
@@ -202,6 +208,9 @@ export function buildSessionRequest(
     audio_track_index: opts.audioTrackIndex ?? stream.audio_track_index,
     audio_channels: stream.audio_channels,
     audio_codec_out: stream.audio_codec_out,
+    // Only set on transcode decisions; the server clamps it regardless
+    // (a forceTranscode retry after a failed remux carries no value).
+    video_codec_out: stream.video_codec_out,
     hdr_tonemap: stream.hdr_tonemap,
     video_codec: stream.video_codec,
     start_sec: opts.startSec > 0 ? opts.startSec : undefined,

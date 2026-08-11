@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -540,6 +541,20 @@ type Manager struct {
 	// once even if SetHighlightCacheDir is called multiple times.
 	reaperOnce sync.Once
 
+	// shareCacheInvalidator drops a party's cached share artwork (the
+	// legacy share image and every fingerprinted share-card variant).
+	// Wired from the API layer at boot via SetShareCacheInvalidator,
+	// because the renderer and its cache directory live on the HTTP
+	// handler and the manager must not learn about either. Unset is fine
+	// — the 30-day reaper is still the backstop.
+	//
+	// Held in an atomic rather than under m.mu deliberately: the call
+	// sites (ChangeMedia, endPartyInternal) run while ps.mu is held, and
+	// reaching for m.mu there would invert this file's one-way
+	// m.mu → ps.mu nesting and can deadlock against any writer waiting
+	// on m.mu.
+	shareCacheInvalidator atomic.Pointer[func(code string)]
+
 	// M9/M1 — server-lifecycle context for parent-of background work
 	// (highlight-reel ffmpeg jobs, daily reaper). On SIGTERM this
 	// context cancels, in-flight goroutines unwind cleanly rather than
@@ -562,6 +577,34 @@ func (m *Manager) SetDispatcher(d *notify.Dispatcher) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dispatcher = d
+}
+
+// SetShareCacheInvalidator wires the share-image / share-card cache
+// dropper. Called once at boot from NewRouter. Optional: without it the
+// only cleanup is the daily reaper, which is how the system behaved
+// before this hook existed.
+func (m *Manager) SetShareCacheInvalidator(fn func(code string)) {
+	if fn == nil {
+		m.shareCacheInvalidator.Store(nil)
+		return
+	}
+	m.shareCacheInvalidator.Store(&fn)
+}
+
+// invalidateShareCache fires the hook, if one is wired.
+//
+// Runs on its own goroutine: cache eviction is filesystem work and must
+// never stall a party teardown or a media change. That also means the
+// eviction can, in principle, land just after a concurrent request has
+// re-rendered and written a fresh card — the glob would delete the new
+// file too. Harmless: the cache is an optimisation, and the next request
+// simply re-renders.
+func (m *Manager) invalidateShareCache(code string) {
+	fn := m.shareCacheInvalidator.Load()
+	if fn == nil {
+		return
+	}
+	go (*fn)(code)
 }
 
 // SetShutdownContext wires the server-lifecycle context for background
@@ -1921,6 +1964,11 @@ func (m *Manager) endPartyInternal(code string, ps *PartyState, expectedHost int
 	delete(m.parties, code)
 	m.mu.Unlock()
 
+	// The party is gone, so its cards can never be regenerated (the image
+	// route resolves against live manager state) — the cached PNGs are now
+	// pure dead weight.
+	m.invalidateShareCache(code)
+
 	slog.Info("watch party ended", "code", code, "room_persistent", isRoomPersistent)
 	return nil
 }
@@ -2727,6 +2775,11 @@ func (m *Manager) broadcastToRoomPeersExcludeLocked(ps *PartyState, excludeUserI
 // Media Change (TV episode auto-advance + manual swap)
 // ============================================================
 
+// changeMediaValidateTimeout bounds the existence check ChangeMedia runs
+// before mutating. Short on purpose: it is a single indexed EXISTS, and a
+// slow database must not hold up a host's episode advance.
+const changeMediaValidateTimeout = 2 * time.Second
+
 // ChangeMedia swaps the party's media to a new item/episode. Used primarily
 // for TV episode auto-advance when the host's video reaches its end —
 // the host's client resolves the next episode via the existing /next-episode
@@ -2744,12 +2797,72 @@ func (m *Manager) broadcastToRoomPeersExcludeLocked(ps *PartyState, excludeUserI
 // each client (re-)opens it, OR the next tick / pause broadcast carries
 // the new anchor — but in practice clients teardown+reopen their sync
 // socket as part of the player re-init, so they receive a fresh hello.
-func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
+// callerUserID/callerRefreshTokenID identify whoever SENT the change-media
+// message, not necessarily the host — the host-only check below runs AFTER
+// the DB validation block (see that block's own comment for why), so
+// naming these "host*" would be misleading about what's verified when.
+func (m *Manager) ChangeMedia(code string, callerUserID int64, callerRefreshTokenID int64, newMediaItemID int64, newEpisodeID *int64, newMediaTitle, newMediaPoster string) error {
 	m.mu.RLock()
 	ps, exists := m.parties[code]
 	m.mu.RUnlock()
 	if !exists {
 		return errUser("party not found")
+	}
+
+	// Issue #460 — both ids come straight off the wire, and until the
+	// next-episode button nothing ever sent this message. Reject a pair
+	// that doesn't exist (or an episode belonging to another show) BEFORE
+	// mutating: the in-memory swap used to succeed while the matching FK
+	// failed inside UpdatePartyMedia's fire-and-forget goroutine, leaving
+	// the room playing one thing and the row saying another until a
+	// restart rehydrated the stale value.
+	//
+	// Deliberately outside ps.mu: this is the party-wide lock that ticks
+	// and broadcasts take, and a DB round-trip under it would stall the
+	// room. That does mean a non-host reaches the query before the
+	// host check below — acceptable, since it's one indexed EXISTS behind
+	// the room socket's 30/min limiter, and authorization itself is
+	// unchanged. Skipped when queries is nil (tests build the manager
+	// without a pool).
+	if m.queries != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), changeMediaValidateTimeout)
+		defer cancel()
+		ok, err := m.queries.PartyMediaTargetExists(ctx, newMediaItemID, newEpisodeID)
+		if err != nil {
+			// Don't strand the room on a transient DB hiccup: log and let
+			// the swap through, exactly as the persist path already
+			// tolerates a failed write.
+			slog.Warn("party: media-change validation failed, allowing swap",
+				"code", code, "media_item_id", newMediaItemID, "error", err)
+		} else if !ok {
+			return errUser("unknown media for this party")
+		}
+
+		// Issue #462 — best-effort early rejection using the CALLER's own
+		// rating ceiling (not yet verified as the host — see below). This is
+		// deliberately NOT the security boundary (the real one is the
+		// read/playback path enforcement in internal/api/phase2_handlers.go,
+		// which every participant's player hits regardless of how it
+		// learned the media id) — it only covers a host swapping to
+		// something above their OWN ceiling, not a participant whose
+		// ceiling is lower than the host's. Party JOIN carries no per-
+		// participant rating gate at all (pre-existing, documented limit);
+		// closing that is separate follow-up work, not this fix. Fails OPEN
+		// on a lookup error, matching the existence check above — this
+		// check exists for a good error message, not enforcement.
+		//
+		// Running this before the host-only check below is safe: it only
+		// ever resolves and applies the CALLER's own ceiling (ownership-
+		// scoped by ResolveActingProfile), so a non-host learns nothing
+		// beyond "would this exceed MY OWN ceiling" — the same answer
+		// GetEnriched already gives them directly for any media id.
+		if item, ierr := m.queries.GetMediaItem(ctx, newMediaItemID); ierr == nil && item != nil {
+			if profile, perr := m.queries.ResolveActingProfile(ctx, callerUserID, callerRefreshTokenID); perr == nil && profile != nil {
+				if !db.RatingAllowed(profile.MaxAgeRating, item.ContentRating) {
+					return errUser("media exceeds this profile's content rating")
+				}
+			}
+		}
 	}
 
 	ps.mu.Lock()
@@ -2758,7 +2871,7 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	// Host-only — guests can't reroute the whole party to a different
 	// episode. (Future: allow with democratic vote if AllowPause-style
 	// settings expand.)
-	if ps.HostUserID != hostUserID {
+	if ps.HostUserID != callerUserID {
 		return errUser("only the host can change media")
 	}
 
@@ -2772,12 +2885,12 @@ func (m *Manager) ChangeMedia(code string, hostUserID int64, newMediaItemID int6
 	ps.StateRevision++
 	m.stopTickLoopLocked(ps)
 
-	// Note: the cached share image (party-share/{code}.png) is now stale —
-	// it shows the old episode poster + code. We don't have a manager-level
-	// invalidator wired today (party_share.go's InvalidateCache lives on the
-	// HTTP handler and the manager has no reference to it). The 30-day
-	// share-image reaper handles long-term cleanup; for immediate freshness,
-	// wiring InvalidateCache into the manager is a small follow-up.
+	// The cached share artwork is now stale — it shows the old episode's
+	// poster. Drop it. The share CARD additionally fingerprints its cache
+	// key on (schedule | title | poster | host | code), so a media change
+	// already renders to a different file; this eviction is what reclaims
+	// the superseded one instead of leaving it for the 30-day reaper.
+	m.invalidateShareCache(code)
 
 	// Persist the new media to DB so reconnects + share-image lookups
 	// see the updated values. Best-effort: a transient DB hiccup

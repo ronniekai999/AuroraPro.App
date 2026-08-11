@@ -430,9 +430,9 @@ func (q *Queries) CreateFirstAdmin(ctx context.Context, username, email, passwor
 func (q *Queries) CreateRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
 	hashed := hashToken(rt.Token)
 	return q.pool.QueryRow(ctx,
-		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info)
-		 VALUES ($1, $2, $3, $4) RETURNING id, created_at`,
-		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo,
+		`INSERT INTO refresh_tokens (user_id, token, expires_at, device_info, active_profile_id)
+		 VALUES ($1, $2, $3, $4, $5) RETURNING id, created_at`,
+		rt.UserID, hashed, rt.ExpiresAt, rt.DeviceInfo, rt.ActiveProfileID,
 	).Scan(&rt.ID, &rt.CreatedAt)
 }
 
@@ -440,10 +440,10 @@ func (q *Queries) GetRefreshToken(ctx context.Context, token string) (*models.Re
 	hashed := hashToken(token)
 	rt := &models.RefreshToken{}
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')
+		`SELECT id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, ''), active_profile_id
 		 FROM refresh_tokens WHERE token = $1 AND NOT revoked AND expires_at > NOW()`,
 		hashed,
-	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo, &rt.ActiveProfileID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -467,9 +467,9 @@ func (q *Queries) RevokeAndGetRefreshToken(ctx context.Context, token string) (*
 	err := q.pool.QueryRow(ctx,
 		`UPDATE refresh_tokens SET revoked = TRUE
 		 WHERE token = $1 AND NOT revoked AND expires_at > NOW()
-		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, '')`,
+		 RETURNING id, user_id, token, expires_at, created_at, revoked, COALESCE(device_info, ''), active_profile_id`,
 		hashed,
-	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo)
+	).Scan(&rt.ID, &rt.UserID, &rt.Token, &rt.ExpiresAt, &rt.CreatedAt, &rt.Revoked, &rt.DeviceInfo, &rt.ActiveProfileID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -1053,8 +1053,8 @@ func (q *Queries) GetItemsNeedingReview(ctx context.Context) ([]*models.MediaIte
 func (q *Queries) UpsertMediaFile(ctx context.Context, f *models.MediaFile) error {
 	aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
 	return q.pool.QueryRow(ctx,
-		`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		 ON CONFLICT (path) DO UPDATE SET
 		   size_bytes = EXCLUDED.size_bytes, container = EXCLUDED.container,
 		   video_codec = EXCLUDED.video_codec, audio_codec = EXCLUDED.audio_codec,
@@ -1063,12 +1063,12 @@ func (q *Queries) UpsertMediaFile(ctx context.Context, f *models.MediaFile) erro
 		   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
 		   version_tag = EXCLUDED.version_tag,
 		   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
-		   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries,
+		   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries, video_fps = EXCLUDED.video_fps,
 		   scanned_at = NOW()
 		 RETURNING id, scanned_at`,
 		f.MediaItemID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
 		f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
-		f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries,
+		f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries, f.VideoFPS,
 	).Scan(&f.ID, &f.ScannedAt)
 }
 
@@ -1076,11 +1076,11 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 	f := &models.MediaFile{}
 	var audioJSON, subtitleJSON []byte
 	err := q.pool.QueryRow(ctx,
-		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM media_files WHERE path = $1`, path,
 	).Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
 		&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
-		&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+		&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1100,7 +1100,7 @@ func (q *Queries) GetMediaFileByPath(ctx context.Context, path string) (*models.
 
 func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*models.MediaFile, error) {
 	rows, err := q.pool.Query(ctx,
-		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries
+		`SELECT id, media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, scanned_at, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps
 		 FROM media_files WHERE media_item_id = $1
 		 ORDER BY CASE version_tag WHEN '4K' THEN 1 WHEN '1080p' THEN 2 WHEN '720p' THEN 3 ELSE 4 END, id`, mediaItemID,
 	)
@@ -1115,7 +1115,7 @@ func (q *Queries) GetMediaFiles(ctx context.Context, mediaItemID int64) ([]*mode
 		var audioJSON, subtitleJSON []byte
 		if err := rows.Scan(&f.ID, &f.MediaItemID, &f.Path, &f.SizeBytes, &f.Container, &f.VideoCodec,
 			&f.AudioCodec, &f.Resolution, &f.Bitrate, &f.DurationMs, &f.FileHash, &f.ScannedAt,
-			&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries,
+			&audioJSON, &subtitleJSON, &f.VersionTag, &f.VideoProfile, &f.VideoPixFmt, &f.ColorTransfer, &f.ColorPrimaries, &f.VideoFPS,
 		); err != nil {
 			return nil, fmt.Errorf("scan media file: %w", err)
 		}
@@ -1222,8 +1222,8 @@ func (q *Queries) BatchInsertMediaFiles(ctx context.Context, files []*models.Med
 	for _, f := range files {
 		aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
 		batch.Queue(
-			`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			`INSERT INTO media_files (media_item_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			 ON CONFLICT (path) DO UPDATE SET
 			   size_bytes = EXCLUDED.size_bytes, file_hash = EXCLUDED.file_hash,
 			   container = EXCLUDED.container, video_codec = EXCLUDED.video_codec,
@@ -1232,11 +1232,11 @@ func (q *Queries) BatchInsertMediaFiles(ctx context.Context, files []*models.Med
 			   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
 			   version_tag = EXCLUDED.version_tag,
 			   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
-			   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries,
+			   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries, video_fps = EXCLUDED.video_fps,
 			   scanned_at = NOW()`,
 			f.MediaItemID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
 			f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
-			f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries,
+			f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries, f.VideoFPS,
 		)
 	}
 
@@ -1260,8 +1260,8 @@ func (q *Queries) BatchInsertEpisodeFiles(ctx context.Context, files []*models.E
 	for _, f := range files {
 		aj, sj := marshalTracks(f.AudioTracks, f.SubtitleTracks)
 		batch.Queue(
-			`INSERT INTO episode_files (episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			`INSERT INTO episode_files (episode_id, path, size_bytes, container, video_codec, audio_codec, resolution, bitrate, duration_ms, file_hash, audio_tracks, subtitle_tracks, version_tag, video_profile, video_pix_fmt, color_transfer, color_primaries, video_fps)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			 ON CONFLICT (path) DO UPDATE SET
 			   episode_id = EXCLUDED.episode_id,
 			   size_bytes = EXCLUDED.size_bytes, file_hash = EXCLUDED.file_hash,
@@ -1271,11 +1271,11 @@ func (q *Queries) BatchInsertEpisodeFiles(ctx context.Context, files []*models.E
 			   audio_tracks = EXCLUDED.audio_tracks, subtitle_tracks = EXCLUDED.subtitle_tracks,
 			   version_tag = EXCLUDED.version_tag,
 			   video_profile = EXCLUDED.video_profile, video_pix_fmt = EXCLUDED.video_pix_fmt,
-			   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries,
+			   color_transfer = EXCLUDED.color_transfer, color_primaries = EXCLUDED.color_primaries, video_fps = EXCLUDED.video_fps,
 			   scanned_at = NOW()`,
 			f.EpisodeID, f.Path, f.SizeBytes, f.Container, f.VideoCodec,
 			f.AudioCodec, f.Resolution, f.Bitrate, f.DurationMs, f.FileHash, aj, sj, f.VersionTag,
-			f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries,
+			f.VideoProfile, f.VideoPixFmt, f.ColorTransfer, f.ColorPrimaries, f.VideoFPS,
 		)
 	}
 

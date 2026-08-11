@@ -251,7 +251,7 @@ export function useCast(
   status: CastStatus
   remote: CastRemoteState
   start: () => Promise<void>
-  loadCurrent: () => Promise<void>
+  loadCurrent: (startTimeSec?: number) => Promise<void>
   stop: () => void
   playOrPause: () => void
   seek: (toSec: number) => void
@@ -447,8 +447,15 @@ export function useCast(
   // no device picker. This is the second half of start(), factored out so the
   // next-episode auto-advance can re-point a live receiver at a freshly-booted
   // local session (the receiver mirrors the local <video>'s server session).
+  //
+  // startTimeSec (optional) OVERRIDES the getter's startTime. Used by the
+  // token-renewal resume path: after a long pause the session-scoped cast
+  // token in the loaded URL has expired, so the media is re-loaded with a
+  // freshly-minted token — and the resume position must be the RECEIVER's
+  // timeline (cast.remote.currentTime), not the getter's default (the frozen
+  // local <video> position, which paused when the cast began).
   // Throws on every failure so callers decide whether to retry or stop.
-  const loadCurrent = async () => {
+  const loadCurrent = async (startTimeSec?: number) => {
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
       throw new Error('cast SDK not ready')
     }
@@ -458,6 +465,17 @@ export function useCast(
 
     const load = await Promise.resolve(loadRef.current?.())
     if (!load) throw new Error('no media to cast')
+    // >= 0, not > 0 (2026-08 review fix, issue #461 follow-up): 0 is a valid
+    // explicit resume position (the party/receiver rewound to the very
+    // start), and every caller that passes this argument at all means it as
+    // an authoritative override — "no override intended" is conveyed by
+    // omitting the argument (undefined), which the typeof check already
+    // handles. The old `> 0` silently ignored an explicit 0 and fell back to
+    // the getter's default startTime (the local <video>'s frozen position,
+    // stale since the cast session began), reloading at the wrong spot.
+    if (typeof startTimeSec === 'number' && startTimeSec >= 0) {
+      load.startTime = startTimeSec
+    }
     // eslint-disable-next-line no-console
     console.info('[Aurora Cast] loading media:', {
       url: load.contentUrl,

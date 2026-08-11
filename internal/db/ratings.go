@@ -56,6 +56,26 @@ func AllowedRatingsForMax(maxRating string) []string {
 	return allowed
 }
 
+// RatingAllowed reports whether contentRating is permitted under maxRating's
+// ceiling — the single check every read/playback and discovery gate should
+// call (issue #462) so "unrestricted", "restricted", and "unrated under a
+// restriction" can never be decided two different ways. Fail-closed by
+// construction: AllowedRatingsForMax's returned slice never contains "", so
+// an empty/unrated contentRating is excluded whenever maxRating imposes any
+// restriction, matching its documented NULL-exclusion behavior.
+func RatingAllowed(maxRating, contentRating string) bool {
+	allowed := AllowedRatingsForMax(maxRating)
+	if allowed == nil {
+		return true
+	}
+	for _, r := range allowed {
+		if r == contentRating {
+			return true
+		}
+	}
+	return false
+}
+
 // Tone buckets for LLM-blurb vetting (internal/reasonguard), derived from
 // the SAME ladder as parental gating so the two definitions of "mature" and
 // "kid" can never drift apart. Ratings the ladder doesn't know (foreign

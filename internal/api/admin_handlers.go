@@ -209,9 +209,9 @@ type LLMSettings struct {
 	// single averaged centroid). Pointer+omitempty so "no row" → the UI's `?? 3`
 	// default, distinguishable from an explicit value. Restart-required.
 	TasteCentroids *int `json:"taste_centroids,omitempty"`
-	DebugLog     bool `json:"debug_log"`      // persisted setting in DB
-	LiveDebugLog bool `json:"live_debug_log"` // in-memory state of the *active* client
-	ClientLoaded bool `json:"client_loaded"`  // false when LLM is disabled at startup
+	DebugLog       bool `json:"debug_log"`      // persisted setting in DB
+	LiveDebugLog   bool `json:"live_debug_log"` // in-memory state of the *active* client
+	ClientLoaded   bool `json:"client_loaded"`  // false when LLM is disabled at startup
 	// Effective models the RUNNING client resolved (DB > env > defaults) —
 	// display only. Deliberately separate from the editable fields above:
 	// backfilling live values into chat_model/embed_model is what let a
@@ -1046,6 +1046,16 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 		if page < 1 {
 			page = 1
 		}
+		// Same cap the shared paginate() helper applies, though for a
+		// different failure: paginate() caps to keep a huge OFFSET from
+		// hammering the DB, while here (page-1)*perPage is computed as an
+		// int in GetActivityPaginated, so ?page=9223372036854775807
+		// overflows to a NEGATIVE offset that Postgres rejects outright —
+		// a 500 on a query param. At max perPage the cap still reaches
+		// 1M rows.
+		if page > 10000 {
+			page = 10000
+		}
 		if perPage < 1 || perPage > 100 {
 			perPage = 50
 		}
@@ -1061,18 +1071,33 @@ func (h *AdminHandler) Activity(w http.ResponseWriter, r *http.Request) {
 		entries = []*models.ActivityEntry{}
 	}
 
-	totalPages := int(total) / params.PerPage
-	if int(total)%params.PerPage != 0 {
-		totalPages++
-	}
+	// Canonical paginated envelope — `{data, page, per_page, total_items,
+	// total_pages}`, the shape paginatedResponse gives every genuinely
+	// paginated endpoint. This used to hand-roll `{items, total, ...}`,
+	// which no client ever read: the SPA unwraps `.data` and fell through
+	// to its `|| []` fallback on every call, so the admin Activity tab
+	// rendered "No recent activity." however busy the log was.
+	writeJSON(w, http.StatusOK, paginatedResponse(entries, total, params))
+}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"items":       entries,
-		"total":       total,
-		"page":        params.Page,
-		"per_page":    params.PerPage,
-		"total_pages": totalPages,
-	})
+// ActivityTypes returns the distinct event types present in the activity log,
+// with counts, to populate the admin Activity tab's filter. The filtering
+// itself is server-side via Activity's existing ?type= param — filtering the
+// loaded page in the browser would only ever search the newest 50 rows.
+//
+// Not paginated (there are ~24 possible types, bounded by the call sites that
+// write them), so this uses the flat `{items: […]}` shape the other
+// non-paginated list endpoints use rather than the paginated envelope.
+func (h *AdminHandler) ActivityTypes(w http.ResponseWriter, r *http.Request) {
+	types, err := h.queries.GetActivityEventTypes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get activity types")
+		return
+	}
+	if types == nil {
+		types = []*models.ActivityEventType{}
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": types})
 }
 
 // Sessions returns active streams — transcode + direct-play —

@@ -7,7 +7,7 @@ import (
 func TestVideoEncoderArgs_Software(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"}
 
-	args := hw.VideoEncoderArgs(1920, 1080)
+	args := hw.VideoEncoderArgs(1920, 1080, 0)
 
 	assertContains(t, args, "-c:v", "libx264")
 	assertContains(t, args, "-preset", "veryfast")
@@ -32,7 +32,7 @@ func TestVideoEncoderArgs_LevelByResolution(t *testing.T) {
 		{3840, 2160, "5.1"},
 	}
 	for _, tt := range tests {
-		args := hw.VideoEncoderArgs(tt.width, tt.height)
+		args := hw.VideoEncoderArgs(tt.width, tt.height, 0)
 		assertContains(t, args, "-level", tt.wantLevel)
 	}
 }
@@ -40,7 +40,7 @@ func TestVideoEncoderArgs_LevelByResolution(t *testing.T) {
 func TestVideoEncoderArgs_NVENC(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelNVENC, VideoEncoder: "h264_nvenc"}
 
-	args := hw.VideoEncoderArgs(1280, 720)
+	args := hw.VideoEncoderArgs(1280, 720, 0)
 
 	assertContains(t, args, "-c:v", "h264_nvenc")
 	assertContains(t, args, "-preset", "p4")
@@ -54,7 +54,7 @@ func TestVideoEncoderArgs_NVENC(t *testing.T) {
 func TestVideoEncoderArgs_QSV(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelQSV, VideoEncoder: "h264_qsv"}
 
-	args := hw.VideoEncoderArgs(854, 480)
+	args := hw.VideoEncoderArgs(854, 480, 0)
 
 	assertContains(t, args, "-c:v", "h264_qsv")
 	assertContains(t, args, "-preset", "faster")
@@ -81,7 +81,7 @@ func TestVideoEncoderArgs_VAAPI(t *testing.T) {
 		DevicePath:   "/dev/dri/renderD128",
 	}
 
-	args := hw.VideoEncoderArgs(1920, 1080)
+	args := hw.VideoEncoderArgs(1920, 1080, 0)
 
 	assertContains(t, args, "-vaapi_device", "/dev/dri/renderD128")
 	assertContains(t, args, "-c:v", "h264_vaapi")
@@ -104,7 +104,7 @@ func TestVideoEncoderArgs_VAAPI(t *testing.T) {
 func TestVideoEncoderArgs_AMF(t *testing.T) {
 	hw := HWAccelInfo{Type: HWAccelAMF, VideoEncoder: "h264_amf"}
 
-	args := hw.VideoEncoderArgs(640, 360)
+	args := hw.VideoEncoderArgs(640, 360, 0)
 
 	assertContains(t, args, "-c:v", "h264_amf")
 	assertContains(t, args, "-quality", "speed")
@@ -130,7 +130,7 @@ func TestVideoEncoderArgs_Forces8BitOutput(t *testing.T) {
 	}
 	for _, tt := range types {
 		t.Run(tt.name, func(t *testing.T) {
-			args := tt.hw.VideoEncoderArgs(1920, 1080)
+			args := tt.hw.VideoEncoderArgs(1920, 1080, 0)
 			assertContainsVF(t, args, "format=yuv420p")
 		})
 	}
@@ -154,7 +154,7 @@ func TestVideoEncoderArgs_HighProfile(t *testing.T) {
 
 	for _, tt := range types {
 		t.Run(tt.name, func(t *testing.T) {
-			args := tt.hw.VideoEncoderArgs(1920, 1080)
+			args := tt.hw.VideoEncoderArgs(1920, 1080, 0)
 			hasHigh := false
 			for i, a := range args {
 				if (a == "-profile:v" || a == "-profile") && i+1 < len(args) && args[i+1] == "high" {
@@ -245,24 +245,50 @@ func TestH264LevelRenderings(t *testing.T) {
 	// there), and two hex digits for the CODECS attribute.
 	tests := []struct {
 		height     int
+		fps        float64
 		wantIDC    int
 		wantDotted string
 		wantHex    string
 	}{
-		{480, 31, "3.1", "1f"},
-		{720, 32, "3.2", "20"},
-		{1080, 40, "4.0", "28"},
-		{2160, 51, "5.1", "33"},
+		{480, 0, 31, "3.1", "1f"},
+		{720, 0, 32, "3.2", "20"},
+		{1080, 0, 40, "4.0", "28"},
+		{2160, 0, 51, "5.1", "33"},
+		// fps-aware (2026-08): >30fps bumps the two top rungs to truthful
+		// levels; unknown (0) and ≤30fps keep the Chromecast-pinned choice.
+		{1080, 24, 40, "4.0", "28"},
+		{1080, 29.97, 40, "4.0", "28"},
+		{1080, 59.94, 42, "4.2", "2a"},
+		{1080, 60, 42, "4.2", "2a"},
+		{2160, 30, 51, "5.1", "33"},
+		{2160, 59.94, 52, "5.2", "34"},
+		{720, 60, 32, "3.2", "20"},  // 720p60 fits L3.2's MB/s limit exactly
+		{720, 120, 42, "4.2", "2a"}, // 720p120 exceeds L3.2 → 4.2
+		{480, 120, 32, "3.2", "20"}, // 480p120 exceeds L3.1 → 3.2
 	}
 	for _, tt := range tests {
-		if got := h264LevelIDC(tt.height); got != tt.wantIDC {
-			t.Errorf("h264LevelIDC(%d) = %d, want %d", tt.height, got, tt.wantIDC)
+		if got := h264LevelIDC(tt.height, tt.fps); got != tt.wantIDC {
+			t.Errorf("h264LevelIDC(%d, %v) = %d, want %d", tt.height, tt.fps, got, tt.wantIDC)
 		}
-		if got := h264Level(tt.height); got != tt.wantDotted {
-			t.Errorf("h264Level(%d) = %q, want %q", tt.height, got, tt.wantDotted)
+		if got := h264Level(tt.height, tt.fps); got != tt.wantDotted {
+			t.Errorf("h264Level(%d, %v) = %q, want %q", tt.height, tt.fps, got, tt.wantDotted)
 		}
-		if got := h264LevelHex(tt.height); got != tt.wantHex {
-			t.Errorf("h264LevelHex(%d) = %q, want %q", tt.height, got, tt.wantHex)
+		if got := h264LevelHex(tt.height, tt.fps); got != tt.wantHex {
+			t.Errorf("h264LevelHex(%d, %v) = %q, want %q", tt.height, tt.fps, got, tt.wantHex)
 		}
 	}
+}
+
+func TestVideoEncoderArgs_SoftwarePresetConfigurable(t *testing.T) {
+	// transcode.software_preset (2026-08): the configured preset reaches the
+	// libx264 args; empty keeps the "veryfast" default; hardware encoders
+	// ignore SWPreset entirely.
+	fast := HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264", SWPreset: "faster"}
+	assertContains(t, fast.VideoEncoderArgs(1920, 1080, 0), "-preset", "faster")
+
+	def := HWAccelInfo{Type: HWAccelNone, VideoEncoder: "libx264"}
+	assertContains(t, def.VideoEncoderArgs(1920, 1080, 0), "-preset", "veryfast")
+
+	nv := HWAccelInfo{Type: HWAccelNVENC, VideoEncoder: "h264_nvenc", SWPreset: "medium"}
+	assertContains(t, nv.VideoEncoderArgs(1280, 720, 0), "-preset", "p4") // NVENC keeps its own preset
 }

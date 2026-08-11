@@ -786,23 +786,31 @@ func TestHlsCodecString(t *testing.T) {
 	tests := []struct {
 		height int
 		audio  string
+		fps    float64
 		want   string
 	}{
 		// Values derive from h264LevelIDC (hwaccel.go): 60fps headroom on
-		// the low rungs; 1080p/2160p pinned to 4.0/5.1 by Chromecast
+		// the low rungs; ≤30fps 1080p/2160p pinned to 4.0/5.1 by Chromecast
 		// receiver ceilings (gen-1/2 filter out >4.1, Google TV >5.1).
-		{360, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
-		{480, "aac", "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
-		{720, "aac", "avc1.640020,mp4a.40.2"},  // High, Level 3.2
-		{1080, "aac", "avc1.640028,mp4a.40.2"}, // High, Level 4.0
-		{2160, "aac", "avc1.640033,mp4a.40.2"}, // High, Level 5.1 (4K)
-		{1080, "ac3", "avc1.640028,ac-3"},      // High + AC-3 surround
-		{720, "", "avc1.640020,mp4a.40.2"},     // empty audio defaults to AAC
+		{360, "aac", 0, "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		{480, "aac", 0, "avc1.64001f,mp4a.40.2"},  // High, Level 3.1
+		{720, "aac", 0, "avc1.640020,mp4a.40.2"},  // High, Level 3.2
+		{1080, "aac", 0, "avc1.640028,mp4a.40.2"}, // High, Level 4.0
+		{2160, "aac", 0, "avc1.640033,mp4a.40.2"}, // High, Level 5.1 (4K)
+		{1080, "ac3", 0, "avc1.640028,ac-3"},      // High + AC-3 surround
+		{720, "", 0, "avc1.640020,mp4a.40.2"},     // empty audio defaults to AAC
+		// fps-aware levels (2026-08): >30fps stamps truthful levels.
+		{1080, "aac", 23.976, "avc1.640028,mp4a.40.2"}, // film rate stays 4.0
+		{1080, "aac", 29.97, "avc1.640028,mp4a.40.2"},  // NTSC 30 stays 4.0
+		{1080, "aac", 59.94, "avc1.64002a,mp4a.40.2"},  // 1080p60 → Level 4.2
+		{2160, "aac", 60, "avc1.640034,mp4a.40.2"},     // 2160p60 → Level 5.2
+		{720, "aac", 60, "avc1.640020,mp4a.40.2"},      // 720p60 fits L3.2 exactly
+		{480, "aac", 60, "avc1.64001f,mp4a.40.2"},      // 480p60 fits L3.1
 	}
 	for _, tt := range tests {
-		got := hlsCodecString(tt.height, tt.audio)
+		got := hlsCodecString(tt.height, tt.audio, tt.fps)
 		if got != tt.want {
-			t.Errorf("hlsCodecString(%d, %q) = %q, want %q", tt.height, tt.audio, got, tt.want)
+			t.Errorf("hlsCodecString(%d, %q, %v) = %q, want %q", tt.height, tt.audio, tt.fps, got, tt.want)
 		}
 	}
 }

@@ -112,7 +112,7 @@ func newLinkTestHandler() *OAuthHandler {
 func TestHandleLinkCallback_UIDMismatch(t *testing.T) {
 	h := newLinkTestHandler()
 	// Session token says the caller is user 7…
-	sessionToken, _, err := h.authSvc.GenerateAccessToken(7, "seven", "user", 0)
+	sessionToken, _, err := h.authSvc.GenerateAccessToken(7, "seven", "user", 0, 0)
 	if err != nil {
 		t.Fatalf("generate session token: %v", err)
 	}

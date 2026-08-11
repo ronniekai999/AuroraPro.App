@@ -1540,18 +1540,59 @@ export async function deleteSkipMarker(
   )
 }
 
+// `eventType` filters SERVER-side via ?type=. Filtering the resolved array
+// instead would only ever search the newest `perPage` rows, so picking a rare
+// event would look empty while older matches sat one page back.
 export async function listAdminActivity(
   perPage = 50,
-  signal?: AbortSignal,
+  opts: { eventType?: string; signal?: AbortSignal } = {},
 ): Promise<ActivityEntry[]> {
-  const resp = await apiFetch<PaginatedResponse<ActivityEntry> | ActivityEntry[]>(
-    `/api/admin/activity?per_page=${perPage}`,
+  const qs = new URLSearchParams({ per_page: String(perPage) })
+  if (opts.eventType) qs.set('type', opts.eventType)
+  const resp = await apiFetch<
+    PaginatedResponse<ActivityEntry> | { items?: ActivityEntry[] } | ActivityEntry[]
+  >(`/api/admin/activity?${qs}`, { signal: opts.signal })
+  // /api/admin/activity returns a paginated envelope. Defensive unwrap
+  // because the endpoint's response shape has drifted across versions in
+  // Aurora's history (the M9 audit logged it) — and that drift is exactly
+  // what emptied this tab: the server hand-rolled `{items}` while this only
+  // read `.data`, so `|| []` swallowed every entry. The server now emits the
+  // canonical `.data` envelope; `items` stays accepted so a bundle running
+  // against an older binary still renders rows instead of silently blanking.
+  if (Array.isArray(resp)) return resp
+  // Bail before the `in` checks: apiFetch hands back a STRING for any non-JSON
+  // 200 (its parseBody falls through to res.text()) and null when JSON parsing
+  // fails, and `in` throws a TypeError on a primitive. A reverse proxy with a
+  // lapsed SSO session answering the API call with an HTML login page — 200,
+  // text/html, redirect-followed — hits exactly this.
+  if (!resp || typeof resp !== 'object') return []
+  if ('data' in resp && Array.isArray(resp.data)) return resp.data
+  if ('items' in resp && Array.isArray(resp.items)) return resp.items
+  return []
+}
+
+// One selectable option in the Activity tab's filter. Server-derived rather
+// than a constant here: event types are registered ad hoc across ~24 handler
+// call sites with no central registry, so a hardcoded list would drift.
+export interface ActivityEventType {
+  event_type: string
+  count: number
+}
+
+export async function listAdminActivityTypes(
+  signal?: AbortSignal,
+): Promise<ActivityEventType[]> {
+  const resp = await apiFetch<{ items?: ActivityEventType[] } | ActivityEventType[]>(
+    '/api/admin/activity/types',
     { signal },
   )
-  // /api/admin/activity returns a paginated envelope. Defensive
-  // unwrap because the endpoint's response shape has drifted across
-  // versions in Aurora's history (the M9 audit logged it).
-  return Array.isArray(resp) ? resp : (resp.data || [])
+  // Same unwrap discipline as listAdminActivity above — non-object bodies
+  // (an HTML login page from a lapsed proxy session) must degrade to an
+  // empty option list, not throw on an `in` check.
+  if (Array.isArray(resp)) return resp
+  if (!resp || typeof resp !== 'object') return []
+  if ('items' in resp && Array.isArray(resp.items)) return resp.items
+  return []
 }
 
 // Which slice of the server's in-memory log rings to read.
@@ -2046,6 +2087,16 @@ export async function getMemberProfile(username: string, signal?: AbortSignal): 
 
 export async function setDefaultProfile(id: number): Promise<void> {
   await apiFetch(`/api/profiles/${id}/default`, { method: 'POST' })
+}
+
+// Binds `id` as this session's server-side acting profile (issue #462) —
+// distinct from setDefaultProfile's account-wide persistent default. The
+// server derives the parental rating ceiling from this, never from a
+// client-supplied value, so it must be called whenever the local active
+// profile changes. Best-effort by design: local switching (activeProfileId)
+// already works instantly regardless of this call's outcome.
+export async function activateProfile(id: number): Promise<void> {
+  await apiFetch(`/api/profiles/${id}/activate`, { method: 'POST' })
 }
 
 export interface Watchlist {
@@ -3000,6 +3051,38 @@ export async function sendPartyInvites(
   return apiFetch<SendPartyInvitesResult>(
     `/api/parties/${encodeURIComponent(code)}/invites`,
     { method: 'POST', body: { usernames, note: note || undefined } },
+  )
+}
+
+// Watch-party share card. Host-only: the server 403s anyone else, because
+// the card carries the HOST's name and the host pressing the button is the
+// consent event for publishing it.
+//
+// One signed URL per crop, all carrying the same HMAC tag (it is over the
+// CODE, not the variant) and differing only in `?v=`. The keys match
+// `CardFormat` in ./partyShare, which is what lets the share modal index
+// this by the selected format; PartyCardLinks there requires an entry for
+// every format, so a crop added to the union without a field here is a
+// compile error rather than an undefined preview.
+export interface PartyCardLinksResponse {
+  code: string
+  /** Signed 1080×1920 PNG URL — public, but unguessable without the tag. */
+  story: string
+  /** Signed 1080×1080 PNG URL — feeds, Discord drops. */
+  square: string
+  /** Signed 1200×630 PNG URL — the crop a link unfurl reads. */
+  og: string
+  /** The party's /p/{CODE} deep link. */
+  page: string
+}
+
+export async function getPartyCardLinks(
+  code: string,
+  signal?: AbortSignal,
+): Promise<PartyCardLinksResponse> {
+  return apiFetch<PartyCardLinksResponse>(
+    `/api/parties/${encodeURIComponent(code)}/card-links`,
+    { signal },
   )
 }
 

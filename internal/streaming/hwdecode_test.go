@@ -216,7 +216,7 @@ func TestPlanDecode_Tiers(t *testing.T) {
 
 func TestFullGPUEncoderArgs(t *testing.T) {
 	nv := nvencFull()
-	args := nv.FullGPUEncoderArgs(1280, 720, false)
+	args := nv.FullGPUEncoderArgs(1280, 720, false, 0)
 	assertContains(t, args, "-c:v", "h264_nvenc")
 	assertContains(t, args, "-profile:v", "high")
 	assertContains(t, args, "-level", "3.2")
@@ -228,12 +228,12 @@ func TestFullGPUEncoderArgs(t *testing.T) {
 	}
 
 	va := vaapiFull()
-	sdr := va.FullGPUEncoderArgs(1920, 1080, false)
+	sdr := va.FullGPUEncoderArgs(1920, 1080, false, 0)
 	assertContains(t, sdr, "-c:v", "h264_vaapi")
 	assertContains(t, sdr, "-level", "4.0")
 	assertContainsVF(t, sdr, "scale_vaapi=w=1920:h=-2:format=nv12")
 
-	hdr := va.FullGPUEncoderArgs(1920, 1080, true)
+	hdr := va.FullGPUEncoderArgs(1920, 1080, true, 0)
 	assertContainsVF(t, hdr, "tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709")
 	assertContainsVF(t, hdr, "scale_vaapi=w=1920:h=-2")
 	for _, a := range hdr {

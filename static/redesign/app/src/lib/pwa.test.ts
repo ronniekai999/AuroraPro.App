@@ -5,6 +5,7 @@ import {
   isIOSDevice,
   createInstallPromptStore,
   registerServiceWorker,
+  syncAppBadge,
   type BeforeInstallPromptEvent,
 } from './pwa'
 
@@ -230,5 +231,39 @@ describe('registerServiceWorker', () => {
     await new Promise(r => setTimeout(r, 0))
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
+  })
+})
+
+describe('syncAppBadge', () => {
+  // Issue #474 — the app icon badge (Dock/taskbar/launcher) is set from a
+  // push payload in sw.js but was never cleared by anything running in the
+  // foreground, so it could only ever climb and would outlive the user
+  // actually reading their notifications.
+  it('sets the badge to the unread count when there is unread', () => {
+    const setAppBadge = vi.fn().mockResolvedValue(undefined)
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    syncAppBadge(22, { setAppBadge, clearAppBadge })
+    expect(setAppBadge).toHaveBeenCalledWith(22)
+    expect(clearAppBadge).not.toHaveBeenCalled()
+  })
+
+  it('clears the badge once the count reaches zero', () => {
+    const setAppBadge = vi.fn().mockResolvedValue(undefined)
+    const clearAppBadge = vi.fn().mockResolvedValue(undefined)
+    syncAppBadge(0, { setAppBadge, clearAppBadge })
+    expect(clearAppBadge).toHaveBeenCalledTimes(1)
+    expect(setAppBadge).not.toHaveBeenCalled()
+  })
+
+  it('is a silent no-op where the Badging API is unsupported', () => {
+    expect(() => syncAppBadge(3, {})).not.toThrow()
+    expect(() => syncAppBadge(0, {})).not.toThrow()
+  })
+
+  it('a rejected badge call is swallowed — badging is a nicety, never load-bearing', async () => {
+    const setAppBadge = vi.fn().mockRejectedValue(new Error('denied'))
+    expect(() => syncAppBadge(5, { setAppBadge })).not.toThrow()
+    await new Promise(r => setTimeout(r, 0))
+    expect(setAppBadge).toHaveBeenCalledWith(5)
   })
 })

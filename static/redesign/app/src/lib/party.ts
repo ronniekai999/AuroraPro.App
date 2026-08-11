@@ -43,6 +43,14 @@ export type OutboundRoomMessage =
   // SetReadDeadline reset path). Sending a data frame every 25s keeps
   // every reasonable proxy's idle counter at zero. Server no-ops it.
   | { type: 'heartbeat' }
+  // Issue #460 — host advances the party to the next episode. Rides the
+  // room socket (low-frequency, membership-adjacent) and lands on
+  // Manager.ChangeMedia, which is host-only, resets the anchor to
+  // Paused@0, and echoes `media-change` back to EVERY room conn —
+  // including the sender, so the host re-points through the same
+  // onMediaChange resolver guests use. Title/poster ride along so the
+  // server needn't re-query them for PartyState.
+  | { type: 'change-media'; payload: { media_item_id: number; episode_id?: number; media_title: string; media_poster: string } }
   // Phase 4.6 — voice mesh signaling (rides the room socket).
   | { type: 'voice-join' }
   | { type: 'voice-leave' }
@@ -74,6 +82,70 @@ export function partyPauseRequest(absMs: number): Extract<OutboundSyncMessage, {
 
 export function partySeekRequest(absMs: number): Extract<OutboundSyncMessage, { type: 'request-seek' }> {
   return { type: 'request-seek', payload: { to_ms: absMs } }
+}
+
+/**
+ * Issue #460 — the host's next-episode swap, as a room frame. Field names
+ * must match changeMediaPayload in internal/api/party_ratelimit.go; Go's
+ * decoder ignores unknown keys, so a typo here degrades to the zero value
+ * (media_item_id: 0) and the server rejects it rather than misbehaving.
+ */
+export function changeMediaRequest(p: {
+  mediaItemId: number
+  episodeId?: number
+  mediaTitle: string
+  mediaPoster: string
+}): Extract<OutboundRoomMessage, { type: 'change-media' }> {
+  return {
+    type: 'change-media',
+    payload: {
+      media_item_id: p.mediaItemId,
+      episode_id: p.episodeId,
+      media_title: p.mediaTitle,
+      media_poster: p.mediaPoster,
+    },
+  }
+}
+
+/**
+ * Issue #460 — how long before the end of an episode a party host's
+ * next-episode card appears, straight from the request ("less than 2 mins
+ * of a show remains"). Only a fallback; a credits marker usually arms
+ * earlier.
+ */
+export const PARTY_NEXT_UP_LEAD_SEC = 120
+
+/**
+ * The playback second at which the next-up card arms, or null if it never
+ * does for this file.
+ *
+ * Solo playback arms only on a credits marker — unchanged behavior. A party
+ * HOST additionally arms on "under two minutes left", because skip markers
+ * are optional and issue #460 asks for the button on any episode.
+ * Whichever threshold comes first wins.
+ *
+ * The duration rule needs a duration that is actually FIXED, which is what
+ * durationTrusted asserts (the server's ffprobe value). Without it the
+ * player falls back to the media element's duration, and for an HLS EVENT
+ * playlist that GROWS as the transcode produces segments — so
+ * `duration - 120` would trail just behind the playhead for the whole
+ * episode and arm the card minutes in. durationSec must also exceed the
+ * lead-in: it is 0 until stream info resolves, and an episode shorter than
+ * the lead-in would otherwise arm before it began. A credits marker still
+ * arms either of those cases.
+ */
+export function nextUpArmSecond(args: {
+  creditsStartSec: number | null
+  durationSec: number
+  durationTrusted: boolean
+  partyHost: boolean
+}): number | null {
+  const candidates: number[] = []
+  if (args.creditsStartSec != null) candidates.push(args.creditsStartSec)
+  if (args.partyHost && args.durationTrusted && args.durationSec > PARTY_NEXT_UP_LEAD_SEC) {
+    candidates.push(args.durationSec - PARTY_NEXT_UP_LEAD_SEC)
+  }
+  return candidates.length ? Math.min(...candidates) : null
 }
 
 /**

@@ -156,14 +156,23 @@ interface PickerProps {
   // a top-edge button gets clipped. Opening downward into the card
   // body (like the adjacent Audio/CC menus) avoids the clip.
   vertical?: 'up' | 'down'
+  // 2026-08-09 — optional open-state report. VideoPlayer's auto-hide timer
+  // pins the chrome while ANY popover is open; without this the picker's
+  // internal open state was invisible to it and an open picker could fade
+  // out mid-read in fullscreen.
+  onOpenChange?: (open: boolean) => void
 }
 
 const QUICK_EMOJI = ['😂', '😱', '🔥', '❤️', '👏', '🤯', '😭', '💀', '🎉']
 
-export function ReactionPicker({ onSend, placement = 'right', vertical = 'up' }: PickerProps) {
+export function ReactionPicker({ onSend, placement = 'right', vertical = 'up', onOpenChange }: PickerProps) {
   const [open, setOpen] = useState(false)
   const popoverAnchor = placement === 'left' ? 'left-0' : 'right-0'
   const popoverV = vertical === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'
+  // Report open state up (VideoPlayer's auto-hide pin). Effect, not inline
+  // in the toggles: every state path — trigger toggle, emoji pick, any
+  // future dismiss — reports through one channel.
+  useEffect(() => { onOpenChange?.(open) }, [open, onOpenChange])
   return (
     <div className="relative">
       <button

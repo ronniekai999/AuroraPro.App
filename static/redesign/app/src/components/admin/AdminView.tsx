@@ -48,6 +48,7 @@ import {
   getSkipMarkerStatus,
   getUpdateStatus,
   listAdminActivity,
+  listAdminActivityTypes,
   listAdminLogs,
   listAdminSessions,
   listAdminUsers,
@@ -69,6 +70,7 @@ import {
   updateUserRole,
   type ActiveStreamRow,
   type ActivityEntry,
+  type ActivityEventType,
   type AdminUser,
   type AIRematchJobStatus,
   type EmbeddingStatus,
@@ -2327,6 +2329,10 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
   const [activity, setActivity] = useState<ActivityEntry[] | null>(null)
   const [activityLoading, setActivityLoading] = useState(false)
   const [activityErr, setActivityErr] = useState<string | null>(null)
+  // '' = every type. Filtering is server-side (?type=), so this must clear
+  // `activity` to let the fetch effect re-run — same dance as logLevel.
+  const [activityType, setActivityType] = useState('')
+  const [activityTypes, setActivityTypes] = useState<ActivityEventType[] | null>(null)
   const [logs, setLogs] = useState<LogEntry[] | null>(null)
   const [logLevel, setLogLevel] = useState<LogLevelFilter>('all')
   const [logsLoading, setLogsLoading] = useState(false)
@@ -2411,7 +2417,11 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
     if (tab !== 'activity' || activity !== null) return
     const ac = new AbortController()
     setActivityLoading(true)
-    listAdminActivity(50, ac.signal)
+    // Clear a prior failure before retrying, like the logs effect below.
+    // Without this a transient error stayed pinned above the rows for the
+    // life of the mount, even once a later load succeeded.
+    setActivityErr(null)
+    listAdminActivity(50, { eventType: activityType, signal: ac.signal })
       .then(a => setActivity(a))
       .catch(err => {
         if (err && err.name === 'AbortError') return
@@ -2421,7 +2431,19 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
     // Cleanup so a rapid tab-switch doesn't fire setState on an
     // unmounted AdminView.
     return () => ac.abort()
-  }, [tab, activity])
+  }, [tab, activity, activityType])
+
+  // Filter options, loaded once per mount alongside the first activity page.
+  // A failure here leaves the dropdown at "All activity" rather than blocking
+  // the log itself — the rows are the point, the filter is an affordance.
+  useEffect(() => {
+    if (tab !== 'activity' || activityTypes !== null) return
+    const ac = new AbortController()
+    listAdminActivityTypes(ac.signal)
+      .then(t => setActivityTypes(t))
+      .catch(() => { /* dropdown stays on "All activity" */ })
+    return () => ac.abort()
+  }, [tab, activityTypes])
 
   useEffect(() => {
     if (tab !== 'logs' || logs !== null) return
@@ -2814,12 +2836,44 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
 
       {tab === 'activity' && (
         <div className="glass-panel rounded-2xl p-6">
-          <h2 className="text-white font-semibold mb-4">Recent Activity</h2>
+          <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+            <h2 className="text-white font-semibold">Recent Activity</h2>
+            {/* Server-side filter (?type=). The option list comes from the
+                server's distinct event types, so it can't drift from the
+                types handlers actually write, and only lists what this
+                instance has recorded. */}
+            <label className="flex items-center gap-2 text-xs text-white/40">
+              <span>Filter</span>
+              <select
+                value={activityType}
+                onChange={e => {
+                  setActivityType(e.target.value)
+                  // Let the fetch effect's `activity !== null` guard re-run
+                  // against the new filter, exactly like the log-level toggle.
+                  setActivity(null)
+                }}
+                className="px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm"
+              >
+                <option value="">All activity</option>
+                {(activityTypes ?? []).map(t => (
+                  <option key={t.event_type} value={t.event_type}>
+                    {t.event_type.replace(/_/g, ' ')} ({t.count})
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
           {activityLoading && !activity && <p className="text-white/40 text-sm">Loading activity…</p>}
           {activityErr && <p className="text-red-300 text-sm">{activityErr}</p>}
           {activity && (
             <div className="space-y-3">
-              {activity.length === 0 && <p className="text-white/40 text-sm">No recent activity.</p>}
+              {activity.length === 0 && (
+                <p className="text-white/40 text-sm">
+                  {activityType
+                    ? `No "${activityType.replace(/_/g, ' ')}" activity recorded.`
+                    : 'No recent activity.'}
+                </p>
+              )}
               {activity.map((e) => (
                 <div key={e.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
                   <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center flex-shrink-0">

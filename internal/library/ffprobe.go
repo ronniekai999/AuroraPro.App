@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -31,6 +32,15 @@ type ProbeResult struct {
 	ColorTransfer  string // e.g., "bt709", "smpte2084" (PQ), "arib-std-b67" (HLG)
 	ColorPrimaries string // e.g., "bt709", "bt2020"
 
+	// VideoFPS is the video stream's AVERAGE frame rate parsed from
+	// ffprobe's avg_frame_rate (r_frame_rate as fallback). 0 = unknown.
+	// The H.264 level table uses it to stamp truthful levels for >30fps
+	// content (1080p60 → 4.2, 2160p60 → 5.2). Average rate is the right
+	// input for VFR content: the level only needs to separate the
+	// ≤30fps world from the 50/60fps world, and avg vs peak rates never
+	// sit on opposite sides of that boundary for real content.
+	VideoFPS float64
+
 	// Multi-track info (Gap 2)
 	AudioTracks    []models.AudioTrack    `json:"audio_tracks,omitempty"`
 	SubtitleTracks []models.SubtitleTrack `json:"subtitle_tracks,omitempty"`
@@ -53,6 +63,8 @@ type ffprobeStream struct {
 	Channels       int               `json:"channels"`
 	ColorTransfer  string            `json:"color_transfer"`  // e.g. "smpte2084", "arib-std-b67", "bt709"
 	ColorPrimaries string            `json:"color_primaries"` // e.g. "bt2020", "bt709"
+	AvgFrameRate   string            `json:"avg_frame_rate"`  // e.g. "30000/1001", "60/1", "0/0"
+	RFrameRate     string            `json:"r_frame_rate"`    // fallback when avg is 0/0
 	Tags           map[string]string `json:"tags"`
 	Disposition    ffprobeDisp       `json:"disposition"`
 }
@@ -124,6 +136,10 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 				result.VideoPixFmt = stream.PixFmt
 				result.ColorTransfer = stream.ColorTransfer
 				result.ColorPrimaries = stream.ColorPrimaries
+				result.VideoFPS = parseFrameRate(stream.AvgFrameRate)
+				if result.VideoFPS <= 0 {
+					result.VideoFPS = parseFrameRate(stream.RFrameRate)
+				}
 				if stream.Width > 0 && stream.Height > 0 {
 					result.Resolution = fmt.Sprintf("%dx%d", stream.Width, stream.Height)
 				}
@@ -165,4 +181,33 @@ func Probe(ctx context.Context, ffprobePath, filePath string) (*ProbeResult, err
 	}
 
 	return result, nil
+}
+
+// parseFrameRate converts ffprobe's rational frame-rate strings
+// ("30000/1001", "60/1", "25") to fps. Returns 0 for "0/0", empty,
+// malformed, or zero-denominator values — the caller treats 0 as
+// "unknown" and keeps the resolution-only level choice.
+func parseFrameRate(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	num, den := s, "1"
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		num, den = s[:i], s[i+1:]
+	}
+	n, errN := strconv.ParseFloat(num, 64)
+	d, errD := strconv.ParseFloat(den, 64)
+	if errN != nil || errD != nil || d <= 0 || n <= 0 {
+		return 0
+	}
+	v := n / d
+	// ParseFloat ACCEPTS "NaN" and overflowing exponents ("1e999" → +Inf).
+	// Storing either would poison the DB row (Postgres REAL takes NaN) and
+	// break encoding/json on every API response carrying this file — guard
+	// both. (ffprobe never emits them; this is pure defense.)
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return v
 }

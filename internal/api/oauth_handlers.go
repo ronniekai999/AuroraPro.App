@@ -495,26 +495,30 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Issue tokens — same path as the password login flow.
-	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion)
-	if err != nil {
-		slog.Error("oauth callback: access token generate", "error", err)
-		h.renderError(w, "Authentication succeeded but token issuance failed.")
-		return
-	}
+	// Issue tokens — same path as the password login flow. Refresh token row
+	// first (issue #462) so its id is known for the access token's "rtid"
+	// claim.
 	refreshTokenStr, err := h.authSvc.GenerateRefreshToken()
 	if err != nil {
 		slog.Error("oauth callback: refresh token generate", "error", err)
 		h.renderError(w, "Authentication succeeded but token issuance failed.")
 		return
 	}
-	if err := h.queries.CreateRefreshToken(r.Context(), &models.RefreshToken{
+	newRT := &models.RefreshToken{
 		UserID:     user.ID,
 		Token:      refreshTokenStr,
 		DeviceInfo: r.UserAgent(),
 		ExpiresAt:  h.authSvc.RefreshTokenExpiry(),
-	}); err != nil {
+	}
+	if err := h.queries.CreateRefreshToken(r.Context(), newRT); err != nil {
 		slog.Error("oauth callback: refresh token persist", "error", err)
+		h.renderError(w, "Authentication succeeded but token issuance failed.")
+		return
+	}
+
+	accessToken, expiresAt, err := h.authSvc.GenerateAccessToken(user.ID, user.Username, string(user.Role), user.TokenVersion, newRT.ID)
+	if err != nil {
+		slog.Error("oauth callback: access token generate", "error", err)
 		h.renderError(w, "Authentication succeeded but token issuance failed.")
 		return
 	}

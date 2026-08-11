@@ -91,6 +91,87 @@ func (q *Queries) GetDefaultProfile(ctx context.Context, userID int64) (*models.
 	return p, nil
 }
 
+// ResolveActingProfile returns the sub-profile currently bound to
+// refreshTokenID (set via ProfileHandler.ActivateProfile), falling back to
+// the account's default profile when there's no binding — refreshTokenID is
+// 0 (a cast-scoped token, or an access token minted before this feature
+// shipped), the bound profile was deleted, or it no longer belongs to
+// userID. This is issue #462's fix: it is the ONLY place read/playback
+// (and now discovery) rating-ceiling enforcement should get an acting
+// profile from — never a client-supplied profile_id/max_rating, which was
+// a full bypass (the ceiling was entirely client-elective).
+//
+// Deliberately does NOT filter the refresh_tokens lookup on `NOT revoked`:
+// Refresh() rotates the row (revoking the old one) on every renewal, but the
+// OLD access token stays valid — and gets presented — for up to its own
+// 15-minute TTL afterward. Filtering on revoked would make that token's
+// requests silently fall through to the account default (typically
+// unrestricted) for the rest of its lifetime, undermining the enforcement
+// this function exists for. Ownership (`user_id = $2`) is still checked.
+//
+// Contract: whenever err == nil, the returned profile is NEVER nil — on the
+// documented (and real: see phase2_handlers.go's ProgressHandler comment)
+// edge case where an account has no default profile row yet, a synthetic
+// unrestricted profile is returned rather than nil, so every caller can
+// dereference the result without a separate nil check. This matches the
+// existing "prof == nil means unrestricted" convention in
+// party_invite_handlers.go's send-time ceiling check.
+func (q *Queries) ResolveActingProfile(ctx context.Context, userID, refreshTokenID int64) (*models.UserProfile, error) {
+	if refreshTokenID != 0 {
+		var profileID *int64
+		err := q.pool.QueryRow(ctx,
+			`SELECT active_profile_id FROM refresh_tokens WHERE id = $1 AND user_id = $2`,
+			refreshTokenID, userID,
+		).Scan(&profileID)
+		if err != nil && err != pgx.ErrNoRows {
+			return nil, fmt.Errorf("resolve acting profile: %w", err)
+		}
+		if profileID != nil {
+			p, err := q.GetProfile(ctx, *profileID)
+			if err != nil {
+				return nil, err
+			}
+			if p != nil && p.UserID == userID {
+				return p, nil
+			}
+		}
+	}
+	p, err := q.GetDefaultProfile(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return &models.UserProfile{UserID: userID}, nil
+	}
+	return p, nil
+}
+
+// SetActiveProfileForToken binds profileID as the acting sub-profile for the
+// session identified by refreshTokenID (issue #462). Returns false if no
+// matching row exists for userID at all — the caller has already validated
+// profileID ownership separately, so this only fails when the row was never
+// created for this account (or a forged/foreign id).
+//
+// Deliberately does NOT filter on `NOT revoked`, matching
+// ResolveActingProfile's read side: the access token minted alongside this
+// refresh_tokens row stays valid — and gets presented — for up to its own
+// 15-minute TTL after the row is revoked (rotation). Filtering here would
+// make a switch silently fail to take (a 409 the SPA's fire-and-forget call
+// swallows) for that whole window, and in the unsafe direction: the session
+// stays on whatever LOOSER profile it already had instead of picking up a
+// stricter one.
+func (q *Queries) SetActiveProfileForToken(ctx context.Context, refreshTokenID, userID, profileID int64) (bool, error) {
+	tag, err := q.pool.Exec(ctx,
+		`UPDATE refresh_tokens SET active_profile_id = $1
+		 WHERE id = $2 AND user_id = $3`,
+		profileID, refreshTokenID, userID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (q *Queries) UpdateProfile(ctx context.Context, profileID int64, req *models.UpdateProfileRequest) error {
 	setClauses := []string{}
 	args := []interface{}{}
@@ -512,6 +593,35 @@ func (q *Queries) GetActivityPaginated(ctx context.Context, params models.Pagina
 
 	entries, err := scanActivityRows(rows)
 	return entries, total, err
+}
+
+// GetActivityEventTypes returns every distinct event_type currently present
+// in activity_log with its row count, ordered alphabetically so an option
+// keeps a stable position in the admin filter as counts move around.
+//
+// Grouping over the whole table is affordable here: activity_log is bounded
+// by the 90-day retention sweep and event_type is indexed
+// (idx_activity_log_type), so this is an index-only scan.
+func (q *Queries) GetActivityEventTypes(ctx context.Context) ([]*models.ActivityEventType, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT event_type, COUNT(*)
+		FROM activity_log
+		GROUP BY event_type
+		ORDER BY event_type ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var types []*models.ActivityEventType
+	for rows.Next() {
+		t := &models.ActivityEventType{}
+		if err := rows.Scan(&t.EventType, &t.Count); err != nil {
+			return nil, err
+		}
+		types = append(types, t)
+	}
+	return types, rows.Err()
 }
 
 func scanActivityRows(rows pgx.Rows) ([]*models.ActivityEntry, error) {

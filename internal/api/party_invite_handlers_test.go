@@ -310,8 +310,8 @@ func TestPartyInvites_FullFlow(t *testing.T) {
 		t.Fatalf("send: code = %d body=%s", w.Code, w.Body.String())
 	}
 	var sendResp struct {
-		Sent    []struct{ Username string }              `json:"sent"`
-		Skipped []struct{ Username, Reason string }      `json:"skipped"`
+		Sent    []struct{ Username string }         `json:"sent"`
+		Skipped []struct{ Username, Reason string } `json:"skipped"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &sendResp); err != nil {
 		t.Fatalf("send resp: %v", err)

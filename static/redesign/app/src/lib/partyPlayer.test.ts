@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
+  castPlayPauseMismatch,
+  isCastHostSeekJump,
   isPlaybackResolutionCurrent,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
   partyPlayerAutoOpenKey,
   partyPlayerDismissalKeyOnClose,
+  projectPartyTickAbsMs,
   resolvePlaybackBootPause,
   shouldApplyExplicitPartySeek,
   shouldAutoOpenPartyPlayer,
@@ -14,6 +17,7 @@ import {
   shouldPreservePauseOnSeekRebuild,
   shouldRebuildSeekBeforeDeliveryReady,
   shouldReplaceUnreadyTargetForExplicitSeek,
+  shouldResyncCastReceiver,
   type PartyPlayerSnapshot,
 } from './partyPlayer'
 
@@ -226,5 +230,83 @@ describe('paused-party player boot', () => {
     expect(resolvePlaybackBootPause(false, true, true, true, false, 10, 11)).toBe(true)
     // The inverse matters too: a later resume must release a captured pause.
     expect(resolvePlaybackBootPause(true, true, true, true, true, 10, 11)).toBe(false)
+  })
+})
+
+describe('Chromecast receiver-driven party sync (issue #461)', () => {
+  describe('castPlayPauseMismatch', () => {
+    it('flags a receiver paused while the party is playing', () => {
+      expect(castPlayPauseMismatch(true, true)).toBe(true)
+    })
+    it('flags a receiver playing while the party is paused', () => {
+      expect(castPlayPauseMismatch(false, false)).toBe(true)
+    })
+    it('agrees when both are playing', () => {
+      expect(castPlayPauseMismatch(true, false)).toBe(false)
+    })
+    it('agrees when both are paused', () => {
+      expect(castPlayPauseMismatch(false, true)).toBe(false)
+    })
+  })
+
+  describe('isCastHostSeekJump', () => {
+    it('is not a seek when the receiver simply kept playing', () => {
+      // 4s of real playback since the last poll, reported 4.1s later — well
+      // inside jitter.
+      expect(isCastHostSeekJump(104.1, 100, 4, 3)).toBe(false)
+    })
+    it('is a seek when the receiver jumped far ahead of natural progression', () => {
+      // Only 1s of wall-clock passed but currentTime jumped 30s — a scrub.
+      expect(isCastHostSeekJump(130, 100, 1, 3)).toBe(true)
+    })
+    it('is a seek when the receiver jumped backward', () => {
+      expect(isCastHostSeekJump(10, 100, 1, 3)).toBe(true)
+    })
+    it('treats a negative poll interval as zero elapsed rather than going negative', () => {
+      // Defensive: Date.now() is monotonic in practice, but a clock oddity
+      // should never make the tolerance window wider than intended.
+      expect(isCastHostSeekJump(100, 100, -5, 3)).toBe(false)
+      expect(isCastHostSeekJump(105, 100, -5, 3)).toBe(true)
+    })
+  })
+
+  describe('projectPartyTickAbsMs', () => {
+    it('projects forward by elapsed server time when the tick is fresh', () => {
+      // Tick said abs_ms=10_000 at server_now_ms=1_000_000; 2500ms of
+      // wall-clock have since passed and the tick itself is 2500ms old
+      // (receivedAtMs consistent with elapsed), so the clamp doesn't bite.
+      expect(projectPartyTickAbsMs(10_000, 1_000_000, 2_500, 0, 1_002_500)).toBe(12_500)
+    })
+    it('applies the NTP-style clock offset before projecting', () => {
+      // Client clock runs 800ms behind the server; without correction the
+      // naive Date.now() - server_now_ms would under-project by 800ms.
+      expect(projectPartyTickAbsMs(10_000, 1_000_000, 1_800, 800, 1_001_000)).toBe(11_800)
+    })
+    it('clamps projection to the tick age plus jitter margin', () => {
+      // The tick is already 2000ms old (tickAgeMs) but the raw wall-clock
+      // delta computes to 5000ms (e.g. a burst of clock skew) — clamp to
+      // tickAgeMs + 500 so a skew spike can't run the target far ahead of
+      // where the tick could plausibly be.
+      const result = projectPartyTickAbsMs(10_000, 1_000_000, 2_000, 0, 1_005_000)
+      expect(result).toBe(10_000 + 2_500)
+    })
+    it('never projects backward even if the raw delta is negative', () => {
+      expect(projectPartyTickAbsMs(10_000, 1_000_000, 0, 0, 999_000)).toBe(10_000)
+    })
+  })
+
+  describe('shouldResyncCastReceiver', () => {
+    it('ignores drift under the tolerance', () => {
+      expect(shouldResyncCastReceiver(100, 101.5, 2)).toBe(false)
+    })
+    it('resyncs at exactly the tolerance boundary', () => {
+      expect(shouldResyncCastReceiver(100, 102, 2)).toBe(true)
+    })
+    it('resyncs when the receiver is far ahead', () => {
+      expect(shouldResyncCastReceiver(110, 100, 2)).toBe(true)
+    })
+    it('resyncs when the receiver is far behind', () => {
+      expect(shouldResyncCastReceiver(90, 100, 2)).toBe(true)
+    })
   })
 })

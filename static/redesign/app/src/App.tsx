@@ -49,6 +49,7 @@ import {
   getAdminDashboard,
   listAdminActivity,
   listProfiles,
+  activateProfile,
   setProfileMaturity,
   updateProfile,
   listWatchlists,
@@ -123,6 +124,7 @@ import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefresh'
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
+import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -1739,13 +1741,27 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
   // Phase 11.4 — same gap as ServerPanel: role="dialog" with no focus management.
   const panelRef = useRef<HTMLDivElement | null>(null)
   usePanelDismiss(open, onClose, panelRef)
+  // Which ids were unread the moment the panel opened, so rows can show that
+  // distinction (issue #474 — previously nothing rendered read_at at all, so
+  // a badge count and an undifferentiated list of familiar-looking items
+  // were indistinguishable from "the badge was wrong"). Snapshotted before
+  // marking read below, and held for the rest of this open session so the
+  // dots don't vanish out from under the user as read_at flips locally.
+  const [unreadSnapshot, setUnreadSnapshot] = useState<Set<number>>(() => new Set())
   // Mark the user's notifications read when the panel opens (clears the badge).
   // Via a ref so this open→true effect doesn't depend on the parent's inline
   // callback identity, which changes every render.
   const onMarkAllReadRef = useRef(onMarkAllRead)
   onMarkAllReadRef.current = onMarkAllRead
   useEffect(() => {
-    if (open) onMarkAllReadRef.current()
+    if (!open) return
+    setUnreadSnapshot(new Set(notifications.filter(n => !n.read_at).map(n => n.id)))
+    onMarkAllReadRef.current()
+    // Deliberately keyed on `open` alone — `notifications` is read for its
+    // value at the moment the panel opens, not tracked as a trigger (the
+    // mark-all-read this fires would otherwise cause it to re-run on every
+    // resulting re-render, re-marking already-read ids as "was unread").
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
   useEffect(() => {
     if (!open || !isAdmin) return
@@ -1815,8 +1831,12 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
             : undefined
           const inviteGone = n.type === 'party_invite' && partyCode && partyInvites && !invite
           const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-purple-400' : 'bg-emerald-400'
+          const isUnread = unreadSnapshot.has(n.id)
           return (
-            <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
+            <div
+              key={n.id}
+              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-purple-500/[0.05]' : ''}`}
+            >
               <span
                 className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${dot}`}
                 aria-hidden="true"
@@ -1892,7 +1912,10 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                     Join
                   </button>
                 )}
-                <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
+                <p className="text-white/30 text-xs mt-1">
+                  {fmtRel(n.created_at)}
+                  {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
+                </p>
               </div>
             </div>
           )
@@ -2086,6 +2109,14 @@ export default function App() {
   // inside such a callback would capture a stale snapshot.
   const partyStateRef = useRef(party.state)
   partyStateRef.current = party.state
+  // Issue #460 — set when THIS client sent the change-media that is about
+  // to come back as a media-change broadcast. Two things key off it in the
+  // resolver: the host's own player boots playing (so "Play for all"
+  // actually plays instead of parking the room at Paused@0), and the
+  // "host moved everyone" notice is suppressed for the person who did it.
+  // Consumed on the first media-change that arrives, so a rejected swap
+  // can't leave it armed for someone else's later change.
+  const partySelfAdvanceRef = useRef(false)
   // Manual player dismissal is scoped to one party/media/role lifecycle. It
   // prevents the auto-open recovery effect from immediately recreating a
   // player the user just closed, while a new episode or promotion to host can
@@ -2179,6 +2210,16 @@ export default function App() {
       else localStorage.removeItem('aurora_active_profile_id')
     } catch { /* ignore */ }
   }, [activeProfileId])
+  // Issue #462 — bind the switch server-side so parental-rating enforcement
+  // (which never trusts a client-supplied profile id) knows which profile is
+  // acting. Fire-and-forget: local switching above already works instantly
+  // regardless of this call's outcome, and a transient failure here just
+  // means enforcement uses the account default until the next successful
+  // switch or token refresh.
+  useEffect(() => {
+    if (!activeProfileId) return
+    void activateProfile(activeProfileId).catch(() => { /* best-effort */ })
+  }, [activeProfileId])
 
   // Phase 5.2 parity — right-click context menu state.
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; items: MediaContextItem[]; title?: string } | null>(null)
@@ -2263,6 +2304,16 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false)
   // Ref to the search input so Cmd+K / Ctrl+K can move focus to it.
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  // Shared "leave the nav search" routine — the X/clear button, an
+  // outside click, and Escape (below) all need to do the exact same
+  // thing: drop the query, fall back to Home if that's what the query
+  // was driving, and give the input back its resting (unfocused) look.
+  const closeSearch = useCallback(() => {
+    setSearchQuery('')
+    setSearchOpen(false)
+    setView(v => (v === 'search' ? 'home' : v))
+    searchInputRef.current?.blur()
+  }, [])
   // Cmd+K opens a full-screen Spotlight-style palette (the top-bar
   // input stays for click-to-search flows).
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -2562,6 +2613,21 @@ export default function App() {
   // 'notification' WS event; unreadCount drives the sidebar bell badge.
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
+  // Set the moment a mark-all-read is issued (panel open); reset at the top
+  // of the seed effect below on every realtimeUserId change (login, logout,
+  // session-expiry relogin). Guards the seed fetch against a race where its
+  // GET was already in flight when the user marked everything read: without
+  // this, the GET's now-stale `unread` count lands afterward and Math.max
+  // slams the badge back up even though the server (and local state) has
+  // already zeroed it. See issue #474.
+  const markedAllReadRef = useRef(false)
+  // True once the seed GET below has resolved at least once for the current
+  // session — lets onMarkAllRead skip the mark-all-read POST when it KNOWS
+  // unreadCount is trustworthy and already zero, without reintroducing the
+  // stale-unreadCount race the guard above exists to prevent (unreadCount
+  // reads 0 before the seed resolves too, for the unrelated reason that
+  // nothing has loaded yet).
+  const seedResolvedRef = useRef(false)
 
   // Load profiles once the user is logged in.
   useEffect(() => {
@@ -2797,14 +2863,25 @@ export default function App() {
   })
 
   // Seed the notification feed + unread badge on login (once per user id). The
-  // WS keeps it live thereafter; resetUserState clears it on logout.
+  // WS keeps it live thereafter; resetUserState clears it on explicit logout.
+  //
+  // markedAllReadRef is reset HERE, not only in resetUserState, because
+  // session expiry (SESSION_EXPIRED_EVENT below) drops to the auth screen
+  // via a bare setUser(false) — it does not call resetUserState, and the
+  // subsequent re-login calls setUser(u) directly too. Without this reset,
+  // a mark-all-read from the PRIOR session would permanently pin the badge
+  // to its last value across that relogin, discarding every real unread
+  // count the new session's seed fetch reports.
   useEffect(() => {
     if (realtimeUserId == null) return
+    markedAllReadRef.current = false
+    seedResolvedRef.current = false
     let cancelled = false
     const ac = new AbortController()
     listNotifications(ac.signal)
       .then(res => {
         if (cancelled) return
+        seedResolvedRef.current = true
         // Merge, don't overwrite. The WS opens on the same render, so a live
         // 'notification' may have already been prepended by onNotification
         // before this GET resolves. Union by id (newest-first) so that live
@@ -2822,7 +2899,10 @@ export default function App() {
           merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
           return merged
         })
-        setUnreadCount(prev => Math.max(res.unread, prev))
+        // Once a mark-all-read has fired, this GET (issued before that POST
+        // landed) reflects a stale unread count — trust local state instead
+        // of resurrecting a badge the user already cleared.
+        setUnreadCount(prev => (markedAllReadRef.current ? prev : Math.max(res.unread, prev)))
       })
       .catch(() => {
         /* non-fatal — the bell just stays empty */
@@ -2832,6 +2912,19 @@ export default function App() {
       ac.abort()
     }
   }, [realtimeUserId])
+
+  // Mirror unreadCount onto the OS/PWA app icon badge (Dock, taskbar,
+  // Android launcher) — see lib/pwa.ts:syncAppBadge for why this is
+  // needed on top of the push payload's own badge write in sw.js.
+  //
+  // Forced to 0 whenever realtimeUserId is null (logged out, including
+  // session expiry — which unmounts the authed subtree via a bare
+  // setUser(false) rather than resetUserState, leaving unreadCount's last
+  // value sitting around): without this, an OS-level badge would keep
+  // showing a signed-out user's stale unread count at the login screen.
+  useEffect(() => {
+    syncAppBadge(realtimeUserId == null ? 0 : unreadCount)
+  }, [unreadCount, realtimeUserId])
 
   const handleNavigate = useCallback((v: string) => {
     // QA 2026-05-25 — clicking the *current* view's nav item should
@@ -3124,7 +3217,7 @@ export default function App() {
         // must NOT unmount it (that kills the cast) — fall through to the
         // normal app navigation below instead.
         if ((playerTarget || playerLoading) && !playerMinimizedRef.current) closePlayer(true)
-        else if (searchOpen) setSearchOpen(false)
+        else if (searchOpen) closeSearch()
         else if (view === 'detail') handleBack()
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -3156,7 +3249,7 @@ export default function App() {
     // Modal-state deps so the Cmd+K guard re-binds when a modal
     // opens/closes (avoids a stale closure reading "no modal" while
     // one is actually open).
-  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer])
+  }, [playerTarget, playerLoading, searchOpen, view, handleBack, partyJoinPrompt, contextMenu, addToListMedia, user, paletteOpen, profilesGateOpen, closePlayer, closeSearch])
 
   // Session expiry. /api/auth/me is validated once at mount (below), so a
   // long-lived tab whose session expired mid-session never re-checked: it kept
@@ -3220,6 +3313,10 @@ export default function App() {
     return party.onMediaChange((p) => {
       const myGen = ++mediaChangeGenRef.current
       mediaChangePendingGenRef.current = myGen
+      // Consume synchronously: whoever sent the swap is decided now, not
+      // after an async resolve that a second broadcast could interleave with.
+      const selfAdvanced = partySelfAdvanceRef.current
+      partySelfAdvanceRef.current = false
       void (async () => {
         try {
           if (p.episode_id) {
@@ -3253,10 +3350,24 @@ export default function App() {
               title: titleDetail?.title ?? party.state.mediaTitle ?? 'Untitled',
               subtitle: `S${foundSeasonNum}E${foundEp.episode_number}${foundEp.title ? ' — ' + foundEp.title : ''}`,
               partyRecoveryBoot: true,
-              pauseOnBootToken: partyStateRef.current.isPlaying
+              // Issue #460 — the host who asked for this advance boots
+              // PLAYING. ChangeMedia always parks the room at Paused@0, so
+              // the usual isPlaying check would pause the very person who
+              // just clicked "Play for all". Booting unpaused lets the
+              // player's existing host-broadcast recovery fire request-play,
+              // which resumes the whole room. Guests still boot paused and
+              // follow that broadcast, exactly as they do for any host play.
+              pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
             })
+            // Guests get no other signal that the room moved — the episode
+            // simply changes under them after a resolve that can take
+            // seconds on a long series. Host succession already toasts for
+            // a smaller disruption than this.
+            if (!selfAdvanced) {
+              addToast(`Host started S${foundSeasonNum}E${foundEp.episode_number}`, 'info')
+            }
           } else {
             // Movie — fetch files + play first.
             const files = await getMediaFiles(p.media_item_id)
@@ -3271,7 +3382,8 @@ export default function App() {
               fileType: 'media',
               title: titleDetail?.title ?? 'Untitled',
               partyRecoveryBoot: true,
-              pauseOnBootToken: partyStateRef.current.isPlaying
+              // Same self-advance rule as the episode branch above.
+              pauseOnBootToken: (selfAdvanced || partyStateRef.current.isPlaying)
                 ? undefined
                 : ++partyPauseOnBootTokenRef.current,
             })
@@ -3552,6 +3664,8 @@ export default function App() {
     setRequestsList(null)
     setNotifications([])
     setUnreadCount(0)
+    markedAllReadRef.current = false
+    seedResolvedRef.current = false
     setLibrary([])
     setSelectedMedia(null)
     setDetailItem(null)
@@ -4456,6 +4570,45 @@ export default function App() {
     }
   }, [nextToastId])
 
+  // Issue #177 / #460 — "what comes after this episode?", shared by the
+  // solo auto-advance below and the party advance beneath it.
+  //
+  // Order: the next playable episode in the current season, else the
+  // first playable episode of the earliest later season. Fileless
+  // episodes are skipped (a gap in the library shouldn't dead-end the
+  // series). Returns null at the series end.
+  //
+  // Pure resolution — no state, no staleness guards. Callers own those,
+  // because "is this result still wanted?" differs between the two
+  // (solo re-checks the local player target; the party path re-checks
+  // that AND that the host is still the host).
+  const resolveNextEpisode = useCallback(async (
+    mediaItemId: number,
+    curSeason: number,
+    curEp: number,
+    preferQuality: 'auto' | '1080p' | '4k',
+  ): Promise<{ ep: ApiEpisode; file: NonNullable<ReturnType<typeof pickFile>>; season: number } | null> => {
+    const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
+      .sort((a, b) => a.episode_number - b.episode_number)
+    for (const e of sameSeason) {
+      if (e.episode_number <= curEp) continue
+      const f = pickFile(e.files, preferQuality)
+      if (f) return { ep: e, file: f, season: curSeason }
+    }
+    const laterSeasons = [...await getSeasons(mediaItemId)]
+      .sort((a, b) => a.season_number - b.season_number)
+      .filter(s => s.season_number > curSeason)
+    for (const s of laterSeasons) {
+      const eps = [...await getEpisodes(mediaItemId, s.season_number)]
+        .sort((a, b) => a.episode_number - b.episode_number)
+      for (const e of eps) {
+        const f = pickFile(e.files, preferQuality)
+        if (f) return { ep: e, file: f, season: s.season_number }
+      }
+    }
+    return null
+  }, [])
+
   // Issue #177 — auto-play the next episode when one finishes.
   //
   // The "Auto-play next episode" toggle in Settings has shipped since
@@ -4520,37 +4673,13 @@ export default function App() {
     const endedEpisodeId = ended.episodeId
 
     try {
-      // 1) Next playable episode in the current season.
-      let nextEp: ApiEpisode | null = null
-      let nextFile: ReturnType<typeof pickFile> = null
-      let nextSeason = curSeason
-      const sameSeason = [...await getEpisodes(mediaItemId, curSeason)]
-        .sort((a, b) => a.episode_number - b.episode_number)
-      for (const e of sameSeason) {
-        if (e.episode_number <= curEp) continue
-        const f = pickFile(e.files, preferQuality)
-        if (f) { nextEp = e; nextFile = f; break }
-      }
-      // 2) Else the first playable episode of the earliest later season.
-      if (!nextEp) {
-        const laterSeasons = [...await getSeasons(mediaItemId)]
-          .sort((a, b) => a.season_number - b.season_number)
-          .filter(s => s.season_number > curSeason)
-        for (const s of laterSeasons) {
-          const eps = [...await getEpisodes(mediaItemId, s.season_number)]
-            .sort((a, b) => a.episode_number - b.episode_number)
-          for (const e of eps) {
-            const f = pickFile(e.files, preferQuality)
-            if (f) { nextEp = e; nextFile = f; nextSeason = s.season_number; break }
-          }
-          if (nextEp) break
-        }
-      }
+      const resolved = await resolveNextEpisode(mediaItemId, curSeason, curEp, preferQuality)
 
       // Bail if the player moved on while we were resolving.
       if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false) ||
           playerTargetRef.current?.episodeId !== endedEpisodeId) return false
-      if (!nextEp || !nextFile) return false // series end / nothing playable — park on final frame
+      if (!resolved) return false // series end / nothing playable — park on final frame
+      const { ep: nextEp, file: nextFile, season: nextSeason } = resolved
 
       const label = `S${nextSeason}E${nextEp.episode_number}${nextEp.title ? ' — ' + nextEp.title : ''}`
       setPlayerTarget({
@@ -4573,7 +4702,122 @@ export default function App() {
       console.warn('[Aurora] auto-advance to next episode failed', err)
       return false
     }
-  }, [party.state.code, addToast])
+  }, [party.state.code, addToast, resolveNextEpisode])
+
+  // Issue #460 — advance the WHOLE PARTY to the next episode.
+  //
+  // The counterpart to handlePlaybackEnded's `party.state.code` bail:
+  // that path refuses to advance unilaterally because it would desync
+  // guests. This one is the sanctioned route — the host resolves the
+  // next episode locally, then hands it to the server via `change-media`.
+  // The server resets the anchor to Paused@0 and echoes `media-change`
+  // to every room conn (the host's included), so nobody — host or guest
+  // — re-points off anything but the server's broadcast. That's why this
+  // function never calls setPlayerTarget: doing so would race the
+  // onMediaChange resolver and give the host a second, conflicting boot.
+  //
+  // Host-only and explicit-click-only. The autoplay preference is
+  // deliberately NOT consulted: it governs what happens when a lone
+  // viewer does nothing, and silently yanking a room full of people to
+  // the next episode is a different act than doing it to yourself.
+  //
+  // Three outcomes, because the card renders each differently and
+  // collapsing them lies to the user: 'advanced' (intent is on the wire
+  // — the swap itself arrives via the broadcast), 'end' (no next episode
+  // exists, show the finale notice), 'failed' (couldn't send or the
+  // resolve went stale — re-offer the button rather than claim the
+  // series ended).
+  // Pulled out of `party` so the callback below can depend on the sender
+  // itself (stable — useCallback with no deps) instead of on the whole
+  // hook object, which is a fresh reference on every App render.
+  const partyChangeMedia = party.changeMedia
+  const handlePartyAdvance = useCallback(async (): Promise<'advanced' | 'end' | 'failed'> => {
+    const cur = playerTargetRef.current
+    if (!cur || cur.fileType !== 'episode') return 'failed'
+    if (cur.seasonNumber == null || cur.episodeNumber == null) return 'failed'
+    const code = party.state.code
+    if (!code) return 'failed'
+    // Host-only. The manager rejects a guest's change-media anyway, but
+    // bailing here keeps a demoted host from firing a doomed swap and
+    // reporting success to the card.
+    if (!user || party.state.hostUserId !== user.id) return 'failed'
+    // The player must be showing the party's OWN media. A host can hold a
+    // party while watching something else — a scheduled lobby that hasn't
+    // started, or a party player they closed — and advancing from that
+    // target would push the room into an unrelated series carrying the
+    // party's old title. The player-side gate already refuses to arm the
+    // card there; this is the authority check behind it, since the server
+    // validates only that the sender is the host.
+    if (party.state.mediaItemId !== cur.mediaItemId) return 'failed'
+
+    let preferQuality: 'auto' | '1080p' | '4k' = 'auto'
+    try {
+      const raw: unknown = JSON.parse(localStorage.getItem('aurora_prefs') || '{}')
+      if (raw && typeof raw === 'object') {
+        const q = (raw as Record<string, unknown>).preferred_quality
+        if (q === '4k') preferQuality = '4k'
+        else if (q === '1080p') preferQuality = '1080p'
+      }
+    } catch { /* malformed prefs — keep 'auto' */ }
+
+    const resolutionGen = playbackResolutionGenRef.current
+    const fromEpisodeId = cur.episodeId
+
+    try {
+      const next = await resolveNextEpisode(cur.mediaItemId, cur.seasonNumber, cur.episodeNumber, preferQuality)
+      // Re-check everything the resolve could have outlived: the player
+      // moving on, the episode changing under us, the party ending, and
+      // host succession (a disconnect mid-resolve promotes someone else,
+      // and the server would reject the swap anyway).
+      if (!isPlaybackResolutionCurrent(resolutionGen, playbackResolutionGenRef.current, false) ||
+          playerTargetRef.current?.episodeId !== fromEpisodeId) return 'failed'
+      if (partyStateRef.current.code !== code) return 'failed'
+      if (!user || partyStateRef.current.hostUserId !== user.id) return 'failed'
+      if (partyStateRef.current.mediaItemId !== cur.mediaItemId) return 'failed'
+      if (!next) return 'end' // series end — the card shows its finale notice
+
+      const sent = partyChangeMedia({
+        mediaItemId: cur.mediaItemId,
+        episodeId: next.ep.id,
+        // Same show, so the party's own title/poster carry over. Passing
+        // the target's title as a fallback keeps a party that somehow
+        // never received them from being blanked by this swap.
+        mediaTitle: partyStateRef.current.mediaTitle || cur.title,
+        mediaPoster: partyStateRef.current.mediaPoster || '',
+      })
+      if (!sent) {
+        addToast("Couldn't advance the party — reconnecting. Try again in a moment.", 'error')
+        return 'failed'
+      }
+      // Tell the host's own player to resume once the swap lands, so the
+      // one click that says "Play for all" actually plays. ChangeMedia
+      // parks the room at Paused@0 by design; without this the card
+      // vanishes, the next episode boots frozen, and someone has to hunt
+      // for play. Consumed by the onMediaChange resolver.
+      partySelfAdvanceRef.current = true
+
+      // Mark the outgoing episode watched. It is NOT complete on its own:
+      // completion is 95%, and the 2-minute rule fires at ~91% of a 22
+      // minute episode, so without this the episode the party just
+      // finished lingers in Continue Watching, resumes near the end, and —
+      // because history surfaces require completed_at — never reaches
+      // recent watches or the follow feed. Deliberate: choosing "next
+      // episode" IS finishing this one. Fire-and-forget; a failure costs
+      // a stale rail, not the advance.
+      if (fromEpisodeId != null) {
+        void markWatched(cur.mediaItemId, {
+          episode_id: fromEpisodeId,
+          profile_id: activeProfileId ?? undefined,
+        }).catch(() => { /* non-fatal — the swap already went out */ })
+      }
+      // Same nonce the solo path and player-close bump.
+      setCwReloadNonce(n => n + 1)
+      return 'advanced'
+    } catch (err) {
+      console.warn('[Aurora] party advance to next episode failed', err)
+      return 'failed'
+    }
+  }, [party.state.code, party.state.hostUserId, party.state.mediaItemId, partyChangeMedia, user, addToast, resolveNextEpisode, activeProfileId])
 
   // Deep-debug M2 — memoized bundle for HomeView's CW rail. Stable
   // identity unless continueItems OR handlePlayContinue changes (both
@@ -4740,7 +4984,9 @@ export default function App() {
   // ceiling, unknown name) the server reported.
   const launchComposerParty = useCallback(async (
     m: Media, episodeId: number | undefined, launch: PartyComposerLaunch,
-  ): Promise<{ ok: boolean; error?: string }> => {
+    // `code` rides back on success so the composer's scheduled-success
+    // state can hand straight off to the share card.
+  ): Promise<{ ok: boolean; error?: string; code?: string }> => {
     let createdCode: string | null = null
     try {
       const resp = await createQuickParty({
@@ -4791,7 +5037,7 @@ export default function App() {
             type: 'info',
           }])
         }
-        return { ok: true }
+        return { ok: true, code: resp.code }
       }
       // Server created the party but we couldn't join it. Surface
       // the error so the admin knows the party exists. Used to be
@@ -5224,12 +5470,25 @@ export default function App() {
         onRsvp={handleInviteRsvp}
         onJoinParty={code => void handleJoinInviteParty(code)}
         onMarkAllRead={() => {
-          if (unreadCount === 0) return
+          // Only skip once seedResolvedRef confirms unreadCount is trustworthy
+          // — before that, 0 can mean "genuinely nothing unread" OR "the seed
+          // fetch hasn't landed yet", and treating those the same previously
+          // caused this to silently skip both the local mark and the server
+          // POST — issue #474. Past that point the endpoint is idempotent, so
+          // this is purely avoiding a pointless write on every panel open.
+          if (seedResolvedRef.current && unreadCount === 0) return
+          markedAllReadRef.current = true
           setUnreadCount(0)
           const now = new Date().toISOString()
           setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
           markAllNotificationsRead().catch(() => {
-            /* non-fatal — local state is already cleared */
+            // The optimistic local clear stands (matches this endpoint's
+            // existing fire-and-forget contract), but un-poison the seed
+            // guard: the POST never actually reached the server, so a still
+            // in-flight (or not-yet-started) seed fetch's real unread count
+            // must NOT be discarded as "stale" — that would strand the badge
+            // at 0 for notifications that were never actually marked read.
+            markedAllReadRef.current = false
           })
         }}
       />
@@ -5311,6 +5570,7 @@ export default function App() {
               }
             }}
             onSearchFocus={() => setSearchOpen(true)}
+            onSearchClose={closeSearch}
             searchInputRef={searchInputRef}
             onOpenPalette={() => setPaletteOpen(true)}
             // Party — M10 Phase 4. Click opens the panel if already in a
@@ -5839,6 +6099,7 @@ export default function App() {
       <VideoPlayer
         target={playerTarget}
         onEnded={handlePlaybackEnded}
+        onPartyAdvance={handlePartyAdvance}
         isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onSurfaceChange={setPlayerSurface}
@@ -6103,7 +6364,7 @@ export default function App() {
 
       {addToListMedia && activeProfileId && (
         <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setAddToListMedia(null)}>
-          <div className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
+          <div role="dialog" aria-label={`Add "${addToListMedia.title}" to a watchlist`} className="w-full max-w-sm bg-[#0a0a0f] border border-white/[0.06] rounded-2xl p-5" onClick={e => e.stopPropagation()}>
             <h2 className="text-white text-lg font-semibold mb-2">Add "{addToListMedia.title}" to…</h2>
             <p className="text-white/40 text-xs mb-4">Profile: {profiles.find(p => p.id === activeProfileId)?.name}</p>
             {addToListLists === null && <p className="text-white/40 text-sm">Loading…</p>}

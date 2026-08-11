@@ -27,7 +27,7 @@ Aurora is a media server written in Go with a React single-page app on top. It s
 
 ### 🎬 Streaming that gets out of the way
 - **Direct play** over HTTP range requests, with **HLS transcode fallback** via FFmpeg
-- **Hardware acceleration** auto-detected per host: NVENC, QSV, VAAPI, AMF
+- **Hardware acceleration** auto-detected per host: NVENC, QSV, VAAPI, AMF — including **HEVC output** on capable encoders (`hevc_nvenc`/`_qsv`/`_vaapi`/`_amf`, `libx265` in software) for clients that can decode it
 - **Smart Skip** — automatic intro & credits detection (sandboxed analysis workers), one tap to skip
 - **Subtitles** — embedded tracks extracted to WebVTT, plus external SRT/VTT discovery
 - **Casting** — AirPlay-compatible casting with codec-aware remuxing and secure cast tokens
@@ -35,29 +35,40 @@ Aurora is a media server written in Go with a React single-page app on top. It s
 
 ### 🎉 Watch together
 - **Watch parties** with synchronized playback, live chat, reaction overlays, and WebRTC voice
-- **QR / link invites** to pull friends into a room in seconds
+- **QR / link invites** to pull friends into a room in seconds, plus **member invites** you can send now or **schedule** — RSVP from the notification bell, a lobby countdown, and the booking shows up as a chip on the Calendar
+- **Host succession** — the party survives its host leaving, and scheduled parties survive a server restart
+- **Highlight reels** — the most-reacted moments auto-exported as a shareable MP4
+- **Phone as second screen** — a mobile companion at `/join` for chat, reactions, and voice without a video player
 - Admin **Rooms** panel to see and manage active parties
 
 ### 🧠 AI, local or bring-your-own-key (optional)
 - **Semantic search** — describe what you want in plain English; pgvector embeddings + a chat model turn it into results, with classic trigram search as the always-on fallback
 - **AI file matching** — uncertain filename→metadata matches get flagged into an admin review queue instead of silently mis-filing
-- **Personalized home** — hero picks and discover rows tuned by your watch history, with a taste-onboarding flow for new accounts
-- **Catch Me Up** — episode recaps so you can rejoin a show without rewatching
+- **Personalized home** — hero picks and discover rows tuned by your watch history, with a personal **Match %** on each pick and a taste-onboarding flow for new accounts
+- **Catch Me Up** — episode recaps so you can rejoin a show without rewatching, plus **Ask Previously**: spoiler-bounded follow-up questions about the show so far
+- **Star ratings** — per-profile 1–5★ verdicts that steer the recommender directly (4–5★ pulls your taste toward a title, 1–2★ excludes it and its lookalikes)
 - Runs on **your** hardware through [Ollama](https://ollama.com) by default — no cloud calls — or plug in an **Anthropic (Claude)** or **OpenAI (ChatGPT)** API key to run the same features on hosted models. Aurora works fine with all of it switched off
 
 ### 📚 A library that stays organized
 - Multi-path libraries with **filesystem watching** and scheduled auto-scans
 - **TMDB** metadata (movies + TV) with **TVDB** fallback — cast & crew, artwork, blurhash placeholders
-- **Collections**, a release **Calendar**, **My Library**, and a ⌘K **search palette**
-- Per-user **profiles** with avatars
+- **Collections**, a release **Calendar**, **My Library**, per-profile **watchlists**, and a ⌘K **search palette**
+- Netflix-style **sub-profiles** with avatars and per-profile subtitle/language preferences, plus a **parental age ceiling** applied to browsing, the home rails, taste onboarding, the follow feed, and watch-party invites
+- **XP, levels, streaks, and achievements** for the people who like a scoreboard
+
+### 👥 Social
+- **Member profiles** at `/user/:name` — bio, social handles, and (opt-in, off by default) recent watches
+- **Follow** other members, browse the **`/members`** directory, and get a **"From People You Follow"** rail on the home page
 
 ### 📥 Requests
 - End-user request flow backed by **Radarr / Sonarr** (including separate 4K instances)
 - Approval workflow with request progress tracking
 
 ### 🛡️ Built to be operated
-- **Auth**: cookie-based JWT + refresh tokens, Argon2 hashing, invite codes, rate limiting, **Google & GitHub OAuth** account linking
-- **Admin dashboard**: users & roles, activity log, live transcode sessions, flagged-match review, logs, server panel, LLM settings, OAuth config, notifications
+- **Auth**: cookie-based JWT + refresh tokens, Argon2 hashing, invite codes, rate limiting, and **OAuth sign-in / account linking** for **Google, Discord, Twitch, Facebook, and X (Twitter)** — each one separately enabled and configured in the admin UI, with a per-provider "skip the invite code" toggle
+- **Installable PWA** — manifest + icons, and **web push** that reaches your devices with no tab open (request ready/failed, party invites & reminders, highlight reel ready, plus admin alerts for pending requests and completed scans). Zero configuration: the VAPID keypair is generated on first use. See [`docs/push.md`](docs/push.md)
+- **Admin dashboard**: users & roles, libraries, requests, flagged-match review, activity log, live transcode sessions, watch-party rooms, logs, server panel, LLM settings, OAuth config
+- **Signup attribution** — a one-shot "how did you hear about Aurora?" prompt for invite-free SSO signups, surfaced in the admin Users table
 - **Backup & restore** built into the admin UI (`pg_dump` under the hood)
 - **Auto-updater**: a 5-minute systemd timer plus an in-app **Update Now** button; optional signed-commit verification before anything is built as root
 - **Hardened systemd unit**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, dedicated unprivileged `aurora` user
@@ -169,20 +180,34 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | Key | Purpose |
 |-----|---------|
 | `DATABASE_URL` | PostgreSQL connection string |
+| `DB_MAX_CONNS` / `DB_MIN_CONNS` | Connection-pool bounds (defaults `10` / `2`) |
 | `JWT_SECRET` | Session signing secret (auto-generated; keep private) |
+| `ACCESS_TOKEN_MINUTES` / `REFRESH_TOKEN_DAYS` / `CAST_TOKEN_HOURS` (or `CAST_TOKEN_MINUTES`) | Token lifetimes (defaults 15 min / 30 days / 4 h) |
+| `AURORA_HOST` / `AURORA_PORT` | Listen address (defaults `0.0.0.0` / `8484`) |
 | `TMDB_API_KEY` / `TVDB_API_KEY` + `TVDB_PIN` | Metadata providers — optional overrides for Aurora's bundled application keys (`TVDB_ENABLED=false` disables the TVDB fallback) |
+| `METADATA_REFRESH_HOURS` / `TMDB_LANGUAGE` / `TVDB_LANGUAGE` | Metadata refresh interval (default 168 h) and language |
+| `SCANNER_WORKERS` / `WATCH_DEBOUNCE_MS` / `FFPROBE_PATH` | Library scanner concurrency (default `8`), filesystem-watch debounce (default 2000 ms), `ffprobe` location |
+| `MATCH_AUTO_THRESHOLD` / `MATCH_REVIEW_THRESHOLD` | Filename→metadata confidence cutoffs (defaults `85` / `50`) — below the review threshold a match is flagged for admin review instead of applied |
+| `AI_MATCH_AUTO_THRESHOLD` / `AI_MATCH_RATE_PER_SEC` | Same, for the LLM-assisted rematch pass |
 | `LLM_ENABLED` | AI stack on/off (default on) |
 | `LLM_OLLAMA_URL` | Ollama endpoint (installer pins `http://localhost:11434`) |
 | `LLM_EMBED_MODEL` / `LLM_CHAT_MODEL` | Model overrides (defaults: `qwen3-embedding:0.6b`, `qwen3:4b-instruct`) |
 | `LLM_PROVIDER` / `LLM_EMBED_PROVIDER` | Chat / embedding backends: `local`, `ollama_cloud`, `anthropic`, `openai` for chat; `local`, `openai` for embeds. Usually set from **Admin → LLM** (DB settings override env) |
 | `LLM_ANTHROPIC_API_KEY` / `LLM_OPENAI_API_KEY` | Hosted-provider keys for env-only deployments (the admin UI stores them in the DB instead) |
 | `LLM_ANTHROPIC_BASE_URL` / `LLM_OPENAI_BASE_URL` | Gateway/proxy overrides for the hosted providers (env-only on purpose — never admin-editable) |
+| `LLM_EMBED_DIMS` / `LLM_NUM_CTX` / `LLM_HTTP_TIMEOUT_SEC` | Embedding width (must match the `vector(768)` column), context window, request timeout |
+| `LLM_BACKFILL_WORKERS` / `LLM_BACKFILL_BATCH` | Concurrency of the background embedding backfill (default 2 workers) |
 | `REQUESTS_ENABLED` + `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY` | Requests integrations |
 | `AURORA_ALLOWED_ORIGINS` | CORS / WebSocket origins (same-origin always allowed) |
 | `AURORA_SECURE_COOKIES` | Force the `Secure` flag on auth cookies — set automatically when a domain fronts the install (TLS terminates at nginx, so the Go server can't infer it) |
 | `AURORA_VOICE_STUN_SERVERS` / `AURORA_TURN_URL` + `AURORA_TURN_USERNAME` + `AURORA_TURN_CREDENTIAL` | Watch-party voice ICE servers. Defaults to Google's public STUN, which covers most home NATs; behind CGNAT or symmetric NAT, point these at your own TURN relay (e.g. coturn) |
+| `TLS_ENABLED` + `TLS_CERT_FILE`/`TLS_KEY_FILE`, or `TLS_AUTO_CERT` + `TLS_DOMAIN` + `TLS_CACHE_DIR` | Terminate TLS **in the Go server** instead of nginx — either your own cert pair or built-in Let's Encrypt autocert. The installer's nginx path is the supported default; this is for installs that don't want a reverse proxy |
+| `TRANSCODE_HW_ACCEL` | `auto` (default), a specific backend, or `off` to force software encoding |
+| `TRANSCODE_MAX_SESSIONS` / `TRANSCODE_MAX_SESSIONS_PER_USER` / `TRANSCODE_MAX_CACHE_GB` / `TRANSCODE_SESSION_TIMEOUT_SEC` | Transcode ceilings and idle-session reaping (`0` = manager default) |
+| `TRANSCODE_PROFILES` / `TRANSCODE_SEGMENT_DURATION` / `TRANSCODE_SEGMENT_FORMAT` | HLS ladder and segmentation |
 | `CACHE_IMAGE_DIR` / `CACHE_TRANSCODE_DIR` / `CACHE_SUBTITLE_DIR` | Cache locations |
-| `LOG_DIR` / `LOG_LEVEL` | Logging |
+| `LOG_DIR` / `LOG_LEVEL` / `LOG_MAX_SIZE_MB` / `LOG_MAX_BACKUPS` / `LOG_MAX_AGE_DAYS` / `LOG_COMPRESS` | Logging and rotation |
+| `BUG_REPORT_ENABLED` + `BUG_REPORT_GITHUB_REPO` / `BUG_REPORT_GITHUB_TOKEN` (+ `BUG_REPORT_*` limits) | In-app bug reporter — full setup in [`docs/bug-report-setup.md`](docs/bug-report-setup.md) |
 | `AURORA_SOURCE_DIR` / `AURORA_UPDATE_BRANCH` / `AURORA_EXPECTED_REMOTE` | Auto-updater source (root-owned mirror) |
 | `AURORA_UPDATE_REQUIRE_SIGNED` + `AURORA_UPDATE_ALLOWED_SIGNERS` | Require verified commit signatures before the updater builds as root. **Run `scripts/check-update-signing.sh` first** — if verification fails the updater stops deploying entirely, and recovering needs shell access |
 | `AURORA_TRUSTED_PROXIES` | CIDRs whose `X-Forwarded-For` is honoured, e.g. `127.0.0.1/32,::1/128` for a local nginx. **Required behind a reverse proxy** — without it every request looks like it came from the proxy, so the per-IP auth rate limiter shares one bucket across all clients and audit logs record the proxy instead of the client. `install.sh`/`setup-domain.sh` set it for you |
@@ -240,17 +265,19 @@ sudo ./scripts/install.sh
 
 ```mermaid
 flowchart LR
-    B["Browser<br/>React 19 SPA"] -->|"HTTPS"| N["nginx + certbot<br/>(optional)"]
+    B["Browser / PWA<br/>React 19 SPA"] -->|"HTTPS"| N["nginx + certbot<br/>(optional)"]
     N --> A["Aurora<br/>Go · systemd · :8484"]
     B -.->|"LAN / direct"| A
     A --> P[("PostgreSQL 14+<br/>pgvector · pg_trgm")]
     A --> F["FFmpeg<br/>direct play · HLS · hw-accel"]
     A --> O["Ollama (optional)<br/>qwen3-embedding · qwen3"]
+    A -.->|"or, per admin setting"| C["Anthropic / OpenAI<br/>(optional, BYO key)"]
     A --> M["TMDB / TVDB"]
     A --> R["Radarr / Sonarr<br/>(optional)"]
+    A -.->|"web push"| W["Push services<br/>(FCM / APNs / Mozilla)"]
 ```
 
-A single Go binary serves the API, WebSockets (live scan progress, watch parties), and the built SPA. PostgreSQL holds the catalog with pgvector for embeddings and pg_trgm for fuzzy search. FFmpeg handles transcoding with per-host hardware-acceleration detection. Everything optional degrades gracefully when absent.
+A single Go binary serves the API, WebSockets (live scan progress, watch parties), and the built SPA. PostgreSQL holds the catalog with pgvector for embeddings and pg_trgm for fuzzy search. FFmpeg handles transcoding with per-host hardware-acceleration detection. The AI stack sits behind one internal client, so local Ollama and the hosted providers are a settings change rather than a code path. Everything optional degrades gracefully when absent.
 
 ## 📦 Requirements
 
@@ -271,15 +298,27 @@ Removes the binary, systemd units, config, cache, source clone, database, and th
 <a id="development"></a>
 ## 🛠️ Development
 
+Backend (repo root):
+
 ```bash
 go build ./...     # must be green
 go test ./...      # must be green
 ```
 
+Frontend (`static/redesign/app` — React 19 + Vite 7 + TypeScript):
+
+```bash
+npm run build      # tsc -b && vite build
+npm test           # vitest
+npm run lint       # eslint
+npm run audit      # build + a11y, contrast, glass, motion, breakpoint, layout & PWA checks
+```
+
 - Branch off `main`; never commit to `main` directly. The pipeline (research → implement + tests → adversarial review → merge gate) is documented in [`docs/dev-workflow.md`](docs/dev-workflow.md).
 - Testing a change against a live server end-to-end: [`docs/server-testing.md`](docs/server-testing.md) (`scripts/server-test-loop.sh`).
 - Manual reverse-proxy configs (Caddy + nginx): [`docs/reverse-proxy/`](docs/reverse-proxy/).
-- Frontend lives in `static/redesign/app` (React 19 + Vite 7 + TypeScript).
+- Web push internals and operator notes: [`docs/push.md`](docs/push.md).
+- Recommender measurement — the privacy-bounded Match beta report: [`docs/match-report.md`](docs/match-report.md) (`scripts/match-report.sh`).
 
 ## 📄 License
 

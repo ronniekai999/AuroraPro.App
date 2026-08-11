@@ -78,7 +78,10 @@ export default function SearchView({ query, onSelect, libraryIds, onToggleLib }:
   }, [query])
 
   return (
-    <div className="animate-fade-in">
+    // data-search-results: lets TopNav's outside-click-to-close handler
+    // exempt clicks on result cards (a page-level sibling, not a DOM
+    // descendant of the search pill) from closing the search.
+    <div className="animate-fade-in" data-search-results>
       <PageHeader
         // No eyebrow: every other page's kicker names a category the page
         // belongs to ("Curated", "Upcoming"). Search results aren't a

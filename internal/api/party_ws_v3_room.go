@@ -283,6 +283,20 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				h.sendErr(sc, "not in a party")
 				continue
 			}
+			// Issue #460 — throttle the swap. This was the last
+			// state-mutating room message with no limiter, which only went
+			// unnoticed because nothing in the SPA ever sent it; the
+			// next-episode button makes it routine traffic. Each call is an
+			// O(N_roomConns) broadcast plus a StateRevision bump, a tick-loop
+			// stop and a DB-write goroutine, and it forces every participant
+			// to tear down and re-create a transcode session — so a host
+			// looping it is a cheap way to churn ffmpeg for the whole room.
+			// Same 30/min tracker chat and reactions use; a human clicking
+			// "next episode" never comes close.
+			if !h.checkChatRate(claims.UserID) {
+				h.sendErr(sc, "media change rate limit exceeded (max 30 per minute)")
+				continue
+			}
 			var p changeMediaPayload
 			if err := json.Unmarshal(msg.Payload, &p); err != nil {
 				h.sendErr(sc, "invalid change-media payload")
@@ -292,7 +306,15 @@ func (h *PartyWSHandlerV3Room) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				h.sendErr(sc, "media_item_id required")
 				continue
 			}
-			if err := h.manager.ChangeMedia(code, claims.UserID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
+			// The title is client-supplied and lands in PartyState, the
+			// party row (VARCHAR(500)), every room broadcast, and the
+			// unauthenticated /api/code/{code}/info response. Clamp it
+			// rather than let an oversized value silently fail the DB write
+			// and leave memory diverged from disk. Create derives the title
+			// server-side, so this is the only path that needs the guard.
+			p.MediaTitle = truncateRunes(p.MediaTitle, partyMediaTextMaxRunes)
+			p.MediaPoster = truncateRunes(p.MediaPoster, partyMediaTextMaxRunes)
+			if err := h.manager.ChangeMedia(code, claims.UserID, claims.RefreshTokenID, p.MediaItemID, p.EpisodeID, p.MediaTitle, p.MediaPoster); err != nil {
 				h.sendErr(sc, safeWSError(err))
 			}
 

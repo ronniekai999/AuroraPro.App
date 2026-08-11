@@ -47,6 +47,16 @@ type JWTClaims struct {
 	// Consumers MUST NOT assume this names a transcode session (e.g. by
 	// blindly calling GetSession with it).
 	SessionID string `json:"sid,omitempty"`
+	// RefreshTokenID references the refresh_tokens row this access token was
+	// minted alongside (0 for tokens minted before this field existed, and
+	// always 0 for cast-scoped tokens, which have no profile concept of
+	// their own). It is the ONLY server-authoritative link from a request to
+	// "which sub-profile is currently acting" — internal/db's
+	// ResolveActingProfile looks up refresh_tokens.active_profile_id by this
+	// id, falling back to the account default profile when it's 0 or unset.
+	// Issue #462: this replaced trusting a client-supplied profile_id/
+	// max_rating for rating-ceiling enforcement, which was a full bypass.
+	RefreshTokenID int64 `json:"rtid,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -124,13 +134,19 @@ func (s *Service) VerifyPassword(password, encodedHash string) (bool, error) {
 // fetch user.TokenVersion right before calling this (or pass 0 if they
 // haven't yet adopted the new column — pre-15 tokens remain valid because
 // users.token_version defaults to 0).
-func (s *Service) GenerateAccessToken(userID int64, username, role string, tokenVersion int) (string, time.Time, error) {
+//
+// refreshTokenID should be the id of the refresh_tokens row minted alongside
+// this access token (create/rotate that row FIRST so its id is known), or 0
+// when none exists (e.g. a caller that hasn't adopted session-bound acting
+// profiles yet). See JWTClaims.RefreshTokenID.
+func (s *Service) GenerateAccessToken(userID int64, username, role string, tokenVersion int, refreshTokenID int64) (string, time.Time, error) {
 	expiresAt := time.Now().Add(s.cfg.AccessTokenExpiry)
 	claims := JWTClaims{
-		UserID:       userID,
-		Username:     username,
-		Role:         role,
-		TokenVersion: tokenVersion,
+		UserID:         userID,
+		Username:       username,
+		Role:           role,
+		TokenVersion:   tokenVersion,
+		RefreshTokenID: refreshTokenID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
