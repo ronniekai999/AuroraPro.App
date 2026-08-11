@@ -2855,9 +2855,18 @@ export default function App() {
   })
 
   // Seed the notification feed + unread badge on login (once per user id). The
-  // WS keeps it live thereafter; resetUserState clears it on logout.
+  // WS keeps it live thereafter; resetUserState clears it on explicit logout.
+  //
+  // markedAllReadRef is reset HERE, not only in resetUserState, because
+  // session expiry (SESSION_EXPIRED_EVENT below) drops to the auth screen
+  // via a bare setUser(false) — it does not call resetUserState, and the
+  // subsequent re-login calls setUser(u) directly too. Without this reset,
+  // a mark-all-read from the PRIOR session would permanently pin the badge
+  // to its last value across that relogin, discarding every real unread
+  // count the new session's seed fetch reports.
   useEffect(() => {
     if (realtimeUserId == null) return
+    markedAllReadRef.current = false
     let cancelled = false
     const ac = new AbortController()
     listNotifications(ac.signal)
@@ -2897,9 +2906,15 @@ export default function App() {
   // Mirror unreadCount onto the OS/PWA app icon badge (Dock, taskbar,
   // Android launcher) — see lib/pwa.ts:syncAppBadge for why this is
   // needed on top of the push payload's own badge write in sw.js.
+  //
+  // Forced to 0 whenever realtimeUserId is null (logged out, including
+  // session expiry — which unmounts the authed subtree via a bare
+  // setUser(false) rather than resetUserState, leaving unreadCount's last
+  // value sitting around): without this, an OS-level badge would keep
+  // showing a signed-out user's stale unread count at the login screen.
   useEffect(() => {
-    syncAppBadge(unreadCount)
-  }, [unreadCount])
+    syncAppBadge(realtimeUserId == null ? 0 : unreadCount)
+  }, [unreadCount, realtimeUserId])
 
   const handleNavigate = useCallback((v: string) => {
     // QA 2026-05-25 — clicking the *current* view's nav item should
