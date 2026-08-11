@@ -2613,13 +2613,21 @@ export default function App() {
   // 'notification' WS event; unreadCount drives the sidebar bell badge.
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
-  // Set the moment a mark-all-read is issued (panel open) and never cleared
-  // until logout. Guards the seed fetch below against a race where its GET
-  // was already in flight when the user marked everything read: without
+  // Set the moment a mark-all-read is issued (panel open); reset at the top
+  // of the seed effect below on every realtimeUserId change (login, logout,
+  // session-expiry relogin). Guards the seed fetch against a race where its
+  // GET was already in flight when the user marked everything read: without
   // this, the GET's now-stale `unread` count lands afterward and Math.max
   // slams the badge back up even though the server (and local state) has
   // already zeroed it. See issue #474.
   const markedAllReadRef = useRef(false)
+  // True once the seed GET below has resolved at least once for the current
+  // session — lets onMarkAllRead skip the mark-all-read POST when it KNOWS
+  // unreadCount is trustworthy and already zero, without reintroducing the
+  // stale-unreadCount race the guard above exists to prevent (unreadCount
+  // reads 0 before the seed resolves too, for the unrelated reason that
+  // nothing has loaded yet).
+  const seedResolvedRef = useRef(false)
 
   // Load profiles once the user is logged in.
   useEffect(() => {
@@ -2867,11 +2875,13 @@ export default function App() {
   useEffect(() => {
     if (realtimeUserId == null) return
     markedAllReadRef.current = false
+    seedResolvedRef.current = false
     let cancelled = false
     const ac = new AbortController()
     listNotifications(ac.signal)
       .then(res => {
         if (cancelled) return
+        seedResolvedRef.current = true
         // Merge, don't overwrite. The WS opens on the same render, so a live
         // 'notification' may have already been prepended by onNotification
         // before this GET resolves. Union by id (newest-first) so that live
@@ -3655,6 +3665,7 @@ export default function App() {
     setNotifications([])
     setUnreadCount(0)
     markedAllReadRef.current = false
+    seedResolvedRef.current = false
     setLibrary([])
     setSelectedMedia(null)
     setDetailItem(null)
@@ -5459,12 +5470,13 @@ export default function App() {
         onRsvp={handleInviteRsvp}
         onJoinParty={code => void handleJoinInviteParty(code)}
         onMarkAllRead={() => {
-          // No `unreadCount === 0` guard: unreadCount can still read 0 here
-          // purely because the initial seed fetch hasn't landed yet (see the
-          // seed effect above), which previously caused this to silently
-          // skip both the local mark and the server POST — issue #474. The
-          // endpoint is idempotent, so firing it with nothing to mark is a
-          // harmless no-op.
+          // Only skip once seedResolvedRef confirms unreadCount is trustworthy
+          // — before that, 0 can mean "genuinely nothing unread" OR "the seed
+          // fetch hasn't landed yet", and treating those the same previously
+          // caused this to silently skip both the local mark and the server
+          // POST — issue #474. Past that point the endpoint is idempotent, so
+          // this is purely avoiding a pointless write on every panel open.
+          if (seedResolvedRef.current && unreadCount === 0) return
           markedAllReadRef.current = true
           setUnreadCount(0)
           const now = new Date().toISOString()
