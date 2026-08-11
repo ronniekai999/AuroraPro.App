@@ -182,3 +182,26 @@ export function initPWA(): void {
   installPrompt.init()
   registerServiceWorker()
 }
+
+/**
+ * Mirror the in-app unread count onto the OS/PWA app icon badge (Dock,
+ * taskbar, Android launcher). sw.js sets this same badge from a push
+ * payload for background delivery, but never clears it once the app is
+ * open again — without a foreground write, an installed app's badge is
+ * monotonic and can outlive being read entirely. Best-effort: unsupported
+ * browsers and denied/errored calls are silently ignored (badging is a
+ * nicety, never load-bearing).
+ */
+export function syncAppBadge(
+  count: number,
+  nav: {
+    setAppBadge?: (n?: number) => Promise<void>
+    clearAppBadge?: () => Promise<void>
+  } = navigator,
+): void {
+  if (count > 0) {
+    void nav.setAppBadge?.(count)?.catch(() => { /* badging is a nicety */ })
+  } else {
+    void nav.clearAppBadge?.()?.catch(() => { /* badging is a nicety */ })
+  }
+}

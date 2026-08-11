@@ -124,6 +124,7 @@ import { lockBodyScroll } from '@/lib/scrollLock'
 import { prewarm, cancelPrewarm, prewarmEnabled } from '@/lib/prewarm'
 import { shouldRefreshHome, shouldResetPersonalizedRails } from '@/lib/homeRefresh'
 import { pushSupported, bootResyncPush, unsubscribePushOnLogout } from '@/lib/push'
+import { syncAppBadge } from '@/lib/pwa'
 import { ViewSuspense, ViewFallback } from '@/components/ViewSuspense'
 import ManualMatchModal from '@/components/admin/ManualMatchModal'
 
@@ -1740,13 +1741,27 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
   // Phase 11.4 — same gap as ServerPanel: role="dialog" with no focus management.
   const panelRef = useRef<HTMLDivElement | null>(null)
   usePanelDismiss(open, onClose, panelRef)
+  // Which ids were unread the moment the panel opened, so rows can show that
+  // distinction (issue #474 — previously nothing rendered read_at at all, so
+  // a badge count and an undifferentiated list of familiar-looking items
+  // were indistinguishable from "the badge was wrong"). Snapshotted before
+  // marking read below, and held for the rest of this open session so the
+  // dots don't vanish out from under the user as read_at flips locally.
+  const [unreadSnapshot, setUnreadSnapshot] = useState<Set<number>>(() => new Set())
   // Mark the user's notifications read when the panel opens (clears the badge).
   // Via a ref so this open→true effect doesn't depend on the parent's inline
   // callback identity, which changes every render.
   const onMarkAllReadRef = useRef(onMarkAllRead)
   onMarkAllReadRef.current = onMarkAllRead
   useEffect(() => {
-    if (open) onMarkAllReadRef.current()
+    if (!open) return
+    setUnreadSnapshot(new Set(notifications.filter(n => !n.read_at).map(n => n.id)))
+    onMarkAllReadRef.current()
+    // Deliberately keyed on `open` alone — `notifications` is read for its
+    // value at the moment the panel opens, not tracked as a trigger (the
+    // mark-all-read this fires would otherwise cause it to re-run on every
+    // resulting re-render, re-marking already-read ids as "was unread").
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
   useEffect(() => {
     if (!open || !isAdmin) return
@@ -1816,8 +1831,12 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
             : undefined
           const inviteGone = n.type === 'party_invite' && partyCode && partyInvites && !invite
           const dot = n.type === 'request_failed' ? 'bg-red-400' : isPartyType ? 'bg-purple-400' : 'bg-emerald-400'
+          const isUnread = unreadSnapshot.has(n.id)
           return (
-            <div key={n.id} className="p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3">
+            <div
+              key={n.id}
+              className={`p-4 border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors flex items-start gap-3 ${isUnread ? 'bg-purple-500/[0.05]' : ''}`}
+            >
               <span
                 className={`mt-1.5 w-2 h-2 rounded-full flex-shrink-0 ${dot}`}
                 aria-hidden="true"
@@ -1893,7 +1912,10 @@ function NotificationPanel({ open, isAdmin, onClose, notifications, onMarkAllRea
                     Join
                   </button>
                 )}
-                <p className="text-white/30 text-xs mt-1">{fmtRel(n.created_at)}</p>
+                <p className="text-white/30 text-xs mt-1">
+                  {fmtRel(n.created_at)}
+                  {isUnread && <span className="ml-1.5 text-purple-300 font-medium">· New</span>}
+                </p>
               </div>
             </div>
           )
@@ -2591,6 +2613,13 @@ export default function App() {
   // 'notification' WS event; unreadCount drives the sidebar bell badge.
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unreadCount, setUnreadCount] = useState(0)
+  // Set the moment a mark-all-read is issued (panel open) and never cleared
+  // until logout. Guards the seed fetch below against a race where its GET
+  // was already in flight when the user marked everything read: without
+  // this, the GET's now-stale `unread` count lands afterward and Math.max
+  // slams the badge back up even though the server (and local state) has
+  // already zeroed it. See issue #474.
+  const markedAllReadRef = useRef(false)
 
   // Load profiles once the user is logged in.
   useEffect(() => {
@@ -2851,7 +2880,10 @@ export default function App() {
           merged.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
           return merged
         })
-        setUnreadCount(prev => Math.max(res.unread, prev))
+        // Once a mark-all-read has fired, this GET (issued before that POST
+        // landed) reflects a stale unread count — trust local state instead
+        // of resurrecting a badge the user already cleared.
+        setUnreadCount(prev => (markedAllReadRef.current ? prev : Math.max(res.unread, prev)))
       })
       .catch(() => {
         /* non-fatal — the bell just stays empty */
@@ -2861,6 +2893,13 @@ export default function App() {
       ac.abort()
     }
   }, [realtimeUserId])
+
+  // Mirror unreadCount onto the OS/PWA app icon badge (Dock, taskbar,
+  // Android launcher) — see lib/pwa.ts:syncAppBadge for why this is
+  // needed on top of the push payload's own badge write in sw.js.
+  useEffect(() => {
+    syncAppBadge(unreadCount)
+  }, [unreadCount])
 
   const handleNavigate = useCallback((v: string) => {
     // QA 2026-05-25 — clicking the *current* view's nav item should
@@ -3600,6 +3639,7 @@ export default function App() {
     setRequestsList(null)
     setNotifications([])
     setUnreadCount(0)
+    markedAllReadRef.current = false
     setLibrary([])
     setSelectedMedia(null)
     setDetailItem(null)
@@ -5404,7 +5444,13 @@ export default function App() {
         onRsvp={handleInviteRsvp}
         onJoinParty={code => void handleJoinInviteParty(code)}
         onMarkAllRead={() => {
-          if (unreadCount === 0) return
+          // No `unreadCount === 0` guard: unreadCount can still read 0 here
+          // purely because the initial seed fetch hasn't landed yet (see the
+          // seed effect above), which previously caused this to silently
+          // skip both the local mark and the server POST — issue #474. The
+          // endpoint is idempotent, so firing it with nothing to mark is a
+          // harmless no-op.
+          markedAllReadRef.current = true
           setUnreadCount(0)
           const now = new Date().toISOString()
           setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
