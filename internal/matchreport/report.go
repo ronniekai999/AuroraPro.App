@@ -8,7 +8,7 @@ import (
 	"github.com/aurora-media/aurora/internal/db"
 )
 
-const SchemaVersion = "aurora-match-report-v1"
+const SchemaVersion = "aurora-match-report-v2"
 
 type Report struct {
 	SchemaVersion string        `json:"schema_version"`
@@ -19,6 +19,7 @@ type Report struct {
 	Truncated     bool          `json:"truncated"`
 	Selection     string        `json:"selection"`
 	ExposureCount *int          `json:"qualified_exposures,omitempty"`
+	ProfileCount  *int          `json:"distinct_profiles,omitempty"`
 	ObservedCount *int          `json:"observed_outcomes,omitempty"`
 	CensoredCount *int          `json:"censored_outcomes,omitempty"`
 	Coverage      *float64      `json:"outcome_coverage,omitempty"`
@@ -57,6 +58,7 @@ func Build(rows []db.RecommendationCalibrationRow, now, since time.Time, days, m
 	}
 	r := Report{SchemaVersion: SchemaVersion, GeneratedAt: now.UTC(), Since: since.UTC(), Days: days, MinimumGroup: minimumGroup, Truncated: truncated, Selection: "oldest_qualified_exposures_first"}
 	modelCounts := map[string]int{}
+	profileIDs := map[int64]struct{}{}
 	labelCounts := map[string]int{}
 	type accumulator struct {
 		n                   int
@@ -67,6 +69,7 @@ func Build(rows []db.RecommendationCalibrationRow, now, since time.Time, days, m
 	var predictionSum, outcomeSum, squaredError, logLoss float64
 	for _, row := range rows {
 		modelCounts[row.ModelVersion]++
+		profileIDs[row.ProfileID] = struct{}{}
 		if !row.Observed {
 			continue
 		}
@@ -90,6 +93,10 @@ func Build(rows []db.RecommendationCalibrationRow, now, since time.Time, days, m
 	if len(rows) >= minimumGroup {
 		exposureCount := len(rows)
 		r.ExposureCount = &exposureCount
+		if len(profileIDs) >= minimumGroup {
+			profileCount := len(profileIDs)
+			r.ProfileCount = &profileCount
+		}
 		r.Models = privateGroups(modelCounts, minimumGroup)
 	}
 	partitionsPrivate := (observedCount == 0 || observedCount >= minimumGroup) && (censoredCount == 0 || censoredCount >= minimumGroup)
@@ -121,7 +128,7 @@ func Build(rows []db.RecommendationCalibrationRow, now, since time.Time, days, m
 	if len(rows) == 0 {
 		r.Warnings = append(r.Warnings, "No qualified exposures were found in the selected window.")
 	} else if len(rows) < minimumGroup || observedCount < minimumGroup {
-		r.Warnings = append(r.Warnings, "Cohort is below the privacy threshold; exact counts and outcome metrics are suppressed.")
+		r.Warnings = append(r.Warnings, "Observed outcomes are below the privacy threshold; outcome counts and metrics are suppressed.")
 	} else if observedCount < 100 {
 		r.Warnings = append(r.Warnings, "Fewer than 100 observed outcomes: metrics are descriptive only and too unstable for model fitting or production calibration claims.")
 	}
@@ -129,7 +136,7 @@ func Build(rows []db.RecommendationCalibrationRow, now, since time.Time, days, m
 		r.Warnings = append(r.Warnings, "Result limit reached: metrics cover the oldest qualified exposures in the requested window, not the full window.")
 	}
 	if len(r.MatchBins) < 3 {
-		r.Warnings = append(r.Warnings, "Fewer than three privacy-eligible calibration bins: collect more outcomes before interpreting ECE.")
+		r.Warnings = append(r.Warnings, "Fewer than three Match-score bands contain enough observed outcomes to meet the privacy threshold; this refers to calibration bands, not users. Collect more attributable outcomes before interpreting ECE.")
 	}
 	return r
 }

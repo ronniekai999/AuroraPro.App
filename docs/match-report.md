@@ -34,13 +34,18 @@ keep it access-restricted and share it only through an approved private channel.
 
 - `qualified_exposures` counts heroes actually measured as visible, not every
   recommendation returned by the API.
+- `distinct_profiles` is the number of profiles represented by those qualified
+  exposures (not the number of login accounts). It is omitted when fewer than
+  `minimum_group_size` profiles are represented.
 - `observed_outcomes` and `outcome_coverage` show how much of the retained cohort
   currently has an attributable explicit or behavioral label. No-action rows are
   censored rather than treated as dislikes.
 - `brier_score` and `log_loss` measure probability error; lower is better.
 - `expected_calibration_error` summarizes the weighted absolute prediction gap
-  over ten fixed Match bands. `match_bins` exposes only bands meeting the privacy
-threshold.
+  over ten fixed Match-score bands. `match_bins` exposes only bands containing at
+  least `minimum_group_size` **observed outcomes**. A warning about fewer than
+  three eligible bins refers to score ranges with outcomes, not to users or
+  profiles.
 
 If the limit is reached, `truncated` is true and `selection` explains that the
 canonical query returned the oldest qualified exposures first. Do not treat a
