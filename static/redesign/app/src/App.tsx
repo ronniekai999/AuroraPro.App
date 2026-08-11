@@ -5482,7 +5482,13 @@ export default function App() {
           const now = new Date().toISOString()
           setNotifications(prev => prev.map(n => (n.read_at ? n : { ...n, read_at: now })))
           markAllNotificationsRead().catch(() => {
-            /* non-fatal — local state is already cleared */
+            // The optimistic local clear stands (matches this endpoint's
+            // existing fire-and-forget contract), but un-poison the seed
+            // guard: the POST never actually reached the server, so a still
+            // in-flight (or not-yet-started) seed fetch's real unread count
+            // must NOT be discarded as "stale" — that would strand the badge
+            // at 0 for notifications that were never actually marked read.
+            markedAllReadRef.current = false
           })
         }}
       />
