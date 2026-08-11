@@ -210,14 +210,14 @@ export function SearchPalette({ open, onClose, onSelect, initialQuery = '' }: Pr
     <div
       className="fixed inset-0 z-[200] flex items-start justify-center pt-[14vh] px-4 animate-fade-in"
       onClick={(e) => {
-        // Click outside the panel closes. Stop propagation on the
-        // panel itself in its own handler.
-        if (e.target === e.currentTarget) onClose()
+        // Click outside the panel closes. The backdrop below is a
+        // covering child, so target !== currentTarget for backdrop
+        // clicks too — check panel containment instead.
+        if (!panelRef.current?.contains(e.target as Node)) onClose()
       }}
     >
       {/* Backdrop — deep blur + violet tint so the page beneath
-          feels far away. Pointer-events on the parent overlay
-          captures the close-on-outside click. */}
+          feels far away. */}
       <div className="absolute inset-0 bg-[#050505]/85 backdrop-blur-xl" aria-hidden="true" />
 
       {/* Aurora-violet glow blobs behind the palette so the

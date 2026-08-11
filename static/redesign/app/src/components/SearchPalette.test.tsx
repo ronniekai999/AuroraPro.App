@@ -204,6 +204,29 @@ describe('SearchPalette — keyboard', () => {
   })
 })
 
+describe('SearchPalette — outside click', () => {
+  // Regression for #472: the backdrop is a covering CHILD of the overlay, not
+  // the overlay itself, so `e.target === e.currentTarget` never matched a
+  // backdrop click and the palette could never be dismissed by clicking out.
+  it('closes when the backdrop behind the panel is clicked', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const { container } = render(<SearchPalette open onClose={onClose} onSelect={() => {}} />)
+    const backdrop = container.querySelector('.backdrop-blur-xl')
+    expect(backdrop).not.toBeNull()
+    await user.click(backdrop as Element)
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('does not close when the panel itself is clicked', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    render(<SearchPalette open onClose={onClose} onSelect={() => {}} />)
+    await user.click(screen.getByRole('dialog'))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
 describe('SearchPalette — the Tab trap', () => {
   // Eighteen lines of WCAG rationale sat above this trap with ZERO assertions.
   // A reviewer disabled it outright — `if (e.key !== 'Tab') return` made
