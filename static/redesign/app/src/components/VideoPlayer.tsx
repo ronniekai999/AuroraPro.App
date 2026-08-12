@@ -73,7 +73,8 @@ import {
   viewingTerminal,
   type FailureKind,
 } from '@/lib/playbackQoESession'
-import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
+import { absoluteUrl, assertCastScopedToken, castSessionIdFromPlaylist, useCast } from '@/lib/cast'
+import { createCastSessionTracker, type CastSessionTracker } from '@/lib/castSession'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
   castPlayPauseMismatch,
@@ -271,6 +272,12 @@ interface VideoPlayerProps {
   // writes through admin-only endpoints, so the UI only mounts for
   // admins).
   isAdmin?: boolean
+  // App-level toast. For the rare message that must outlive the player: a
+  // cast failing terminally minimizes and then CLOSES the player, so the
+  // in-player cast banner is inside an inert, opacity-0 subtree that is
+  // about to unmount. Ordinary cast errors still use that banner — this is
+  // only for what the user needs to read after the player is gone.
+  onToast?: (message: string, type?: 'success' | 'error' | 'info') => void
 }
 
 interface SeekBootIntent {
@@ -471,7 +478,7 @@ async function attemptPlay(
 // inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
 export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
-  onSurfaceChange, isAdmin }: VideoPlayerProps) {
+  onSurfaceChange, isAdmin, onToast }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
   // listener (bound in the [target] effect) always invokes the current
@@ -788,11 +795,29 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // so resumeCast can tell when the URL the receiver holds has gone
   // stale during a long pause (see below).
   const castTokenExpRef = useRef(0)
+  // Which session the RECEIVER is streaming — usually a cast-safe clone the
+  // server made of ours (CloneForCast clones for ANY subtitle track, so this
+  // is the normal path), sometimes ours verbatim when no clone was needed.
+  // Only knowable from the playlist URL, and the keepalive ticker and the
+  // teardown guard below both need it.
+  //
+  // The mint/commit/release bookkeeping — and the reason it is not a single
+  // ref — lives in lib/castSession, where it is unit-tested. Held in a ref
+  // (created once, lazily) because the callbacks that drive it must keep a
+  // stable identity across renders.
+  const castSessionRef = useRef<CastSessionTracker | null>(null)
+  if (!castSessionRef.current) {
+    castSessionRef.current = createCastSessionTracker({
+      localSessionId: () => sessionIdRef.current,
+      release: id => { void deleteSession(id) },
+    })
+  }
   const castLoadGetter = useCallback(async () => {
     const sid = sessionIdRef.current
     if (!sid || !target) return null
     const resp = await createCastToken(sid)
     castTokenExpRef.current = resp.expires_at
+    castSessionRef.current?.notePending(castSessionIdFromPlaylist(resp.playlist))
     // Defense-in-depth: confirm the server actually gave us a
     // cast-scoped JWT before we hand its URL to a receiver. A future
     // bug that wired this path to a different token-mint endpoint
@@ -871,10 +896,45 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // same equivalence useCast's own start/stop/seek/etc. rely on. No
   // memoization needed, and it sidesteps having to thread these through
   // dependency arrays anywhere they're used.
+  // ── Cast loads are serialized ────────────────────────────────────────
+  // Three independent paths re-point the receiver — the Cast button's
+  // start(), the next-episode advance (castReloadEpoch), and the token
+  // renewal / party-drift reload — and each of them mints a cast token,
+  // which allocates a server-side clone. The tracker holds ONE pending slot,
+  // because "the session we just minted" is only a well-defined idea if a
+  // mint cannot begin while another is in flight.
+  //
+  // castReloadInFlightRef guards the renewal path against ITSELF (a 1s poll
+  // out-racing a slow network); it says nothing about the other two. Without
+  // this gate, an episode ending mid-renewal overwrites the pending slot: one
+  // clone is stranded for the full 30-minute lease — the exact leak this
+  // machinery exists to prevent — and whichever promise settles first
+  // promotes its id regardless of which load it belonged to, leaving the
+  // keepalive ping and the teardown guard keyed to a session the receiver is
+  // not on.
+  //
+  // Chaining rather than dropping: a queued re-point still happens, just
+  // after the one ahead of it. Each link swallows the previous link's
+  // rejection so one failed load cannot poison every later one.
+  const castLoadGateRef = useRef<Promise<void>>(Promise.resolve())
+  const runCastLoad = (op: () => Promise<void>): Promise<void> => {
+    const run = castLoadGateRef.current.then(async () => {
+      try {
+        await op()
+        castSessionRef.current?.commit()
+      } catch (e) {
+        castSessionRef.current?.abandon()
+        throw e
+      }
+    })
+    castLoadGateRef.current = run.catch(() => { /* keep the chain alive */ })
+    return run
+  }
+
   const reloadCastWithFreshToken = (targetSec: number) => {
     if (castReloadInFlightRef.current) return // already refreshing — next poll retries if still needed
     castReloadInFlightRef.current = true
-    void castRef.current.loadCurrent(targetSec)
+    void runCastLoad(() => castRef.current.loadCurrent(targetSec))
       .catch(() => { /* best-effort — next poll retries */ })
       .finally(() => { castReloadInFlightRef.current = false })
   }
@@ -1134,6 +1194,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
       castHasPlayedRef.current = false
       castAdvancePendingRef.current = false
+      // Cast over. Release the clone the receiver was on — nothing will ever
+      // fetch it again, and leaving it to age out holds one of the user's
+      // three session slots for the full 30-minute lease. The tracker no-ops
+      // when the receiver was sharing the local player's session.
+      castSessionRef.current?.end()
       return
     }
     if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
@@ -1177,7 +1242,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!castAdvancePendingRef.current) return
     castAdvancePendingRef.current = false
     if (!cast.status.connected) return
-    void cast.loadCurrent().catch((err) => {
+    void runCastLoad(() => cast.loadCurrent()).catch((err) => {
       // eslint-disable-next-line no-console
       console.warn('[Aurora Cast] auto-advance load failed; stopping cast', err)
       cast.stop()
@@ -1603,7 +1668,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const sid = sessionIdRef.current
     sessionIdRef.current = null
     deliveryModeRef.current = 'idle'
-    if (sid) {
+    // Never delete the session a Chromecast is streaming. When the server
+    // decides no cast-safe clone is needed (already H.264 + AAC, no subtitle
+    // tracks) the receiver plays the SAME session as the local <video> — so
+    // this DELETE, which exists to release a local player's transcode, was
+    // reaching across and killing the TV mid-title. Nothing else can
+    // resurrect it: session IDs aren't reissued and the segments are gone.
+    // Leaving it to the idle sweep is the correct disposal here; a genuinely
+    // finished cast is deleted the same way every abandoned session is.
+    const castingThisSession = castConnectedRef.current && !!sid &&
+      sid === castSessionRef.current?.committed()
+    if (sid && !castingThisSession) {
       // Best-effort — no await, just fire and forget. The server
       // GCs idle sessions anyway, so a missed DELETE costs at most
       // a few minutes of ffmpeg keepalive.
@@ -2690,8 +2765,65 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     if (!target) return
     let stopped = false
     let recovering = false
+    // Distinct from `stopped`: this one means "the effect itself is gone",
+    // set only by the cleanup below. `stopped` means "the local session died
+    // and its recovery latch fired", which is not a reason to stop keeping
+    // the RECEIVER's separate session alive.
+    let torndown = false
+
+    // The receiver's session gets its own ping. It is usually a DIFFERENT
+    // session from the local one (a cast-safe clone), and nothing else in
+    // the client has ever pinged it — until now the only thing keeping it
+    // alive was the receiver's own segment fetches, so a cast paused on the
+    // TV for five minutes had its segments deleted underneath it and could
+    // not be resumed. The server's cast lease (streaming.castHeldTimeout) is
+    // what covers the case this ping can't: a locked phone, whose timers the
+    // OS has frozen. This half handles the awake-sender case and, via the
+    // visibilitychange hook below, re-extends the moment the phone unlocks.
+    const pingCast = () => {
+      const castSid = castSessionRef.current?.committed() ?? null
+      // `torndown`, NOT `stopped`. `stopped` is the LOCAL recovery latch: it
+      // is set when the local session 404s, and in the branch where no
+      // rebuild is available (a party syncing this media, or no
+      // onSeekRebuild) nothing ever changes `target`, so this effect never
+      // re-runs and `stopped` never clears. Keying the cast ping off it
+      // killed the cast's keepalive for the rest of the viewing — including
+      // the visibilitychange re-ping — precisely when the receiver is still
+      // happily playing its own independent clone.
+      if (!castSid || torndown) return
+      // castConnectedRef gates on a session the receiver actually took: the
+      // tracker only promotes `pending` once loadMedia has resolved, and this
+      // catches the narrower case where the CAF session has since dropped.
+      if (!castConnectedRef.current) return
+      if (castSid === sessionIdRef.current) return // shared session — the local ping covers it
+      void keepalive(castSid).then(result => {
+        // torndown re-checked: this promise can settle after the effect is
+        // gone, and stopping a cast the user deliberately left running would
+        // be worse than saying nothing.
+        if (torndown || result !== 'gone') return
+        if (castSessionRef.current?.committed() !== castSid) return
+        // This must NOT enter the local rebuild path below — the local
+        // session may be perfectly healthy. But it must not be silent
+        // either: the Default Media Receiver renders a dead source as an
+        // indefinite spinner rather than an error (see the #324/#328 notes
+        // above), and its buffer means the freeze can arrive minutes later
+        // with no visible cause. This is the one moment the client KNOWS the
+        // cast is dead, so say so and tear it down.
+        //
+        // The message goes to the APP's toast, not flashCastError. By the
+        // time this can fire, remoteActive has minimized the player, so the
+        // cast-error banner lives inside a subtree that is opacity-0, inert
+        // and aria-hidden — and stop() below closes the player outright a
+        // moment later. Routing it here is the difference between an
+        // explanation and the player simply vanishing.
+        castSessionRef.current?.end()
+        onToast?.('Casting stopped — the stream expired on the server. Press Cast to start again.', 'error')
+        castRef.current.stop()
+      })
+    }
 
     const ping = () => {
+      pingCast()
       const sid = sessionIdRef.current
       if (!sid || stopped) return
       void keepalive(sid).then((result) => {
@@ -2702,7 +2834,13 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         if (recovering) return
         recovering = true
         stopped = true
-        window.clearInterval(id)
+        // The interval is deliberately NOT cleared here. `stopped` already
+        // makes ping() skip the local half, so nothing pings the dead local
+        // session — but pingCast still needs the tick to keep the RECEIVER's
+        // separate session alive, and in the no-rebuild branch below nothing
+        // ever re-arms this effect. A 10s no-op timer in the rare
+        // dead-local-session case is a much better trade than a cast whose
+        // keepalive silently stopped. Cleanup still clears it.
 
         const vid = videoRef.current
         // Absolute media position — currentTime is relative to the session's
@@ -2745,12 +2883,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     document.addEventListener('visibilitychange', onVisible)
     return () => {
       stopped = true
+      torndown = true
       window.clearInterval(id)
       document.removeEventListener('visibilitychange', onVisible)
     }
     // Deps stay at [target] deliberately — see the ref note above. Adding
     // `party` or `onSeekRebuild` here re-arms the interval on every render.
-  }, [target])
+    // onToast is the one exception: App defines it as a useCallback over a
+    // stable dep, so its identity never changes and listing it cannot re-arm
+    // anything — it's here only to keep the exhaustive-deps rule honest.
+  }, [target, onToast])
 
   // M10 Phase 4 — party sync. Two responsibilities:
   //
@@ -4939,7 +5081,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
                     <button
                       type="button"
                       onClick={() => {
-                        void cast.start().catch((err) => {
+                        // runCastLoad releases the mint when the receiver
+                        // never takes it (dismissed picker, load_failed,
+                        // receiver stall) rather than leaving a stillborn
+                        // session leased for 30 minutes.
+                        void runCastLoad(() => cast.start()).catch((err) => {
                           // Log + briefly flag the button. Deliberately
                           // do NOT call setErrorMsg here — that would
                           // surface the full-screen "Playback Error"

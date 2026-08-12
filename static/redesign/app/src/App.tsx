@@ -6104,6 +6104,7 @@ export default function App() {
         isAdmin={user.role === 'admin'}
         onMinimizedChange={(m) => { playerMinimizedRef.current = m }}
         onSurfaceChange={setPlayerSurface}
+        onToast={addToast}
         onClose={() => {
           closePlayer()
           // 2026-05-27 (PR #97 H2) — refetch Continue Watching after

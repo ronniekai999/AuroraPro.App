@@ -5,11 +5,18 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  MAX_MEMBER_RESULTS,
+  MIN_MEMBER_QUERY_CHARS,
   buildQuickChips,
+  countMemberMatches,
   countdownLabel,
+  matchMembersWithTotal,
   formatPartyTime,
   inviteCodeFromLink,
   localDateKey,
+  matchMembers,
+  memberQueryReady,
+  normalizeMemberQuery,
   skipReasonCopy,
 } from './partyInvites'
 
@@ -104,5 +111,157 @@ describe('skipReasonCopy', () => {
     expect(skipReasonCopy('not_found')).toContain('no member')
     expect(skipReasonCopy('self')).toContain('you')
     expect(skipReasonCopy('mystery_reason')).toBe('mystery_reason')
+  })
+})
+
+// The composer's people picker shows nobody until these say so, so the
+// threshold and the ranking are what the host actually experiences as
+// "search". Both are asserted here rather than in the modal, which has no
+// business re-deciding either.
+describe('normalizeMemberQuery', () => {
+  it('trims, lowercases, and drops a typed @handle prefix', () => {
+    expect(normalizeMemberQuery('  Sam  ')).toBe('sam')
+    expect(normalizeMemberQuery('@Ronnie')).toBe('ronnie')
+    expect(normalizeMemberQuery('@@dee')).toBe('dee')
+  })
+  it('re-trims after the @ so the query never starts with whitespace', () => {
+    expect(normalizeMemberQuery('@ sam')).toBe('sam')
+  })
+})
+
+describe('memberQueryReady', () => {
+  it('needs the threshold in real characters, not whitespace or @', () => {
+    expect(memberQueryReady('')).toBe(false)
+    expect(memberQueryReady('sa')).toBe(false)
+    expect(memberQueryReady('  sa  ')).toBe(false)
+    expect(memberQueryReady('@sa')).toBe(false)
+    expect(memberQueryReady('sam')).toBe(true)
+    expect(memberQueryReady('@sam')).toBe(true)
+  })
+  it('agrees with the exported threshold', () => {
+    expect(memberQueryReady('x'.repeat(MIN_MEMBER_QUERY_CHARS - 1))).toBe(false)
+    expect(memberQueryReady('x'.repeat(MIN_MEMBER_QUERY_CHARS))).toBe(true)
+  })
+})
+
+describe('matchMembers', () => {
+  const roster = [
+    { username: 'samir', display_name: 'Samir P', is_following: false },
+    { username: 'dee', display_name: 'Samantha Dee', is_following: false },
+    { username: 'kass', display_name: 'Kass', is_following: true },
+    { username: 'rosam', display_name: 'Ro', is_following: true },
+    { username: 'sammy', display_name: 'Sammy', is_following: true },
+  ]
+
+  it('shows nobody until the query hits the threshold', () => {
+    expect(matchMembers(roster, '')).toEqual([])
+    expect(matchMembers(roster, 'sa')).toEqual([])
+    expect(matchMembers(roster, 'sam').length).toBeGreaterThan(0)
+  })
+
+  // A blind 3-char floor makes some members permanently unreachable: OAuth
+  // signup derives usernames from an email local-part with no length floor
+  // (jd@gmail.com -> "jd"), display names have no minimum at all, and plenty
+  // of CJK names are exactly two characters. They are invitable through the
+  // API and visible in /members, so a picker that can never surface them is
+  // a client-side lockout, not a tidier list.
+  describe('short names stay reachable', () => {
+    const shortRoster = [
+      { username: 'jd', display_name: 'JD' },
+      { username: 'k_9f2a1b', display_name: '田中' },
+      { username: 'sammy', display_name: 'Sammy' },
+      { username: 'j', display_name: 'J' },
+    ]
+
+    it('finds a member whose whole name the query already spells out', () => {
+      expect(matchMembers(shortRoster, 'jd').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, 'JD').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, '@jd').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, '田中').map(m => m.username)).toEqual(['k_9f2a1b'])
+      expect(matchMembers(shortRoster, 'j').map(m => m.username)).toEqual(['j'])
+    })
+
+    it('still refuses to list people from a partial short query', () => {
+      // "sa" is a prefix of Sammy, but it is nobody's WHOLE name — so the
+      // threshold still applies and the wall of names stays away.
+      expect(matchMembers(shortRoster, 'sa')).toEqual([])
+      expect(matchMembers(shortRoster, 'k_')).toEqual([])
+    })
+  })
+
+  it('matches username or display name, case-insensitively', () => {
+    expect(matchMembers(roster, 'SAMANTHA').map(m => m.username)).toEqual(['dee'])
+    expect(matchMembers(roster, 'kass').map(m => m.username)).toEqual(['kass'])
+  })
+
+  it('ranks prefix matches above mid-word ones, follows above strangers', () => {
+    // 'sammy' and 'samir' and 'dee' (Samantha) all start with "sam";
+    // 'rosam' only contains it, so it sorts last however well-connected.
+    expect(matchMembers(roster, 'sam').map(m => m.username))
+      .toEqual(['sammy', 'dee', 'samir', 'rosam'])
+  })
+
+  it('honors the result cap', () => {
+    expect(matchMembers(roster, 'sam', 2).map(m => m.username)).toEqual(['sammy', 'dee'])
+    expect(matchMembers(roster, 'sam', 0)).toEqual([])
+  })
+
+  it('returns empty rather than everything when nothing matches', () => {
+    expect(matchMembers(roster, 'zzz')).toEqual([])
+    expect(matchMembers([], 'sam')).toEqual([])
+  })
+
+  it('tolerates members with no display name', () => {
+    expect(matchMembers([{ username: 'samwise' }], 'sam').map(m => m.username))
+      .toEqual(['samwise'])
+  })
+
+  // The DEFAULT cap, not just an explicitly-passed limit — the picker never
+  // passes one, so this is the number users actually hit.
+  it('caps at MAX_MEMBER_RESULTS by default', () => {
+    const many = Array.from({ length: MAX_MEMBER_RESULTS + 4 }, (_, i) => ({
+      username: `sam${String(i).padStart(2, '0')}`,
+    }))
+    expect(matchMembers(many, 'sam')).toHaveLength(MAX_MEMBER_RESULTS)
+  })
+})
+
+// The count the picker announces. Announcing the RENDERED row count once the
+// cap bites isn't an omission, it's false — and because the results box
+// scrolls, a truncated list and a long one look identical.
+describe('countMemberMatches', () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ username: `sam${i}` }))
+
+  it('counts every match, past the render cap', () => {
+    expect(matchMembers(many, 'sam')).toHaveLength(MAX_MEMBER_RESULTS)
+    expect(countMemberMatches(many, 'sam')).toBe(12)
+  })
+
+  it('equals the rendered count when nothing is truncated', () => {
+    expect(countMemberMatches(many, 'sam3')).toBe(1)
+    expect(matchMembers(many, 'sam3')).toHaveLength(1)
+    expect(countMemberMatches(many, 'nobody')).toBe(0)
+    expect(countMemberMatches(many, 'sa')).toBe(0)
+  })
+})
+
+// Both public entry points delegate to one ranked pass, so they cannot
+// disagree about what matched — and the picker takes both from a single
+// call rather than scanning and sorting the roster twice per keystroke.
+describe('matchMembersWithTotal', () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ username: `sam${i}` }))
+
+  it('returns the capped rows and the uncapped total together', () => {
+    const { matches, total } = matchMembersWithTotal(many, 'sam')
+    expect(matches).toHaveLength(MAX_MEMBER_RESULTS)
+    expect(total).toBe(12)
+  })
+
+  it('agrees with the single-purpose helpers exactly', () => {
+    for (const q of ['sam', 'sam1', 'nobody', 'sa', '']) {
+      const { matches, total } = matchMembersWithTotal(many, q)
+      expect(matches).toEqual(matchMembers(many, q))
+      expect(total).toBe(countMemberMatches(many, q))
+    }
   })
 })

@@ -102,6 +102,145 @@ export function skipReasonCopy(reason: string): string {
   }
 }
 
+// ── People picker search ────────────────────────────────────────────────
+//
+// The composer used to render the entire member list the moment it opened.
+// On anything past a handful of accounts that is a wall of names to scroll
+// past, and it puts every member of the household in front of every host who
+// only ever wanted to invite one person. Nothing is listed now until the host
+// has typed enough for the query to mean something specific.
+
+// How many characters before we're willing to show anyone. Three is the point
+// where a query stops matching most of the server: shorter than that and the
+// "results" are just the list again with extra steps.
+export const MIN_MEMBER_QUERY_CHARS = 3
+
+// Results are a short list to scan, not a second directory. Anything past this
+// means the query wasn't specific enough — keep typing.
+export const MAX_MEMBER_RESULTS = 8
+
+// The shape matchMembers needs. Structural, so both MemberSummary (api.ts)
+// and test fixtures satisfy it without importing each other.
+export interface MemberMatchable {
+  username: string
+  display_name?: string
+  is_following?: boolean
+}
+
+// normalizeMemberQuery trims, lowercases, and drops a leading "@" — people
+// type handles the way they read them ("@ronnie"), and the stored username
+// is bare. Trimmed again after the strip so "@ sam" doesn't normalize to a
+// query with a leading space.
+export function normalizeMemberQuery(query: string): string {
+  return query.trim().replace(/^@+/, '').trim().toLowerCase()
+}
+
+// memberQueryReady reports whether a query is long enough to run the normal
+// substring search. Drives the picker's "keep typing" hint as well as the
+// search itself, so the threshold can never drift between the two.
+//
+// NOTE this is not the same question as "will matchMembers return anything" —
+// see the short-name rule below. The picker renders results whenever there
+// are any, and only falls back to the hint when there are none.
+export function memberQueryReady(query: string): boolean {
+  return normalizeMemberQuery(query).length >= MIN_MEMBER_QUERY_CHARS
+}
+
+// rankMembers is the whole ranked match set, uncapped. Exported behaviour
+// goes through matchMembers (capped) and countMemberMatches (total) so the
+// two can never disagree about what matched.
+//
+// Ranking, best first:
+//   1. the query starts the username or the display name (what you get when
+//      you type the first letters of someone's name, which is the whole
+//      interaction this picker is built around),
+//   2. it appears anywhere in either,
+// and inside each tier, people you follow come before people you don't, then
+// alphabetically by the name actually rendered on the row.
+//
+// THE SHORT-NAME RULE. Below MIN_MEMBER_QUERY_CHARS we normally match
+// nobody — that gate is the point of the search-first picker. But a floor
+// applied blindly makes some members permanently unreachable: the OAuth
+// signup path derives a username from the email local-part with no length
+// floor (jd@gmail.com becomes "jd"), display names have no minimum at all,
+// and plenty of CJK names are exactly two characters. Those people are
+// invitable through the API and visible in /members, so a picker that can
+// never surface them is a client-side lockout, not a tidier list.
+//
+// So below the threshold we match only names the query has ALREADY spelled
+// out in full. Typing "sa" still shows nobody (no one is named "sa"), while
+// typing "jd" finds @jd, because there is no third letter to ask for.
+function rankMembers<T extends MemberMatchable>(members: readonly T[], q: string): T[] {
+  if (!q) return []
+  const short = q.length < MIN_MEMBER_QUERY_CHARS
+
+  const scored: Array<{ m: T; tier: number; name: string }> = []
+  for (const m of members) {
+    const username = m.username.toLowerCase()
+    const display = (m.display_name ?? '').toLowerCase()
+    let tier: number
+    if (short) {
+      // Complete-name matches only — anything else would be the wall of
+      // names the threshold exists to prevent.
+      if (username !== q && display !== q) continue
+      tier = 0
+    } else {
+      const prefix = username.startsWith(q) || display.startsWith(q)
+      if (!prefix && !(username.includes(q) || display.includes(q))) continue
+      tier = prefix ? 0 : 1
+    }
+    scored.push({ m, tier, name: (m.display_name || m.username).toLowerCase() })
+  }
+
+  scored.sort((a, b) =>
+    a.tier - b.tier ||
+    Number(!!b.m.is_following) - Number(!!a.m.is_following) ||
+    a.name.localeCompare(b.name))
+
+  return scored.map(s => s.m)
+}
+
+// MEMBER_DIRECTORY_LIMIT mirrors the server's `LIMIT 500` on /api/members
+// (internal/db/queries_social.go). At the cap the client is searching a
+// truncated roster, so "no members match" stops being a fact about the
+// server and becomes a fact about what we happened to fetch — which the
+// picker has to say out loud rather than assert someone doesn't exist.
+export const MEMBER_DIRECTORY_LIMIT = 500
+
+// matchMembersWithTotal returns the rows to render AND how many matched
+// before the cap, from a single pass. The picker needs both on every
+// keystroke, and computing them separately means two full scans plus two
+// sorts — and two chances to disagree about what matched.
+export function matchMembersWithTotal<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+  limit: number = MAX_MEMBER_RESULTS,
+): { matches: T[]; total: number } {
+  const ranked = rankMembers(members, normalizeMemberQuery(query))
+  return { matches: ranked.slice(0, Math.max(0, limit)), total: ranked.length }
+}
+
+// matchMembers returns just the rows the picker should render: ranked, and
+// capped so the results stay a short list to scan rather than a second
+// directory.
+export function matchMembers<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+  limit: number = MAX_MEMBER_RESULTS,
+): T[] {
+  return matchMembersWithTotal(members, query, limit).matches
+}
+
+// countMemberMatches is how many members matched BEFORE the cap. With 12
+// matches and a cap of 8, saying "8 matching members" isn't an omission,
+// it's false.
+export function countMemberMatches<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+): number {
+  return matchMembersWithTotal(members, query).total
+}
+
 // countdownParts renders a "starts in" delta as h:mm:ss / m:ss, clamped at
 // zero. Feed it server-aligned time (now + clockOffset) so every client's
 // countdown converges.
