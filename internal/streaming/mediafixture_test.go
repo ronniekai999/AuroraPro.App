@@ -145,6 +145,13 @@ func (f mediaFixture) encoderFor() string {
 	switch f.VideoCodec {
 	case "hevc", "h265":
 		return "libx265"
+	case "av1":
+		// SVT-AV1 rather than libaom: at preset 12 it encodes these fixtures
+		// in well under a second, where libaom takes tens of seconds. The
+		// review is right that SVT-AV1 has no place in interactive playback,
+		// but generating a 4-second test clip is exactly the offline job it is
+		// good at.
+		return "libsvtav1"
 	default:
 		return "libx264"
 	}
@@ -288,17 +295,26 @@ func (f mediaFixture) generate(outPath string) error {
 		"-c:v", f.encoderFor(),
 		"-pix_fmt", f.PixFmt,
 		"-g", strconv.Itoa(f.GOP),
+	)
+	if f.encoderFor() != "libsvtav1" {
 		// Deterministic-ish output: no scene-cut keyframes, so segment
 		// boundaries land exactly on the GOP grid and the seek assertions have
-		// a known keyframe cadence to aim at.
-		"-sc_threshold", "0",
-	)
-	if f.encoderFor() == "libx265" {
+		// a known keyframe cadence to aim at. SVT-AV1 rejects the option.
+		args = append(args, "-sc_threshold", "0")
+	}
+	switch f.encoderFor() {
+	case "libx265":
 		// x265 takes its keyframe interval through the param blob, and prints
 		// a banner per run without log-level:none.
 		args = append(args, "-x265-params",
 			fmt.Sprintf("keyint=%d:min-keyint=%d:scenecut=0:log-level=none", f.GOP, f.GOP))
 		args = append(args, "-tag:v", "hvc1")
+	case "libsvtav1":
+		// Preset 12 is SVT-AV1's fastest; fixtures are about existing, not
+		// about compression. -sc_threshold is an x264/x265 option that SVT
+		// rejects, so the keyframe interval goes through its own param blob.
+		args = append(args, "-preset", "12",
+			"-svtav1-params", fmt.Sprintf("keyint=%d", f.GOP))
 	}
 	if f.HDR {
 		// HDR10 signalling. Aurora keys HDR off color_transfer

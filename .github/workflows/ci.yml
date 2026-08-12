@@ -72,7 +72,7 @@ jobs:
           # filters/encoders, and the playback matrix gates itself on those
           # capabilities rather than on a version number (August 2026 review §5).
           ffmpeg -hide_banner -version | head -1
-          ffmpeg -hide_banner -encoders | grep -E ' (libx264|libx265|aac|ac3|eac3) ' || true
+          ffmpeg -hide_banner -encoders | grep -E ' (libx264|libx265|libsvtav1|aac|ac3|eac3) ' || true
           ffmpeg -hide_banner -filters  | grep -E ' (subtitles|zscale|tonemap|overlay) ' || true
 
       - name: Build
