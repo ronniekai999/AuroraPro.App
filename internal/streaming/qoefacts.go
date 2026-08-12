@@ -83,9 +83,9 @@ func (tm *TranscodeManager) SessionQoEFacts(sessionID string) (SessionQoEFacts, 
 	}
 
 	switch {
-	case burning && s.BurnSubExternal != "":
-		facts.SubtitleMode = "burned"
 	case burning:
+		// Burned covers both embedded and external sources — once the pixels
+		// carry the text there is no separate rendition to describe.
 		facts.SubtitleMode = "burned"
 	case len(s.SubtitleTracks) > 0:
 		// Text tracks extracted into the HLS pipeline as WebVTT renditions.

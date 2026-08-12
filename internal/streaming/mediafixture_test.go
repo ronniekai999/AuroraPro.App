@@ -46,19 +46,21 @@ func mediaToolingRequired() bool {
 	return false
 }
 
-// requireFFmpeg returns the resolved ffmpeg and ffprobe paths. It skips the
+// requireFFmpeg asserts that both ffmpeg and ffprobe are on PATH. It skips the
 // test when either is absent — unless AURORA_REQUIRE_MEDIA_TESTS is set, in
 // which case it fails.
-func requireFFmpeg(t *testing.T) (ffmpeg, ffprobe string) {
+//
+// It returns nothing: every call site invokes the tools by bare name through
+// exec.Command, which performs its own PATH lookup, so returning resolved paths
+// only invited a caller to believe one was being used when it was not.
+func requireFFmpeg(t *testing.T) {
 	t.Helper()
-	var err error
-	if ffmpeg, err = exec.LookPath("ffmpeg"); err != nil {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		failOrSkipMedia(t, "ffmpeg not in PATH")
 	}
-	if ffprobe, err = exec.LookPath("ffprobe"); err != nil {
+	if _, err := exec.LookPath("ffprobe"); err != nil {
 		failOrSkipMedia(t, "ffprobe not in PATH")
 	}
-	return ffmpeg, ffprobe
 }
 
 // requireFFmpegEncoders skips (or fails under CI) unless every named encoder is
@@ -207,6 +209,12 @@ var (
 )
 
 // TestMain cleans up the shared fixture corpus after the package's tests run.
+//
+// Known limit: a panic or a -timeout kill bypasses this and leaves the corpus
+// behind. There is no t.TempDir equivalent at package scope, and the fixtures
+// are a few hundred KB in the OS temp directory, so a leak on an abnormal exit
+// is the accepted trade for sharing them across subtests. The prefix makes
+// strays identifiable.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	fixtureCacheMu.Lock()
@@ -239,11 +247,15 @@ func (f mediaFixture) build(t *testing.T) string {
 		fixtureCacheDir = dir
 	}
 
-	name := f.Name
-	if name == "" {
-		name = f.key()
+	// The output path is derived from key(), NOT from Name. Name is a label,
+	// and two specs that shared one would have written to the same file while
+	// holding distinct cache entries — silently handing one test the other's
+	// media. Name is kept only as a readable prefix.
+	base := f.key()
+	if f.Name != "" {
+		base = f.Name + "_" + f.key()
 	}
-	out := filepath.Join(fixtureCacheDir, name+"."+f.Container)
+	out := filepath.Join(fixtureCacheDir, base+"."+f.Container)
 	if err := f.generate(out); err != nil {
 		t.Fatalf("generate fixture %s: %v", f.key(), err)
 	}

@@ -1,5 +1,18 @@
 -- Playback quality-of-experience telemetry (August 2026 review, item #1).
 --
+-- NOTE FOR ANYONE WHO RAN THIS BRANCH BEFORE IT MERGED: this file was revised
+-- in place during review (bounded counters, a dropped index, a narrowed
+-- decision_reason vocabulary, delivery_rebuilds). That is safe because 056 has
+-- never existed on main — but RunMigrations records a version, not a checksum,
+-- so a database that applied an earlier copy will report applied=0 and quietly
+-- lack the newer columns. Drop the table and delete its schema_migrations row
+-- to re-apply:
+--
+--   DROP TABLE IF EXISTS playback_qoe_sessions;
+--   DELETE FROM schema_migrations WHERE version LIKE '056%';
+--
+-- Once this is on main it is immutable like every other migration.
+--
 -- Aurora has rich diagnostic logging and a live per-session diagnose endpoint,
 -- but both are ephemeral: they describe a session happening right now and
 -- retain nothing. There has been no durable answer to the questions that should

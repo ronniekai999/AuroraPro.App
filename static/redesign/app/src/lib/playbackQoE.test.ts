@@ -50,6 +50,13 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+/** Build a PageTransitionEvent with a settable `persisted` (jsdom omits it). */
+function pageTransition(type: string, persisted: boolean): PageTransitionEvent {
+  const e = new Event(type) as PageTransitionEvent
+  Object.defineProperty(e, 'persisted', { value: persisted })
+  return e
+}
+
 async function flush() {
   await new Promise((r) => setTimeout(r, 0))
 }
@@ -159,37 +166,65 @@ describe('attachPlaybackQoE', () => {
     expect(beacons[0].body.terminal).toBe('ended')
   })
 
-  it('does not end the row when the page enters the bfcache', async () => {
+  it('writes a provisional row on bfcache entry and upgrades it on the real end', async () => {
     const video = makeVideo()
-    attachPlaybackQoE(video, { decision: 'direct_play' })
-    video.dispatchEvent(new Event('playing'))
+    const qoe = attachPlaybackQoE(video, { decision: 'direct_play' })
+    try {
+      video.dispatchEvent(new Event('playing'))
 
-    // persisted=true means restorable, not gone.
-    const bfcache = new Event('pagehide') as PageTransitionEvent
-    Object.defineProperty(bfcache, 'persisted', { value: true })
-    window.dispatchEvent(bfcache)
-    await flush()
-    expect(beacons).toHaveLength(0)
+      // persisted=true means restorable — but the page may equally be
+      // DISCARDED, after which no further event ever fires and the row would
+      // hang open until retention swept it, counted as abandoned. A
+      // provisional 'unknown' covers that; the collector stays live so a
+      // restored page keeps being measured.
+      window.dispatchEvent(pageTransition('pagehide', true))
+      await flush()
+      expect(beacons).toHaveLength(1)
+      expect(beacons[0].body.terminal).toBe('unknown')
 
-    // The restored page keeps playing and still reports its real outcome.
-    video.dispatchEvent(new Event('ended'))
-    await flush()
-    expect(beacons).toHaveLength(1)
-    expect(beacons[0].body.terminal).toBe('ended')
+      // Restored and finished properly: the real outcome replaces it. The
+      // server allows exactly one upgrade out of 'unknown'.
+      video.dispatchEvent(new Event('ended'))
+      await flush()
+      expect(beacons).toHaveLength(2)
+      expect(beacons[1].body.terminal).toBe('ended')
+    } finally {
+      qoe.detach()
+    }
   })
 
   it('ends the row on a real page unload', async () => {
     const video = makeVideo()
-    attachPlaybackQoE(video, { decision: 'direct_play' })
-    video.dispatchEvent(new Event('playing'))
+    const qoe = attachPlaybackQoE(video, { decision: 'direct_play' })
+    try {
+      video.dispatchEvent(new Event('playing'))
+      window.dispatchEvent(pageTransition('pagehide', false))
+      await flush()
 
-    const unload = new Event('pagehide') as PageTransitionEvent
-    Object.defineProperty(unload, 'persisted', { value: false })
-    window.dispatchEvent(unload)
-    await flush()
+      expect(beacons).toHaveLength(1)
+      expect(beacons[0].body.terminal).toBe('user_exit')
+    } finally {
+      qoe.detach()
+    }
+  })
 
-    expect(beacons).toHaveLength(1)
-    expect(beacons[0].body.terminal).toBe('user_exit')
+  it('clears a pending error when the delivery is rebuilt', async () => {
+    const video = makeVideo()
+    const qoe = attachPlaybackQoE(video, { decision: 'direct_play' })
+    try {
+      video.dispatchEvent(new Event('playing'))
+      // A delivery fails, then the player falls back and recovers.
+      qoe.noteError('media_error')
+      qoe.noteDeliveryRebuild('session-2')
+      qoe.finish('ended')
+      await flush()
+
+      // The error belonged to the delivery that was replaced, not to the
+      // viewing, which went on to finish.
+      expect(beacons[0].body.terminal).toBe('ended')
+    } finally {
+      qoe.detach()
+    }
   })
 
   it('counts rendition switches', async () => {

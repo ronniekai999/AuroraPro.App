@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // PlaybackQoERetention bounds how long raw QoE rows are kept.
@@ -228,7 +230,14 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 		       ended_at           = NOW()
 		 WHERE session_token = $2
 		   AND profile_id    = $1
-		   AND terminal IS NULL`,
+		   -- 'unknown' is the PROVISIONAL terminal a client writes when its
+		   -- page enters the back/forward cache: at that instant nobody knows
+		   -- whether it will be restored or discarded, so a row is written to
+		   -- cover the discard case. A page that does come back and then ends
+		   -- properly must be able to replace it with the real outcome, so
+		   -- exactly one upgrade out of 'unknown' is allowed. Any other
+		   -- terminal is final — a late duplicate beacon cannot rewrite it.
+		   AND (terminal IS NULL OR terminal = 'unknown')`,
 		profileID,
 		rec.SessionToken,
 		clampRange(rec.RebufferCount, maxPlaybackEventCount),
@@ -241,6 +250,51 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 	)
 	if err != nil {
 		return fmt.Errorf("finish playback qoe: %w", err)
+	}
+	return nil
+}
+
+// PlaybackQoEDelivery is the mutable part of a row: how the media was being
+// delivered at a given moment.
+type PlaybackQoEDelivery struct {
+	OutputCodec   string
+	EncoderFamily string
+	SegmentFormat string
+	HDRConversion string
+	BurnIn        string
+	SubtitleMode  string
+}
+
+// RestampPlaybackQoEDelivery updates a still-open row's delivery facts after
+// the delivery beneath the viewing was rebuilt.
+//
+// Scoped to the caller's own profile and to rows without a terminal, so it can
+// neither reach another account's row nor rewrite a finished one.
+func (q *Queries) RestampPlaybackQoEDelivery(ctx context.Context, profileID int64, token string, d PlaybackQoEDelivery) error {
+	if profileID <= 0 || !ValidPlaybackQoESessionToken(token) {
+		return fmt.Errorf("invalid playback qoe restamp")
+	}
+	_, err := q.pool.Exec(ctx, `
+		UPDATE playback_qoe_sessions
+		   SET output_codec   = $3,
+		       encoder_family = $4,
+		       segment_format = $5,
+		       hdr_conversion = $6,
+		       burn_in        = $7,
+		       subtitle_mode  = $8
+		 WHERE session_token = $2
+		   AND profile_id    = $1
+		   AND terminal IS NULL`,
+		profileID, token,
+		normalizeEnum(d.OutputCodec, PlaybackQoEOutputCodecs, "none"),
+		normalizeEnum(d.EncoderFamily, PlaybackQoEEncoderFamilies, "none"),
+		normalizeEnum(d.SegmentFormat, PlaybackQoESegmentFormats, "none"),
+		normalizeEnum(d.HDRConversion, PlaybackQoEHDRConversions, "none"),
+		normalizeEnum(d.BurnIn, PlaybackQoEBurnIn, "none"),
+		normalizeEnum(d.SubtitleMode, PlaybackQoESubtitleModes, "none"),
+	)
+	if err != nil {
+		return fmt.Errorf("restamp playback qoe delivery: %w", err)
 	}
 	return nil
 }
@@ -299,6 +353,12 @@ type PlaybackQoESummary struct {
 	// false alarm raised exactly when someone opens a narrow window to
 	// investigate a live problem.
 	AbandonedRatio float64 `json:"abandoned_ratio"`
+	// SettledSessions is AbandonedRatio's denominator: sessions old enough to
+	// have reported a terminal. Reported explicitly because the ratio is
+	// meaningless without it — a window shorter than the settle interval
+	// contains no settled sessions at all, and a bare 0.0 there reads as a
+	// clean bill of health rather than as "no data yet".
+	SettledSessions int `json:"settled_sessions"`
 
 	ByDecision []PlaybackQoEDecisionStat `json:"by_decision"`
 	// BurnInSessions is the count with subtitle burn-in active. Burn-in forces
@@ -316,6 +376,21 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 	seconds := int64(window.Seconds())
 	out := &PlaybackQoESummary{WindowHours: int(window.Hours())}
 
+	// One REPEATABLE READ transaction across all three queries. They each
+	// re-evaluated NOW() independently before, so under concurrent ingest the
+	// per-decision counts did not sum to the headline total and each query saw
+	// a slightly later window start — a dashboard whose subtotals visibly
+	// disagree with its total is the kind of thing that gets debugged for an
+	// hour.
+	tx, err := q.pool.BeginTx(ctx, pgx.TxOptions{
+		IsoLevel:   pgx.RepeatableRead,
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("playback qoe summary: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	// Scan targets stay function-local: two admins loading the dashboard
 	// concurrently would race on anything shared.
 	var (
@@ -326,7 +401,7 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 
 	// Headline aggregates in one pass. FILTER keeps each ratio's denominator
 	// explicit rather than folding NULLs into an average silently.
-	err := q.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT
 			COUNT(*),
 			percentile_cont(0.5) WITHIN GROUP (ORDER BY click_to_first_frame_ms)
@@ -357,6 +432,7 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 	if out.Sessions > 0 {
 		out.DirectPlayRatio = float64(directPlays) / float64(out.Sessions)
 	}
+	out.SettledSessions = int(settled)
 	if settled > 0 {
 		out.AbandonedRatio = float64(settledAbandoned) / float64(settled)
 	}
@@ -371,17 +447,17 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 	// that will read this should not have to special-case both.
 	out.ByDecision = []PlaybackQoEDecisionStat{}
 	out.TopReasons = []PlaybackQoEReasonStat{}
-	if err := q.playbackQoEByDecision(ctx, seconds, out); err != nil {
+	if err := playbackQoEByDecision(ctx, tx, seconds, out); err != nil {
 		return nil, err
 	}
-	if err := q.playbackQoETopReasons(ctx, seconds, out); err != nil {
+	if err := playbackQoETopReasons(ctx, tx, seconds, out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (q *Queries) playbackQoEByDecision(ctx context.Context, seconds int64, out *PlaybackQoESummary) error {
-	rows, err := q.pool.Query(ctx, `
+func playbackQoEByDecision(ctx context.Context, tx pgx.Tx, seconds int64, out *PlaybackQoESummary) error {
+	rows, err := tx.Query(ctx, `
 		SELECT decision,
 		       COUNT(*),
 		       percentile_cont(0.5) WITHIN GROUP (ORDER BY click_to_first_frame_ms)
@@ -408,8 +484,8 @@ func (q *Queries) playbackQoEByDecision(ctx context.Context, seconds int64, out 
 	return rows.Err()
 }
 
-func (q *Queries) playbackQoETopReasons(ctx context.Context, seconds int64, out *PlaybackQoESummary) error {
-	rows, err := q.pool.Query(ctx, `
+func playbackQoETopReasons(ctx context.Context, tx pgx.Tx, seconds int64, out *PlaybackQoESummary) error {
+	rows, err := tx.Query(ctx, `
 		SELECT decision_reason, COUNT(*)
 		  FROM playback_qoe_sessions
 		 WHERE created_at >= NOW() - make_interval(secs => $1)
@@ -445,11 +521,32 @@ func (q *Queries) PrunePlaybackQoE(ctx context.Context, retention time.Duration)
 	if retention <= 0 {
 		return 0, nil
 	}
-	tag, err := q.pool.Exec(ctx,
-		`DELETE FROM playback_qoe_sessions WHERE created_at < NOW() - make_interval(secs => $1)`,
-		int64(retention.Seconds()))
-	if err != nil {
-		return 0, fmt.Errorf("prune playback qoe: %w", err)
+	// Batched. A single unbounded DELETE is one transaction: if it misses its
+	// deadline it rolls back entirely, makes zero progress, and meets a larger
+	// table on the next daily sweep — a backlog that can never drain. Each
+	// batch commits on its own, so a cancelled sweep keeps whatever it did.
+	const batch = 5000
+	var total int64
+	for {
+		tag, err := q.pool.Exec(ctx, `
+			DELETE FROM playback_qoe_sessions
+			 WHERE id IN (
+			     SELECT id FROM playback_qoe_sessions
+			      WHERE created_at < NOW() - make_interval(secs => $1)
+			      LIMIT $2
+			 )`, int64(retention.Seconds()), batch)
+		if err != nil {
+			// Return what was already committed alongside the error: the caller
+			// logs progress, and a partial sweep is still progress.
+			return total, fmt.Errorf("prune playback qoe: %w", err)
+		}
+		n := tag.RowsAffected()
+		total += n
+		if n < batch {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, nil
+		}
 	}
-	return tag.RowsAffected(), nil
 }

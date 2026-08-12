@@ -80,11 +80,24 @@ export interface QoECollector {
   /** Latest hls.js bandwidth estimate, in bits/sec. Bucketed before sending. */
   noteThroughput(bitsPerSec: number): void
   /** Terminal categories the player knows about but the DOM does not. */
-  noteError(kind: 'media_error' | 'network_error' | 'transcode_error'): void
+  noteError(kind: QoETerminal): void
   /** Report and stop. Safe to call more than once; only the first wins. */
   finish(terminal: QoETerminal): void
+  /**
+   * Stop listening to the media element WITHOUT reporting or spending the
+   * collector. Used across a delivery teardown: removing the src and calling
+   * load() can re-queue an `error` event on an empty source, which the
+   * collector would otherwise record as a real media_error.
+   */
+  suspendMediaListeners(): void
   /** Detach listeners without reporting — used when a session never started. */
   detach(): void
+  /**
+   * Whether this collector has already reported. A spent collector's listeners
+   * are detached and every further call is a no-op, so a caller holding one
+   * must replace it rather than keep feeding it.
+   */
+  isFinished(): boolean
 }
 
 /** 32 lowercase hex characters, matching the server's token validation. */
@@ -143,6 +156,7 @@ export function attachPlaybackQoE(
   let rebufferStartedAt: number | null = null
   let renditionSwitches = 0
   let deliveryRebuilds = 0
+  let needsRestamp = false
   let throughputBits = 0
   let pendingError: QoETerminal | null = null
 
@@ -172,6 +186,26 @@ export function attachPlaybackQoE(
     } catch {
       // Never propagate into the player.
     }
+  }
+
+  // sendFinish posts the terminal row. Split out of finish() so the bfcache
+  // snapshot can emit one without marking the collector spent.
+  const sendFinish = (terminal: QoETerminal) => {
+    accrueWatch()
+    closeRebuffer()
+    post(
+      '/api/stream/qoe/finish',
+      {
+        rebuffer_count: rebufferCount,
+        rebuffer_ms: rebufferMs,
+        rendition_switches: renditionSwitches,
+        delivery_rebuilds: deliveryRebuilds,
+        watched_ms: watchedMs,
+        throughput_class: throughputClass(throughputBits),
+        terminal: pendingError || terminal,
+      },
+      true,
+    )
   }
 
   const reportFirstFrame = () => {
@@ -248,8 +282,21 @@ export function attachPlaybackQoE(
   // row early AND detach every listener, so the restored playback would report
   // nothing at all and a movie the viewer finished would read as `user_exit`.
   const onPageHide = (e: PageTransitionEvent) => {
-    if (e.persisted) return
-    collector.finish('user_exit')
+    if (!e.persisted) {
+      collector.finish('user_exit')
+      return
+    }
+    // Entering the back/forward cache. The page may be restored and keep
+    // playing, so the row must not close — but it may equally be DISCARDED,
+    // in which case no further event ever fires and the row would hang open
+    // until retention swept it, counted as abandoned.
+    //
+    // Write a PROVISIONAL terminal so the discard case is covered. 'unknown'
+    // is the honest value — at this instant nobody knows whether the page will
+    // come back — and the server allows exactly one upgrade from it, so a
+    // restored page that later ends properly still records its real outcome.
+    // The collector is NOT marked spent, so playback keeps being measured.
+    sendFinish('unknown')
   }
 
   video.addEventListener('playing', onPlaying)
@@ -260,6 +307,26 @@ export function attachPlaybackQoE(
   video.addEventListener('ended', onEnded)
   video.addEventListener('error', onError)
   window.addEventListener('pagehide', onPageHide as EventListener)
+
+  const removeMediaListeners = () => {
+    video.removeEventListener('playing', onPlaying)
+    video.removeEventListener('waiting', onWaiting)
+    video.removeEventListener('pause', onPause)
+    video.removeEventListener('seeking', onSeeking)
+    video.removeEventListener('seeked', onSeeked)
+    video.removeEventListener('ended', onEnded)
+    video.removeEventListener('error', onError)
+  }
+
+  const addMediaListeners = () => {
+    video.addEventListener('playing', onPlaying)
+    video.addEventListener('waiting', onWaiting)
+    video.addEventListener('pause', onPause)
+    video.addEventListener('seeking', onSeeking)
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('ended', onEnded)
+    video.addEventListener('error', onError)
+  }
 
   const removeListeners = () => {
     if (detached) return
@@ -280,13 +347,33 @@ export function attachPlaybackQoE(
     },
     noteSession(sessionId: string) {
       ctx.sessionId = sessionId
+      // A rebuild replaced the delivery underneath a row that has already
+      // reported. Refresh its facts, or a remux that fell back to transcode
+      // keeps reporting output_codec='copy' and encoder_family='none' for a
+      // delivery that actually ran libx264.
+      if (needsRestamp) {
+        needsRestamp = false
+        post('/api/stream/qoe/restamp', { session_id: sessionId }, false)
+      }
     },
     noteDeliveryRebuild(sessionId?: string) {
       deliveryRebuilds++
       if (sessionId) ctx.sessionId = sessionId
+      // The facts stamped at first frame describe the delivery that has just
+      // been replaced. Mark the row for a re-stamp; the new session id arrives
+      // via noteSession once the replacement session exists.
+      needsRestamp = firstFrameReported
+      // A rebuild is the recovery from whatever went wrong, so a pending error
+      // from the previous delivery must not outlive it and terminate a viewing
+      // that went on to play fine.
+      pendingError = null
       // A rebuild re-buffers, but that is not a stall the viewer's connection
       // caused — close any open rebuffer window so it is not charged here.
       closeRebuffer()
+      // The teardown that preceded this rebuild suspended the element
+      // listeners; re-arm them (idempotent — addEventListener with the same
+      // function reference does not stack) so the new delivery is measured.
+      if (!finished) addMediaListeners()
     },
     noteManifestParsed() {
       if (manifestAtMs == null) manifestAtMs = performance.now()
@@ -297,7 +384,7 @@ export function attachPlaybackQoE(
     noteThroughput(bitsPerSec: number) {
       if (Number.isFinite(bitsPerSec) && bitsPerSec > 0) throughputBits = bitsPerSec
     },
-    noteError(kind) {
+    noteError(kind: QoETerminal) {
       pendingError = kind
     },
     finish(terminal: QoETerminal) {
@@ -317,23 +404,17 @@ export function attachPlaybackQoE(
         ctx.clickAtMs = savedClick
       }
 
-      post(
-        '/api/stream/qoe/finish',
-        {
-          rebuffer_count: rebufferCount,
-          rebuffer_ms: rebufferMs,
-          rendition_switches: renditionSwitches,
-          delivery_rebuilds: deliveryRebuilds,
-          watched_ms: watchedMs,
-          throughput_class: throughputClass(throughputBits),
-          terminal: pendingError || terminal,
-        },
-        true,
-      )
+      sendFinish(terminal)
+    },
+    suspendMediaListeners() {
+      removeMediaListeners()
     },
     detach() {
       finished = true
       removeListeners()
+    },
+    isFinished() {
+      return finished
     },
   }
 

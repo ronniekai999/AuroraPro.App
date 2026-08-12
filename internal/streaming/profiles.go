@@ -88,41 +88,31 @@ const (
 	ac3ReencodeBitsPerSec = 448_000
 )
 
-// Passthrough ceilings for copied audio, whose real bitrate the server never
-// probes. These match the assumptions hls.js itself makes when it estimates an
-// audio track's cost, so an over-declaration here can't be worse than what the
-// client already budgets for.
-const (
-	ac3PassthroughCeilingBitsPerSec  = 640_000
-	eac3PassthroughCeilingBitsPerSec = 768_000
-	// AAC is the most common passthrough codec of the three, and a copied 5.1
-	// track runs well past the 192k the re-encoder would have produced. The
-	// passthrough flag was previously honored for AC-3 and E-AC-3 but ignored
-	// for AAC, which put a hole in the "never under-declare" contract in
-	// exactly the branch that takes a passthrough argument.
-	aacPassthroughCeilingBitsPerSec = 640_000
-)
+// Copied audio has no separately declared figure.
+//
+// An earlier version used per-codec passthrough CEILINGS (AAC/AC-3 640k,
+// E-AC-3 768k) on a "never under-declare" instinct. That instinct is wrong
+// here, and the ceilings reintroduced the exact regression the ladder revert
+// existed to undo: 1080p + 640k is 8,140,000, above the 8 Mbps first-play
+// bandwidth estimate, so every first play of the most common transcode shape
+// there is — non-H.264 video with a copied AAC track — dropped to 720p and,
+// because Level.maxBitrate only ever rises, never came back.
+//
+// Under-declaring is the safe direction: hls.js raises maxBitrate from the
+// fragments it has already fetched, so a low figure self-corrects within a few
+// segments, while a high one is permanent. Copied audio therefore declares the
+// same figure its re-encoded equivalent would.
 
 // AudioDeclaredBitrate returns the bits/sec to attribute to a session's audio
 // when declaring playlist bandwidth. codecOut is the session's AudioCodecOut
-// ("", "aac", "ac3", "eac3"); passthrough marks copied rather than re-encoded
-// audio, whose true bitrate is unknown and therefore bounded from above.
+// ("", "aac", "ac3", "eac3").
+//
+// passthrough is accepted but does not change the answer — see the constants
+// above for why a copied track is not declared higher than a re-encoded one.
 func AudioDeclaredBitrate(codecOut string, passthrough bool) int {
 	switch strings.ToLower(codecOut) {
-	case "aac", "":
-		if passthrough {
-			return aacPassthroughCeilingBitsPerSec
-		}
-		return aacReencodeBitsPerSec
-	case "ac3":
-		if passthrough {
-			return ac3PassthroughCeilingBitsPerSec
-		}
+	case "ac3", "eac3":
 		return ac3ReencodeBitsPerSec
-	case "eac3":
-		// E-AC-3 is never a re-encode target — it only reaches output via
-		// fMP4 passthrough — so the ceiling applies either way.
-		return eac3PassthroughCeilingBitsPerSec
 	default:
 		return aacReencodeBitsPerSec
 	}

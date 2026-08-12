@@ -936,6 +936,8 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// page unload.
 				r.Post("/qoe/start", qoeH.RecordStart)
 				r.Post("/qoe/finish", qoeH.RecordFinish)
+				// Delivery rebuilt beneath a still-open viewing: re-stamp its facts.
+				r.Post("/qoe/restamp", qoeH.Restamp)
 
 				// Subtitles (includes Phase 3 burn-in support)
 				r.Get("/{fileID}/subtitles", streamH.GetSubtitles)

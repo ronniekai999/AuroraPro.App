@@ -92,6 +92,18 @@ func (h HWAccelInfo) policy() QualityPolicy {
 // validates (ultrafast..medium) — a policy must never select a preset that
 // cannot keep up with on-demand transcoding.
 func (p QualityPolicy) softwarePresetFor(configured string) string {
+	return p.softwarePresetForEncoder(configured, false)
+}
+
+// softwarePresetForEncoder resolves the preset for a specific software encoder.
+//
+// x264 and x265 share preset NAMES but not their cost. x265 at a given preset
+// is several times slower than x264 at the same one, so the quality policy's
+// "one step slower" cannot be the same step for both: `fast` is comfortably
+// realtime on x264 for the hardware class this project targets and is not on
+// x265, where it would leave the encoder unable to keep up with on-demand
+// playback — the exact failure the realtime allowlist exists to prevent.
+func (p QualityPolicy) softwarePresetForEncoder(configured string, hevc bool) string {
 	if configured != "" {
 		return configured
 	}
@@ -99,9 +111,11 @@ func (p QualityPolicy) softwarePresetFor(configured string) string {
 	case PolicyFastStart:
 		return "superfast"
 	case PolicyQuality:
-		// Two steps slower than the default. x264's compression gain per step
-		// is largest at the fast end of the curve, and "fast" is still
-		// comfortably realtime on the hardware class this project targets.
+		if hevc {
+			// One step, not two. x265's per-step cost is steep enough that
+			// `fast` risks falling behind realtime.
+			return "faster"
+		}
 		return "fast"
 	default:
 		return "veryfast"

@@ -169,6 +169,23 @@ func tryProbe(p hwProbe) (HWAccelInfo, bool) {
 	return HWAccelInfo{}, false
 }
 
+// The capability probes deliberately use FIXED presets rather than the
+// configured quality policy.
+//
+// They run inside DetectHWAccel, before NewTranscodeManager has resolved the
+// policy onto HWAccelInfo, so the policy is genuinely unavailable here. That is
+// acceptable because of what the probe actually answers: "does this encoder
+// exist and run on this device at all". Preset names are universal within an
+// encoder family — every h264_nvenc build accepts p1..p7, every h264_qsv build
+// accepts the x264-style names — so a probe that succeeds at one preset
+// succeeds at the others. Threading the policy in would validate a marginally
+// more specific argv at the cost of an initialisation-order dependency, for a
+// failure mode that does not exist.
+//
+// (The Tier-2 decode probe in hwdecode.go DOES see the policy, because it runs
+// asynchronously after the manager is built. The asymmetry is a consequence of
+// when each probe runs, not a decision about what to validate.)
+
 // runTestEncode generates 1 frame of synthetic video and encodes it, and
 // returns FFmpeg's reason when that fails (see tryProbe). Thin wrapper over
 // runProbeFFmpegDiag (hwdecode.go) so encode and decode probes share one
@@ -660,7 +677,7 @@ func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
 		// transcode.software_preset (or the quality policy when unset) like
 		// the H.264 path. x265 picks its own level from the input
 		// dimensions/rate.
-		preset := h.policy().softwarePresetFor(h.SWPreset)
+		preset := h.policy().softwarePresetForEncoder(h.SWPreset, true)
 		return []string{"-c:v", "libx265", "-preset", preset,
 			"-vf", scale, "-tag:v", "hvc1"}
 	}

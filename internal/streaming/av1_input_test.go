@@ -147,10 +147,13 @@ func TestAV1Input_MKVAlwaysTranscodes(t *testing.T) {
 	if pd.Remux {
 		t.Error("AV1 must never be remuxed into HLS segments")
 	}
-	// The reason string is what the QoE telemetry records, so it has to
-	// actually explain the cost rather than say something generic.
-	if pd.TranscodeReason == "" {
-		t.Error("AV1 MKV transcode carries no reason; the decision counters need one to be useful")
+	// The reason is what the QoE counters aggregate on, so assert the BUCKET
+	// rather than mere non-emptiness — DecidePlayback always populates some
+	// reason on a transcode verdict, so the old check could not fail. This one
+	// fails if the AV1 remux-forbidden wording ever drifts past the bucketer
+	// and collapses into "unspecified".
+	if got := ReasonCode(pd); got != ReasonVideoCodec {
+		t.Errorf("AV1 MKV buckets as %q, want %q (reason: %q)", got, ReasonVideoCodec, pd.TranscodeReason)
 	}
 }
 

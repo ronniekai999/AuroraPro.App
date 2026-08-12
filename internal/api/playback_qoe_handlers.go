@@ -10,6 +10,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -139,9 +140,23 @@ func (h *PlaybackQoEHandler) RecordStart(w http.ResponseWriter, r *http.Request)
 
 	// Rate guard: bounded rows per profile per hour. Checked before the insert
 	// so a looping client cannot inflate the table or skew the percentiles.
+	// Fails CLOSED. A count that errors means the database is under pressure —
+	// precisely when an unbounded insert rate is least affordable — and the
+	// previous `err == nil &&` form stopped guarding at exactly that moment.
+	//
+	// The check is not atomic with the insert, so concurrent requests can each
+	// read a count just under the cap and all proceed. Overshoot is bounded by
+	// in-flight concurrency, which is orders of magnitude below the cap itself;
+	// serializing it would put a lock on the playback hot path for an
+	// analytics write.
 	since := time.Now().Add(-time.Hour)
-	if n, err := h.queries.CountRecentPlaybackQoE(r.Context(), profileID, since); err == nil &&
-		n >= db.MaxPlaybackQoEPerProfilePerHour {
+	n, countErr := h.queries.CountRecentPlaybackQoE(r.Context(), profileID, since)
+	if countErr != nil {
+		slog.Debug("playback qoe: rate check failed; dropping sample", "error", countErr)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if n >= db.MaxPlaybackQoEPerProfilePerHour {
 		// Logged at most once per profile per window. Every over-limit request
 		// used to emit a WARN, and Aurora routes WARN into a bounded
 		// problem-ring an operator reads to notice exactly this kind of abuse —
@@ -156,7 +171,7 @@ func (h *PlaybackQoEHandler) RecordStart(w http.ResponseWriter, r *http.Request)
 	// holds no reference to, the encoder family is a probe result, the segment
 	// format is a manager setting — and they are not the client's to assert
 	// anyway. Whatever the request claimed for these fields is discarded.
-	facts := h.deliveryFacts(req.Decision, req.SessionID)
+	facts := h.deliveryFacts(claims.UserID, req.Decision, req.SessionID)
 
 	err := h.queries.RecordPlaybackQoEStart(r.Context(), profileID, db.PlaybackQoEStart{
 		SessionToken:   req.SessionToken,
@@ -224,6 +239,54 @@ func (h *PlaybackQoEHandler) RecordFinish(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type playbackQoERestampRequest struct {
+	SessionToken string `json:"session_token"`
+	ProfileID    int64  `json:"profile_id,omitempty"`
+	SessionID    string `json:"session_id"`
+}
+
+// Restamp refreshes a row's delivery facts after the delivery was rebuilt
+// underneath a still-open viewing.
+//
+// One row now covers a whole viewing, and the delivery beneath it can change:
+// a remux that falls back to transcode goes from copying video to running
+// libx264. The facts stamped at first frame would otherwise describe a pipeline
+// that no longer exists, under-reporting encoder_family and burn_in exactly
+// where the change happened. Only ever applied to a row this profile owns that
+// has not yet reported a terminal.
+func (h *PlaybackQoEHandler) Restamp(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var req playbackQoERestampRequest
+	if !decodeQoEBody(w, r, &req) {
+		return
+	}
+	if !db.ValidPlaybackQoESessionToken(req.SessionToken) || req.SessionID == "" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	profileID, ok := h.resolveProfile(r, claims.UserID, req.ProfileID)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	facts := h.deliveryFacts(claims.UserID, "transcode", req.SessionID)
+	if err := h.queries.RestampPlaybackQoEDelivery(r.Context(), profileID, req.SessionToken, db.PlaybackQoEDelivery{
+		OutputCodec:   facts.OutputCodec,
+		EncoderFamily: facts.EncoderFamily,
+		SegmentFormat: facts.SegmentFormat,
+		HDRConversion: facts.HDRConversion,
+		BurnIn:        facts.BurnIn,
+		SubtitleMode:  facts.SubtitleMode,
+	}); err != nil {
+		slog.Debug("restamp playback qoe delivery", "error", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Summary is the admin read: percentiles and ratios over a recent window.
 func (h *PlaybackQoEHandler) Summary(w http.ResponseWriter, r *http.Request) {
 	window := 24 * time.Hour
@@ -233,10 +296,16 @@ func (h *PlaybackQoEHandler) Summary(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid hours")
 			return
 		}
-		// Bounded by the retention window: a longer request would silently
-		// report a partial period as if it were complete.
+		// Bounded by the retention window, and REJECTED rather than clamped
+		// up. Silently widening an out-of-range request handed a typo the most
+		// expensive query the endpoint can run — a full scan of the table,
+		// three times inside one transaction — while also reporting a partial
+		// period as if it were complete.
 		if maxHours := int(db.PlaybackQoERetention.Hours()); hours > maxHours {
-			hours = maxHours
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"hours must be <= %d (the retention window); a longer window has no data behind it",
+				maxHours))
+			return
 		}
 		window = time.Duration(hours) * time.Hour
 	}
@@ -270,8 +339,16 @@ func decodeQoEBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool
 // the zero vocabulary rather than to client-supplied values — an unknown is
 // more honest than an unverified claim, and it shows up in the aggregate as
 // "none" rather than as a fabricated encoder family.
-func (h *PlaybackQoEHandler) deliveryFacts(decision, sessionID string) streaming.SessionQoEFacts {
+func (h *PlaybackQoEHandler) deliveryFacts(userID int64, decision, sessionID string) streaming.SessionQoEFacts {
 	if decision == "direct_play" || sessionID == "" || h.transcode == nil {
+		return streaming.DirectPlayQoEFacts()
+	}
+	// Ownership check. Session ids are 32 hex characters so guessing one is not
+	// practical, but the row is per-profile history and a member should not be
+	// able to stamp somebody else's session facts into it even in principle.
+	if owner := h.transcode.GetSessionOwner(sessionID); owner != 0 && owner != userID {
+		slog.Debug("playback qoe: session belongs to another user; not stamping",
+			"session_id", sessionID)
 		return streaming.DirectPlayQoEFacts()
 	}
 	if facts, ok := h.transcode.SessionQoEFacts(sessionID); ok {

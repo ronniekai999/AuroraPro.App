@@ -105,12 +105,33 @@ func TestLadder_FirstPlayStartRungIsPreserved(t *testing.T) {
 	// Keep in sync with BW_ESTIMATE_DEFAULT in static/redesign/app/src/lib/streaming.ts.
 	const firstPlayEstimateBPS = 8_000_000
 
-	p := AllProfiles["1080p"]
-	got := p.LadderBandwidth(AudioDeclaredBitrate("aac", false))
-	if got > firstPlayEstimateBPS {
-		t.Errorf("1080p declares %d bps, above the %d bps first-play estimate — every "+
-			"first play would start at 720p instead, and hls.js never revises a "+
-			"declared peak downward", got, firstPlayEstimateBPS)
+	// EVERY audio shape, not just the default. An earlier version of this test
+	// checked only re-encoded stereo AAC, so it stayed green while a
+	// passthrough ceiling pushed the same rung to 8,140,000 — above the seed —
+	// for the most common transcode shape there is.
+	for _, ac := range []struct {
+		name        string
+		codecOut    string
+		passthrough bool
+	}{
+		{"aac_reencode", "aac", false},
+		{"aac_passthrough", "aac", true},
+		{"ac3_reencode", "ac3", false},
+		{"ac3_passthrough", "ac3", true},
+		{"eac3_passthrough", "eac3", true},
+		{"unset_codec", "", false},
+		{"unset_codec_passthrough", "", true},
+	} {
+		t.Run(ac.name, func(t *testing.T) {
+			p := AllProfiles["1080p"]
+			got := p.LadderBandwidth(AudioDeclaredBitrate(ac.codecOut, ac.passthrough))
+			if got > firstPlayEstimateBPS {
+				t.Errorf("1080p with %s declares %d bps, above the %d bps first-play "+
+					"estimate — every first play would start at 720p instead, and "+
+					"hls.js never revises a declared peak downward",
+					ac.name, got, firstPlayEstimateBPS)
+			}
+		})
 	}
 }
 
@@ -143,6 +164,40 @@ func TestLadder_StaticConstantsMatchDerivedAACValues(t *testing.T) {
 		if got := p.LadderBandwidth(audioBits); p.HLSBandwidth != got {
 			t.Errorf("%s: checked-in HLSBandwidth %d disagrees with derived %d",
 				name, p.HLSBandwidth, got)
+		}
+	}
+}
+
+// TestLadder_DeclaredVideoStaysWithinItsRateEnvelope ties DeclaredVideoBPS back
+// to the encoder settings beside it.
+//
+// The declaration is hand-maintained now that it is no longer derived from
+// MaxRate, so nothing structurally stops a future ladder retune from moving
+// -maxrate and leaving the declared figure behind. It should sit between the
+// rate-control target and the cap: below -maxrate is deliberate (hls.js raises
+// maxBitrate from measured fragments, so under-declaring self-heals while
+// over-declaring is permanent), but below the -b:v target would under-declare
+// even the encoder's own aim, and above the cap would reintroduce the
+// first-play rung demotion.
+func TestLadder_DeclaredVideoStaysWithinItsRateEnvelope(t *testing.T) {
+	for _, name := range ProfileOrder {
+		p := AllProfiles[name]
+		target, ok := parseBitrateSpec(p.VideoBitrate)
+		if !ok {
+			t.Fatalf("%s has unparseable VideoBitrate %q", name, p.VideoBitrate)
+		}
+		maxRate, ok := parseBitrateSpec(p.MaxRate)
+		if !ok {
+			t.Fatalf("%s has unparseable MaxRate %q", name, p.MaxRate)
+		}
+		if p.DeclaredVideoBPS < target {
+			t.Errorf("%s declares %d bps, below its own -b:v target of %d",
+				name, p.DeclaredVideoBPS, target)
+		}
+		if p.DeclaredVideoBPS > maxRate {
+			t.Errorf("%s declares %d bps, above its -maxrate cap of %d — that is what "+
+				"pushed the 1080p rung past the first-play estimate",
+				name, p.DeclaredVideoBPS, maxRate)
 		}
 	}
 }
@@ -257,16 +312,17 @@ func measurePeakSegmentBitrate(t *testing.T, variantDir string) (peakBitsPerSec,
 		if !strings.HasSuffix(name, ".m4s") && !strings.HasSuffix(name, ".ts") {
 			continue
 		}
-		info, ierr := e.Info()
-		if ierr != nil || info.Size() == 0 {
-			continue
-		}
 		if idx >= len(durations) {
 			break
 		}
+		// Advance the EXTINF cursor for EVERY segment file, including a
+		// zero-size one. `continue`-ing without advancing shifted every
+		// subsequent file/duration pairing by one and silently measured the
+		// wrong bitrates.
 		d := durations[idx]
 		idx++
-		if d <= 0 {
+		info, ierr := e.Info()
+		if ierr != nil || info.Size() == 0 || d <= 0 {
 			continue
 		}
 		bps := int(float64(info.Size()) * 8 / d)
