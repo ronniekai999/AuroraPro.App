@@ -1308,6 +1308,9 @@ function AdminFlaggedTab() {
   )
 }
 
+const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434'
+const OLLAMA_CLOUD_DEFAULT = 'https://ollama.com'
+
 function AdminLLMTab() {
   const [s, setS] = useState<LLMSettings | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1351,6 +1354,18 @@ function AdminLLMTab() {
         next.chat_model = ''; next.chat_model_fast = ''; next.chat_model_smart = ''
       }
     }
+    // Local and Ollama Cloud are the same transport, told apart only by
+    // ollama_url (CheckProviderCombo 400s local-on-ollama.com and
+    // cloud-on-non-https) — so flipping just the dropdown otherwise looks
+    // like a no-op until Save rejects it. Swap the URL along with it, but
+    // only when it still holds the OTHER side's default (i.e. the operator
+    // hasn't customized it), so a deliberately-set LAN/proxy URL is never
+    // clobbered.
+    if (p === 'ollama_cloud' && (s.ollama_url === '' || s.ollama_url === OLLAMA_LOCAL_DEFAULT)) {
+      next.ollama_url = OLLAMA_CLOUD_DEFAULT
+    } else if (p !== 'ollama_cloud' && s.ollama_url === OLLAMA_CLOUD_DEFAULT) {
+      next.ollama_url = ''
+    }
     setS(next)
   }
   const changeEmbedProvider = (p: string) => {
@@ -1388,7 +1403,8 @@ function AdminLLMTab() {
           <span className="block text-[10px] text-amber-300/80 mt-1">Changing the embedding provider or model clears stored vectors and re-embeds the whole library on restart{openaiEmbeds ? ' (OpenAI API cost applies)' : ''}.</span>
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Ollama URL{hostedChat ? ' (local embeds + reranker only)' : ''}</span>
-          <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          <input value={s.ollama_url} onChange={e => setS({ ...s, ollama_url: e.target.value })} placeholder={s.provider === 'ollama_cloud' ? OLLAMA_CLOUD_DEFAULT : OLLAMA_LOCAL_DEFAULT} className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
+          {s.provider === 'ollama_cloud' && <span className="block text-[10px] text-white/40 mt-1">Must be an https ollama.com URL — this is what actually distinguishes Ollama Cloud from Local.</span>}
         </label>
         <label className="text-sm text-white/70"><span className="block text-xs text-white/40 mb-1">Embed URL (optional)</span>
           <input value={s.embed_url} onChange={e => setS({ ...s, embed_url: e.target.value })} placeholder="http://localhost:11434" className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded text-white text-sm" />
