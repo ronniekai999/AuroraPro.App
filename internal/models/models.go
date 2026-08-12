@@ -262,8 +262,10 @@ type MediaItem struct {
 	// from the recommender's pgvector ORDER BY. Populated by NearestUnwatched /
 	// NearestUnwatchedRich for personalized (taste-vector) pools only; stays 0
 	// for the cold-start popular pool which has no centroid to compare against.
-	// The hero recommender maps this to an integer percent (HeroPick.Score).
-	// Never persisted.
+	// Under multi-centroid recall this is the similarity to the profile's
+	// CLOSEST taste mode (interleaveMerge stamps the max). The hero recommender
+	// maps it to the integer personal percent (HeroPick.Match — NOT .Score,
+	// which is the global Aurora Score). Never persisted.
 	MatchScore float64 `json:"match_score,omitempty"`
 
 	// AI-match suggestion (migration 026). Populated by the AI matcher

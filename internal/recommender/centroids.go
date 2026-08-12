@@ -256,7 +256,34 @@ func meanNormalized(pts [][]float32) []float32 {
 // represented near the top instead of one cluster dominating. Each input list
 // is NearestUnwatched output, so it already carries Phase D 👎-exclusion and
 // Phase B2 anti-repetition; the merge preserves them. Deterministic.
+//
+// Each kept item's MatchScore is stamped with its BEST similarity across every
+// centroid that recalled it — "how close to your CLOSEST taste mode" — not the
+// similarity carried by whichever list won the dedup race. An item near two
+// taste modes used to display whichever centroid reached it first, so the
+// user-facing Match % could shift a few points between rebuilds (anti-repeat
+// demotion reorders lists) with no change in taste evidence. Max is also the
+// right question for a personal fit: a horror/rom-com profile's rom-com pick
+// should read as a strong rom-com match, not a mediocre average of both modes.
+//
+// Mutating MatchScore here is safe: every list is freshly scanned by this
+// build's NearestUnwatched calls, so no cached or cross-profile pointer is
+// touched (the snapshot only becomes shared once build() caches it).
 func interleaveMerge(lists [][]*models.MediaItem, limit int) []*models.MediaItem {
+	// Pass 1: best similarity per item across ALL lists, so the stamp doesn't
+	// depend on which list the round-robin below happens to keep.
+	best := make(map[int64]float64)
+	for _, l := range lists {
+		for _, it := range l {
+			if it == nil {
+				continue
+			}
+			if prev, ok := best[it.ID]; !ok || it.MatchScore > prev {
+				best[it.ID] = it.MatchScore
+			}
+		}
+	}
+
 	seen := make(map[int64]struct{})
 	out := make([]*models.MediaItem, 0, limit)
 	maxLen := 0
@@ -278,6 +305,7 @@ func interleaveMerge(lists [][]*models.MediaItem, limit int) []*models.MediaItem
 				continue
 			}
 			seen[it.ID] = struct{}{}
+			it.MatchScore = best[it.ID]
 			out = append(out, it)
 			if len(out) >= limit {
 				break

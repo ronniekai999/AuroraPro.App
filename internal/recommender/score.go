@@ -247,7 +247,13 @@ func auroraDisplay(core, mean, std float64) int {
 	return clampInt(int(math.Round(p*100)), 1, 100)
 }
 
-const matchModelVersion = "match-v2-bootstrap-1"
+// matchModelVersion identifies the calibration manifest AND the evidence
+// definition behind a displayed Match. bootstrap-2 changed the evidence term
+// from the capped top-20 taste slice to db.MatchEvidenceCount (uncapped,
+// DISTINCT titles), which moves displayed values for evidence-rich profiles —
+// so the generation is bumped rather than silently mixing two populations in
+// the calibration report.
+const matchModelVersion = "match-v2-bootstrap-2"
 
 // personalMatchV2 maps absolute taste-vector similarity plus the amount of
 // independent profile evidence to a conservative [0,1] estimate. The semantic
@@ -256,6 +262,11 @@ const matchModelVersion = "match-v2-bootstrap-1"
 // checked-in bootstrap manifest, not a claim of empirical calibration; the
 // version and evidence strength are exposed/logged so future outcome fitting can
 // be evaluated without confusing model generations.
+//
+// `evidence` MUST be db.MatchEvidenceCount — distinct supporting titles, with
+// no cap. rho is the whole conservatism mechanism, so an evidence term that
+// saturates makes the floor/ceiling constants dead code and caps what any
+// profile can ever be told.
 func personalMatchV2(sim float64, evidence int) (probability, confidence float64) {
 	if sim <= 0 || evidence <= 0 || math.IsNaN(sim) {
 		return 0, 0
@@ -270,12 +281,23 @@ func personalMatchV2(sim float64, evidence int) (probability, confidence float64
 	return probability, confidence
 }
 
-func matchDisplayV2(sim float64, evidence int) int {
-	p, _ := personalMatchV2(sim, evidence)
+// matchPercent maps a Match probability to the displayed integer percent. The
+// ONE place that conversion happens: p==0 means "no personal estimate" and must
+// stay 0 (the frontend then shows the global Aurora Score), while any real
+// estimate floors at 1 so a genuine match never reads as "no score".
+func matchPercent(p float64) int {
 	if p == 0 {
 		return 0
 	}
 	return clampInt(int(math.Round(p*100)), 1, 100)
+}
+
+// matchDisplayV2 is the full similarity+evidence → displayed-percent path,
+// exercised directly by tests; applyPersonalMatch runs the same two steps and
+// additionally keeps the confidence/audit metadata.
+func matchDisplayV2(sim float64, evidence int) int {
+	p, _ := personalMatchV2(sim, evidence)
+	return matchPercent(p)
 }
 
 // libraryScoreStats is the per-deployment calibration for the Aurora Score: the

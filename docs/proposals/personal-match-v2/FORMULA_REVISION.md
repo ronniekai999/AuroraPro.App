@@ -1,12 +1,21 @@
 # Personal Match v2 — calibrated satisfaction, not a pool-relative percentile
 
 **Status:** Phase 2 beta measurement implemented. Aurora now uses the pool-invariant
-`match-v2-bootstrap-1` curve, exposes its evidence confidence/model version, and
+`match-v2-bootstrap-2` curve, exposes its evidence confidence/model version, and
 records API-selected slates plus foreground, ≥50%-visible hero exposures for
 time-forward calibration. The checked-in
 bootstrap coefficients are conservative engineering priors, not empirical
 calibration: Aurora must not describe the value as a satisfaction probability
 until a fitted model passes the calibration gates below.
+
+`bootstrap-2` (review follow-up) changed the **evidence term**, not the curve:
+`support` is now `db.MatchEvidenceCount` — DISTINCT supporting titles, uncapped
+— where `bootstrap-1` reused the capped top-20 taste slice. That cap pinned
+`rho` at `20/25 = 0.8`, so no profile could ever be shown more than ~86% and the
+manifest's own 0.05/0.95 clamps were unreachable; counting per-episode rows also
+let one binged show impersonate a mature profile. Because displayed values move
+for evidence-rich profiles, the generation is versioned so the two populations
+stay separable in the calibration report.
 **Scope:** the personal `Match` percentage shown on personalized media; the
 global Aurora `Score` remains a separate quality/engagement signal.
 
@@ -373,11 +382,23 @@ Current implementation status:
   plus daily 90-day slate/impression retention, profile/media deletion cascades,
   real hero visibility measurement, series-aware outcome attribution with the
   approved beta labels, and pool-invariance/unit/integration coverage.
-- **Next:** calibration reporting, source-aware weighted
+- **Landed (review follow-up, `bootstrap-2`):** uncapped distinct-title
+  evidence (above); the displayed similarity is the item's cosine to the
+  profile's CLOSEST taste mode rather than whichever centroid's recall list won
+  the interleave dedupe, closing a rebuild-to-rebuild wobble that gate 5 below
+  otherwise failed; and the report's metrics cohort is now the exposures that
+  actually displayed a Match, with the cold-start remainder counted and
+  disclosed instead of scored as a 0% prediction.
+- **Next:** source-aware weighted
   taste modes/negative-neighborhood features, fitted manifest development, and
   shadow comparison. The local-only beta targets 11–50 testers over six months;
   introduce 6.5% propensity-logged exploration only after exposure/outcome
   integrity passes, never across parental or explicit-negative constraints.
+
+Known residual on gate 5: an item is only scored against the centroids whose
+recall pool actually returned it, so on a large library a distant taste mode can
+be truncated away before it is compared. Pool composition no longer moves the
+value; recall depth still can.
 
 1. **Instrumentation first:** add versioned impression/slate logging and join it
    to later starts, completion, rating, and feedback. Record censored outcomes;
