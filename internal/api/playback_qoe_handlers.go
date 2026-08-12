@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/aurora-media/aurora/internal/auth"
@@ -22,10 +23,48 @@ import (
 // PlaybackQoEHandler serves the telemetry endpoints.
 type PlaybackQoEHandler struct {
 	queries *db.Queries
+
+	// rateLimitLogged tracks which profiles have already had their over-limit
+	// warning emitted in the current window, so enforcement cannot become its
+	// own denial of service against the operator's log ring.
+	rateLimitMu     sync.Mutex
+	rateLimitLogged map[int64]time.Time
 }
 
 func NewPlaybackQoEHandler(queries *db.Queries) *PlaybackQoEHandler {
-	return &PlaybackQoEHandler{queries: queries}
+	return &PlaybackQoEHandler{
+		queries:         queries,
+		rateLimitLogged: make(map[int64]time.Time),
+	}
+}
+
+// rateLimitLogInterval is how often one profile may produce a rate-limit
+// warning. Matches the rate-limit window itself.
+const rateLimitLogInterval = time.Hour
+
+// logRateLimitOnce emits at most one warning per profile per interval.
+func (h *PlaybackQoEHandler) logRateLimitOnce(profileID int64, recent int) {
+	now := time.Now()
+	h.rateLimitMu.Lock()
+	last, seen := h.rateLimitLogged[profileID]
+	if seen && now.Sub(last) < rateLimitLogInterval {
+		h.rateLimitMu.Unlock()
+		return
+	}
+	h.rateLimitLogged[profileID] = now
+	// Bound the map: without this an attacker cycling profile ids would grow it
+	// without limit, which is the same failure in a different resource.
+	if len(h.rateLimitLogged) > 1024 {
+		for id, at := range h.rateLimitLogged {
+			if now.Sub(at) >= rateLimitLogInterval {
+				delete(h.rateLimitLogged, id)
+			}
+		}
+	}
+	h.rateLimitMu.Unlock()
+
+	slog.Warn("playback qoe ingest rate limit hit; dropping samples for this profile",
+		"profile_id", profileID, "recent_rows", recent, "suppress_for", rateLimitLogInterval)
 }
 
 // maxQoEBodyBytes caps the request body. The payloads are a few hundred bytes;
@@ -94,8 +133,11 @@ func (h *PlaybackQoEHandler) RecordStart(w http.ResponseWriter, r *http.Request)
 	since := time.Now().Add(-time.Hour)
 	if n, err := h.queries.CountRecentPlaybackQoE(r.Context(), profileID, since); err == nil &&
 		n >= db.MaxPlaybackQoEPerProfilePerHour {
-		slog.Warn("playback qoe ingest rate limit hit; dropping sample",
-			"profile_id", profileID, "recent_rows", n)
+		// Logged at most once per profile per window. Every over-limit request
+		// used to emit a WARN, and Aurora routes WARN into a bounded
+		// problem-ring an operator reads to notice exactly this kind of abuse —
+		// so a few seconds of a looping client evicted the evidence of itself.
+		h.logRateLimitOnce(profileID, n)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

@@ -46,9 +46,14 @@ CREATE TABLE playback_qoe_sessions (
     -- in a log line and useless in aggregate; these buckets are what answers
     -- "why are we transcoding so much".
     decision_reason VARCHAR(24) NOT NULL DEFAULT 'unspecified'
+        -- No 'hdr' bucket: HDR never appears in a TranscodeReason. An HDR
+        -- source transcodes because of its BIT DEPTH, and the tonemap is a
+        -- consequence of that decision rather than its cause — the HDR
+        -- dimension is captured properly by hdr_conversion below, which
+        -- records what the pipeline did rather than guessing from prose.
         CHECK (decision_reason IN (
             'compatible', 'container', 'video_codec', 'audio_codec',
-            'bit_depth', 'hdr', 'audio_track', 'client_retry', 'unspecified'
+            'bit_depth', 'audio_track', 'unspecified'
         )),
 
     -- --- What the pipeline actually did ---
@@ -86,10 +91,14 @@ CREATE TABLE playback_qoe_sessions (
     manifest_to_first_frame_ms INTEGER CHECK (manifest_to_first_frame_ms BETWEEN 0 AND 600000),
 
     -- --- Steady state (phase 2) ---
-    rebuffer_count     INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_count     >= 0),
-    rebuffer_ms        INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_ms        >= 0),
-    rendition_switches INTEGER NOT NULL DEFAULT 0 CHECK (rendition_switches >= 0),
-    watched_ms         INTEGER CHECK (watched_ms >= 0),
+    -- Bounded above as well as below, for the same reason the startup columns
+    -- are: rebuffer_ms is summed into the dashboard's rebuffer ratio, so a
+    -- single absurd value distorts every window that contains it for the whole
+    -- retention period. 86400000 ms is 24 hours, past any real playback.
+    rebuffer_count     INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_count     BETWEEN 0 AND 100000),
+    rebuffer_ms        INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_ms        BETWEEN 0 AND 86400000),
+    rendition_switches INTEGER NOT NULL DEFAULT 0 CHECK (rendition_switches BETWEEN 0 AND 100000),
+    watched_ms         INTEGER CHECK (watched_ms BETWEEN 0 AND 86400000),
 
     -- Coarse classes, never raw values: a raw throughput figure plus a
     -- timestamp is closer to a network fingerprint than to an operational
@@ -111,9 +120,11 @@ CREATE TABLE playback_qoe_sessions (
 -- Retention sweep (the prune deletes by age).
 CREATE INDEX idx_playback_qoe_retention ON playback_qoe_sessions (created_at);
 
--- The admin dashboard's shape: percentiles and ratios over a recent window,
--- sliced by decision. Leading created_at DESC serves the window scan.
-CREATE INDEX idx_playback_qoe_window ON playback_qoe_sessions (created_at DESC, decision);
+-- NOTE: a (created_at DESC, decision) index was considered for the dashboard's
+-- window queries and deliberately left out. Their predicate is a plain
+-- created_at range, which idx_playback_qoe_retention above already satisfies at
+-- a smaller size — the planner picks it every time and the composite went
+-- unused, costing an extra index write on the playback hot path for nothing.
 
 -- Per-profile insert-rate guard: the ingest endpoint counts a profile's recent
 -- rows before accepting another, so this partial index keeps that check cheap.

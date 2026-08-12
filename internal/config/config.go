@@ -419,10 +419,15 @@ type yamlConfig struct {
 	} `yaml:"watchparty"`
 }
 
-// Load reads configuration from YAML file (if present) then overlays environment variables.
-// Environment variables always take precedence over the YAML file.
-func Load() (*Config, error) {
-	cfg := &Config{
+// Default returns the configuration with every field at its built-in default,
+// before any YAML file or environment override is applied.
+//
+// Extracted from Load so the defaults are reachable on their own. They carry
+// real behaviour: transcode.software_preset defaulting to a concrete preset
+// silently disabled quality_policy on every software install, and no test
+// could see it because they all hand-built their own config structs.
+func Default() *Config {
+	return &Config{
 		Server: ServerConfig{
 			Host:           "0.0.0.0",
 			Port:           8484,
@@ -501,9 +506,14 @@ func Load() (*Config, error) {
 			// fMP4 for HEVC, and hls.js skips its TS→fMP4 remux entirely.
 			// Set "ts" to roll back to the legacy MPEG-TS pipeline.
 			SegmentFormat: "fmp4",
-			// libx264 preset for software transcodes. "faster" is the
-			// quality-first alternative (~5-8% better, ~30% more CPU).
-			SoftwarePreset: "veryfast",
+			// Software-encoder preset. EMPTY by default on purpose: an
+			// explicit value overrides quality_policy for the software
+			// encoders, so defaulting it to a concrete preset here would
+			// make the policy a no-op on every GPU-less install — the most
+			// common configuration this project targets. Empty means "let
+			// the policy decide", and balanced resolves to veryfast, which
+			// is what a default install got before the policy existed.
+			SoftwarePreset: "",
 			// Speed/quality policy applied across every encoder family.
 			// "balanced" reproduces the historical arguments exactly.
 			QualityPolicy: "balanced",
@@ -564,6 +574,12 @@ func Load() (*Config, error) {
 			VoiceSTUNServers: []string{"stun:stun.l.google.com:19302"},
 		},
 	}
+}
+
+// Load reads configuration from YAML file (if present) then overlays environment variables.
+// Environment variables always take precedence over the YAML file.
+func Load() (*Config, error) {
+	cfg := Default()
 
 	// Phase 1: Load from YAML config file if it exists
 	if err := loadYAML(cfg); err != nil {

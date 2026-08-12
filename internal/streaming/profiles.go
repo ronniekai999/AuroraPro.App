@@ -90,6 +90,12 @@ const (
 const (
 	ac3PassthroughCeilingBitsPerSec  = 640_000
 	eac3PassthroughCeilingBitsPerSec = 768_000
+	// AAC is the most common passthrough codec of the three, and a copied 5.1
+	// track runs well past the 192k the re-encoder would have produced. The
+	// passthrough flag was previously honored for AC-3 and E-AC-3 but ignored
+	// for AAC, which put a hole in the "never under-declare" contract in
+	// exactly the branch that takes a passthrough argument.
+	aacPassthroughCeilingBitsPerSec = 640_000
 )
 
 // vbvPeakHeadroom scales -maxrate up to the peak a SEGMENT can actually reach.
@@ -127,6 +133,11 @@ const vbvPeakHeadroom = 1.35
 // audio, whose true bitrate is unknown and therefore bounded from above.
 func AudioDeclaredBitrate(codecOut string, passthrough bool) int {
 	switch strings.ToLower(codecOut) {
+	case "aac", "":
+		if passthrough {
+			return aacPassthroughCeilingBitsPerSec
+		}
+		return aacReencodeBitsPerSec
 	case "ac3":
 		if passthrough {
 			return ac3PassthroughCeilingBitsPerSec

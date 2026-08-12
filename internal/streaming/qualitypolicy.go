@@ -157,11 +157,16 @@ func (p QualityPolicy) amfQuality() string {
 // default path carries zero risk on hardware this project cannot test against.
 // The non-default policies opt in explicitly.
 func (p QualityPolicy) vaapiCompressionArgs() []string {
+	// The :v stream specifier is load-bearing. -compression_level is flagged
+	// E..VA in ffmpeg — it applies to audio encoders too, so a bare form is
+	// also handed to the AAC/AC-3 encoder. Neither reads it today so the bare
+	// form was inert rather than broken, but an encoder that starts honoring
+	// it would silently take a video quality knob as an audio one.
 	switch p {
 	case PolicyFastStart:
-		return []string{"-compression_level", "7"}
+		return []string{"-compression_level:v", "7"}
 	case PolicyQuality:
-		return []string{"-compression_level", "1"}
+		return []string{"-compression_level:v", "1"}
 	default:
 		return nil
 	}

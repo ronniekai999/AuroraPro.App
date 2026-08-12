@@ -3,6 +3,8 @@ package streaming
 import (
 	"strings"
 	"testing"
+
+	"github.com/aurora-media/aurora/internal/config"
 )
 
 // backends is every encoder family the policy must answer for. Keeping this in
@@ -46,7 +48,7 @@ func TestQualityPolicy_BalancedIsByteIdenticalToHistoricalArgs(t *testing.T) {
 		// VAAPI had no quality knob at all. Balanced must keep emitting none:
 		// -compression_level semantics are driver-defined and this project has
 		// no VAAPI hardware in the loop to validate a chosen value against.
-		HWAccelVAAPI: {flag: "-compression_level", absent: true},
+		HWAccelVAAPI: {flag: "-compression_level:v", absent: true},
 		HWAccelNone:  {flag: "-preset", want: "veryfast"},
 	}
 
@@ -98,7 +100,7 @@ func TestQualityPolicy_EveryBackendHonorsTheKnob(t *testing.T) {
 		HWAccelNVENC: "-preset",
 		HWAccelQSV:   "-preset",
 		HWAccelAMF:   "-quality",
-		HWAccelVAAPI: "-compression_level",
+		HWAccelVAAPI: "-compression_level:v",
 		HWAccelNone:  "-preset",
 	}
 
@@ -224,5 +226,79 @@ func TestQualityPolicy_DescribeNamesTheResolvedKnob(t *testing.T) {
 			t.Errorf("Describe(%s, %s) = %q, want it to name the policy itself",
 				tc.backend, tc.policy, got)
 		}
+	}
+}
+
+// TestQualityPolicy_ReachesSoftwareEncoderThroughRealConfigDefaults is the test
+// whose absence let a shipped no-op through.
+//
+// Every other software-path test in this file hand-builds an HWAccelInfo with
+// SWPreset empty, which is not the state a booted server is ever in: config.Load
+// used to default transcode.software_preset to a concrete "veryfast", and an
+// explicit preset overrides the policy by design. The two behaviours composed
+// into "quality_policy does nothing on any GPU-less install" — the most common
+// configuration this project targets — while the unit tests stayed green.
+//
+// This goes through NewTranscodeManager with the DEFAULTS the config package
+// actually produces, so the knob is exercised the way an operator experiences it.
+func TestQualityPolicy_ReachesSoftwareEncoderThroughRealConfigDefaults(t *testing.T) {
+	fakeFFmpegOnPath(t)
+
+	defaults := config.Default().Transcode
+	if defaults.SoftwarePreset != "" {
+		t.Fatalf("config default software_preset = %q; a concrete default here makes "+
+			"quality_policy inert on every software install", defaults.SoftwarePreset)
+	}
+
+	cases := map[string]string{
+		"balanced":   "veryfast", // must equal the pre-policy default
+		"fast_start": "superfast",
+		"quality":    "fast",
+	}
+	for policy, wantPreset := range cases {
+		t.Run(policy, func(t *testing.T) {
+			cfg := defaults
+			cfg.HWAccel = "none"
+			cfg.HWDecode = "off"
+			cfg.QualityPolicy = policy
+
+			tm, err := NewTranscodeManager(t.TempDir(), cfg)
+			if err != nil {
+				t.Fatalf("new transcode manager: %v", err)
+			}
+			t.Cleanup(tm.Close)
+
+			args := tm.hwAccel.VideoEncoderArgs(1280, 720, 24)
+			got, ok := argValue(args, "-preset")
+			if !ok {
+				t.Fatalf("no -preset in software encoder args: %v", args)
+			}
+			if got != wantPreset {
+				t.Errorf("quality_policy=%q resolved to -preset %q, want %q", policy, got, wantPreset)
+			}
+		})
+	}
+}
+
+// TestQualityPolicy_ExplicitSoftwarePresetStillWinsThroughConfig pins the
+// precedence rule end-to-end: an operator who set software_preset keeps it,
+// whatever the policy says.
+func TestQualityPolicy_ExplicitSoftwarePresetStillWinsThroughConfig(t *testing.T) {
+	fakeFFmpegOnPath(t)
+
+	cfg := config.Default().Transcode
+	cfg.HWAccel = "none"
+	cfg.HWDecode = "off"
+	cfg.SoftwarePreset = "medium"
+	cfg.QualityPolicy = "fast_start"
+
+	tm, err := NewTranscodeManager(t.TempDir(), cfg)
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	t.Cleanup(tm.Close)
+
+	if got, _ := argValue(tm.hwAccel.VideoEncoderArgs(1280, 720, 24), "-preset"); got != "medium" {
+		t.Errorf("explicit software_preset=medium with policy fast_start gave -preset %q, want medium", got)
 	}
 }

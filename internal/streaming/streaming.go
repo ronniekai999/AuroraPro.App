@@ -1382,7 +1382,12 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	case "", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
 		// valid ("" = default "veryfast", applied in VideoEncoderArgs)
 	default:
-		slog.Warn("unknown transcode software_preset, using veryfast",
+		// Blanking it hands the choice to quality_policy, whose balanced
+		// resolution is veryfast — so the historical behaviour is preserved
+		// for the default policy. The message names the policy rather than a
+		// fixed preset because a non-default policy resolves to something
+		// else, and a warning that states the wrong preset is worse than none.
+		slog.Warn("unknown transcode software_preset, deferring to quality_policy",
 			"configured", tcCfg.SoftwarePreset)
 		tcCfg.SoftwarePreset = ""
 	}

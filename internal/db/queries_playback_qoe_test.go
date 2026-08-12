@@ -397,32 +397,63 @@ func TestPlaybackQoE_SummaryAndPrune(t *testing.T) {
 	if summary.ErrorRate <= 0 {
 		t.Errorf("error rate = %v, want > 0 given a seeded media_error", summary.ErrorRate)
 	}
-	// Two of four never reported a terminal; that has to be visible rather
-	// than silently shrinking the error-rate denominator.
-	if summary.AbandonedRatio <= 0 {
-		t.Errorf("abandoned ratio = %v, want > 0 given two sessions with no terminal",
+	// Freshly-seeded rows are still inside the settle window, so none of them
+	// counts as abandoned yet — an in-progress playback must never be reported
+	// as a lost beacon.
+	if summary.AbandonedRatio != 0 {
+		t.Errorf("abandoned ratio = %v for rows inside the settle window, want 0",
 			summary.AbandonedRatio)
+	}
+	// Age them past the settle window: the two that never reported a terminal
+	// must now surface, rather than silently shrinking the error-rate
+	// denominator.
+	if _, err := pool.Exec(ctx,
+		`UPDATE playback_qoe_sessions SET created_at = NOW() - INTERVAL '12 hours' WHERE profile_id = $1`,
+		profileID); err != nil {
+		t.Fatalf("age rows past the settle window: %v", err)
+	}
+	settledSummary, err := q.PlaybackQoESummaryStats(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("summary after settle: %v", err)
+	}
+	if settledSummary.AbandonedRatio <= 0 {
+		t.Errorf("abandoned ratio = %v after the settle window, want > 0 given two "+
+			"sessions with no terminal", settledSummary.AbandonedRatio)
 	}
 	if len(summary.ByDecision) == 0 {
 		t.Error("summary carries no per-decision breakdown")
 	}
 
-	// Retention: nothing is old enough to prune yet.
-	if n, err := q.PrunePlaybackQoE(ctx, PlaybackQoERetention); err != nil {
-		t.Fatalf("prune: %v", err)
-	} else if n != 0 {
-		t.Errorf("prune removed %d fresh rows, want 0", n)
+	// Retention. PrunePlaybackQoE is table-wide, so the assertions are scoped
+	// to THIS profile's rows rather than to the table: asserting a global
+	// count would make the test depend on — and destroy — whatever else a
+	// long-lived developer database happens to hold.
+	countMine := func() int {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM playback_qoe_sessions WHERE profile_id = $1`, profileID).Scan(&n); err != nil {
+			t.Fatalf("count own rows: %v", err)
+		}
+		return n
 	}
-	// Age the seeded rows past the bound and re-run.
+	if _, err := q.PrunePlaybackQoE(ctx, PlaybackQoERetention); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if got := countMine(); got != len(samples) {
+		t.Errorf("prune removed %d of this profile's fresh rows; they are inside retention",
+			len(samples)-got)
+	}
+	// Age this profile's rows past the bound and re-run.
 	if _, err := pool.Exec(ctx,
 		`UPDATE playback_qoe_sessions SET created_at = NOW() - INTERVAL '400 days' WHERE profile_id = $1`,
 		profileID); err != nil {
 		t.Fatalf("age rows: %v", err)
 	}
-	if n, err := q.PrunePlaybackQoE(ctx, PlaybackQoERetention); err != nil {
+	if _, err := q.PrunePlaybackQoE(ctx, PlaybackQoERetention); err != nil {
 		t.Fatalf("prune aged: %v", err)
-	} else if n < 4 {
-		t.Errorf("prune removed %d aged rows, want at least the 4 seeded", n)
+	}
+	if got := countMine(); got != 0 {
+		t.Errorf("%d aged rows survived the retention sweep", got)
 	}
 }
 
@@ -443,5 +474,80 @@ func TestPlaybackQoE_CountRecent(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("CountRecentPlaybackQoE = %d, want 1", n)
+	}
+}
+
+// TestClampRangeBoundsBothEnds pins the fix for a defect that reached review:
+// the steady-state counters were floored at zero and bounded nowhere above.
+//
+// Two distinct failures came out of that. A value past int32 made the whole
+// terminal UPDATE fail at parameter encoding, silently discarding the outcome,
+// watch time and throughput of that session. A merely huge value succeeded and
+// poisoned RebufferRatio — one request could distort the dashboard's headline
+// metric for the entire retention window.
+func TestClampRangeBoundsBothEnds(t *testing.T) {
+	cases := []struct {
+		in, max, want int
+	}{
+		{-1, 100, 0},
+		{0, 100, 0},
+		{50, 100, 50},
+		{100, 100, 100},
+		{101, 100, 100},
+		// The values that used to break things.
+		{2147483647, maxPlaybackDurationMs, maxPlaybackDurationMs},
+		{3000000000, maxPlaybackDurationMs, maxPlaybackDurationMs},
+	}
+	for _, tc := range cases {
+		if got := clampRange(tc.in, tc.max); got != tc.want {
+			t.Errorf("clampRange(%d, %d) = %d, want %d", tc.in, tc.max, got, tc.want)
+		}
+	}
+}
+
+// TestPlaybackQoE_AbsurdCountersCannotPoisonTheSummary is the end-to-end proof,
+// against a real database: a member sending int32-max counters must neither
+// lose their terminal write nor move the aggregate off a sane scale.
+func TestPlaybackQoE_AbsurdCountersCannotPoisonTheSummary(t *testing.T) {
+	pool := qoeTestPool(t)
+	q := NewQueries(pool)
+	ctx := context.Background()
+	profileID := qoeTestProfile(t, pool)
+
+	token := "eeeeeeeeffffffff0000000011111111"
+	if err := q.RecordPlaybackQoEStart(ctx, profileID, PlaybackQoEStart{
+		SessionToken: token, Decision: "transcode",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Both a value that used to overflow int4 and one that used to insert
+	// cleanly and wreck the ratio.
+	if err := q.FinishPlaybackQoE(ctx, profileID, PlaybackQoEFinish{
+		SessionToken:  token,
+		RebufferMS:    3000000000,
+		RebufferCount: 2147483647,
+		WatchedMS:     1,
+		Terminal:      "ended",
+	}); err != nil {
+		t.Fatalf("finish with absurd counters must still succeed: %v", err)
+	}
+
+	var terminal *string
+	var rebufferMS, rebufferCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT terminal, rebuffer_ms, rebuffer_count FROM playback_qoe_sessions WHERE session_token = $1`,
+		token).Scan(&terminal, &rebufferMS, &rebufferCount); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	// The terminal write must have LANDED — losing it is the silent failure.
+	if terminal == nil || *terminal != "ended" {
+		t.Fatalf("terminal = %v, want ended — the outcome was discarded", terminal)
+	}
+	if rebufferMS != maxPlaybackDurationMs {
+		t.Errorf("rebuffer_ms = %d, want it clamped to %d", rebufferMS, maxPlaybackDurationMs)
+	}
+	if rebufferCount != maxPlaybackEventCount {
+		t.Errorf("rebuffer_count = %d, want it clamped to %d", rebufferCount, maxPlaybackEventCount)
 	}
 }

@@ -22,6 +22,11 @@ import (
 // more per-profile history for no additional operational answer.
 const PlaybackQoERetention = 30 * 24 * time.Hour
 
+// playbackSettleWindow is how long a session is given to report its terminal
+// before its silence counts as abandonment. Longer than any plausible movie, so
+// an in-progress playback is never mistaken for a lost beacon.
+const playbackSettleWindow = 6 * time.Hour
+
 // MaxPlaybackQoEPerProfilePerHour bounds how many rows one profile may create
 // per hour. Normal use is a handful; the ceiling exists so a looping or
 // malicious client cannot inflate the table (and skew the percentiles) without
@@ -49,7 +54,7 @@ var (
 	PlaybackQoEDecisions       = []string{"direct_play", "direct_stream", "transcode"}
 	PlaybackQoEDecisionReasons = []string{
 		"compatible", "container", "video_codec", "audio_codec",
-		"bit_depth", "hdr", "audio_track", "client_retry", "unspecified",
+		"bit_depth", "audio_track", "unspecified",
 	}
 	PlaybackQoEOutputCodecs    = []string{"none", "copy", "h264", "hevc"}
 	PlaybackQoEEncoderFamilies = []string{"none", "software", "nvenc", "qsv", "vaapi", "amf"}
@@ -127,9 +132,35 @@ func clampStartupMs(v *int) *int {
 	return v
 }
 
-func clampNonNegative(v int) int {
+// Ceilings for the steady-state counters.
+//
+// Flooring at zero was not enough. These columns are int4, so a client that
+// sends a value past int32 makes the whole terminal UPDATE fail at parameter
+// encoding — the outcome, watch time and throughput class of that session are
+// all lost, the handler swallows the error at Debug, and the row then counts as
+// "abandoned", pointing any investigation at the wrong layer.
+//
+// A merely large value is worse, because it succeeds: rebuffer_ms is summed
+// into RebufferRatio, so one request with 2147483647 poisons the dashboard's
+// headline metric for every window containing it — up to the full retention
+// period. The startup columns already had both a Go clamp and a SQL bound with
+// a comment explaining exactly this; phase 2 had neither.
+//
+// 24 hours bounds any plausible single playback. Values are CLAMPED rather than
+// dropped because these columns are NOT NULL accumulators with no "not measured"
+// representation; clamping keeps the row's other fields usable and bounds the
+// distortion to something physically possible.
+const (
+	maxPlaybackDurationMs = 24 * 60 * 60 * 1000 // 86_400_000
+	maxPlaybackEventCount = 100_000
+)
+
+func clampRange(v, max int) int {
 	if v < 0 {
 		return 0
+	}
+	if v > max {
+		return max
 	}
 	return v
 }
@@ -198,10 +229,10 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 		   AND terminal IS NULL`,
 		profileID,
 		rec.SessionToken,
-		clampNonNegative(rec.RebufferCount),
-		clampNonNegative(rec.RebufferMS),
-		clampNonNegative(rec.RenditionSwitches),
-		clampNonNegative(rec.WatchedMS),
+		clampRange(rec.RebufferCount, maxPlaybackEventCount),
+		clampRange(rec.RebufferMS, maxPlaybackDurationMs),
+		clampRange(rec.RenditionSwitches, maxPlaybackEventCount),
+		clampRange(rec.WatchedMS, maxPlaybackDurationMs),
 		normalizeEnum(rec.ThroughputClass, PlaybackQoEThroughput, "unknown"),
 		normalizeEnum(rec.Terminal, PlaybackQoETerminals, "unknown"),
 	)
@@ -258,6 +289,12 @@ type PlaybackQoESummary struct {
 	// values mean the beacon is not landing, which makes every other
 	// terminal-derived number here suspect — so it is reported rather than
 	// quietly excluded.
+	//
+	// Only sessions old enough to have finished are counted. A playback still
+	// in progress has a NULL terminal too, so counting every NULL made a
+	// healthy server at peak report a ratio near 1.0 on a short window — a
+	// false alarm raised exactly when someone opens a narrow window to
+	// investigate a live problem.
 	AbandonedRatio float64 `json:"abandoned_ratio"`
 
 	ByDecision []PlaybackQoEDecisionStat `json:"by_decision"`
@@ -281,6 +318,7 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 	var (
 		p50Scan, p95Scan                                        *float64
 		directPlays, rebufferMS, watchedMS, terminated, errored int64
+		settled, settledAbandoned                               int64
 	)
 
 	// Headline aggregates in one pass. FILTER keeps each ratio's denominator
@@ -297,11 +335,16 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 			COALESCE(SUM(watched_ms), 0),
 			COUNT(*) FILTER (WHERE terminal IS NOT NULL),
 			COUNT(*) FILTER (WHERE terminal IN ('media_error','network_error','transcode_error')),
-			COUNT(*) FILTER (WHERE burn_in <> 'none')
+			COUNT(*) FILTER (WHERE burn_in <> 'none'),
+			COUNT(*) FILTER (WHERE created_at < NOW() - make_interval(secs => $2)),
+			COUNT(*) FILTER (WHERE terminal IS NULL
+			                   AND created_at < NOW() - make_interval(secs => $2))
 		FROM playback_qoe_sessions
-		WHERE created_at >= NOW() - make_interval(secs => $1)`, seconds).
+		WHERE created_at >= NOW() - make_interval(secs => $1)`,
+		seconds, int64(playbackSettleWindow.Seconds())).
 		Scan(&out.Sessions, &p50Scan, &p95Scan,
-			&directPlays, &rebufferMS, &watchedMS, &terminated, &errored, &out.BurnInSessions)
+			&directPlays, &rebufferMS, &watchedMS, &terminated, &errored, &out.BurnInSessions,
+			&settled, &settledAbandoned)
 	if err != nil {
 		return nil, fmt.Errorf("playback qoe summary: %w", err)
 	}
@@ -310,7 +353,9 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 	out.P95FirstFrameMS = roundedMS(p95Scan)
 	if out.Sessions > 0 {
 		out.DirectPlayRatio = float64(directPlays) / float64(out.Sessions)
-		out.AbandonedRatio = float64(int64(out.Sessions)-terminated) / float64(out.Sessions)
+	}
+	if settled > 0 {
+		out.AbandonedRatio = float64(settledAbandoned) / float64(settled)
 	}
 	if watchedMS > 0 {
 		out.RebufferRatio = float64(rebufferMS) / float64(watchedMS)
@@ -319,6 +364,10 @@ func (q *Queries) PlaybackQoESummaryStats(ctx context.Context, window time.Durat
 		out.ErrorRate = float64(errored) / float64(terminated)
 	}
 
+	// Non-nil so an empty window marshals as [] rather than null — the SPA tab
+	// that will read this should not have to special-case both.
+	out.ByDecision = []PlaybackQoEDecisionStat{}
+	out.TopReasons = []PlaybackQoEReasonStat{}
 	if err := q.playbackQoEByDecision(ctx, seconds, out); err != nil {
 		return nil, err
 	}
