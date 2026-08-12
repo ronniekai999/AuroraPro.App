@@ -10,6 +10,7 @@ import {
   buildQuickChips,
   countMemberMatches,
   countdownLabel,
+  matchMembersWithTotal,
   formatPartyTime,
   inviteCodeFromLink,
   localDateKey,
@@ -236,9 +237,31 @@ describe('countMemberMatches', () => {
     expect(countMemberMatches(many, 'sam')).toBe(12)
   })
 
-  it('agrees with matchMembers when nothing is truncated', () => {
+  it('equals the rendered count when nothing is truncated', () => {
     expect(countMemberMatches(many, 'sam3')).toBe(1)
+    expect(matchMembers(many, 'sam3')).toHaveLength(1)
     expect(countMemberMatches(many, 'nobody')).toBe(0)
     expect(countMemberMatches(many, 'sa')).toBe(0)
+  })
+})
+
+// Both public entry points delegate to one ranked pass, so they cannot
+// disagree about what matched — and the picker takes both from a single
+// call rather than scanning and sorting the roster twice per keystroke.
+describe('matchMembersWithTotal', () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ username: `sam${i}` }))
+
+  it('returns the capped rows and the uncapped total together', () => {
+    const { matches, total } = matchMembersWithTotal(many, 'sam')
+    expect(matches).toHaveLength(MAX_MEMBER_RESULTS)
+    expect(total).toBe(12)
+  })
+
+  it('agrees with the single-purpose helpers exactly', () => {
+    for (const q of ['sam', 'sam1', 'nobody', 'sa', '']) {
+      const { matches, total } = matchMembersWithTotal(many, q)
+      expect(matches).toEqual(matchMembers(many, q))
+      expect(total).toBe(countMemberMatches(many, q))
+    }
   })
 })

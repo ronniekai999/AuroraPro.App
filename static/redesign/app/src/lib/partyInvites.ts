@@ -200,28 +200,45 @@ function rankMembers<T extends MemberMatchable>(members: readonly T[], q: string
   return scored.map(s => s.m)
 }
 
-// matchMembers returns the rows the picker should render: ranked, and capped
-// so the results stay a short list to scan rather than a second directory.
-// Pair it with countMemberMatches when you need to tell the user that the
-// cap hid something.
+// MEMBER_DIRECTORY_LIMIT mirrors the server's `LIMIT 500` on /api/members
+// (internal/db/queries_social.go). At the cap the client is searching a
+// truncated roster, so "no members match" stops being a fact about the
+// server and becomes a fact about what we happened to fetch — which the
+// picker has to say out loud rather than assert someone doesn't exist.
+export const MEMBER_DIRECTORY_LIMIT = 500
+
+// matchMembersWithTotal returns the rows to render AND how many matched
+// before the cap, from a single pass. The picker needs both on every
+// keystroke, and computing them separately means two full scans plus two
+// sorts — and two chances to disagree about what matched.
+export function matchMembersWithTotal<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+  limit: number = MAX_MEMBER_RESULTS,
+): { matches: T[]; total: number } {
+  const ranked = rankMembers(members, normalizeMemberQuery(query))
+  return { matches: ranked.slice(0, Math.max(0, limit)), total: ranked.length }
+}
+
+// matchMembers returns just the rows the picker should render: ranked, and
+// capped so the results stay a short list to scan rather than a second
+// directory.
 export function matchMembers<T extends MemberMatchable>(
   members: readonly T[],
   query: string,
   limit: number = MAX_MEMBER_RESULTS,
 ): T[] {
-  return rankMembers(members, normalizeMemberQuery(query)).slice(0, Math.max(0, limit))
+  return matchMembersWithTotal(members, query, limit).matches
 }
 
-// countMemberMatches is how many members matched BEFORE the cap. The picker
-// announces this rather than the rendered row count: with 12 matches and a
-// cap of 8, saying "8 matching members" isn't an omission, it's false — and
-// the results box already scrolls, so a truncated list and a long one look
-// identical on screen.
+// countMemberMatches is how many members matched BEFORE the cap. With 12
+// matches and a cap of 8, saying "8 matching members" isn't an omission,
+// it's false.
 export function countMemberMatches<T extends MemberMatchable>(
   members: readonly T[],
   query: string,
 ): number {
-  return rankMembers(members, normalizeMemberQuery(query)).length
+  return matchMembersWithTotal(members, query).total
 }
 
 // countdownParts renders a "starts in" delta as h:mm:ss / m:ss, clamped at

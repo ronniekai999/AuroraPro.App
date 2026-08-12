@@ -23,11 +23,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { listMembers, type MemberSummary } from '@/lib/api'
 import {
+  MEMBER_DIRECTORY_LIMIT,
   MIN_MEMBER_QUERY_CHARS,
   buildQuickChips,
-  countMemberMatches,
   formatPartyTime,
-  matchMembers,
+  matchMembersWithTotal,
   memberQueryReady,
 } from '@/lib/partyInvites'
 import { PartyShareCardModal } from './PartyShareCardModal'
@@ -96,6 +96,11 @@ export function PartyComposerModal({
 
   useEffect(() => {
     const ac = new AbortController()
+    // Clear any previous failure before re-fetching. The results tree is an
+    // exclusive ternary with membersError first, so a stale error from an
+    // earlier attempt would render a dead picker: the roster loads, matches
+    // exist, and the user sees only the old warning with no rows.
+    setMembersError(null)
     listMembers(ac.signal)
       .then(list => {
         // Only self-filtering here. Ordering is matchMembers' job now (it
@@ -118,16 +123,18 @@ export function PartyComposerModal({
   // query has already spelled out ("jd"), because there is no third letter
   // to ask them for. `searching` only decides which EMPTY state to show.
   const searching = memberQueryReady(search)
-  const matches = useMemo(
-    () => (members ? matchMembers(members, search) : []),
-    [members, search])
-  // Matches before the cap. Announcing the rendered count instead would be a
-  // false statement once the cap bites, and the scrolling box hides the
-  // difference.
-  const totalMatches = useMemo(
-    () => (members ? countMemberMatches(members, search) : 0),
+  // One pass per keystroke, not two: `total` is the count BEFORE the render
+  // cap (announcing the rendered count once the cap bites is a false
+  // statement, and the scrolling box hides the difference), and taking both
+  // from one call means they cannot disagree.
+  const { matches, total: totalMatches } = useMemo(
+    () => (members ? matchMembersWithTotal(members, search) : { matches: [], total: 0 }),
     [members, search])
   const hiddenMatches = Math.max(0, totalMatches - matches.length)
+  // The roster endpoint is capped server-side. At the cap we cannot tell
+  // "this member does not exist" from "this member is past the cap", so the
+  // no-match copy stops asserting the former.
+  const rosterTruncated = members !== null && members.length >= MEMBER_DIRECTORY_LIMIT
   // A server with nobody else on it is its own answer — "no members match"
   // would blame the query for an empty roster.
   const rosterEmpty = members !== null && members.length === 0
@@ -144,13 +151,32 @@ export function PartyComposerModal({
       byName.get(username) ?? { user_id: -1, username, is_following: false } as MemberSummary)
   }, [members, selected])
 
-  const toggle = (username: string) => {
+  // Announced when someone is added or removed. Sighted users see the chip
+  // row change; a screen-reader user gets nothing otherwise — the result row
+  // whose aria-pressed would have flipped is unmounted in the same commit
+  // (the query clears), and neither the chip row nor the "N invited" counter
+  // is a live region. Without this, a blind host activates Sammy, the list
+  // vanishes, nothing is announced, and the natural recovery is to press
+  // Enter again on a row that no longer exists.
+  const [pickAnnouncement, setPickAnnouncement] = useState('')
+
+  const toggle = (username: string, shownName?: string) => {
+    // Same split as pick(): the SELECTION is a functional update (must never
+    // lose a write), the ANNOUNCEMENT is derived from a closure read (worst
+    // case in a batched update: the wrong verb is spoken). The updater stays
+    // pure — setState inside another setState's updater is a side effect
+    // React is free to run twice.
+    const wasSelected = selected.has(username)
     setSelected(prev => {
       const next = new Set(prev)
       if (next.has(username)) next.delete(username)
       else next.add(username)
       return next
     })
+    const name = shownName || username
+    setPickAnnouncement(wasSelected
+      ? `${name} removed from the invite list`
+      : `${name} added to the invite list`)
   }
 
   // Picking from the results clears the query and hands focus back to the
@@ -158,19 +184,22 @@ export function PartyComposerModal({
   // type-tap-select-all-delete-type. Deselecting from the results leaves the
   // query alone — the row you just unticked should stay where it is instead
   // of vanishing out from under the tap.
-  const pick = (username: string) => {
-    // One read of `selected`, used for BOTH the new set and the decision to
-    // clear the query. The previous shape asked the closure whether the
-    // member was selected and separately handed a functional update to
-    // toggle(): two sources for one fact, which can only ever agree by
-    // luck. (They do agree today — React flushes discrete click events
-    // synchronously — but nothing here should depend on that.)
-    const next = new Set(selected)
-    const selecting = !next.has(username)
-    if (selecting) next.add(username)
-    else next.delete(username)
-    setSelected(next)
-    if (selecting) {
+  const pick = (username: string, shownName: string) => {
+    // The SELECTION goes through toggle()'s functional update — that is the
+    // batching-safe form, and it is the half that must never lose a write:
+    // a dropped update here means someone the host removed still receives an
+    // invite. Reading `selected` from the closure to build the next set
+    // instead (tried, reverted) loses one of two updates that land in the
+    // same React batch.
+    //
+    // The closure read below decides only whether to CLEAR THE QUERY, which
+    // is cosmetic. If it were ever stale the query would simply not clear —
+    // visible, harmless, and self-correcting on the next keystroke. Splitting
+    // it this way keeps the authoritative write authoritative and confines
+    // the closure to the part that cannot corrupt anything.
+    const wasSelected = selected.has(username)
+    toggle(username, shownName)
+    if (!wasSelected) {
       setSearch('')
       searchRef.current?.focus()
     }
@@ -357,8 +386,19 @@ export function PartyComposerModal({
                 <li key={m.username}>
                   <button
                     type="button"
-                    onClick={() => toggle(m.username)}
-                    aria-label={`Remove ${shownName} from the invite list`}
+                    onClick={() => {
+                      toggle(m.username, shownName)
+                      // The chip unmounts on click. Without this, focus falls
+                      // to <body> — and this dialog has no focus trap, so the
+                      // next Tab starts at the top of the page BEHIND it.
+                      searchRef.current?.focus()
+                    }}
+                    // Qualified with the handle: two guests can share a
+                    // display name, and "Remove JD" twice is unusable. The
+                    // "@" is deliberately absent — screen readers read it as
+                    // "at" regardless, and keeping it off the chips leaves
+                    // "@handle" unique to the result rows.
+                    aria-label={`Remove ${shownName} (${m.username}) from the invite list`}
                     className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full bg-purple-600/20 border border-purple-500/40 text-white/90 text-xs hover:bg-purple-600/30 transition-colors"
                   >
                     <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={18} />
@@ -389,13 +429,23 @@ export function PartyComposerModal({
             frame under the input reads as "broken", not as "keep typing". */}
         {membersError ? (
           <p className="text-amber-300/80 text-xs mt-2">Couldn't load members: {membersError}</p>
-        ) : members === null && searching ? (
+        ) : members === null && search.trim() !== '' ? (
+          // Any typing at all, not just a query past the threshold. Gating
+          // this on `searching` told a host with a slow roster fetch to "type
+          // at least 3 letters" — advice that is actively wrong for the
+          // short-name members the threshold rule exists to keep reachable,
+          // since their whole name IS the query.
           <p className="text-white/40 text-xs mt-2">Loading members…</p>
         ) : rosterEmpty ? (
           <p className="text-white/40 text-xs mt-2">Nobody else here yet.</p>
         ) : matches.length === 0 ? (
           searching
-            ? <p className="text-white/40 text-xs mt-2">No members match “{search.trim()}”.</p>
+            ? (
+              <p className="text-white/40 text-xs mt-2">
+                No members match “{search.trim()}”.
+                {rosterTruncated && ' Only the first ' + members!.length + ' members were loaded, so someone further down the list may be missing — you can still invite them with the party code.'}
+              </p>
+            )
             : (
               <p className="text-white/35 text-[11px] mt-2">
                 Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
@@ -410,7 +460,7 @@ export function PartyComposerModal({
                 <li key={m.user_id}>
                   <button
                     type="button"
-                    onClick={() => pick(m.username)}
+                    onClick={() => pick(m.username, shownName)}
                     aria-pressed={on}
                     className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-white/[0.04] transition-colors"
                   >
@@ -446,7 +496,12 @@ export function PartyComposerModal({
             count as if it were the match count. */}
         {hiddenMatches > 0 && (
           <p className="text-white/35 text-[11px] mt-1.5">
-            Showing {matches.length} of {totalMatches} — keep typing to narrow it down.
+            Showing {matches.length} of {totalMatches}
+            {/* "Keep typing" is only true above the threshold. Below it,
+                matches are whole-name equality, so another character can
+                only take the count to zero — advice that walks the host into
+                a dead end. */}
+            {searching ? ' — keep typing to narrow it down.' : '.'}
           </p>
         )}
 
@@ -459,7 +514,7 @@ export function PartyComposerModal({
             roster is still loading — or, worse, when the fetch FAILED and
             the visible error sits outside any live region — tells the user
             that Sam isn't on this server when we simply don't know yet. */}
-        <p className="sr-only" role="status" aria-live="polite">
+        <p className="sr-only" role="status" aria-live="polite" aria-label="Member search results">
           {membersError
             ? 'Could not load members'
             : members === null && searching
@@ -473,6 +528,13 @@ export function PartyComposerModal({
                     ? 'No matching members'
                     : ''}
         </p>
+        {/* Separate region from the results status above: adding someone and
+            the result list changing are two different events, and sharing one
+            region means the second overwrites the first before it is read.
+            This is the ONLY confirmation a screen-reader user gets that a
+            pick landed — the row whose aria-pressed would have flipped is
+            unmounted in the same commit, since picking clears the query. */}
+        <p className="sr-only" role="status" aria-live="polite" aria-label="Guest list updates">{pickAnnouncement}</p>
 
         {/* ─── Note ──────────────────────────────────────────────── */}
         <p className="text-white/40 text-[10px] uppercase tracking-wider mt-4 mb-2">

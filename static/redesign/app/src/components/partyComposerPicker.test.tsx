@@ -69,8 +69,14 @@ function renderComposer(onLaunch = vi.fn<LaunchFn>(async () => ({ ok: true }))) 
   return onLaunch
 }
 
-// Every member row renders its handle as "@name"; the chips and the CTA don't.
+// Every member row renders its handle as "@name"; the chips deliberately
+// omit the "@" so this stays unique to the results list.
 const memberRow = (username: string) => screen.queryByText(new RegExp(`^@${username}\\b`))
+
+// The two sr-only live regions are distinguished by accessible name: one
+// reports the search results, the other confirms picks and removals.
+const resultsStatus = () => screen.getByRole('status', { name: 'Member search results' })
+const guestStatus = () => screen.getByRole('status', { name: 'Guest list updates' })
 
 describe('PartyComposerModal people picker', () => {
   beforeEach(() => {
@@ -154,7 +160,7 @@ describe('PartyComposerModal people picker', () => {
     // Exact string: the sr-only live region carries the same sentence
     // without the period, and a loose regex matches both.
     expect(await screen.findByText('Nobody else here yet.')).toBeInTheDocument()
-    expect(screen.getByRole('status')).toHaveTextContent('Nobody else here yet')
+    expect(resultsStatus()).toHaveTextContent('Nobody else here yet')
     // Not "no members match" — that would blame the query for an empty house.
     expect(screen.queryByText(/No members match/i)).toBeNull()
   })
@@ -166,8 +172,8 @@ describe('PartyComposerModal people picker', () => {
     expect(await screen.findByText(/Couldn't load members: boom/i)).toBeInTheDocument()
     // The live region must not tell a screen-reader user that nobody
     // matched when the truth is that we never found out.
-    expect(screen.getByRole('status')).toHaveTextContent(/Could not load members/i)
-    expect(screen.getByRole('status')).not.toHaveTextContent(/No matching members/i)
+    expect(resultsStatus()).toHaveTextContent(/Could not load members/i)
+    expect(resultsStatus()).not.toHaveTextContent(/No matching members/i)
   })
 
   it('announces the true match count, not the rendered one', async () => {
@@ -175,11 +181,57 @@ describe('PartyComposerModal people picker', () => {
     const box = await screen.findByLabelText('Search members by name')
 
     await userEvent.type(box, 'sam')
-    expect(screen.getByRole('status')).toHaveTextContent('2 matching members')
+    expect(resultsStatus()).toHaveTextContent(/^2 matching members$/)
 
     await userEvent.clear(box)
     await userEvent.type(box, 'dup')
-    expect(screen.getByRole('status')).toHaveTextContent('10 matching members, showing 8')
+    expect(resultsStatus()).toHaveTextContent('10 matching members, showing 8')
+  })
+
+  // Picking clears the query, which unmounts the row whose aria-pressed
+  // would have carried the confirmation — so without this announcement a
+  // screen-reader user gets no signal at all that the pick landed.
+  it('announces adding and removing a guest', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'sammy')
+    await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
+    expect(guestStatus()).toHaveTextContent('Sammy added to the invite list')
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove Sammy/i }))
+    expect(guestStatus()).toHaveTextContent('Sammy removed from the invite list')
+  })
+
+  // The chip unmounts on click. This dialog has no focus trap, so focus
+  // falling to <body> means the next Tab starts behind the dialog.
+  it('keeps focus in the dialog after removing a guest chip', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'sammy')
+    await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
+    await userEvent.click(screen.getByRole('button', { name: /Remove Sammy/i }))
+
+    expect(document.activeElement).toBe(box)
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  // Gating the loading state on the 3-char threshold told a host with a slow
+  // roster fetch to "type at least 3 letters" — advice that is wrong for the
+  // very members the short-name rule exists to keep reachable.
+  it('says it is loading as soon as the host types, not only past the threshold', async () => {
+    let release: (m: MemberSummary[]) => void = () => {}
+    mockedListMembers.mockReturnValue(new Promise(res => { release = res }))
+    renderComposer()
+
+    const box = screen.getByLabelText('Search members by name')
+    await userEvent.type(box, 'jd')
+    expect(screen.getByText(/Loading members…/i)).toBeInTheDocument()
+    expect(screen.queryByText(/Type at least 3 letters/i)).toBeNull()
+
+    release(ROSTER)
+    expect(await screen.findByText(/^@jd/)).toBeInTheDocument()
   })
 
   // Deselecting from the results list is the asymmetric half of pick(): the
