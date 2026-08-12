@@ -25,6 +25,7 @@ import { listMembers, type MemberSummary } from '@/lib/api'
 import {
   MIN_MEMBER_QUERY_CHARS,
   buildQuickChips,
+  countMemberMatches,
   formatPartyTime,
   matchMembers,
   memberQueryReady,
@@ -112,12 +113,24 @@ export function PartyComposerModal({
     return () => ac.abort()
   }, [currentUsername])
 
-  // Ranked matches for the current query, or [] while it's still too short.
-  // searching says which of those two an empty result means.
+  // Ranked matches for the current query. Note this is NOT gated on
+  // `searching`: matchMembers still surfaces someone whose whole name the
+  // query has already spelled out ("jd"), because there is no third letter
+  // to ask them for. `searching` only decides which EMPTY state to show.
   const searching = memberQueryReady(search)
   const matches = useMemo(
-    () => (members && searching ? matchMembers(members, search) : []),
-    [members, search, searching])
+    () => (members ? matchMembers(members, search) : []),
+    [members, search])
+  // Matches before the cap. Announcing the rendered count instead would be a
+  // false statement once the cap bites, and the scrolling box hides the
+  // difference.
+  const totalMatches = useMemo(
+    () => (members ? countMemberMatches(members, search) : 0),
+    [members, search])
+  const hiddenMatches = Math.max(0, totalMatches - matches.length)
+  // A server with nobody else on it is its own answer — "no members match"
+  // would blame the query for an empty roster.
+  const rosterEmpty = members !== null && members.length === 0
 
   // The chip row: everyone picked so far, in the order they were picked, and
   // independent of the query. Selection is stored as usernames (that's the
@@ -146,9 +159,18 @@ export function PartyComposerModal({
   // query alone — the row you just unticked should stay where it is instead
   // of vanishing out from under the tap.
   const pick = (username: string) => {
-    const wasSelected = selected.has(username)
-    toggle(username)
-    if (!wasSelected) {
+    // One read of `selected`, used for BOTH the new set and the decision to
+    // clear the query. The previous shape asked the closure whether the
+    // member was selected and separately handed a functional update to
+    // toggle(): two sources for one fact, which can only ever agree by
+    // luck. (They do agree today — React flushes discrete click events
+    // synchronously — but nothing here should depend on that.)
+    const next = new Set(selected)
+    const selecting = !next.has(username)
+    if (selecting) next.add(username)
+    else next.delete(username)
+    setSelected(next)
+    if (selecting) {
       setSearch('')
       searchRef.current?.focus()
     }
@@ -367,14 +389,18 @@ export function PartyComposerModal({
             frame under the input reads as "broken", not as "keep typing". */}
         {membersError ? (
           <p className="text-amber-300/80 text-xs mt-2">Couldn't load members: {membersError}</p>
-        ) : !searching ? (
-          <p className="text-white/35 text-[11px] mt-2">
-            Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
-          </p>
-        ) : members === null ? (
+        ) : members === null && searching ? (
           <p className="text-white/40 text-xs mt-2">Loading members…</p>
+        ) : rosterEmpty ? (
+          <p className="text-white/40 text-xs mt-2">Nobody else here yet.</p>
         ) : matches.length === 0 ? (
-          <p className="text-white/40 text-xs mt-2">No members match “{search.trim()}”.</p>
+          searching
+            ? <p className="text-white/40 text-xs mt-2">No members match “{search.trim()}”.</p>
+            : (
+              <p className="text-white/35 text-[11px] mt-2">
+                Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
+              </p>
+            )
         ) : (
           <ul className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-white/[0.06] divide-y divide-white/[0.05]">
             {matches.map(m => {
@@ -413,15 +439,39 @@ export function PartyComposerModal({
             })}
           </ul>
         )}
+
+        {/* The cap is not silent. The results box already scrolls, so a list
+            that was cut at 8 and a list that merely overflows look identical
+            — and the announcement below would otherwise state the rendered
+            count as if it were the match count. */}
+        {hiddenMatches > 0 && (
+          <p className="text-white/35 text-[11px] mt-1.5">
+            Showing {matches.length} of {totalMatches} — keep typing to narrow it down.
+          </p>
+        )}
+
         {/* Announced, not shown: sighted users can see the list appear, but a
             screen-reader user typing into the box gets no other signal that
-            the results underneath it changed. */}
+            the results underneath it changed.
+
+            This mirrors the branch tree above rather than deriving from the
+            match count alone: announcing "no matching members" while the
+            roster is still loading — or, worse, when the fetch FAILED and
+            the visible error sits outside any live region — tells the user
+            that Sam isn't on this server when we simply don't know yet. */}
         <p className="sr-only" role="status" aria-live="polite">
-          {!searching
-            ? ''
-            : matches.length === 0
-              ? 'No matching members'
-              : `${matches.length} matching ${matches.length === 1 ? 'member' : 'members'}`}
+          {membersError
+            ? 'Could not load members'
+            : members === null && searching
+              ? 'Loading members'
+              : rosterEmpty
+                ? 'Nobody else here yet'
+                : matches.length > 0
+                  ? `${totalMatches} matching ${totalMatches === 1 ? 'member' : 'members'}` +
+                    (hiddenMatches > 0 ? `, showing ${matches.length}` : '')
+                  : searching
+                    ? 'No matching members'
+                    : ''}
         </p>
 
         {/* ─── Note ──────────────────────────────────────────────── */}

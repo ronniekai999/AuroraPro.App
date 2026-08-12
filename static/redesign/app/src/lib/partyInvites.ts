@@ -129,22 +129,26 @@ export interface MemberMatchable {
 
 // normalizeMemberQuery trims, lowercases, and drops a leading "@" — people
 // type handles the way they read them ("@ronnie"), and the stored username
-// is bare.
+// is bare. Trimmed again after the strip so "@ sam" doesn't normalize to a
+// query with a leading space.
 export function normalizeMemberQuery(query: string): string {
-  return query.trim().replace(/^@+/, '').toLowerCase()
+  return query.trim().replace(/^@+/, '').trim().toLowerCase()
 }
 
-// memberQueryReady reports whether a query is long enough to search on.
-// Drives the picker's "keep typing" hint as well as the search itself, so
-// the threshold can never drift between the two.
+// memberQueryReady reports whether a query is long enough to run the normal
+// substring search. Drives the picker's "keep typing" hint as well as the
+// search itself, so the threshold can never drift between the two.
+//
+// NOTE this is not the same question as "will matchMembers return anything" —
+// see the short-name rule below. The picker renders results whenever there
+// are any, and only falls back to the hint when there are none.
 export function memberQueryReady(query: string): boolean {
   return normalizeMemberQuery(query).length >= MIN_MEMBER_QUERY_CHARS
 }
 
-// matchMembers ranks members against a typed query. Returns [] for a query
-// below the threshold — "too short" and "no matches" are deliberately the
-// same empty result here; the caller distinguishes them with
-// memberQueryReady so the two states can say different things on screen.
+// rankMembers is the whole ranked match set, uncapped. Exported behaviour
+// goes through matchMembers (capped) and countMemberMatches (total) so the
+// two can never disagree about what matched.
 //
 // Ranking, best first:
 //   1. the query starts the username or the display name (what you get when
@@ -153,22 +157,39 @@ export function memberQueryReady(query: string): boolean {
 //   2. it appears anywhere in either,
 // and inside each tier, people you follow come before people you don't, then
 // alphabetically by the name actually rendered on the row.
-export function matchMembers<T extends MemberMatchable>(
-  members: readonly T[],
-  query: string,
-  limit: number = MAX_MEMBER_RESULTS,
-): T[] {
-  const q = normalizeMemberQuery(query)
-  if (q.length < MIN_MEMBER_QUERY_CHARS) return []
+//
+// THE SHORT-NAME RULE. Below MIN_MEMBER_QUERY_CHARS we normally match
+// nobody — that gate is the point of the search-first picker. But a floor
+// applied blindly makes some members permanently unreachable: the OAuth
+// signup path derives a username from the email local-part with no length
+// floor (jd@gmail.com becomes "jd"), display names have no minimum at all,
+// and plenty of CJK names are exactly two characters. Those people are
+// invitable through the API and visible in /members, so a picker that can
+// never surface them is a client-side lockout, not a tidier list.
+//
+// So below the threshold we match only names the query has ALREADY spelled
+// out in full. Typing "sa" still shows nobody (no one is named "sa"), while
+// typing "jd" finds @jd, because there is no third letter to ask for.
+function rankMembers<T extends MemberMatchable>(members: readonly T[], q: string): T[] {
+  if (!q) return []
+  const short = q.length < MIN_MEMBER_QUERY_CHARS
 
   const scored: Array<{ m: T; tier: number; name: string }> = []
   for (const m of members) {
     const username = m.username.toLowerCase()
     const display = (m.display_name ?? '').toLowerCase()
-    const prefix = username.startsWith(q) || display.startsWith(q)
-    const anywhere = username.includes(q) || display.includes(q)
-    if (!prefix && !anywhere) continue
-    scored.push({ m, tier: prefix ? 0 : 1, name: (m.display_name || m.username).toLowerCase() })
+    let tier: number
+    if (short) {
+      // Complete-name matches only — anything else would be the wall of
+      // names the threshold exists to prevent.
+      if (username !== q && display !== q) continue
+      tier = 0
+    } else {
+      const prefix = username.startsWith(q) || display.startsWith(q)
+      if (!prefix && !(username.includes(q) || display.includes(q))) continue
+      tier = prefix ? 0 : 1
+    }
+    scored.push({ m, tier, name: (m.display_name || m.username).toLowerCase() })
   }
 
   scored.sort((a, b) =>
@@ -176,7 +197,31 @@ export function matchMembers<T extends MemberMatchable>(
     Number(!!b.m.is_following) - Number(!!a.m.is_following) ||
     a.name.localeCompare(b.name))
 
-  return scored.slice(0, Math.max(0, limit)).map(s => s.m)
+  return scored.map(s => s.m)
+}
+
+// matchMembers returns the rows the picker should render: ranked, and capped
+// so the results stay a short list to scan rather than a second directory.
+// Pair it with countMemberMatches when you need to tell the user that the
+// cap hid something.
+export function matchMembers<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+  limit: number = MAX_MEMBER_RESULTS,
+): T[] {
+  return rankMembers(members, normalizeMemberQuery(query)).slice(0, Math.max(0, limit))
+}
+
+// countMemberMatches is how many members matched BEFORE the cap. The picker
+// announces this rather than the rendered row count: with 12 matches and a
+// cap of 8, saying "8 matching members" isn't an omission, it's false — and
+// the results box already scrolls, so a truncated list and a long one look
+// identical on screen.
+export function countMemberMatches<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+): number {
+  return rankMembers(members, normalizeMemberQuery(query)).length
 }
 
 // countdownParts renders a "starts in" delta as h:mm:ss / m:ss, clamped at

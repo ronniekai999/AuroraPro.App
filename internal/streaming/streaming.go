@@ -1207,15 +1207,32 @@ type TranscodeSession struct {
 //
 // 30 minutes covers a pause for dinner. It costs disk, not CPU:
 // reapIdleVariants still stops every encoder after 75 idle seconds
-// (resumably), and enforceDiskCap still evicts these sessions under cache
-// pressure — the lease buys time, it does not pin anything forever.
+// (resumably).
+//
+// Two honest limits on what the lease guarantees:
+//
+//   - enforceDiskCap evicts oldest-LastAccess-first, and a paused cast-held
+//     session is BY CONSTRUCTION the oldest thing in the manager — so it is
+//     the first eviction candidate, not an incidental one. Under cache
+//     pressure the lease degrades to "until the next ~2-minute disk-cap
+//     tick", with the same os.RemoveAll outcome it exists to prevent.
+//     Exempting cast-held sessions from the cap would be worse (an
+//     unbounded transcode tree), so this stands as a known ceiling.
+//   - StopAllSessions on shutdown ignores the lease entirely, and this box
+//     auto-deploys, so in practice the guarantee is "30 minutes or until the
+//     next deploy".
 const castHeldTimeout = 30 * time.Minute
 
 // sessionIdleTimeout picks the idle window for one session: the configured
 // timeout normally, the longer cast lease for a session a receiver is
-// playing. Never SHORTENS the window — an operator who configured a
-// session_timeout_sec above 30 minutes meant it, and a cast is the last
-// thing that should get less patience than local playback.
+// playing.
+//
+// The asymmetry is deliberate and worth stating: this widens a shorter
+// configured window but never shortens a longer one. Overriding a short
+// session_timeout_sec IS the feature — a receiver has no browser to ping for
+// it — while an operator who configured a window above 30 minutes already
+// asked for more patience than the lease grants, and a cast is the last
+// thing that should get less of it than local playback.
 func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
 	if configured <= 0 {
 		configured = 5 * time.Minute
@@ -1704,20 +1721,7 @@ func (tm *TranscodeManager) cleanupLoop() {
 		}
 
 		// Phase 1: identify and remove expired sessions under lock (fast).
-		// The window is per-session, not global: a session a receiver is
-		// playing gets the longer cast lease, because the only client that
-		// could keep pinging it is a phone the OS has frozen.
-		var expired []*TranscodeSession
-		tm.mu.Lock()
-		for id, s := range tm.sessions {
-			if time.Since(s.LastAccess) > sessionIdleTimeout(s.castHeld, timeout) {
-				slog.Info("cleaning up idle transcode session",
-					"session_id", id, "user_id", s.UserID, "cast_held", s.castHeld)
-				delete(tm.sessions, id)
-				expired = append(expired, s)
-			}
-		}
-		tm.mu.Unlock()
+		expired := tm.takeExpiredSessions(timeout, time.Now())
 
 		// Phase 2: stop processes and delete files WITHOUT holding the main lock.
 		// This prevents os.RemoveAll on large segment dirs from blocking
@@ -2323,6 +2327,42 @@ func (tm *TranscodeManager) KeepAlive(sessionID string) bool {
 		s.LastAccess = time.Now()
 	}
 	return ok
+}
+
+// takeExpiredSessions removes and returns every session past its idle
+// window. Split out of cleanupLoop so the selection rule — the part with the
+// per-session cast lease in it — can be exercised directly; the loop's own
+// 30-second ticker is not something a test can drive.
+//
+// The window is per-session, not global: a session a receiver is playing
+// gets the longer cast lease, because the only client that could keep
+// pinging it is a phone whose OS has frozen its timers.
+//
+// Callers must stop processes and delete files WITHOUT holding tm.mu, which
+// is why this returns the victims rather than disposing of them.
+func (tm *TranscodeManager) takeExpiredSessions(timeout time.Duration, now time.Time) []*TranscodeSession {
+	var expired []*TranscodeSession
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for id, s := range tm.sessions {
+		if now.Sub(s.LastAccess) > sessionIdleTimeout(s.castHeld, timeout) {
+			slog.Info("cleaning up idle transcode session",
+				"session_id", id, "user_id", s.UserID, "cast_held", s.castHeld)
+			delete(tm.sessions, id)
+			expired = append(expired, s)
+		}
+	}
+	return expired
+}
+
+// IsCastHeld reports whether a session is on the cast lease. Exported for
+// the API-level test that the cast-token handler actually applies it, and
+// useful for diagnosing a session that is outliving the normal window.
+func (tm *TranscodeManager) IsCastHeld(sessionID string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	s, ok := tm.sessions[sessionID]
+	return ok && s.castHeld
 }
 
 // MarkCastHeld records that a session has been handed to a Chromecast or

@@ -689,7 +689,11 @@ export function absoluteUrl(path: string): string {
 // "no separate cast session", which is the safe reading.
 export function castSessionIdFromPlaylist(playlist: string): string | null {
   const m = /\/api\/stream\/hls\/([^/?#]+)\/master\.m3u8/.exec(playlist)
-  return m ? decodeURIComponent(m[1]) : null
+  // No decodeURIComponent: session IDs are hex (hex.EncodeToString server-
+  // side), so decoding is a no-op on every real input — and on a malformed
+  // one ("%") it THROWS a URIError, which would reject the whole cast from a
+  // function documented to return null on anything it doesn't recognize.
+  return m ? m[1] : null
 }
 
 // assertCastScopedToken decodes a JWT (without verifying its signature —

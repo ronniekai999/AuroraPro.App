@@ -1436,6 +1436,28 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 	// pre-#324 native-HLS behaviour where the original session was used directly.
 	castSessionID := sessionID
 	if r.URL.Query().Get("for_airplay") != "true" {
+		// Hand this session over to the receiver's clock. From here the thing
+		// keeping it alive is a TV pulling segments, not a browser POSTing
+		// keepalive — and the sender that would have pinged it is a phone
+		// whose screen locks, freezing its timers. MarkCastHeld widens the
+		// idle window so a paused cast (or a locked pocket) doesn't get its
+		// segments deleted five minutes later. See streaming.castHeldTimeout.
+		//
+		// Deliberately INSIDE this branch, and applied to the clone below
+		// rather than up here. for_airplay=true is NOT an "AirPlay started"
+		// signal: the SPA mints one of those during ordinary native-HLS setup
+		// for every Safari/iOS playback (VideoPlayer's usesNativeHls branch),
+		// whether or not an Apple TV is ever involved. Marking there would put
+		// every Apple-browser session — including the abandoned-tab case that
+		// is most common on exactly that platform — on a 30-minute lease it
+		// has no receiver to justify. Those sessions have a live browser
+		// pinging keepalive, which is what the normal window is sized for.
+		//
+		// The cost is that a genuine AirPlay session gets no lease. Closing
+		// that needs a real "playback moved to a receiver" signal from the
+		// client (webkitcurrentplaybacktargetiswirelesschanged), which no
+		// endpoint carries today — tracked as a follow-up rather than papered
+		// over by over-marking here.
 		if castSession, cloneErr := h.transcode.CloneForCast(claims.UserID, claims.Username, sessionID); cloneErr != nil {
 			if errors.Is(cloneErr, streaming.ErrUserSessionLimit) || errors.Is(cloneErr, streaming.ErrSessionLimit) {
 				slog.Warn("cast: clone hit session quota — refusing to silently cast the incompatible original",
@@ -1447,6 +1469,14 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 				"session_id", sessionID, "user_id", claims.UserID, "error", cloneErr)
 		} else {
 			castSessionID = castSession.ID
+		}
+		if !h.transcode.MarkCastHeld(castSessionID) {
+			// The session can be reaped between the ownership check above and
+			// here (a cleanup tick, a disk-cap eviction). Worth a line: we are
+			// about to hand out a token for a session that no longer exists,
+			// and the receiver will 404 on the master playlist.
+			slog.Warn("cast: session vanished before it could be marked cast-held",
+				"session_id", castSessionID, "user_id", claims.UserID)
 		}
 		// Pre-warm every quality variant so the Chromecast Default Media
 		// Receiver's ABR bandwidth probe hits a ready FFmpeg process rather
@@ -1465,14 +1495,6 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	}
-
-	// Hand the session over to the receiver's clock. From here the thing
-	// keeping it alive is a TV pulling segments, not a browser POSTing
-	// keepalive — and the sender that would have pinged it is a phone whose
-	// screen locks. MarkCastHeld widens the idle window accordingly so a
-	// paused cast (or a locked pocket) doesn't get the segments deleted out
-	// from under it five minutes later. See streaming.castHeldTimeout.
-	h.transcode.MarkCastHeld(castSessionID)
 
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
 		claims.UserID, claims.Username, claims.Role, claims.TokenVersion, castSessionID,

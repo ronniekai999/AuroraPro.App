@@ -17,19 +17,33 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PartyComposerModal, type PartyComposerLaunch } from './PartyComposerModal'
-import type { MemberSummary } from '@/lib/api'
+import { listMembers, type MemberSummary } from '@/lib/api'
 
 const ROSTER: MemberSummary[] = [
   { user_id: 1, username: 'ronnie', display_name: 'Ronnie', is_following: true },
   { user_id: 2, username: 'samir', display_name: 'Samir P', is_following: false },
   { user_id: 3, username: 'sammy', display_name: 'Sammy', is_following: true },
   { user_id: 4, username: 'kass', display_name: 'Kass', is_following: false },
+  // A member the OAuth path can really produce (jd@gmail.com -> "jd"):
+  // shorter than the query threshold, so a blind floor would hide them.
+  { user_id: 5, username: 'jd', display_name: 'JD', is_following: false },
+  // Ten matches for "dup" — more than MAX_MEMBER_RESULTS, so the cap bites.
+  ...Array.from({ length: 10 }, (_, i): MemberSummary => ({
+    user_id: 100 + i,
+    username: `dup${String(i).padStart(2, '0')}`,
+    is_following: false,
+  })),
 ]
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
-  return { ...actual, listMembers: vi.fn(async () => ROSTER) }
+  return { ...actual, listMembers: vi.fn() }
 })
+
+// The roster is installed per-test in beforeEach rather than baked into the
+// factory, so a test that needs a different one just reassigns it. (A
+// `mockResolvedValueOnce` does not survive this file's `clearAllMocks`.)
+const mockedListMembers = vi.mocked(listMembers)
 
 // The share card the booked state hands off to renders a canvas; nothing here
 // books a party, but the import chain is stubbed so jsdom's missing canvas
@@ -59,7 +73,10 @@ function renderComposer(onLaunch = vi.fn<LaunchFn>(async () => ({ ok: true }))) 
 const memberRow = (username: string) => screen.queryByText(new RegExp(`^@${username}\\b`))
 
 describe('PartyComposerModal people picker', () => {
-  beforeEach(() => { vi.clearAllMocks() })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockedListMembers.mockResolvedValue(ROSTER)
+  })
 
   it('lists nobody on open, however many members exist', async () => {
     renderComposer()
@@ -98,10 +115,87 @@ describe('PartyComposerModal people picker', () => {
     const box = await screen.findByLabelText('Search members by name')
     await userEvent.type(box, 'zzz')
 
-    expect(screen.getByText(/No members match/i)).toBeInTheDocument()
+    // Echoes the query back. The copy this replaced was a bare "No members
+    // match.", so asserting the quoted term is what makes this test fail
+    // against the old implementation rather than pass by coincidence.
+    expect(screen.getByText(/No members match “zzz”/i)).toBeInTheDocument()
     for (const m of ROSTER) {
       expect(memberRow(m.username)).toBeNull()
     }
+  })
+
+  // A blind 3-character floor locks out members the API will happily invite:
+  // OAuth derives usernames from an email local-part with no length floor,
+  // and 2-character CJK display names are ordinary.
+  it('finds a member whose whole name is shorter than the threshold', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+    await userEvent.type(box, 'jd')
+
+    expect(memberRow('jd')).not.toBeNull()
+    // …without that turning into "show everyone on a 2-character query".
+    expect(memberRow('sammy')).toBeNull()
+    expect(memberRow('samir')).toBeNull()
+  })
+
+  it('does not truncate silently — it says how many were hidden', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+    await userEvent.type(box, 'dup')
+
+    // 10 members match; the picker renders at most MAX_MEMBER_RESULTS.
+    expect(screen.getByText(/Showing 8 of 10/i)).toBeInTheDocument()
+  })
+
+  it('says the roster is empty rather than blaming the query', async () => {
+    mockedListMembers.mockResolvedValue([])
+    renderComposer()
+
+    // Exact string: the sr-only live region carries the same sentence
+    // without the period, and a loose regex matches both.
+    expect(await screen.findByText('Nobody else here yet.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Nobody else here yet')
+    // Not "no members match" — that would blame the query for an empty house.
+    expect(screen.queryByText(/No members match/i)).toBeNull()
+  })
+
+  it('surfaces a roster fetch failure instead of reporting no matches', async () => {
+    mockedListMembers.mockRejectedValue(new Error("boom"))
+    renderComposer()
+
+    expect(await screen.findByText(/Couldn't load members: boom/i)).toBeInTheDocument()
+    // The live region must not tell a screen-reader user that nobody
+    // matched when the truth is that we never found out.
+    expect(screen.getByRole('status')).toHaveTextContent(/Could not load members/i)
+    expect(screen.getByRole('status')).not.toHaveTextContent(/No matching members/i)
+  })
+
+  it('announces the true match count, not the rendered one', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'sam')
+    expect(screen.getByRole('status')).toHaveTextContent('2 matching members')
+
+    await userEvent.clear(box)
+    await userEvent.type(box, 'dup')
+    expect(screen.getByRole('status')).toHaveTextContent('10 matching members, showing 8')
+  })
+
+  // Deselecting from the results list is the asymmetric half of pick(): the
+  // query must survive so the row doesn't vanish out from under the tap.
+  it('leaves the query alone when a result row is deselected', async () => {
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'sammy')
+    await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
+    await userEvent.type(box, 'sammy') // box was cleared by the pick
+    await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
+
+    expect(box).toHaveValue('sammy')
+    expect(memberRow('sammy')).not.toBeNull()
+    expect(screen.queryByText('1 invited')).toBeNull()
   })
 
   // The regression this design invites: results are transient, so if the

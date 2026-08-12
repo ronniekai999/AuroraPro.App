@@ -100,18 +100,74 @@ func TestMarkCastHeld_UnknownSessionIsReportedNotCreated(t *testing.T) {
 	}
 }
 
-// The end-to-end shape of the fix, expressed against the same predicate the
-// cleanup loop uses: at 10 minutes idle — a locked phone plus a cast paused
-// on the TV — a normal session is gone and a cast-held one survives.
-func TestCastHeldSessionOutlivesTheNormalIdleSweep(t *testing.T) {
-	const configured = 5 * time.Minute
-	const idle = 10 * time.Minute
+// The end-to-end shape of the fix, driven through the SWEEP rather than the
+// pure helper: at 10 minutes idle — a locked phone plus a cast paused on the
+// TV — the normal session is reaped and the cast-held one survives.
+//
+// This runs the real selection rule (takeExpiredSessions), which is what
+// cleanupLoop calls. An earlier version of this test only called
+// sessionIdleTimeout twice and compared it to constants; reverting the loop
+// to ignore castHeld left it green, which made it worthless as a guard.
+func TestTakeExpiredSessions_CastHeldSurvivesTheNormalIdleSweep(t *testing.T) {
+	tm := castLeaseManager(t)
+	now := time.Now()
+	idle := 10 * time.Minute
 
-	if idle <= sessionIdleTimeout(false, configured) {
-		t.Fatal("precondition: a normal session should already be expired at 10m idle")
+	addLeaseSession(tm, "normal", now.Add(-idle), false)
+	addLeaseSession(tm, "casting", now.Add(-idle), true)
+	addLeaseSession(tm, "fresh", now.Add(-30*time.Second), false)
+
+	expired := tm.takeExpiredSessions(5*time.Minute, now)
+
+	gone := map[string]bool{}
+	for _, s := range expired {
+		gone[s.ID] = true
 	}
-	if idle > sessionIdleTimeout(true, configured) {
-		t.Errorf("a cast-held session must survive %v idle, window is only %v",
-			idle, sessionIdleTimeout(true, configured))
+	if !gone["normal"] {
+		t.Error("a normal session idle for 10m should have been reaped")
 	}
+	if gone["casting"] {
+		t.Error("a cast-held session idle for 10m must survive — this is the whole fix")
+	}
+	if gone["fresh"] {
+		t.Error("a session touched 30s ago must not be reaped")
+	}
+
+	// And it is actually removed from the manager, not merely reported.
+	tm.mu.Lock()
+	_, normalStillThere := tm.sessions["normal"]
+	_, castStillThere := tm.sessions["casting"]
+	tm.mu.Unlock()
+	if normalStillThere {
+		t.Error("reaped session should be gone from the map")
+	}
+	if !castStillThere {
+		t.Error("cast-held session should still be in the map")
+	}
+}
+
+// The lease is a reprieve, not immortality: past castHeldTimeout a cast-held
+// session is reaped like anything else. Without this, "never expires" would
+// pass every other test in this file.
+func TestTakeExpiredSessions_CastHeldStillExpiresEventually(t *testing.T) {
+	tm := castLeaseManager(t)
+	now := time.Now()
+
+	addLeaseSession(tm, "long-abandoned-cast", now.Add(-castHeldTimeout-time.Minute), true)
+
+	expired := tm.takeExpiredSessions(5*time.Minute, now)
+	if len(expired) != 1 || expired[0].ID != "long-abandoned-cast" {
+		t.Errorf("a cast-held session idle past the lease must be reaped, got %d session(s)", len(expired))
+	}
+}
+
+func addLeaseSession(tm *TranscodeManager, id string, lastAccess time.Time, castHeld bool) {
+	tm.mu.Lock()
+	tm.sessions[id] = &TranscodeSession{
+		ID:         id,
+		LastAccess: lastAccess,
+		castHeld:   castHeld,
+		Variants:   map[string]*QualityVariant{},
+	}
+	tm.mu.Unlock()
 }

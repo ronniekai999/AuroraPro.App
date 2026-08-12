@@ -5,8 +5,10 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  MAX_MEMBER_RESULTS,
   MIN_MEMBER_QUERY_CHARS,
   buildQuickChips,
+  countMemberMatches,
   countdownLabel,
   formatPartyTime,
   inviteCodeFromLink,
@@ -121,6 +123,9 @@ describe('normalizeMemberQuery', () => {
     expect(normalizeMemberQuery('@Ronnie')).toBe('ronnie')
     expect(normalizeMemberQuery('@@dee')).toBe('dee')
   })
+  it('re-trims after the @ so the query never starts with whitespace', () => {
+    expect(normalizeMemberQuery('@ sam')).toBe('sam')
+  })
 })
 
 describe('memberQueryReady', () => {
@@ -153,6 +158,36 @@ describe('matchMembers', () => {
     expect(matchMembers(roster, 'sam').length).toBeGreaterThan(0)
   })
 
+  // A blind 3-char floor makes some members permanently unreachable: OAuth
+  // signup derives usernames from an email local-part with no length floor
+  // (jd@gmail.com -> "jd"), display names have no minimum at all, and plenty
+  // of CJK names are exactly two characters. They are invitable through the
+  // API and visible in /members, so a picker that can never surface them is
+  // a client-side lockout, not a tidier list.
+  describe('short names stay reachable', () => {
+    const shortRoster = [
+      { username: 'jd', display_name: 'JD' },
+      { username: 'k_9f2a1b', display_name: '田中' },
+      { username: 'sammy', display_name: 'Sammy' },
+      { username: 'j', display_name: 'J' },
+    ]
+
+    it('finds a member whose whole name the query already spells out', () => {
+      expect(matchMembers(shortRoster, 'jd').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, 'JD').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, '@jd').map(m => m.username)).toEqual(['jd'])
+      expect(matchMembers(shortRoster, '田中').map(m => m.username)).toEqual(['k_9f2a1b'])
+      expect(matchMembers(shortRoster, 'j').map(m => m.username)).toEqual(['j'])
+    })
+
+    it('still refuses to list people from a partial short query', () => {
+      // "sa" is a prefix of Sammy, but it is nobody's WHOLE name — so the
+      // threshold still applies and the wall of names stays away.
+      expect(matchMembers(shortRoster, 'sa')).toEqual([])
+      expect(matchMembers(shortRoster, 'k_')).toEqual([])
+    })
+  })
+
   it('matches username or display name, case-insensitively', () => {
     expect(matchMembers(roster, 'SAMANTHA').map(m => m.username)).toEqual(['dee'])
     expect(matchMembers(roster, 'kass').map(m => m.username)).toEqual(['kass'])
@@ -178,5 +213,32 @@ describe('matchMembers', () => {
   it('tolerates members with no display name', () => {
     expect(matchMembers([{ username: 'samwise' }], 'sam').map(m => m.username))
       .toEqual(['samwise'])
+  })
+
+  // The DEFAULT cap, not just an explicitly-passed limit — the picker never
+  // passes one, so this is the number users actually hit.
+  it('caps at MAX_MEMBER_RESULTS by default', () => {
+    const many = Array.from({ length: MAX_MEMBER_RESULTS + 4 }, (_, i) => ({
+      username: `sam${String(i).padStart(2, '0')}`,
+    }))
+    expect(matchMembers(many, 'sam')).toHaveLength(MAX_MEMBER_RESULTS)
+  })
+})
+
+// The count the picker announces. Announcing the RENDERED row count once the
+// cap bites isn't an omission, it's false — and because the results box
+// scrolls, a truncated list and a long one look identical.
+describe('countMemberMatches', () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ username: `sam${i}` }))
+
+  it('counts every match, past the render cap', () => {
+    expect(matchMembers(many, 'sam')).toHaveLength(MAX_MEMBER_RESULTS)
+    expect(countMemberMatches(many, 'sam')).toBe(12)
+  })
+
+  it('agrees with matchMembers when nothing is truncated', () => {
+    expect(countMemberMatches(many, 'sam3')).toBe(1)
+    expect(countMemberMatches(many, 'nobody')).toBe(0)
+    expect(countMemberMatches(many, 'sa')).toBe(0)
   })
 })
