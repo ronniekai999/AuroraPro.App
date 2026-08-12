@@ -174,7 +174,7 @@ func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool, fps 
 		// format=yuv420p contract. HDR never reaches here (PlanDecode
 		// keeps NVENC HDR on Tier 1's CPU zscale chain).
 		vf := fmt.Sprintf("scale_cuda=%d:-2:format=yuv420p", width)
-		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+		return []string{"-c:v", "h264_nvenc", "-preset", h.policy().nvencPreset(), "-tune", "hq", "-rc", "vbr",
 			"-profile:v", profile, "-level", level, "-vf", vf}
 	case HWAccelVAAPI:
 		vf := fmt.Sprintf("scale_vaapi=w=%d:h=-2:format=nv12", width)
@@ -185,7 +185,8 @@ func (h HWAccelInfo) FullGPUEncoderArgs(width, height int, hdrTonemap bool, fps 
 			// outputs bt709 nv12.
 			vf = fmt.Sprintf("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709,scale_vaapi=w=%d:h=-2", width)
 		}
-		return []string{"-c:v", "h264_vaapi", "-level", level, "-vf", vf}
+		args := []string{"-c:v", "h264_vaapi", "-level", level, "-vf", vf}
+		return append(args, h.policy().vaapiCompressionArgs()...)
 	}
 	return nil
 }
@@ -199,14 +200,15 @@ func (h HWAccelInfo) FullGPUHEVCEncoderArgs(width, height int, hdrTonemap bool, 
 	switch h.Type {
 	case HWAccelNVENC:
 		vf := fmt.Sprintf("scale_cuda=%d:-2:format=yuv420p", width)
-		return []string{"-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+		return []string{"-c:v", "hevc_nvenc", "-preset", h.policy().nvencPreset(), "-tune", "hq", "-rc", "vbr",
 			"-profile:v", "main", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
 	case HWAccelVAAPI:
 		vf := fmt.Sprintf("scale_vaapi=w=%d:h=-2:format=nv12", width)
 		if hdrTonemap {
 			vf = fmt.Sprintf("tonemap_vaapi=format=nv12:t=bt709:m=bt709:p=bt709,scale_vaapi=w=%d:h=-2", width)
 		}
-		return []string{"-c:v", "hevc_vaapi", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
+		args := []string{"-c:v", "hevc_vaapi", "-level", level, "-vf", vf, "-tag:v", "hvc1"}
+		return append(args, h.policy().vaapiCompressionArgs()...)
 	}
 	return nil
 }

@@ -1,0 +1,120 @@
+name: CI
+
+# The merge gate described in docs/dev-workflow.md, automated (August 2026
+# playback review, item #1). Until this existed, `go build ./... && go test
+# ./...` was a step a human remembered to run, and the ffmpeg-dependent tests
+# only ever ran on machines that happened to have media tooling installed.
+#
+# Two things here are deliberate rather than incidental:
+#
+#   - ffmpeg is installed and AURORA_REQUIRE_MEDIA_TESTS=1 is set, which turns
+#     every "ffmpeg not in PATH → t.Skip" guard into a hard failure. Without
+#     that flag a container without ffmpeg reports a green run having executed
+#     none of the playback matrix.
+#   - Postgres carries the pgvector and pg_trgm extensions the schema needs, and
+#     TEST_DATABASE_URL is exported, so the migration chain is actually applied
+#     instead of skipped.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go build & test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector's image is stock Postgres plus the `vector` extension that
+        # migration 014 requires; pg_trgm (migration 001) ships with contrib.
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: aurora
+          POSTGRES_PASSWORD: aurora
+          POSTGRES_DB: aurora_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aurora -d aurora_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Turns the media-tooling skips into failures. See mediafixture_test.go.
+      AURORA_REQUIRE_MEDIA_TESTS: "1"
+      TEST_DATABASE_URL: postgres://aurora:aurora@localhost:5432/aurora_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install media tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          # Recorded in the log because distro builds differ in enabled
+          # filters/encoders, and the playback matrix gates itself on those
+          # capabilities rather than on a version number (August 2026 review §5).
+          ffmpeg -hide_banner -version | head -1
+          ffmpeg -hide_banner -encoders | grep -E ' (libx264|libx265|libsvtav1|aac|ac3|eac3) ' || true
+          ffmpeg -hide_banner -filters  | grep -E ' (subtitles|zscale|tonemap|overlay) ' || true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Establish the schema BEFORE the suite. A large body of tests opts into
+      # database mode purely by TEST_DATABASE_URL being set and assumes a
+      # migrated schema is already there — and `go test ./...` runs packages
+      # concurrently against the one database, so no package can be relied on
+      # to migrate before another reads. Running the chain as its own step is
+      # what makes that assumption true. RunMigrations is idempotent, so this
+      # is also safe to re-run.
+      - name: Apply migrations
+        run: go test ./internal/db/ -run TestRunMigrations_AppliesFullChain -count=1 -v
+
+      - name: Test
+        run: go test ./... -timeout 20m
+
+  web:
+    name: SPA build & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: static/redesign/app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: static/redesign/app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck & build
+        run: npm run build
+
+      - name: Test
+        run: npm test

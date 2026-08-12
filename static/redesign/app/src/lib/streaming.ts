@@ -60,6 +60,10 @@ export interface StreamDecision {
   // total for sync-with-friends parity. Optional only because some
   // old/edge-case files may scan without a duration.
   duration_ms?: number
+  // Server-bucketed transcode reason, drawn from the fixed QoE vocabulary
+  // (streaming.ReasonCode). transcode_reason above is prose for humans; this
+  // is the value telemetry aggregates on.
+  reason_code?: string
   // direct_stream === remux. Set so the session-create payload echoes
   // it back; the server uses it to short-circuit transcode parameter
   // selection.

@@ -70,6 +70,12 @@ func TestDefaults(t *testing.T) {
 	if cfg.Transcode.SegmentDuration != 6 {
 		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 6)
 	}
+	// The default must be the policy that reproduces the historical encoder
+	// arguments — an upgrade that silently re-tuned every transcode would be
+	// exactly the regression this knob is designed to avoid.
+	if cfg.Transcode.QualityPolicy != "balanced" {
+		t.Errorf("Transcode.QualityPolicy = %q, want %q", cfg.Transcode.QualityPolicy, "balanced")
+	}
 	if cfg.Transcode.SessionTimeout != 300*time.Second {
 		t.Errorf("Transcode.SessionTimeout = %v, want %v", cfg.Transcode.SessionTimeout, 300*time.Second)
 	}
@@ -450,6 +456,7 @@ tmdb:
 transcode:
   max_sessions: 10
   hw_accel: "qsv"
+  quality_policy: "quality"
   session_timeout_sec: 600
   segment_duration: 4
   profiles:
@@ -491,6 +498,9 @@ transcode:
 	}
 	if cfg.Transcode.SegmentDuration != 4 {
 		t.Errorf("Transcode.SegmentDuration = %d, want %d", cfg.Transcode.SegmentDuration, 4)
+	}
+	if cfg.Transcode.QualityPolicy != "quality" {
+		t.Errorf("Transcode.QualityPolicy = %q, want %q", cfg.Transcode.QualityPolicy, "quality")
 	}
 	if cfg.Auth.AccessTokenExpiry != 60*time.Minute {
 		t.Errorf("Auth.AccessTokenExpiry = %v, want %v", cfg.Auth.AccessTokenExpiry, 60*time.Minute)

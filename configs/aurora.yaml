@@ -48,7 +48,15 @@ transcode:
   max_sessions: 0               # 0 = unlimited
   hw_accel: "auto"              # auto, nvenc, qsv, vaapi, amf, none
   hw_decode: "auto"             # auto (probe GPU decode at startup), off (encode-side accel only)
-  # software_preset: "veryfast" # libx264 preset for SOFTWARE transcodes: ultrafast..medium ("faster" = quality-first)
+  # quality_policy: "balanced"  # speed/quality preference, resolved per encoder family:
+                                #   balanced   (default) — the historical settings, unchanged
+                                #   fast_start           — faster presets, lower time-to-first-frame
+                                #   quality              — more encode time for better compression
+                                # Applies to every family (NVENC/QSV/VAAPI/AMF/software); VAAPI had
+                                # no quality knob at all before this and stays on the driver default
+                                # under "balanced".
+  # software_preset: "veryfast" # libx264/libx265 preset for SOFTWARE transcodes: ultrafast..medium.
+                                # OVERRIDES quality_policy for the software encoders when set.
   # hevc_output: "auto"           # auto (emit HEVC for HEVC-capable clients when an encoder is available), off (H.264 only)
   session_timeout_sec: 120
   segment_duration: 6

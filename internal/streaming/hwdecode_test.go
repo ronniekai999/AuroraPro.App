@@ -250,8 +250,11 @@ func TestFullGPUEncoderArgs(t *testing.T) {
 // ffmpeg is absent. (On a real GPU box the probes flip capabilities on;
 // that path is validated by construction via the exact-shape probe args.)
 func TestProbeHWDecode_NoHardwareDegradesToOff(t *testing.T) {
+	// Missing ffmpeg is a skip on a bare dev laptop but a hard failure under
+	// AURORA_REQUIRE_MEDIA_TESTS (CI) — otherwise this test reports green
+	// having probed nothing at all.
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg not in PATH")
+		failOrSkipMedia(t, "ffmpeg not in PATH")
 	}
 	// The assertion below is "hardware is ABSENT, so probes must fail" — on
 	// a machine that actually has GPU decode (nvidia driver or a DRI render

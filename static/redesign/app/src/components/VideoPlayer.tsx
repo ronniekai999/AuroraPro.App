@@ -60,6 +60,19 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
+import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
+// Session-identity rules live in their own module so they can be tested — the
+// player itself is not mountable in a unit test, and an adversarial review
+// showed every one of these behaviors could be reverted with the SPA suite
+// staying green.
+import {
+  collectorAction,
+  failureTerminal,
+  prewarmOutcome,
+  viewingKeyOf,
+  viewingTerminal,
+  type FailureKind,
+} from '@/lib/playbackQoESession'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
@@ -232,6 +245,10 @@ interface VideoPlayerProps {
   // user explicitly clicks the card's button, `force: true` asks the
   // parent to advance even with the autoplay preference off — an
   // explicit click outranks the passive-behavior setting.
+  // Active sub-profile, so playback telemetry is attributed to the profile
+  // that actually watched rather than falling back to the account default —
+  // which mis-filed every kids-profile playback.
+  profileId?: number | null
   onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
   // Issue #460 — the next-up card's party counterpart. In a watch party
   // the host's advance must move the ROOM, not this player, so the card
@@ -453,7 +470,7 @@ async function attemptPlay(
 // button being the usual last click before sitting back) stranded focus
 // inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
+export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
   onSurfaceChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -466,6 +483,29 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const onPartyAdvanceRef = useRef(onPartyAdvance)
   onPartyAdvanceRef.current = onPartyAdvance
   const hlsRef = useRef<Hls | null>(null)
+  // Playback QoE collector for the CURRENT playback (August 2026 review item
+  // #1). Held in a ref rather than state because nothing renders from it and a
+  // re-render must never restart the measurement.
+  const qoeRef = useRef<QoECollector | null>(null)
+  // The VIEWING the current collector belongs to. A viewing is one title being
+  // watched; the delivery underneath it can be rebuilt many times (seek
+  // re-anchor, audio-track switch, transcode fallback) and each rebuild
+  // produces a new `target` object. Keying the collector on the target made one
+  // movie with four scrubs write five rows — four terminating as `user_exit`,
+  // four contributing a bogus "startup" timed from the rebuild, and watched_ms
+  // reset each time. Keying it on the viewing keeps one row per playback.
+  const qoeViewingRef = useRef<string | null>(null)
+  // Set when a completed playthrough hands off to the next episode, so the
+  // viewing-key cleanup can report `ended` instead of `user_exit`. The <video>
+  // element never fires `ended` on this path — the next-up card advances at the
+  // credits marker — so without it a fully-watched episode and an abandoned one
+  // are indistinguishable. Set only where the advance ACTUALLY succeeded;
+  // every failure path below leaves the viewer parked on the same episode.
+  const qoeAdvancedRef = useRef(false)
+  // performance.now() at the moment the user asked for playback. Captured as
+  // early as the effect runs so click-to-first-frame measures what the viewer
+  // actually waited through, not just the part after the manifest resolved.
+  const playRequestedAtRef = useRef<number | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   // sessionId=null means both "native direct play" and "an HLS target is
   // still resolving". Keep the delivery state explicit so a second rapid seek
@@ -1482,6 +1522,53 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     promote()
   }, [target, availableSubs])
 
+  // The QoE row is closed HERE, not in closeAndCleanup and not on unmount.
+  //
+  // closeAndCleanup runs on every delivery teardown, including the seek
+  // re-anchor and audio-switch rebuilds that continue the same viewing, so
+  // closing there fragmented one playback into several rows.
+  //
+  // Unmount is equally wrong, and more subtly: App renders <VideoPlayer>
+  // UNCONDITIONALLY and the component's `if (!target) return null` sits after
+  // every hook, so this component stays mounted for the whole logged-in
+  // session. A cleanup with [] deps would fire at most once per app lifetime —
+  // closing the player would never close the row.
+  //
+  // Keying on the viewing itself is what actually matches the lifetime: the
+  // cleanup runs exactly when the viewing changes, including when it becomes
+  // '' because the player was closed. `finish` is idempotent, so a viewing
+  // already closed by `ended`, by fireAdvance or by a terminal error keeps the
+  // outcome it really had.
+  const currentViewing = viewingKeyOf(target)
+  useEffect(() => {
+    if (!target) return
+    // Sample the bandwidth estimate on a timer rather than only at teardown.
+    // It used to be read inside closeAndCleanup, but React runs cleanups in
+    // declaration order and this effect is declared FIRST — so on a viewing
+    // change the row was posted before the sample was ever taken, and
+    // throughput_class was 'unknown' on nearly every row.
+    const sample = window.setInterval(() => {
+      const bw = hlsRef.current?.bandwidthEstimate
+      if (bw) {
+        try { qoeRef.current?.noteThroughput(bw) } catch { /* best-effort */ }
+      }
+    }, 10_000)
+    return () => {
+      window.clearInterval(sample)
+      // One final sample while hls.js is still alive.
+      const bw = hlsRef.current?.bandwidthEstimate
+      if (bw) {
+        try { qoeRef.current?.noteThroughput(bw) } catch { /* best-effort */ }
+      }
+      try {
+        qoeRef.current?.finish(viewingTerminal(qoeAdvancedRef.current))
+        qoeRef.current = null
+        qoeViewingRef.current = null
+        qoeAdvancedRef.current = false
+      } catch { /* never let telemetry break teardown */ }
+    }
+  }, [currentViewing])
+
   // Stable close handler — does NOT depend on `target`, so the
   // teardown effect's cleanup doesn't change identity across renders
   // (which would trigger spurious cleanup runs).
@@ -1491,11 +1578,28 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // buffer; running it twice is a no-op.
     if (hlsRef.current) {
       // Persist the measured bandwidth before teardown so the next session
-      // seeds its ABR at the right tier (review P2).
+      // seeds its ABR at the right tier (review P2). The same estimate is the
+      // most accurate throughput figure the QoE row will ever see, so it is
+      // handed over here rather than sampled at some arbitrary earlier moment.
       try { saveBandwidthEstimate(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
+      try { qoeRef.current?.noteThroughput(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
       try { hlsRef.current.destroy() } catch { /* defensive */ }
       hlsRef.current = null
     }
+    // Suspend the QoE element listeners across the teardown below. Removing
+    // the src and calling load() can re-queue an `error` event on an empty
+    // source — the two comments further down say so explicitly, which is why
+    // the player detaches its own media listeners first. Without the same
+    // treatment the collector would read a routine close as a media_error and
+    // mark itself spent, inflating the very error rate it exists to measure.
+    try { qoeRef.current?.suspendMediaListeners() } catch { /* best-effort */ }
+
+    // Deliberately does NOT close the QoE row. closeAndCleanup runs on every
+    // DELIVERY teardown — including the seek re-anchor and audio-switch
+    // rebuilds that continue the same viewing — so ending the row here is what
+    // fragmented one playback into several. The viewing is closed by the
+    // unmount effect below, by a change of title, or by the player's own
+    // terminal events.
     const sid = sessionIdRef.current
     sessionIdRef.current = null
     deliveryModeRef.current = 'idle'
@@ -1611,10 +1715,53 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
 
     ;(async () => {
       try {
+        // Click-to-first-frame starts HERE, before stream-info: the probe,
+        // the session create and the encoder warmup are all latency the
+        // viewer sits through, and a measurement that started later would
+        // flatter exactly the part of the pipeline this is meant to watch.
+        if (qoeViewingRef.current !== viewingKeyOf(target)) {
+          playRequestedAtRef.current = performance.now()
+        }
         // 1. Stream-info: server decides direct vs HLS.
         const info: StreamInfo = await getStreamInfo(target.fileId, target.fileType, ac.signal)
         if (cancelled) return
         const stream = info.stream
+
+        // Playback QoE (August 2026 review item #1). Attached once the
+        // decision is known and before any delivery path is chosen, so both
+        // direct play and HLS report through the same collector. Every entry
+        // point swallows its own errors — telemetry must never be able to
+        // break playback.
+        try {
+          const viewing = viewingKeyOf(target)
+          const action = collectorAction({
+            hasCollector: !!qoeRef.current,
+            collectorFinished: !!qoeRef.current?.isFinished(),
+            currentKey: qoeViewingRef.current,
+            nextKey: viewing,
+          })
+          if (action === 'reuse') {
+            // Same viewing, rebuilt delivery. Keep the row open and count the
+            // rebuild; do NOT restart the startup clock, which would otherwise
+            // report seek latency as click-to-first-frame. The new session id
+            // arrives later, via noteSession once the session is created.
+            qoeRef.current!.noteDeliveryRebuild()
+          } else if (videoRef.current) {
+            // A different title: close the previous viewing before opening one.
+            qoeRef.current?.finish('user_exit')
+            qoeRef.current = attachPlaybackQoE(videoRef.current, {
+              decision: stream.decision,
+              decisionReason: stream.reason_code,
+              // May still be null while the profile gate resolves, in which
+              // case the server falls back to the account default for this
+              // row. Playback started that early is rare and the row is not
+              // rewritten afterwards — noted rather than papered over.
+              profileId: profileId ?? undefined,
+              clickAtMs: playRequestedAtRef.current ?? undefined,
+            })
+            qoeViewingRef.current = viewing
+          }
+        } catch { /* never let telemetry break playback */ }
         // M10 Phase 4.5 — expose tracks for the picker.
         setAvailableAudio(info.audio_tracks || [])
         // Issue #133 — filter out bitmap-format subtitles (PGS/VobSub/
@@ -1677,7 +1824,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // review — was previously re-inlined per path). The pairing matters:
         // setErrorMsg without closeAndCleanup once shipped and leaked the
         // server-side FFmpeg session for the life of the tab (Audit HIGH-2).
-        const failPlayback = (msg: string) => {
+        // qoeKind classifies the failure for the QoE row. Without it every
+        // terminal error funnelled through closeAndCleanup and was recorded as
+        // 'user_exit', so the admin summary's error rate read 0.00 during an
+        // outage that was failing every transcode. hls.js media/network errors
+        // do not set HTMLMediaElement.error, so the collector's own element
+        // listener cannot see them — only this funnel can.
+        const failPlayback = (msg: string, kind: FailureKind = 'media') => {
+          try { qoeRef.current?.noteError(failureTerminal(kind)) } catch { /* never let telemetry break teardown */ }
           setErrorMsg(msg)
           closeAndCleanup()
         }
@@ -1857,6 +2011,15 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // returns null and we create a fresh session exactly as before.
         let session: SessionResponse
         const warmed = prewarmEnabled() ? takeWarmedSession(sessionReq) : null
+        // Pre-warm adoption is only knowable here, after the session request is
+        // built. It is the column that says whether the hover pre-warm works —
+        // so 'miss' has to mean "we looked and there was nothing to adopt",
+        // not "the operator has the feature switched off". Reporting the
+        // latter as a miss buried every opted-out user in the denominator and
+        // dragged the reported hit rate toward zero.
+        try {
+          qoeRef.current?.notePrewarm(prewarmOutcome(prewarmEnabled(), !!warmed))
+        } catch { /* telemetry is best-effort */ }
         if (warmed) {
           session = {
             session_id: warmed.sessionId,
@@ -1873,6 +2036,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           return
         }
         sessionIdRef.current = session.session_id
+        // Hand the session to the collector so the SERVER stamps the delivery
+        // facts (encoder family, segment format, burn-in, HDR conversion)
+        // rather than the browser guessing at values it cannot see.
+        try { qoeRef.current?.noteSession(session.session_id) } catch { /* best-effort */ }
         deliveryModeRef.current = 'hls'
         startSecRef.current = session.start_sec ?? 0
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
@@ -2179,7 +2346,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // already, so don't seek client-side. When start_sec=0 but
         // resumeSec>0 (server didn't honour our offset for some
         // reason), fall back to client-side seek on MANIFEST_PARSED.
+        // Rendition churn is one of the review's requested QoE dimensions:
+        // frequent switching on a healthy connection points at a ladder whose
+        // declared bandwidth disagrees with what the segments actually cost.
+        hls.on(Hls.Events.LEVEL_SWITCHED, () => {
+          qoeRef.current?.noteRenditionSwitch()
+        })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
             try { vid.currentTime = resumeSec } catch { /* defensive */ }
           }
@@ -2344,7 +2518,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               // Refresh "succeeded" but streams still 401 (revoked token
               // version, clock skew, proxy stripping cookies) — retrying
               // forever would hammer the auth endpoint for the tab's life.
-              failPlayback('Session expired. Please sign in again.')
+              failPlayback('Session expired. Please sign in again.', 'network')
               return
             }
             authRefreshAttempts++
@@ -2358,9 +2532,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 // before the first fragment was ever requested. Passing
                 // the element's current time keeps the restart anchored
                 // where playback actually is.
-                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh') }
+                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh', 'network') }
               } else {
-                failPlayback('Session expired. Please sign in again.')
+                failPlayback('Session expired. Please sign in again.', 'network')
               }
             })()
             return
@@ -2421,14 +2595,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             // a GC'd session whose segments 404/410 forever hits the cap
             // and surfaces instead of silently retrying for hours.
             if (networkRetryAttempts >= NETWORK_RETRY_MAX) {
-              failPlayback('Playback failed — network error')
+              failPlayback('Playback failed — network error', 'network')
               return
             }
             networkRetryAttempts++
             // See the token-refresh recovery above: pass currentTime so a
             // retry can't re-trigger the live-edge start-position guess.
             try { hls.startLoad(vid.currentTime) } catch {
-              failPlayback('Playback failed — network error')
+              failPlayback('Playback failed — network error', 'network')
             }
           } else {
             failPlayback('Playback failed — ' + (data.details ?? 'unknown'))
@@ -2439,6 +2613,27 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         if (err && (err as Error).name === 'AbortError') return
         deliveryModeRef.current = 'idle'
         const msg = err instanceof Error ? err.message : 'Failed to start playback'
+        // A stream-info or session-create failure is an OUTAGE — a session cap,
+        // an ffprobe failure, a full disk — and it never reaches hls.js or the
+        // element, so nothing else classifies it. Left unclassified the admin
+        // error rate read 0.00 for exactly the shape an operator most needs to
+        // see.
+        //
+        // On a COLD start the failure happens upstream of the attach, so there
+        // is no collector yet and the outage would produce no row at all. Open
+        // one just to close it: a failed start is a playback that happened.
+        try {
+          if (!qoeRef.current && videoRef.current) {
+            qoeRef.current = attachPlaybackQoE(videoRef.current, {
+              decision: 'transcode',
+              profileId: profileId ?? undefined,
+              clickAtMs: playRequestedAtRef.current ?? undefined,
+            })
+            qoeViewingRef.current = viewingKeyOf(target)
+          }
+          qoeRef.current?.noteError(failureTerminal('session_create'))
+          qoeRef.current?.finish(failureTerminal('session_create'))
+        } catch { /* best-effort */ }
         setErrorMsg(msg)
         // If a cast auto-advance was waiting on this boot, it just failed
         // (sessionIdRef was never set). Tick the reload epoch so the cast
@@ -4010,6 +4205,13 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const fireAdvance = useCallback(async (force: boolean) => {
     if (advanceFiredRef.current) return
     advanceFiredRef.current = true
+    // NOTE: the QoE row is NOT closed here. The viewing looks complete — the
+    // next-up card fires at the credits marker, before the <video> element
+    // ever emits `ended` — but every failure path below resets
+    // advanceFiredRef and leaves the viewer parked on the same episode. Closing
+    // the row up front would report `ended` for a viewing that then continues,
+    // and the spent collector would swallow the rest of it. The advance is
+    // reported as complete only where it actually succeeds.
     setNextUpPhase('spent')
     if (partyAdvanceHostRef.current) {
       // Party: the parent reports which of the three outcomes happened,
@@ -4020,6 +4222,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         outcome = (await onPartyAdvanceRef.current?.()) ?? 'failed'
       } catch { /* treated as 'failed' — re-offer below */ }
       if (outcome === 'advanced') {
+        qoeAdvancedRef.current = true
         // Stays 'spent' — the server's broadcast is what re-points us, and
         // the resulting file change resets this state (clearing the
         // watchdog with it). If neither happens the swap was rejected, so
@@ -4028,6 +4231,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         swapWatchdogRef.current = window.setTimeout(() => {
           swapWatchdogRef.current = null
           advanceFiredRef.current = false
+          // The swap was rejected: the viewer is still on this episode, so the
+          // viewing has NOT ended. Without this reset, closing the player here
+          // would report a completed playthrough.
+          qoeAdvancedRef.current = false
           setNextUpPhase('prompt')
         }, PARTY_SWAP_WATCHDOG_MS)
         return
@@ -4040,6 +4247,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     try {
       advanced = !!(await onEndedRef.current?.(force ? { force: true } : undefined))
     } catch { /* parent resolve failed — stay parked on this episode */ }
+    if (advanced) qoeAdvancedRef.current = true
     if (!advanced) {
       // No next episode (series end) or the resolve failed. Re-arm the
       // natural 'ended' flow so close-out behavior matches a playthrough

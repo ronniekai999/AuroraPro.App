@@ -22,13 +22,16 @@ import (
 // Skipped when ffmpeg — or its libass-backed subtitles filter — is not
 // available, so CI without media tooling is unaffected.
 func TestEscapeFFmpegPath_RealFFmpeg(t *testing.T) {
+	// Both guards escalate to failures under AURORA_REQUIRE_MEDIA_TESTS (CI):
+	// this test's whole value is that it runs against a REAL ffmpeg, so a
+	// silent skip in the pipeline is indistinguishable from deleting it.
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		t.Skip("ffmpeg not in PATH")
+		failOrSkipMedia(t, "ffmpeg not in PATH")
 	}
 	filters, _ := exec.Command(ffmpeg, "-hide_banner", "-filters").Output()
 	if !strings.Contains(string(filters), " subtitles ") {
-		t.Skip("ffmpeg lacks the subtitles filter (built without libass)")
+		failOrSkipMedia(t, "ffmpeg lacks the subtitles filter (built without libass)")
 	}
 
 	names := []string{

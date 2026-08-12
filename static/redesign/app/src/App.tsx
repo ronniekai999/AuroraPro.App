@@ -6098,6 +6098,7 @@ export default function App() {
       )}
       <VideoPlayer
         target={playerTarget}
+        profileId={activeProfileId}
         onEnded={handlePlaybackEnded}
         onPartyAdvance={handlePartyAdvance}
         isAdmin={user.role === 'admin'}

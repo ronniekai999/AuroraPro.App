@@ -1382,11 +1382,28 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	case "", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium":
 		// valid ("" = default "veryfast", applied in VideoEncoderArgs)
 	default:
-		slog.Warn("unknown transcode software_preset, using veryfast",
+		// Blanking it hands the choice to quality_policy, whose balanced
+		// resolution is veryfast — so the historical behaviour is preserved
+		// for the default policy. The message names the policy rather than a
+		// fixed preset because a non-default policy resolves to something
+		// else, and a warning that states the wrong preset is worse than none.
+		slog.Warn("unknown transcode software_preset, deferring to quality_policy",
 			"configured", tcCfg.SoftwarePreset)
 		tcCfg.SoftwarePreset = ""
 	}
 	hwAccel.SWPreset = strings.ToLower(strings.TrimSpace(tcCfg.SoftwarePreset))
+
+	// Speed/quality policy (transcode.quality_policy). Unknown values fail
+	// SAFE to balanced with a warning, matching software_preset above: this
+	// resolves into real encoder flags, and a typo must not reach FFmpeg as a
+	// misspelled preset. "balanced" reproduces the pre-policy arguments on
+	// every encoder family, so a rejected value is always the safe landing.
+	policy, ok := ParseQualityPolicy(tcCfg.QualityPolicy)
+	if !ok {
+		slog.Warn("unknown transcode quality_policy, using balanced",
+			"configured", tcCfg.QualityPolicy)
+	}
+	hwAccel.Policy = policy
 
 	// HEVC output encoder (2026-08 review item #5): probe the hevc_*
 	// counterpart of the detected backend (libx265 on software boxes).
@@ -1477,6 +1494,9 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		"profiles", tcCfg.Profiles,
 		"segment_format", segFormat,
 		"software_preset", hwAccel.SWPreset,
+		// Resolved policy, not the raw config string: what the encoders will
+		// actually be asked for, per the family that was detected.
+		"quality_policy", hwAccel.policy().Describe(hwAccel.Type, hwAccel.SWPreset),
 		"readrate_pacing", tm.readrateOK,
 	)
 
@@ -1577,6 +1597,18 @@ func effectiveMaxSessionsPerUser(configured int) int {
 		return defaultMaxSessionsPerUser
 	}
 	return configured
+}
+
+// EncodingPolicy reports the resolved speed/quality policy together with the
+// concrete encoder knob it selected on THIS host ("quality (nvenc preset p6)").
+//
+// The resolved form is what an operator actually needs: the policy name alone
+// says nothing about what their particular GPU was asked for, and the
+// per-family vocabularies don't translate into each other. Kept separate from
+// HWAccelStatus because that struct describes DETECTED CAPABILITY while this is
+// configuration — the review's item #2 asks for both in admin.
+func (tm *TranscodeManager) EncodingPolicy() string {
+	return tm.hwAccel.policy().Describe(tm.hwAccel.Type, tm.hwAccel.SWPreset)
 }
 
 // HWAccelStatus returns info about the detected hardware acceleration,
@@ -2121,8 +2153,16 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// hevcLevelIDC; unknown fps keeps the default choice).
 	// Remux: codec string is unknown at creation time (omitted, valid per HLS spec).
 	if !session.Remux {
+		// Declared bandwidth is resolved here, alongside CODECS, because both
+		// depend on the SESSION's audio output rather than on the static
+		// ladder: a 5.1 AC-3 passthrough costs ~640 kbps where stereo AAC
+		// costs 192, and that difference is a real part of what the client has
+		// to sustain. Deriving it from the profile's own -maxrate/-b:v keeps
+		// the declaration and the encoder configuration in lockstep.
+		audioBits := AudioDeclaredBitrate(session.AudioCodecOut, session.AudioPassthrough)
 		for i := range profiles {
 			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
+			profiles[i].HLSBandwidth = profiles[i].LadderBandwidth(audioBits)
 		}
 		session.Profiles = profiles
 	}
