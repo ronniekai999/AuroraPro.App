@@ -86,6 +86,12 @@ export function PartyComposerModal({
   // returns focus to it after a selection.
   const searchRef = useRef<HTMLInputElement | null>(null)
 
+  // Bumped by the error state's Try again button. Without it a failed roster
+  // fetch is a dead end — the effect's only other trigger is currentUsername,
+  // which never changes while the modal is mounted, so the host's only
+  // recovery is to close the composer and start over.
+  const [rosterAttempt, setRosterAttempt] = useState(0)
+
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -116,7 +122,7 @@ export function PartyComposerModal({
         setMembers([])
       })
     return () => ac.abort()
-  }, [currentUsername])
+  }, [currentUsername, rosterAttempt])
 
   // Ranked matches for the current query. Note this is NOT gated on
   // `searching`: matchMembers still surfaces someone whose whole name the
@@ -134,7 +140,12 @@ export function PartyComposerModal({
   // The roster endpoint is capped server-side. At the cap we cannot tell
   // "this member does not exist" from "this member is past the cap", so the
   // no-match copy stops asserting the former.
-  const rosterTruncated = members !== null && members.length >= MEMBER_DIRECTORY_LIMIT
+  //
+  // -1 because the server's LIMIT counts the VIEWER (ListMembers has no
+  // `WHERE u.id != $1`) and we filter ourselves out above. Comparing against
+  // the raw limit made this dead code for every host whose username sorts
+  // inside the first 500 — i.e. almost all of them.
+  const rosterTruncated = members !== null && members.length >= MEMBER_DIRECTORY_LIMIT - 1
   // A server with nobody else on it is its own answer — "no members match"
   // would blame the query for an empty roster.
   const rosterEmpty = members !== null && members.length === 0
@@ -173,7 +184,11 @@ export function PartyComposerModal({
       else next.add(username)
       return next
     })
-    const name = shownName || username
+    // Qualified with the handle for the same reason the chip label is: two
+    // guests can share a display name, and a live region does NOT re-announce
+    // byte-identical consecutive text — so adding the second "JD" would be
+    // met with the silence this announcement exists to prevent.
+    const name = shownName && shownName !== username ? `${shownName} (${username})` : username
     setPickAnnouncement(wasSelected
       ? `${name} removed from the invite list`
       : `${name} added to the invite list`)
@@ -428,7 +443,16 @@ export function PartyComposerModal({
             bordered box only exists when there is something in it — an empty
             frame under the input reads as "broken", not as "keep typing". */}
         {membersError ? (
-          <p className="text-amber-300/80 text-xs mt-2">Couldn't load members: {membersError}</p>
+          <p className="text-amber-300/80 text-xs mt-2">
+            Couldn't load members: {membersError}{' '}
+            <button
+              type="button"
+              onClick={() => { setMembers(null); setRosterAttempt(n => n + 1) }}
+              className="underline underline-offset-2 hover:text-amber-200"
+            >
+              Try again
+            </button>
+          </p>
         ) : members === null && search.trim() !== '' ? (
           // Any typing at all, not just a query past the threshold. Gating
           // this on `searching` told a host with a slow roster fetch to "type
@@ -517,7 +541,7 @@ export function PartyComposerModal({
         <p className="sr-only" role="status" aria-live="polite" aria-label="Member search results">
           {membersError
             ? 'Could not load members'
-            : members === null && searching
+            : members === null && search.trim() !== ''
               ? 'Loading members'
               : rosterEmpty
                 ? 'Nobody else here yet'
@@ -525,7 +549,12 @@ export function PartyComposerModal({
                   ? `${totalMatches} matching ${totalMatches === 1 ? 'member' : 'members'}` +
                     (hiddenMatches > 0 ? `, showing ${matches.length}` : '')
                   : searching
-                    ? 'No matching members'
+                    // The visible copy stops asserting non-existence at the
+                    // roster cap; this must not keep asserting it to the one
+                    // audience that can't see the softer wording.
+                    ? (rosterTruncated
+                      ? 'No matching members in the first part of the directory that was loaded — you can still invite them with the party code'
+                      : 'No matching members')
                     : ''}
         </p>
         {/* Separate region from the results status above: adding someone and

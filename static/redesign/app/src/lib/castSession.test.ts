@@ -166,4 +166,47 @@ describe('createCastSessionTracker', () => {
     t.commit()
     expect(t.committed()).toBe('clone-2')
   })
+
+  // The three guards below all protect the SAME failure — deleting the
+  // session the receiver is currently on — and all three need
+  // `pending === committed`, a state no other test in this file constructs.
+  // Without them, "released exactly once, never early" is a claim the suite
+  // does not actually check: each guard can be removed with everything green.
+  //
+  // The state is reachable in production: a re-mint that resolves to the
+  // session already being cast (the shared-session case, or a server that
+  // hands back the original because no clone is needed).
+  describe('a re-mint of the session already being cast', () => {
+    it('is not released when that load fails', () => {
+      const { t, released } = tracker()
+      t.notePending('clone-1'); t.commit()
+      t.notePending('clone-1')   // same session, minted again
+      t.abandon()                // …and this load failed
+      // The receiver is still on clone-1. Releasing it here would delete a
+      // live cast out from under the TV.
+      expect(released).toEqual([])
+      expect(t.committed()).toBe('clone-1')
+    })
+
+    it('is not released twice when the cast then ends', () => {
+      const { t, released } = tracker()
+      t.notePending('clone-1'); t.commit()
+      t.notePending('clone-1')
+      t.end()
+      expect(released).toEqual(['clone-1'])
+    })
+
+    it('is not released when a third mint supersedes it', () => {
+      const { t, released } = tracker()
+      t.notePending('clone-1'); t.commit()
+      t.notePending('clone-1')   // superseded before it resolved…
+      t.notePending('clone-2')   // …by a mint for a different session
+      // clone-1 is still the one the receiver is on: it must survive until
+      // clone-2 is actually committed.
+      expect(released).toEqual([])
+      t.commit()
+      expect(t.committed()).toBe('clone-2')
+      expect(released).toEqual(['clone-1'])
+    })
+  })
 })

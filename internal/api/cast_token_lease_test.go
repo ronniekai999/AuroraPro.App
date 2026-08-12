@@ -1,23 +1,30 @@
 package api
 
-// Cast lease wiring — CreateCastToken must put the session the RECEIVER will
-// stream onto streaming's longer idle window, and must NOT put an ordinary
-// Safari/iOS playback session there.
+// Cast lease wiring — the longer idle window is granted on the first
+// cast-token-authenticated FETCH, not when the token is minted.
 //
-// Both halves are asserted at the handler, not through the streaming
-// package's own helpers. An earlier version of these tests exercised only
-// the pure timeout helper, and deleting the handler's MarkCastHeld call
-// entirely left the whole suite green — the behaviour change was
-// unprotected. These fail if the wiring is removed.
+// Minting is the wrong moment: the clone exists and is leased before the
+// response is written, so a response lost on the way back to a flaky phone
+// leaves a 30-minute clone whose ID the client never learned and can never
+// release. Two of those exhaust the per-user session cap and ordinary
+// playback starts failing — the failure this whole area exists to avoid.
+//
+// Asserted at the handlers rather than through streaming's helpers. An
+// earlier version of these tests exercised only the pure timeout helper, and
+// deleting the wiring entirely left the whole suite green.
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/config"
 	"github.com/aurora-media/aurora/internal/streaming"
+	"github.com/go-chi/chi/v5"
 )
 
 func leaseTestHandler(t *testing.T) (*StreamHandler, *streaming.TranscodeManager) {
@@ -54,10 +61,28 @@ func leaseTestSession(t *testing.T, tm *streaming.TranscodeManager) *streaming.T
 	return s
 }
 
-// The fix: minting a Chromecast token puts the session the receiver streams
-// on the cast lease, so a paused cast with a frozen (locked-phone) sender
-// isn't reaped five minutes later.
-func TestCreateCastToken_MarksTheCastSessionHeld(t *testing.T) {
+// castFetch drives an HLS route the way a RECEIVER does: a cast-scoped token
+// bound to the session it is asking for.
+func castFetch(t *testing.T, h *StreamHandler, sessionID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/stream/hls/"+sessionID+"/master.m3u8", nil)
+	claims := &auth.JWTClaims{
+		UserID: 7, Username: "testuser", Role: "user",
+		Scope: auth.ScopeCast, SessionID: sessionID,
+	}
+	ctx := context.WithValue(req.Context(), auth.ClaimsContextKey, claims)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionID", sessionID)
+	ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
+	rr := httptest.NewRecorder()
+	h.ServeMasterPlaylist(rr, req.WithContext(ctx))
+	return rr
+}
+
+// Minting alone leases nothing. This is the M1 guard: if the response never
+// reaches the sender, the clone must age out on the normal five-minute sweep
+// rather than hold a session slot for thirty.
+func TestCreateCastToken_MintAloneDoesNotLease(t *testing.T) {
 	h, tm := leaseTestHandler(t)
 	src := leaseTestSession(t, tm)
 	claims := &auth.JWTClaims{UserID: 7, Username: "testuser", Role: "user"}
@@ -68,29 +93,53 @@ func TestCreateCastToken_MarksTheCastSessionHeld(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	// This source clones, so the leased session is the clone — find it as
-	// "the session that isn't the original". Asserting on the clone rather
-	// than the original is the point: the clone is what the TV fetches.
-	var leased int
 	for _, s := range tm.ListSessions() {
 		if tm.IsCastHeld(s.ID) {
-			leased++
-			if s.ID == src.ID {
-				t.Error("the ORIGINAL session was leased; the receiver streams the clone")
-			}
+			t.Errorf("session %s was leased at mint time; the lease belongs on the first receiver fetch", s.ID)
 		}
 	}
-	if leased != 1 {
-		t.Errorf("expected exactly 1 cast-held session, got %d", leased)
+}
+
+// The fix: once a receiver actually pulls from the session, it goes on the
+// longer idle window — so a paused cast with a frozen (locked-phone) sender
+// is not reaped five minutes later.
+func TestCastFetch_LeasesTheSessionTheReceiverPulls(t *testing.T) {
+	h, tm := leaseTestHandler(t)
+	src := leaseTestSession(t, tm)
+	claims := &auth.JWTClaims{UserID: 7, Username: "testuser", Role: "user"}
+
+	rr := httptest.NewRecorder()
+	h.CreateCastToken(rr, castTokenRequest(t, src.ID, "", claims))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("mint: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct{ Playlist string }
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// This source clones, so the receiver's session is NOT the original —
+	// which is the point: the clone is what the TV fetches and what must be
+	// leased.
+	castID := castSessionIDFromPlaylist(t, resp.Playlist)
+	if castID == src.ID {
+		t.Fatalf("precondition: expected a clone, got the original %s", src.ID)
+	}
+
+	castFetch(t, h, castID)
+
+	if !tm.IsCastHeld(castID) {
+		t.Error("the session the receiver fetched should be on the cast lease")
+	}
+	if tm.IsCastHeld(src.ID) {
+		t.Error("the ORIGINAL session must not be leased; the receiver streams the clone")
 	}
 }
 
 // The regression guard. ?for_airplay=true is NOT an "AirPlay started"
 // signal: the SPA mints one during ordinary native-HLS setup for EVERY
-// Safari/iOS playback, AirPlay or not. Leasing there would put every
-// Apple-browser session — including the abandoned-tab case, which is most
-// common on exactly that platform — on a 30-minute window it has no receiver
-// to justify, while a live browser is still pinging keepalive for it.
+// Safari/iOS playback, AirPlay or not. That must not lease the local session
+// — a live browser is pinging keepalive for it, which is what the normal
+// window is sized for, and abandoned tabs are most common on that platform.
 func TestCreateCastToken_ForAirplayDoesNotLeaseTheLocalSession(t *testing.T) {
 	h, tm := leaseTestHandler(t)
 	src := leaseTestSession(t, tm)
@@ -110,4 +159,42 @@ func TestCreateCastToken_ForAirplayDoesNotLeaseTheLocalSession(t *testing.T) {
 			t.Errorf("for_airplay=true leased session %s; it should lease nothing", s.ID)
 		}
 	}
+}
+
+// …but a real Apple TV pulling that same session with the cast token does
+// earn the lease. The AirPlay gap the previous round documented is closed by
+// moving the grant to fetch time: the signal is the fetch itself.
+func TestCastFetch_LeasesAnAirplaySessionOnceAReceiverPulls(t *testing.T) {
+	h, tm := leaseTestHandler(t)
+	src := leaseTestSession(t, tm)
+	claims := &auth.JWTClaims{UserID: 7, Username: "testuser", Role: "user"}
+
+	rr := httptest.NewRecorder()
+	h.CreateCastToken(rr, castTokenRequest(t, src.ID, "for_airplay=true", claims))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if tm.IsCastHeld(src.ID) {
+		t.Fatal("precondition: minting must not lease")
+	}
+
+	castFetch(t, h, src.ID)
+
+	if !tm.IsCastHeld(src.ID) {
+		t.Error("an Apple TV pulling the session with a cast token should earn the lease")
+	}
+}
+
+func castSessionIDFromPlaylist(t *testing.T, playlist string) string {
+	t.Helper()
+	const prefix = "/api/stream/hls/"
+	rest, ok := strings.CutPrefix(playlist, prefix)
+	if !ok {
+		t.Fatalf("unexpected playlist URL %q", playlist)
+	}
+	id, _, ok := strings.Cut(rest, "/")
+	if !ok || id == "" {
+		t.Fatalf("no session ID in playlist URL %q", playlist)
+	}
+	return id
 }

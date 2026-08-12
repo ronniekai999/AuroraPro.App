@@ -14,7 +14,7 @@
 // payload once the query that found them is gone.
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { PartyComposerModal, type PartyComposerLaunch } from './PartyComposerModal'
 import { listMembers, type MemberSummary } from '@/lib/api'
@@ -176,6 +176,23 @@ describe('PartyComposerModal people picker', () => {
     expect(resultsStatus()).not.toHaveTextContent(/No matching members/i)
   })
 
+  // Without a retry the error is a dead end: the fetch effect's only other
+  // trigger never changes while the modal is mounted, so the host has to
+  // close the composer and start over.
+  it('recovers from a failed roster fetch without reopening the modal', async () => {
+    mockedListMembers.mockRejectedValue(new Error('boom'))
+    renderComposer()
+    await screen.findByText(/Couldn't load members: boom/i)
+
+    mockedListMembers.mockResolvedValue(ROSTER)
+    await userEvent.click(screen.getByRole('button', { name: /Try again/i }))
+
+    const box = await screen.findByLabelText('Search members by name')
+    await userEvent.type(box, 'sam')
+    expect(memberRow('sammy')).not.toBeNull()
+    expect(screen.queryByText(/Couldn't load members/i)).toBeNull()
+  })
+
   it('announces the true match count, not the rendered one', async () => {
     renderComposer()
     const box = await screen.findByLabelText('Search members by name')
@@ -188,6 +205,53 @@ describe('PartyComposerModal people picker', () => {
     expect(resultsStatus()).toHaveTextContent('10 matching members, showing 8')
   })
 
+  // THE guard for pick()/toggle()'s functional update. This exact code has
+  // regressed once already: an "improvement" replaced the functional update
+  // with a set built from the render closure, which silently drops one of two
+  // selection changes that land in the same React batch — including the case
+  // where a member the host removed stays in the payload and is invited
+  // anyway. Every other test in this file awaits userEvent.click, and each of
+  // those flushes its own batch, so none of them can see it. This one
+  // dispatches both clicks inside a single act().
+  it('keeps both changes when two selections land in one React batch', async () => {
+    const onLaunch = renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+    await userEvent.type(box, 'sam')
+
+    const sammy = screen.getByRole('button', { name: /@sammy/ }) as HTMLButtonElement
+    const samir = screen.getByRole('button', { name: /@samir/ }) as HTMLButtonElement
+    act(() => { sammy.click(); samir.click() })
+
+    expect(screen.getByText('2 invited')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /Start party & send invites/i }))
+    const launch = onLaunch.mock.calls[0][0]
+    expect([...launch.usernames].sort()).toEqual(['sammy', 'samir'].sort())
+  })
+
+  // The mixed case, which is the one that actually leaks an invite: a
+  // chip-removal and a row-deselection batched together must both land.
+  it('keeps a chip removal that batches with another change', async () => {
+    const onLaunch = renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'sam')
+    await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
+    await userEvent.type(box, 'sam')
+    await userEvent.click(screen.getByRole('button', { name: /@samir/ }))
+    expect(screen.getByText('2 invited')).toBeInTheDocument()
+
+    const removeSammy = screen.getByRole('button', { name: /Remove Sammy/i }) as HTMLButtonElement
+    const removeSamir = screen.getByRole('button', { name: /Remove Samir/i }) as HTMLButtonElement
+    act(() => { removeSammy.click(); removeSamir.click() })
+
+    expect(screen.queryByText(/invited/)).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: /^Start party$/i }))
+    const launch = onLaunch.mock.calls[0][0]
+    expect(launch.usernames).toEqual([])
+  })
+
   // Picking clears the query, which unmounts the row whose aria-pressed
   // would have carried the confirmation — so without this announcement a
   // screen-reader user gets no signal at all that the pick landed.
@@ -197,10 +261,33 @@ describe('PartyComposerModal people picker', () => {
 
     await userEvent.type(box, 'sammy')
     await userEvent.click(screen.getByRole('button', { name: /@sammy/ }))
-    expect(guestStatus()).toHaveTextContent('Sammy added to the invite list')
+    expect(guestStatus()).toHaveTextContent('Sammy (sammy) added to the invite list')
 
     await userEvent.click(screen.getByRole('button', { name: /Remove Sammy/i }))
-    expect(guestStatus()).toHaveTextContent('Sammy removed from the invite list')
+    expect(guestStatus()).toHaveTextContent('Sammy (sammy) removed from the invite list')
+  })
+
+  // A live region does not re-announce byte-identical consecutive text, so
+  // two guests sharing a display name would meet the second pick with the
+  // silence this announcement exists to prevent.
+  it('distinguishes two guests who share a display name', async () => {
+    mockedListMembers.mockResolvedValue([
+      { user_id: 20, username: 'jd_one', display_name: 'JD', is_following: false },
+      { user_id: 21, username: 'jd_two', display_name: 'JD', is_following: false },
+    ])
+    renderComposer()
+    const box = await screen.findByLabelText('Search members by name')
+
+    await userEvent.type(box, 'jd_one')
+    await userEvent.click(screen.getByRole('button', { name: /@jd_one/ }))
+    const first = guestStatus().textContent
+
+    await userEvent.type(box, 'jd_two')
+    await userEvent.click(screen.getByRole('button', { name: /@jd_two/ }))
+    const second = guestStatus().textContent
+
+    expect(first).not.toBe(second)
+    expect(second).toContain('jd_two')
   })
 
   // The chip unmounts on click. This dialog has no focus trap, so focus
