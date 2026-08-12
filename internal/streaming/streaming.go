@@ -1183,6 +1183,47 @@ type TranscodeSession struct {
 	// populated on first subtitle segment request.
 	// Values: -1 = not probed, -2 = probe in progress, >= 0 = cached PTS.
 	initPTS90kHz int64
+	// castHeld marks a session that has been handed to a Chromecast or
+	// AirPlay receiver (set by MarkCastHeld when a cast token is minted for
+	// it). Such a session is kept for castHeldTimeout instead of the normal
+	// idle timeout — see sessionIdleTimeout for why. Guarded by tm.mu, like
+	// LastAccess, because the cleanup loop reads both in the same pass.
+	castHeld bool
+}
+
+// castHeldTimeout is how long a cast-held session survives with nothing
+// touching it at all — no keepalive, no receiver fetch.
+//
+// The normal 5-minute idle timeout assumes a browser is awake to POST
+// keepalive every 10s. Once playback is on a TV that assumption breaks:
+// the sender is a phone whose screen has locked, and a locked phone's page
+// is frozen by the OS, so its timers do not run — for hours, if the user
+// puts it in a pocket. While the receiver is actively pulling segments its
+// own fetches bump LastAccess and nothing is at risk, but the moment it
+// stops pulling (paused on the TV, a Wi-Fi blip, a short title fully
+// buffered) the 5-minute clock starts against a session that has no live
+// client to defend it. It expires, os.RemoveAll takes the segments, and the
+// cast is dead with no way back except starting over from the phone.
+//
+// 30 minutes covers a pause for dinner. It costs disk, not CPU:
+// reapIdleVariants still stops every encoder after 75 idle seconds
+// (resumably), and enforceDiskCap still evicts these sessions under cache
+// pressure — the lease buys time, it does not pin anything forever.
+const castHeldTimeout = 30 * time.Minute
+
+// sessionIdleTimeout picks the idle window for one session: the configured
+// timeout normally, the longer cast lease for a session a receiver is
+// playing. Never SHORTENS the window — an operator who configured a
+// session_timeout_sec above 30 minutes meant it, and a cast is the last
+// thing that should get less patience than local playback.
+func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
+	if configured <= 0 {
+		configured = 5 * time.Minute
+	}
+	if castHeld && castHeldTimeout > configured {
+		return castHeldTimeout
+	}
+	return configured
 }
 
 // QualityVariant is a single FFmpeg process transcoding at one quality level.
@@ -1662,12 +1703,16 @@ func (tm *TranscodeManager) cleanupLoop() {
 			timeout = 5 * time.Minute
 		}
 
-		// Phase 1: identify and remove expired sessions under lock (fast)
+		// Phase 1: identify and remove expired sessions under lock (fast).
+		// The window is per-session, not global: a session a receiver is
+		// playing gets the longer cast lease, because the only client that
+		// could keep pinging it is a phone the OS has frozen.
 		var expired []*TranscodeSession
 		tm.mu.Lock()
 		for id, s := range tm.sessions {
-			if time.Since(s.LastAccess) > timeout {
-				slog.Info("cleaning up idle transcode session", "session_id", id, "user_id", s.UserID)
+			if time.Since(s.LastAccess) > sessionIdleTimeout(s.castHeld, timeout) {
+				slog.Info("cleaning up idle transcode session",
+					"session_id", id, "user_id", s.UserID, "cast_held", s.castHeld)
 				delete(tm.sessions, id)
 				expired = append(expired, s)
 			}
@@ -2278,6 +2323,34 @@ func (tm *TranscodeManager) KeepAlive(sessionID string) bool {
 		s.LastAccess = time.Now()
 	}
 	return ok
+}
+
+// MarkCastHeld records that a session has been handed to a Chromecast or
+// AirPlay receiver, moving it onto the longer castHeldTimeout idle window
+// (see sessionIdleTimeout). Called when a cast token is minted for the
+// session — that is the exact moment a surface Aurora cannot poll becomes
+// responsible for keeping it warm.
+//
+// One-way on purpose: there is no reliable "cast ended" signal to clear it
+// on (the sender may be frozen, backgrounded, or gone), and the flag only
+// ever buys the session a longer idle window — it never stops the session
+// being deleted explicitly or evicted under disk pressure.
+//
+// Also bumps LastAccess: minting a token means a receiver is about to
+// fetch, so the clock should start now rather than from whenever the
+// session last saw traffic.
+//
+// Reports whether the session existed.
+func (tm *TranscodeManager) MarkCastHeld(sessionID string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	s, ok := tm.sessions[sessionID]
+	if !ok {
+		return false
+	}
+	s.castHeld = true
+	s.LastAccess = time.Now()
+	return true
 }
 
 // GetSessionOwner returns the user ID of a session's owner, or -1 if not found.

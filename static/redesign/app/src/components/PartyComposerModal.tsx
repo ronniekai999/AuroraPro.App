@@ -4,8 +4,16 @@
 // one modal, one decision at the top — When. "Right now" starts the party
 // the moment you send; "Schedule" books it for a quick-chip time or a
 // custom date/time. Below that, both modes share the same people picker
-// (members list, followed people first), an optional note, and a CTA whose
-// label tracks the mode + selection.
+// (type-to-search — see below), an optional note, and a CTA whose label
+// tracks the mode + selection.
+//
+// The people picker is search-first: it lists nobody until the host has
+// typed MIN_MEMBER_QUERY_CHARS, then shows the ranked matches. The standing
+// list it replaced was a wall of every account on the server, which is the
+// wrong shape for "invite Sam" and gets worse with every member added.
+// Because results come and go as the query changes, the people already
+// picked live in their own chip row that does NOT depend on the query —
+// otherwise clearing the box would hide who you'd invited.
 //
 // The modal is presentation + selection state only. The actual
 // create → invite → join sequence lives in App.tsx's launchPartyComposer
@@ -14,7 +22,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { listMembers, type MemberSummary } from '@/lib/api'
-import { buildQuickChips, formatPartyTime } from '@/lib/partyInvites'
+import {
+  MIN_MEMBER_QUERY_CHARS,
+  buildQuickChips,
+  formatPartyTime,
+  matchMembers,
+  memberQueryReady,
+} from '@/lib/partyInvites'
 import { PartyShareCardModal } from './PartyShareCardModal'
 import { ProfileAvatar } from './ProfileAvatar'
 
@@ -56,14 +70,20 @@ export function PartyComposerModal({
   const [customOpen, setCustomOpen] = useState(false)
   const [customValue, setCustomValue] = useState('') // datetime-local string
 
-  // People picker. Followed members sort first — the follow graph is the
-  // "my people" signal, but anyone on the server is invitable (invite-only
-  // household; the server enforces rating ceilings per invitee).
+  // People picker. The full roster is still fetched once on open — it's one
+  // small call, it's what makes the first keystroke search instantly, and the
+  // selected chips need each member's display name and avatar after the query
+  // that found them is gone. It is never RENDERED as a list; matchMembers
+  // decides what the host actually sees. Anyone on the server is invitable
+  // (invite-only household; the server enforces rating ceilings per invitee).
   const [members, setMembers] = useState<MemberSummary[] | null>(null)
   const [membersError, setMembersError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [note, setNote] = useState('')
+  // Declared up here with the rest of the picker state because pick() below
+  // returns focus to it after a selection.
+  const searchRef = useRef<HTMLInputElement | null>(null)
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -77,12 +97,12 @@ export function PartyComposerModal({
     const ac = new AbortController()
     listMembers(ac.signal)
       .then(list => {
+        // Only self-filtering here. Ordering is matchMembers' job now (it
+        // ranks by how well each row matches what was typed, with followed
+        // people winning ties), so pre-sorting the roster would be a second,
+        // silently-ignored opinion about order.
         const mine = (currentUsername ?? '').toLowerCase()
-        const others = list.filter(m => m.username.toLowerCase() !== mine)
-        others.sort((a, b) =>
-          Number(b.is_following) - Number(a.is_following) ||
-          a.username.localeCompare(b.username))
-        setMembers(others)
+        setMembers(list.filter(m => m.username.toLowerCase() !== mine))
       })
       .catch((err: unknown) => {
         if (err instanceof Error && err.name === 'AbortError') return
@@ -92,14 +112,24 @@ export function PartyComposerModal({
     return () => ac.abort()
   }, [currentUsername])
 
-  const filtered = useMemo(() => {
-    if (!members) return null
-    const q = search.trim().toLowerCase()
-    if (!q) return members
-    return members.filter(m =>
-      m.username.toLowerCase().includes(q) ||
-      (m.display_name ?? '').toLowerCase().includes(q))
-  }, [members, search])
+  // Ranked matches for the current query, or [] while it's still too short.
+  // searching says which of those two an empty result means.
+  const searching = memberQueryReady(search)
+  const matches = useMemo(
+    () => (members && searching ? matchMembers(members, search) : []),
+    [members, search, searching])
+
+  // The chip row: everyone picked so far, in the order they were picked, and
+  // independent of the query. Selection is stored as usernames (that's the
+  // launch payload), so the roster is what turns them back into a face and a
+  // name. A member who vanished from the roster mid-modal still gets a chip
+  // rendered from the username alone rather than silently dropping out of a
+  // send the host thinks they set up.
+  const selectedMembers = useMemo(() => {
+    const byName = new Map((members ?? []).map(m => [m.username, m]))
+    return [...selected].map(username =>
+      byName.get(username) ?? { user_id: -1, username, is_following: false } as MemberSummary)
+  }, [members, selected])
 
   const toggle = (username: string) => {
     setSelected(prev => {
@@ -108,6 +138,20 @@ export function PartyComposerModal({
       else next.add(username)
       return next
     })
+  }
+
+  // Picking from the results clears the query and hands focus back to the
+  // box, so inviting four people is type-tap-type-tap rather than
+  // type-tap-select-all-delete-type. Deselecting from the results leaves the
+  // query alone — the row you just unticked should stay where it is instead
+  // of vanishing out from under the tap.
+  const pick = (username: string) => {
+    const wasSelected = selected.has(username)
+    toggle(username)
+    if (!wasSelected) {
+      setSearch('')
+      searchRef.current?.focus()
+    }
   }
 
   // Custom datetime-local values are interpreted in the viewer's timezone
@@ -150,8 +194,10 @@ export function PartyComposerModal({
     onClose()
   }
 
-  // Focus the search box once members load — the picker is the main input.
-  const searchRef = useRef<HTMLInputElement | null>(null)
+  // Focus the search box once members load — the picker is the main input,
+  // and with nothing listed until you type, the box IS the picker. Skipped
+  // when there's nobody to find, so a one-account server doesn't open the
+  // keyboard onto a search that can't match anything.
   useEffect(() => {
     if (members && members.length > 0) searchRef.current?.focus()
   }, [members])
@@ -278,57 +324,105 @@ export function PartyComposerModal({
             <span className="text-purple-300 text-xs font-medium">{selected.size} invited</span>
           )}
         </div>
+
+        {/* Picked people. Survives the query being cleared — this row, not the
+            search results, is the record of who is actually being invited. */}
+        {selectedMembers.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5 mb-2" aria-label="Selected guests">
+            {selectedMembers.map(m => {
+              const shownName = m.display_name || m.username
+              return (
+                <li key={m.username}>
+                  <button
+                    type="button"
+                    onClick={() => toggle(m.username)}
+                    aria-label={`Remove ${shownName} from the invite list`}
+                    className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full bg-purple-600/20 border border-purple-500/40 text-white/90 text-xs hover:bg-purple-600/30 transition-colors"
+                  >
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={18} />
+                    <span className="max-w-[9rem] truncate">{shownName}</span>
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" className="w-3 h-3 flex-none">
+                      <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
         <input
           ref={searchRef}
           type="text"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder="Search members…"
-          aria-label="Search members"
+          placeholder={`Type a name — ${MIN_MEMBER_QUERY_CHARS} letters minimum`}
+          aria-label="Search members by name"
+          autoComplete="off"
           className="w-full px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-lg text-white text-sm placeholder:text-white/30 focus:bg-white/[0.06] focus:outline-none"
         />
-        <div className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-white/[0.06] divide-y divide-white/[0.05]">
-          {members === null && <p className="text-white/40 text-xs p-3">Loading members…</p>}
-          {membersError && <p className="text-amber-300/80 text-xs p-3">Couldn't load members: {membersError}</p>}
-          {filtered && filtered.length === 0 && !membersError && (
-            <p className="text-white/40 text-xs p-3">
-              {search ? 'No members match.' : 'Nobody else here yet.'}
-            </p>
-          )}
-          {filtered?.map(m => {
-            const shownName = m.display_name || m.username
-            const on = selected.has(m.username)
-            return (
-              <button
-                key={m.user_id}
-                type="button"
-                onClick={() => toggle(m.username)}
-                aria-pressed={on}
-                className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-white/[0.04] transition-colors"
-              >
-                <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={32} />
-                <span className="min-w-0 flex-1">
-                  <span className="block text-white/90 text-sm truncate">{shownName}</span>
-                  <span className="block text-white/40 text-[11px] truncate">
-                    @{m.username}{m.is_following ? ' · you follow them' : ''}
-                  </span>
-                </span>
-                <span
-                  aria-hidden="true"
-                  className={`w-5 h-5 rounded-md border flex items-center justify-center flex-none transition-colors ${
-                    on ? 'bg-purple-600 border-purple-500' : 'border-white/25'
-                  }`}
-                >
-                  {on && (
-                    <svg viewBox="0 0 24 24" fill="none" className="w-3 h-3">
-                      <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </span>
-              </button>
-            )
-          })}
-        </div>
+
+        {/* Results. Nothing is listed until the query is long enough, so the
+            bordered box only exists when there is something in it — an empty
+            frame under the input reads as "broken", not as "keep typing". */}
+        {membersError ? (
+          <p className="text-amber-300/80 text-xs mt-2">Couldn't load members: {membersError}</p>
+        ) : !searching ? (
+          <p className="text-white/35 text-[11px] mt-2">
+            Type at least {MIN_MEMBER_QUERY_CHARS} letters of someone's name to find them.
+          </p>
+        ) : members === null ? (
+          <p className="text-white/40 text-xs mt-2">Loading members…</p>
+        ) : matches.length === 0 ? (
+          <p className="text-white/40 text-xs mt-2">No members match “{search.trim()}”.</p>
+        ) : (
+          <ul className="mt-2 max-h-52 overflow-y-auto rounded-lg border border-white/[0.06] divide-y divide-white/[0.05]">
+            {matches.map(m => {
+              const shownName = m.display_name || m.username
+              const on = selected.has(m.username)
+              return (
+                <li key={m.user_id}>
+                  <button
+                    type="button"
+                    onClick={() => pick(m.username)}
+                    aria-pressed={on}
+                    className="w-full flex items-center gap-3 p-2.5 text-left hover:bg-white/[0.04] transition-colors"
+                  >
+                    <ProfileAvatar avatarUrl={m.avatar_url} name={shownName} size={32} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-white/90 text-sm truncate">{shownName}</span>
+                      <span className="block text-white/40 text-[11px] truncate">
+                        @{m.username}{m.is_following ? ' · you follow them' : ''}
+                      </span>
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={`w-5 h-5 rounded-md border flex items-center justify-center flex-none transition-colors ${
+                        on ? 'bg-purple-600 border-purple-500' : 'border-white/25'
+                      }`}
+                    >
+                      {on && (
+                        <svg viewBox="0 0 24 24" fill="none" className="w-3 h-3">
+                          <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+        {/* Announced, not shown: sighted users can see the list appear, but a
+            screen-reader user typing into the box gets no other signal that
+            the results underneath it changed. */}
+        <p className="sr-only" role="status" aria-live="polite">
+          {!searching
+            ? ''
+            : matches.length === 0
+              ? 'No matching members'
+              : `${matches.length} matching ${matches.length === 1 ? 'member' : 'members'}`}
+        </p>
 
         {/* ─── Note ──────────────────────────────────────────────── */}
         <p className="text-white/40 text-[10px] uppercase tracking-wider mt-4 mb-2">

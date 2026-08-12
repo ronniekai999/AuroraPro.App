@@ -73,7 +73,7 @@ import {
   viewingTerminal,
   type FailureKind,
 } from '@/lib/playbackQoESession'
-import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
+import { absoluteUrl, assertCastScopedToken, castSessionIdFromPlaylist, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
   castPlayPauseMismatch,
@@ -788,11 +788,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // so resumeCast can tell when the URL the receiver holds has gone
   // stale during a long pause (see below).
   const castTokenExpRef = useRef(0)
+  // Which session the RECEIVER is streaming. Usually a cast-safe clone the
+  // server made of ours (CloneForCast), sometimes ours verbatim when no
+  // clone was needed — either way it's only knowable from the playlist URL,
+  // and the keepalive ticker and teardown below both need to know.
+  const castSessionIdRef = useRef<string | null>(null)
   const castLoadGetter = useCallback(async () => {
     const sid = sessionIdRef.current
     if (!sid || !target) return null
     const resp = await createCastToken(sid)
     castTokenExpRef.current = resp.expires_at
+    castSessionIdRef.current = castSessionIdFromPlaylist(resp.playlist)
     // Defense-in-depth: confirm the server actually gave us a
     // cast-scoped JWT before we hand its URL to a receiver. A future
     // bug that wired this path to a different token-mint endpoint
@@ -1134,6 +1140,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
       castHasPlayedRef.current = false
       castAdvancePendingRef.current = false
+      // Forget which session was feeding the receiver. Nothing is playing on
+      // a TV any more, so it should stop getting keepalives and stop being
+      // protected from teardown — the next cast records its own.
+      castSessionIdRef.current = null
       return
     }
     if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
@@ -1603,7 +1613,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const sid = sessionIdRef.current
     sessionIdRef.current = null
     deliveryModeRef.current = 'idle'
-    if (sid) {
+    // Never delete the session a Chromecast is streaming. When the server
+    // decides no cast-safe clone is needed (already H.264 + AAC, no subtitle
+    // tracks) the receiver plays the SAME session as the local <video> — so
+    // this DELETE, which exists to release a local player's transcode, was
+    // reaching across and killing the TV mid-title. Nothing else can
+    // resurrect it: session IDs aren't reissued and the segments are gone.
+    // Leaving it to the idle sweep is the correct disposal here; a genuinely
+    // finished cast is deleted the same way every abandoned session is.
+    const castingThisSession = castConnectedRef.current && !!sid && sid === castSessionIdRef.current
+    if (sid && !castingThisSession) {
       // Best-effort — no await, just fire and forget. The server
       // GCs idle sessions anyway, so a missed DELETE costs at most
       // a few minutes of ffmpeg keepalive.
@@ -2691,7 +2710,37 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     let stopped = false
     let recovering = false
 
+    // The receiver's session gets its own ping. It is usually a DIFFERENT
+    // session from the local one (a cast-safe clone), and nothing else in
+    // the client has ever pinged it — until now the only thing keeping it
+    // alive was the receiver's own segment fetches, so a cast paused on the
+    // TV for five minutes had its segments deleted underneath it and could
+    // not be resumed. The server's cast lease (streaming.castHeldTimeout) is
+    // what covers the case this ping can't: a locked phone, whose timers the
+    // OS has frozen. This half handles the awake-sender case and, via the
+    // visibilitychange hook below, re-extends the moment the phone unlocks.
+    const pingCast = () => {
+      const castSid = castSessionIdRef.current
+      if (!castSid || stopped) return
+      // castConnectedRef, not the ref alone: castLoadGetter records the ID
+      // before the session is established, so a cast attempt that fails at
+      // the picker or on loadMedia would otherwise leave us pinging a
+      // session nothing is watching for the rest of the playback.
+      if (!castConnectedRef.current) return
+      if (castSid === sessionIdRef.current) return // shared session — the local ping covers it
+      void keepalive(castSid).then(result => {
+        // 'gone' here is not the local player's problem: the receiver's
+        // session is unrecoverable but the local one may be perfectly fine,
+        // so this must NOT enter the rebuild path below. Just stop pinging a
+        // corpse; the cast itself will surface its own failure.
+        if (result === 'gone' && castSessionIdRef.current === castSid) {
+          castSessionIdRef.current = null
+        }
+      })
+    }
+
     const ping = () => {
+      pingCast()
       const sid = sessionIdRef.current
       if (!sid || stopped) return
       void keepalive(sid).then((result) => {

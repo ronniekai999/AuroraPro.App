@@ -1466,6 +1466,14 @@ func (h *StreamHandler) CreateCastToken(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
+	// Hand the session over to the receiver's clock. From here the thing
+	// keeping it alive is a TV pulling segments, not a browser POSTing
+	// keepalive — and the sender that would have pinged it is a phone whose
+	// screen locks. MarkCastHeld widens the idle window accordingly so a
+	// paused cast (or a locked pocket) doesn't get the segments deleted out
+	// from under it five minutes later. See streaming.castHeldTimeout.
+	h.transcode.MarkCastHeld(castSessionID)
+
 	tokenStr, expiresAt, err := h.authSvc.GenerateCastToken(
 		claims.UserID, claims.Username, claims.Role, claims.TokenVersion, castSessionID,
 	)

@@ -102,6 +102,83 @@ export function skipReasonCopy(reason: string): string {
   }
 }
 
+// ── People picker search ────────────────────────────────────────────────
+//
+// The composer used to render the entire member list the moment it opened.
+// On anything past a handful of accounts that is a wall of names to scroll
+// past, and it puts every member of the household in front of every host who
+// only ever wanted to invite one person. Nothing is listed now until the host
+// has typed enough for the query to mean something specific.
+
+// How many characters before we're willing to show anyone. Three is the point
+// where a query stops matching most of the server: shorter than that and the
+// "results" are just the list again with extra steps.
+export const MIN_MEMBER_QUERY_CHARS = 3
+
+// Results are a short list to scan, not a second directory. Anything past this
+// means the query wasn't specific enough — keep typing.
+export const MAX_MEMBER_RESULTS = 8
+
+// The shape matchMembers needs. Structural, so both MemberSummary (api.ts)
+// and test fixtures satisfy it without importing each other.
+export interface MemberMatchable {
+  username: string
+  display_name?: string
+  is_following?: boolean
+}
+
+// normalizeMemberQuery trims, lowercases, and drops a leading "@" — people
+// type handles the way they read them ("@ronnie"), and the stored username
+// is bare.
+export function normalizeMemberQuery(query: string): string {
+  return query.trim().replace(/^@+/, '').toLowerCase()
+}
+
+// memberQueryReady reports whether a query is long enough to search on.
+// Drives the picker's "keep typing" hint as well as the search itself, so
+// the threshold can never drift between the two.
+export function memberQueryReady(query: string): boolean {
+  return normalizeMemberQuery(query).length >= MIN_MEMBER_QUERY_CHARS
+}
+
+// matchMembers ranks members against a typed query. Returns [] for a query
+// below the threshold — "too short" and "no matches" are deliberately the
+// same empty result here; the caller distinguishes them with
+// memberQueryReady so the two states can say different things on screen.
+//
+// Ranking, best first:
+//   1. the query starts the username or the display name (what you get when
+//      you type the first letters of someone's name, which is the whole
+//      interaction this picker is built around),
+//   2. it appears anywhere in either,
+// and inside each tier, people you follow come before people you don't, then
+// alphabetically by the name actually rendered on the row.
+export function matchMembers<T extends MemberMatchable>(
+  members: readonly T[],
+  query: string,
+  limit: number = MAX_MEMBER_RESULTS,
+): T[] {
+  const q = normalizeMemberQuery(query)
+  if (q.length < MIN_MEMBER_QUERY_CHARS) return []
+
+  const scored: Array<{ m: T; tier: number; name: string }> = []
+  for (const m of members) {
+    const username = m.username.toLowerCase()
+    const display = (m.display_name ?? '').toLowerCase()
+    const prefix = username.startsWith(q) || display.startsWith(q)
+    const anywhere = username.includes(q) || display.includes(q)
+    if (!prefix && !anywhere) continue
+    scored.push({ m, tier: prefix ? 0 : 1, name: (m.display_name || m.username).toLowerCase() })
+  }
+
+  scored.sort((a, b) =>
+    a.tier - b.tier ||
+    Number(!!b.m.is_following) - Number(!!a.m.is_following) ||
+    a.name.localeCompare(b.name))
+
+  return scored.slice(0, Math.max(0, limit)).map(s => s.m)
+}
+
 // countdownParts renders a "starts in" delta as h:mm:ss / m:ss, clamped at
 // zero. Feed it server-aligned time (now + clockOffset) so every client's
 // countdown converges.

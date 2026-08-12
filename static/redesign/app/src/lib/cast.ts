@@ -672,6 +672,26 @@ export function absoluteUrl(path: string): string {
   return path.startsWith('/') ? `${origin}${path}` : `${origin}/${path}`
 }
 
+// castSessionIdFromPlaylist recovers the transcode-session ID out of the
+// playlist URL the cast-token endpoint hands back
+// (/api/stream/hls/{sessionID}/master.m3u8?token=…).
+//
+// That URL is the only place the sender learns which session the RECEIVER
+// is actually streaming. It is often NOT the session the local <video> is
+// playing: the server clones a cast-safe H.264+AAC session when the local
+// one carries codecs the Default Media Receiver can't handle
+// (CloneForCast), and the clone's ID appears nowhere else in the response.
+// The player needs it for two things — keeping that session alive while
+// it's the one feeding the TV, and not deleting it on teardown when the
+// clone was skipped and both surfaces share one session.
+//
+// Returns null on any shape we don't recognize; every caller treats that as
+// "no separate cast session", which is the safe reading.
+export function castSessionIdFromPlaylist(playlist: string): string | null {
+  const m = /\/api\/stream\/hls\/([^/?#]+)\/master\.m3u8/.exec(playlist)
+  return m ? decodeURIComponent(m[1]) : null
+}
+
 // assertCastScopedToken decodes a JWT (without verifying its signature —
 // only the server can do that) and throws if the `scope` claim is not
 // "stream:cast". Used as a defense-in-depth check before handing a URL

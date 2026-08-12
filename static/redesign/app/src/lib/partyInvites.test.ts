@@ -5,11 +5,15 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  MIN_MEMBER_QUERY_CHARS,
   buildQuickChips,
   countdownLabel,
   formatPartyTime,
   inviteCodeFromLink,
   localDateKey,
+  matchMembers,
+  memberQueryReady,
+  normalizeMemberQuery,
   skipReasonCopy,
 } from './partyInvites'
 
@@ -104,5 +108,75 @@ describe('skipReasonCopy', () => {
     expect(skipReasonCopy('not_found')).toContain('no member')
     expect(skipReasonCopy('self')).toContain('you')
     expect(skipReasonCopy('mystery_reason')).toBe('mystery_reason')
+  })
+})
+
+// The composer's people picker shows nobody until these say so, so the
+// threshold and the ranking are what the host actually experiences as
+// "search". Both are asserted here rather than in the modal, which has no
+// business re-deciding either.
+describe('normalizeMemberQuery', () => {
+  it('trims, lowercases, and drops a typed @handle prefix', () => {
+    expect(normalizeMemberQuery('  Sam  ')).toBe('sam')
+    expect(normalizeMemberQuery('@Ronnie')).toBe('ronnie')
+    expect(normalizeMemberQuery('@@dee')).toBe('dee')
+  })
+})
+
+describe('memberQueryReady', () => {
+  it('needs the threshold in real characters, not whitespace or @', () => {
+    expect(memberQueryReady('')).toBe(false)
+    expect(memberQueryReady('sa')).toBe(false)
+    expect(memberQueryReady('  sa  ')).toBe(false)
+    expect(memberQueryReady('@sa')).toBe(false)
+    expect(memberQueryReady('sam')).toBe(true)
+    expect(memberQueryReady('@sam')).toBe(true)
+  })
+  it('agrees with the exported threshold', () => {
+    expect(memberQueryReady('x'.repeat(MIN_MEMBER_QUERY_CHARS - 1))).toBe(false)
+    expect(memberQueryReady('x'.repeat(MIN_MEMBER_QUERY_CHARS))).toBe(true)
+  })
+})
+
+describe('matchMembers', () => {
+  const roster = [
+    { username: 'samir', display_name: 'Samir P', is_following: false },
+    { username: 'dee', display_name: 'Samantha Dee', is_following: false },
+    { username: 'kass', display_name: 'Kass', is_following: true },
+    { username: 'rosam', display_name: 'Ro', is_following: true },
+    { username: 'sammy', display_name: 'Sammy', is_following: true },
+  ]
+
+  it('shows nobody until the query hits the threshold', () => {
+    expect(matchMembers(roster, '')).toEqual([])
+    expect(matchMembers(roster, 'sa')).toEqual([])
+    expect(matchMembers(roster, 'sam').length).toBeGreaterThan(0)
+  })
+
+  it('matches username or display name, case-insensitively', () => {
+    expect(matchMembers(roster, 'SAMANTHA').map(m => m.username)).toEqual(['dee'])
+    expect(matchMembers(roster, 'kass').map(m => m.username)).toEqual(['kass'])
+  })
+
+  it('ranks prefix matches above mid-word ones, follows above strangers', () => {
+    // 'sammy' and 'samir' and 'dee' (Samantha) all start with "sam";
+    // 'rosam' only contains it, so it sorts last however well-connected.
+    expect(matchMembers(roster, 'sam').map(m => m.username))
+      .toEqual(['sammy', 'dee', 'samir', 'rosam'])
+  })
+
+  it('honors the result cap', () => {
+    expect(matchMembers(roster, 'sam', 2).map(m => m.username)).toEqual(['sammy', 'dee'])
+    expect(matchMembers(roster, 'sam', 0)).toEqual([])
+  })
+
+  it('returns empty rather than everything when nothing matches', () => {
+    expect(matchMembers(roster, 'zzz')).toEqual([])
+    expect(matchMembers([], 'sam')).toEqual([])
+  })
+
+  it('tolerates members with no display name', () => {
+    expect(matchMembers([{ username: 'samwise' }], 'sam').map(m => m.username))
+      .toEqual(['samwise'])
   })
 })
