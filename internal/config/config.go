@@ -271,13 +271,26 @@ type TranscodeConfig struct {
 	// pipeline). Decode offload is what removes the dominant CPU cost of
 	// the 4K-HEVC→H.264 transcode; see streaming.ProbeHWDecode.
 	HWDecode string
-	// SoftwarePreset is the libx264 preset for SOFTWARE transcodes (the
-	// HWAccelNone path — hardware encoders have their own speed/quality
-	// knobs). Default "veryfast". "faster" buys ~5-8% quality at ~30%
-	// more CPU for operators who prefer quality over warmup speed.
-	// Validated against the x264 realtime-capable presets in
-	// NewTranscodeManager; unknown values fall back to "veryfast".
+	// SoftwarePreset is the libx264/libx265 preset for SOFTWARE transcodes.
+	// Default "veryfast". "faster" buys ~5-8% quality at ~30% more CPU for
+	// operators who prefer quality over warmup speed. Validated against the
+	// x264 realtime-capable presets in NewTranscodeManager; unknown values
+	// fall back to "veryfast".
+	//
+	// When set it OVERRIDES whatever preset QualityPolicy would pick for the
+	// software encoders — it is the more specific knob and predates the
+	// policy. It has never had any effect on hardware encoders.
 	SoftwarePreset string
+	// QualityPolicy is the operator's speed/quality preference, resolved
+	// per encoder family (streaming.QualityPolicy): "balanced" (default),
+	// "fast_start" or "quality".
+	//
+	// It exists because software_preset only ever reached libx264/libx265 —
+	// two of the ten encoder paths. NVENC/QSV/AMF carried hardcoded values
+	// and VAAPI, the most common self-hosted backend, had no quality knob
+	// at all. "balanced" reproduces the historical arguments exactly on
+	// every family, so upgrading without setting this changes nothing.
+	QualityPolicy string
 	// HEVCOutput controls HEVC transcode OUTPUT (2026-08): "auto"
 	// (default — probe the hevc_* counterpart of the detected encoder,
 	// emit HEVC for HEVC-capable clients) or "off" (every transcode stays
@@ -350,6 +363,7 @@ type yamlConfig struct {
 		SegmentDuration    int      `yaml:"segment_duration"`
 		SegmentFormat      string   `yaml:"segment_format"`
 		SoftwarePreset     string   `yaml:"software_preset"`
+		QualityPolicy      string   `yaml:"quality_policy"`
 		HEVCOutput         string   `yaml:"hevc_output"`
 		Profiles           []string `yaml:"profiles"`
 		MaxCacheGB         int      `yaml:"max_cache_gb"`
@@ -490,6 +504,9 @@ func Load() (*Config, error) {
 			// libx264 preset for software transcodes. "faster" is the
 			// quality-first alternative (~5-8% better, ~30% more CPU).
 			SoftwarePreset: "veryfast",
+			// Speed/quality policy applied across every encoder family.
+			// "balanced" reproduces the historical arguments exactly.
+			QualityPolicy: "balanced",
 			// HEVC transcode output for HEVC-capable clients (probe the
 			// hevc_* counterpart of the detected encoder). "off" keeps
 			// every transcode on H.264.
@@ -777,6 +794,9 @@ func loadYAML(cfg *Config) error {
 	if yc.Transcode.SoftwarePreset != "" {
 		cfg.Transcode.SoftwarePreset = yc.Transcode.SoftwarePreset
 	}
+	if yc.Transcode.QualityPolicy != "" {
+		cfg.Transcode.QualityPolicy = yc.Transcode.QualityPolicy
+	}
 	if yc.Transcode.HEVCOutput != "" {
 		cfg.Transcode.HEVCOutput = yc.Transcode.HEVCOutput
 	}
@@ -1019,6 +1039,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("TRANSCODE_SEGMENT_FORMAT"); v != "" {
 		cfg.Transcode.SegmentFormat = v
+	}
+	if v := os.Getenv("TRANSCODE_QUALITY_POLICY"); v != "" {
+		cfg.Transcode.QualityPolicy = v
 	}
 	if v := os.Getenv("TRANSCODE_MAX_SESSIONS_PER_USER"); v != "" {
 		if i, err := strconv.Atoi(v); err == nil {

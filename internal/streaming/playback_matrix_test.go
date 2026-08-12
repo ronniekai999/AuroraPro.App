@@ -480,6 +480,56 @@ func TestPlaybackMatrix_BurnInForcesCPUDecodePath(t *testing.T) {
 	}
 }
 
+// TestPlaybackMatrix_EveryQualityPolicyEncodes runs each speed/quality policy
+// through a real software transcode.
+//
+// The unit tests in qualitypolicy_test.go assert the resolved argv; this asserts
+// that FFmpeg accepts it. A policy that selects a preset name the local encoder
+// build does not recognize fails at encoder init, before a single segment — the
+// exact failure mode the fail-safe parsing exists to prevent, and one that only
+// a real encode can catch. Software-only here because CI has no GPU; the
+// hardware families need the hardware-in-the-loop runs documented in
+// docs/server-testing.md.
+func TestPlaybackMatrix_EveryQualityPolicyEncodes(t *testing.T) {
+	requireFFmpeg(t)
+	requireFFmpegEncoders(t, "libx264", "aac")
+
+	fixture := mediaFixture{Container: "mkv", VideoCodec: "h264", AudioCodec: "aac"}
+	path := fixture.build(t)
+
+	for _, policy := range []QualityPolicy{PolicyFastStart, PolicyBalanced, PolicyQuality} {
+		t.Run(string(policy), func(t *testing.T) {
+			cfg := matrixConfig()
+			cfg.QualityPolicy = string(policy)
+			// Clear the preset so the POLICY picks it — otherwise
+			// software_preset wins by design and every case would encode
+			// identically, testing nothing.
+			cfg.SoftwarePreset = ""
+
+			tm, err := NewTranscodeManager(t.TempDir(), cfg)
+			if err != nil {
+				t.Fatalf("new transcode manager: %v", err)
+			}
+			t.Cleanup(tm.Close)
+
+			if got := tm.hwAccel.policy(); got != policy {
+				t.Fatalf("manager resolved policy %q, want %q", got, policy)
+			}
+
+			_, variant := startFirstVariant(t, tm, path,
+				SessionOpts{SourceVideoCodec: "h264", AudioTrackIndex: -1, AudioChannels: 2})
+
+			merged := mergeInitAndSegment(t, variant.OutputDir)
+			if got := firstVideoStream(t, probeStreams(t, merged)).CodecName; got != "h264" {
+				t.Errorf("policy %q produced video codec %q, want h264", policy, got)
+			}
+			if d := segmentDurationOf(t, merged); d <= 0 {
+				t.Errorf("policy %q produced a segment with no media (%v)", policy, d)
+			}
+		})
+	}
+}
+
 // TestPlaybackMatrix_SeekAnchoredSessionEncodesOnlyTheRemainder asserts that a
 // seek actually moves FFmpeg's input position rather than silently re-encoding
 // from zero.

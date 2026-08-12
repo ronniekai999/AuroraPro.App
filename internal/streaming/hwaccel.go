@@ -43,6 +43,18 @@ type HWAccelInfo struct {
 	// admin-facing JSON: it's a config knob, not a detected capability.
 	SWPreset string `json:"-"`
 
+	// Policy is the operator's speed/quality preference
+	// (transcode.quality_policy), resolved per encoder family by
+	// qualitypolicy.go. Like SWPreset it's config, not a detected
+	// capability, so it stays out of the admin capability JSON — the
+	// policy is reported separately via HWAccelStatus's sibling fields.
+	//
+	// The ZERO VALUE must behave as PolicyBalanced: HWAccelInfo literals
+	// are constructed directly all over the probe and test code, and a
+	// zero-value struct has to keep producing the historical arguments.
+	// Read it through policy(), never directly.
+	Policy QualityPolicy `json:"-"`
+
 	// HEVCEncoder is the probed HEVC encoder for OUTPUT transcodes
 	// (2026-08, review item #5): hevc_nvenc / hevc_qsv / hevc_vaapi /
 	// hevc_amf for the detected hardware, libx265 for software boxes.
@@ -373,7 +385,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int, fps float64) []string {
 		// same bitrate budget for zero benefit here — segments are served from
 		// disk, so encode latency never reaches the viewer. `hq` restores the
 		// lookahead/B-frame quality NVENC is capable of.
-		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+		return []string{"-c:v", "h264_nvenc", "-preset", h.policy().nvencPreset(), "-tune", "hq", "-rc", "vbr",
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	case HWAccelQSV:
 		// `-profile:v` with the explicit :v stream specifier — NOT bare
@@ -383,7 +395,7 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int, fps float64) []string {
 		// profile=high, which is not a valid AAC profile constant
 		// (aac_low/aac_main/…), and FFmpeg aborts at encoder init before
 		// producing a single segment. Review 2026-06 finding B1.
-		return []string{"-c:v", "h264_qsv", "-preset", "faster",
+		return []string{"-c:v", "h264_qsv", "-preset", h.policy().qsvPreset(),
 			"-profile:v", profile, "-level", strconv.Itoa(h264LevelIDC(height, fps)), "-vf", scale}
 	case HWAccelVAAPI:
 		// VAAPI does not support explicit baseline profile constraint — leave as-is.
@@ -393,18 +405,20 @@ func (h HWAccelInfo) VideoEncoderArgs(width, height int, fps float64) []string {
 			dev = findDRIDevice()
 		}
 		vf := fmt.Sprintf("format=nv12,hwupload,scale_vaapi=w=%d:h=-2", width)
-		return []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "h264_vaapi", "-level", level}
+		args := []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "h264_vaapi", "-level", level}
+		// Until the quality policy existed this family had no quality knob at
+		// all — on the most common self-hosted GPU. Balanced still emits
+		// nothing (driver default), so the default path is unchanged.
+		return append(args, h.policy().vaapiCompressionArgs()...)
 	case HWAccelAMF:
-		return []string{"-c:v", "h264_amf", "-quality", "speed",
+		return []string{"-c:v", "h264_amf", "-quality", h.policy().amfQuality(),
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	default:
-		// Software (libx264). Preset is operator-tunable via
-		// transcode.software_preset (validated in NewTranscodeManager);
-		// empty defends the zero-value struct used by tests/probes.
-		preset := h.SWPreset
-		if preset == "" {
-			preset = "veryfast"
-		}
+		// Software (libx264). Preset comes from transcode.software_preset when
+		// set (validated in NewTranscodeManager) and otherwise from the
+		// quality policy; empty defends the zero-value struct used by
+		// tests/probes.
+		preset := h.policy().softwarePresetFor(h.SWPreset)
 		return []string{"-c:v", "libx264", "-preset", preset,
 			"-profile:v", profile, "-level", level, "-vf", scale}
 	}
@@ -622,10 +636,10 @@ func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
 	level := hevcLevel(height, fps)
 	switch h.Type {
 	case HWAccelNVENC:
-		return []string{"-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+		return []string{"-c:v", "hevc_nvenc", "-preset", h.policy().nvencPreset(), "-tune", "hq", "-rc", "vbr",
 			"-profile:v", "main", "-level", level, "-vf", scale, "-tag:v", "hvc1"}
 	case HWAccelQSV:
-		return []string{"-c:v", "hevc_qsv", "-preset", "faster",
+		return []string{"-c:v", "hevc_qsv", "-preset", h.policy().qsvPreset(),
 			"-profile:v", "main", "-level", strconv.Itoa(hevcLevelIDC(height, fps)), "-vf", scale, "-tag:v", "hvc1"}
 	case HWAccelVAAPI:
 		dev := h.DevicePath
@@ -633,21 +647,20 @@ func (h HWAccelInfo) HEVCEncoderArgs(width, height int, fps float64) []string {
 			dev = findDRIDevice()
 		}
 		vf := fmt.Sprintf("format=nv12,hwupload,scale_vaapi=w=%d:h=-2", width)
-		return []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "hevc_vaapi",
+		args := []string{"-vaapi_device", dev, "-vf", vf, "-c:v", "hevc_vaapi",
 			"-level", level, "-tag:v", "hvc1"}
+		return append(args, h.policy().vaapiCompressionArgs()...)
 	case HWAccelAMF:
-		return []string{"-c:v", "hevc_amf", "-quality", "speed",
+		return []string{"-c:v", "hevc_amf", "-quality", h.policy().amfQuality(),
 			"-profile:v", "main", "-level", level, "-vf", scale, "-tag:v", "hvc1"}
 	default:
 		// libx265: no explicit -profile — the forced yuv420p (8-bit) input
 		// makes x265 emit Main automatically, and the wrapper's profile
 		// option naming differs from x264's. Preset honors
-		// transcode.software_preset like the H.264 path. x265 picks its
-		// own level from the input dimensions/rate.
-		preset := h.SWPreset
-		if preset == "" {
-			preset = "veryfast"
-		}
+		// transcode.software_preset (or the quality policy when unset) like
+		// the H.264 path. x265 picks its own level from the input
+		// dimensions/rate.
+		preset := h.policy().softwarePresetFor(h.SWPreset)
 		return []string{"-c:v", "libx265", "-preset", preset,
 			"-vf", scale, "-tag:v", "hvc1"}
 	}

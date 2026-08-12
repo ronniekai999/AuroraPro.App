@@ -1388,6 +1388,18 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 	}
 	hwAccel.SWPreset = strings.ToLower(strings.TrimSpace(tcCfg.SoftwarePreset))
 
+	// Speed/quality policy (transcode.quality_policy). Unknown values fail
+	// SAFE to balanced with a warning, matching software_preset above: this
+	// resolves into real encoder flags, and a typo must not reach FFmpeg as a
+	// misspelled preset. "balanced" reproduces the pre-policy arguments on
+	// every encoder family, so a rejected value is always the safe landing.
+	policy, ok := ParseQualityPolicy(tcCfg.QualityPolicy)
+	if !ok {
+		slog.Warn("unknown transcode quality_policy, using balanced",
+			"configured", tcCfg.QualityPolicy)
+	}
+	hwAccel.Policy = policy
+
 	// HEVC output encoder (2026-08 review item #5): probe the hevc_*
 	// counterpart of the detected backend (libx265 on software boxes).
 	// transcode.hevc_output: off skips probing — the rollback knob. Empty
@@ -1477,6 +1489,9 @@ func NewTranscodeManager(baseDir string, tcCfg config.TranscodeConfig) (*Transco
 		"profiles", tcCfg.Profiles,
 		"segment_format", segFormat,
 		"software_preset", hwAccel.SWPreset,
+		// Resolved policy, not the raw config string: what the encoders will
+		// actually be asked for, per the family that was detected.
+		"quality_policy", hwAccel.policy().Describe(hwAccel.Type, hwAccel.SWPreset),
 		"readrate_pacing", tm.readrateOK,
 	)
 
@@ -1577,6 +1592,18 @@ func effectiveMaxSessionsPerUser(configured int) int {
 		return defaultMaxSessionsPerUser
 	}
 	return configured
+}
+
+// EncodingPolicy reports the resolved speed/quality policy together with the
+// concrete encoder knob it selected on THIS host ("quality (nvenc preset p6)").
+//
+// The resolved form is what an operator actually needs: the policy name alone
+// says nothing about what their particular GPU was asked for, and the
+// per-family vocabularies don't translate into each other. Kept separate from
+// HWAccelStatus because that struct describes DETECTED CAPABILITY while this is
+// configuration — the review's item #2 asks for both in admin.
+func (tm *TranscodeManager) EncodingPolicy() string {
+	return tm.hwAccel.policy().Describe(tm.hwAccel.Type, tm.hwAccel.SWPreset)
 }
 
 // HWAccelStatus returns info about the detected hardware acceleration,

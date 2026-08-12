@@ -1766,6 +1766,10 @@ func (h *StreamHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 		"direct_plays": directPlays,
 		"count":        len(sessions) + len(directPlays),
 		"hw_accel":     h.transcode.HWAccelStatus(),
+		// Resolved speed/quality policy for THIS host's encoder family, so the
+		// admin surface shows what the encoders were actually asked for rather
+		// than only what hardware was detected.
+		"quality_policy": h.transcode.EncodingPolicy(),
 	})
 }
 
@@ -1854,9 +1858,22 @@ func (h *StreamHandler) noteStaleKeepalive(sessionID string, userID int64) {
 		"consecutive_404s", misses)
 }
 
-// HWAccelStatus returns detected hardware acceleration info.
+// hwAccelStatusResponse is the detected hardware capability plus the resolved
+// encoding policy. HWAccelInfo is EMBEDDED so its fields stay at the top level
+// of the JSON object — existing consumers of this endpoint keep reading exactly
+// the shape they always have, with quality_policy added alongside.
+type hwAccelStatusResponse struct {
+	streaming.HWAccelInfo
+	QualityPolicy string `json:"quality_policy"`
+}
+
+// HWAccelStatus returns detected hardware acceleration info plus the resolved
+// speed/quality policy.
 func (h *StreamHandler) HWAccelStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.transcode.HWAccelStatus())
+	writeJSON(w, http.StatusOK, hwAccelStatusResponse{
+		HWAccelInfo:   h.transcode.HWAccelStatus(),
+		QualityPolicy: h.transcode.EncodingPolicy(),
+	})
 }
 
 // writeSessionCreateError maps a transcode session-creation failure onto the
