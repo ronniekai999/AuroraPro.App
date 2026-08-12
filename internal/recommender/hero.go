@@ -642,7 +642,7 @@ func (h *Hero) build(ctx context.Context, profileID int64) ([]HeroPick, poolQual
 		// Personal Match v2: absolute cosine mapping + evidence shrinkage.
 		// Candidate-pool composition cannot move the displayed value. Cold-start
 		// (Tier 2) skips this — Match stays 0.
-		evidence, evidenceErr := h.q.PersonalizationHistoryCount(ctx, profileID)
+		evidence, evidenceErr := h.q.MatchEvidenceCount(ctx, profileID)
 		if evidenceErr != nil {
 			slog.Warn("hero: match evidence count failed; suppressing personal match",
 				"profile", profileID, "error", evidenceErr)
@@ -948,9 +948,17 @@ func assembleHeroPicks(parsedPicks []heroRerankPick, candidates []*models.MediaI
 }
 
 // applyPersonalMatch sets the personal Match v2 from absolute cosine similarity
-// and profile evidence. Candidate-pool composition is intentionally absent: a
-// title's percentage must not change because a different neighbor entered the
-// recall pool. Only the personalized tier calls this; cold-start picks remain 0.
+// and profile evidence (db.MatchEvidenceCount — distinct supporting titles).
+// Only the personalized tier calls this; cold-start picks remain 0.
+//
+// Pool INVARIANCE is the point: the mapping reads only (similarity, evidence),
+// so a title's percentage cannot move because a different neighbour entered the
+// recall pool. The similarity itself is the item's cosine to the profile's
+// CLOSEST taste mode (interleaveMerge stamps the max across centroids), which
+// is a property of the profile's taste, not of which centroid's list happened
+// to reach the item first. One residual caveat: an item is only scored against
+// the centroids whose recall pool actually returned it, so on a large library a
+// distant taste mode can be truncated away before it is compared.
 func applyPersonalMatch(picks []HeroPick, evidence int) {
 	if evidence <= 0 {
 		return
@@ -958,7 +966,7 @@ func applyPersonalMatch(picks []HeroPick, evidence int) {
 	for i := range picks {
 		if it := picks[i].Item; it != nil && it.MatchScore > 0 {
 			p, confidence := personalMatchV2(it.MatchScore, evidence)
-			picks[i].Match = clampInt(int(math.Round(p*100)), 1, 100)
+			picks[i].Match = matchPercent(p)
 			picks[i].MatchConfidence = confidence
 			picks[i].MatchModelVersion = matchModelVersion
 			picks[i].MatchSimilarity = it.MatchScore

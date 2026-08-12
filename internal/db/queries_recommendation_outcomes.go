@@ -101,6 +101,18 @@ type RecommendationCalibrationRow struct {
 	LabelReason  string
 }
 
+// Predicted reports whether this exposure actually displayed a personal Match
+// probability. Cold-start heroes are logged with the same fidelity as
+// personalized ones (they are real exposures, and the surface mix matters), but
+// they showed the viewer an Aurora Score — no probabilistic claim was made, so
+// they belong to no calibration bucket. Scoring them anyway feeds Match=0 into
+// Brier/log-loss as a confident "this will disappoint you": one satisfied
+// cold-start outcome adds ~10 to summed log loss, which on a beta-sized cohort
+// swamps the very metrics the report exists to produce.
+func (r RecommendationCalibrationRow) Predicted() bool {
+	return r.Match > 0 && r.ModelVersion != "" && r.ModelVersion != UnpersonalizedModelVersion
+}
+
 // RecommendationCalibrationRows returns visible, reproducible decisions plus
 // all currently observable post-exposure outcomes. It deliberately leaves
 // no-action rows censored; callers choose an attribution/maturity window rather
@@ -147,7 +159,13 @@ func (q *Queries) RecommendationCalibrationRows(ctx context.Context, since time.
 		    COUNT(DISTINCT e.episode_id) FILTER (WHERE e.event_type='completed' AND e.episode_id IS NOT NULL)::int
 		      + COUNT(*) FILTER (WHERE e.event_type='completed' AND e.episode_id IS NULL)::int AS fresh_completions,
 		    COUNT(*) FILTER (WHERE e.event_type='rewatch_completed')::int AS rewatch_completions,
-		    COUNT(DISTINCT COALESCE(e.episode_id, e.id))::int AS engaged_rows,
+		    -- Engagement excludes 'started' (progress < 20%): the series label
+		    -- promises TWO engaged/completed episodes, and counting bounces let
+		    -- 25% of ep1 plus two minutes of ep2 read as 0.75 "series_engaged"
+		    -- instead of 0.55 sustained-partial. The movie path is unchanged —
+		    -- SatisfactionLabel already gated it on MaxProgress >= 0.20.
+		    (COUNT(DISTINCT COALESCE(e.episode_id, e.id))
+		      FILTER (WHERE e.event_type <> 'started'))::int AS engaged_rows,
 		    MAX(e.progress) AS max_progress,
 		    (ARRAY_AGG(e.event_type ORDER BY e.occurred_at DESC, e.id DESC))[1] = 'started'
 		      AND MAX(e.occurred_at) <= NOW() - INTERVAL '30 minutes'

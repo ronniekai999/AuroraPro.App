@@ -143,12 +143,27 @@ const watchlistedNotExists = ` AND NOT EXISTS (SELECT 1 FROM watchlist_items wl 
 // const, three callers, so what the clusters see can never drift from what the
 // average sees. Binds $1=profileID; append a `SELECT … FROM recent` to use it.
 //
+// The SOURCE branches live in tasteSignalUnionSQL, shared with
+// MatchEvidenceCount, which asks a different question (how much independent
+// evidence exists at all) and therefore must NOT inherit this slice's LIMIT.
+// Splitting the union out keeps both reading the same signal definition: add a
+// source here and the evidence count sees it too.
+const tasteRecentSliceCTE = `
+		WITH recent AS (
+		  SELECT embedding FROM (` + tasteSignalUnionSQL + `  ) src` + tasteLowRatedExclusion + `
+		  ORDER BY completed DESC, ts DESC
+		  LIMIT 20
+		)`
+
+// tasteSignalUnionSQL is the UNION of every positive taste signal, one row per
+// (source, media_item_id), deduped across branches in precedence order. Binds
+// $1=profileID; wrap it in `SELECT … FROM (` … `) src` and apply
+// tasteLowRatedExclusion.
+//
 // Anything added here must also be excluded from RECALL — see
 // watchlistedNotExists. A source that steers the centroid puts its own items on
 // top of it, and they come back as their own nearest neighbours.
-const tasteRecentSliceCTE = `
-		WITH recent AS (
-		  SELECT embedding FROM (
+const tasteSignalUnionSQL = `
 		    -- A watch counts as top-tier when it is finished OR meaningfully
 		    -- under way. The ` + "`completed`" + ` column alone put every in-progress watch
 		    -- BELOW every seed, thumb, rating and watchlist add — all of which
@@ -319,20 +334,20 @@ const tasteRecentSliceCTE = `
 		        WHERE w2.profile_id = $1 AND w2.list_type = 'want_to_watch'
 		          AND wi2.media_item_id = wi.media_item_id
 		      )
-		  ) src
-		  -- 1-2★ exclusion, applied across ALL branches: a low-starred title
-		  -- must stop pulling the centroid no matter how it entered the slice.
-		  -- This is what fixes the "watched 5 minutes of it, hated it" case —
-		  -- the abandoned watch_progress row would otherwise keep steering
-		  -- recommendations toward the title until 20 newer watches displaced it.
+`
+
+// tasteLowRatedExclusion drops 1-2★ titles across ALL branches of
+// tasteSignalUnionSQL: a low-starred title must stop pulling the centroid no
+// matter how it entered the slice. This is what fixes the "watched 5 minutes of
+// it, hated it" case — the abandoned watch_progress row would otherwise keep
+// steering recommendations toward the title until 20 newer watches displaced
+// it. Expects the union wrapped as `src`; binds $1=profileID.
+const tasteLowRatedExclusion = `
 		  WHERE NOT EXISTS (
 		    SELECT 1 FROM user_ratings lr
 		    WHERE lr.profile_id = $1 AND lr.media_item_id = src.media_item_id
 		      AND lr.stars <= 2
-		  )
-		  ORDER BY completed DESC, ts DESC
-		  LIMIT 20
-		)`
+		  )`
 
 // ProfileEmbeddingSlice returns the SAME recency slice BuildProfileVector
 // averages, but UN-averaged — one pgvector text literal per item — for Go-side
@@ -387,6 +402,35 @@ func (q *Queries) PersonalizationHistoryCount(ctx context.Context, profileID int
 	var n int
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("personalization history count: %w", err)
+	}
+	return n, nil
+}
+
+// MatchEvidenceCount returns how many DISTINCT titles independently support a
+// profile's taste model. It is the evidence term in the personal Match formula
+// (recommender.personalMatchV2 shrinks toward the uninformative 0.50 prior by
+// rho = n/(n+k)), and it is deliberately NOT PersonalizationHistoryCount:
+//
+//   - Uncapped. The slice's LIMIT 20 exists so clustering reads a RECENT slice;
+//     reused as evidence it pinned rho at 20/25 = 0.8 forever, so no profile —
+//     however mature — could ever display above ~86% Match, and the formula's
+//     own 0.95 ceiling was unreachable. Evidence should keep accruing after the
+//     20 titles that happen to steer the centroid today.
+//   - DISTINCT titles. watch_progress holds one row PER EPISODE, so counting
+//     rows let a single binged show read as 20 independent pieces of evidence
+//     and hand a one-show profile a mature profile's confidence. Same reasoning
+//     as the maturity lean's DISTINCT-titles rule.
+//
+// Shares tasteSignalUnionSQL + tasteLowRatedExclusion with the centroid slice,
+// so the signals counted here are exactly the signals that steer taste.
+func (q *Queries) MatchEvidenceCount(ctx context.Context, profileID int64) (int, error) {
+	row := q.pool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT src.media_item_id) FROM (`+tasteSignalUnionSQL+`) src`+tasteLowRatedExclusion,
+		profileID,
+	)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, fmt.Errorf("match evidence count: %w", err)
 	}
 	return n, nil
 }

@@ -9,6 +9,13 @@ import (
 
 const RecommendationImpressionRetention = 90 * 24 * time.Hour
 
+// UnpersonalizedModelVersion marks an impression that displayed NO personal
+// Match — a cold-start pick (the ring shows the global Aurora Score instead) or
+// a personalized pick with no usable similarity. Written here and read by the
+// calibration cohort filter, so the two can't drift: these rows made no
+// probabilistic claim and must never be scored as if they had predicted ~0%.
+const UnpersonalizedModelVersion = "unpersonalized"
+
 // RecommendationImpression is one item in a recommendation slate selected for
 // API delivery. Position is zero-based. Similarity and Evidence are the raw
 // Match-model inputs; Match and Confidence are the derived values shown/logged.
@@ -50,7 +57,7 @@ func (q *Queries) RecordRecommendationImpressions(ctx context.Context, profileID
 		}
 		version := item.ModelVersion
 		if version == "" {
-			version = "unpersonalized"
+			version = UnpersonalizedModelVersion
 		}
 		n := item.Evidence
 		if n < 0 {

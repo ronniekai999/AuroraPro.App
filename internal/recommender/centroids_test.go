@@ -140,6 +140,44 @@ func TestInterleaveMerge(t *testing.T) {
 	}
 }
 
+// TestInterleaveMerge_StampsBestSimilarityAcrossCentroids pins the fix for the
+// user-visible symptom: an item recalled by TWO taste modes used to display
+// whichever centroid's list won the first-wins dedupe, so its Match % moved a
+// few points between rebuilds (anti-repeat demotion reorders the lists) with no
+// change in taste evidence. The stamp must be the max — similarity to the
+// CLOSEST taste mode — regardless of which list the merge keeps.
+func TestInterleaveMerge_StampsBestSimilarityAcrossCentroids(t *testing.T) {
+	// Same title recalled by both centroids: a weak 0.41 fit to mode A, a strong
+	// 0.88 fit to mode B. Distinct pointers, exactly as two NearestUnwatched
+	// scans produce.
+	fromA := &models.MediaItem{ID: 7, MatchScore: 0.41}
+	fromB := &models.MediaItem{ID: 7, MatchScore: 0.88}
+	only := &models.MediaItem{ID: 9, MatchScore: 0.55}
+
+	// List A wins the dedupe (rank 0 of the first list) but carries the WEAKER
+	// similarity — the pre-fix bug.
+	got := interleaveMerge([][]*models.MediaItem{{fromA}, {fromB, only}}, 10)
+	if len(got) != 2 || got[0].ID != 7 {
+		t.Fatalf("merge = %v, want the shared item first", ids(got))
+	}
+	if got[0].MatchScore != 0.88 {
+		t.Errorf("shared item kept %v, want the best-across-centroids 0.88", got[0].MatchScore)
+	}
+	if got[1].MatchScore != 0.55 {
+		t.Errorf("single-mode item = %v, want its own 0.55 untouched", got[1].MatchScore)
+	}
+
+	// Order-invariance is the actual guarantee: swapping which centroid's list
+	// comes first must not change the displayed similarity.
+	swapped := interleaveMerge([][]*models.MediaItem{
+		{&models.MediaItem{ID: 7, MatchScore: 0.88}},
+		{&models.MediaItem{ID: 7, MatchScore: 0.41}},
+	}, 10)
+	if len(swapped) != 1 || swapped[0].MatchScore != 0.88 {
+		t.Errorf("list order changed the stamp: %+v", swapped)
+	}
+}
+
 func ids(items []*models.MediaItem) []int64 {
 	out := make([]int64, len(items))
 	for i, it := range items {

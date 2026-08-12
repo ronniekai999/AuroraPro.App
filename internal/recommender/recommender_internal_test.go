@@ -970,6 +970,30 @@ func TestPersonalMatchV2(t *testing.T) {
 		t.Fatalf("weak sim should fall with confidence: sparse=%d mature=%d", weakSparse, weakMature)
 	}
 
+	// Evidence is UNCAPPED (db.MatchEvidenceCount), so confidence keeps growing
+	// past the 20 titles the centroid slice happens to hold. When evidence was
+	// the capped slice count, rho pinned at 20/25 = 0.8 and nothing could ever
+	// display above ~86% — the 0.95 ceiling was unreachable dead code.
+	rich := matchDisplayV2(0.95, 200)
+	if rich <= matchDisplayV2(0.95, 20) {
+		t.Errorf("evidence beyond the old cap must still raise confidence: 200→%d vs 20→%d",
+			rich, matchDisplayV2(0.95, 20))
+	}
+	if rich <= 86 {
+		t.Errorf("a strongly-matched, evidence-rich profile should clear the old ~86%% ceiling, got %d", rich)
+	}
+	if _, confidence := personalMatchV2(0.95, 200); confidence <= 0.8 {
+		t.Errorf("rho = %v, want > 0.8 once evidence exceeds the old top-20 cap", confidence)
+	}
+
+	// The manifest's floor/ceiling now bind instead of being unreachable.
+	if got := matchDisplayV2(1, 100000); got != 95 {
+		t.Errorf("overwhelming evidence + perfect sim should hit the 0.95 ceiling, got %d", got)
+	}
+	if got := matchDisplayV2(0.01, 100000); got != 5 {
+		t.Errorf("overwhelming evidence + near-zero sim should hit the 0.05 floor, got %d", got)
+	}
+
 	// Bounded [0,100] and monotonic in sim for fixed evidence — a higher
 	// similarity can never produce a lower match %.
 	prev := -1
