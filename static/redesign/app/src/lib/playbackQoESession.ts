@@ -7,7 +7,7 @@
 // staying green. The wiring still has no test; the LOGIC now does, and the logic
 // is where every one of those defects lived.
 
-import type { QoEPrewarm, QoETerminal } from './playbackQoE'
+import type { QoEFailureTerminal, QoEPrewarm, QoETerminal } from './playbackQoE'
 
 /** The subset of PlayTarget that identifies what is being watched. */
 export interface ViewingIdentity {
@@ -93,7 +93,7 @@ export function viewingTerminal(advanceSucceeded: boolean): QoETerminal {
  */
 export type FailureKind = 'media' | 'network' | 'session_create'
 
-export function failureTerminal(kind: FailureKind): QoETerminal {
+export function failureTerminal(kind: FailureKind): QoEFailureTerminal {
   switch (kind) {
     case 'network':
       return 'network_error'

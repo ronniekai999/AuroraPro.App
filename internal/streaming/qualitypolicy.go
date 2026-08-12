@@ -204,6 +204,15 @@ func (p QualityPolicy) Describe(backend HWAccelType, softwarePreset string) stri
 		}
 		return fmt.Sprintf("%s (vaapi driver default)", p)
 	default:
-		return fmt.Sprintf("%s (x264/x265 preset %s)", p, p.softwarePresetFor(softwarePreset))
+		// The two software encoders no longer resolve to the same preset —
+		// x265's per-step cost is far steeper, so the quality policy gives it
+		// one step where x264 gets two. Reporting a single value would be
+		// wrong for one of them.
+		x264 := p.softwarePresetForEncoder(softwarePreset, false)
+		x265 := p.softwarePresetForEncoder(softwarePreset, true)
+		if x264 == x265 {
+			return fmt.Sprintf("%s (x264/x265 preset %s)", p, x264)
+		}
+		return fmt.Sprintf("%s (x264 preset %s, x265 preset %s)", p, x264, x265)
 	}
 }

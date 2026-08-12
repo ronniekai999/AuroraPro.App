@@ -233,10 +233,14 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 		   -- 'unknown' is the PROVISIONAL terminal a client writes when its
 		   -- page enters the back/forward cache: at that instant nobody knows
 		   -- whether it will be restored or discarded, so a row is written to
-		   -- cover the discard case. A page that does come back and then ends
-		   -- properly must be able to replace it with the real outcome, so
-		   -- exactly one upgrade out of 'unknown' is allowed. Any other
-		   -- terminal is final — a late duplicate beacon cannot rewrite it.
+		   -- cover the discard case. A page that comes back and then ends
+		   -- properly must be able to replace it with the real outcome.
+		   --
+		   -- Precisely: a row may be written while it has no terminal or while
+		   -- it holds 'unknown' (so repeated bfcache entries are idempotent),
+		   -- and any OTHER terminal is final. That is the property that
+		   -- matters — a late or duplicate beacon can never rewrite a settled
+		   -- outcome, and watched_ms cannot regress.
 		   AND (terminal IS NULL OR terminal = 'unknown')`,
 		profileID,
 		rec.SessionToken,
@@ -284,7 +288,14 @@ func (q *Queries) RestampPlaybackQoEDelivery(ctx context.Context, profileID int6
 		       subtitle_mode  = $8
 		 WHERE session_token = $2
 		   AND profile_id    = $1
-		   AND terminal IS NULL`,
+		   -- Same "still open" definition FinishPlaybackQoE uses. A row whose
+		   -- page entered the back/forward cache carries the provisional
+		   -- 'unknown' terminal; it is still an open viewing and can still have
+		   -- its delivery rebuilt, so restamping has to reach it. Using a
+		   -- stricter predicate here meant a viewer who backgrounded a tab and
+		   -- then seeked kept the pre-rebuild encoder on a row that later
+		   -- settled as a completed transcode.
+		   AND (terminal IS NULL OR terminal = 'unknown')`,
 		profileID, token,
 		normalizeEnum(d.OutputCodec, PlaybackQoEOutputCodecs, "none"),
 		normalizeEnum(d.EncoderFamily, PlaybackQoEEncoderFamilies, "none"),
@@ -546,7 +557,10 @@ func (q *Queries) PrunePlaybackQoE(ctx context.Context, retention time.Duration)
 			return total, nil
 		}
 		if err := ctx.Err(); err != nil {
-			return total, nil
+			// Report the cancellation. Returning nil here logged a truncated
+			// sweep as a clean one, hiding a retention backlog that the next
+			// run would meet larger still.
+			return total, fmt.Errorf("prune playback qoe: swept %d rows before %w", total, err)
 		}
 	}
 }

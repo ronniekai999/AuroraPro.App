@@ -22,6 +22,9 @@ import { apiFetchResponse } from './api'
 export type QoEDecision = 'direct_play' | 'direct_stream' | 'transcode'
 export type QoEBurnIn = 'none' | 'text' | 'bitmap'
 export type QoEPrewarm = 'none' | 'hit' | 'miss'
+/** The subset of terminals that represent a failure rather than an outcome. */
+export type QoEFailureTerminal = 'media_error' | 'network_error' | 'transcode_error'
+
 export type QoETerminal =
   | 'ended'
   | 'user_exit'
@@ -79,8 +82,14 @@ export interface QoECollector {
   noteRenditionSwitch(): void
   /** Latest hls.js bandwidth estimate, in bits/sec. Bucketed before sending. */
   noteThroughput(bitsPerSec: number): void
-  /** Terminal categories the player knows about but the DOM does not. */
-  noteError(kind: QoETerminal): void
+  /**
+   * Terminal categories the player knows about but the DOM does not.
+   *
+   * Narrowed to the FAILURE terminals on purpose: a pending value wins over
+   * whatever `finish` is later called with, so accepting the full vocabulary
+   * would let `noteError('unknown')` permanently mask a completed playthrough.
+   */
+  noteError(kind: QoEFailureTerminal): void
   /** Report and stop. Safe to call more than once; only the first wins. */
   finish(terminal: QoETerminal): void
   /**
@@ -384,7 +393,7 @@ export function attachPlaybackQoE(
     noteThroughput(bitsPerSec: number) {
       if (Number.isFinite(bitsPerSec) && bitsPerSec > 0) throughputBits = bitsPerSec
     },
-    noteError(kind: QoETerminal) {
+    noteError(kind: QoEFailureTerminal) {
       pendingError = kind
     },
     finish(terminal: QoETerminal) {

@@ -173,6 +173,48 @@ func TestQualityPolicy_SoftwarePresetsStayRealtimeCapable(t *testing.T) {
 	}
 }
 
+// TestQualityPolicy_X265GetsAShallowerStepThanX264 pins the asymmetry.
+//
+// x264 and x265 share preset NAMES but not their cost — x265 at a given preset
+// is several times slower. The quality policy therefore gives x265 one step
+// where x264 gets two; giving both the same step left x265 unable to keep up
+// with on-demand playback, the exact failure the realtime allowlist exists to
+// prevent.
+func TestQualityPolicy_X265GetsAShallowerStepThanX264(t *testing.T) {
+	info := HWAccelInfo{Type: HWAccelNone, Policy: PolicyQuality}
+
+	x264, _ := argValue(info.VideoEncoderArgs(1280, 720, 24), "-preset")
+	x265, _ := argValue(info.HEVCEncoderArgs(1280, 720, 24), "-preset")
+
+	if x264 != "fast" {
+		t.Errorf("x264 quality preset = %q, want fast", x264)
+	}
+	if x265 != "faster" {
+		t.Errorf("x265 quality preset = %q, want faster — one step, not two", x265)
+	}
+	if x264 == x265 {
+		t.Error("both software encoders resolved to the same preset; x265's per-step " +
+			"cost is far steeper and it cannot afford x264's step")
+	}
+
+	// The admin string has to report both, or it is wrong for one of them.
+	desc := PolicyQuality.Describe(HWAccelNone, "")
+	if !strings.Contains(desc, x264) || !strings.Contains(desc, x265) {
+		t.Errorf("Describe = %q; it must name both resolved presets now that they differ", desc)
+	}
+
+	// An explicit software_preset still overrides both.
+	explicit := HWAccelInfo{Type: HWAccelNone, Policy: PolicyQuality, SWPreset: "medium"}
+	for name, args := range map[string][]string{
+		"x264": explicit.VideoEncoderArgs(1280, 720, 24),
+		"x265": explicit.HEVCEncoderArgs(1280, 720, 24),
+	} {
+		if got, _ := argValue(args, "-preset"); got != "medium" {
+			t.Errorf("%s with explicit software_preset: got %q, want medium", name, got)
+		}
+	}
+}
+
 func TestParseQualityPolicy(t *testing.T) {
 	cases := []struct {
 		in     string

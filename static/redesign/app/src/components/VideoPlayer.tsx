@@ -1541,6 +1541,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // outcome it really had.
   const currentViewing = viewingKeyOf(target)
   useEffect(() => {
+    if (!target) return
     // Sample the bandwidth estimate on a timer rather than only at teardown.
     // It used to be read inside closeAndCleanup, but React runs cleanups in
     // declaration order and this effect is declared FIRST — so on a viewing
@@ -1751,9 +1752,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
             qoeRef.current = attachPlaybackQoE(videoRef.current, {
               decision: stream.decision,
               decisionReason: stream.reason_code,
-              // May be null while the profile gate is still resolving; the
-              // server then falls back to the account default. Re-reported
-              // below once it lands so the attribution corrects itself.
+              // May still be null while the profile gate resolves, in which
+              // case the server falls back to the account default for this
+              // row. Playback started that early is rare and the row is not
+              // rewritten afterwards — noted rather than papered over.
               profileId: profileId ?? undefined,
               clickAtMs: playRequestedAtRef.current ?? undefined,
             })
@@ -2613,10 +2615,25 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         const msg = err instanceof Error ? err.message : 'Failed to start playback'
         // A stream-info or session-create failure is an OUTAGE — a session cap,
         // an ffprobe failure, a full disk — and it never reaches hls.js or the
-        // element, so nothing else classifies it. Left unclassified the row
-        // closed as user_exit and the admin error rate read 0.00 for exactly
-        // the shape an operator most needs to see.
-        try { qoeRef.current?.noteError(failureTerminal('session_create')) } catch { /* best-effort */ }
+        // element, so nothing else classifies it. Left unclassified the admin
+        // error rate read 0.00 for exactly the shape an operator most needs to
+        // see.
+        //
+        // On a COLD start the failure happens upstream of the attach, so there
+        // is no collector yet and the outage would produce no row at all. Open
+        // one just to close it: a failed start is a playback that happened.
+        try {
+          if (!qoeRef.current && videoRef.current) {
+            qoeRef.current = attachPlaybackQoE(videoRef.current, {
+              decision: 'transcode',
+              profileId: profileId ?? undefined,
+              clickAtMs: playRequestedAtRef.current ?? undefined,
+            })
+            qoeViewingRef.current = viewingKeyOf(target)
+          }
+          qoeRef.current?.noteError(failureTerminal('session_create'))
+          qoeRef.current?.finish(failureTerminal('session_create'))
+        } catch { /* best-effort */ }
         setErrorMsg(msg)
         // If a cast auto-advance was waiting on this boot, it just failed
         // (sessionIdRef was never set). Tick the reload epoch so the cast
@@ -4214,6 +4231,10 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         swapWatchdogRef.current = window.setTimeout(() => {
           swapWatchdogRef.current = null
           advanceFiredRef.current = false
+          // The swap was rejected: the viewer is still on this episode, so the
+          // viewing has NOT ended. Without this reset, closing the player here
+          // would report a completed playthrough.
+          qoeAdvancedRef.current = false
           setNextUpPhase('prompt')
         }, PARTY_SWAP_WATCHDOG_MS)
         return

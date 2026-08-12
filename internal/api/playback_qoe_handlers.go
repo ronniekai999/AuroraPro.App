@@ -273,7 +273,16 @@ func (h *PlaybackQoEHandler) Restamp(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	facts := h.deliveryFacts(claims.UserID, "transcode", req.SessionID)
+	facts, known := h.knownDeliveryFacts(claims.UserID, req.SessionID)
+	if !known {
+		// The session is gone or not ours. On the FIRST-FRAME write an unknown
+		// resolves to the zero vocabulary, which is honest for a new row. Here
+		// it would overwrite facts that were already stamped correctly,
+		// producing a decision='transcode' row claiming no encoder — worse
+		// than leaving the pre-rebuild values in place.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if err := h.queries.RestampPlaybackQoEDelivery(r.Context(), profileID, req.SessionToken, db.PlaybackQoEDelivery{
 		OutputCodec:   facts.OutputCodec,
 		EncoderFamily: facts.EncoderFamily,
@@ -339,6 +348,22 @@ func decodeQoEBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool
 // the zero vocabulary rather than to client-supplied values — an unknown is
 // more honest than an unverified claim, and it shows up in the aggregate as
 // "none" rather than as a fabricated encoder family.
+// knownDeliveryFacts is deliveryFacts without the fallback: ok=false means the
+// session could not be described, and the caller decides whether "unknown" or
+// "leave it alone" is the right answer.
+func (h *PlaybackQoEHandler) knownDeliveryFacts(userID int64, sessionID string) (streaming.SessionQoEFacts, bool) {
+	if sessionID == "" || h.transcode == nil {
+		return streaming.SessionQoEFacts{}, false
+	}
+	if owner := h.transcode.GetSessionOwner(sessionID); owner > 0 && owner != userID {
+		slog.Warn("playback qoe: session belongs to another user; not stamping",
+			"session_id", sessionID)
+		return streaming.SessionQoEFacts{}, false
+	}
+	facts, ok := h.transcode.SessionQoEFacts(sessionID)
+	return facts, ok
+}
+
 func (h *PlaybackQoEHandler) deliveryFacts(userID int64, decision, sessionID string) streaming.SessionQoEFacts {
 	if decision == "direct_play" || sessionID == "" || h.transcode == nil {
 		return streaming.DirectPlayQoEFacts()
@@ -346,8 +371,11 @@ func (h *PlaybackQoEHandler) deliveryFacts(userID int64, decision, sessionID str
 	// Ownership check. Session ids are 32 hex characters so guessing one is not
 	// practical, but the row is per-profile history and a member should not be
 	// able to stamp somebody else's session facts into it even in principle.
-	if owner := h.transcode.GetSessionOwner(sessionID); owner != 0 && owner != userID {
-		slog.Debug("playback qoe: session belongs to another user; not stamping",
+	// GetSessionOwner returns -1 for a session it does not know — a reaped
+	// session, which is the ordinary case by the time a beacon lands, not a
+	// security event. Only a KNOWN session owned by somebody else is refused.
+	if owner := h.transcode.GetSessionOwner(sessionID); owner > 0 && owner != userID {
+		slog.Warn("playback qoe: session belongs to another user; not stamping",
 			"session_id", sessionID)
 		return streaming.DirectPlayQoEFacts()
 	}

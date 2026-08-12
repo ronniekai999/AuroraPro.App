@@ -182,8 +182,12 @@ func main() {
 			// shorter (30 days vs 90): the data answers questions about the
 			// recent past, so keeping it longer would carry more per-profile
 			// history for no additional operational answer.
+			// The sweep is batched and returns how much it committed even when
+			// it stops early, so log the progress alongside the failure rather
+			// than discarding it — a truncated sweep is still a partial one and
+			// the count is what says whether a backlog is draining.
 			if n, err := queries.PrunePlaybackQoE(pctx, db.PlaybackQoERetention); err != nil {
-				slog.Warn("playback qoe retention sweep failed", "error", err)
+				slog.Warn("playback qoe retention sweep incomplete", "error", err, "pruned", n)
 			} else if n > 0 {
 				slog.Info("pruned playback qoe sessions", "count", n)
 			}
