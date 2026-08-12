@@ -2148,8 +2148,16 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// hevcLevelIDC; unknown fps keeps the default choice).
 	// Remux: codec string is unknown at creation time (omitted, valid per HLS spec).
 	if !session.Remux {
+		// Declared bandwidth is resolved here, alongside CODECS, because both
+		// depend on the SESSION's audio output rather than on the static
+		// ladder: a 5.1 AC-3 passthrough costs ~640 kbps where stereo AAC
+		// costs 192, and that difference is a real part of what the client has
+		// to sustain. Deriving it from the profile's own -maxrate/-b:v keeps
+		// the declaration and the encoder configuration in lockstep.
+		audioBits := AudioDeclaredBitrate(session.AudioCodecOut, session.AudioPassthrough)
 		for i := range profiles {
 			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
+			profiles[i].HLSBandwidth, profiles[i].HLSAvgBandwidth = profiles[i].LadderBandwidth(audioBits)
 		}
 		session.Profiles = profiles
 	}
