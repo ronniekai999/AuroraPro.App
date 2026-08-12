@@ -34,12 +34,17 @@ export interface QoEContext {
   decision: QoEDecision
   /** Coarse bucket of the server's transcode reason. */
   decisionReason?: string
-  outputCodec?: string
-  encoderFamily?: string
-  segmentFormat?: string
-  hdrConversion?: string
-  burnIn?: QoEBurnIn
-  subtitleMode?: string
+  /**
+   * The transcode session this playback uses, so the SERVER can stamp the
+   * delivery facts — encoder family, segment format, burn-in, HDR conversion.
+   * The browser cannot know those (burn-in is configured on a pre-play path
+   * the player holds no reference to; the encoder family is a probe result),
+   * and an earlier version of this module asked it to report them anyway, so
+   * every row carried their defaults and burn_in_sessions was a hardcoded 0.
+   * Omitted for direct play, which has no session.
+   */
+   sessionId?: string
+  /** Whether the detail-page hover pre-warm was adopted. Client-side fact. */
   prewarm?: QoEPrewarm
   /**
    * performance.now() at the moment the user asked for playback. The single
@@ -51,6 +56,23 @@ export interface QoEContext {
 }
 
 export interface QoECollector {
+  /**
+   * A delivery was rebuilt underneath this viewing — a seek that re-anchors
+   * the server session, an audio-track switch, a fallback to transcode. The
+   * VIEWING continues, so the row must not close: an earlier version tore the
+   * collector down on every rebuild, which turned one movie with four scrubs
+   * into five rows, four of them terminating as `user_exit` and four of them
+   * contributing a bogus "startup" measured from the rebuild.
+   */
+  noteDeliveryRebuild(sessionId?: string): void
+  /**
+   * Whether the hover pre-warm was adopted. Reported after attach, because the
+   * adoption happens during session creation — which is downstream of the
+   * decision this collector attaches on.
+   */
+  notePrewarm(kind: QoEPrewarm): void
+  /** The transcode session backing this playback, for server-side stamping. */
+  noteSession(sessionId: string): void
   /** hls.js MANIFEST_PARSED (or the native-HLS equivalent). */
   noteManifestParsed(): void
   /** hls.js LEVEL_SWITCHED. */
@@ -120,6 +142,7 @@ export function attachPlaybackQoE(
   let rebufferMs = 0
   let rebufferStartedAt: number | null = null
   let renditionSwitches = 0
+  let deliveryRebuilds = 0
   let throughputBits = 0
   let pendingError: QoETerminal | null = null
 
@@ -165,12 +188,7 @@ export function attachPlaybackQoE(
       {
         decision: ctx.decision,
         decision_reason: ctx.decisionReason || 'unspecified',
-        output_codec: ctx.outputCodec || 'none',
-        encoder_family: ctx.encoderFamily || 'none',
-        segment_format: ctx.segmentFormat || 'none',
-        hdr_conversion: ctx.hdrConversion || 'none',
-        burn_in: ctx.burnIn || 'none',
-        subtitle_mode: ctx.subtitleMode || 'none',
+        session_id: ctx.sessionId,
         prewarm: ctx.prewarm || 'none',
         viewport_class: viewportClass(video),
         click_to_first_frame_ms: clickToFirstFrame,
@@ -224,7 +242,15 @@ export function attachPlaybackQoE(
   }
   // A page being unloaded mid-playback is a user exit, and the beacon is the
   // only thing that will still run.
-  const onPageHide = () => collector.finish('user_exit')
+  //
+  // persisted=true means the page is going into the back/forward cache, not
+  // away: it can be restored and keep playing. Finishing there would close the
+  // row early AND detach every listener, so the restored playback would report
+  // nothing at all and a movie the viewer finished would read as `user_exit`.
+  const onPageHide = (e: PageTransitionEvent) => {
+    if (e.persisted) return
+    collector.finish('user_exit')
+  }
 
   video.addEventListener('playing', onPlaying)
   video.addEventListener('waiting', onWaiting)
@@ -233,7 +259,7 @@ export function attachPlaybackQoE(
   video.addEventListener('seeked', onSeeked)
   video.addEventListener('ended', onEnded)
   video.addEventListener('error', onError)
-  window.addEventListener('pagehide', onPageHide)
+  window.addEventListener('pagehide', onPageHide as EventListener)
 
   const removeListeners = () => {
     if (detached) return
@@ -245,10 +271,23 @@ export function attachPlaybackQoE(
     video.removeEventListener('seeked', onSeeked)
     video.removeEventListener('ended', onEnded)
     video.removeEventListener('error', onError)
-    window.removeEventListener('pagehide', onPageHide)
+    window.removeEventListener('pagehide', onPageHide as EventListener)
   }
 
   const collector: QoECollector = {
+    notePrewarm(kind: QoEPrewarm) {
+      ctx.prewarm = kind
+    },
+    noteSession(sessionId: string) {
+      ctx.sessionId = sessionId
+    },
+    noteDeliveryRebuild(sessionId?: string) {
+      deliveryRebuilds++
+      if (sessionId) ctx.sessionId = sessionId
+      // A rebuild re-buffers, but that is not a stall the viewer's connection
+      // caused — close any open rebuffer window so it is not charged here.
+      closeRebuffer()
+    },
     noteManifestParsed() {
       if (manifestAtMs == null) manifestAtMs = performance.now()
     },
@@ -284,6 +323,7 @@ export function attachPlaybackQoE(
           rebuffer_count: rebufferCount,
           rebuffer_ms: rebufferMs,
           rendition_switches: renditionSwitches,
+          delivery_rebuilds: deliveryRebuilds,
           watched_ms: watchedMs,
           throughput_class: throughputClass(throughputBits),
           terminal: pendingError || terminal,

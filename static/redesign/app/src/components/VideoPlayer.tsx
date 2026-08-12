@@ -233,6 +233,10 @@ interface VideoPlayerProps {
   // user explicitly clicks the card's button, `force: true` asks the
   // parent to advance even with the autoplay preference off — an
   // explicit click outranks the passive-behavior setting.
+  // Active sub-profile, so playback telemetry is attributed to the profile
+  // that actually watched rather than falling back to the account default —
+  // which mis-filed every kids-profile playback.
+  profileId?: number | null
   onEnded?: (opts?: { force?: boolean }) => boolean | Promise<boolean>
   // Issue #460 — the next-up card's party counterpart. In a watch party
   // the host's advance must move the ROOM, not this player, so the card
@@ -454,7 +458,16 @@ async function attemptPlay(
 // button being the usual last click before sitting back) stranded focus
 // inside `data-player-chrome` and suppressed the auto-hide timer forever.
 
-export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
+// viewingKeyOf identifies one VIEWING — the title being watched — as distinct
+// from one delivery. A seek re-anchor, an audio-track switch and a transcode
+// fallback all produce a new `target` object for the same viewing; only a
+// change of file is a new one.
+function viewingKeyOf(t: PlayTarget | null): string {
+  if (!t) return ''
+  return `${t.fileType}:${t.fileId}`
+}
+
+export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTrack, onSendReaction, onFallbackToTranscode, onSeekRebuild, onEnded, onPartyAdvance, onMinimizedChange,
   onSurfaceChange, isAdmin }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   // Issue #177 — hold the latest onEnded in a ref so the 'ended'
@@ -471,6 +484,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   // #1). Held in a ref rather than state because nothing renders from it and a
   // re-render must never restart the measurement.
   const qoeRef = useRef<QoECollector | null>(null)
+  // The VIEWING the current collector belongs to. A viewing is one title being
+  // watched; the delivery underneath it can be rebuilt many times (seek
+  // re-anchor, audio-track switch, transcode fallback) and each rebuild
+  // produces a new `target` object. Keying the collector on the target made one
+  // movie with four scrubs write five rows — four terminating as `user_exit`,
+  // four contributing a bogus "startup" timed from the rebuild, and watched_ms
+  // reset each time. Keying it on the viewing keeps one row per playback.
+  const qoeViewingRef = useRef<string | null>(null)
   // performance.now() at the moment the user asked for playback. Captured as
   // early as the effect runs so click-to-first-frame measures what the viewer
   // actually waited through, not just the part after the manifest resolved.
@@ -1491,6 +1512,25 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     promote()
   }, [target, availableSubs])
 
+  // The QoE row is closed HERE, not in closeAndCleanup.
+  //
+  // closeAndCleanup runs on every delivery teardown, including the seek
+  // re-anchor and audio-switch rebuilds that continue the same viewing. This
+  // effect has an empty dependency list, so its cleanup runs exactly once —
+  // when the player unmounts — which is the moment a viewing genuinely ends
+  // without having reached its natural end. `finish` is idempotent, so a
+  // viewing already closed by `ended`, by fireAdvance, or by a terminal error
+  // keeps the outcome it actually had.
+  useEffect(() => {
+    return () => {
+      try {
+        qoeRef.current?.finish('user_exit')
+        qoeRef.current = null
+        qoeViewingRef.current = null
+      } catch { /* never let telemetry break teardown */ }
+    }
+  }, [])
+
   // Stable close handler — does NOT depend on `target`, so the
   // teardown effect's cleanup doesn't change identity across renders
   // (which would trigger spurious cleanup runs).
@@ -1508,13 +1548,12 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
       try { hlsRef.current.destroy() } catch { /* defensive */ }
       hlsRef.current = null
     }
-    // Close the QoE row. Reaching closeAndCleanup without the <video> having
-    // fired 'ended' means the viewer left, which is a distinct outcome from a
-    // completed playthrough and worth counting separately.
-    try {
-      qoeRef.current?.finish('user_exit')
-      qoeRef.current = null
-    } catch { /* never let telemetry break teardown */ }
+    // Deliberately does NOT close the QoE row. closeAndCleanup runs on every
+    // DELIVERY teardown — including the seek re-anchor and audio-switch
+    // rebuilds that continue the same viewing — so ending the row here is what
+    // fragmented one playback into several. The viewing is closed by the
+    // unmount effect below, by a change of title, or by the player's own
+    // terminal events.
     const sid = sessionIdRef.current
     sessionIdRef.current = null
     deliveryModeRef.current = 'idle'
@@ -1634,7 +1673,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // the session create and the encoder warmup are all latency the
         // viewer sits through, and a measurement that started later would
         // flatter exactly the part of the pipeline this is meant to watch.
-        playRequestedAtRef.current = performance.now()
+        if (qoeViewingRef.current !== viewingKeyOf(target)) {
+          playRequestedAtRef.current = performance.now()
+        }
         // 1. Stream-info: server decides direct vs HLS.
         const info: StreamInfo = await getStreamInfo(target.fileId, target.fileType, ac.signal)
         if (cancelled) return
@@ -1645,20 +1686,25 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // direct play and HLS report through the same collector. Every entry
         // point swallows its own errors — telemetry must never be able to
         // break playback.
-        qoeRef.current?.detach()
-        qoeRef.current = null
-        if (videoRef.current) {
-          try {
+        try {
+          const viewing = viewingKeyOf(target)
+          if (qoeRef.current && qoeViewingRef.current === viewing) {
+            // Same viewing, rebuilt delivery. Keep the row open and count the
+            // rebuild; do NOT restart the startup clock, which would otherwise
+            // report seek latency as click-to-first-frame.
+            qoeRef.current.noteDeliveryRebuild()
+          } else if (videoRef.current) {
+            // A different title: close the previous viewing before opening one.
+            qoeRef.current?.finish('user_exit')
             qoeRef.current = attachPlaybackQoE(videoRef.current, {
               decision: stream.decision,
               decisionReason: stream.reason_code,
-              outputCodec: stream.decision === 'direct_stream' ? 'copy' : (stream.video_codec_out || 'none'),
-              segmentFormat: stream.decision === 'direct_play' ? 'none' : 'fmp4',
-              hdrConversion: stream.hdr_tonemap ? 'tonemap_cpu' : 'none',
+              profileId: profileId ?? undefined,
               clickAtMs: playRequestedAtRef.current ?? undefined,
             })
-          } catch { /* never let telemetry break playback */ }
-        }
+            qoeViewingRef.current = viewing
+          }
+        } catch { /* never let telemetry break playback */ }
         // M10 Phase 4.5 — expose tracks for the picker.
         setAvailableAudio(info.audio_tracks || [])
         // Issue #133 — filter out bitmap-format subtitles (PGS/VobSub/
@@ -1908,6 +1954,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // returns null and we create a fresh session exactly as before.
         let session: SessionResponse
         const warmed = prewarmEnabled() ? takeWarmedSession(sessionReq) : null
+        // Pre-warm adoption is only knowable here, after the session request is
+        // built. It is the column that says whether the hover pre-warm works.
+        try { qoeRef.current?.notePrewarm(warmed ? 'hit' : 'miss') } catch { /* telemetry is best-effort */ }
         if (warmed) {
           session = {
             session_id: warmed.sessionId,
@@ -1924,6 +1973,10 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
           return
         }
         sessionIdRef.current = session.session_id
+        // Hand the session to the collector so the SERVER stamps the delivery
+        // facts (encoder family, segment format, burn-in, HDR conversion)
+        // rather than the browser guessing at values it cannot see.
+        try { qoeRef.current?.noteSession(session.session_id) } catch { /* best-effort */ }
         deliveryModeRef.current = 'hls'
         startSecRef.current = session.start_sec ?? 0
         // Issue #141 — record the EFFECTIVE remux state (sessionReq.remux
@@ -4068,6 +4121,11 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const fireAdvance = useCallback(async (force: boolean) => {
     if (advanceFiredRef.current) return
     advanceFiredRef.current = true
+    // The viewing IS complete here, even though the <video> element will never
+    // fire `ended`: the next-up card advances at the credits marker, the parent
+    // re-targets, and teardown follows. Without this a fully-watched episode
+    // and an abandoned one were indistinguishable in the data.
+    try { qoeRef.current?.finish('ended') } catch { /* telemetry is best-effort */ }
     setNextUpPhase('spent')
     if (partyAdvanceHostRef.current) {
       // Party: the parent reports which of the three outcomes happened,

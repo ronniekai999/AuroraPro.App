@@ -424,7 +424,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	recapH := NewRecapHandler(deps.Queries, deps.LLMClient)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
 	streamH := NewStreamHandler(deps.Queries, deps.Transcode, deps.DirectPlay, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
-	qoeH := NewPlaybackQoEHandler(deps.Queries)
+	qoeH := NewPlaybackQoEHandler(deps.Queries, deps.Transcode)
 	progressH := NewProgressHandler(deps.Queries, deps.Hub)
 	if deps.HeroProv != nil {
 		progressH.SetHeroProvider(deps.HeroProv)

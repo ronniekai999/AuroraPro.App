@@ -41,7 +41,7 @@ func qoeRequest(t *testing.T, path, body string, authed bool) *http.Request {
 }
 
 func TestPlaybackQoE_RequiresAuthentication(t *testing.T) {
-	h := NewPlaybackQoEHandler(nil)
+	h := NewPlaybackQoEHandler(nil, nil)
 
 	for _, tc := range []struct {
 		name    string
@@ -67,7 +67,7 @@ func TestPlaybackQoE_RequiresAuthentication(t *testing.T) {
 // test would panic rather than quietly start issuing 4xx to a mid-playback
 // client.
 func TestPlaybackQoE_MalformedInputIsNeverAnError(t *testing.T) {
-	h := NewPlaybackQoEHandler(nil)
+	h := NewPlaybackQoEHandler(nil, nil)
 
 	bodies := map[string]string{
 		"not json":           `{{{`,
@@ -107,7 +107,7 @@ func TestPlaybackQoE_MalformedInputIsNeverAnError(t *testing.T) {
 // or an attempt to use the analytics endpoint as a memory sink, and neither
 // deserves a parsed body — nor an error the client can retry against.
 func TestPlaybackQoE_OversizedBodyIsRejectedWithoutError(t *testing.T) {
-	h := NewPlaybackQoEHandler(nil)
+	h := NewPlaybackQoEHandler(nil, nil)
 	huge := `{"session_token":"` + strings.Repeat("a", 32) + `","pad":"` + strings.Repeat("x", 1<<20) + `"}`
 
 	rec := httptest.NewRecorder()
@@ -121,7 +121,7 @@ func TestPlaybackQoE_OversizedBodyIsRejectedWithoutError(t *testing.T) {
 // allowed to answer with an error, because it is an admin read rather than a
 // hot-path write.
 func TestPlaybackQoE_SummaryRejectsInvalidWindow(t *testing.T) {
-	h := NewPlaybackQoEHandler(nil)
+	h := NewPlaybackQoEHandler(nil, nil)
 	for _, bad := range []string{"0", "-5", "abc"} {
 		rec := httptest.NewRecorder()
 		h.Summary(rec, httptest.NewRequest(http.MethodGet, "/api/admin/playback-qoe?hours="+bad, nil))

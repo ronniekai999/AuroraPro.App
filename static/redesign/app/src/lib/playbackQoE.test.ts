@@ -60,19 +60,23 @@ describe('attachPlaybackQoE', () => {
     const qoe = attachPlaybackQoE(video, {
       decision: 'transcode',
       decisionReason: 'video_codec',
-      outputCodec: 'h264',
-      encoderFamily: 'software',
-      burnIn: 'bitmap',
       clickAtMs: performance.now() - 500,
     })
     qoe.noteManifestParsed()
+    qoe.noteSession('abc123')
+    qoe.notePrewarm('hit')
     video.dispatchEvent(new Event('playing'))
     await flush()
 
     expect(fetched).toHaveLength(1)
     expect(fetched[0].path).toBe('/api/stream/qoe/start')
     expect(fetched[0].body.decision).toBe('transcode')
-    expect(fetched[0].body.burn_in).toBe('bitmap')
+    // The delivery facts are NOT sent — the server stamps them from the
+    // session, because the browser cannot see burn-in or the encoder family.
+    expect(fetched[0].body.session_id).toBe('abc123')
+    expect(fetched[0].body.prewarm).toBe('hit')
+    expect(fetched[0].body).not.toHaveProperty('burn_in')
+    expect(fetched[0].body).not.toHaveProperty('encoder_family')
     // The session token has to satisfy the server's shape check.
     expect(String(fetched[0].body.session_token)).toMatch(/^[0-9a-f]{32}$/)
     // Startup timing is measured, not fabricated.
@@ -130,6 +134,62 @@ describe('attachPlaybackQoE', () => {
     // The raw figure must never appear — with a timestamp it is closer to a
     // network fingerprint than to an operational metric.
     expect(JSON.stringify(beacons[0].body)).not.toContain('7500000')
+  })
+
+  it('keeps one row open across delivery rebuilds', async () => {
+    const video = makeVideo()
+    const qoe = attachPlaybackQoE(video, {
+      decision: 'transcode',
+      clickAtMs: performance.now() - 300,
+    })
+    video.dispatchEvent(new Event('playing'))
+    await flush()
+    const startRows = fetched.filter((f) => f.path.endsWith('/qoe/start')).length
+
+    // A seek re-anchor and an audio-track switch rebuild the delivery; the
+    // viewing continues, so neither may close the row or open a new one.
+    qoe.noteDeliveryRebuild('session-2')
+    qoe.noteDeliveryRebuild('session-3')
+    qoe.finish('ended')
+    await flush()
+
+    expect(fetched.filter((f) => f.path.endsWith('/qoe/start'))).toHaveLength(startRows)
+    expect(beacons).toHaveLength(1)
+    expect(beacons[0].body.delivery_rebuilds).toBe(2)
+    expect(beacons[0].body.terminal).toBe('ended')
+  })
+
+  it('does not end the row when the page enters the bfcache', async () => {
+    const video = makeVideo()
+    attachPlaybackQoE(video, { decision: 'direct_play' })
+    video.dispatchEvent(new Event('playing'))
+
+    // persisted=true means restorable, not gone.
+    const bfcache = new Event('pagehide') as PageTransitionEvent
+    Object.defineProperty(bfcache, 'persisted', { value: true })
+    window.dispatchEvent(bfcache)
+    await flush()
+    expect(beacons).toHaveLength(0)
+
+    // The restored page keeps playing and still reports its real outcome.
+    video.dispatchEvent(new Event('ended'))
+    await flush()
+    expect(beacons).toHaveLength(1)
+    expect(beacons[0].body.terminal).toBe('ended')
+  })
+
+  it('ends the row on a real page unload', async () => {
+    const video = makeVideo()
+    attachPlaybackQoE(video, { decision: 'direct_play' })
+    video.dispatchEvent(new Event('playing'))
+
+    const unload = new Event('pagehide') as PageTransitionEvent
+    Object.defineProperty(unload, 'persisted', { value: false })
+    window.dispatchEvent(unload)
+    await flush()
+
+    expect(beacons).toHaveLength(1)
+    expect(beacons[0].body.terminal).toBe('user_exit')
   })
 
   it('counts rendition switches', async () => {

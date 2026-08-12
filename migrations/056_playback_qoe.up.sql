@@ -98,6 +98,12 @@ CREATE TABLE playback_qoe_sessions (
     rebuffer_count     INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_count     BETWEEN 0 AND 100000),
     rebuffer_ms        INTEGER NOT NULL DEFAULT 0 CHECK (rebuffer_ms        BETWEEN 0 AND 86400000),
     rendition_switches INTEGER NOT NULL DEFAULT 0 CHECK (rendition_switches BETWEEN 0 AND 100000),
+    -- How many times the DELIVERY was rebuilt underneath one viewing: a seek
+    -- that re-anchors the server session, an audio-track switch, a fallback to
+    -- transcode. The row stays open across these (one row per viewing, not per
+    -- delivery), so this is what makes the churn visible instead of silently
+    -- fragmenting one playback into several rows.
+    delivery_rebuilds  INTEGER NOT NULL DEFAULT 0 CHECK (delivery_rebuilds  BETWEEN 0 AND 100000),
     watched_ms         INTEGER CHECK (watched_ms BETWEEN 0 AND 86400000),
 
     -- Coarse classes, never raw values: a raw throughput figure plus a

@@ -109,6 +109,7 @@ type PlaybackQoEFinish struct {
 	RebufferCount     int
 	RebufferMS        int
 	RenditionSwitches int
+	DeliveryRebuilds  int
 	WatchedMS         int
 	ThroughputClass   string
 	Terminal          string
@@ -223,6 +224,7 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 		       watched_ms         = $6,
 		       throughput_class   = $7,
 		       terminal           = $8,
+		       delivery_rebuilds  = $9,
 		       ended_at           = NOW()
 		 WHERE session_token = $2
 		   AND profile_id    = $1
@@ -235,6 +237,7 @@ func (q *Queries) FinishPlaybackQoE(ctx context.Context, profileID int64, rec Pl
 		clampRange(rec.WatchedMS, maxPlaybackDurationMs),
 		normalizeEnum(rec.ThroughputClass, PlaybackQoEThroughput, "unknown"),
 		normalizeEnum(rec.Terminal, PlaybackQoETerminals, "unknown"),
+		clampRange(rec.DeliveryRebuilds, maxPlaybackEventCount),
 	)
 	if err != nil {
 		return fmt.Errorf("finish playback qoe: %w", err)

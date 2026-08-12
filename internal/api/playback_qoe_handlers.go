@@ -18,11 +18,17 @@ import (
 
 	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
+	"github.com/aurora-media/aurora/internal/streaming"
 )
 
 // PlaybackQoEHandler serves the telemetry endpoints.
 type PlaybackQoEHandler struct {
 	queries *db.Queries
+	// transcode resolves the delivery facts (encoder family, segment format,
+	// burn-in, HDR conversion) from the live session rather than trusting the
+	// browser to report them. Optional — nil disables stamping, which is what
+	// the handler unit tests use.
+	transcode *streaming.TranscodeManager
 
 	// rateLimitLogged tracks which profiles have already had their over-limit
 	// warning emitted in the current window, so enforcement cannot become its
@@ -31,9 +37,10 @@ type PlaybackQoEHandler struct {
 	rateLimitLogged map[int64]time.Time
 }
 
-func NewPlaybackQoEHandler(queries *db.Queries) *PlaybackQoEHandler {
+func NewPlaybackQoEHandler(queries *db.Queries, transcode *streaming.TranscodeManager) *PlaybackQoEHandler {
 	return &PlaybackQoEHandler{
 		queries:         queries,
+		transcode:       transcode,
 		rateLimitLogged: make(map[int64]time.Time),
 	}
 }
@@ -72,18 +79,19 @@ func (h *PlaybackQoEHandler) logRateLimitOnce(profileID int64, recent int) {
 const maxQoEBodyBytes = 4 << 10
 
 type playbackQoEStartRequest struct {
-	SessionToken           string `json:"session_token"`
-	ProfileID              int64  `json:"profile_id,omitempty"`
-	Decision               string `json:"decision"`
-	DecisionReason         string `json:"decision_reason"`
-	OutputCodec            string `json:"output_codec"`
-	EncoderFamily          string `json:"encoder_family"`
-	SegmentFormat          string `json:"segment_format"`
-	HDRConversion          string `json:"hdr_conversion"`
-	BurnIn                 string `json:"burn_in"`
-	SubtitleMode           string `json:"subtitle_mode"`
-	Prewarm                string `json:"prewarm"`
-	ViewportClass          string `json:"viewport_class"`
+	SessionToken   string `json:"session_token"`
+	ProfileID      int64  `json:"profile_id,omitempty"`
+	Decision       string `json:"decision"`
+	DecisionReason string `json:"decision_reason"`
+	// NOTE: output_codec, encoder_family, segment_format, hdr_conversion,
+	// burn_in and subtitle_mode are deliberately NOT accepted here. They are
+	// delivery facts the server resolves from the session itself.
+	Prewarm       string `json:"prewarm"`
+	ViewportClass string `json:"viewport_class"`
+	// SessionID names the transcode session this playback used, so the server
+	// can stamp the delivery facts itself. Absent for direct play, which has
+	// no session and for which every delivery field is "none".
+	SessionID              string `json:"session_id,omitempty"`
 	ClickToFirstFrameMS    *int   `json:"click_to_first_frame_ms"`
 	ManifestToFirstFrameMS *int   `json:"manifest_to_first_frame_ms"`
 }
@@ -94,6 +102,7 @@ type playbackQoEFinishRequest struct {
 	RebufferCount     int    `json:"rebuffer_count"`
 	RebufferMS        int    `json:"rebuffer_ms"`
 	RenditionSwitches int    `json:"rendition_switches"`
+	DeliveryRebuilds  int    `json:"delivery_rebuilds"`
 	WatchedMS         int    `json:"watched_ms"`
 	ThroughputClass   string `json:"throughput_class"`
 	Terminal          string `json:"terminal"`
@@ -142,16 +151,25 @@ func (h *PlaybackQoEHandler) RecordStart(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Delivery facts come from the SERVER, never from the payload. The browser
+	// cannot know them — burn-in is configured on a pre-play path the player
+	// holds no reference to, the encoder family is a probe result, the segment
+	// format is a manager setting — and they are not the client's to assert
+	// anyway. Whatever the request claimed for these fields is discarded.
+	facts := h.deliveryFacts(req.Decision, req.SessionID)
+
 	err := h.queries.RecordPlaybackQoEStart(r.Context(), profileID, db.PlaybackQoEStart{
-		SessionToken:           req.SessionToken,
-		Decision:               req.Decision,
-		DecisionReason:         req.DecisionReason,
-		OutputCodec:            req.OutputCodec,
-		EncoderFamily:          req.EncoderFamily,
-		SegmentFormat:          req.SegmentFormat,
-		HDRConversion:          req.HDRConversion,
-		BurnIn:                 req.BurnIn,
-		SubtitleMode:           req.SubtitleMode,
+		SessionToken:   req.SessionToken,
+		Decision:       req.Decision,
+		DecisionReason: req.DecisionReason,
+		OutputCodec:    facts.OutputCodec,
+		EncoderFamily:  facts.EncoderFamily,
+		SegmentFormat:  facts.SegmentFormat,
+		HDRConversion:  facts.HDRConversion,
+		BurnIn:         facts.BurnIn,
+		SubtitleMode:   facts.SubtitleMode,
+		// Client-side facts the server genuinely cannot see: whether the
+		// hover pre-warm was adopted, and how big the player was rendered.
 		Prewarm:                req.Prewarm,
 		ViewportClass:          req.ViewportClass,
 		ClickToFirstFrameMS:    req.ClickToFirstFrameMS,
@@ -196,6 +214,7 @@ func (h *PlaybackQoEHandler) RecordFinish(w http.ResponseWriter, r *http.Request
 		RebufferCount:     req.RebufferCount,
 		RebufferMS:        req.RebufferMS,
 		RenditionSwitches: req.RenditionSwitches,
+		DeliveryRebuilds:  req.DeliveryRebuilds,
 		WatchedMS:         req.WatchedMS,
 		ThroughputClass:   req.ThroughputClass,
 		Terminal:          req.Terminal,
@@ -242,6 +261,25 @@ func decodeQoEBody(w http.ResponseWriter, r *http.Request, dst interface{}) bool
 		return false
 	}
 	return true
+}
+
+// deliveryFacts resolves how this playback was delivered.
+//
+// Direct play has no session and needs no lookup. A transcode/remux session
+// that has already been reaped by the time the first frame lands falls back to
+// the zero vocabulary rather than to client-supplied values — an unknown is
+// more honest than an unverified claim, and it shows up in the aggregate as
+// "none" rather than as a fabricated encoder family.
+func (h *PlaybackQoEHandler) deliveryFacts(decision, sessionID string) streaming.SessionQoEFacts {
+	if decision == "direct_play" || sessionID == "" || h.transcode == nil {
+		return streaming.DirectPlayQoEFacts()
+	}
+	if facts, ok := h.transcode.SessionQoEFacts(sessionID); ok {
+		return facts
+	}
+	slog.Debug("playback qoe: session gone before the first-frame write; "+
+		"delivery facts unavailable", "session_id", sessionID)
+	return streaming.DirectPlayQoEFacts()
 }
 
 // resolveProfile maps the request to a profile this user owns, defaulting to
