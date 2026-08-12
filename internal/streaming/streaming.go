@@ -2162,7 +2162,7 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 		audioBits := AudioDeclaredBitrate(session.AudioCodecOut, session.AudioPassthrough)
 		for i := range profiles {
 			profiles[i].CodecString = hlsCodecString(profiles[i].Height, session.AudioCodecOut, session.SourceFPS, session.VideoCodecOut)
-			profiles[i].HLSBandwidth, profiles[i].HLSAvgBandwidth = profiles[i].LadderBandwidth(audioBits)
+			profiles[i].HLSBandwidth = profiles[i].LadderBandwidth(audioBits)
 		}
 		session.Profiles = profiles
 	}

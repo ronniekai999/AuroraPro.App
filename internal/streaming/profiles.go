@@ -14,19 +14,12 @@ type QualityProfile struct {
 	VideoBitrate string `json:"-"`
 	MaxRate      string `json:"-"`
 	BufSize      string `json:"-"`
-	CRF          int    `json:"-"`         // Software encoder quality (ignored by HW encoders)
-	HLSBandwidth int    `json:"bandwidth"` // BANDWIDTH attribute: PEAK bits/sec (video + audio)
-	// HLSAvgBandwidth is the AVERAGE-BANDWIDTH attribute: the rendition's
-	// expected average bits/sec (target video bitrate + audio). 0 = omitted.
-	//
-	// It is not decoration. hls.js's findBestLevel picks between the two:
-	// it uses maxBitrate (BANDWIDTH) while the buffer is shallow — startup,
-	// after a seek, when rebuffering is a live risk — and averageBitrate
-	// (AVERAGE-BANDWIDTH) once the buffer is at least two segments deep.
-	// Declaring only a peak therefore pins a healthy player to the
-	// conservative number forever.
-	HLSAvgBandwidth int    `json:"average_bandwidth,omitempty"`
-	CodecString     string `json:"-"` // HLS CODECS attribute (e.g., "avc1.640028,mp4a.40.2"); empty = omitted
+	CRF          int    `json:"-"` // Software encoder quality (ignored by HW encoders)
+	// DeclaredVideoBPS is the hand-tuned VIDEO bits/sec this rung declares.
+	// LadderBandwidth adds the session's audio cost to produce HLSBandwidth.
+	DeclaredVideoBPS int    `json:"-"`
+	HLSBandwidth     int    `json:"bandwidth"` // BANDWIDTH attribute: video + audio
+	CodecString      string `json:"-"`         // HLS CODECS attribute; empty = omitted
 }
 
 // AllProfiles defines all supported quality tiers.
@@ -45,32 +38,44 @@ type QualityProfile struct {
 // considered "visually transparent" for 1080p+. CRF 20 is "near
 // transparent" for 4K where the source pixel density absorbs more
 // compression artifacts.
-// 2026-08 ladder-bandwidth correction (August 2026 review follow-up). The
-// declared HLSBandwidth values used to be hand-set numbers that sat BELOW the
-// encoder's own -maxrate on every rung — 1080p declared 7.5 Mbps against an
-// 8 Mbps cap, 720p declared 4.5 against 5, and none of them counted the audio
-// track at all (a re-encoded AAC stream adds 192 kbps; AC-3 surround adds 448).
+// 2026-08 declared-bandwidth correction (August 2026 review follow-up).
 //
-// RFC 8216 §4.3.4.2 is explicit that BANDWIDTH is the PEAK segment bit rate of
-// the variant, which the client uses to decide whether it can sustain the
-// rendition. Under-declaring it makes hls.js believe each rung is cheaper than
-// it is, so on a marginal connection it selects a rung it cannot actually
-// sustain — and it does so precisely when the buffer is emptiest, because that
-// is when findBestLevel consults BANDWIDTH rather than AVERAGE-BANDWIDTH.
-// (hls.js does self-correct later from observed fragment sizes via realBitrate;
-// the damage lands at startup, before it has any observations.)
+// The rung figures below are unchanged and deliberately so. The one real defect
+// was that they counted no audio at all — a re-encoded AAC stream adds 192 kbps
+// and a copied surround track far more — so LadderBandwidth now adds the
+// session's actual audio cost on top of them.
 //
-// The values are now DERIVED rather than hand-maintained: peak from MaxRate,
-// average from VideoBitrate, both plus the session's real audio bitrate. See
-// LadderBandwidth. The constants below are the AAC-stereo resolution of that
-// same arithmetic, used by any path that renders a playlist without a resolved
-// session.
+// An earlier version of this change also inflated the video figures to
+// -maxrate x a VBV headroom factor, on the theory that BANDWIDTH must bound the
+// true peak (RFC 8216 4.3.4.2) and that over-declaring was the safe direction.
+// Reviewing the vendored hls.js showed both halves of that were wrong:
+//
+//	Level.maxBitrate  = max(realBitrate, bitrate)
+//	Level.averageBitrate = _avgBitrate || realBitrate || bitrate
+//
+// The measured realBitrate can only RAISE maxBitrate, never lower it, so an
+// under-declaration self-heals from the fragments the player has already
+// downloaded while an over-declaration is permanent. And declaring
+// AVERAGE-BANDWIDTH sets _avgBitrate, which SUPPRESSES realBitrate on the
+// average path — so emitting it actively removes hls.js's ability to learn the
+// real cost. It is therefore not emitted at all.
+//
+// The inflation also had a concrete cost. Aurora seeds hls.js with
+// abrEwmaDefaultEstimate = 8 Mbps on a first-ever play (lib/streaming.ts), and
+// start-level selection compares against maxBitrate. At 7.5M + 192k the 1080p
+// rung still fits under that seed; at the inflated 10.99M it did not, so every
+// first play, every private window and every play after a storage clear
+// dropped a full rung.
+//
+// The empirical check in ladder_bitrate_test.go is kept: it is what caught the
+// inflation being wrong in the first place, and it documents the real
+// relationship between the rate cap and what segments actually reach.
 var AllProfiles = map[string]QualityProfile{
-	"2160p": {Name: "2160p", Width: 3840, Height: 2160, VideoBitrate: "16M", MaxRate: "18M", BufSize: "36M", CRF: 18, HLSBandwidth: 24492000, HLSAvgBandwidth: 16192000},
-	"1080p": {Name: "1080p", Width: 1920, Height: 1080, VideoBitrate: "7M", MaxRate: "8M", BufSize: "16M", CRF: 20, HLSBandwidth: 10992000, HLSAvgBandwidth: 7192000},
-	"720p":  {Name: "720p", Width: 1280, Height: 720, VideoBitrate: "4M", MaxRate: "5M", BufSize: "9M", CRF: 21, HLSBandwidth: 6942000, HLSAvgBandwidth: 4192000},
-	"480p":  {Name: "480p", Width: 854, Height: 480, VideoBitrate: "2M", MaxRate: "2.5M", BufSize: "5M", CRF: 22, HLSBandwidth: 3567000, HLSAvgBandwidth: 2192000},
-	"360p":  {Name: "360p", Width: 640, Height: 360, VideoBitrate: "1.2M", MaxRate: "1.5M", BufSize: "3M", CRF: 24, HLSBandwidth: 2217000, HLSAvgBandwidth: 1392000},
+	"2160p": {Name: "2160p", Width: 3840, Height: 2160, VideoBitrate: "16M", MaxRate: "18M", BufSize: "36M", CRF: 18, DeclaredVideoBPS: 18000000, HLSBandwidth: 18192000},
+	"1080p": {Name: "1080p", Width: 1920, Height: 1080, VideoBitrate: "7M", MaxRate: "8M", BufSize: "16M", CRF: 20, DeclaredVideoBPS: 7500000, HLSBandwidth: 7692000},
+	"720p":  {Name: "720p", Width: 1280, Height: 720, VideoBitrate: "4M", MaxRate: "5M", BufSize: "9M", CRF: 21, DeclaredVideoBPS: 4500000, HLSBandwidth: 4692000},
+	"480p":  {Name: "480p", Width: 854, Height: 480, VideoBitrate: "2M", MaxRate: "2.5M", BufSize: "5M", CRF: 22, DeclaredVideoBPS: 2200000, HLSBandwidth: 2392000},
+	"360p":  {Name: "360p", Width: 640, Height: 360, VideoBitrate: "1.2M", MaxRate: "1.5M", BufSize: "3M", CRF: 24, DeclaredVideoBPS: 1400000, HLSBandwidth: 1592000},
 }
 
 // --- Declared-bandwidth arithmetic ---
@@ -98,35 +103,6 @@ const (
 	aacPassthroughCeilingBitsPerSec = 640_000
 )
 
-// vbvPeakHeadroom scales -maxrate up to the peak a SEGMENT can actually reach.
-//
-// -maxrate/-bufsize is a VBV rate-control constraint averaged over the buffer
-// window, not a hard per-segment ceiling: with bufsize at 2x maxrate, a segment
-// shorter than the buffer window can legitimately exceed maxrate and still
-// satisfy the encoder's constraint. Declaring bare maxrate as BANDWIDTH is
-// therefore under-declaring by construction, which is what
-// TestLadder_DeclaredBandwidthBoundsMeasuredPeak caught on a real encode.
-//
-// Measured against high-entropy content (testsrc2, libx264, the ladder's own
-// CRF/maxrate/bufsize values) at 2-second segments — the tightest configuration
-// the server supports, where overshoot is worst because the buffer window
-// spans more than one segment:
-//
-//	360p  1.25x    480p  1.19x    720p  1.01x    1080p  1.22x
-//
-// At the 6-second production default every rung measured well BELOW maxrate
-// (0.26x-0.73x) — CRF binds before the rate cap does — so this factor is
-// headroom for the worst supported configuration, not a typical-case estimate.
-//
-// 1.35 clears the worst observation with margin. The theoretical VBV bound is
-// higher still (maxrate + bufsize/segment_duration, ~2x at 2s segments), but
-// declaring that would overstate every rung by a factor no real content
-// reaches. The asymmetry justifies erring high rather than low: an
-// over-declaration costs a conservative rung choice for the first segment or
-// two, after which hls.js switches to AVERAGE-BANDWIDTH and its own measured
-// realBitrate; an under-declaration costs a stall.
-const vbvPeakHeadroom = 1.35
-
 // AudioDeclaredBitrate returns the bits/sec to attribute to a session's audio
 // when declaring playlist bandwidth. codecOut is the session's AudioCodecOut
 // ("", "aac", "ac3", "eac3"); passthrough marks copied rather than re-encoded
@@ -152,29 +128,23 @@ func AudioDeclaredBitrate(codecOut string, passthrough bool) int {
 	}
 }
 
-// LadderBandwidth returns the BANDWIDTH (peak) and AVERAGE-BANDWIDTH values to
-// declare for this profile, given the session's audio cost in bits/sec.
+// LadderBandwidth returns the BANDWIDTH value to declare for this profile,
+// given the session's audio cost in bits/sec.
 //
-// Peak comes from MaxRate scaled by vbvPeakHeadroom — the rate cap is a VBV
-// constraint, not a per-segment ceiling — and average from VideoBitrate, the
-// target the rate controller aims at. Deriving both from the same fields the
-// encoder is configured with is the point: a future ladder retune changes one
-// number and the declared bandwidth follows, instead of the two drifting apart
-// the way they had.
+// Only a peak is returned; AVERAGE-BANDWIDTH is deliberately not emitted (see
+// the block comment above AllProfiles — declaring it suppresses hls.js's own
+// measured realBitrate).
 //
-// A profile with no parseable rates (the synthetic "source" profile used for
-// remux) returns its existing values unchanged.
-func (p QualityProfile) LadderBandwidth(audioBitsPerSec int) (peak, average int) {
-	maxRate, okPeak := parseBitrateSpec(p.MaxRate)
-	avgVideo, okAvg := parseBitrateSpec(p.VideoBitrate)
-	if !okPeak || !okAvg {
-		return p.HLSBandwidth, p.HLSAvgBandwidth
+// A profile with no declared video figure (the synthetic "source" profile used
+// for remux) keeps whatever it already had.
+func (p QualityProfile) LadderBandwidth(audioBitsPerSec int) int {
+	if p.DeclaredVideoBPS <= 0 {
+		return p.HLSBandwidth
 	}
 	if audioBitsPerSec < 0 {
 		audioBitsPerSec = 0
 	}
-	peak = int(float64(maxRate)*vbvPeakHeadroom) + audioBitsPerSec
-	return peak, avgVideo + audioBitsPerSec
+	return p.DeclaredVideoBPS + audioBitsPerSec
 }
 
 // parseBitrateSpec converts an FFmpeg bitrate string ("18M", "1.2M", "448k")
@@ -347,20 +317,12 @@ func GenerateMasterPlaylist(profiles []QualityProfile, baseURL, queryToken strin
 		if hasSubs {
 			subsAttr = ",SUBTITLES=\"subs\""
 		}
-		// AVERAGE-BANDWIDTH is optional per RFC 8216 and omitted when unknown
-		// (the remux "source" profile has no rate targets to derive it from).
-		// A value that exceeded the declared peak would be self-contradictory,
-		// so it is only emitted when it is genuinely below BANDWIDTH.
-		avgAttr := ""
-		if p.HLSAvgBandwidth > 0 && p.HLSAvgBandwidth <= p.HLSBandwidth {
-			avgAttr = fmt.Sprintf(",AVERAGE-BANDWIDTH=%d", p.HLSAvgBandwidth)
-		}
 		if p.CodecString != "" {
-			out += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,RESOLUTION=%dx%d,CODECS=\"%s\",NAME=\"%s\"%s\n",
-				p.HLSBandwidth, avgAttr, p.Width, p.Height, p.CodecString, p.Name, subsAttr)
+			out += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,CODECS=\"%s\",NAME=\"%s\"%s\n",
+				p.HLSBandwidth, p.Width, p.Height, p.CodecString, p.Name, subsAttr)
 		} else {
-			out += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d%s,RESOLUTION=%dx%d,NAME=\"%s\"%s\n",
-				p.HLSBandwidth, avgAttr, p.Width, p.Height, p.Name, subsAttr)
+			out += fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d,NAME=\"%s\"%s\n",
+				p.HLSBandwidth, p.Width, p.Height, p.Name, subsAttr)
 		}
 		out += fmt.Sprintf("%s/%s/stream.m3u8%s\n", baseURL, p.Name, suffix)
 	}

@@ -44,10 +44,13 @@ const reqFor = (fileId: number, startSec: number) =>
 
 // A full 4K ABR ladder (highest-first), as CreateSession returns it.
 const PROFILES = [
-  { name: '2160p', width: 3840, height: 2160, bandwidth: 18_000_000 },
-  { name: '1080p', width: 1920, height: 1080, bandwidth: 7_500_000 },
-  { name: '720p', width: 1280, height: 720, bandwidth: 4_500_000 },
-  { name: '480p', width: 854, height: 480, bandwidth: 2_200_000 },
+  // Mirrors AllProfiles in internal/streaming/profiles.go, where the declared
+  // BANDWIDTH is the rung's video figure plus the session's audio cost
+  // (stereo AAC re-encode = 192k here).
+  { name: '2160p', width: 3840, height: 2160, bandwidth: 18_192_000 },
+  { name: '1080p', width: 1920, height: 1080, bandwidth: 7_692_000 },
+  { name: '720p', width: 1280, height: 720, bandwidth: 4_692_000 },
+  { name: '480p', width: 854, height: 480, bandwidth: 2_392_000 },
 ]
 const fetchCalls = () => (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
 

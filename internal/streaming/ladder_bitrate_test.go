@@ -3,19 +3,22 @@ package streaming
 // ABR ladder bandwidth validation (August 2026 review follow-up).
 //
 // The declared BANDWIDTH attribute is the number hls.js uses to decide whether
-// it can afford a rendition. Aurora's ladder used to carry hand-set values that
-// sat below the encoder's own -maxrate on every rung and ignored audio
-// entirely, which meant the client believed each rung was cheaper than it is
-// and over-selected on marginal connections — at startup especially, since that
-// is when findBestLevel consults BANDWIDTH rather than AVERAGE-BANDWIDTH.
+// it can afford a rendition, and — because Level.maxBitrate resolves as
+// max(realBitrate, bitrate) — a declaration it will never revise downward. The
+// ladder's real defect was that it counted no audio at all; the figures
+// themselves are left alone, since an under-declaration self-heals from
+// measured fragments while an over-declaration permanently costs a rung on
+// every first play.
 //
 // Two layers of test here:
 //
 //   - arithmetic invariants over the ladder, which run everywhere and catch a
-//     future retune that changes -maxrate without changing the declaration;
-//   - a real encode that measures actual peak segment bitrate and asserts the
-//     declaration bounds it, which catches the case where the encoder overshoots
-//     its own configured ceiling.
+//     future retune that drops the audio term or pushes 1080p past the
+//     first-play bandwidth estimate;
+//   - a real encode that MEASURES actual peak segment bitrate, which is what
+//     caught an earlier, wrong version of this change. It reports the ratio and
+//     fails only on a sanity rail, because the declaration is deliberately below
+//     the encoder's rate cap rather than above it.
 
 import (
 	"fmt"
@@ -51,21 +54,17 @@ func TestParseBitrateSpec(t *testing.T) {
 	}
 }
 
-// TestLadder_DeclaredBandwidthCoversEncoderCeiling is the invariant that was
-// violated before this change: every rung's declared BANDWIDTH must be at least
-// the encoder's own -maxrate plus the audio it will carry.
-//
-// RFC 8216 §4.3.4.2 defines BANDWIDTH as the PEAK segment bit rate. A rendition
-// capped at 8 Mbps of video plus a 192 kbps AAC track cannot honestly declare
-// 7.5 Mbps, and a client that budgets 7.5 will stall on it.
-func TestLadder_DeclaredBandwidthCoversEncoderCeiling(t *testing.T) {
-	// Every audio output shape a session can resolve to.
+// TestLadder_DeclaredBandwidthCountsAudio is the defect the ladder actually
+// had: the hand-tuned figures counted video only, so a session carrying a
+// copied surround track declared hundreds of kbps less than it costs.
+func TestLadder_DeclaredBandwidthCountsAudio(t *testing.T) {
 	audioCases := []struct {
 		name        string
 		codecOut    string
 		passthrough bool
 	}{
 		{"aac_reencode", "aac", false},
+		{"aac_passthrough", "aac", true},
 		{"ac3_reencode", "ac3", false},
 		{"ac3_passthrough", "ac3", true},
 		{"eac3_passthrough", "eac3", true},
@@ -73,105 +72,90 @@ func TestLadder_DeclaredBandwidthCoversEncoderCeiling(t *testing.T) {
 
 	for _, name := range ProfileOrder {
 		p := AllProfiles[name]
-		maxRate, ok := parseBitrateSpec(p.MaxRate)
-		if !ok {
-			t.Fatalf("profile %s has unparseable MaxRate %q", name, p.MaxRate)
+		if p.DeclaredVideoBPS <= 0 {
+			t.Fatalf("profile %s has no declared video bandwidth", name)
 		}
-		target, ok := parseBitrateSpec(p.VideoBitrate)
-		if !ok {
-			t.Fatalf("profile %s has unparseable VideoBitrate %q", name, p.VideoBitrate)
-		}
-
 		for _, ac := range audioCases {
 			t.Run(name+"/"+ac.name, func(t *testing.T) {
 				audioBits := AudioDeclaredBitrate(ac.codecOut, ac.passthrough)
-				peak, avg := p.LadderBandwidth(audioBits)
-
-				if want := int(float64(maxRate)*vbvPeakHeadroom) + audioBits; peak != want {
-					t.Errorf("BANDWIDTH = %d, want %d (-maxrate %d x %.2f VBV headroom + audio %d)",
-						peak, want, maxRate, vbvPeakHeadroom, audioBits)
+				got := p.LadderBandwidth(audioBits)
+				if want := p.DeclaredVideoBPS + audioBits; got != want {
+					t.Errorf("BANDWIDTH = %d, want %d (video %d + audio %d)",
+						got, want, p.DeclaredVideoBPS, audioBits)
 				}
-				// The floor that actually matters: a declaration below the
-				// bare rate cap plus audio is under-declaring by construction.
-				if floor := maxRate + audioBits; peak < floor {
-					t.Errorf("BANDWIDTH %d is below -maxrate + audio (%d) — under-declared", peak, floor)
-				}
-				if want := target + audioBits; avg != want {
-					t.Errorf("AVERAGE-BANDWIDTH = %d, want %d (-b:v %d + audio %d)",
-						avg, want, target, audioBits)
-				}
-				// AVERAGE-BANDWIDTH above BANDWIDTH is self-contradictory and
-				// makes a player's two estimates disagree about which
-				// direction is safer.
-				if avg > peak {
-					t.Errorf("AVERAGE-BANDWIDTH %d exceeds BANDWIDTH %d", avg, peak)
+				if got <= p.DeclaredVideoBPS {
+					t.Errorf("BANDWIDTH %d does not account for audio at all", got)
 				}
 			})
 		}
 	}
 }
 
+// TestLadder_FirstPlayStartRungIsPreserved pins the property the inflation
+// broke, and the reason this change stayed conservative.
+//
+// hls.js is seeded with abrEwmaDefaultEstimate on a first-ever play — 8 Mbps,
+// from BW_ESTIMATE_DEFAULT in lib/streaming.ts — and start-level selection
+// compares that against each level's maxBitrate, which is the declared
+// BANDWIDTH until fragments have been measured. A 1080p rung declared above the
+// seed therefore drops every first play, every private window, and every play
+// after a storage clear to 720p. Because maxBitrate is max(realBitrate,
+// bitrate), a too-high declaration is never revised back down.
+func TestLadder_FirstPlayStartRungIsPreserved(t *testing.T) {
+	// Keep in sync with BW_ESTIMATE_DEFAULT in static/redesign/app/src/lib/streaming.ts.
+	const firstPlayEstimateBPS = 8_000_000
+
+	p := AllProfiles["1080p"]
+	got := p.LadderBandwidth(AudioDeclaredBitrate("aac", false))
+	if got > firstPlayEstimateBPS {
+		t.Errorf("1080p declares %d bps, above the %d bps first-play estimate — every "+
+			"first play would start at 720p instead, and hls.js never revises a "+
+			"declared peak downward", got, firstPlayEstimateBPS)
+	}
+}
+
+// TestLadder_NoAverageBandwidthIsEmitted pins a deliberate omission.
+//
+// hls.js resolves averageBitrate as `_avgBitrate || realBitrate || bitrate`, so
+// declaring AVERAGE-BANDWIDTH sets _avgBitrate and SUPPRESSES the measured
+// realBitrate the player derives from fragments it has already downloaded.
+// Emitting it would replace a measurement with a guess — and for software
+// transcodes the guess would be badly wrong, since those are CRF-driven and
+// never receive the -b:v the guess would be derived from.
+func TestLadder_NoAverageBandwidthIsEmitted(t *testing.T) {
+	profiles := ResolveProfiles(nil, 1920, 1080)
+	for i := range profiles {
+		profiles[i].CodecString = "avc1.640028,mp4a.40.2"
+	}
+	master := GenerateMasterPlaylist(profiles, "/base", "")
+	if strings.Contains(master, "AVERAGE-BANDWIDTH") {
+		t.Errorf("master playlist declares AVERAGE-BANDWIDTH, which suppresses "+
+			"hls.js's measured realBitrate:\n%s", master)
+	}
+}
+
 // TestLadder_StaticConstantsMatchDerivedAACValues keeps the checked-in
-// HLSBandwidth constants honest. They are the fallback for any path that
-// renders a playlist without a resolved session, so they must agree with what
-// LadderBandwidth would produce for the default stereo-AAC case — otherwise the
-// two disagree and only one of them is ever tested.
+// HLSBandwidth constants honest against the default stereo-AAC resolution.
 func TestLadder_StaticConstantsMatchDerivedAACValues(t *testing.T) {
 	audioBits := AudioDeclaredBitrate("aac", false)
 	for _, name := range ProfileOrder {
 		p := AllProfiles[name]
-		peak, avg := p.LadderBandwidth(audioBits)
-		if p.HLSBandwidth != peak {
-			t.Errorf("%s: checked-in HLSBandwidth %d disagrees with derived peak %d",
-				name, p.HLSBandwidth, peak)
-		}
-		if p.HLSAvgBandwidth != avg {
-			t.Errorf("%s: checked-in HLSAvgBandwidth %d disagrees with derived average %d",
-				name, p.HLSAvgBandwidth, avg)
+		if got := p.LadderBandwidth(audioBits); p.HLSBandwidth != got {
+			t.Errorf("%s: checked-in HLSBandwidth %d disagrees with derived %d",
+				name, p.HLSBandwidth, got)
 		}
 	}
 }
 
-// TestLadder_RungsAreStrictlyOrdered guards the property ABR depends on: rungs
-// must be monotonically cheaper as quality drops. A ladder where two rungs
-// cross gives the client no reason to prefer the smaller one.
+// TestLadder_RungsAreStrictlyOrdered guards the property ABR depends on.
 func TestLadder_RungsAreStrictlyOrdered(t *testing.T) {
-	var prevPeak, prevAvg int
+	var prev int
 	for i, name := range ProfileOrder {
 		p := AllProfiles[name]
-		if i > 0 {
-			if p.HLSBandwidth >= prevPeak {
-				t.Errorf("%s BANDWIDTH %d is not below the rung above (%d)", name, p.HLSBandwidth, prevPeak)
-			}
-			if p.HLSAvgBandwidth >= prevAvg {
-				t.Errorf("%s AVERAGE-BANDWIDTH %d is not below the rung above (%d)", name, p.HLSAvgBandwidth, prevAvg)
-			}
+		if i > 0 && p.HLSBandwidth >= prev {
+			t.Errorf("%s BANDWIDTH %d is not below the rung above (%d)", name, p.HLSBandwidth, prev)
 		}
-		prevPeak, prevAvg = p.HLSBandwidth, p.HLSAvgBandwidth
-	}
-}
-
-// TestLadder_MasterPlaylistCarriesBothAttributes checks the playlist rendering,
-// including the remux case that legitimately has neither rate target.
-func TestLadder_MasterPlaylistCarriesBothAttributes(t *testing.T) {
-	profiles := []QualityProfile{
-		{Name: "720p", Width: 1280, Height: 720, HLSBandwidth: 5192000, HLSAvgBandwidth: 4192000, CodecString: "avc1.64001f,mp4a.40.2"},
-	}
-	master := GenerateMasterPlaylist(profiles, "/base", "")
-	if !strings.Contains(master, "BANDWIDTH=5192000") {
-		t.Errorf("master playlist missing BANDWIDTH:\n%s", master)
-	}
-	if !strings.Contains(master, "AVERAGE-BANDWIDTH=4192000") {
-		t.Errorf("master playlist missing AVERAGE-BANDWIDTH:\n%s", master)
-	}
-
-	// The synthetic remux profile has no rate targets, so AVERAGE-BANDWIDTH
-	// must be omitted rather than declared as 0 (which a player would read as
-	// a free rendition).
-	remux := []QualityProfile{{Name: "source", Width: 1920, Height: 1080, HLSBandwidth: 20000000}}
-	masterRemux := GenerateMasterPlaylist(remux, "/base", "")
-	if strings.Contains(masterRemux, "AVERAGE-BANDWIDTH") {
-		t.Errorf("remux master should omit AVERAGE-BANDWIDTH entirely:\n%s", masterRemux)
+		prev = p.HLSBandwidth
 	}
 }
 
@@ -224,12 +208,24 @@ func TestLadder_DeclaredBandwidthBoundsMeasuredPeak(t *testing.T) {
 		t.Fatal("no segments to measure")
 	}
 
+	ratio := float64(peak) / float64(declared)
 	t.Logf("%s: declared BANDWIDTH %d bps, measured peak %d bps across %d segments (%.0f%% of declared)",
-		profileName, declared, peak, segCount, float64(peak)/float64(declared)*100)
+		profileName, declared, peak, segCount, ratio*100)
 
-	if peak > declared {
-		t.Errorf("measured peak segment bitrate %d bps EXCEEDS declared BANDWIDTH %d bps. "+
-			"A client that budgets the declared value will stall on this rendition.", peak, declared)
+	// This is a MEASUREMENT, not a ceiling assertion. The declared figures are
+	// deliberately below the encoder's -maxrate (see the block comment above
+	// AllProfiles): hls.js raises maxBitrate from observed fragment sizes, so an
+	// under-declaration self-heals, while an over-declaration is permanent and
+	// costs a rung on every first play.
+	//
+	// The bound here is a sanity rail, not the spec's peak rule. A segment that
+	// reaches several times the declared value would mean the rate cap is not
+	// binding at all and the ladder needs retuning — that is worth failing on;
+	// modest overshoot is expected and fine.
+	const sanityRail = 2.0
+	if ratio > sanityRail {
+		t.Errorf("measured peak %d bps is %.1fx the declared BANDWIDTH %d bps. "+
+			"The rate cap is not binding; the rung needs retuning.", peak, ratio, declared)
 	}
 }
 
