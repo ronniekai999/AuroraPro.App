@@ -178,6 +178,15 @@ func main() {
 			} else if n > 0 {
 				slog.Info("pruned recommendation impression slates", "count", n)
 			}
+			// Playback QoE rides the same daily sweep. Its retention is
+			// shorter (30 days vs 90): the data answers questions about the
+			// recent past, so keeping it longer would carry more per-profile
+			// history for no additional operational answer.
+			if n, err := queries.PrunePlaybackQoE(pctx, db.PlaybackQoERetention); err != nil {
+				slog.Warn("playback qoe retention sweep failed", "error", err)
+			} else if n > 0 {
+				slog.Info("pruned playback qoe sessions", "count", n)
+			}
 			pcancel()
 			select {
 			case <-ticker.C:

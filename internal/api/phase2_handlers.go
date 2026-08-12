@@ -2075,6 +2075,7 @@ func (h *StreamHandler) GetStreamInfo(w http.ResponseWriter, r *http.Request) {
 		Resolution:       resolution,
 		DurationMs:       durationMs,
 		TranscodeReason:  pd.TranscodeReason,
+		ReasonCode:       streaming.ReasonCode(pd),
 		AudioTrackIndex:  pd.AudioTrackIndex,
 		Remux:            pd.Remux,
 		AudioPassthrough: pd.AudioPassthrough,

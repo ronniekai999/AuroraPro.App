@@ -806,6 +806,22 @@ func (h *MediaHandler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 		items = sem
 		searchMode = "semantic"
+		// Trigram rescue. semanticFirst routes on MARKER WORDS ("like",
+		// "similar to", "movies about"), and those words also occur inside real
+		// titles — "As You Like It", "Something Like Summer". When the LLM
+		// answers successfully but finds nothing, the query may simply have
+		// been a title lookup that tripped a marker, so fall back to trigram
+		// rather than serving an empty page for a film the library actually
+		// has. Mirrors the empty-trigram → semantic fallback in the else
+		// branch, in the opposite direction.
+		//
+		// A trigram error here is NOT fatal: the semantic path already
+		// succeeded, so the correct outcome is its (empty) result, not a 500.
+		if len(items) == 0 {
+			if its, err := trigram(); err == nil && len(its) > 0 {
+				items, searchMode = its, "literal"
+			}
+		}
 	} else {
 		// Title lookup → trigram first.
 		its, err := trigram()

@@ -60,6 +60,7 @@ import {
   type SubtitleTrack,
 } from '@/lib/streaming'
 import { prewarmEnabled, takeWarmedSession } from '@/lib/prewarm'
+import { attachPlaybackQoE, type QoECollector } from '@/lib/playbackQoE'
 import { absoluteUrl, assertCastScopedToken, useCast } from '@/lib/cast'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
@@ -466,6 +467,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
   const onPartyAdvanceRef = useRef(onPartyAdvance)
   onPartyAdvanceRef.current = onPartyAdvance
   const hlsRef = useRef<Hls | null>(null)
+  // Playback QoE collector for the CURRENT playback (August 2026 review item
+  // #1). Held in a ref rather than state because nothing renders from it and a
+  // re-render must never restart the measurement.
+  const qoeRef = useRef<QoECollector | null>(null)
+  // performance.now() at the moment the user asked for playback. Captured as
+  // early as the effect runs so click-to-first-frame measures what the viewer
+  // actually waited through, not just the part after the manifest resolved.
+  const playRequestedAtRef = useRef<number | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   // sessionId=null means both "native direct play" and "an HLS target is
   // still resolving". Keep the delivery state explicit so a second rapid seek
@@ -1491,11 +1500,21 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
     // buffer; running it twice is a no-op.
     if (hlsRef.current) {
       // Persist the measured bandwidth before teardown so the next session
-      // seeds its ABR at the right tier (review P2).
+      // seeds its ABR at the right tier (review P2). The same estimate is the
+      // most accurate throughput figure the QoE row will ever see, so it is
+      // handed over here rather than sampled at some arbitrary earlier moment.
       try { saveBandwidthEstimate(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
+      try { qoeRef.current?.noteThroughput(hlsRef.current.bandwidthEstimate) } catch { /* defensive */ }
       try { hlsRef.current.destroy() } catch { /* defensive */ }
       hlsRef.current = null
     }
+    // Close the QoE row. Reaching closeAndCleanup without the <video> having
+    // fired 'ended' means the viewer left, which is a distinct outcome from a
+    // completed playthrough and worth counting separately.
+    try {
+      qoeRef.current?.finish('user_exit')
+      qoeRef.current = null
+    } catch { /* never let telemetry break teardown */ }
     const sid = sessionIdRef.current
     sessionIdRef.current = null
     deliveryModeRef.current = 'idle'
@@ -1611,10 +1630,35 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
 
     ;(async () => {
       try {
+        // Click-to-first-frame starts HERE, before stream-info: the probe,
+        // the session create and the encoder warmup are all latency the
+        // viewer sits through, and a measurement that started later would
+        // flatter exactly the part of the pipeline this is meant to watch.
+        playRequestedAtRef.current = performance.now()
         // 1. Stream-info: server decides direct vs HLS.
         const info: StreamInfo = await getStreamInfo(target.fileId, target.fileType, ac.signal)
         if (cancelled) return
         const stream = info.stream
+
+        // Playback QoE (August 2026 review item #1). Attached once the
+        // decision is known and before any delivery path is chosen, so both
+        // direct play and HLS report through the same collector. Every entry
+        // point swallows its own errors — telemetry must never be able to
+        // break playback.
+        qoeRef.current?.detach()
+        qoeRef.current = null
+        if (videoRef.current) {
+          try {
+            qoeRef.current = attachPlaybackQoE(videoRef.current, {
+              decision: stream.decision,
+              decisionReason: stream.reason_code,
+              outputCodec: stream.decision === 'direct_stream' ? 'copy' : (stream.video_codec_out || 'none'),
+              segmentFormat: stream.decision === 'direct_play' ? 'none' : 'fmp4',
+              hdrConversion: stream.hdr_tonemap ? 'tonemap_cpu' : 'none',
+              clickAtMs: playRequestedAtRef.current ?? undefined,
+            })
+          } catch { /* never let telemetry break playback */ }
+        }
         // M10 Phase 4.5 — expose tracks for the picker.
         setAvailableAudio(info.audio_tracks || [])
         // Issue #133 — filter out bitmap-format subtitles (PGS/VobSub/
@@ -2179,7 +2223,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // already, so don't seek client-side. When start_sec=0 but
         // resumeSec>0 (server didn't honour our offset for some
         // reason), fall back to client-side seek on MANIFEST_PARSED.
+        // Rendition churn is one of the review's requested QoE dimensions:
+        // frequent switching on a healthy connection points at a ladder whose
+        // declared bandwidth disagrees with what the segments actually cost.
+        hls.on(Hls.Events.LEVEL_SWITCHED, () => {
+          qoeRef.current?.noteRenditionSwitch()
+        })
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          qoeRef.current?.noteManifestParsed()
           if (resumeSec > 0 && (session.start_sec ?? 0) === 0) {
             try { vid.currentTime = resumeSec } catch { /* defensive */ }
           }

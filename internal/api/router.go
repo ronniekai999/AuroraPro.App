@@ -424,6 +424,7 @@ func NewRouter(deps RouterDeps) http.Handler {
 	recapH := NewRecapHandler(deps.Queries, deps.LLMClient)
 	metaH := NewMetadataHandler(deps.Queries, deps.Enricher, deps.ImgProxy)
 	streamH := NewStreamHandler(deps.Queries, deps.Transcode, deps.DirectPlay, cfg.Cache.SubtitleDir, deps.Hub, deps.Activity, deps.AuthSvc)
+	qoeH := NewPlaybackQoEHandler(deps.Queries)
 	progressH := NewProgressHandler(deps.Queries, deps.Hub)
 	if deps.HeroProv != nil {
 		progressH.SetHeroProvider(deps.HeroProv)
@@ -927,6 +928,15 @@ func NewRouter(deps RouterDeps) http.Handler {
 				// Phase 3: Hardware acceleration status
 				r.Get("/hwaccel", streamH.HWAccelStatus)
 
+				// Playback QoE telemetry (August 2026 review item #1).
+				// Member-authenticated and fire-and-forget: both handlers
+				// answer 204 even when they reject the payload, so telemetry
+				// can never become something a player has to handle mid-movie.
+				// The /finish twin is delivered by navigator.sendBeacon during
+				// page unload.
+				r.Post("/qoe/start", qoeH.RecordStart)
+				r.Post("/qoe/finish", qoeH.RecordFinish)
+
 				// Subtitles (includes Phase 3 burn-in support)
 				r.Get("/{fileID}/subtitles", streamH.GetSubtitles)
 				r.Get("/{fileID}/subtitles/{trackIdx}", streamH.ServeSubtitle)
@@ -1108,6 +1118,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 				r.Get("/activity/types", adminH.ActivityTypes)
 				r.Get("/sessions", adminH.Sessions)
 				r.Get("/sessions/{sessionID}/diagnose", adminH.DiagnoseSession)
+				// Aggregate playback QoE: startup percentiles, rebuffer
+				// ratio, direct-play ratio and error rate over a window.
+				r.Get("/playback-qoe", qoeH.Summary)
 				r.Get("/settings", adminH.GetSettings)
 				r.Put("/settings", adminH.UpdateSettings)
 				r.Get("/logs", adminH.Logs)

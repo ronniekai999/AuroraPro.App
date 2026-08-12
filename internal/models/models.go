@@ -665,6 +665,12 @@ type StreamInfo struct {
 	DurationMs   int64  `json:"duration_ms"`
 	// Client-aware decision fields (populated when client sends capabilities)
 	TranscodeReason  string `json:"transcode_reason,omitempty"`  // Why not direct_play
+	// ReasonCode is TranscodeReason collapsed into one of the fixed buckets
+	// the QoE schema records (migration 056). The prose above is for a human
+	// reading a log line; this is what aggregates. Bucketed server-side so the
+	// vocabulary lives in exactly one place rather than being re-derived by
+	// every client that reports telemetry.
+	ReasonCode       string `json:"reason_code,omitempty"`
 	AudioTrackIndex  int    `json:"audio_track_index"`           // Recommended audio track (0-based, -1=default)
 	Remux            bool   `json:"remux,omitempty"`             // Frontend should send remux:true to session
 	AudioPassthrough bool   `json:"audio_passthrough,omitempty"` // Frontend should send audio_passthrough:true
