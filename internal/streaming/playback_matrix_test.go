@@ -423,17 +423,24 @@ func TestPlaybackMatrix_SubtitleBurnInProducesFrames(t *testing.T) {
 				},
 			}
 
-			tm := newMatrixManager(t)
-			_, variant := startFirstVariant(t, tm, path, opts)
+			// Encode the SAME fixture twice — once with burn-in, once without —
+			// and require the pixels to differ.
+			//
+			// The earlier version of this test asserted only "output is h264"
+			// and "duration > 0", both of which hold whether or not the
+			// subtitle filter ran at all: an adversarial review disabled
+			// injectBurnInFilter entirely and every subtest still passed. That
+			// caught the malformed-graph-kills-ffmpeg failure but not the
+			// user-visible one — subtitles requested, none rendered — which is
+			// the whole point of the axis.
+			withBurn := encodeAndHashFirstFrames(t, path, opts)
+			plain := opts
+			plain.BurnIn = nil
+			withoutBurn := encodeAndHashFirstFrames(t, path, plain)
 
-			merged := mergeInitAndSegment(t, variant.OutputDir)
-			streams := probeStreams(t, merged)
-			video := firstVideoStream(t, streams)
-			if video.CodecName != "h264" {
-				t.Errorf("burn-in output video codec = %q, want h264", video.CodecName)
-			}
-			if d := segmentDurationOf(t, merged); d <= 0 {
-				t.Errorf("burn-in segment has non-positive duration %v — no frames were encoded", d)
+			if withBurn == withoutBurn {
+				t.Errorf("burn-in produced pixel-identical output to no burn-in (framehash %s) — "+
+					"the subtitle filter did not reach the frames", withBurn)
 			}
 		})
 	}
@@ -618,6 +625,40 @@ func publishedPlaylistDuration(t *testing.T, playlistPath string) float64 {
 		total += d
 	}
 	return total
+}
+
+// encodeAndHashFirstFrames runs a session and returns a hash of the decoded
+// frames of its first segment, so two encodes of the same source can be
+// compared for an actual visual difference.
+//
+// It decodes rather than hashing the segment bytes: two encodes of identical
+// input are not byte-identical (timestamps, encoder state), so a byte hash
+// would differ even when nothing was drawn.
+func encodeAndHashFirstFrames(t *testing.T, path string, opts SessionOpts) string {
+	t.Helper()
+
+	tm := newMatrixManager(t)
+	_, variant := startFirstVariant(t, tm, path, opts)
+	merged := mergeInitAndSegment(t, variant.OutputDir)
+
+	// framehash over the decoded frames of the segment. Deterministic for a
+	// given set of decoded pixels and independent of container framing.
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", merged, "-frames:v", "12", "-f", "framehash", "-").Output()
+	if err != nil {
+		t.Fatalf("framehash %s: %v", merged, err)
+	}
+	var hashes []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		hashes = append(hashes, line)
+	}
+	if len(hashes) == 0 {
+		t.Fatalf("framehash produced no frame rows for %s — nothing decoded", merged)
+	}
+	return strings.Join(hashes, "|")
 }
 
 // requireSubtitlesFilter skips (or fails under CI) when ffmpeg was built without

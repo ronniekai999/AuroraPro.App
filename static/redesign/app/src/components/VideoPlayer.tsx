@@ -1721,7 +1721,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
         // review — was previously re-inlined per path). The pairing matters:
         // setErrorMsg without closeAndCleanup once shipped and leaked the
         // server-side FFmpeg session for the life of the tab (Audit HIGH-2).
-        const failPlayback = (msg: string) => {
+        // qoeKind classifies the failure for the QoE row. Without it every
+        // terminal error funnelled through closeAndCleanup and was recorded as
+        // 'user_exit', so the admin summary's error rate read 0.00 during an
+        // outage that was failing every transcode. hls.js media/network errors
+        // do not set HTMLMediaElement.error, so the collector's own element
+        // listener cannot see them — only this funnel can.
+        const failPlayback = (msg: string, qoeKind: 'media_error' | 'network_error' = 'media_error') => {
+          try { qoeRef.current?.noteError(qoeKind) } catch { /* never let telemetry break teardown */ }
           setErrorMsg(msg)
           closeAndCleanup()
         }
@@ -2395,7 +2402,7 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
               // Refresh "succeeded" but streams still 401 (revoked token
               // version, clock skew, proxy stripping cookies) — retrying
               // forever would hammer the auth endpoint for the tab's life.
-              failPlayback('Session expired. Please sign in again.')
+              failPlayback('Session expired. Please sign in again.', 'network_error')
               return
             }
             authRefreshAttempts++
@@ -2409,9 +2416,9 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
                 // before the first fragment was ever requested. Passing
                 // the element's current time keeps the restart anchored
                 // where playback actually is.
-                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh') }
+                try { hls.startLoad(vid.currentTime) } catch { failPlayback('Playback failed — token refresh', 'network_error') }
               } else {
-                failPlayback('Session expired. Please sign in again.')
+                failPlayback('Session expired. Please sign in again.', 'network_error')
               }
             })()
             return
@@ -2472,14 +2479,14 @@ export function VideoPlayer({ target, onClose, party, onChangeAudioTrack, onSend
             // a GC'd session whose segments 404/410 forever hits the cap
             // and surfaces instead of silently retrying for hours.
             if (networkRetryAttempts >= NETWORK_RETRY_MAX) {
-              failPlayback('Playback failed — network error')
+              failPlayback('Playback failed — network error', 'network_error')
               return
             }
             networkRetryAttempts++
             // See the token-refresh recovery above: pass currentTime so a
             // retry can't re-trigger the live-edge start-position guess.
             try { hls.startLoad(vid.currentTime) } catch {
-              failPlayback('Playback failed — network error')
+              failPlayback('Playback failed — network error', 'network_error')
             }
           } else {
             failPlayback('Playback failed — ' + (data.details ?? 'unknown'))
