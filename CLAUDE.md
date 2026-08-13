@@ -156,3 +156,59 @@ Invariants to preserve here:
   `ScheduledStartAt` at fire time and dedupe via `reminderSentFor`.
 - Calendar: party chips group by the viewer's **local** date; episode air
   dates stay UTC-keyed. Don't unify them.
+
+## Native-client direct play (Tier 1 of the Mac-app work)
+
+Capability keys that let a NATIVE client (libVLC/mpv/ExoPlayer-backed app)
+direct-play what browsers cannot: `mkv_container` / `avi_container` /
+`ts_container`, the legacy video codecs (`mpeg4`, `msmpeg4v3`,
+`mpeg2video`, `vc1`), the native-only audio codecs (`dts`, `truehd`,
+`mlp`, `alac`, `mp2`, `pcm_*`), and the `h264_hi10` profile key. Code:
+`internal/streaming/streaming.go` (`containerCapKey`,
+`directPlayOnlyVideoCodecs`, `isDirectPlayOnlyAudio`,
+`hlsDeliverableAudio`), tests in `nativeclient_test.go`, client contract
+in `docs/native-client-caps.md`.
+
+Invariants to preserve when touching this area:
+
+- **Nothing is direct-playable by default — a client reaches these paths
+  only by NAMING the capability.** The SPA emits exactly
+  `mp4_container`/`webm_container` and no native-only codec, so browsers
+  are structurally unable to be handed an MKV. That absence IS the safety
+  model, and it is enforced mechanically:
+  `TestSPAProbeEmitsNoNativeOnlyCapabilities` reads `streaming.ts` and
+  fails if a native-only key appears anywhere in it as a string literal
+  (it scans ALL literals rather than modelling how the caps array is
+  built, so a spread or a ternary can't slip one past it).
+  `TestBrowserDecisionGolden` pins the full decision (every field + reason
+  code) for browsers across fMP4 on/off and the nil-caps fallback — a
+  changed line in that golden file is a changed user experience, so read
+  the diff rather than regenerating reflexively.
+- **"Direct-play-only" sets never reach a copy path *by decision*:**
+  `directPlayOnlyVideoCodecs` forces `remuxVideoOK=false`, and
+  `isDirectPlayOnlyAudio` codecs are denied by `RemuxAudioCopySafe` /
+  `TranscodeAudioCopySafe`. Adding a codec to `knownVideoCodecs` /
+  `knownAudioCodecs` without deciding which side it falls on is the bug
+  `TestNativeOnlyCodecSetsDoNotDrift` guards — an unclassified video codec
+  keeps `remuxVideoOK=true` and reaches `-c:v copy`.
+  Note the asymmetry in ENFORCEMENT, which is weaker than the decision:
+  audio is clamped server-side at session mint (`NormalizeSessionAudio`
+  re-derives the codec from the library's own probe data), but video is
+  not — `SessionOpts.Remux` comes straight from the request body, so a
+  client that POSTs `remux:true` for an MPEG-2 file still reaches the copy
+  path. Pre-existing (VP9/AV1 had the same hole) and self-harm only, but
+  don't read the decision-engine invariant as a server-side guarantee.
+  A video-side clamp is the open follow-up.
+- **`hlsCaps` means "what THIS delivery path can carry", never "what the
+  client can decode"** — that is why the hls.js restriction now has a
+  native-client counterpart (`hlsDeliverableAudio`). Without it,
+  `findBestAudioTrack` picks a DTS default track on a path that must
+  re-encode it, passing over a copyable AAC track beside it.
+- **Hi10P and the legacy codecs are direct-play-or-transcode, never
+  remux.** H.264 High 10 in fMP4/TS is unproven on every consumer we ship;
+  MPEG-4 Part 2 / MPEG-2 / VC-1 have no fMP4 mapping and hls.js can't
+  demux them from TS.
+- `containerCapKey` is keyed by **NormalizeContainer output**, not file
+  extension — `mov` normalizes to `mp4` and must not get its own entry.
+  Note `.webm` files probe as `matroska` and are therefore stored as
+  container `mkv` (pre-existing; documented in the client contract).

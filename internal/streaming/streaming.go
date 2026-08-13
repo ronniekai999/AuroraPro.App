@@ -119,9 +119,14 @@ func CanDirectPlay(container, videoCodec, audioCodec string) bool {
 type ClientCaps struct {
 	VideoCodecs map[string]bool // e.g. "h264", "h265", "vp9", "av1"
 	AudioCodecs map[string]bool // e.g. "aac", "mp3", "opus", "ac3", "eac3"
-	Containers  map[string]bool // e.g. "mp4_container", "webm_container"
-	HLSNative   bool
-	HLSJS       bool
+	// Containers holds "<name>_container" keys, read through containerCapKey.
+	// Browsers emit only mp4_container/webm_container; NATIVE clients (a
+	// libVLC/mpv-backed app) additionally claim mkv_container, avi_container
+	// and ts_container to direct-play their originals. See
+	// docs/native-client-caps.md for the contract such a client implements.
+	Containers map[string]bool
+	HLSNative  bool
+	HLSJS      bool
 	// FMP4 is NOT parsed from the client caps string — it is set by the
 	// SERVER (from TranscodeManager.FMP4Enabled) before calling
 	// DecidePlayback, and describes the delivery pipeline: HLS segments are
@@ -149,6 +154,16 @@ type ClientCaps struct {
 	// hardware decoders; DecidePlayback gates 10-bit HEVC sources on this
 	// instead. 2026-07 review.
 	HEVCMain10 bool
+	// H264Hi10 is the client's H.264 High 10 Profile claim (caps key
+	// "h264_hi10"). Aurora's SPA deliberately never emits it: browsers'
+	// MediaSource API universally rejects Hi10P, which is why the guard in
+	// DecidePlayback exists at all. NATIVE clients (libVLC/mpv) decode it
+	// fine, and Hi10P is a large share of anime libraries — without a way to
+	// say so, every one of those files would transcode on a client that could
+	// have played the original. Same shape as HEVCMain10: a PROFILE
+	// capability, not an ffprobe codec name, so it cannot live in
+	// VideoCodecs.
+	H264Hi10 bool
 	// HEVCEncode is NOT parsed from the client caps string — it is set by
 	// the SERVER (from TranscodeManager.HEVCEncodeEnabled) before calling
 	// DecidePlayback, like FMP4. It reports that this host has a working
@@ -182,6 +197,30 @@ type PlaybackDecision struct {
 
 var knownVideoCodecs = map[string]bool{
 	"h264": true, "h265": true, "hevc": true, "vp8": true, "vp9": true, "av1": true,
+	// Legacy codecs no browser decodes but every native player (libVLC,
+	// mpv, AVFoundation with a codec pack) does. See
+	// directPlayOnlyVideoCodecs for why they can never ride the HLS path.
+	"mpeg4": true, "msmpeg4v3": true, "mpeg2video": true, "vc1": true,
+}
+
+// directPlayOnlyVideoCodecs are codecs a client may legitimately claim for
+// DIRECT PLAY of the original file but that Aurora's HLS pipeline must never
+// COPY into segments.
+//
+// They exist so native clients (a Mac/iOS app wrapping libVLC or mpv) can
+// direct-play the legacy end of a library — XviD-in-AVI, MPEG-2-in-TS,
+// VC-1-in-MKV — without the decision engine mistaking "this client decodes
+// it" for "this stream can be repackaged as HLS". MPEG-4 Part 2 and MPEG-2
+// have no standard fMP4 mapping and hls.js cannot demux them from MPEG-TS;
+// a copy would produce segments nothing plays.
+//
+// INVARIANT: this set and the remux path are disjoint by construction —
+// DecidePlayback forces remuxVideoOK=false for every member, so the only
+// decisions reachable for them are direct_play (client claimed the codec AND
+// the container) or a full transcode.
+// TestDirectPlayOnlyVideoNeverRemuxes pins it.
+var directPlayOnlyVideoCodecs = map[string]bool{
+	"mpeg4": true, "msmpeg4v3": true, "mpeg2video": true, "vc1": true,
 }
 
 // pixFmtIsHighBitDepth reports whether an ffprobe pix_fmt names a >8-bit
@@ -197,6 +236,75 @@ func pixFmtIsHighBitDepth(pixFmt string) bool {
 
 var knownAudioCodecs = map[string]bool{
 	"aac": true, "mp3": true, "opus": true, "vorbis": true, "flac": true, "ac3": true, "eac3": true,
+	// Native-player codecs — see directPlayOnlyAudioCodecs. PCM variants are
+	// accepted by prefix in ParseClientCaps rather than listed here: ffprobe
+	// reports a dozen names (pcm_s16le, pcm_s24le, pcm_bluray, pcm_dvd, …)
+	// and an allowlist that misses one silently force-transcodes a file the
+	// client can play.
+	"dts": true, "truehd": true, "mlp": true, "alac": true, "mp2": true,
+}
+
+// directPlayOnlyAudioCodecs is the audio twin of directPlayOnlyVideoCodecs:
+// codecs a native client may claim for DIRECT PLAY that Aurora's HLS pipeline
+// can never carry as-is. DTS, TrueHD/MLP, ALAC, MP2 and raw PCM are all
+// either absent from the fMP4/TS codec mappings or undemuxable by hls.js.
+//
+// Stripping them from the HLS caps (hlsDeliverableAudio) is not merely
+// cosmetic. findBestAudioTrack returns the FIRST COMPATIBLE track, preferring
+// the default one — so leaving DTS in the map makes a DTS default track
+// "compatible" and causes the engine to pass over a perfectly copyable AAC
+// track sitting next to it, re-encoding lossless audio to reach the same
+// place. The HLS caps must mean exactly one thing: what this delivery path
+// can actually carry.
+//
+// INVARIANT: disjoint from RemuxAudioCopySafe and TranscodeAudioCopySafe.
+// TestDirectPlayOnlyAudioIsNeverCopySafe pins it.
+func isDirectPlayOnlyAudio(codec string) bool {
+	switch codec {
+	case "dts", "truehd", "mlp", "alac", "mp2":
+		return true
+	}
+	return strings.HasPrefix(codec, "pcm_")
+}
+
+// hlsDeliverableAudio projects a client's full (direct-play-oriented) audio
+// capability map onto the subset the HLS remux/transcode paths can deliver.
+// Browsers claim none of the stripped codecs, so for them the result is an
+// identical map.
+func hlsDeliverableAudio(src map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(src))
+	for codec, ok := range src {
+		if ok && !isDirectPlayOnlyAudio(codec) {
+			out[codec] = true
+		}
+	}
+	return out
+}
+
+// containerCapKey maps a NORMALIZED container name (a NormalizeContainer
+// output, not a file extension) to the client-caps key that vouches for it.
+//
+// This replaced a hardcoded mp4/webm/mov switch. That switch made
+// ClientCaps.Containers a two-value field in practice: ParseClientCaps
+// accepted any "*_container" key, but nothing ever READ one outside the three
+// browser containers, so a native client claiming mkv_container was told to
+// remux an MKV it could have played byte-for-byte. Every container Aurora's
+// scanner ingests and ServeFile can type correctly now has a key here, and
+// adding another is one entry plus one Content-Type case in ServeFile.
+//
+// Nothing is direct-playable by DEFAULT: a client only reaches these paths by
+// naming the container, and no Aurora browser build emits anything but
+// mp4_container/webm_container (static/redesign/app/src/lib/streaming.ts).
+// The nil-caps static fallback is unaffected — it uses DirectPlayContainers.
+//
+// "mov" is deliberately absent: NormalizeContainer aliases mov→mp4, so a
+// "mov" case was unreachable. .mov files check mp4_container, as before.
+var containerCapKey = map[string]string{
+	"mp4":  "mp4_container",
+	"webm": "webm_container",
+	"mkv":  "mkv_container",
+	"avi":  "avi_container",
+	"ts":   "ts_container",
 }
 
 // ParseClientCaps parses the comma-separated capabilities string from the frontend.
@@ -221,6 +329,8 @@ func ParseClientCaps(raw string) *ClientCaps {
 			caps.EAC3MSE = true
 		case key == "hevc_main10":
 			caps.HEVCMain10 = true
+		case key == "h264_hi10":
+			caps.H264Hi10 = true
 		case strings.HasSuffix(key, "_container"):
 			caps.Containers[key] = true
 		case knownVideoCodecs[key]:
@@ -231,7 +341,12 @@ func ParseClientCaps(raw string) *ClientCaps {
 			} else if key == "h265" {
 				caps.VideoCodecs["hevc"] = true
 			}
-		case knownAudioCodecs[key]:
+		case knownAudioCodecs[key], strings.HasPrefix(key, "pcm_"):
+			// The pcm_ prefix admits the whole raw-PCM family under one rule
+			// (see knownAudioCodecs). The key is stored verbatim because
+			// findBestAudioTrack matches it against the ffprobe codec name
+			// exactly, and an unrecognized variant is harmless: every copy
+			// path is a closed allowlist that denies it.
 			caps.AudioCodecs[key] = true
 		}
 	}
@@ -280,8 +395,16 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// H.264 High 10 Profile. FFprobe reports the codec as just "h264" so the
 	// above check thinks MSE can handle it. Detect 10-bit via pix_fmt containing
 	// "10" (e.g., "yuv420p10le", "yuv422p10le") and force full transcode to 8-bit.
+	// isH264_10bit stays a pure property of the FILE. Only the direct-play
+	// verdict is relaxed for a client that claims h264_hi10: the guard
+	// describes a MediaSource limitation, not a property of the bitstream,
+	// and native decoders (libVLC/mpv) play Hi10P. The REMUX path stays
+	// closed for everyone (see remuxVideoOK below) — Hi10P in HLS segments is
+	// unproven on every consumer we ship, so a Hi10P source is either played
+	// as the original file or transcoded to 8-bit. Aurora's SPA never emits
+	// the key, so browsers keep the guard exactly as it was.
 	isH264_10bit := (vc == "h264" || vc == "avc" || vc == "avc1") && pixFmtIsHighBitDepth(videoPixFmt)
-	if isH264_10bit {
+	if isH264_10bit && !clientCaps.H264Hi10 {
 		videoOK = false // MSE/direct play will not work
 	}
 
@@ -306,6 +429,12 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	remuxVideoOK := videoOK
 	// H.264 10-bit cannot be remuxed — the browser rejects the encoded data
 	if isH264_10bit {
+		remuxVideoOK = false
+	}
+	// Legacy native-player codecs never ride the HLS path — see
+	// directPlayOnlyVideoCodecs. Checked before the switch so the guard
+	// cannot be lost if a codec is later added to both sets.
+	if directPlayOnlyVideoCodecs[vc] {
 		remuxVideoOK = false
 	}
 	switch vc {
@@ -335,15 +464,11 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		remuxVideoOK = false
 	}
 
-	// Check container support
+	// Check container support. Caps-driven via containerCapKey — a container
+	// with no key, or one the client did not claim, stays unsupported.
 	containerOK := false
-	switch nc {
-	case "mp4":
-		containerOK = clientCaps.Containers["mp4_container"]
-	case "webm":
-		containerOK = clientCaps.Containers["webm_container"]
-	case "mov":
-		containerOK = clientCaps.Containers["mp4_container"] // browsers treat mov ≈ mp4
+	if key, known := containerCapKey[nc]; known {
+		containerOK = clientCaps.Containers[key]
 	}
 
 	// --- Direct play check (uses FULL client caps) ---
@@ -380,12 +505,19 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// for this path — same rationale as the ac3 cap). FLAC/Opus stay out:
 	// FFmpeg's mov muxer treats them as experimental and player handling of
 	// them inside HLS-fMP4 is patchy.
-	hlsCaps := clientCaps
+	//
+	// Native clients (HLSJS=false) get the complementary restriction. They
+	// claim codecs that exist only for direct play — DTS, TrueHD, PCM — and
+	// those must not reach findBestAudioTrack on a delivery path that cannot
+	// carry them; see directPlayOnlyAudioCodecs for what goes wrong. Both
+	// branches exist so hlsCaps means one thing on every path: what THIS
+	// delivery path can carry.
+	//
+	// Shallow struct copy, then replace ONLY the audio map: new ClientCaps
+	// fields are carried automatically instead of each one needing to be
+	// remembered here (FMP4 was missed once this way).
+	restricted := *clientCaps
 	if clientCaps.HLSJS {
-		// Shallow struct copy, then replace ONLY the audio map: new
-		// ClientCaps fields are carried automatically instead of each one
-		// needing to be remembered here (FMP4 was missed once this way).
-		restricted := *clientCaps
 		restricted.AudioCodecs = map[string]bool{
 			"aac": clientCaps.AudioCodecs["aac"],
 			"mp3": clientCaps.AudioCodecs["mp3"],
@@ -394,8 +526,10 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 		if clientCaps.FMP4 {
 			restricted.AudioCodecs["eac3"] = clientCaps.EAC3MSE
 		}
-		hlsCaps = &restricted
+	} else {
+		restricted.AudioCodecs = hlsDeliverableAudio(clientCaps.AudioCodecs)
 	}
+	hlsCaps := &restricted
 
 	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps)
 
@@ -459,11 +593,24 @@ func DecidePlayback(container, videoCodec string, audioTracks []models.AudioTrac
 	// Video codec not supported (or a codec the HLS segment pipeline can't
 	// carry, or H.264 10-bit) → full transcode
 	reason := fmt.Sprintf("video codec %q not supported by browser", vc)
-	if isH264_10bit {
+	if isH264_10bit && clientCaps.H264Hi10 {
+		// Claimed Hi10P but direct play was unavailable (container not
+		// claimed, or incompatible default audio) — and remux is closed to
+		// Hi10P. Both wordings carry "10-bit", so ReasonCode files either as
+		// bit_depth, which is the true cause in both.
+		reason = "H.264 10-bit (Hi10P) cannot be remuxed into HLS segments; transcoding to 8-bit H.264"
+	} else if isH264_10bit {
 		reason = "H.264 10-bit (Hi10P) not supported by browser MediaSource API; transcoding to 8-bit H.264"
 	} else if isHEVC10bit && !clientCaps.HEVCMain10 {
 		reason = "HEVC 10-bit (Main 10) not supported by this browser; transcoding to 8-bit H.264"
-	} else if videoOK && !remuxVideoOK && (vc == "vp8" || vc == "vp9" || vc == "av1") {
+	} else if videoOK && !remuxVideoOK && (vc == "vp8" || vc == "vp9" || vc == "av1" || directPlayOnlyVideoCodecs[vc]) {
+		// Shared with the legacy native-player codecs (MPEG-4 Part 2, MPEG-2,
+		// VC-1): the situation is identical — the client DID claim the codec,
+		// so "not supported by browser" would be a lie in the QoE record; it
+		// is the HLS path that cannot carry it, and direct play was
+		// unavailable (container not claimed, or incompatible default audio).
+		// Reusing the wording keeps both in ReasonCode's "cannot be remuxed"
+		// bucket instead of needing a new rule there.
 		reason = fmt.Sprintf("%s cannot be remuxed into HLS segments; transcoding to H.264", strings.ToUpper(vc))
 	} else if videoOK && !remuxVideoOK && (vc == "hevc" || vc == "h265") {
 		reason = "HEVC requires fMP4 HLS segments for native playback (Apple HLS spec); transcoding to H.264"
@@ -1005,7 +1152,11 @@ func ServeFile(w http.ResponseWriter, r *http.Request, filePath string, allowedR
 		contentType = "video/quicktime"
 	case ".avi":
 		contentType = "video/x-msvideo"
-	case ".ts":
+	case ".ts", ".m2ts":
+		// .mts is deliberately absent: internal/library/parser.go's
+		// videoExtensions does not ingest it, so no .mts file can reach a
+		// playback decision and a case here would be unreachable code that
+		// reads as support. Add it there first if that changes.
 		contentType = "video/mp2t"
 	}
 
