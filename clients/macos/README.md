@@ -11,10 +11,12 @@ capability contract this app implements.
 
 ```bash
 cd clients/macos
-swift build
-swift run Aurora
+./scripts/run.sh          # build + run
 swift test
 ```
+
+`swift run Aurora` works too, but **only without VLCKit installed**. See the
+dyld note under [Adding VLCKit](#adding-vlckit).
 
 No third-party dependencies, so the first build cannot fail on dependency
 resolution — the one failure mode that tells you nothing about whether the code
@@ -59,10 +61,23 @@ failing obscurely. Install VLCKit (below) and those same titles direct-play.
 
 ```bash
 ./scripts/fetch-vlckit.sh
-swift build && swift run Aurora
+./scripts/run.sh
 ```
 
 Then pick **VLC (libVLC)** from the player menu in the toolbar.
+
+> **Use `scripts/run.sh`, not `swift run`, once VLCKit is installed.** The
+> framework's install name is
+> `@loader_path/../Frameworks/VLCKit.framework/Versions/A/VLCKit`, written for
+> an app *bundle* — inside `Aurora.app` that resolves to
+> `Contents/Frameworks/` and works natively. `swift run` produces a bare
+> executable at `.build/<triple>/debug/Aurora`, so `@loader_path/..` resolves
+> to `.build/<triple>/`, where SwiftPM never creates a `Frameworks` directory.
+> The build links fine and the process dies at launch with
+> `dyld: Library not loaded`. Nothing is broken — dyld looks exactly where it
+> was told and nobody put the framework there. `run.sh` puts it there,
+> deriving the path from `swift build --show-bin-path` rather than hardcoding
+> a triple. Packaging (Milestone 7) makes this moot.
 
 The app ships two engines behind one protocol (`AuroraPlayback/PlaybackEngine.swift`):
 
