@@ -1,0 +1,146 @@
+import Foundation
+
+// DTOs mirroring internal/models/models.go. Field names match the Go `json`
+// tags exactly; the decoder is configured with .convertFromSnakeCase, so
+// `poster_path` arrives as `posterPath` and needs no CodingKeys.
+//
+// Every field the server marks `omitempty` is Optional here. That is not
+// defensive style — a non-optional Swift property for an omitempty Go field
+// fails the WHOLE decode when the value is absent, which turns "this movie has
+// no year" into "the library screen is empty".
+
+public enum MediaType: String, Codable, Sendable {
+    case movie, tv, episode
+    // Unknown kinds decode rather than throwing: a server that adds a type
+    // should not blank the client's library.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = MediaType(rawValue: raw) ?? .movie
+    }
+}
+
+public struct User: Codable, Sendable, Identifiable {
+    public let id: Int64
+    public let username: String
+    public let email: String?
+    public let role: String?
+    public let avatarUrl: String?
+    public let displayName: String?
+}
+
+public struct TokenResponse: Codable, Sendable {
+    /// Always absent in practice — the server sets httpOnly cookies and
+    /// returns no tokens in the body (see models.go). Kept because the field
+    /// exists in the contract.
+    public let accessToken: String?
+    public let refreshToken: String?
+    public let expiresIn: Int64
+    public let user: User?
+}
+
+public struct AnchorRef: Codable, Sendable, Hashable {
+    public let title: String
+    public let year: Int?
+}
+
+public struct MediaItem: Codable, Sendable, Identifiable, Hashable {
+    public let id: Int64
+    public let libraryId: Int64
+    public let type: MediaType
+    public let title: String
+    public let sortTitle: String?
+    public let year: Int?
+    public let overview: String?
+    public let rating: Double?
+    public let runtimeMinutes: Int?
+    public let contentRating: String?
+    public let posterPath: String?
+    public let backdropPath: String?
+    public let studio: String?
+    public let network: String?
+    public let releaseDate: String?
+    public let genres: [String]?
+    public let has4k: Bool?
+    public let hasHdr: Bool?
+    /// Transient LLM-generated caption ("Because you finished Severance").
+    public let reason: String?
+    public let nearestAnchor: AnchorRef?
+
+    public static func == (a: MediaItem, b: MediaItem) -> Bool { a.id == b.id }
+    public func hash(into h: inout Hasher) { h.combine(id) }
+
+    /// "Because you watched X" caption, preferring the LLM reason like the SPA.
+    public var subtitleCaption: String? {
+        if let reason, !reason.isEmpty { return reason }
+        if let anchor = nearestAnchor {
+            return anchor.year.map { "Because you watched \(anchor.title) (\($0))" }
+                ?? "Because you watched \(anchor.title)"
+        }
+        return nil
+    }
+}
+
+public struct MediaFile: Codable, Sendable, Identifiable {
+    public let id: Int64
+    public let path: String?
+    public let container: String?
+    public let videoCodec: String?
+    public let audioCodec: String?
+    public let width: Int?
+    public let height: Int?
+    public let durationMs: Int64?
+    public let sizeBytes: Int64?
+}
+
+/// Response of GET /api/stream/info/{fileID}?caps=…
+///
+/// `decision` is the whole point of Tier 1: "direct_play" means fetch the
+/// original bytes and hand them to the player.
+public struct StreamInfo: Codable, Sendable {
+    public let decision: String
+    public let transcodeReason: String?
+    public let audioTrackIndex: Int?
+    public let audioPassthrough: Bool?
+    public let audioCodecOut: String?
+    public let videoCodecOut: String?
+    public let remux: Bool?
+    public let hdrTonemap: Bool?
+
+    public var isDirectPlay: Bool { decision == "direct_play" }
+}
+
+public struct WatchProgress: Codable, Sendable {
+    public let mediaId: Int64?
+    public let positionSeconds: Double?
+    public let durationSeconds: Double?
+    public let completedAt: String?
+}
+
+/// A home-screen rail. The home endpoint returns these as a list.
+public struct MediaRail: Codable, Sendable, Identifiable {
+    public let title: String
+    public let items: [MediaItem]
+    public var id: String { title }
+}
+
+/// Envelope used by the paginated list endpoints.
+public struct PagedResponse<T: Codable & Sendable>: Codable, Sendable {
+    public let items: [T]?
+    public let total: Int?
+
+    /// The list endpoints are not perfectly uniform — some return a bare
+    /// array, some an envelope. `AuroraClient.decodeList` handles both so
+    /// callers never branch on it.
+    public var itemsOrEmpty: [T] { items ?? [] }
+}
+
+public struct APIError: Error, LocalizedError, Sendable {
+    public let status: Int
+    public let message: String
+    public var errorDescription: String? { message }
+
+    /// The session is gone and re-login is required — distinct from a
+    /// permission error, which re-login would not fix.
+    public var isUnauthorized: Bool { status == 401 }
+    public var isForbidden: Bool { status == 403 }
+}
