@@ -56,7 +56,7 @@ struct DetailView: View {
                     image.resizable().aspectRatio(contentMode: .fill)
                 } else {
                     LinearGradient(
-                        colors: [Color.accentColor.opacity(0.35), .black.opacity(0.6)],
+                        colors: [Color.auroraPurpleDeep.opacity(0.35), .black.opacity(0.6)],
                         startPoint: .topLeading, endPoint: .bottomTrailing
                     )
                 }
@@ -75,8 +75,12 @@ struct DetailView: View {
                     if case .success(let image) = phase {
                         image.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Rectangle().fill(.ultraThinMaterial)
-                            .overlay { Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary) }
+                        AuroraCardBackground()
+                            .overlay {
+                                Image(systemName: item.type.isSeries ? "tv" : "film")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(Color.auroraMutedForeground.opacity(0.5))
+                            }
                     }
                 }
                 .frame(width: AuroraMetrics.posterWidth, height: AuroraMetrics.posterHeight)
@@ -182,25 +186,6 @@ struct DetailView: View {
     }
 }
 
-struct Pill: View {
-    let text: String
-    var tinted = false
-    init(_ text: String, tinted: Bool = false) {
-        self.text = text
-        self.tinted = tinted
-    }
-    var body: some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(
-                tinted ? AnyShapeStyle(Color.accentColor.opacity(0.9)) : AnyShapeStyle(.ultraThinMaterial),
-                in: Capsule()
-            )
-            .foregroundStyle(.white)
-    }
-}
-
 /// Shows what the server decided and — when it isn't direct play — why.
 ///
 /// This is the feedback loop for the whole Tier 1 change: it makes the
@@ -219,7 +204,7 @@ struct PlaybackDecisionBadge: View {
                     .foregroundStyle(info.isDirectPlay ? .green : .orange)
                 Text(info.summary).font(.auroraSans(AuroraType.body, weight: .semibold))
                 Spacer()
-                Text(engine.displayName).font(.caption).foregroundStyle(.tertiary)
+                Text(engine.displayName).font(.auroraCaption).foregroundStyle(Color.auroraMutedForeground)
             }
             if let reason = info.transcodeReason, !reason.isEmpty {
                 Text(reason).font(.auroraCaption).foregroundStyle(Color.auroraTextSecondary)
@@ -233,8 +218,8 @@ struct PlaybackDecisionBadge: View {
             }
             if tracks.count > 1 {
                 Text("\(tracks.count) audio tracks · " + tracks.prefix(3).map(\.displayName).joined(separator: ", "))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .font(.auroraCaption)
+                    .foregroundStyle(Color.auroraMutedForeground)
             }
         }
         .padding(14)
