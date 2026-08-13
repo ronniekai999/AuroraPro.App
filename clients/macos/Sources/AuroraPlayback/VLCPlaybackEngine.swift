@@ -189,8 +189,16 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
             state = .paused
         case .buffering, .opening:
             state = .buffering
-        case .stopped, .ended:
+        case .ended:
             state = .ended
+        case .stopped:
+            // NOT .ended. VLCMediaPlayerStateStopped is the INITIAL state of a
+            // fresh VLCMediaPlayer (value 0 in the enum) as well as the state
+            // after stop() — it does not mean the media finished. Conflating
+            // the two meant every Play opened the player, immediately reported
+            // "ended", marked the title watched and dismissed the sheet before
+            // a frame drew. Only VLCMediaPlayerStateEnded is end-of-media.
+            state = .idle
         case .error:
             state = .failed(
                 "libVLC could not play this stream. If this is a direct play, "

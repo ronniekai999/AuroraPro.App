@@ -28,6 +28,10 @@ struct PlayerView: View {
     @State private var playbackState: PlaybackState = .idle
     @State private var scrubbing = false
     @State private var lastReported: Double = 0
+    /// Guards the end-of-media handler. An engine that reports "ended" before
+    /// it ever played is reporting its idle state, not a finished film — and
+    /// acting on that writes a false entry into real watch history.
+    @State private var everPlayed = false
     // Tracks only exist once the demuxer has opened the media, so they are
     // read on the transition to .playing rather than at load time.
     @State private var audioTracks: [MediaTrack] = []
@@ -160,8 +164,11 @@ struct PlayerView: View {
         engine.onStateChange = { newState in
             Task { @MainActor in
                 playbackState = newState
-                if newState == .playing { refreshTracks() }
-                if newState == .ended {
+                if newState == .playing {
+                    everPlayed = true
+                    refreshTracks()
+                }
+                if newState == .ended, everPlayed {
                     try? await state.client.markWatched(mediaID: target.mediaID)
                     dismiss()
                 }
