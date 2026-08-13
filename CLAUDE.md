@@ -176,8 +176,10 @@ Invariants to preserve when touching this area:
   `mp4_container`/`webm_container` and no native-only codec, so browsers
   are structurally unable to be handed an MKV. That absence IS the safety
   model, and it is enforced mechanically:
-  `TestSPAProbeEmitsNoNativeOnlyCapabilities` PARSES `streaming.ts` and
-  fails if a probe for a native-only key is ever added there.
+  `TestSPAProbeEmitsNoNativeOnlyCapabilities` reads `streaming.ts` and
+  fails if a native-only key appears anywhere in it as a string literal
+  (it scans ALL literals rather than modelling how the caps array is
+  built, so a spread or a ternary can't slip one past it).
   `TestBrowserDecisionGolden` pins the full decision (every field + reason
   code) for browsers across fMP4 on/off and the nil-caps fallback — a
   changed line in that golden file is a changed user experience, so read

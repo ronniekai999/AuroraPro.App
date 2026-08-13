@@ -23,10 +23,9 @@ import (
 // AND — more importantly — pin that browsers are untouched.
 
 // nativeAppCaps is the caps string a libVLC/mpv-backed client sends: it plays
-// essentially every container and codec in a real library. Mirrors the
-// contract documented in docs/native-client-caps.md.
-// Kept in sync with docs/native-client-caps.md's "complete native caps string"
-// by TestNativeAppCapsMatchesDocumentedContract.
+// essentially every container and codec in a real library. Kept in sync with
+// docs/native-client-caps.md's "complete native caps string" by
+// TestNativeAppCapsMatchesDocumentedContract.
 const nativeAppCaps = "h264,h264_hi10,hevc,hevc_main10,vp8,vp9,av1,mpeg4,msmpeg4v3,mpeg2video,vc1," +
 	"aac,mp3,ac3,eac3,flac,opus,vorbis,dts,truehd,mlp,alac,mp2,pcm_s16le,pcm_s24le,pcm_bluray," +
 	"mp4_container,webm_container,mkv_container,avi_container,ts_container,hls_native"
@@ -45,6 +44,18 @@ const (
 
 func track(codec string, isDefault bool) models.AudioTrack {
 	return models.AudioTrack{Codec: codec, IsDefault: isDefault}
+}
+
+// browserProfiles is the single list every browser-safety test iterates, so a
+// profile cannot be added to the constants above and silently skipped by a
+// guard that hardcodes its own subset.
+func browserProfiles() map[string]string {
+	return map[string]string{
+		"chrome":  chromeCapsStr,
+		"firefox": firefoxCapsStr,
+		"safari":  safariCapsStr,
+		"ios":     iosCapsStr,
+	}
 }
 
 // --- The headline: what a native Mac app now gets ---
@@ -107,11 +118,18 @@ func TestNativeClientPlaysHi10PWhileBrowserStillTranscodes(t *testing.T) {
 
 // --- The safety argument: browsers are bit-for-bit unaffected ---
 
-// A browser must NEVER be handed an MKV to direct-play. This is the failure
-// mode that would break every existing user, so it is asserted directly
-// against the real caps strings the SPA emits rather than hand-built maps.
+// A browser must NEVER be handed an MKV to direct-play — the failure mode that
+// would break every existing user.
+//
+// These profiles are hand-authored, not read from the SPA. The link to reality
+// is enforced separately and in both directions:
+// TestBrowserCapsConstantsAreSubsetsOfTheSPAProbe bounds them by what
+// clientCaps() actually pushes, and TestSPAProbeEmitsNoNativeOnlyCapabilities
+// reads streaming.ts directly. Do not restate the "asserted against the real
+// SPA strings" claim here — an earlier version of this comment did, and it
+// was not true of this test.
 func TestBrowsersNeverDirectPlayNativeOnlyContainers(t *testing.T) {
-	browsers := map[string]string{"chrome": chromeCapsStr, "safari": safariCapsStr, "ios": iosCapsStr}
+	browsers := browserProfiles()
 	containers := []string{"matroska", "avi", "mpegts"}
 
 	for name, capsStr := range browsers {
@@ -128,48 +146,133 @@ func TestBrowsersNeverDirectPlayNativeOnlyContainers(t *testing.T) {
 	}
 }
 
-// spaProbeKeys extracts every capability literal the SPA's clientCaps() probe
-// can push, by READING streaming.ts. Hand-copied constants would drift; this
-// reads the source of truth, the same way TestReasonCodeVocabularyMatchesSchema
-// reads migration 056 rather than restating its CHECK constraint.
-func spaProbeKeys(t *testing.T) map[string]bool {
+const spaProbePath = "../../static/redesign/app/src/lib/streaming.ts"
+
+func readSPAProbe(t *testing.T) string {
 	t.Helper()
-	const probePath = "../../static/redesign/app/src/lib/streaming.ts"
-	source, err := os.ReadFile(probePath)
+	source, err := os.ReadFile(spaProbePath)
 	if err != nil {
-		t.Fatalf("read SPA probe %s: %v", probePath, err)
+		t.Fatalf("read SPA probe %s: %v", spaProbePath, err)
 	}
+	return string(source)
+}
+
+// spaProbeLiterals returns EVERY quoted string literal in the probe source,
+// however it is written.
+//
+// The safety assertion deliberately does not model how the caps array is
+// built. An earlier version scraped `caps.push(...)` and was bypassable two
+// ways: a spread (`caps.push(...NATIVE)`) and a nested paren
+// (`caps.push(cond('video/x-matroska') ? 'mkv_container' : …)`, where the
+// argument regex stopped at the inner `)`). Since the property we care about
+// is "the string 'mkv_container' must not appear in a browser build at all",
+// scanning every literal is both simpler and strictly harder to sneak past.
+// MIME strings come along for the ride and are harmless — no capability key
+// is equal to one.
+func spaProbeLiterals(t *testing.T) map[string]bool {
+	t.Helper()
+	lits := scanJSStringLiterals(readSPAProbe(t))
+	if len(lits) < 30 {
+		t.Fatalf("extracted only %d string literals from %s — the file's shape changed "+
+			"and this test is no longer reading it", len(lits), spaProbePath)
+	}
+	return lits
+}
+
+// scanJSStringLiterals walks JS/TS source and returns its string literals,
+// skipping comments.
+//
+// A regex cannot do this job here, and getting it wrong is silent. The obvious
+// `'([^']*)'` pairs apostrophes in PROSE — streaming.ts is full of them
+// ("hls.js's TS demuxer", "browsers' MSE", "Aurora's") — so quotes pair across
+// comment boundaries and the real literals get swallowed into the gaps. That
+// version of this helper passed while a planted `caps.push(...NATIVE)` bypass
+// sat in the file, which is why this is a scanner and not a pattern.
+//
+// Deliberately not a full JS lexer: it does not handle regex literals or
+// template interpolation, neither of which streaming.ts uses. It only has to
+// answer "does this capability key appear as a literal in shipped code".
+func scanJSStringLiterals(src string) map[string]bool {
+	lits := map[string]bool{}
+	var buf strings.Builder
+	var quote byte
+	inLine, inBlock, inStr := false, false, false
+
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+			}
+		case inBlock:
+			if c == '*' && i+1 < len(src) && src[i+1] == '/' {
+				inBlock, i = false, i+1
+			}
+		case inStr:
+			switch c {
+			case '\\':
+				i++ // skip the escaped character
+			case quote:
+				inStr = false
+				lits[buf.String()] = true
+				buf.Reset()
+			default:
+				buf.WriteByte(c)
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			inLine, i = true, i+1
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			inBlock, i = true, i+1
+		case c == '\'' || c == '"' || c == '`':
+			inStr, quote = true, c
+			buf.Reset()
+		}
+	}
+	return lits
+}
+
+// spaPushedKeys is the narrower "what does clientCaps() actually emit" set,
+// used only to bound the hand-authored profiles below. Unlike the safety
+// assertion this DOES model the construction, so it carries a vacuity guard
+// pinned to the exact number of keys the probe pushes today.
+func spaPushedKeys(t *testing.T) map[string]bool {
+	t.Helper()
 	keys := map[string]bool{}
-	pushes := regexp.MustCompile(`caps\.push\(([^)]*)\)`).FindAllStringSubmatch(string(source), -1)
+	pushes := regexp.MustCompile(`caps\.push\(([^)]*)\)`).FindAllStringSubmatch(readSPAProbe(t), -1)
 	for _, push := range pushes {
 		for _, lit := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(push[1], -1) {
 			keys[lit[1]] = true
 		}
 	}
-	// Guard against a silently-vacuous pass: if the regex stops matching
-	// (clientCaps refactored to build the array differently), an empty set
-	// would satisfy every assertion below.
-	if len(keys) < 15 {
-		t.Fatalf("extracted only %d capability keys from %s (%v) — the probe's shape changed "+
-			"and this test is no longer reading it; update the extraction", len(keys), probePath, keys)
+	// Exact, not a loose lower bound: a bound of 15 against 19 real keys would
+	// let four pushes silently stop being scanned. Adding a probe requires
+	// updating this number, which is the moment to ask whether the new key is
+	// browser-safe.
+	const wantKeys = 19
+	if len(keys) != wantKeys {
+		t.Fatalf("extracted %d pushed capability keys from %s, want %d (%v) — if clientCaps() "+
+			"gained or lost a probe, update wantKeys; if the extraction broke, fix it",
+			len(keys), spaProbePath, wantKeys, keys)
 	}
 	return keys
 }
 
 // THE safety model, enforced mechanically: no browser build can emit a
 // native-only capability, so no browser can be handed an MKV, a DTS track, or
-// a Hi10P direct play. Adding such a probe to streaming.ts fails this test.
+// a Hi10P direct play. Adding such a key to streaming.ts fails this test —
+// in any syntactic form, including inside a comment.
 func TestSPAProbeEmitsNoNativeOnlyCapabilities(t *testing.T) {
-	for key := range spaProbeKeys(t) {
+	for key := range spaProbeLiterals(t) {
 		switch {
 		case key == "h264_hi10":
-			t.Errorf("SPA probe emits %q — browsers' MSE rejects Hi10P; this key exists for native clients only", key)
+			t.Errorf("SPA probe references %q — browsers' MSE rejects Hi10P; this key exists for native clients only", key)
 		case strings.HasSuffix(key, "_container") && key != "mp4_container" && key != "webm_container":
-			t.Errorf("SPA probe emits %q — browsers cannot demux it", key)
+			t.Errorf("SPA probe references %q — browsers cannot demux it", key)
 		case isDirectPlayOnlyAudio(key):
-			t.Errorf("SPA probe emits direct-play-only audio %q", key)
+			t.Errorf("SPA probe references direct-play-only audio %q", key)
 		case directPlayOnlyVideoCodecs[key]:
-			t.Errorf("SPA probe emits direct-play-only video %q", key)
+			t.Errorf("SPA probe references direct-play-only video %q", key)
 		}
 	}
 }
@@ -177,10 +280,12 @@ func TestSPAProbeEmitsNoNativeOnlyCapabilities(t *testing.T) {
 // The hand-authored browser profiles below feed the golden matrix, so they
 // must stay a SUBSET of what the probe can actually emit. This catches a
 // fabricated key propping up a test (e.g. asserting on a capability no browser
-// ever sends).
+// ever sends). EVERY profile is checked — firefox was previously omitted here
+// and in TestBrowsersNeverDirectPlayNativeOnlyContainers, so a native-only key
+// added to it would have gone unnoticed by the very guard meant to catch that.
 func TestBrowserCapsConstantsAreSubsetsOfTheSPAProbe(t *testing.T) {
-	emitted := spaProbeKeys(t)
-	for name, capsStr := range map[string]string{"chrome": chromeCapsStr, "safari": safariCapsStr, "ios": iosCapsStr} {
+	emitted := spaPushedKeys(t)
+	for name, capsStr := range browserProfiles() {
 		t.Run(name, func(t *testing.T) {
 			for _, key := range strings.Split(capsStr, ",") {
 				if !emitted[strings.TrimSpace(key)] {
@@ -312,7 +417,7 @@ func orDash(s string) string {
 // worse or unsafe. Complements the golden file with a property that holds for
 // caps combinations the golden matrix does not enumerate.
 func TestBrowserHLSAudioIsNeverNativeOnly(t *testing.T) {
-	for name, capsStr := range map[string]string{"chrome": chromeCapsStr, "safari": safariCapsStr, "ios": iosCapsStr, "firefox": firefoxCapsStr} {
+	for name, capsStr := range browserProfiles() {
 		for _, fmp4 := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/fmp4=%v", name, fmp4), func(t *testing.T) {
 				caps := ParseClientCaps(capsStr)
@@ -464,7 +569,15 @@ func TestNativeClientStillGetsLosslessAudioOnDirectPlay(t *testing.T) {
 // describe the real container for every extension a native client can now
 // reach. Previously untested: reverting the .m2ts case broke nothing.
 func TestServeFileContentTypeForNativeContainers(t *testing.T) {
-	dir := t.TempDir()
+	// Resolve symlinks in the root: pathWithinRoot requires an already-resolved
+	// canonicalRoot (it resolves only the target). On macOS, TMPDIR sits under
+	// /var → /private/var, so a raw t.TempDir() makes every case 404 — which
+	// would greet the first developer to run this on the Mac app's own target
+	// platform.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
 	tests := []struct{ file, want string }{
 		{"movie.mkv", "video/x-matroska"},
 		{"movie.avi", "video/x-msvideo"},
@@ -641,9 +754,15 @@ func TestNativeOnlyCodecSetsDoNotDrift(t *testing.T) {
 			case hlsRemuxable[codec] && classified:
 				t.Errorf("%q is HLS-remuxable but classified direct-play-only", codec)
 			case !hlsRemuxable[codec] && !classified:
+				// The remedy is deliberately not symmetric. Adding the codec
+				// to this test's set is the easier edit (same file) and the
+				// wrong one unless you have CONFIRMED the HLS pipeline carries
+				// it — fMP4 mapping exists and hls.js can demux it from TS.
+				// Absent that proof, directPlayOnlyVideoCodecs is the answer.
 				t.Errorf("%q is claimable but unaccounted for — remuxVideoOK stays true "+
-					"and it would be copied into segments nothing can demux; "+
-					"add it to directPlayOnlyVideoCodecs or to this test's hlsRemuxable set", codec)
+					"and it would be copied into segments nothing can demux. "+
+					"Add it to directPlayOnlyVideoCodecs; only add it to this test's "+
+					"hlsRemuxable set if you have verified the segment pipeline carries it", codec)
 			}
 		}
 		for codec := range directPlayOnlyVideoCodecs {
