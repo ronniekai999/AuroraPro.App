@@ -38,12 +38,22 @@ To work in Xcode: `open Package.swift`.
 | # | Scope | Status |
 |---|---|---|
 | 1 | API client, cookie auth, home, detail, player | done |
-| **2** | **VLCKit engine + track selection** | **this milestone** |
-| 3 | HLS session playback; Library, Browse, Search, Collections, Calendar | next |
-| 4 | Watch parties + realtime (4 WebSocket channels) | |
-| 5 | Admin + Settings | |
-| 6 | Offline downloads | |
-| 7 | AirPlay, notarization, updater | |
+| 2 | VLCKit engine + track selection | done |
+| **3** | **Design system: tokens, type, components** | **this milestone** |
+| 4 | HLS session playback; Library, Browse, Search, Collections, Calendar | next |
+| 5 | Watch parties + realtime (4 WebSocket channels) | |
+| 6 | Admin + Settings | |
+| 7 | Offline downloads | |
+| 8 | AirPlay, notarization, updater | |
+| 9 | Art-direction pass — motion, density, feel | |
+
+**The design work is split deliberately.** Milestone 3 is the design SYSTEM
+(tokens, type scale, components) and comes early because it is infrastructure:
+there are 5 views today and ~20 on the roadmap, so every view built after it
+composes from shared components instead of open-coding a poster card again.
+Milestone 9 is the art-direction pass — motion, density, how it feels at real
+size — which needs every surface to exist before it can be judged, and needs
+human eyes on a real display.
 
 **VLCKit moved ahead of HLS playback** on evidence, not preference. The
 original plan assumed the Apple engine needed HLS to play a real library — but
@@ -146,9 +156,47 @@ Swift without updating `docs/native-client-caps.md` fails CI on Linux.
 
 ```
 AuroraKit        — API client, DTOs, cookie auth, capabilities. No UI.
+AuroraUI         — design system: tokens, type, effects, components. SwiftUI only.
 AuroraPlayback   — PlaybackEngine protocol + the two engines. No UI beyond an NSView.
 AuroraApp        — SwiftUI views and app state.
 ```
+
+`AuroraUI` deliberately depends on nothing but SwiftUI — not even `AuroraKit`.
+Components take primitives (`URL?`, `String`, `Double`) rather than API models,
+so the design system stays previewable on its own and view code and transport
+code cannot grow into each other.
+
+## Design system
+
+Tokens are a TRANSLATION of the SPA's `static/redesign/app/src/index.css`, not
+a redesign — same values, same units, so the two can be diffed by eye. Before
+this existed the app used SwiftUI defaults (system blue, SF Pro, 24pt gutters)
+against Aurora's violet `hsl(270 91% 65%)`, Bricolage Grotesque and 48px
+gutters: it did not look undesigned so much as designed as generic macOS.
+
+| Concern | Where |
+|---|---|
+| Colours, metrics, type scale | `Tokens.swift` |
+| Bundled faces + registration | `Fonts.swift` |
+| Glow, card fill, tinted backdrop | `Effects.swift` |
+| PosterCard, StillCard, Rail, Pill, ButtonStyle | `Components.swift` |
+
+Two details worth knowing before touching the fonts:
+
+- **The family names are not what you would guess.** `InterVariable.ttf`
+  reports family `Inter Variable` (not `Inter`), and `BricolageGrotesque.ttf`
+  reports `Bricolage Grotesque 96pt ExtraBold`. Asking for the obvious name
+  yields nothing and SwiftUI silently substitutes the system font — a failure
+  with no error. The code uses PostScript names, read from the fonts' own name
+  tables.
+- **Bricolage's variable default is wght 800 / opsz 96**, so it renders
+  ExtraBold unless the axis is driven explicitly. That suits large titles —
+  the SPA pairs the face with `font-weight: 700` — which is why
+  `Font.auroraDisplay` takes no weight argument rather than accepting one and
+  quietly ignoring it.
+
+Both faces are SIL OFL and ship with their licences in
+`Sources/AuroraUI/Resources/Fonts/` (~1.3 MB total).
 
 Auth is **cookie-based**, not bearer tokens: `POST /api/auth/login` sets
 httpOnly cookies and returns no tokens in the body (`internal/models/models.go`

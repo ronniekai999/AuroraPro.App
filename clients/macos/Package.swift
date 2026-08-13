@@ -45,13 +45,24 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "AuroraKit", targets: ["AuroraKit"]),
+        .library(name: "AuroraUI", targets: ["AuroraUI"]),
         .library(name: "AuroraPlayback", targets: ["AuroraPlayback"]),
         .executable(name: "Aurora", targets: ["AuroraApp"]),
     ],
     targets: [
         .target(name: "AuroraKit"),
+        // Design system: tokens ported from the SPA's index.css, plus the
+        // shared components every view composes from. Depends on SwiftUI
+        // only — no API types — so it stays previewable in isolation.
+        //
+        // The fonts are RESOURCES, which is what generates Bundle.module for
+        // this target; AuroraFonts.register() reads them from there.
+        .target(
+            name: "AuroraUI",
+            resources: [.process("Resources/Fonts")]
+        ),
         .target(name: "AuroraPlayback", dependencies: playbackDependencies),
-        .executableTarget(name: "AuroraApp", dependencies: ["AuroraKit", "AuroraPlayback"]),
+        .executableTarget(name: "AuroraApp", dependencies: ["AuroraKit", "AuroraPlayback", "AuroraUI"]),
         .testTarget(name: "AuroraKitTests", dependencies: ["AuroraKit"]),
     ] + extraTargets
 )

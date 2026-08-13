@@ -1,5 +1,6 @@
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
 
 struct PlaybackTarget: Identifiable {
@@ -88,8 +89,8 @@ struct PlayerView: View {
                 .keyboardShortcut(.space, modifiers: [])
 
                 Text("\(format(position)) / \(format(duration))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(.auroraSans(12).monospacedDigit())
+                    .foregroundStyle(Color.auroraTextSecondary)
 
                 Spacer()
 

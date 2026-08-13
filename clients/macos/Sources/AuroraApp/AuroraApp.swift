@@ -1,6 +1,7 @@
 import AppKit
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
 
 /// Makes `swift run Aurora` behave like a real app.
@@ -18,6 +19,10 @@ import SwiftUI
 /// behave the same.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any view renders: an unregistered face makes SwiftUI silently
+        // substitute the system font, which looks like a design problem rather
+        // than a loading one.
+        AuroraFonts.register()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
         NSApp.windows.first?.makeKeyAndOrderFront(nil)

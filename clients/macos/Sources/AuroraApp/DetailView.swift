@@ -1,5 +1,6 @@
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
 
 struct DetailView: View {
@@ -21,8 +22,9 @@ struct DetailView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     if let overview = item.overview, !overview.isEmpty {
                         Text(overview)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                            .font(.auroraSans(15))
+                            .foregroundStyle(Color.auroraTextSecondary)
+                            .lineSpacing(3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     playbackSection
@@ -30,7 +32,7 @@ struct DetailView: View {
                 .padding(28)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(AuroraBackdrop())
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close") { dismiss() }
@@ -77,39 +79,38 @@ struct DetailView: View {
                             .overlay { Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary) }
                     }
                 }
-                .frame(width: 150, height: 225)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(width: AuroraMetrics.posterWidth, height: AuroraMetrics.posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: AuroraMetrics.radius, style: .continuous))
+                .auroraGlow()
                 .shadow(color: .black.opacity(0.5), radius: 14, y: 6)
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text(item.title)
-                        .font(.system(size: 34, weight: .bold))
+                        .font(.auroraDisplay(38))
                         .foregroundStyle(.white)
-                        .shadow(radius: 6)
+                        .shadow(radius: 8)
                         .lineLimit(2)
 
                     HStack(spacing: 8) {
-                        if let year = item.year { Pill(String(year)) }
-                        if let runtime = item.runtimeMinutes { Pill("\(runtime) min") }
-                        if let rated = item.contentRating, !rated.isEmpty { Pill(rated) }
-                        if item.has4k == true { Pill("4K", tinted: true) }
-                        if item.hasHdr == true { Pill("HDR", tinted: true) }
+                        if let year = item.year { AuroraPill(String(year)) }
+                        if let runtime = item.runtimeMinutes { AuroraPill("\(runtime) min") }
+                        if let rated = item.contentRating, !rated.isEmpty { AuroraPill(rated) }
+                        if item.has4k == true { AuroraPill("4K", tinted: true) }
+                        if item.hasHdr == true { AuroraPill("HDR", tinted: true) }
                     }
 
                     if let genres = item.genres, !genres.isEmpty {
                         Text(genres.prefix(3).joined(separator: " · "))
-                            .font(.callout)
+                            .font(.auroraSans(13))
                             .foregroundStyle(.white.opacity(0.75))
                     }
 
                     Button(action: play) {
-                        Label("Play", systemImage: "play.fill")
-                            .frame(width: 110)
+                        Label("Play", systemImage: "play.fill").frame(width: 84)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(AuroraButtonStyle())
                     .disabled(!canPlay)
-                    .padding(.top, 4)
+                    .padding(.top, 6)
                 }
                 Spacer(minLength: 0)
             }
@@ -124,24 +125,24 @@ struct DetailView: View {
         if loading {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Checking playback…").font(.callout).foregroundStyle(.secondary)
+                Text("Checking playback…").font(.auroraBody).foregroundStyle(Color.auroraTextSecondary)
             }
         } else if let error {
             // Errors are SHOWN, never swallowed. The previous version used
             // `try?` here, so a failed stream-info left the Play button inert
             // with nothing on screen to explain why.
             Label(error, systemImage: "exclamationmark.triangle.fill")
-                .font(.callout)
+                .font(.auroraBody)
                 .foregroundStyle(.orange)
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .background(Color.auroraCard, in: RoundedRectangle(cornerRadius: AuroraMetrics.radiusSmall, style: .continuous))
         } else if let stream = info?.stream {
             VStack(alignment: .leading, spacing: 10) {
                 if let summary = playable?.file.mediaSummary, !summary.isEmpty {
                     Text(summary)
-                        .font(.callout.monospaced())
-                        .foregroundStyle(.secondary)
+                        .font(.auroraSans(12).monospaced())
+                        .foregroundStyle(Color.auroraTextSecondary)
                 }
                 PlaybackDecisionBadge(info: stream, engine: state.engine, tracks: info?.audioTracks ?? [])
             }
@@ -216,19 +217,19 @@ struct PlaybackDecisionBadge: View {
             HStack(spacing: 8) {
                 Image(systemName: info.isDirectPlay ? "bolt.fill" : "arrow.triangle.2.circlepath")
                     .foregroundStyle(info.isDirectPlay ? .green : .orange)
-                Text(info.summary).font(.callout.weight(.semibold))
+                Text(info.summary).font(.auroraSans(AuroraType.body, weight: .semibold))
                 Spacer()
                 Text(engine.displayName).font(.caption).foregroundStyle(.tertiary)
             }
             if let reason = info.transcodeReason, !reason.isEmpty {
-                Text(reason).font(.caption).foregroundStyle(.secondary)
+                Text(reason).font(.auroraCaption).foregroundStyle(Color.auroraTextSecondary)
             }
             if !info.isDirectPlay, engine == .appleNative {
                 Text(EngineKind.libVLC.isAvailable
                      ? "The VLC engine can likely play this without transcoding."
                      : "Adding the VLC engine would let this play without transcoding.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.auroraCaption)
+                    .foregroundStyle(Color.auroraTextSecondary)
             }
             if tracks.count > 1 {
                 Text("\(tracks.count) audio tracks · " + tracks.prefix(3).map(\.displayName).joined(separator: ", "))
@@ -238,6 +239,6 @@ struct PlaybackDecisionBadge: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+        .background(Color.auroraCard, in: RoundedRectangle(cornerRadius: AuroraMetrics.radius, style: .continuous))
     }
 }
