@@ -60,9 +60,15 @@ public actor AuroraClient {
         return response.user
     }
 
-    /// Current user, or nil when the session is not valid.
+    /// Current user; throws when the session is not valid.
+    ///
+    /// `/api/auth/me`, NOT `/api/me` — the latter is the recommendations
+    /// subtree (hero, discover, rails) and 404s for this. The first version
+    /// used it, which broke session restore silently: login itself still
+    /// worked because the login response carries the user object, so the only
+    /// symptom was being asked to sign in again on every launch.
     public func me() async throws -> User {
-        try await get("/api/me")
+        try await get("/api/auth/me")
     }
 
     public func logout() async {

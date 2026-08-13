@@ -27,7 +27,6 @@ BASE="${BASE%/}"
 
 JAR="$(mktemp)"
 chmod 600 "$JAR"
-trap 'rm -f "$JAR"' EXIT
 
 user="${AURORA_USER:-${AURORA_TEST_USER:-}}"
 pass="${AURORA_PASS:-${AURORA_TEST_PASS:-}}"
@@ -36,8 +35,15 @@ if [ -z "$pass" ]; then read -r -s -p "Password: " pass; echo; fi
 
 # Summarize JSON structurally: keys and types, not values. Keeps the output
 # readable and avoids pasting a library's worth of titles into a chat.
-summarize() {
-  python3 - "$1" <<'PY'
+#
+# The summarizer is written to a temp FILE rather than fed to `python3 -` via
+# a heredoc. That was the first version and it silently printed nothing: a
+# heredoc IS stdin, so python consumed it as the program and sys.stdin.read()
+# returned "" — every endpoint reported "NOT JSON" while returning perfectly
+# good JSON.
+SUMMARIZER="$(mktemp -t summarize.XXXXXX.py)"
+trap 'rm -f "$JAR" "$SUMMARIZER"' EXIT
+cat >"$SUMMARIZER" <<'PY'
 import json, sys
 
 def kind(v, depth=0):
@@ -56,16 +62,22 @@ def kind(v, depth=0):
     s = str(v)
     return f'"{s[:40]}…"' if len(s) > 40 else f'"{s}"'
 
-label = sys.argv[1]
 raw = sys.stdin.read()
+if not raw.strip():
+    print("  (empty body)")
+    sys.exit()
 try:
     data = json.loads(raw)
 except Exception:
-    print(f"  {label}: NOT JSON — {raw[:200]}")
+    print(f"  NOT JSON — {raw[:200]}")
     sys.exit()
-print(f"  shape: {kind(data)}")
+if isinstance(data, list):
+    print(f"  shape: [{kind(data[0]) if data else ''} ×{len(data)}]")
+else:
+    print(f"  shape: {kind(data)}")
 PY
-}
+
+summarize() { python3 "$SUMMARIZER"; }
 
 req() { # name, path
   local name="$1" path="$2"
@@ -77,7 +89,7 @@ req() { # name, path
   body="$(printf '%s' "$body" | sed '$d')"
   echo "── $name"
   echo "  GET $path → HTTP $code"
-  [ "$code" = "200" ] && printf '%s' "$body" | summarize "$name"
+  [ "$code" = "200" ] && printf '%s' "$body" | summarize
   echo
 }
 
@@ -96,10 +108,10 @@ if [ "$login_code" != "200" ]; then
 fi
 # Prove the cookie-auth model the native client depends on.
 echo "  cookies set: $(grep -c $'\t' "$JAR" || echo 0)"
-echo "  cookie names: $(awk 'NF>=7 && $0 !~ /^#/ {printf "%s ", $6}' "$JAR")"
+echo "  cookie names: $(awk -F'\t' 'NF>=7 {sub(/^#HttpOnly_/, "", $1); printf "%s ", $6}' "$JAR")"
 echo
 
-req "me"               "/api/me"
+req "me (auth)"        "/api/auth/me"
 req "continue"         "/api/progress/continue"
 req "recent"           "/api/media/recent?limit=3"
 req "libraries"        "/api/libraries"
