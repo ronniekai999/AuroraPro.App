@@ -28,6 +28,22 @@ public enum PlaybackState: Equatable, Sendable {
     case failed(String)
 }
 
+/// A selectable audio or subtitle track, as the ENGINE sees it.
+///
+/// Distinct from `AuroraKit.AudioTrack`, which is what the SERVER probed.
+/// They describe the same file but are not interchangeable: the server's
+/// indices address ffmpeg streams for a transcode session, while these
+/// address whatever the local demuxer found. On the direct-play path only the
+/// engine's view is authoritative, because nothing server-side is involved.
+public struct MediaTrack: Identifiable, Hashable, Sendable {
+    public let id: Int
+    public let name: String
+    public init(id: Int, name: String) {
+        self.id = id
+        self.name = name
+    }
+}
+
 /// A concrete video player.
 ///
 /// This protocol exists because the engine determines the CAPABILITIES the app
@@ -60,6 +76,29 @@ public protocol PlaybackEngine: AnyObject {
     /// Called roughly once a second with (position, duration).
     var onProgress: ((Double, Double) -> Void)? { get set }
     var onStateChange: ((PlaybackState) -> Void)? { get set }
+
+    // MARK: Tracks
+    //
+    // Only meaningful once the media is open, so read them after `.playing`.
+    // Engines that cannot enumerate tracks return empty and ignore selection,
+    // which is why these have default implementations.
+
+    var audioTracks: [MediaTrack] { get }
+    var subtitleTracks: [MediaTrack] { get }
+    var currentAudioTrack: Int? { get }
+    var currentSubtitleTrack: Int? { get }
+    func selectAudioTrack(_ id: Int)
+    /// Pass nil to turn subtitles off.
+    func selectSubtitleTrack(_ id: Int?)
+}
+
+public extension PlaybackEngine {
+    var audioTracks: [MediaTrack] { [] }
+    var subtitleTracks: [MediaTrack] { [] }
+    var currentAudioTrack: Int? { nil }
+    var currentSubtitleTrack: Int? { nil }
+    func selectAudioTrack(_ id: Int) {}
+    func selectSubtitleTrack(_ id: Int?) {}
 }
 
 /// Which engine the app is running.

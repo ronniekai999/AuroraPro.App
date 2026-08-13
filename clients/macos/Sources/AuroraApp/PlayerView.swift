@@ -28,6 +28,12 @@ struct PlayerView: View {
     @State private var playbackState: PlaybackState = .idle
     @State private var scrubbing = false
     @State private var lastReported: Double = 0
+    // Tracks only exist once the demuxer has opened the media, so they are
+    // read on the transition to .playing rather than at load time.
+    @State private var audioTracks: [MediaTrack] = []
+    @State private var subtitleTracks: [MediaTrack] = []
+    @State private var currentSubtitle: Int?
+    @State private var currentAudio: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -83,6 +89,54 @@ struct PlayerView: View {
 
                 Spacer()
 
+                // Track pickers. Populated only by engines that can enumerate
+                // them — on the direct-play path libVLC reads the embedded
+                // tracks straight from the container, so a file with a dozen
+                // subtitle streams is fully usable with no server involvement.
+                if !subtitleTracks.isEmpty {
+                    Menu {
+                        Button("Off") { selectSubtitle(nil) }
+                        Divider()
+                        ForEach(subtitleTracks) { track in
+                            Button {
+                                selectSubtitle(track.id)
+                            } label: {
+                                HStack {
+                                    Text(track.name)
+                                    if currentSubtitle == track.id { Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: currentSubtitle == nil
+                              ? "captions.bubble" : "captions.bubble.fill")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Subtitles (\(subtitleTracks.count) available)")
+                }
+
+                if audioTracks.count > 1 {
+                    Menu {
+                        ForEach(audioTracks) { track in
+                            Button {
+                                engine?.selectAudioTrack(track.id)
+                                currentAudio = track.id
+                            } label: {
+                                HStack {
+                                    Text(track.name)
+                                    if currentAudio == track.id { Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "waveform")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Audio track (\(audioTracks.count) available)")
+                }
+
                 Label(
                     target.info.isDirectPlay ? "Direct Play" : "Transcoding",
                     systemImage: target.info.isDirectPlay ? "bolt.fill" : "arrow.triangle.2.circlepath"
@@ -106,6 +160,7 @@ struct PlayerView: View {
         engine.onStateChange = { newState in
             Task { @MainActor in
                 playbackState = newState
+                if newState == .playing { refreshTracks() }
                 if newState == .ended {
                     try? await state.client.markWatched(mediaID: target.mediaID)
                     dismiss()
@@ -159,6 +214,20 @@ struct PlayerView: View {
             durationSeconds: duration,
             episodeID: target.episodeID
         )
+    }
+
+    /// Track lists are only valid once the media is open.
+    private func refreshTracks() {
+        guard let engine else { return }
+        audioTracks = engine.audioTracks
+        subtitleTracks = engine.subtitleTracks
+        currentAudio = engine.currentAudioTrack
+        currentSubtitle = engine.currentSubtitleTrack
+    }
+
+    private func selectSubtitle(_ id: Int?) {
+        engine?.selectSubtitleTrack(id)
+        currentSubtitle = id
     }
 
     private func teardown() {

@@ -35,38 +35,69 @@ To work in Xcode: `open Package.swift`.
 
 | # | Scope | Status |
 |---|---|---|
-| **1** | API client, cookie auth, home, detail, player | **this milestone** |
-| 2 | HLS session playback; Library, Browse, Search, Collections, Calendar, Requests | next |
-| 3 | Watch parties + realtime (4 WebSocket channels) | |
-| 4 | Admin + Settings | |
-| 5 | Offline downloads | |
-| 6 | AirPlay, notarization, updater | |
+| 1 | API client, cookie auth, home, detail, player | done |
+| **2** | **VLCKit engine + track selection** | **this milestone** |
+| 3 | HLS session playback; Library, Browse, Search, Collections, Calendar | next |
+| 4 | Watch parties + realtime (4 WebSocket channels) | |
+| 5 | Admin + Settings | |
+| 6 | Offline downloads | |
+| 7 | AirPlay, notarization, updater | |
 
-**Milestone 1 plays direct-play titles only.** Anything the server decides to
-remux or transcode shows an explicit message rather than failing obscurely —
-HLS session playback is Milestone 2. On the Apple engine that will be most of
-the library, which is the point: it makes the engine's limits visible before
-VLCKit is wired up.
+**VLCKit moved ahead of HLS playback** on evidence, not preference. The
+original plan assumed the Apple engine needed HLS to play a real library — but
+measuring the live server showed it gets `direct_stream` (a remux), not a full
+transcode. So wiring libVLC converts those same files to `direct_play`
+outright, which is both the bigger win and less code. HLS still has to exist —
+it is the right answer for remote playback over thin links, where transcoding
+down is a feature — but it is no longer the urgent half.
+
+**Playback still requires a `direct_play` decision.** On the Apple engine most
+of a real library will remux, and the player says so explicitly rather than
+failing obscurely. Install VLCKit (below) and those same titles direct-play.
 
 ## Adding VLCKit
 
+```bash
+./scripts/fetch-vlckit.sh
+swift build && swift run Aurora
+```
+
+Then pick **VLC (libVLC)** from the player menu in the toolbar.
+
 The app ships two engines behind one protocol (`AuroraPlayback/PlaybackEngine.swift`):
 
-| Engine | Plays | Capability set |
+| Engine | Plays | Capability set | Dependency |
+|---|---|---|---|
+| `AVPlaybackEngine` | MP4/MOV — H.264/HEVC, AAC/AC-3/E-AC-3 | `appleNative` | none |
+| `VLCPlaybackEngine` | essentially everything | `libVLC` | VLCKit, ~84 MB |
+
+`Package.swift` **detects** `Frameworks/VLCKit.xcframework` rather than pinning
+a download URL: VideoLAN's artifact locations, versions and checksums move
+between releases, and a stale hard-coded URL fails at dependency resolution —
+the one failure that tells you nothing about whether the code is right. Without
+the framework the package still builds, `VLCPlaybackEngine` compiles out via
+`#if canImport(VLCKit)`, and `EngineKind.libVLC.isAvailable` reports false.
+
+The version is **pinned to VLCKit 3.7.3** (universal `macos-arm64_x86_64`).
+VLCKit 4.x reworks the track API entirely, so it is not a drop-in — this engine
+is written against the 3.7 Objective-C headers, down to their nullability
+annotations. VLCKit is LGPL-2.1+, which suits direct distribution; the fetch
+script copies `COPYING.txt` alongside the framework.
+
+### Why it's worth the 84 MB
+
+Measured against a real library file — MKV, HEVC Main 10, E-AC-3, HDR
+(`color_transfer: smpte2084`):
+
+| Caps sent | Server decision | What happens |
 |---|---|---|
-| `AVPlaybackEngine` | MP4/MOV — H.264/HEVC, AAC/AC-3/E-AC-3 | `ClientCapabilities.appleNative` |
-| `VLCPlaybackEngine` | essentially everything | `ClientCapabilities.libVLC` |
+| none | `transcode` | full re-encode |
+| `appleNative` | `direct_stream` | FFmpeg remuxes the container |
+| `libVLC` | **`direct_play`** | original bytes, no FFmpeg, HDR preserved |
 
-`VLCPlaybackEngine.swift` is wrapped in `#if canImport(VLCKit)`, so it compiles
-in only once the dependency exists and `EngineKind.libVLC.isAvailable` reports
-the truth at runtime.
-
-To add it, either add the package dependency in Xcode (File → Add Package
-Dependencies) pointing at VideoLAN's VLCKit, or add it to `Package.swift` and
-list `"VLCKit"` in the `AuroraPlayback` target's dependencies. VideoLAN
-publishes VLCKit as a binary XCFramework; check
-<https://code.videolan.org/videolan/VLCKit> for the current SPM URL and tag,
-since the distribution has changed across major versions.
+The third row is the entire point of the Tier 1 server work. It also means the
+embedded tracks stay available: that file carries **12 subtitle tracks**, which
+libVLC reads straight from the container with no server involvement.
 
 > **The engine chooses the capability string.** They are one decision, not two.
 > `ClientCapabilities.appleNative` deliberately omits `mkv_container`, `dts`,
