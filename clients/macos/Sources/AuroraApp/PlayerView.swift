@@ -136,7 +136,7 @@ struct PlayerView: View {
             headers["Cookie"] = cookie
         }
 
-        let url = await state.client.directPlayURL(fileID: target.fileID)
+        let url = state.client.directPlayURL(fileID: target.fileID) // nonisolated
         engine.load(PlaybackRequest(url: url, headers: headers, startAt: 0, title: target.title))
         self.engine = engine
     }

@@ -3,6 +3,14 @@ import AuroraPlayback
 import Foundation
 import Observation
 
+/// UserDefaults keys live outside AppState on purpose: a `static let` inside a
+/// `@MainActor` type is itself MainActor-isolated, so the nonisolated
+/// initializer could not read one.
+enum DefaultsKey {
+    static let server = "aurora.serverURL"
+    static let engine = "aurora.engine"
+}
+
 /// App-wide state: server, session, engine, and the home content.
 @MainActor
 @Observable
@@ -28,22 +36,24 @@ public final class AppState {
     public var engine: EngineKind {
         didSet {
             guard engine != oldValue else { return }
-            UserDefaults.standard.set(engine.rawValue, forKey: Self.engineKey)
+            UserDefaults.standard.set(engine.rawValue, forKey: DefaultsKey.engine)
             let caps = engine.capabilities
             Task { await client.setCapabilities(caps) }
         }
     }
 
-    private static let serverKey = "aurora.serverURL"
-    private static let engineKey = "aurora.engine"
-
-    public static var savedServerURL: URL? {
-        UserDefaults.standard.string(forKey: serverKey).flatMap(URL.init(string:))
+    public nonisolated static var savedServerURL: URL? {
+        UserDefaults.standard.string(forKey: DefaultsKey.server).flatMap(URL.init(string:))
     }
 
-    public init(serverURL: URL) {
+    /// `nonisolated` so `@State private var state = AppState(...)` works in the
+    /// App struct: stored-property initializers run in a nonisolated context,
+    /// and a @MainActor init would be unreachable from there. Safe because an
+    /// initializer only populates stored properties — `didSet` does not fire
+    /// during init, so the `engine` observer cannot run here.
+    public nonisolated init(serverURL: URL) {
         self.serverURL = serverURL
-        let saved = UserDefaults.standard.string(forKey: Self.engineKey)
+        let saved = UserDefaults.standard.string(forKey: DefaultsKey.engine)
             .flatMap(EngineKind.init(rawValue:))
         // Never silently fall back to an engine this build lacks: the caps
         // string would then over-claim and the server would hand over files
@@ -95,7 +105,7 @@ public final class AppState {
     }
 
     public func changeServer(to url: URL) async {
-        UserDefaults.standard.set(url.absoluteString, forKey: Self.serverKey)
+        UserDefaults.standard.set(url.absoluteString, forKey: DefaultsKey.server)
         serverURL = url
         client = AuroraClient(baseURL: url, capabilities: engine.capabilities)
         await start()
@@ -108,11 +118,13 @@ public final class AppState {
 
         // Concurrent, and one rail failing must not blank the other — a
         // brand-new account has no continue-watching but plenty of library.
-        async let continuing = try? client.continueWatching()
-        async let recent = try? client.recentlyAdded()
+        // `async let` still needs an explicit `await` on the call itself when
+        // the expression is wrapped in `try?`.
+        async let continuing = try? await client.continueWatching()
+        async let recent = try? await client.recentlyAdded()
 
-        continueWatching = await continuing ?? []
-        recentlyAdded = await recent ?? []
+        continueWatching = (await continuing) ?? []
+        recentlyAdded = (await recent) ?? []
 
         if continueWatching.isEmpty && recentlyAdded.isEmpty {
             loadError = "No titles came back. Check that the server has a scanned library."
