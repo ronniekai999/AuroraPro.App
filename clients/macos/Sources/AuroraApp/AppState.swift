@@ -23,7 +23,7 @@ public final class AppState {
 
     public private(set) var phase: Phase = .launching
     public private(set) var user: User?
-    public private(set) var continueWatching: [MediaItem] = []
+    public private(set) var continueWatching: [ContinueWatchingItem] = []
     public private(set) var recentlyAdded: [MediaItem] = []
     public private(set) var loadError: String?
     public private(set) var isLoading = false

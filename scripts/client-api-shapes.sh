@@ -116,24 +116,52 @@ req "continue"         "/api/progress/continue"
 req "recent"           "/api/media/recent?limit=3"
 req "libraries"        "/api/libraries"
 
-# Resolve one real media id, then exercise the playback path against it.
-ID="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/recent?limit=1" \
-  | python3 -c 'import json,sys
+# Resolve a real media id. Prefer a MOVIE: a series holds no files of its own
+# (/api/media/{id}/files returns []), so picking the first recent item landed on
+# a show and skipped the entire playback section — the most useful part of this
+# report. Falls back to walking a series if the library is all TV.
+RECENT="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/recent?limit=20")"
+read -r ID KIND <<<"$(printf '%s' "$RECENT" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
 items = d if isinstance(d,list) else d.get("items",[])
-print(items[0]["id"] if items else "")' 2>/dev/null || true)"
+movie = next((i for i in items if i.get("type") == "movie"), None)
+pick = movie or (items[0] if items else None)
+print((str(pick["id"]) + " " + str(pick.get("type",""))) if pick else " ")' 2>/dev/null || echo " ")"
 
 if [ -n "$ID" ]; then
-  echo "using media id $ID"
+  echo "using media id $ID (type: ${KIND:-unknown})"
   echo
   req "media detail"   "/api/media/$ID"
   req "media files"    "/api/media/$ID/files"
 
-  FILE_ID="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/$ID/files" \
-    | python3 -c 'import json,sys
+  first_id() { python3 -c 'import json,sys
 d=json.load(sys.stdin)
 f = d if isinstance(d,list) else d.get("items",[])
-print(f[0]["id"] if f else "")' 2>/dev/null || true)"
+print(f[0]["id"] if f else "")'; }
+
+  FILE_TYPE="media"
+  FILE_ID="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/$ID/files" | first_id 2>/dev/null || true)"
+
+  # A series keeps its files on EPISODES. This is the walk a native client has
+  # to implement, so the script exercises it too.
+  if [ -z "$FILE_ID" ] && [ "$KIND" = "show" ]; then
+    echo "── series walk (a show has no files of its own)"
+    req "seasons" "/api/media/$ID/seasons"
+    SEASON="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/$ID/seasons" \
+      | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+s=[x for x in (d if isinstance(d,list) else d.get("items",[])) if x.get("season_number",0)>0]
+print(s[0]["season_number"] if s else "")' 2>/dev/null || true)"
+    if [ -n "$SEASON" ]; then
+      req "episodes (S$SEASON)" "/api/media/$ID/seasons/$SEASON/episodes"
+      EP="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/$ID/seasons/$SEASON/episodes" | first_id 2>/dev/null || true)"
+      if [ -n "$EP" ]; then
+        req "episode files" "/api/media/episodes/$EP/files"
+        FILE_ID="$(curl -sS -b "$JAR" --max-time 30 "$BASE/api/media/episodes/$EP/files" | first_id 2>/dev/null || true)"
+        FILE_TYPE="episode"
+      fi
+    fi
+  fi
 
   if [ -n "$FILE_ID" ]; then
     # The two capability sets the Mac client can send. Comparing the
@@ -141,14 +169,14 @@ print(f[0]["id"] if f else "")' 2>/dev/null || true)"
     APPLE="aac,ac3,eac3,flac,h264,hevc,hevc_main10,hls_native,mp3,mp4_container"
     VLC="alac,av1,avi_container,aac,ac3,dts,eac3,flac,h264,h264_hi10,hevc,hevc_main10,hls_native,mkv_container,mlp,mp2,mp3,mp4_container,mpeg2video,mpeg4,msmpeg4v3,opus,pcm_bluray,pcm_s16le,pcm_s24le,truehd,ts_container,vc1,vorbis,vp8,vp9,webm_container"
 
-    req "stream info (no caps)"     "/api/stream/info/$FILE_ID?type=media"
-    req "stream info (Apple caps)"  "/api/stream/info/$FILE_ID?type=media&caps=$APPLE"
-    req "stream info (libVLC caps)" "/api/stream/info/$FILE_ID?type=media&caps=$VLC"
+    req "stream info (no caps)"     "/api/stream/info/$FILE_ID?type=$FILE_TYPE"
+    req "stream info (Apple caps)"  "/api/stream/info/$FILE_ID?type=$FILE_TYPE&caps=$APPLE"
+    req "stream info (libVLC caps)" "/api/stream/info/$FILE_ID?type=$FILE_TYPE&caps=$VLC"
 
     echo "── decisions side by side (this is Tier 1 working, or not)"
     for label in "Apple:$APPLE" "libVLC:$VLC"; do
       name="${label%%:*}"; caps="${label#*:}"
-      curl -sS -b "$JAR" --max-time 30 "$BASE/api/stream/info/$FILE_ID?type=media&caps=$caps" \
+      curl -sS -b "$JAR" --max-time 30 "$BASE/api/stream/info/$FILE_ID?type=$FILE_TYPE&caps=$caps" \
         | python3 -c "import json,sys
 s = json.load(sys.stdin).get('stream', {})
 print('  %-7s → %-14s %s' % ('$name', s.get('decision','?'), s.get('transcode_reason','') or ''))" 2>/dev/null \

@@ -13,8 +13,10 @@ struct HomeView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 28) {
                     if !state.continueWatching.isEmpty {
-                        MediaRailView(title: "Continue Watching", items: state.continueWatching) {
-                            selected = $0
+                        ContinueRailView(items: state.continueWatching) { entry in
+                            // Continue rows carry media_item_id, not a whole
+                            // MediaItem, so fetch the item the sheet needs.
+                            Task { selected = try? await state.client.media(id: entry.mediaItemId) }
                         }
                     }
                     if !state.recentlyAdded.isEmpty {
@@ -83,6 +85,74 @@ struct HomeView: View {
                 .environment(state)
                 .frame(minWidth: 720, minHeight: 480)
         }
+    }
+}
+
+/// Continue Watching, with the resume position the rows actually carry.
+struct ContinueRailView: View {
+    let items: [ContinueWatchingItem]
+    let onSelect: (ContinueWatchingItem) -> Void
+
+    @Environment(AppState.self) private var state
+    @State private var hoveringID: Int64?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Continue Watching")
+                .font(.title2.weight(.semibold))
+                .padding(.horizontal, 24)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 14) {
+                    ForEach(items) { entry in
+                        VStack(alignment: .leading, spacing: 6) {
+                            ZStack(alignment: .bottom) {
+                                AsyncImage(url: state.client.imageURL(entry.backdropPath ?? entry.posterPath, size: .w342)) { phase in
+                                    if case .success(let image) = phase {
+                                        image.resizable().aspectRatio(contentMode: .fill)
+                                    } else {
+                                        Rectangle().fill(.quaternary)
+                                    }
+                                }
+                                .frame(width: 260, height: 146)
+
+                                // Resume bar — the whole reason this rail exists.
+                                GeometryReader { geo in
+                                    ZStack(alignment: .leading) {
+                                        Rectangle().fill(.black.opacity(0.55))
+                                        Rectangle().fill(Color.accentColor)
+                                            .frame(width: geo.size.width * entry.fraction)
+                                    }
+                                }
+                                .frame(height: 4)
+                            }
+                            .frame(width: 260, height: 146)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .shadow(color: .black.opacity(hoveringID == entry.id ? 0.5 : 0.25),
+                                    radius: hoveringID == entry.id ? 14 : 6, y: 4)
+                            .scaleEffect(hoveringID == entry.id ? 1.03 : 1)
+                            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: hoveringID)
+
+                            Text(entry.title).font(.callout).lineLimit(1)
+                            Text(entry.subtitle ?? timeRemaining(entry))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .frame(width: 260)
+                        .onHover { hoveringID = $0 ? entry.id : nil }
+                        .onTapGesture { onSelect(entry) }
+                    }
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+    }
+
+    private func timeRemaining(_ entry: ContinueWatchingItem) -> String {
+        let left = max(0, entry.durationSeconds - entry.positionSeconds)
+        guard left > 0 else { return "" }
+        return "\(Int(left / 60)) min left"
     }
 }
 

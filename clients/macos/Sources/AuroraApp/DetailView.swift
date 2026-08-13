@@ -8,7 +8,7 @@ struct DetailView: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
 
-    @State private var files: [MediaFile] = []
+    @State private var playable: PlayableFile?
     @State private var info: StreamInfoResponse?
     @State private var error: String?
     @State private var loading = true
@@ -147,12 +147,17 @@ struct DetailView: View {
         loading = true
         defer { loading = false }
         do {
-            files = try await state.client.files(forMedia: item.id)
-            guard let first = files.first else {
-                error = "No playable file is attached to this title."
+            // Walks seasons → episodes for a series; a show holds no files of
+            // its own, which previously read as "no playable file attached"
+            // for every series in the library.
+            guard let found = try await state.client.firstPlayableFile(for: item) else {
+                error = item.type.isSeries
+                    ? "No episode files were found for this series."
+                    : "No playable file is attached to this title."
                 return
             }
-            info = try await state.client.streamInfo(fileID: first.id)
+            playable = found
+            info = try await state.client.streamInfo(fileID: found.file.id, type: found.type)
         } catch let e as APIError {
             error = e.message
         } catch {
@@ -161,8 +166,11 @@ struct DetailView: View {
     }
 
     private func play() {
-        guard let file = files.first, let stream = info?.stream else { return }
-        playing = PlaybackTarget(mediaID: item.id, fileID: file.id, title: item.title, info: stream)
+        guard let found = playable, let stream = info?.stream else { return }
+        playing = PlaybackTarget(
+            mediaID: item.id, fileID: found.file.id, fileType: found.type,
+            episodeID: found.episodeID, title: item.title, info: stream
+        )
     }
 }
 

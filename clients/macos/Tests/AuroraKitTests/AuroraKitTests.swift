@@ -59,6 +59,47 @@ final class DecodingTests: XCTestCase {
         XCTAssertNil(item.posterPath)
     }
 
+    /// The server's constants are "movie" and "show". This decoded `show`
+    /// through the unknown-value fallback and labelled every series a movie —
+    /// which also sent playback down the movie path, where a series has no
+    /// files.
+    func testSeriesDecodesAsShowNotMovie() throws {
+        let item = try decode(#"{"id":981,"library_id":2,"type":"show","title":"Demon Slayer"}"#, as: MediaItem.self)
+        XCTAssertEqual(item.type, .show)
+        XCTAssertTrue(item.type.isSeries)
+        let film = try decode(#"{"id":7,"library_id":1,"type":"movie","title":"Arrival"}"#, as: MediaItem.self)
+        XCTAssertFalse(film.type.isSeries)
+    }
+
+    /// Real /api/progress/continue row. This used to decode as [MediaItem],
+    /// which fails on the missing library_id — and a `try?` turned that into a
+    /// permanently empty Continue Watching rail.
+    func testContinueWatchingRowDecodes() throws {
+        let json = #"""
+        {"id":31,"user_id":1,"profile_id":1,"media_item_id":455,"position_ms":1_284_000,
+         "duration_ms":5_700_000,"completed":false,"updated_at":"2026-08-12T06:12:14.817258+02:00",
+         "title":"The Cabin in the Woods","poster_path":"/zZZe.jpg","backdrop_path":"/dWLo.jpg",
+         "type":"movie","year":2011,"rating":6.9,"percent_complete":22.5}
+        """#.replacingOccurrences(of: "_", with: "")
+        let row = try decode(json, as: ContinueWatchingItem.self)
+        XCTAssertEqual(row.mediaItemId, 455)
+        XCTAssertEqual(row.positionSeconds, 1284, accuracy: 0.5)
+        XCTAssertEqual(row.fraction, 0.225, accuracy: 0.001)
+        XCTAssertNil(row.subtitle, "a film has no SxEy label")
+    }
+
+    func testContinueWatchingEpisodeRowShowsSeasonAndEpisode() throws {
+        let json = #"""
+        {"id":9,"user_id":1,"profile_id":1,"media_item_id":981,"episode_id":4402,
+         "position_ms":600000,"duration_ms":1400000,"completed":false,
+         "updated_at":"2026-08-12T06:12:14Z","title":"Demon Slayer","type":"show",
+         "episode_title":"Sabito and Makomo","season_number":1,"episode_number":4}
+        """#
+        let row = try decode(json, as: ContinueWatchingItem.self)
+        XCTAssertEqual(row.episodeId, 4402)
+        XCTAssertEqual(row.subtitle, "S1E4 · Sabito and Makomo")
+    }
+
     func testUnknownMediaTypeDoesNotThrow() throws {
         let item = try decode(#"{"id":1,"library_id":1,"type":"audiobook","title":"X"}"#, as: MediaItem.self)
         XCTAssertEqual(item.type, .movie, "an unknown type should degrade, not blank the library")

@@ -9,14 +9,29 @@ import Foundation
 // fails the WHOLE decode when the value is absent, which turns "this movie has
 // no year" into "the library screen is empty".
 
+/// Mirrors `models.MediaType`: the server's constants are exactly "movie" and
+/// "show".
+///
+/// This said `tv`, which nothing ever sends — so every series decoded through
+/// the unknown-value fallback and was labelled a movie. The fallback is
+/// deliberate (a new server type must not blank the library) but it also hides
+/// exactly this kind of mistake, so the cases have to match the Go constants
+/// rather than read plausibly.
 public enum MediaType: String, Codable, Sendable {
-    case movie, tv, episode
-    // Unknown kinds decode rather than throwing: a server that adds a type
-    // should not blank the client's library.
+    case movie
+    case show
+    /// Not a `media_items.type` value — only appears where an endpoint labels
+    /// a row as an episode (e.g. Continue Watching).
+    case episode
+
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = MediaType(rawValue: raw) ?? .movie
+        self = MediaType(rawValue: raw.lowercased()) ?? .movie
     }
+
+    /// A series holds no files of its own — episodes do. Playback has to walk
+    /// seasons → episodes → episode files instead of asking for /files.
+    public var isSeries: Bool { self == .show }
 }
 
 public struct User: Codable, Sendable, Identifiable {
@@ -167,11 +182,97 @@ public struct AudioTrack: Decodable, Sendable, Identifiable {
     }
 }
 
-public struct WatchProgress: Codable, Sendable {
-    public let mediaId: Int64?
-    public let positionSeconds: Double?
-    public let durationSeconds: Double?
-    public let completedAt: String?
+/// A row from GET /api/progress/continue (`models.ContinueWatchingItem`).
+///
+/// NOT a MediaItem, which is what this used to decode as. It is a progress
+/// row with display fields grafted on — no `library_id`, and the media id
+/// lives in `media_item_id`. The mismatch made every decode fail, and a `try?`
+/// in loadHome turned that into "Continue Watching is always empty" with no
+/// error anywhere.
+///
+/// Times are MILLISECONDS, matching the server. The client's own progress
+/// reporting was sending seconds under second-suffixed keys the server does
+/// not read — so every position saved as zero.
+public struct ContinueWatchingItem: Decodable, Sendable, Identifiable {
+    public let id: Int64
+    public let mediaItemId: Int64
+    public let episodeId: Int64?
+    public let positionMs: Int64
+    public let durationMs: Int64
+    public let completed: Bool?
+    public let title: String
+    public let posterPath: String?
+    public let backdropPath: String?
+    public let type: MediaType?
+    public let year: Int?
+    public let rating: Double?
+    public let episodeTitle: String?
+    public let seasonNumber: Int?
+    public let episodeNumber: Int?
+    public let percentComplete: Double?
+
+    public var positionSeconds: Double { Double(positionMs) / 1000 }
+    public var durationSeconds: Double { Double(durationMs) / 1000 }
+
+    /// 0…1 for a progress bar. Prefers the server's own percentage.
+    public var fraction: Double {
+        if let p = percentComplete, p > 0 { return min(1, p / 100) }
+        guard durationMs > 0 else { return 0 }
+        return min(1, Double(positionMs) / Double(durationMs))
+    }
+
+    /// "S2E5 · The Title" for episodes, plain title for films.
+    public var subtitle: String? {
+        guard let s = seasonNumber, let e = episodeNumber else { return nil }
+        let code = "S\(s)E\(e)"
+        if let episodeTitle, !episodeTitle.isEmpty { return "\(code) · \(episodeTitle)" }
+        return code
+    }
+}
+
+/// A resolved playable file plus the context the stream endpoints need.
+///
+/// A named type rather than a tuple: it is stored in SwiftUI @State, passed
+/// between views, and has to carry the episode id so progress reporting can
+/// attribute an episode correctly.
+public struct PlayableFile: Sendable {
+    public let file: MediaFile
+    /// "media" or "episode" — required by both /api/stream/info and the
+    /// direct endpoint.
+    public let type: String
+    /// Set when this resolved to an episode; progress updates need it, since
+    /// the endpoint is keyed by MEDIA id with the episode in the body.
+    public let episodeID: Int64?
+
+    public init(file: MediaFile, type: String, episodeID: Int64? = nil) {
+        self.file = file
+        self.type = type
+        self.episodeID = episodeID
+    }
+}
+
+public struct Season: Decodable, Sendable, Identifiable {
+    public let id: Int64
+    public let mediaItemId: Int64
+    public let seasonNumber: Int
+    public let title: String?
+    public let overview: String?
+    public let episodeCount: Int?
+}
+
+public struct Episode: Decodable, Sendable, Identifiable {
+    public let id: Int64
+    public let seasonId: Int64
+    public let mediaItemId: Int64
+    public let episodeNumber: Int
+    public let title: String?
+    public let overview: String?
+    public let runtimeMinutes: Int?
+
+    public var displayTitle: String {
+        let name = (title?.isEmpty == false) ? title! : "Episode \(episodeNumber)"
+        return "\(episodeNumber). \(name)"
+    }
 }
 
 /// A home-screen rail. The home endpoint returns these as a list.

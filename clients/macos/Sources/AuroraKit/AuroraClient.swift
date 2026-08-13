@@ -106,8 +106,49 @@ public actor AuroraClient {
 
     // MARK: - Content
 
-    public func continueWatching() async throws -> [MediaItem] {
+    public func continueWatching() async throws -> [ContinueWatchingItem] {
         try await decodeList("/api/progress/continue")
+    }
+
+    // MARK: - TV
+
+    public func seasons(forShow id: Int64) async throws -> [Season] {
+        try await decodeList("/api/media/\(id)/seasons")
+    }
+
+    public func episodes(showID: Int64, season: Int) async throws -> [Episode] {
+        try await decodeList("/api/media/\(showID)/seasons/\(season)/episodes")
+    }
+
+    public func files(forEpisode id: Int64) async throws -> [MediaFile] {
+        try await decodeList("/api/media/episodes/\(id)/files")
+    }
+
+    /// Resolves the first playable file for ANY item, movie or series.
+    ///
+    /// A series holds no files of its own — /api/media/{id}/files returns an
+    /// empty array for one, which the client previously reported as "no
+    /// playable file is attached to this title" for every show in the library.
+    /// Files hang off episodes, so a series has to be walked:
+    /// seasons → episodes → episode files.
+    public func firstPlayableFile(for item: MediaItem) async throws -> PlayableFile? {
+        if !item.type.isSeries {
+            return try await files(forMedia: item.id).first
+                .map { PlayableFile(file: $0, type: "media") }
+        }
+        // Season 0 is specials, so take it last — "play" on a series should
+        // start at S1E1, not at a Christmas special.
+        let ordered = try await seasons(forShow: item.id)
+            .sorted { ($0.seasonNumber == 0 ? Int.max : $0.seasonNumber) < ($1.seasonNumber == 0 ? Int.max : $1.seasonNumber) }
+        for season in ordered {
+            let eps = try await episodes(showID: item.id, season: season.seasonNumber)
+            for episode in eps.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
+                if let file = try await files(forEpisode: episode.id).first {
+                    return PlayableFile(file: file, type: "episode", episodeID: episode.id)
+                }
+            }
+        }
+        return nil
     }
 
     public func recentlyAdded(limit: Int = 30) async throws -> [MediaItem] {
@@ -161,11 +202,24 @@ public actor AuroraClient {
         return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
-    public func reportProgress(mediaID: Int64, positionSeconds: Double, durationSeconds: Double) async throws {
-        let body: [String: Any] = [
-            "position_seconds": positionSeconds,
-            "duration_seconds": durationSeconds,
+    /// Reports playback position.
+    ///
+    /// The server's `UpdateProgressRequest` takes MILLISECONDS under
+    /// `position_ms` / `duration_ms`. This previously sent seconds under
+    /// `position_seconds` / `duration_seconds` — keys the decoder ignores — so
+    /// every update stored a position of zero and resume never worked. Nothing
+    /// errored; the request was a well-formed 200.
+    public func reportProgress(
+        mediaID: Int64,
+        positionSeconds: Double,
+        durationSeconds: Double,
+        episodeID: Int64? = nil
+    ) async throws {
+        var body: [String: Any] = [
+            "position_ms": Int64(max(0, positionSeconds) * 1000),
+            "duration_ms": Int64(max(0, durationSeconds) * 1000),
         ]
+        if let episodeID { body["episode_id"] = episodeID }
         _ = try await putRaw("/api/progress/\(mediaID)", json: body)
     }
 

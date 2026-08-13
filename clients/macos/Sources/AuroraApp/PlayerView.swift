@@ -5,6 +5,12 @@ import SwiftUI
 struct PlaybackTarget: Identifiable {
     let mediaID: Int64
     let fileID: Int64
+    /// "media" or "episode" — the direct endpoint and stream-info both need
+    /// it, and a series resolves to an EPISODE file.
+    let fileType: String
+    /// Set for episodes; progress updates are keyed by MEDIA id with the
+    /// episode in the body.
+    let episodeID: Int64?
     let title: String
     let info: StreamInfo
     var id: Int64 { fileID }
@@ -136,7 +142,7 @@ struct PlayerView: View {
             headers["Cookie"] = cookie
         }
 
-        let url = state.client.directPlayURL(fileID: target.fileID) // nonisolated
+        let url = state.client.directPlayURL(fileID: target.fileID, type: target.fileType)
         engine.load(PlaybackRequest(url: url, headers: headers, startAt: 0, title: target.title))
         self.engine = engine
     }
@@ -150,7 +156,8 @@ struct PlayerView: View {
         try? await state.client.reportProgress(
             mediaID: target.mediaID,
             positionSeconds: position,
-            durationSeconds: duration
+            durationSeconds: duration,
+            episodeID: target.episodeID
         )
     }
 
