@@ -1,0 +1,178 @@
+import AuroraKit
+import AuroraPlayback
+import SwiftUI
+
+struct PlaybackTarget: Identifiable {
+    let mediaID: Int64
+    let fileID: Int64
+    let title: String
+    let info: StreamInfo
+    var id: Int64 { fileID }
+}
+
+struct PlayerView: View {
+    let target: PlaybackTarget
+
+    @Environment(AppState.self) private var state
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var engine: (any PlaybackEngine)?
+    @State private var position: Double = 0
+    @State private var duration: Double = 0
+    @State private var playbackState: PlaybackState = .idle
+    @State private var scrubbing = false
+    @State private var lastReported: Double = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Color.black
+                if let engine {
+                    PlayerSurface(engine: engine)
+                } else {
+                    ProgressView().controlSize(.large)
+                }
+                if case .failed(let message) = playbackState {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.largeTitle).foregroundStyle(.orange)
+                        Text(message)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 40)
+                    }
+                }
+                if playbackState == .buffering {
+                    ProgressView().controlSize(.large)
+                }
+            }
+            controls
+        }
+        .task { await startPlayback() }
+        .onDisappear { teardown() }
+    }
+
+    private var controls: some View {
+        VStack(spacing: 6) {
+            Slider(
+                value: $position,
+                in: 0...max(duration, 1),
+                onEditingChanged: { editing in
+                    scrubbing = editing
+                    if !editing { engine?.seek(to: position) }
+                }
+            )
+            HStack {
+                Button {
+                    guard let engine else { return }
+                    playbackState == .playing ? engine.pause() : engine.play()
+                } label: {
+                    Image(systemName: playbackState == .playing ? "pause.fill" : "play.fill")
+                }
+                .keyboardShortcut(.space, modifiers: [])
+
+                Text("\(format(position)) / \(format(duration))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Label(
+                    target.info.isDirectPlay ? "Direct Play" : "Transcoding",
+                    systemImage: target.info.isDirectPlay ? "bolt.fill" : "arrow.triangle.2.circlepath"
+                )
+                .font(.caption)
+                .foregroundStyle(target.info.isDirectPlay ? .green : .orange)
+
+                Button("Done") {
+                    Task { await reportProgress(force: true) }
+                    dismiss()
+                }
+            }
+        }
+        .padding(12)
+        .background(.bar)
+    }
+
+    private func startPlayback() async {
+        let engine = state.engine.makeEngine()
+
+        engine.onStateChange = { newState in
+            Task { @MainActor in
+                playbackState = newState
+                if newState == .ended {
+                    try? await state.client.markWatched(mediaID: target.mediaID)
+                    dismiss()
+                }
+            }
+        }
+        engine.onProgress = { pos, dur in
+            Task { @MainActor in
+                duration = dur
+                if !scrubbing { position = pos }
+                await reportProgress()
+            }
+        }
+
+        // Direct play fetches the ORIGINAL bytes. Anything else goes through
+        // the HLS session flow, which Milestone 1 does not implement yet —
+        // fail loudly rather than silently playing the wrong thing.
+        guard target.info.isDirectPlay else {
+            playbackState = .failed(
+                """
+                This title needs \(target.info.decision == "direct_stream" ? "remuxing" : "transcoding"), \
+                and HLS session playback lands in Milestone 2.
+
+                \(target.info.transcodeReason ?? "")
+
+                Switching to the VLC engine may make this direct-play.
+                """
+            )
+            return
+        }
+
+        var headers: [String: String] = ["User-Agent": "Aurora-macOS"]
+        if let cookie = await state.client.cookieHeader() {
+            headers["Cookie"] = cookie
+        }
+
+        let url = await state.client.directPlayURL(fileID: target.fileID)
+        engine.load(PlaybackRequest(url: url, headers: headers, startAt: 0, title: target.title))
+        self.engine = engine
+    }
+
+    /// Throttled to once every 10s — the SPA reports at a similar cadence and
+    /// the endpoint is a DB write, not a no-op.
+    private func reportProgress(force: Bool = false) async {
+        guard duration > 0 else { return }
+        guard force || abs(position - lastReported) >= 10 else { return }
+        lastReported = position
+        try? await state.client.reportProgress(
+            mediaID: target.mediaID,
+            positionSeconds: position,
+            durationSeconds: duration
+        )
+    }
+
+    private func teardown() {
+        engine?.stop()
+        engine = nil
+    }
+
+    private func format(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds)
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, s)
+            : String(format: "%d:%02d", m, s)
+    }
+}
+
+/// Hosts the engine's AppKit view inside SwiftUI.
+struct PlayerSurface: NSViewRepresentable {
+    let engine: any PlaybackEngine
+
+    func makeNSView(context: Context) -> NSView { engine.makeView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
