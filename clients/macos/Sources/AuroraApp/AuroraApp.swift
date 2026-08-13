@@ -47,6 +47,12 @@ struct AuroraApp: App {
         WindowGroup {
             RootView()
                 .environment(state)
+                // macOS derives focus rings, slider fills and selection
+                // highlights from the accent colour, which is system BLUE by
+                // default — visible as a blue ring on the login field against
+                // an otherwise violet app. Tint once at the root so every
+                // system-drawn control inherits Aurora's accent.
+                .tint(Color.auroraAccent)
                 .frame(minWidth: 900, minHeight: 600)
                 .task { await state.start() }
         }

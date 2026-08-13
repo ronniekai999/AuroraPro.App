@@ -106,14 +106,23 @@ public struct AuroraBackdrop: View {
 public struct AuroraTextGradient: ViewModifier {
     public init() {}
     public func body(content: Content) -> some View {
-        // Mask the gradient WITH the text, rather than overlaying the gradient
-        // on the text and then clearing the text — that second form clears the
-        // overlay along with everything else and renders nothing.
-        LinearGradient(
-            colors: [.auroraPurple, .auroraPurpleLight, .auroraPurple],
-            startPoint: .topLeading, endPoint: .bottomTrailing
+        // foregroundStyle takes any ShapeStyle, gradients included, and does
+        // not participate in layout.
+        //
+        // The obvious alternatives both misbehave. Overlaying the gradient on
+        // the text and then clearing the text clears the overlay too and
+        // renders nothing. Masking the gradient with the text renders
+        // correctly but sizes wrong: LinearGradient is GREEDY — it expands to
+        // fill whatever space it is offered, and .mask() clips its appearance
+        // without shrinking its frame. On the login screen that made the
+        // "Aurora" title claim the entire window height and push the fields to
+        // the bottom edge.
+        content.foregroundStyle(
+            LinearGradient(
+                colors: [.auroraPurple, .auroraPurpleLight, .auroraPurple],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
         )
-        .mask(content)
     }
 }
 
