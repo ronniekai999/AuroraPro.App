@@ -156,3 +156,43 @@ Invariants to preserve here:
   `ScheduledStartAt` at fire time and dedupe via `reminderSentFor`.
 - Calendar: party chips group by the viewer's **local** date; episode air
   dates stay UTC-keyed. Don't unify them.
+
+## Native-client direct play (Tier 1 of the Mac-app work)
+
+Capability keys that let a NATIVE client (libVLC/mpv/ExoPlayer-backed app)
+direct-play what browsers cannot: `mkv_container` / `avi_container` /
+`ts_container`, the legacy video codecs (`mpeg4`, `msmpeg4v3`,
+`mpeg2video`, `vc1`), the native-only audio codecs (`dts`, `truehd`,
+`mlp`, `alac`, `mp2`, `pcm_*`), and the `h264_hi10` profile key. Code:
+`internal/streaming/streaming.go` (`containerCapKey`,
+`directPlayOnlyVideoCodecs`, `isDirectPlayOnlyAudio`,
+`hlsDeliverableAudio`), tests in `nativeclient_test.go`, client contract
+in `docs/native-client-caps.md`.
+
+Invariants to preserve when touching this area:
+
+- **Nothing is direct-playable by default — a client reaches these paths
+  only by NAMING the capability.** The SPA emits exactly
+  `mp4_container`/`webm_container` and no native-only codec, so browsers
+  are structurally unable to be handed an MKV. If you ever add a probe to
+  `streaming.ts`, re-read `TestBrowserCapsStringsCarryNoNativeOnlyCapabilities`
+  first — that absence IS the safety model.
+- **"Direct-play-only" sets are disjoint from every copy path** by
+  construction: `directPlayOnlyVideoCodecs` forces `remuxVideoOK=false`,
+  and `isDirectPlayOnlyAudio` codecs are denied by `RemuxAudioCopySafe` /
+  `TranscodeAudioCopySafe`. Two tests pin the disjointness. Adding a codec
+  to `knownAudioCodecs` without deciding which side it falls on is the
+  bug these guard.
+- **`hlsCaps` means "what THIS delivery path can carry", never "what the
+  client can decode"** — that is why the hls.js restriction now has a
+  native-client counterpart (`hlsDeliverableAudio`). Without it,
+  `findBestAudioTrack` picks a DTS default track on a path that must
+  re-encode it, passing over a copyable AAC track beside it.
+- **Hi10P and the legacy codecs are direct-play-or-transcode, never
+  remux.** H.264 High 10 in fMP4/TS is unproven on every consumer we ship;
+  MPEG-4 Part 2 / MPEG-2 / VC-1 have no fMP4 mapping and hls.js can't
+  demux them from TS.
+- `containerCapKey` is keyed by **NormalizeContainer output**, not file
+  extension — `mov` normalizes to `mp4` and must not get its own entry.
+  Note `.webm` files probe as `matroska` and are therefore stored as
+  container `mkv` (pre-existing; documented in the client contract).
