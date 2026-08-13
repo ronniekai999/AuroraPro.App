@@ -213,6 +213,23 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
         let position = currentTime
         let total = duration
         if total > 0 { knownDuration = total }
+
+        // The media clock advancing IS playback, and it is better evidence
+        // than any state notification.
+        //
+        // Both .opening and .buffering map to .buffering here, and `state`
+        // only fires its observer on a CHANGE — so if libVLC does not post a
+        // distinct state change for buffering→playing, nothing ever clears
+        // .buffering and the spinner sits on top of video that is playing
+        // fine. That is exactly what happened: the only way out was pressing
+        // play, whose handler set .playing by hand.
+        //
+        // Deriving it here closes that hole regardless of which
+        // notifications libVLC chooses to post.
+        if state == .buffering, player.isPlaying {
+            state = .playing
+        }
+
         guard total > 0 else { return }
         onProgress?(position, total)
     }
