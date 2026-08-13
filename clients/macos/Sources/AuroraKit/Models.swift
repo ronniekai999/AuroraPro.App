@@ -95,16 +95,52 @@ public struct MediaItem: Codable, Sendable, Identifiable, Hashable {
     }
 }
 
+/// Mirrors the shape /api/media/{id}/files actually returns.
+///
+/// There is no width/height — the server sends `resolution` as "1920x800".
+/// `path` is never serialized (`json:"-"`). The colour fields are what make
+/// HDR visible to the client: a direct-played HDR file keeps its HDR, where a
+/// transcode tone-maps it to SDR, and that is worth showing.
 public struct MediaFile: Codable, Sendable, Identifiable {
     public let id: Int64
-    public let path: String?
+    public let mediaItemId: Int64?
     public let container: String?
     public let videoCodec: String?
     public let audioCodec: String?
-    public let width: Int?
-    public let height: Int?
+    public let resolution: String?
+    public let versionTag: String?
+    public let bitrate: Int64?
     public let durationMs: Int64?
     public let sizeBytes: Int64?
+    public let videoProfile: String?
+    public let videoPixFmt: String?
+    public let colorTransfer: String?
+    public let colorPrimaries: String?
+
+    /// Matches the server's IsHDRColorTransfer: PQ (HDR10) or HLG.
+    public var isHDR: Bool {
+        guard let t = colorTransfer?.lowercased() else { return false }
+        return t == "smpte2084" || t == "arib-std-b67"
+    }
+
+    public var isTenBit: Bool {
+        guard let f = videoPixFmt else { return false }
+        return f.contains("10") || f.contains("12")
+    }
+
+    /// "MKV · HEVC Main 10 · E-AC-3 · HDR" — the line that tells you at a
+    /// glance why a file did or did not direct-play.
+    public var mediaSummary: String {
+        var parts: [String] = []
+        if let c = container { parts.append(c.uppercased()) }
+        if let v = videoCodec {
+            parts.append(videoProfile.map { "\(v.uppercased()) \($0)" } ?? v.uppercased())
+        }
+        if let a = audioCodec { parts.append(a.uppercased()) }
+        if let r = resolution { parts.append(r) }
+        if isHDR { parts.append("HDR") }
+        return parts.joined(separator: " · ")
+    }
 }
 
 /// Response of GET /api/stream/info/{fileID}?caps=…

@@ -137,7 +137,14 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
         } else if let stream = info?.stream {
-            PlaybackDecisionBadge(info: stream, engine: state.engine, tracks: info?.audioTracks ?? [])
+            VStack(alignment: .leading, spacing: 10) {
+                if let summary = playable?.file.mediaSummary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+                PlaybackDecisionBadge(info: stream, engine: state.engine, tracks: info?.audioTracks ?? [])
+            }
         }
     }
 
