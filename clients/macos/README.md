@@ -22,6 +22,15 @@ is right. Requires macOS 14 and Xcode 15+.
 
 To work in Xcode: `open Package.swift`.
 
+> **Why there's an `AppDelegate` that only sets the activation policy.** A
+> SwiftPM executable is not a `.app` bundle, so macOS launches it with the
+> *accessory* activation policy: the window draws, but the process never
+> becomes frontmost, never gets a key window, and silently discards every
+> keystroke. It presents as "the login field won't accept typing".
+> `AppDelegate` promotes the process to `.regular` and activates it. Once the
+> app is properly bundled (Milestone 6) those calls become no-ops, so the
+> terminal dev loop and the shipped app behave identically.
+
 ## Milestone status
 
 | # | Scope | Status |
