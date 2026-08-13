@@ -34,6 +34,7 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
 
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
     private var pendingSeek: Double = 0
 
     public override init() {
@@ -42,11 +43,18 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
             forInterval: CMTime(seconds: 1, preferredTimescale: 1),
             queue: .main
         ) { [weak self] time in
-            guard let self else { return }
-            let position = time.seconds
-            let total = self.duration
-            guard position.isFinite, total.isFinite, total > 0 else { return }
-            self.onProgress?(position, total)
+            // The closure is @Sendable, so it is NOT MainActor-isolated in the
+            // type system even though `queue: .main` guarantees it runs there.
+            // assumeIsolated states the fact we already established, rather
+            // than hopping through a Task — which would make every progress
+            // tick async and let ticks reorder against seeks.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let position = time.seconds
+                let total = self.duration
+                guard position.isFinite, total.isFinite, total > 0 else { return }
+                self.onProgress?(position, total)
+            }
         }
     }
 
@@ -105,15 +113,21 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
             }
         }
 
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(didPlayToEnd),
-            name: .AVPlayerItemDidPlayToEndTime, object: item
-        )
+        // Block-based rather than an @objc selector, and pinned to .main:
+        // AVPlayerItemDidPlayToEndTime is posted on an arbitrary queue, so a
+        // selector on this @MainActor class could set `state` — and therefore
+        // fire onStateChange, which dismisses the player — off the main thread.
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.state = .ended }
+        }
 
         player.replaceCurrentItem(with: item)
     }
-
-    @objc private func didPlayToEnd() { state = .ended }
 
     public func play() {
         player.play()
@@ -143,7 +157,10 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
         }
         statusObservation?.invalidate()
         statusObservation = nil
-        NotificationCenter.default.removeObserver(self)
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
+        }
         player.replaceCurrentItem(with: nil)
         state = .idle
     }
