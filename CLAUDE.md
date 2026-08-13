@@ -174,15 +174,29 @@ Invariants to preserve when touching this area:
 - **Nothing is direct-playable by default — a client reaches these paths
   only by NAMING the capability.** The SPA emits exactly
   `mp4_container`/`webm_container` and no native-only codec, so browsers
-  are structurally unable to be handed an MKV. If you ever add a probe to
-  `streaming.ts`, re-read `TestBrowserCapsStringsCarryNoNativeOnlyCapabilities`
-  first — that absence IS the safety model.
-- **"Direct-play-only" sets are disjoint from every copy path** by
-  construction: `directPlayOnlyVideoCodecs` forces `remuxVideoOK=false`,
-  and `isDirectPlayOnlyAudio` codecs are denied by `RemuxAudioCopySafe` /
-  `TranscodeAudioCopySafe`. Two tests pin the disjointness. Adding a codec
-  to `knownAudioCodecs` without deciding which side it falls on is the
-  bug these guard.
+  are structurally unable to be handed an MKV. That absence IS the safety
+  model, and it is enforced mechanically:
+  `TestSPAProbeEmitsNoNativeOnlyCapabilities` PARSES `streaming.ts` and
+  fails if a probe for a native-only key is ever added there.
+  `TestBrowserDecisionGolden` pins the full decision (every field + reason
+  code) for browsers across fMP4 on/off and the nil-caps fallback — a
+  changed line in that golden file is a changed user experience, so read
+  the diff rather than regenerating reflexively.
+- **"Direct-play-only" sets never reach a copy path *by decision*:**
+  `directPlayOnlyVideoCodecs` forces `remuxVideoOK=false`, and
+  `isDirectPlayOnlyAudio` codecs are denied by `RemuxAudioCopySafe` /
+  `TranscodeAudioCopySafe`. Adding a codec to `knownVideoCodecs` /
+  `knownAudioCodecs` without deciding which side it falls on is the bug
+  `TestNativeOnlyCodecSetsDoNotDrift` guards — an unclassified video codec
+  keeps `remuxVideoOK=true` and reaches `-c:v copy`.
+  Note the asymmetry in ENFORCEMENT, which is weaker than the decision:
+  audio is clamped server-side at session mint (`NormalizeSessionAudio`
+  re-derives the codec from the library's own probe data), but video is
+  not — `SessionOpts.Remux` comes straight from the request body, so a
+  client that POSTs `remux:true` for an MPEG-2 file still reaches the copy
+  path. Pre-existing (VP9/AV1 had the same hole) and self-harm only, but
+  don't read the decision-engine invariant as a server-side guarantee.
+  A video-side clamp is the open follow-up.
 - **`hlsCaps` means "what THIS delivery path can carry", never "what the
   client can decode"** — that is why the hls.js restriction now has a
   native-client counterpart (`hlsDeliverableAudio`). Without it,

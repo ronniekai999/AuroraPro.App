@@ -38,21 +38,28 @@ decision, never an error.
 | Key | Reaches |
 |---|---|
 | `mp4_container` | `.mp4`, `.m4v`, `.mov` |
-| `webm_container` | `.webm` muxed as WebM proper |
-| `mkv_container` | `.mkv` — **and most `.webm`**, see the note below |
+| `mkv_container` | `.mkv` **and `.webm`** — see the note below |
 | `avi_container` | `.avi` |
-| `ts_container` | `.ts`, `.m2ts`, `.mts` |
+| `ts_container` | `.ts`, `.m2ts` |
+| `webm_container` | nothing, in practice — see the note below |
 
 A container you do not name is never direct-played. This is the whole safety
 model: Aurora's SPA emits only `mp4_container` and `webm_container`, so no
 browser can be handed a container it cannot demux.
 
-> **`.webm` files land under `mkv_container`.** FFprobe reports `matroska,webm`
-> for both Matroska and WebM, and the scanner keeps the first element
-> (`internal/library/ffprobe.go`), so a `.webm` file is stored with container
-> `mkv`. A native client claiming both keys is unaffected. A browser-like
-> client claiming only `webm_container` never direct-plays its own WebM files —
-> a pre-existing wart, not something this contract introduces.
+> **`.webm` files land under `mkv_container`, and `webm_container` reaches
+> nothing.** FFprobe reports `matroska,webm` for both Matroska and WebM, and
+> the scanner keeps the first element (`internal/library/ffprobe.go`), so
+> **every** `.webm` file is stored with container `mkv`. No scanned file ever
+> has container `webm`, which makes `webm_container` inert in practice — it is
+> retained because it is a legal `NormalizeContainer` output that non-scanner
+> callers may pass, and dropping it would change their behavior silently.
+>
+> Claim both keys. Claiming only `webm_container` direct-plays nothing at all;
+> claiming `mkv_container` is what gets you your WebM files. This is a
+> pre-existing wart in how containers are recorded, not something this contract
+> introduces, and `TestContainerCapKeysAreReachableFromNormalizeContainer`
+> fails if it is ever fixed without updating this document.
 
 ### Video codecs
 
@@ -79,13 +86,17 @@ probed track codecs literally.
 
 ### Delivery
 
-Send `hls_native` if your player consumes HLS (libVLC, mpv, and AVPlayer all
-do). This matters for the *fallback* path: when a file cannot be direct-played
-the server still has to deliver it, and `hls_native` says you can take an HLS
-master playlist.
+**Do not send `hls_js`.** This is the load-bearing half. `hls_js` tells the
+server the client is a browser driving hls.js, which restricts HLS audio to
+what that demuxer can extract (AAC/MP3/AC-3, plus E-AC-3 in fMP4). Its
+*absence* is what selects the native-client audio projection — so sending it
+by mistake silently narrows what you get on every fallback path.
 
-Do **not** send `hls_js` — it is a browser flag that restricts the server to
-what hls.js's demuxer can extract.
+Send `hls_native` to describe your player accurately: it consumes HLS (libVLC,
+mpv, and AVPlayer all do). Be aware that today `ClientCaps.HLSNative` is
+recorded but not read by the decision engine — `DecidePlayback` branches on
+`HLSJS` only. Send it anyway (it is truthful, it costs nothing, and the field
+exists to be used), but do not expect it to change any decision on its own.
 
 ### A complete native caps string
 
@@ -115,9 +126,30 @@ Even with everything claimed, three cases do not direct-play:
   *other* reason, its DTS track is re-encoded — and if a copyable AAC track
   sits beside it, that track is selected instead.
 
+  > **This can change the spoken language, not just the codec.** Track
+  > selection has no language awareness: given a DTS Japanese default track
+  > and an AAC English track, the HLS path picks the AAC one, so the user
+  > hears the English dub. Browsers have always behaved this way, so it is not
+  > new — but a native client is the first client that could have avoided it,
+  > and it only happens on the fallback path. If your player exposes a track
+  > picker, honor `audio_track_index` from the decision but let the user
+  > override it.
+
 These are properties of the HLS delivery path, not of your player. Direct play
 is unaffected: it serves the original file, so every track and every profile
 arrives untouched.
+
+### Codecs you can claim that rarely fire
+
+`mpeg2video` and `vc1` are claimable, but the containers they usually live in
+are not yet mapped: `.mpg`/`.mpeg` normalize to `mpeg` and `.wmv` to `asf`,
+and neither has a capability key, so those files fall to a full transcode with
+no way to opt out. MPEG-2 in `.ts` (DVR recordings) does direct-play. VC-1 is
+narrower still — FFprobe reports `wmv3`, not `vc1`, for Simple/Main profile,
+and `wmv3` is not a recognized key.
+
+Claim them anyway; they cost nothing and the gap is a container-mapping
+follow-up, not a contract change.
 
 ## Server-side notes
 

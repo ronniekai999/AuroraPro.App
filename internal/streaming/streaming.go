@@ -1152,7 +1152,11 @@ func ServeFile(w http.ResponseWriter, r *http.Request, filePath string, allowedR
 		contentType = "video/quicktime"
 	case ".avi":
 		contentType = "video/x-msvideo"
-	case ".ts", ".m2ts", ".mts":
+	case ".ts", ".m2ts":
+		// .mts is deliberately absent: internal/library/parser.go's
+		// videoExtensions does not ingest it, so no .mts file can reach a
+		// playback decision and a case here would be unreachable code that
+		// reads as support. Add it there first if that changes.
 		contentType = "video/mp2t"
 	}
 
