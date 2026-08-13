@@ -199,13 +199,24 @@ struct PlayerView: View {
             return
         }
 
-        var headers: [String: String] = ["User-Agent": "Aurora-macOS"]
-        if let cookie = await state.client.cookieHeader() {
-            headers["Cookie"] = cookie
+        // Authenticate with a cast-scoped token in the URL, not a cookie.
+        // VLCKit's cookie jar does not work on macOS (its header says so
+        // outright), so a token is the only way to authenticate a player that
+        // brings its own HTTP stack. Same mechanism AirPlay receivers use.
+        let url: URL
+        do {
+            url = try await state.client.directCastURL(fileID: target.fileID, type: target.fileType)
+        } catch {
+            playbackState = .failed("Could not authorize playback: \(error.localizedDescription)")
+            return
         }
 
-        let url = state.client.directPlayURL(fileID: target.fileID, type: target.fileType)
-        engine.load(PlaybackRequest(url: url, headers: headers, startAt: 0, title: target.title))
+        engine.load(PlaybackRequest(
+            url: url,
+            headers: ["User-Agent": "Aurora-macOS"],
+            startAt: 0,
+            title: target.title
+        ))
         self.engine = engine
     }
 

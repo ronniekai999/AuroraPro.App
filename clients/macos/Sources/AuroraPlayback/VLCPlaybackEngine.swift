@@ -57,11 +57,11 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
         // here does not compile.
         let media = VLCMedia(url: request.url)
 
-        // libVLC has its own HTTP stack and never sees URLSession's cookie
-        // jar, so auth must ride explicitly or every request 401s.
-        if let cookie = request.headers["Cookie"] {
-            media.addOption(":http-cookies=\(cookie)")
-        }
+        // No cookie handling here on purpose. libVLC has its own HTTP stack
+        // and never sees URLSession's jar, and VLCKit's own cookie API is
+        // documented as iOS/tvOS only — "will never succeed on macOS". The
+        // URL therefore carries a cast-scoped token instead; see
+        // AuroraClient.directCastURL.
         if let agent = request.headers["User-Agent"] {
             media.addOption(":http-user-agent=\(agent)")
         }

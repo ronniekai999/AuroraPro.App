@@ -195,6 +195,30 @@ public actor AuroraClient {
             .appending(queryItems: [URLQueryItem(name: "type", value: type)])
     }
 
+    /// Mints a cast-scoped token bound to ONE file and returns the ready-made
+    /// direct URL the server builds for it.
+    ///
+    /// This exists because cookie auth cannot reach libVLC on macOS. VLCKit's
+    /// own header is explicit — its cookie jar "will never succeed on macOS,
+    /// but requires iOS or tvOS" — so a player with its own HTTP stack has no
+    /// way to carry the session cookie, and every request 401s.
+    ///
+    /// The server already solved this for AirPlay receivers, which have the
+    /// identical problem: POST /api/stream/{id}/cast-token mints a token
+    /// scoped to a single file, and /api/stream/direct/{id}?token=… serves it
+    /// with no cookie involved. Using it here is reusing the designed path,
+    /// not working around one.
+    public func directCastURL(fileID: Int64, type: String = "media") async throws -> URL {
+        struct CastToken: Decodable { let token: String; let url: String }
+        let response: CastToken = try await post(
+            "/api/stream/\(fileID)/cast-token?type=\(type)", json: [String: String]()
+        )
+        guard let url = URL(string: response.url, relativeTo: baseURL)?.absoluteURL else {
+            throw APIError(status: -2, message: "Server returned an unusable cast URL")
+        }
+        return url
+    }
+
     /// Cookie header value for handing to a player with its own HTTP stack.
     public func cookieHeader() -> String? {
         guard let jar = session.configuration.httpCookieStorage,
