@@ -95,7 +95,7 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
     }
 
     public func setVolume(_ volume: Float) {
-        player.audio.volume = Int32(max(0, min(1, volume)) * 100)
+        player.audio?.volume = Int32(max(0, min(1, volume)) * 100)
     }
 
     public func stop() {
@@ -151,8 +151,33 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
     }
 
     // MARK: - VLCMediaPlayerDelegate
+    //
+    // VLCMediaPlayerDelegate is a nonisolated Objective-C protocol, so a
+    // @MainActor method cannot satisfy it (a warning today, an error in Swift
+    // 6). The two candidate fixes are not equivalent:
+    //
+    //   @preconcurrency on the conformance ASSERTS these arrive on the main
+    //   thread and traps at runtime if they do not. VLCKit's headers document
+    //   what each callback carries but never which thread posts it, so that
+    //   would be asserting something unverified.
+    //
+    //   nonisolated + an explicit hop is correct whichever thread libVLC uses,
+    //   at the cost of one enqueue per event.
+    //
+    // The hop is taken. Note both handlers re-read live state (player.state,
+    // currentTime) instead of capturing it at notification time, so even if
+    // two hops land out of order the result is still the current truth rather
+    // than a stale value applied late.
 
-    public func mediaPlayerStateChanged(_ aNotification: Notification) {
+    public nonisolated func mediaPlayerStateChanged(_ aNotification: Notification) {
+        Task { @MainActor in self.handleStateChanged() }
+    }
+
+    public nonisolated func mediaPlayerTimeChanged(_ aNotification: Notification) {
+        Task { @MainActor in self.handleTimeChanged() }
+    }
+
+    private func handleStateChanged() {
         switch player.state {
         case .playing:
             state = .playing
@@ -176,7 +201,7 @@ public final class VLCPlaybackEngine: NSObject, PlaybackEngine, VLCMediaPlayerDe
         }
     }
 
-    public func mediaPlayerTimeChanged(_ aNotification: Notification) {
+    private func handleTimeChanged() {
         let position = currentTime
         let total = duration
         if total > 0 { knownDuration = total }
