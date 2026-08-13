@@ -100,10 +100,6 @@ public actor AuroraClient {
 
     // MARK: - Content
 
-    public func homeRails() async throws -> [MediaRail] {
-        try await decodeList("/api/media/recent")
-    }
-
     public func continueWatching() async throws -> [MediaItem] {
         try await decodeList("/api/progress/continue")
     }
@@ -143,7 +139,11 @@ public actor AuroraClient {
     /// straight to a player that uses the shared cookie storage. VLCKit does
     /// not share `HTTPCookieStorage`, which is why `PlaybackRequest` also
     /// carries explicit headers.
-    public func directPlayURL(fileID: Int64, type: String = "media") -> URL {
+    /// `nonisolated` because it only reads `baseURL`, a `let`. SwiftUI view
+    /// bodies are synchronous and cannot `await`, so a URL builder that
+    /// required actor hopping would be unusable from exactly the place it is
+    /// needed.
+    public nonisolated func directPlayURL(fileID: Int64, type: String = "media") -> URL {
         baseURL.appending(path: "/api/stream/\(fileID)/direct")
             .appending(queryItems: [URLQueryItem(name: "type", value: type)])
     }
@@ -168,7 +168,9 @@ public actor AuroraClient {
     }
 
     /// Absolute URL for an artwork path returned by the API.
-    public func imageURL(_ path: String?) -> URL? {
+    /// `nonisolated` for the same reason as `directPlayURL` — every poster in
+    /// every rail calls this from a synchronous view body.
+    public nonisolated func imageURL(_ path: String?) -> URL? {
         guard let path, !path.isEmpty else { return nil }
         if path.hasPrefix("http://") || path.hasPrefix("https://") { return URL(string: path) }
         return baseURL.appending(path: path.hasPrefix("/") ? path : "/\(path)")

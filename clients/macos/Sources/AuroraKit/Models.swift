@@ -124,7 +124,11 @@ public struct MediaRail: Codable, Sendable, Identifiable {
 }
 
 /// Envelope used by the paginated list endpoints.
-public struct PagedResponse<T: Codable & Sendable>: Codable, Sendable {
+///
+/// Decodable, NOT Codable: the client only ever reads these. Requiring
+/// Encodable here forced the same requirement onto every caller's generic
+/// parameter, which is what broke `decodeList<T: Decodable>`.
+public struct PagedResponse<T: Decodable & Sendable>: Decodable, Sendable {
     public let items: [T]?
     public let total: Int?
 

@@ -1,4 +1,6 @@
 import Foundation
+// Keychain (SecItem*) lives in Security; Foundation does not re-export it.
+import Security
 
 /// Persists Aurora's auth cookies across launches.
 ///

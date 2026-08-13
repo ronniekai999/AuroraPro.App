@@ -1,4 +1,6 @@
 import AVFoundation
+// AVPlayerView is AVKit, not AVFoundation.
+import AVKit
 import AppKit
 import AuroraKit
 
@@ -48,14 +50,9 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
         }
     }
 
-    deinit {
-        // AVPlayer outlives its observer otherwise, and the periodic block
-        // retains `self` until removed.
-        if let timeObserver {
-            player.removeTimeObserver(timeObserver)
-        }
-        statusObservation?.invalidate()
-    }
+    // No deinit: this class is @MainActor, and a deinit is nonisolated, so
+    // touching `player` there is a concurrency error under Swift 5.9+.
+    // Observer teardown lives in stop(), which PlayerView calls on disappear.
 
     public var currentTime: Double {
         let t = player.currentTime().seconds
@@ -139,6 +136,14 @@ public final class AVPlaybackEngine: NSObject, PlaybackEngine {
 
     public func stop() {
         player.pause()
+        if let timeObserver {
+            // The periodic block retains self until removed.
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+        statusObservation?.invalidate()
+        statusObservation = nil
+        NotificationCenter.default.removeObserver(self)
         player.replaceCurrentItem(with: nil)
         state = .idle
     }
