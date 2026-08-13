@@ -107,6 +107,64 @@ public struct StreamInfo: Codable, Sendable {
     public let hdrTonemap: Bool?
 
     public var isDirectPlay: Bool { decision == "direct_play" }
+
+    /// Human-readable summary for the UI.
+    public var summary: String {
+        switch decision {
+        case "direct_play": return "Direct Play"
+        case "direct_stream": return "Remuxing (no re-encode)"
+        default: return "Transcoding"
+        }
+    }
+}
+
+/// GET /api/stream/info/{id} does NOT return a bare StreamInfo — it returns an
+/// envelope, and the decision lives under "stream":
+///
+///     {"stream": {...}, "subtitles": [...], "audio_tracks": [...], "markers": [...]}
+///
+/// Decoding the top level as StreamInfo throws (no "decision" key), which is
+/// exactly what happened: the throw was swallowed by a `try?`, leaving the
+/// Play button silently inert with nothing on screen to explain it.
+public struct StreamInfoResponse: Decodable, Sendable {
+    public let stream: StreamInfo
+    public let subtitles: [SubtitleTrack]?
+    public let audioTracks: [AudioTrack]?
+}
+
+public struct SubtitleTrack: Decodable, Sendable, Identifiable {
+    public let index: Int?
+    public let language: String?
+    public let title: String?
+    public let codec: String?
+    public let external: Bool?
+    public let bitmap: Bool?
+    public var id: Int { index ?? -1 }
+
+    public var displayName: String {
+        if let title, !title.isEmpty { return title }
+        if let language, !language.isEmpty { return language.uppercased() }
+        return "Track \(index ?? 0)"
+    }
+}
+
+public struct AudioTrack: Decodable, Sendable, Identifiable {
+    public let index: Int?
+    public let codec: String?
+    public let language: String?
+    public let channels: Int?
+    public let isDefault: Bool?
+    public var id: Int { index ?? -1 }
+
+    public var displayName: String {
+        var parts: [String] = []
+        if let language, !language.isEmpty { parts.append(language.uppercased()) }
+        if let codec, !codec.isEmpty { parts.append(codec.uppercased()) }
+        if let channels {
+            parts.append(channels > 2 ? "\(channels).1" : "Stereo")
+        }
+        return parts.isEmpty ? "Track \(index ?? 0)" : parts.joined(separator: " · ")
+    }
 }
 
 public struct WatchProgress: Codable, Sendable {

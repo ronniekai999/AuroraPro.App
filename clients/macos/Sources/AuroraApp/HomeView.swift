@@ -36,16 +36,28 @@ struct HomeView: View {
             .navigationTitle("Aurora")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Picker("Player", selection: $state.engine) {
+                    // A bare Picker rendered as an empty pill here — the label
+                    // is hidden in a toolbar and the selection text got
+                    // clipped. An explicit Menu label always shows which
+                    // engine is active, which matters: the engine determines
+                    // what can direct-play.
+                    Menu {
                         ForEach(EngineKind.allCases, id: \.self) { kind in
-                            Text(kind.displayName + (kind.isAvailable ? "" : " (not installed)"))
-                                .tag(kind)
+                            Button {
+                                state.engine = kind
+                            } label: {
+                                HStack {
+                                    Text(kind.displayName)
+                                    if kind == state.engine { Image(systemName: "checkmark") }
+                                    if !kind.isAvailable { Text("(not installed)") }
+                                }
+                            }
+                            .disabled(!kind.isAvailable)
                         }
+                    } label: {
+                        Label(state.engine == .libVLC ? "VLC" : "Apple", systemImage: "play.rectangle")
                     }
-                    .pickerStyle(.menu)
-                    // Selecting an unavailable engine would over-claim
-                    // capabilities to the server; see ClientCapabilities.
-                    .help("The player engine decides which files can be played without transcoding.")
+                    .help("The player engine decides which files can play without transcoding.")
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
@@ -105,7 +117,7 @@ struct PosterCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            AsyncImage(url: state.client.imageURL(item.posterPath)) { phase in
+            AsyncImage(url: state.client.imageURL(item.posterPath, size: .w342)) { phase in
                 switch phase {
                 case .success(let image):
                     image.resizable().aspectRatio(contentMode: .fill)
@@ -125,10 +137,11 @@ struct PosterCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay {
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(.white.opacity(hovering ? 0.6 : 0), lineWidth: 2)
+                    .stroke(.white.opacity(hovering ? 0.7 : 0.08), lineWidth: hovering ? 2 : 1)
             }
-            .scaleEffect(hovering ? 1.04 : 1)
-            .animation(.easeOut(duration: 0.15), value: hovering)
+            .shadow(color: .black.opacity(hovering ? 0.5 : 0.25), radius: hovering ? 14 : 6, y: hovering ? 8 : 3)
+            .scaleEffect(hovering ? 1.05 : 1)
+            .animation(.spring(response: 0.28, dampingFraction: 0.7), value: hovering)
 
             Text(item.title)
                 .font(.callout)

@@ -64,6 +64,53 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(item.type, .movie, "an unknown type should degrade, not blank the library")
     }
 
+    /// The real envelope, copied from the handler's own `writeJSON` call
+    /// (internal/api/phase2_handlers.go) rather than from an assumption about
+    /// what it returns.
+    ///
+    /// This is the test that was missing. The original fixture decoded a BARE
+    /// StreamInfo, which passed happily while the app was broken, because the
+    /// server actually nests the decision under "stream". A fixture written
+    /// from the endpoint would have caught it before it ever ran.
+    func testStreamInfoEnvelopeMatchesTheServerShape() throws {
+        let json = #"""
+        {"stream":{"file_id":42,"direct_play":false,"direct_stream":true,
+                   "decision":"direct_stream","stream_url":"/api/stream/media/42",
+                   "container":"mkv","video_codec":"h264","audio_codec":"ac3",
+                   "resolution":"1080p","duration_ms":7980000,
+                   "transcode_reason":"container \"mkv\" not natively supported",
+                   "reason_code":"container","audio_track_index":0,"remux":true,
+                   "audio_channels":6,"audio_codec_out":"ac3"},
+         "subtitles":[{"index":2,"language":"eng","codec":"subrip","title":"English"}],
+         "audio_tracks":[{"index":0,"codec":"ac3","language":"eng","channels":6,"is_default":true},
+                         {"index":1,"codec":"aac","language":"jpn","channels":2}],
+         "markers":[]}
+        """#
+        let response = try decode(json, as: StreamInfoResponse.self)
+        XCTAssertEqual(response.stream.decision, "direct_stream")
+        XCTAssertFalse(response.stream.isDirectPlay)
+        XCTAssertEqual(response.stream.summary, "Remuxing (no re-encode)")
+        XCTAssertEqual(response.stream.remux, true)
+        XCTAssertEqual(response.audioTracks?.count, 2)
+        XCTAssertEqual(response.audioTracks?.first?.displayName, "ENG · AC3 · 6.1")
+        XCTAssertEqual(response.subtitles?.first?.displayName, "English")
+    }
+
+    /// A direct-play envelope, the case the whole Tier 1 change exists for.
+    func testStreamInfoEnvelopeDirectPlay() throws {
+        let json = #"""
+        {"stream":{"file_id":7,"direct_play":true,"direct_stream":false,
+                   "decision":"direct_play","stream_url":"/api/stream/7/direct?type=media",
+                   "container":"mkv","video_codec":"hevc","audio_codec":"truehd",
+                   "audio_track_index":0,"audio_passthrough":true},
+         "subtitles":[],"audio_tracks":[],"markers":[]}
+        """#
+        let response = try decode(json, as: StreamInfoResponse.self)
+        XCTAssertTrue(response.stream.isDirectPlay)
+        XCTAssertEqual(response.stream.summary, "Direct Play")
+        XCTAssertNil(response.stream.transcodeReason)
+    }
+
     func testStreamInfoDirectPlay() throws {
         let info = try decode(#"{"decision":"direct_play","audio_track_index":0}"#, as: StreamInfo.self)
         XCTAssertTrue(info.isDirectPlay)

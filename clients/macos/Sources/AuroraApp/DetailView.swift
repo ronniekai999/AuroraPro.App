@@ -9,32 +9,34 @@ struct DetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var files: [MediaFile] = []
-    @State private var streamInfo: StreamInfo?
+    @State private var info: StreamInfoResponse?
     @State private var error: String?
+    @State private var loading = true
     @State private var playing: PlaybackTarget?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
-                if let overview = item.overview, !overview.isEmpty {
-                    Text(overview).font(.body)
+            VStack(alignment: .leading, spacing: 0) {
+                hero
+                VStack(alignment: .leading, spacing: 18) {
+                    if let overview = item.overview, !overview.isEmpty {
+                        Text(overview)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    playbackSection
                 }
-                if let info = streamInfo {
-                    PlaybackDecisionBadge(info: info, engine: state.engine)
-                }
-                if let error {
-                    Text(error).font(.callout).foregroundStyle(.red)
-                }
+                .padding(28)
             }
-            .padding(28)
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close") { dismiss() }
             }
         }
-        .task { await loadFiles() }
+        .task { await load() }
         .sheet(item: $playing) { target in
             PlayerView(target: target)
                 .environment(state)
@@ -42,59 +44,115 @@ struct DetailView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 20) {
-            AsyncImage(url: state.client.imageURL(item.posterPath)) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Rectangle().fill(.quaternary)
+    // MARK: - Hero
+
+    private var hero: some View {
+        ZStack(alignment: .bottomLeading) {
+            // Backdrop, dimmed, with a scrim so text stays readable.
+            AsyncImage(url: state.client.backdropURL(item.backdropPath)) { phase in
+                if case .success(let image) = phase {
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    LinearGradient(
+                        colors: [Color.accentColor.opacity(0.35), .black.opacity(0.6)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                }
             }
-            .frame(width: 180, height: 270)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(item.title).font(.largeTitle.weight(.bold))
-
-                HStack(spacing: 10) {
-                    if let year = item.year { Text(String(year)) }
-                    if let runtime = item.runtimeMinutes { Text("\(runtime) min") }
-                    if let rated = item.contentRating { Text(rated) }
-                    if item.has4k == true { Tag("4K") }
-                    if item.hasHdr == true { Tag("HDR") }
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-                if let genres = item.genres, !genres.isEmpty {
-                    Text(genres.joined(separator: " · "))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                Button {
-                    startPlayback()
-                } label: {
-                    Label("Play", systemImage: "play.fill")
-                        .frame(width: 120)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(files.isEmpty)
+            .frame(height: 300)
+            .clipped()
+            .overlay {
+                LinearGradient(
+                    colors: [.black.opacity(0.15), .black.opacity(0.85)],
+                    startPoint: .top, endPoint: .bottom
+                )
             }
-            Spacer()
+
+            HStack(alignment: .bottom, spacing: 20) {
+                AsyncImage(url: state.client.imageURL(item.posterPath, size: .w342)) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Rectangle().fill(.ultraThinMaterial)
+                            .overlay { Image(systemName: "film").font(.largeTitle).foregroundStyle(.tertiary) }
+                    }
+                }
+                .frame(width: 150, height: 225)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .shadow(color: .black.opacity(0.5), radius: 14, y: 6)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(item.title)
+                        .font(.system(size: 34, weight: .bold))
+                        .foregroundStyle(.white)
+                        .shadow(radius: 6)
+                        .lineLimit(2)
+
+                    HStack(spacing: 8) {
+                        if let year = item.year { Pill(String(year)) }
+                        if let runtime = item.runtimeMinutes { Pill("\(runtime) min") }
+                        if let rated = item.contentRating, !rated.isEmpty { Pill(rated) }
+                        if item.has4k == true { Pill("4K", tinted: true) }
+                        if item.hasHdr == true { Pill("HDR", tinted: true) }
+                    }
+
+                    if let genres = item.genres, !genres.isEmpty {
+                        Text(genres.prefix(3).joined(separator: " · "))
+                            .font(.callout)
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    Button(action: play) {
+                        Label("Play", systemImage: "play.fill")
+                            .frame(width: 110)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!canPlay)
+                    .padding(.top, 4)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(24)
         }
     }
 
-    private func loadFiles() async {
+    // MARK: - Playback state
+
+    @ViewBuilder
+    private var playbackSection: some View {
+        if loading {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Checking playback…").font(.callout).foregroundStyle(.secondary)
+            }
+        } else if let error {
+            // Errors are SHOWN, never swallowed. The previous version used
+            // `try?` here, so a failed stream-info left the Play button inert
+            // with nothing on screen to explain why.
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+        } else if let stream = info?.stream {
+            PlaybackDecisionBadge(info: stream, engine: state.engine, tracks: info?.audioTracks ?? [])
+        }
+    }
+
+    private var canPlay: Bool { info?.stream != nil }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
         do {
             files = try await state.client.files(forMedia: item.id)
-            if let first = files.first {
-                streamInfo = try? await state.client.streamInfo(fileID: first.id)
-            } else {
+            guard let first = files.first else {
                 error = "No playable file is attached to this title."
+                return
             }
+            info = try await state.client.streamInfo(fileID: first.id)
         } catch let e as APIError {
             error = e.message
         } catch {
@@ -102,25 +160,28 @@ struct DetailView: View {
         }
     }
 
-    private func startPlayback() {
-        guard let file = files.first, let info = streamInfo else { return }
-        playing = PlaybackTarget(
-            mediaID: item.id,
-            fileID: file.id,
-            title: item.title,
-            info: info
-        )
+    private func play() {
+        guard let file = files.first, let stream = info?.stream else { return }
+        playing = PlaybackTarget(mediaID: item.id, fileID: file.id, title: item.title, info: stream)
     }
 }
 
-struct Tag: View {
+struct Pill: View {
     let text: String
-    init(_ text: String) { self.text = text }
+    var tinted = false
+    init(_ text: String, tinted: Bool = false) {
+        self.text = text
+        self.tinted = tinted
+    }
     var body: some View {
         Text(text)
-            .font(.caption.weight(.bold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(.tertiary, in: RoundedRectangle(cornerRadius: 4))
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(
+                tinted ? AnyShapeStyle(Color.accentColor.opacity(0.9)) : AnyShapeStyle(.ultraThinMaterial),
+                in: Capsule()
+            )
+            .foregroundStyle(.white)
     }
 }
 
@@ -133,31 +194,35 @@ struct Tag: View {
 struct PlaybackDecisionBadge: View {
     let info: StreamInfo
     let engine: EngineKind
+    var tracks: [AudioTrack] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: info.isDirectPlay ? "bolt.fill" : "arrow.triangle.2.circlepath")
                     .foregroundStyle(info.isDirectPlay ? .green : .orange)
-                Text(info.isDirectPlay ? "Direct Play" : label)
-                    .font(.callout.weight(.semibold))
+                Text(info.summary).font(.callout.weight(.semibold))
+                Spacer()
+                Text(engine.displayName).font(.caption).foregroundStyle(.tertiary)
             }
             if let reason = info.transcodeReason, !reason.isEmpty {
-                Text(reason)
+                Text(reason).font(.caption).foregroundStyle(.secondary)
+            }
+            if !info.isDirectPlay, engine == .appleNative {
+                Text(EngineKind.libVLC.isAvailable
+                     ? "The VLC engine can likely play this without transcoding."
+                     : "Adding the VLC engine would let this play without transcoding.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if !info.isDirectPlay, engine == .appleNative, EngineKind.libVLC.isAvailable {
-                Text("The VLC engine may be able to play this without transcoding.")
+            if tracks.count > 1 {
+                Text("\(tracks.count) audio tracks · " + tracks.prefix(3).map(\.displayName).joined(separator: ", "))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
             }
         }
-        .padding(12)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var label: String {
-        info.decision == "direct_stream" ? "Remuxing (no re-encode)" : "Transcoding"
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
     }
 }

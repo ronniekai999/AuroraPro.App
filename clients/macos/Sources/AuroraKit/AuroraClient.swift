@@ -127,7 +127,7 @@ public actor AuroraClient {
     ///
     /// The caps string is the entire input to the server's decision engine —
     /// see docs/native-client-caps.md.
-    public func streamInfo(fileID: Int64, type: String = "media") async throws -> StreamInfo {
+    public func streamInfo(fileID: Int64, type: String = "media") async throws -> StreamInfoResponse {
         let caps = capabilities.capsString
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         return try await get("/api/stream/info/\(fileID)?type=\(type)&caps=\(caps)")
@@ -167,13 +167,36 @@ public actor AuroraClient {
         _ = try await postRaw("/api/progress/\(mediaID)/watched", json: [String: String]())
     }
 
+    /// Artwork sizes the server's image proxy accepts
+    /// (internal/metadata/imageproxy.go's allowlist). Anything else 404s.
+    public enum ImageSize: String, Sendable {
+        case w92, w154, w185, w342, w500, w780, original
+    }
+
     /// Absolute URL for an artwork path returned by the API.
-    /// `nonisolated` for the same reason as `directPlayURL` — every poster in
-    /// every rail calls this from a synchronous view body.
-    public nonisolated func imageURL(_ path: String?) -> URL? {
+    ///
+    /// A `poster_path` is a bare TMDB path like `/abc123.jpg`, NOT a URL on
+    /// this server — it has to go through the proxy at
+    /// `/api/images/{size}/{path}`, exactly as the SPA's `posterURL` does.
+    /// Appending it to the base URL (the first version of this) produced
+    /// `https://host/abc123.jpg`, which 404s — which is why every poster in
+    /// every rail rendered as a grey placeholder.
+    ///
+    /// `nonisolated` for the same reason as `directPlayURL` — every poster
+    /// calls this from a synchronous view body.
+    public nonisolated func imageURL(_ path: String?, size: ImageSize = .w500) -> URL? {
         guard let path, !path.isEmpty else { return nil }
+        // Some endpoints already hand back a fully-qualified URL.
         if path.hasPrefix("http://") || path.hasPrefix("https://") { return URL(string: path) }
-        return baseURL.appending(path: path.hasPrefix("/") ? path : "/\(path)")
+        // Strip leading slashes so the proxy path never doubles up.
+        let cleaned = path.drop(while: { $0 == "/" })
+        guard !cleaned.isEmpty else { return nil }
+        return URL(string: "/api/images/\(size.rawValue)/\(cleaned)", relativeTo: baseURL)?.absoluteURL
+    }
+
+    /// Backdrops are requested at full size, like the SPA's `backdropURL`.
+    public nonisolated func backdropURL(_ path: String?) -> URL? {
+        imageURL(path, size: .original)
     }
 
     // MARK: - Transport
