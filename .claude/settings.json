@@ -12,6 +12,17 @@
             "statusMessage": "Checking adversarial review gate"
           }
         ]
+      },
+      {
+        "matcher": "mcp__github__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/review-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking adversarial review gate"
+          }
+        ]
       }
     ]
   }

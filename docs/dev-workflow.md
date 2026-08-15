@@ -59,6 +59,19 @@ flowchart TD
    final diff again. Any substantive code change after a clean verdict invalidates
    that verdict. If no independent agent is available, mark the gate incomplete;
    never substitute or relabel a self-review.
+
+   **Record the verdict — this gate is enforced at PUSH time, not merge time.**
+   `scripts/review-gate.sh` runs as a PreToolUse hook and blocks the push until
+   a record exists for the commit being pushed:
+
+   ```bash
+   bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
+   ```
+
+   `fix-first` records a blocking verdict; `bypass` records that no review
+   happened and obliges you to report the gate as incomplete. Because the hook
+   runs *before* the command, a chained `git commit … && git push` is refused —
+   the sha it could see is the pre-commit one. Push as a separate call.
 6. **Merge gate** —
    - **Clean** (no unresolved high/critical; lows/nits noted) → squash-merge to
      `main` and delete the merged branch.

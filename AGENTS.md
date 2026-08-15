@@ -25,3 +25,20 @@ merge. A self-review by the implementing agent does **not** satisfy this gate.
 - In the final handoff, report the independent review verdict separately from
   tests/builds. If an independent agent is unavailable, say that the gate is
   incomplete rather than presenting a self-review as equivalent.
+
+## Recording the verdict
+
+The gate is enforced mechanically, at **push** time — not at merge time. A
+PreToolUse hook (`scripts/review-gate.sh`, wired in `.claude/settings.json`)
+blocks the push until a record exists for the commit being pushed:
+
+```bash
+bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
+```
+
+Verdicts: `clean` / `lows-only` open the gate, `fix-first` keeps it closed,
+`bypass` opens it while recording that NO review happened — use that only when
+no independent reviewer is available, and say so in the handoff. Records are
+keyed to the exact commit, so amending or adding one invalidates them. See
+CLAUDE.md's "Adversarial review gate" section for the full procedure and for
+what the hook does and does not enforce.
