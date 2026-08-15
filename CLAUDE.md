@@ -115,6 +115,15 @@ softening it above:
   request`, `enable_pr_auto_merge`, `gh pr merge` and the REST merge endpoint
   are refused; a shape not on that list is not. Merging is a maintainer's
   call — treat the block as a reminder, not a fence.
+- **The PreToolUse command parser is knowably incomplete, and that is the
+  end state, not a to-do.** It recognizes ~25 wrappers with per-wrapper
+  option syntax (`scripts/review-gate-wrapper-spec.sh` pins 155 shapes), and
+  reviewers have still found new ones every round: `systemd-run`, `watch`,
+  and `sudo --chroot` are known to slip today. That layer is advisory by
+  construction — a missed shape costs nothing that `.githooks/pre-push` and
+  the `review-record` CI job do not still see, EXCEPT for `--no-verify` and
+  a merge, which is why those two are the only things it tries to catch.
+  Do not spend rounds closing shapes here; spend them on the CI check.
 - **`review-record` only runs on `pull_request`**, so a direct push to `main`
   gets no CI review check at all. `main` should be protected regardless.
 - Records live in `.claude/review-records/` and are **tracked**, because CI

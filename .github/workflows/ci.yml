@@ -137,6 +137,12 @@ jobs:
       # Guards the suite itself. Twice the suite was green against a gate that
       # was genuinely broken, and "the suite passes" was quoted as evidence
       # both times. This applies known-bad patches and asserts each is caught.
+      # Wrapper shapes, derived from the wrappers' own option syntax rather
+      # than from the implementation. Shipped unreferenced once, which is the
+      # same as deleted — it cannot rot loudly if nothing runs it.
+      - name: Review gate wrapper spec
+        run: bash scripts/review-gate-wrapper-spec.sh
+
       - name: Review gate mutation tests
         run: bash scripts/review-gate-mutation-test.sh
 

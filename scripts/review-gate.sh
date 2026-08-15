@@ -114,34 +114,54 @@ if [ -n "$command_text" ]; then
   # the command word, with commit-message values ignored, since a message is
   # data.
   hit="$(printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
-      function basename(p) { sub(/^.*\//, "", p); return p }
+      function basename(p) { sub(/^\\/, "", p); sub(/^.*\//, "", p); return p }
       function is_wrapper(w) {
-        return (w ~ /^(sudo|doas|env|time|timeout|nohup|command|exec|xargs|builtin|nice|ionice|chrt|flock|setsid|stdbuf|script|bash|sh|zsh|ksh|dash)$/)
+        return (w ~ /^(sudo|doas|su|runuser|env|time|timeout|nohup|command|exec|eval|xargs|builtin|nice|ionice|chrt|taskset|flock|setsid|stdbuf|script|unshare|bash|sh|zsh|ksh|dash)$/)
       }
-      # Wrappers where the value of -c IS the command we still need to read.
-      # For these, no option ending in "c" consumes its argument.
-      function cmd_follows_dash_c(w) { return (w ~ /^(bash|sh|zsh|ksh|dash|script)$/) }
-      # Does `opt` take a SEPARATE value for this wrapper? Long forms spelled
-      # with "=" carry their own value and are never listed here.
+      # Options whose VALUE IS the command we still need to read. Skipping
+      # these as if they took an unrelated value skips the command itself:
+      # adding env -S to the value-taking table did exactly that, and made
+      # `env -S "<merge>"` allowed. The letter is matched at the END of the
+      # token so bundled forms (script -qc) are covered too.
+      function value_is_command(w, opt) {
+        if (w ~ /^(bash|sh|zsh|ksh|dash|script|su|runuser)$/) return (opt ~ /^-[A-Za-z]*c$/ || opt == "--command")
+        if (w == "env")   return (opt ~ /^-[A-Za-z]*S$/ || opt == "--split-string")
+        if (w == "flock") return (opt ~ /^-[A-Za-z]*c$/ || opt == "--command")
+        return 0
+      }
+      # Does `opt` take a SEPARATE value for this wrapper? Short forms are
+      # matched with the letter at the END, because bundling is legal and the
+      # LAST letter is the one that takes the value: `sudo -iu root` is one
+      # token, and anchoring on ^-u$ matched nothing — the peel then stopped
+      # on `root` and treated it as the command. Long forms spelled with "="
+      # carry their own value and are never listed.
+      # NOTE: no value_is_command() guard here. The peel loop consults that
+      # first and breaks, so this function is never reached for those options
+      # — a guard here was unreachable, and an unreachable guard is exactly
+      # the kind of line that reads as protection while pinning nothing.
+      # The tables below must therefore not list a letter that names a
+      # command-carrying option for the same wrapper.
       function takes_value(w, opt) {
-        if (cmd_follows_dash_c(w) && opt ~ /^-[A-Za-z]*c$/) return 0
-        if (w == "sudo")    return (opt ~ /^-(u|g|p|C|U|r|t|T|h|R)$/ || opt ~ /^--(user|group|prompt|close-from|other-user|role|type|chdir|host)$/)
-        if (w == "doas")    return (opt ~ /^-(u|C)$/)
-        if (w == "env")     return (opt ~ /^-(u|C|S)$/ || opt ~ /^--(unset|chdir|split-string)$/)
-        if (w == "timeout") return (opt ~ /^-(s|k)$/ || opt ~ /^--(signal|kill-after)$/)
-        if (w == "nice")    return (opt ~ /^-(n)$/ || opt == "--adjustment")
-        if (w == "ionice")  return (opt ~ /^-(c|n|p|P|u)$/ || opt ~ /^--(class|classdata|pid|pgid|uid)$/)
-        if (w == "chrt")    return (opt ~ /^-(p)$/ || opt == "--pid")
-        if (w == "flock")   return (opt ~ /^-(w|E|c)$/ || opt ~ /^--(wait|timeout|conflict-exit-code|command)$/)
-        if (w == "stdbuf")  return (opt ~ /^-(i|o|e)$/ || opt ~ /^--(input|output|error)$/)
-        if (w == "xargs")   return (opt ~ /^-(I|L|n|P|s|d|E|a)$/)
+        if (w == "sudo")    return (opt ~ /^-[A-Za-z]*(u|g|p|C|U|r|t|T|R|D)$/ || opt ~ /^--(user|group|prompt|close-from|other-user|role|type|chroot|chdir|command-timeout|host)$/)
+        if (w == "doas")    return (opt ~ /^-[A-Za-z]*(u|C)$/)
+        if (w == "su")      return (opt ~ /^-[A-Za-z]*(s|g|G)$/ || opt ~ /^--(shell|group|supp-group)$/)
+        if (w == "runuser") return (opt ~ /^-[A-Za-z]*(u|s|g|G)$/ || opt ~ /^--(user|shell|group|supp-group)$/)
+        if (w == "env")     return (opt ~ /^-[A-Za-z]*(u|C)$/ || opt ~ /^--(unset|chdir)$/)
+        if (w == "timeout") return (opt ~ /^-[A-Za-z]*(s|k)$/ || opt ~ /^--(signal|kill-after)$/)
+        if (w == "nice")    return (opt ~ /^-[A-Za-z]*(n)$/ || opt == "--adjustment")
+        if (w == "ionice")  return (opt ~ /^-[A-Za-z]*(c|n|p|P|u)$/ || opt ~ /^--(class|classdata|pid|pgid|uid)$/)
+        if (w == "chrt")    return (opt ~ /^-[A-Za-z]*(p|T|P)$/ || opt ~ /^--(pid|sched-runtime|sched-period|sched-deadline)$/)
+        if (w == "taskset") return (opt ~ /^-[A-Za-z]*(c|p)$/ || opt ~ /^--(cpu-list|pid)$/)
+        if (w == "flock")   return (opt ~ /^-[A-Za-z]*(w|E)$/ || opt ~ /^--(wait|timeout|conflict-exit-code)$/)
+        if (w == "stdbuf")  return (opt ~ /^-[A-Za-z]*(i|o|e)$/ || opt ~ /^--(input|output|error)$/)
+        if (w == "xargs")   return (opt ~ /^-[A-Za-z]*(I|L|n|P|s|d|E|a)$/ || opt ~ /^--(max-args|max-procs|delimiter|arg-file|replace|max-lines)$/)
         return 0
       }
       # Wrappers whose first NON-option token is their own argument, not the
-      # command. ionice and script are NOT among them: `ionice [-c N] CMD`
-      # takes no positional, and `script -c CMD FILE` puts its file last —
-      # listing them ate the command word outright.
-      function eats_positional(w) { return (w ~ /^(timeout|flock|chrt)$/) }
+      # command. ionice and script take none (`ionice [-c N] CMD`,
+      # `script -c CMD FILE`), and listing them ate the command word.
+      # su/runuser take an optional user; taskset an optional mask.
+      function eats_positional(w) { return (w ~ /^(timeout|flock|chrt|su|runuser|taskset)$/) }
       {
         s = $0
         gsub(/^[ \t({]+/, "", s)
@@ -159,11 +179,26 @@ if [ -n "$command_text" ]; then
         while (n > 0 && is_wrapper(basename(t[1]))) {
           w = basename(t[1])
           j = 2
+          got_cmd = 0
           while (j <= n && substr(t[j], 1, 1) == "-") {
+            if (t[j] == "--") { j++; got_cmd = 1; break }
+            if (value_is_command(w, t[j])) { j++; got_cmd = 1; break }
             if (takes_value(w, t[j])) j++
             j++
           }
-          if (eats_positional(w) && j <= n) j++
+          # Only claim the positional if the command has not already started.
+          # taskset and chrt take their argument EITHER as a positional or
+          # via an option (`taskset 0x1 CMD` vs `taskset -c 0 CMD`), never
+          # both — eating one after the other consumed the command word.
+          if (!got_cmd && eats_positional(w) && !(w ~ /^(taskset|chrt)$/ && j > 2) &&
+              j <= n && substr(t[j], 1, 1) != "-") j++
+          if (!got_cmd)
+            while (j <= n && substr(t[j], 1, 1) == "-") {
+              if (t[j] == "--") { j++; break }
+              if (value_is_command(w, t[j])) { j++; break }
+              if (takes_value(w, t[j])) j++
+              j++
+            }
           s = ""
           for (i = j; i <= n; i++) s = s (s == "" ? "" : " ") t[i]
           gsub(/^[ \t({]+/, "", s)
@@ -179,7 +214,8 @@ if [ -n "$command_text" ]; then
         if (cmd == "git") {
           gj = 2
           while (gj <= n && substr(t[gj], 1, 1) == "-") {
-            if (t[gj] ~ /^-(c|C)$/) gj++
+            if (t[gj] ~ /^-(c|C)$/ ||
+                t[gj] ~ /^--(git-dir|work-tree|namespace|exec-path|super-prefix|config-env)$/) gj++
             gj++
           }
           # A commit message is data, whatever git options precede it.

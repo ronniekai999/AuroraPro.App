@@ -31,7 +31,12 @@ tar -C "$ROOT" -cf - \
   tar -C "$REPO" -xf - 2>/dev/null
 git -C "$REPO" init -q 2>/dev/null || true
 SUITE="$REPO/scripts/review-gate-test.sh"
+SPEC="$REPO/scripts/review-gate-wrapper-spec.sh"
 [ -f "$SUITE" ] || { echo "mutation-test: could not stage a copy of the repo"; exit 1; }
+[ -f "$SPEC" ]  || { echo "mutation-test: could not stage the wrapper spec"; exit 1; }
+
+# Green means BOTH pass; a mutation is caught if either notices.
+harness_green() { bash "$SUITE" >/dev/null 2>&1 && bash "$SPEC" >/dev/null 2>&1; }
 
 GATE_FILES='.githooks/pre-push
 scripts/review-gate-ci.sh
@@ -57,7 +62,7 @@ mutate() {
     printf '  SKIP %-52s mutation did not apply (pattern drifted)\n' "$name"
     fail=$((fail+1)); restore; return
   fi
-  if bash "$SUITE" >/dev/null 2>&1; then
+  if harness_green; then
     printf '  FAIL %-52s suite still GREEN against a broken gate\n' "$name"
     fail=$((fail+1))
   else
@@ -71,14 +76,15 @@ mutate() {
 # see that the suite went red, not why — so with a globally broken suite every
 # mutation reports "caught" and the harness certifies a gate it never tested.
 # That is the exact failure this file exists to prevent, one level up.
-echo "Baseline: the suite must pass unmutated."
-if bash "$SUITE" >/dev/null 2>&1; then
+echo "Baseline: the suite and the wrapper spec must pass unmutated."
+if harness_green; then
   printf '  ok   %-52s\n' "unmutated suite passes"; pass=$((pass+1))
 else
   printf '  FAIL %-52s suite is red BEFORE any mutation\n' "unmutated suite passes"
   echo
   echo "Aborting: every mutation below would report a false 'caught'."
-  echo "Fix the suite first — run: bash scripts/review-gate-test.sh"
+  echo "Fix it first — run: bash scripts/review-gate-test.sh"
+  echo "                and: bash scripts/review-gate-wrapper-spec.sh"
   exit 1
 fi
 
@@ -137,10 +143,13 @@ mutate 'CI fails OPEN without jq'           scripts/review-gate-ci.sh   's/{ ech
 mutate 'PreToolUse allows a PR merge'      scripts/review-gate.sh      's/if \[ "$hit" = "MERGE" \]; then/if false; then/'
 mutate 'PreToolUse stops splitting segments' scripts/review-gate.sh     "s/tr ';&|' '\\\\n\\\\n\\\\n'/cat/"
 mutate 'PreToolUse drops the commit skip'  scripts/review-gate.sh      's/if (gj <= n \&\& t\[gj\] == "commit") next/if (0) next/'
-mutate 'PreToolUse forgets wrappers'       scripts/review-gate.sh      's/sudo|doas|env|time|timeout|nohup/sudo|doas|env|time|nohup/'
-mutate 'PreToolUse mis-keys sudo options'  scripts/review-gate.sh      's/if (w == "sudo")    return (opt ~ \/\^-(u|g|p|C|U|r|t|T|h|R)\$\//if (w == "sudo")    return (opt ~ \/^-(u|g|p|C|U|r|t|T|h|R|i|n|s|k)$\//'
-mutate 'PreToolUse eats ionice positional' scripts/review-gate.sh      's/function eats_positional(w) { return (w ~ \/\^(timeout|flock|chrt)\$\/) }/function eats_positional(w) { return (w ~ \/^(timeout|flock|chrt|ionice|script)$\/) }/'
-mutate 'PreToolUse drops basename'         scripts/review-gate.sh      's/function basename(p) { sub(\/\^\.\*\\\/\/, "", p); return p }/function basename(p) { return p }/'
+mutate 'PreToolUse forgets wrappers'       scripts/review-gate.sh      's/env|time|timeout|nohup/env|time|nohup/'
+mutate 'PreToolUse ignores bundled options' scripts/review-gate.sh      's/\^-\[A-Za-z\]\*(u|g|p|C|U|r|t|T|R|D)\$/^-(u|g|p|C|U|r|t|T|R|D)$/'
+mutate 'PreToolUse drops value_is_command' scripts/review-gate.sh      's/function value_is_command(w, opt) {/function value_is_command(w, opt) { return 0;/'
+mutate 'PreToolUse forgets su and eval'    scripts/review-gate.sh      's/sudo|doas|su|runuser|env/sudo|doas|env/'
+mutate 'PreToolUse mis-keys sudo options'  scripts/review-gate.sh      's/(u|g|p|C|U|r|t|T|R|D)\$/(u|g|p|C|U|r|t|T|R|D|i|n|s|k)$/'
+mutate 'PreToolUse eats ionice positional' scripts/review-gate.sh      's/(timeout|flock|chrt|su|runuser|taskset)/(timeout|flock|chrt|su|runuser|taskset|ionice|script)/'
+mutate 'PreToolUse drops basename'         scripts/review-gate.sh      's/^      function basename(p) .*$/      function basename(p) { return p }/'
 # NOT mutation-testable: deleting the empty-verdict arm lets "" fall through
 # to the *) catch-all, which also blocks (verified — the push is refused
 # either way, only the message differs). Equivalent mutant. The behavior
