@@ -42,9 +42,9 @@ bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
 
 Verdicts: `clean` / `lows-only` open the gate, `fix-first` keeps it closed,
 `bypass` opens it while recording that NO review happened — use that only when
-no independent reviewer is available, and say so in the handoff. Records are
-keyed to the exact commit, so amending or adding one invalidates them; record
-after the final commit, then commit the record itself (record-only commits are
+no independent reviewer is available, and say so in the handoff. Records are keyed to the exact
+commit, so amending or adding a code commit invalidates them; record after the
+final code commit, then commit the record itself (record-only commits are
 exempt, and records are tracked so CI can read them).
 
 Read CLAUDE.md's "Adversarial review gate" section before relying on any of

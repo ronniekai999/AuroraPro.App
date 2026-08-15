@@ -111,9 +111,9 @@ section "verdicts"
 # depends on the remote state another case left behind.
 caseno=0
 # Each case branches fresh off the pushed base, so the range under test is
-# exactly ONE commit. The hook requires a record for every commit in the
-# range, so reusing an accumulating branch would (correctly) block on the
-# earlier cases' unreviewed commits and tell us nothing about this one.
+# exactly ONE commit. The hook checks the resolved reviewed commit, whose
+# record covers base...HEAD — so on an accumulating branch a case could pass
+# or fail because of an earlier case's commit rather than its own.
 newcase() {
   caseno=$((caseno+1))
   rm -f "$WORK/.claude/review-records/"*.json 2>/dev/null || true
@@ -403,6 +403,50 @@ out2="$( cd "$IR2" && bash "$IG" 2>&1 )"
 if printf '%s' "$out2" | grep -q "WARNING"; then ok 'installer warns when .githooks is absent'
 else bad 'installer warns when .githooks is absent'; fi
 
+# The probe must not call a dead gate active. Two earlier versions did — one
+# on the failure side, one on the success side — so this pins both.
+IR3="$TMP/instrepo3"; git init -q -b main "$IR3"
+mkdir -p "$IR3/.githooks"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$IR3/.githooks/pre-push"; chmod +x "$IR3/.githooks/pre-push"
+echo x > "$IR3/a.go"; git -C "$IR3" add -A; git -C "$IR3" commit -qm base
+out3="$( cd "$IR3" && bash "$IG" 2>&1 )"
+if printf '%s' "$out3" | grep -q "active"; then
+  bad 'installer does NOT call a disabled hook active'
+else ok 'installer does NOT call a disabled hook active'; fi
+# And it must say active when the hook really does refuse.
+cp "$HOOKS/pre-push" "$IR3/.githooks/pre-push"; chmod +x "$IR3/.githooks/pre-push"
+out4="$( cd "$IR3" && bash "$IG" 2>&1 )"
+if printf '%s' "$out4" | grep -q "active"; then ok 'installer confirms a working hook'
+else bad 'installer confirms a working hook'; fi
+
+section "loud failure modes stay loud"
+# A bypass that reads like a review, or a gate that goes quiet without jq, is
+# how "incomplete" passes unnoticed. Both were mutable with the suite green.
+newcase; rec bypass "no reviewer available"
+out5="$( cd "$WORK" && git push origin "HEAD:refs/heads/$DEST" 2>&1 )"
+if printf '%s' "$out5" | grep -q "BYPASSED"; then ok 'pre-push announces a bypass'
+else bad 'pre-push announces a bypass'; fi
+( cd "$CLONE_CI" && git checkout -q --force main 2>/dev/null ) || true
+git -C "$CIR" checkout -q -B bypasscase mainbase
+echo c >> "$CIR/a.go"; git -C "$CIR" commit -qam "code"
+( cd "$CIR" && bash "$RECORD" bypass "none available" >/dev/null 2>&1 )
+git -C "$CIR" add .claude/review-records >/dev/null 2>&1; git -C "$CIR" commit -qm "chore: record"
+out6="$( cd "$CIR" && bash "$CI" mainbase HEAD 2>&1 )"
+if printf '%s' "$out6" | grep -q "::warning"; then ok 'CI annotates a bypass'
+else bad 'CI annotates a bypass'; fi
+
+section "no jq means fail CLOSED, not fail quiet"
+NOJQ="$TMP/nojq"; mkdir -p "$NOJQ"
+for b in git bash sh grep sed awk printf cat tr cut head tail mktemp rm mkdir env dirname basename sort uniq wc; do
+  [ -x "/usr/bin/$b" ] && ln -sf "/usr/bin/$b" "$NOJQ/$b" 2>/dev/null
+  [ -x "/bin/$b" ] && ln -sf "/bin/$b" "$NOJQ/$b" 2>/dev/null
+done
+newcase
+if ( cd "$WORK" && PATH="$NOJQ" git push -q origin "HEAD:refs/heads/$DEST" ) >/dev/null 2>&1; then
+  bad 'pre-push fails CLOSED without jq'; else ok 'pre-push fails CLOSED without jq'; fi
+if ( cd "$CIR" && PATH="$NOJQ" bash "$CI" mainbase HEAD ) >/dev/null 2>&1; then
+  bad 'CI check fails CLOSED without jq'; else ok 'CI check fails CLOSED without jq'; fi
+
 section "record-review argument handling"
 r() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }
 if r clean "no reviewer flag";       then bad 'clean without --reviewer rejected'; else ok 'clean without --reviewer rejected'; fi
@@ -412,6 +456,17 @@ if r clean --reviewer x "   ";       then bad 'whitespace summary rejected'; els
 if r bogus --reviewer x "s";         then bad 'unknown verdict rejected'; else ok 'unknown verdict rejected'; fi
 if r clean --reviewer x --findings n "s"; then bad 'non-numeric --findings rejected'; else ok 'non-numeric --findings rejected'; fi
 if r bypass "no reviewer available"; then ok 'bypass needs no reviewer'; else bad 'bypass needs no reviewer'; fi
+# CLAUDE.md cites the diff digest as what makes a hollow record auditable.
+# Nothing asserted it, and nothing reads it — so at minimum it must be
+# present and match the diff it claims to describe.
+( cd "$WORK" && bash "$RECORD" clean --reviewer someone "digest check" >/dev/null 2>&1 )
+dsha="$(git -C "$WORK" rev-parse HEAD)"
+drec="$WORK/.claude/review-records/$dsha.json"
+dgot="$(jq -r '.diff_digest // ""' "$drec" 2>/dev/null)"
+dmb="$(git -C "$WORK" merge-base refs/remotes/origin/main "$dsha" 2>/dev/null || true)"
+dwant="$(git -C "$WORK" diff "$dmb" "$dsha" 2>/dev/null | sha256sum | cut -d' ' -f1)"
+if [ -n "$dgot" ] && [ "$dgot" = "$dwant" ]; then ok 'record carries a correct diff digest'
+else bad "record carries a correct diff digest (got '${dgot:0:12}', want '${dwant:0:12}')"; fi
 
 printf '\npass=%s fail=%s\n' "$pass" "$fail"
 [ "$fail" = 0 ]

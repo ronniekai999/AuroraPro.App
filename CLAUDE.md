@@ -111,6 +111,12 @@ softening it above:
 - **`scripts/review-gate-test.sh` does not pin everything.** What is pinned
   is what `scripts/review-gate-mutation-test.sh` can kill; two behaviors are
   documented there as equivalent mutants rather than covered.
+- **The merge block covers the paths it knows.** `mcp__github__merge_pull_
+  request`, `enable_pr_auto_merge`, `gh pr merge` and the REST merge endpoint
+  are refused; a shape not on that list is not. Merging is a maintainer's
+  call — treat the block as a reminder, not a fence.
+- **`review-record` only runs on `pull_request`**, so a direct push to `main`
+  gets no CI review check at all. `main` should be protected regardless.
 - Records live in `.claude/review-records/` and are **tracked**, because CI
   reads them from the checkout. Since committing a record moves HEAD, both
   gates resolve the reviewed commit by walking back over record-only commits.

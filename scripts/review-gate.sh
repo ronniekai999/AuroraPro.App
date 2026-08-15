@@ -5,11 +5,13 @@
 # the refs and repo before calling it), but it is advisory too: core.hooksPath
 # is the pusher's to unset.
 #
-# This hook covers only the two things a git hook structurally cannot see:
+# This hook covers what a git hook structurally cannot see:
 #
 #   1. `git push --no-verify`, which skips pre-push hooks by design.
 #   2. MCP tools that write repository CONTENT over the GitHub API without
 #      ever touching a local git repo.
+#   3. Merging a PR — over MCP, `gh`, or the REST endpoint — which lands code
+#      on main without a push happening at all.
 #
 # It deliberately no longer tries to decide whether an arbitrary shell string
 # is a push. Four review rounds walked through that parser — `git push;`,
@@ -101,6 +103,15 @@ if [ -n "$command_text" ]; then
   # --no-verify` and `( git push --no-verify )` all passed. Those are the
   # same shapes listed in .githooks/pre-push as having defeated the old
   # parser; repeating them here would be careless.
+  # Merging over the CLI/API, same outcome as the blocked MCP tools. The
+  # harness prompt tells agents to prefer `gh` for GitHub operations, so
+  # leaving this open meant the recommended path was the unguarded one.
+  if printf '%s' "$norm" | tr ';&|' '\n\n\n' |
+     grep -qE '(^|[[:space:]])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)|(^|[[:space:]])gh[[:space:]]+api[^|]*pulls/[0-9]+/merge|curl[^|]*pulls/[0-9]+/merge'; then
+    fail "review-gate: BLOCKED — merging a PR from here skips the review the gate exists to require.
+A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for one."
+  fi
+
   if printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
       function basename(p) { sub(/^.*\//, "", p); return p }
       {

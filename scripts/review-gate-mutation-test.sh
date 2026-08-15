@@ -117,6 +117,14 @@ mutate 'installer never sets hooksPath'    scripts/install-git-hooks.sh 's/  git
 mutate 'installer writes a relative path'  scripts/install-git-hooks.sh 's#^hooks_dir="$repo_root/.githooks"#hooks_dir=".githooks"#'
 mutate 'installer skips chmod +x'          scripts/install-git-hooks.sh 's/^if ! chmod +x "$hooks_dir\/pre-push" 2>\/dev\/null; then/if false; then/'
 
+mutate 'installer calls a dead hook active'  scripts/install-git-hooks.sh 's/if \[ "$probe_rc" -ne 0 \] \&\& grep -q .review-gate: BLOCKED. "$probe\/out"; then/if true; then/'
+mutate 'installer skips the wiring check'   scripts/install-git-hooks.sh 's/^if \[ "$hooks_path" != "$hooks_dir" \]; then/if false; then/'
+mutate 'pre-push goes quiet on a bypass'    .githooks/pre-push          's/BYPASSED for/QUIETLY ALLOWED for/'
+mutate 'CI drops the bypass annotation'     scripts/review-gate-ci.sh   's/^    echo "::warning title=.*$/    true/'
+mutate 'pre-push fails OPEN without jq'     .githooks/pre-push          's/^  echo "review-gate: jq is not installed/  exit 0; echo "review-gate: jq is not installed/'
+mutate 'CI fails OPEN without jq'           scripts/review-gate-ci.sh   's/{ echo "review-gate-ci: jq missing"; exit 1; }/{ exit 0; }/'
+mutate 'PreToolUse allows gh pr merge'      scripts/review-gate.sh      's/gh\[\[:space:\]\]+pr\[\[:space:\]\]+merge/gh[[:space:]]+NEVERMERGE/'
+
 echo
 echo "record-review.sh (never mutated before this round)"
 mutate 'record always writes clean'        scripts/record-review.sh    's/^verdict="\${1:-}"; shift || true/verdict=clean; shift || true/'

@@ -45,48 +45,54 @@ if ! chmod +x "$hooks_dir/pre-push" 2>/dev/null; then
   fi
 fi
 
-# Prove it fires rather than assuming it. A non-executable hook, a bad
-# shebang, or a hooksPath that doesn't resolve all fail silently in git —
-# the gate's failure mode is indistinguishable from success without this.
+# Prove it fires rather than assuming it, in two parts — because every
+# weaker probe tried here reported a dead gate as working:
+#
+#   v1 treated ANY probe-push failure as proof the hook refused it. This
+#   checkout is a shallow clone, where pushing to a fresh bare repo fails with
+#   "shallow update not allowed" regardless, so a hook replaced by `exit 0`
+#   reported "verified" in the default environment on every session start.
+#   v2 fixed that side and left the other: an ALLOWED push was still read as
+#   "active" whenever HEAD was recorded or docs-only. An allowed push is not
+#   evidence of anything.
+#
+# So: check the wiring directly, and exercise the hook against a synthetic
+# unreviewed commit it must refuse. Neither step pushes this repo's history
+# anywhere, which also keeps the SessionStart cost flat.
+hooks_path="$(git -C "$repo_root" config --local --get core.hooksPath 2>/dev/null || true)"
+if [ "$hooks_path" != "$hooks_dir" ]; then
+  echo "install-git-hooks: WARNING — core.hooksPath is '${hooks_path:-unset}', not '$hooks_dir'. The gate will NOT run."
+  exit 0
+fi
+if [ ! -x "$hooks_dir/pre-push" ]; then
+  echo "install-git-hooks: WARNING — $hooks_dir/pre-push is not executable. git skips such hooks SILENTLY."
+  exit 0
+fi
+
 probe="$(mktemp -d)"
-trap 'rm -rf "$probe"' EXIT
-head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
-git init -q --bare -b main "$probe/r.git" 2>/dev/null || true
-probe_rc=0
-probe_out="$(git -C "$repo_root" push "$probe/r.git" "HEAD:refs/heads/gate-probe" 2>&1)" || probe_rc=$?
-# A FAILED push is only evidence of a working gate if the hook is what refused
-# it. This checkout is a shallow clone, and pushing shallow history to a fresh
-# bare repo fails with "shallow update not allowed" — so treating any failure
-# as success reported a completely disabled hook as "verified", in the default
-# environment, on every session start.
-if [ "$probe_rc" != 0 ] && printf '%s' "$probe_out" | grep -q 'review-gate: BLOCKED'; then
-  echo "install-git-hooks: pre-push review gate active (probe push refused by the hook)."
-  exit 0
-fi
-if [ "$probe_rc" != 0 ]; then
-  echo "install-git-hooks: WARNING — could not verify the hook: the probe push failed for an unrelated reason."
-  printf 'install-git-hooks: %s\n' "$(printf '%s' "$probe_out" | tail -1)"
-  exit 0
-fi
-if true; then
-  # A push that succeeds is only alarming if HEAD had nothing to allow it.
-  # Warning on every reviewed HEAD trains people to ignore the message.
-  docs_head=0
-  if base_ref="$(git -C "$repo_root" rev-parse --verify --quiet origin/main 2>/dev/null)" && [ -n "$base_ref" ]; then
-    mb="$(git -C "$repo_root" merge-base "$base_ref" HEAD 2>/dev/null || true)"
-    if [ -n "$mb" ]; then
-      ch="$(git -C "$repo_root" diff --no-renames --name-only "$mb" HEAD 2>/dev/null || true)"
-      if [ -n "$ch" ] && ! printf '%s\n' "$ch" | grep -qvE '\.(md|txt)$'; then docs_head=1; fi
-    fi
-  fi
-  if [ -n "$head_sha" ] && [ -f "$repo_root/.claude/review-records/$head_sha.json" ]; then
-    echo "install-git-hooks: pre-push review gate active (HEAD is already recorded, so the probe push was allowed)."
-  elif [ "$docs_head" = 1 ]; then
-    echo "install-git-hooks: pre-push review gate active (HEAD is documentation-only, which is exempt)."
-  else
-    echo "install-git-hooks: WARNING — a test push was NOT blocked and HEAD has no review record."
-    echo "install-git-hooks: the gate may be off. Check core.hooksPath and that .githooks/pre-push is executable."
-  fi
+trap 'rm -rf "$probe"' EXIT INT TERM HUP
+(
+  set -e
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_AUTHOR_NAME=probe GIT_AUTHOR_EMAIL=probe@invalid
+  export GIT_COMMITTER_NAME=probe GIT_COMMITTER_EMAIL=probe@invalid
+  git init -q --bare -b main "$probe/r.git"
+  git init -q -b main "$probe/w"
+  cd "$probe/w"
+  git remote add origin "$probe/r.git"
+  echo probe > probe.go
+  git add -A
+  git commit -qm "probe: an unreviewed code commit"
+  git config core.hooksPath "$hooks_dir"
+  git push -q origin main
+) >"$probe/out" 2>&1 || probe_rc=$?
+probe_rc="${probe_rc:-0}"
+# Explicit capture, because `set -e` aborts on the failing subshell before a
+# bare `$?` test can run — the refusal we are looking for IS a failure.
+if [ "$probe_rc" -ne 0 ] && grep -q 'review-gate: BLOCKED' "$probe/out"; then
+  echo "install-git-hooks: pre-push review gate active (it refused a synthetic unreviewed commit)."
 else
-  echo "install-git-hooks: pre-push review gate active (verified by test push)."
+  echo "install-git-hooks: WARNING — the gate did NOT refuse a synthetic unreviewed commit."
+  echo "install-git-hooks: the review gate is not working. Inspect $hooks_dir/pre-push."
+  printf 'install-git-hooks: %s\n' "$(tail -1 "$probe/out" 2>/dev/null)"
 fi
