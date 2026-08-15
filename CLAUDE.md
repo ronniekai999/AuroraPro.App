@@ -117,9 +117,13 @@ softening it above:
   call — treat the block as a reminder, not a fence.
 - **The PreToolUse command parser is knowably incomplete, and that is the
   end state, not a to-do.** It recognizes ~25 wrappers with per-wrapper
-  option syntax (`scripts/review-gate-wrapper-spec.sh` pins 155 shapes), and
+  option syntax (`scripts/review-gate-wrapper-spec.sh` pins 177 shapes), and
   reviewers have still found new ones every round: `systemd-run` and `watch`
-  are known to slip today. That layer is advisory by
+  are known to slip today, and two shapes are over-peeled (`su -u USER` and
+  `chrt -m`) — neither runs a command, so both are cosmetic. The fix for the
+  over-peel is one arm of `supplies_positional()`; it is left undone
+  deliberately, because changing parser code would invalidate a clean review
+  verdict to close something that cannot execute anything. That layer is advisory by
   construction — a missed shape costs nothing that `.githooks/pre-push` and
   the `review-record` CI job do not still see, EXCEPT for `--no-verify` and
   a merge, which is why those two are the only things it tries to catch.
