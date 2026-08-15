@@ -59,9 +59,97 @@ final class DecodingTests: XCTestCase {
         XCTAssertNil(item.posterPath)
     }
 
+    /// The server's constants are "movie" and "show". This decoded `show`
+    /// through the unknown-value fallback and labelled every series a movie —
+    /// which also sent playback down the movie path, where a series has no
+    /// files.
+    func testSeriesDecodesAsShowNotMovie() throws {
+        let item = try decode(#"{"id":981,"library_id":2,"type":"show","title":"Demon Slayer"}"#, as: MediaItem.self)
+        XCTAssertEqual(item.type, .show)
+        XCTAssertTrue(item.type.isSeries)
+        let film = try decode(#"{"id":7,"library_id":1,"type":"movie","title":"Arrival"}"#, as: MediaItem.self)
+        XCTAssertFalse(film.type.isSeries)
+    }
+
+    /// Real /api/progress/continue row. This used to decode as [MediaItem],
+    /// which fails on the missing library_id — and a `try?` turned that into a
+    /// permanently empty Continue Watching rail.
+    func testContinueWatchingRowDecodes() throws {
+        let json = #"""
+        {"id":31,"user_id":1,"profile_id":1,"media_item_id":455,"position_ms":1_284_000,
+         "duration_ms":5_700_000,"completed":false,"updated_at":"2026-08-12T06:12:14.817258+02:00",
+         "title":"The Cabin in the Woods","poster_path":"/zZZe.jpg","backdrop_path":"/dWLo.jpg",
+         "type":"movie","year":2011,"rating":6.9,"percent_complete":22.5}
+        """#.replacingOccurrences(of: "_", with: "")
+        let row = try decode(json, as: ContinueWatchingItem.self)
+        XCTAssertEqual(row.mediaItemId, 455)
+        XCTAssertEqual(row.positionSeconds, 1284, accuracy: 0.5)
+        XCTAssertEqual(row.fraction, 0.225, accuracy: 0.001)
+        XCTAssertNil(row.subtitle, "a film has no SxEy label")
+    }
+
+    func testContinueWatchingEpisodeRowShowsSeasonAndEpisode() throws {
+        let json = #"""
+        {"id":9,"user_id":1,"profile_id":1,"media_item_id":981,"episode_id":4402,
+         "position_ms":600000,"duration_ms":1400000,"completed":false,
+         "updated_at":"2026-08-12T06:12:14Z","title":"Demon Slayer","type":"show",
+         "episode_title":"Sabito and Makomo","season_number":1,"episode_number":4}
+        """#
+        let row = try decode(json, as: ContinueWatchingItem.self)
+        XCTAssertEqual(row.episodeId, 4402)
+        XCTAssertEqual(row.subtitle, "S1E4 · Sabito and Makomo")
+    }
+
     func testUnknownMediaTypeDoesNotThrow() throws {
         let item = try decode(#"{"id":1,"library_id":1,"type":"audiobook","title":"X"}"#, as: MediaItem.self)
         XCTAssertEqual(item.type, .movie, "an unknown type should degrade, not blank the library")
+    }
+
+    /// The real envelope, copied from the handler's own `writeJSON` call
+    /// (internal/api/phase2_handlers.go) rather than from an assumption about
+    /// what it returns.
+    ///
+    /// This is the test that was missing. The original fixture decoded a BARE
+    /// StreamInfo, which passed happily while the app was broken, because the
+    /// server actually nests the decision under "stream". A fixture written
+    /// from the endpoint would have caught it before it ever ran.
+    func testStreamInfoEnvelopeMatchesTheServerShape() throws {
+        let json = #"""
+        {"stream":{"file_id":42,"direct_play":false,"direct_stream":true,
+                   "decision":"direct_stream","stream_url":"/api/stream/media/42",
+                   "container":"mkv","video_codec":"h264","audio_codec":"ac3",
+                   "resolution":"1080p","duration_ms":7980000,
+                   "transcode_reason":"container \"mkv\" not natively supported",
+                   "reason_code":"container","audio_track_index":0,"remux":true,
+                   "audio_channels":6,"audio_codec_out":"ac3"},
+         "subtitles":[{"index":2,"language":"eng","codec":"subrip","title":"English"}],
+         "audio_tracks":[{"index":0,"codec":"ac3","language":"eng","channels":6,"is_default":true},
+                         {"index":1,"codec":"aac","language":"jpn","channels":2}],
+         "markers":[]}
+        """#
+        let response = try decode(json, as: StreamInfoResponse.self)
+        XCTAssertEqual(response.stream.decision, "direct_stream")
+        XCTAssertFalse(response.stream.isDirectPlay)
+        XCTAssertEqual(response.stream.summary, "Remuxing (no re-encode)")
+        XCTAssertEqual(response.stream.remux, true)
+        XCTAssertEqual(response.audioTracks?.count, 2)
+        XCTAssertEqual(response.audioTracks?.first?.displayName, "ENG · AC3 · 6.1")
+        XCTAssertEqual(response.subtitles?.first?.displayName, "English")
+    }
+
+    /// A direct-play envelope, the case the whole Tier 1 change exists for.
+    func testStreamInfoEnvelopeDirectPlay() throws {
+        let json = #"""
+        {"stream":{"file_id":7,"direct_play":true,"direct_stream":false,
+                   "decision":"direct_play","stream_url":"/api/stream/7/direct?type=media",
+                   "container":"mkv","video_codec":"hevc","audio_codec":"truehd",
+                   "audio_track_index":0,"audio_passthrough":true},
+         "subtitles":[],"audio_tracks":[],"markers":[]}
+        """#
+        let response = try decode(json, as: StreamInfoResponse.self)
+        XCTAssertTrue(response.stream.isDirectPlay)
+        XCTAssertEqual(response.stream.summary, "Direct Play")
+        XCTAssertNil(response.stream.transcodeReason)
     }
 
     func testStreamInfoDirectPlay() throws {

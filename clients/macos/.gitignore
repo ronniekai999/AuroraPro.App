@@ -1,0 +1,10 @@
+# VLCKit is an 84 MB binary fetched by scripts/fetch-vlckit.sh, not vendored.
+# Package.swift detects it here; absent, the app builds on the Apple engine.
+Frameworks/
+
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.DS_Store

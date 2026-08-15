@@ -1,4 +1,5 @@
 import AuroraKit
+import AuroraUI
 import SwiftUI
 
 struct LoginView: View {
@@ -16,7 +17,8 @@ struct LoginView: View {
     var body: some View {
         VStack(spacing: 20) {
             Text("Aurora")
-                .font(.system(size: 42, weight: .thin, design: .rounded))
+                .font(.auroraDisplay(44))
+                .auroraTextGradient()
                 .padding(.bottom, 4)
 
             if showServerField {
@@ -31,8 +33,8 @@ struct LoginView: View {
                     focus = .server
                 } label: {
                     Text(state.serverURL.host ?? state.serverURL.absoluteString)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .font(.auroraBody)
+                        .foregroundStyle(Color.auroraTextSecondary)
                 }
                 .buttonStyle(.plain)
                 .help("Change server")
@@ -50,26 +52,26 @@ struct LoginView: View {
 
             if let error {
                 Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.red)
+                    .font(.auroraBody)
+                    .foregroundStyle(Color.auroraDestructive)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             Button(action: submit) {
                 if state.isLoading {
-                    ProgressView().controlSize(.small)
+                    ProgressView().controlSize(.small).frame(maxWidth: .infinity)
                 } else {
                     Text("Sign In").frame(maxWidth: .infinity)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(AuroraButtonStyle())
             .disabled(state.isLoading || username.isEmpty || password.isEmpty)
         }
         .frame(width: 320)
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AuroraBackdrop())
         .onAppear { focus = .username }
     }
 

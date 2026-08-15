@@ -23,7 +23,7 @@ public final class AppState {
 
     public private(set) var phase: Phase = .launching
     public private(set) var user: User?
-    public private(set) var continueWatching: [MediaItem] = []
+    public private(set) var continueWatching: [ContinueWatchingItem] = []
     public private(set) var recentlyAdded: [MediaItem] = []
     public private(set) var loadError: String?
     public private(set) var isLoading = false
@@ -46,12 +46,16 @@ public final class AppState {
         UserDefaults.standard.string(forKey: DefaultsKey.server).flatMap(URL.init(string:))
     }
 
-    /// `nonisolated` so `@State private var state = AppState(...)` works in the
-    /// App struct: stored-property initializers run in a nonisolated context,
-    /// and a @MainActor init would be unreachable from there. Safe because an
-    /// initializer only populates stored properties — `didSet` does not fire
-    /// during init, so the `engine` observer cannot run here.
-    public nonisolated init(serverURL: URL) {
+    /// Stays MainActor-isolated, like the rest of the class.
+    ///
+    /// An earlier version marked this `nonisolated` to make
+    /// `@State private var state = AppState(...)` work in the App struct. That
+    /// was both wrong and unnecessary: Swift counts the assignments below as
+    /// mutations of MainActor-isolated properties, so a nonisolated init
+    /// cannot perform them — and SwiftUI's `App` protocol is itself
+    /// `@MainActor`, so the conforming struct's property initializers are
+    /// already on the main actor and can call this directly.
+    public init(serverURL: URL) {
         self.serverURL = serverURL
         let saved = UserDefaults.standard.string(forKey: DefaultsKey.engine)
             .flatMap(EngineKind.init(rawValue:))

@@ -1,10 +1,17 @@
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
 
 struct PlaybackTarget: Identifiable {
     let mediaID: Int64
     let fileID: Int64
+    /// "media" or "episode" — the direct endpoint and stream-info both need
+    /// it, and a series resolves to an EPISODE file.
+    let fileType: String
+    /// Set for episodes; progress updates are keyed by MEDIA id with the
+    /// episode in the body.
+    let episodeID: Int64?
     let title: String
     let info: StreamInfo
     var id: Int64 { fileID }
@@ -22,6 +29,16 @@ struct PlayerView: View {
     @State private var playbackState: PlaybackState = .idle
     @State private var scrubbing = false
     @State private var lastReported: Double = 0
+    /// Guards the end-of-media handler. An engine that reports "ended" before
+    /// it ever played is reporting its idle state, not a finished film — and
+    /// acting on that writes a false entry into real watch history.
+    @State private var everPlayed = false
+    // Tracks only exist once the demuxer has opened the media, so they are
+    // read on the transition to .playing rather than at load time.
+    @State private var audioTracks: [MediaTrack] = []
+    @State private var subtitleTracks: [MediaTrack] = []
+    @State private var currentSubtitle: Int?
+    @State private var currentAudio: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -72,10 +89,58 @@ struct PlayerView: View {
                 .keyboardShortcut(.space, modifiers: [])
 
                 Text("\(format(position)) / \(format(duration))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(.auroraSans(12).monospacedDigit())
+                    .foregroundStyle(Color.auroraTextSecondary)
 
                 Spacer()
+
+                // Track pickers. Populated only by engines that can enumerate
+                // them — on the direct-play path libVLC reads the embedded
+                // tracks straight from the container, so a file with a dozen
+                // subtitle streams is fully usable with no server involvement.
+                if !subtitleTracks.isEmpty {
+                    Menu {
+                        Button("Off") { selectSubtitle(nil) }
+                        Divider()
+                        ForEach(subtitleTracks) { track in
+                            Button {
+                                selectSubtitle(track.id)
+                            } label: {
+                                HStack {
+                                    Text(track.name)
+                                    if currentSubtitle == track.id { Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: currentSubtitle == nil
+                              ? "captions.bubble" : "captions.bubble.fill")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Subtitles (\(subtitleTracks.count) available)")
+                }
+
+                if audioTracks.count > 1 {
+                    Menu {
+                        ForEach(audioTracks) { track in
+                            Button {
+                                engine?.selectAudioTrack(track.id)
+                                currentAudio = track.id
+                            } label: {
+                                HStack {
+                                    Text(track.name)
+                                    if currentAudio == track.id { Image(systemName: "checkmark") }
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "waveform")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Audio track (\(audioTracks.count) available)")
+                }
 
                 Label(
                     target.info.isDirectPlay ? "Direct Play" : "Transcoding",
@@ -100,7 +165,11 @@ struct PlayerView: View {
         engine.onStateChange = { newState in
             Task { @MainActor in
                 playbackState = newState
-                if newState == .ended {
+                if newState == .playing {
+                    everPlayed = true
+                    refreshTracks()
+                }
+                if newState == .ended, everPlayed {
                     try? await state.client.markWatched(mediaID: target.mediaID)
                     dismiss()
                 }
@@ -131,13 +200,24 @@ struct PlayerView: View {
             return
         }
 
-        var headers: [String: String] = ["User-Agent": "Aurora-macOS"]
-        if let cookie = await state.client.cookieHeader() {
-            headers["Cookie"] = cookie
+        // Authenticate with a cast-scoped token in the URL, not a cookie.
+        // VLCKit's cookie jar does not work on macOS (its header says so
+        // outright), so a token is the only way to authenticate a player that
+        // brings its own HTTP stack. Same mechanism AirPlay receivers use.
+        let url: URL
+        do {
+            url = try await state.client.directCastURL(fileID: target.fileID, type: target.fileType)
+        } catch {
+            playbackState = .failed("Could not authorize playback: \(error.localizedDescription)")
+            return
         }
 
-        let url = state.client.directPlayURL(fileID: target.fileID) // nonisolated
-        engine.load(PlaybackRequest(url: url, headers: headers, startAt: 0, title: target.title))
+        engine.load(PlaybackRequest(
+            url: url,
+            headers: ["User-Agent": "Aurora-macOS"],
+            startAt: 0,
+            title: target.title
+        ))
         self.engine = engine
     }
 
@@ -150,8 +230,23 @@ struct PlayerView: View {
         try? await state.client.reportProgress(
             mediaID: target.mediaID,
             positionSeconds: position,
-            durationSeconds: duration
+            durationSeconds: duration,
+            episodeID: target.episodeID
         )
+    }
+
+    /// Track lists are only valid once the media is open.
+    private func refreshTracks() {
+        guard let engine else { return }
+        audioTracks = engine.audioTracks
+        subtitleTracks = engine.subtitleTracks
+        currentAudio = engine.currentAudioTrack
+        currentSubtitle = engine.currentSubtitleTrack
+    }
+
+    private func selectSubtitle(_ id: Int?) {
+        engine?.selectSubtitleTrack(id)
+        currentSubtitle = id
     }
 
     private func teardown() {

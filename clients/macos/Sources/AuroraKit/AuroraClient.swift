@@ -60,9 +60,15 @@ public actor AuroraClient {
         return response.user
     }
 
-    /// Current user, or nil when the session is not valid.
+    /// Current user; throws when the session is not valid.
+    ///
+    /// `/api/auth/me`, NOT `/api/me` — the latter is the recommendations
+    /// subtree (hero, discover, rails) and 404s for this. The first version
+    /// used it, which broke session restore silently: login itself still
+    /// worked because the login response carries the user object, so the only
+    /// symptom was being asked to sign in again on every launch.
     public func me() async throws -> User {
-        try await get("/api/me")
+        try await get("/api/auth/me")
     }
 
     public func logout() async {
@@ -100,8 +106,49 @@ public actor AuroraClient {
 
     // MARK: - Content
 
-    public func continueWatching() async throws -> [MediaItem] {
+    public func continueWatching() async throws -> [ContinueWatchingItem] {
         try await decodeList("/api/progress/continue")
+    }
+
+    // MARK: - TV
+
+    public func seasons(forShow id: Int64) async throws -> [Season] {
+        try await decodeList("/api/media/\(id)/seasons")
+    }
+
+    public func episodes(showID: Int64, season: Int) async throws -> [Episode] {
+        try await decodeList("/api/media/\(showID)/seasons/\(season)/episodes")
+    }
+
+    public func files(forEpisode id: Int64) async throws -> [MediaFile] {
+        try await decodeList("/api/media/episodes/\(id)/files")
+    }
+
+    /// Resolves the first playable file for ANY item, movie or series.
+    ///
+    /// A series holds no files of its own — /api/media/{id}/files returns an
+    /// empty array for one, which the client previously reported as "no
+    /// playable file is attached to this title" for every show in the library.
+    /// Files hang off episodes, so a series has to be walked:
+    /// seasons → episodes → episode files.
+    public func firstPlayableFile(for item: MediaItem) async throws -> PlayableFile? {
+        if !item.type.isSeries {
+            return try await files(forMedia: item.id).first
+                .map { PlayableFile(file: $0, type: "media") }
+        }
+        // Season 0 is specials, so take it last — "play" on a series should
+        // start at S1E1, not at a Christmas special.
+        let ordered = try await seasons(forShow: item.id)
+            .sorted { ($0.seasonNumber == 0 ? Int.max : $0.seasonNumber) < ($1.seasonNumber == 0 ? Int.max : $1.seasonNumber) }
+        for season in ordered {
+            let eps = try await episodes(showID: item.id, season: season.seasonNumber)
+            for episode in eps.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
+                if let file = try await files(forEpisode: episode.id).first {
+                    return PlayableFile(file: file, type: "episode", episodeID: episode.id)
+                }
+            }
+        }
+        return nil
     }
 
     public func recentlyAdded(limit: Int = 30) async throws -> [MediaItem] {
@@ -127,7 +174,7 @@ public actor AuroraClient {
     ///
     /// The caps string is the entire input to the server's decision engine —
     /// see docs/native-client-caps.md.
-    public func streamInfo(fileID: Int64, type: String = "media") async throws -> StreamInfo {
+    public func streamInfo(fileID: Int64, type: String = "media") async throws -> StreamInfoResponse {
         let caps = capabilities.capsString
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         return try await get("/api/stream/info/\(fileID)?type=\(type)&caps=\(caps)")
@@ -148,6 +195,30 @@ public actor AuroraClient {
             .appending(queryItems: [URLQueryItem(name: "type", value: type)])
     }
 
+    /// Mints a cast-scoped token bound to ONE file and returns the ready-made
+    /// direct URL the server builds for it.
+    ///
+    /// This exists because cookie auth cannot reach libVLC on macOS. VLCKit's
+    /// own header is explicit — its cookie jar "will never succeed on macOS,
+    /// but requires iOS or tvOS" — so a player with its own HTTP stack has no
+    /// way to carry the session cookie, and every request 401s.
+    ///
+    /// The server already solved this for AirPlay receivers, which have the
+    /// identical problem: POST /api/stream/{id}/cast-token mints a token
+    /// scoped to a single file, and /api/stream/direct/{id}?token=… serves it
+    /// with no cookie involved. Using it here is reusing the designed path,
+    /// not working around one.
+    public func directCastURL(fileID: Int64, type: String = "media") async throws -> URL {
+        struct CastToken: Decodable { let token: String; let url: String }
+        let response: CastToken = try await post(
+            "/api/stream/\(fileID)/cast-token?type=\(type)", json: [String: String]()
+        )
+        guard let url = URL(string: response.url, relativeTo: baseURL)?.absoluteURL else {
+            throw APIError(status: -2, message: "Server returned an unusable cast URL")
+        }
+        return url
+    }
+
     /// Cookie header value for handing to a player with its own HTTP stack.
     public func cookieHeader() -> String? {
         guard let jar = session.configuration.httpCookieStorage,
@@ -155,11 +226,24 @@ public actor AuroraClient {
         return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
-    public func reportProgress(mediaID: Int64, positionSeconds: Double, durationSeconds: Double) async throws {
-        let body: [String: Any] = [
-            "position_seconds": positionSeconds,
-            "duration_seconds": durationSeconds,
+    /// Reports playback position.
+    ///
+    /// The server's `UpdateProgressRequest` takes MILLISECONDS under
+    /// `position_ms` / `duration_ms`. This previously sent seconds under
+    /// `position_seconds` / `duration_seconds` — keys the decoder ignores — so
+    /// every update stored a position of zero and resume never worked. Nothing
+    /// errored; the request was a well-formed 200.
+    public func reportProgress(
+        mediaID: Int64,
+        positionSeconds: Double,
+        durationSeconds: Double,
+        episodeID: Int64? = nil
+    ) async throws {
+        var body: [String: Any] = [
+            "position_ms": Int64(max(0, positionSeconds) * 1000),
+            "duration_ms": Int64(max(0, durationSeconds) * 1000),
         ]
+        if let episodeID { body["episode_id"] = episodeID }
         _ = try await putRaw("/api/progress/\(mediaID)", json: body)
     }
 
@@ -167,13 +251,36 @@ public actor AuroraClient {
         _ = try await postRaw("/api/progress/\(mediaID)/watched", json: [String: String]())
     }
 
+    /// Artwork sizes the server's image proxy accepts
+    /// (internal/metadata/imageproxy.go's allowlist). Anything else 404s.
+    public enum ImageSize: String, Sendable {
+        case w92, w154, w185, w342, w500, w780, original
+    }
+
     /// Absolute URL for an artwork path returned by the API.
-    /// `nonisolated` for the same reason as `directPlayURL` — every poster in
-    /// every rail calls this from a synchronous view body.
-    public nonisolated func imageURL(_ path: String?) -> URL? {
+    ///
+    /// A `poster_path` is a bare TMDB path like `/abc123.jpg`, NOT a URL on
+    /// this server — it has to go through the proxy at
+    /// `/api/images/{size}/{path}`, exactly as the SPA's `posterURL` does.
+    /// Appending it to the base URL (the first version of this) produced
+    /// `https://host/abc123.jpg`, which 404s — which is why every poster in
+    /// every rail rendered as a grey placeholder.
+    ///
+    /// `nonisolated` for the same reason as `directPlayURL` — every poster
+    /// calls this from a synchronous view body.
+    public nonisolated func imageURL(_ path: String?, size: ImageSize = .w500) -> URL? {
         guard let path, !path.isEmpty else { return nil }
+        // Some endpoints already hand back a fully-qualified URL.
         if path.hasPrefix("http://") || path.hasPrefix("https://") { return URL(string: path) }
-        return baseURL.appending(path: path.hasPrefix("/") ? path : "/\(path)")
+        // Strip leading slashes so the proxy path never doubles up.
+        let cleaned = path.drop(while: { $0 == "/" })
+        guard !cleaned.isEmpty else { return nil }
+        return URL(string: "/api/images/\(size.rawValue)/\(cleaned)", relativeTo: baseURL)?.absoluteURL
+    }
+
+    /// Backdrops are requested at full size, like the SPA's `backdropURL`.
+    public nonisolated func backdropURL(_ path: String?) -> URL? {
+        imageURL(path, size: .original)
     }
 
     // MARK: - Transport

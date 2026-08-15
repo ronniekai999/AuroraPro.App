@@ -1,5 +1,6 @@
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
 
 struct DetailView: View {
@@ -8,33 +9,36 @@ struct DetailView: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
 
-    @State private var files: [MediaFile] = []
-    @State private var streamInfo: StreamInfo?
+    @State private var playable: PlayableFile?
+    @State private var info: StreamInfoResponse?
     @State private var error: String?
+    @State private var loading = true
     @State private var playing: PlaybackTarget?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
-                if let overview = item.overview, !overview.isEmpty {
-                    Text(overview).font(.body)
+            VStack(alignment: .leading, spacing: 0) {
+                hero
+                VStack(alignment: .leading, spacing: 18) {
+                    if let overview = item.overview, !overview.isEmpty {
+                        Text(overview)
+                            .font(.auroraSans(15))
+                            .foregroundStyle(Color.auroraTextSecondary)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    playbackSection
                 }
-                if let info = streamInfo {
-                    PlaybackDecisionBadge(info: info, engine: state.engine)
-                }
-                if let error {
-                    Text(error).font(.callout).foregroundStyle(.red)
-                }
+                .padding(28)
             }
-            .padding(28)
         }
+        .background(AuroraBackdrop())
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Close") { dismiss() }
             }
         }
-        .task { await loadFiles() }
+        .task { await load() }
         .sheet(item: $playing) { target in
             PlayerView(target: target)
                 .environment(state)
@@ -42,59 +46,130 @@ struct DetailView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 20) {
-            AsyncImage(url: state.client.imageURL(item.posterPath)) { image in
-                image.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Rectangle().fill(.quaternary)
+    // MARK: - Hero
+
+    private var hero: some View {
+        ZStack(alignment: .bottomLeading) {
+            // Backdrop, dimmed, with a scrim so text stays readable.
+            AsyncImage(url: state.client.backdropURL(item.backdropPath)) { phase in
+                if case .success(let image) = phase {
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    LinearGradient(
+                        colors: [Color.auroraPurpleDeep.opacity(0.35), .black.opacity(0.6)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                }
             }
-            .frame(width: 180, height: 270)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(item.title).font(.largeTitle.weight(.bold))
-
-                HStack(spacing: 10) {
-                    if let year = item.year { Text(String(year)) }
-                    if let runtime = item.runtimeMinutes { Text("\(runtime) min") }
-                    if let rated = item.contentRating { Text(rated) }
-                    if item.has4k == true { Tag("4K") }
-                    if item.hasHdr == true { Tag("HDR") }
-                }
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-                if let genres = item.genres, !genres.isEmpty {
-                    Text(genres.joined(separator: " · "))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                Button {
-                    startPlayback()
-                } label: {
-                    Label("Play", systemImage: "play.fill")
-                        .frame(width: 120)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(files.isEmpty)
+            .frame(height: 300)
+            .clipped()
+            .overlay {
+                LinearGradient(
+                    colors: [.black.opacity(0.15), .black.opacity(0.85)],
+                    startPoint: .top, endPoint: .bottom
+                )
             }
-            Spacer()
+
+            HStack(alignment: .bottom, spacing: 20) {
+                AsyncImage(url: state.client.imageURL(item.posterPath, size: .w342)) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        AuroraCardBackground()
+                            .overlay {
+                                Image(systemName: item.type.isSeries ? "tv" : "film")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(Color.auroraMutedForeground.opacity(0.5))
+                            }
+                    }
+                }
+                .frame(width: AuroraMetrics.posterWidth, height: AuroraMetrics.posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: AuroraMetrics.radius, style: .continuous))
+                .auroraGlow()
+                .shadow(color: .black.opacity(0.5), radius: 14, y: 6)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(item.title)
+                        .font(.auroraDisplay(38))
+                        .foregroundStyle(.white)
+                        .shadow(radius: 8)
+                        .lineLimit(2)
+
+                    HStack(spacing: 8) {
+                        if let year = item.year { AuroraPill(String(year)) }
+                        if let runtime = item.runtimeMinutes { AuroraPill("\(runtime) min") }
+                        if let rated = item.contentRating, !rated.isEmpty { AuroraPill(rated) }
+                        if item.has4k == true { AuroraPill("4K", tinted: true) }
+                        if item.hasHdr == true { AuroraPill("HDR", tinted: true) }
+                    }
+
+                    if let genres = item.genres, !genres.isEmpty {
+                        Text(genres.prefix(3).joined(separator: " · "))
+                            .font(.auroraSans(13))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
+
+                    Button(action: play) {
+                        Label("Play", systemImage: "play.fill").frame(width: 84)
+                    }
+                    .buttonStyle(AuroraButtonStyle())
+                    .disabled(!canPlay)
+                    .padding(.top, 6)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(24)
         }
     }
 
-    private func loadFiles() async {
-        do {
-            files = try await state.client.files(forMedia: item.id)
-            if let first = files.first {
-                streamInfo = try? await state.client.streamInfo(fileID: first.id)
-            } else {
-                error = "No playable file is attached to this title."
+    // MARK: - Playback state
+
+    @ViewBuilder
+    private var playbackSection: some View {
+        if loading {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Checking playback…").font(.auroraBody).foregroundStyle(Color.auroraTextSecondary)
             }
+        } else if let error {
+            // Errors are SHOWN, never swallowed. The previous version used
+            // `try?` here, so a failed stream-info left the Play button inert
+            // with nothing on screen to explain why.
+            Label(error, systemImage: "exclamationmark.triangle.fill")
+                .font(.auroraBody)
+                .foregroundStyle(.orange)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.auroraCard, in: RoundedRectangle(cornerRadius: AuroraMetrics.radiusSmall, style: .continuous))
+        } else if let stream = info?.stream {
+            VStack(alignment: .leading, spacing: 10) {
+                if let summary = playable?.file.mediaSummary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.auroraSans(12).monospaced())
+                        .foregroundStyle(Color.auroraTextSecondary)
+                }
+                PlaybackDecisionBadge(info: stream, engine: state.engine, tracks: info?.audioTracks ?? [])
+            }
+        }
+    }
+
+    private var canPlay: Bool { info?.stream != nil }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        do {
+            // Walks seasons → episodes for a series; a show holds no files of
+            // its own, which previously read as "no playable file attached"
+            // for every series in the library.
+            guard let found = try await state.client.firstPlayableFile(for: item) else {
+                error = item.type.isSeries
+                    ? "No episode files were found for this series."
+                    : "No playable file is attached to this title."
+                return
+            }
+            playable = found
+            info = try await state.client.streamInfo(fileID: found.file.id, type: found.type)
         } catch let e as APIError {
             error = e.message
         } catch {
@@ -102,25 +177,12 @@ struct DetailView: View {
         }
     }
 
-    private func startPlayback() {
-        guard let file = files.first, let info = streamInfo else { return }
+    private func play() {
+        guard let found = playable, let stream = info?.stream else { return }
         playing = PlaybackTarget(
-            mediaID: item.id,
-            fileID: file.id,
-            title: item.title,
-            info: info
+            mediaID: item.id, fileID: found.file.id, fileType: found.type,
+            episodeID: found.episodeID, title: item.title, info: stream
         )
-    }
-}
-
-struct Tag: View {
-    let text: String
-    init(_ text: String) { self.text = text }
-    var body: some View {
-        Text(text)
-            .font(.caption.weight(.bold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(.tertiary, in: RoundedRectangle(cornerRadius: 4))
     }
 }
 
@@ -133,31 +195,35 @@ struct Tag: View {
 struct PlaybackDecisionBadge: View {
     let info: StreamInfo
     let engine: EngineKind
+    var tracks: [AudioTrack] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: info.isDirectPlay ? "bolt.fill" : "arrow.triangle.2.circlepath")
                     .foregroundStyle(info.isDirectPlay ? .green : .orange)
-                Text(info.isDirectPlay ? "Direct Play" : label)
-                    .font(.callout.weight(.semibold))
+                Text(info.summary).font(.auroraSans(AuroraType.body, weight: .semibold))
+                Spacer()
+                Text(engine.displayName).font(.auroraCaption).foregroundStyle(Color.auroraMutedForeground)
             }
             if let reason = info.transcodeReason, !reason.isEmpty {
-                Text(reason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(reason).font(.auroraCaption).foregroundStyle(Color.auroraTextSecondary)
             }
-            if !info.isDirectPlay, engine == .appleNative, EngineKind.libVLC.isAvailable {
-                Text("The VLC engine may be able to play this without transcoding.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if !info.isDirectPlay, engine == .appleNative {
+                Text(EngineKind.libVLC.isAvailable
+                     ? "The VLC engine can likely play this without transcoding."
+                     : "Adding the VLC engine would let this play without transcoding.")
+                    .font(.auroraCaption)
+                    .foregroundStyle(Color.auroraTextSecondary)
+            }
+            if tracks.count > 1 {
+                Text("\(tracks.count) audio tracks · " + tracks.prefix(3).map(\.displayName).joined(separator: ", "))
+                    .font(.auroraCaption)
+                    .foregroundStyle(Color.auroraMutedForeground)
             }
         }
-        .padding(12)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var label: String {
-        info.decision == "direct_stream" ? "Remuxing (no re-encode)" : "Transcoding"
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.auroraCard, in: RoundedRectangle(cornerRadius: AuroraMetrics.radius, style: .continuous))
     }
 }

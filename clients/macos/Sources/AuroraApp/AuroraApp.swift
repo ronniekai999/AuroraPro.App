@@ -1,9 +1,44 @@
+import AppKit
 import AuroraKit
 import AuroraPlayback
+import AuroraUI
 import SwiftUI
+
+/// Makes `swift run Aurora` behave like a real app.
+///
+/// A SwiftPM executable is not a `.app` bundle, so macOS launches it with the
+/// ACCESSORY activation policy: the window draws, but the process never
+/// becomes the active application. It therefore never gets a key window, and
+/// every keystroke — including into the login fields — is discarded. The
+/// symptom looks like a broken text field; the cause is that nothing has
+/// keyboard focus because nothing is frontmost.
+///
+/// Promoting to `.regular` and activating fixes it, and costs nothing once the
+/// app IS bundled (a bundled app is already `.regular`, so these calls are
+/// no-ops). Keeping them means the terminal dev loop and the packaged app
+/// behave the same.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any view renders: an unregistered face makes SwiftUI silently
+        // substitute the system font, which looks like a design problem rather
+        // than a loading one.
+        AuroraFonts.register()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Terminal dev loop convenience: closing the window should end the
+    /// process rather than leave a dockless executable running.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+}
 
 @main
 struct AuroraApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     @State private var state = AppState(
         serverURL: AppState.savedServerURL ?? URL(string: "https://aurorapro.app")!
     )
@@ -12,6 +47,12 @@ struct AuroraApp: App {
         WindowGroup {
             RootView()
                 .environment(state)
+                // macOS derives focus rings, slider fills and selection
+                // highlights from the accent colour, which is system BLUE by
+                // default — visible as a blue ring on the login field against
+                // an otherwise violet app. Tint once at the root so every
+                // system-drawn control inherits Aurora's accent.
+                .tint(Color.auroraAccent)
                 .frame(minWidth: 900, minHeight: 600)
                 .task { await state.start() }
         }
