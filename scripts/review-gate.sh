@@ -103,24 +103,23 @@ if [ -n "$command_text" ]; then
   # --no-verify` and `( git push --no-verify )` all passed. Those are the
   # same shapes listed in .githooks/pre-push as having defeated the old
   # parser; repeating them here would be careless.
-  # Merging over the CLI/API, same outcome as the blocked MCP tools. The
-  # harness prompt tells agents to prefer `gh` for GitHub operations, so
-  # leaving this open meant the recommended path was the unguarded one.
-  if printf '%s' "$norm" | tr ';&|' '\n\n\n' |
-     grep -qE '(^|[[:space:]])gh[[:space:]]+pr[[:space:]]+merge([[:space:]]|$)|(^|[[:space:]])gh[[:space:]]+api[^|]*pulls/[0-9]+/merge|curl[^|]*pulls/[0-9]+/merge'; then
-    fail "review-gate: BLOCKED — merging a PR from here skips the review the gate exists to require.
-A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for one."
-  fi
-
-  if printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
+  # ONE anchored pass for both guarded shapes. The merge check used to be a
+  # bare regex over the whole command, so searching for the literal in the
+  # docs, echoing it, or naming it in a commit message were all refused — a
+  # reviewer's first command of the round was, and CLAUDE.md documents the
+  # literal, so an agent could not grep the very limits list it is told to
+  # read. Mentioning a command is not running it, and this file argues that
+  # over-blocking teaches agents to route around the gate. So: anchored on
+  # the command word, with commit-message values ignored, since a message is
+  # data.
+  hit="$(printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
       function basename(p) { sub(/^.*\//, "", p); return p }
       {
         s = $0
         gsub(/^[ \t(]+/, "", s)
         while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
         n = split(s, t, /[ \t]+/)
-        while (n > 0 && (basename(t[1]) ~ /^(sudo|env|time|nohup|command|exec|doas|xargs)$/ ||
-                         basename(t[1]) ~ /^(bash|sh|zsh|ksh|dash)$/)) {
+        while (n > 0 && basename(t[1]) ~ /^(sudo|env|time|nohup|command|exec|doas|xargs|bash|sh|zsh|ksh|dash)$/) {
           s = ""
           for (i = 2; i <= n; i++) if (t[i] !~ /^-/ || i > 2) s = s (s == "" ? "" : " ") t[i]
           gsub(/^[ \t(]+/, "", s)
@@ -128,15 +127,33 @@ A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for 
           n = split(s, t, /[ \t]+/)
           if (n == 0) break
         }
-        if (n > 0 && basename(t[1]) == "git") {
+        if (n == 0) next
+        cmd = basename(t[1])
+        # A commit message is data. Heredoc bodies are stripped upstream;
+        # -m/-F values were not, which is how this check blocked the very
+        # commit that introduced it.
+        if (cmd == "git" && n > 1 && t[2] == "commit") next
+        if (cmd == "git") {
           hasPush = 0; hasFlag = 0
           for (i = 2; i <= n; i++) {
             if (t[i] == "push") hasPush = 1
             if (t[i] == "--no-verify") hasFlag = 1
           }
-          if (hasPush && hasFlag) { print "HIT"; exit }
+          if (hasPush && hasFlag) { print "NOVERIFY"; exit }
         }
-      }' | grep -q HIT; then
+        if (cmd == "gh") {
+          if (n >= 3 && t[2] == "pr" && t[3] == "merge") { print "MERGE"; exit }
+          if (n >= 2 && t[2] == "api")
+            for (i = 3; i <= n; i++) if (t[i] ~ /pulls\/[0-9]+\/merge/) { print "MERGE"; exit }
+        }
+        if (cmd == "curl")
+          for (i = 2; i <= n; i++) if (t[i] ~ /pulls\/[0-9]+\/merge/) { print "MERGE"; exit }
+      }')"
+  if [ "$hit" = "MERGE" ]; then
+    fail "review-gate: BLOCKED — merging a PR from here skips the review the gate exists to require.
+A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for one."
+  fi
+  if [ "$hit" = "NOVERIFY" ]; then
     fail "review-gate: BLOCKED — --no-verify skips .githooks/pre-push, which is where the adversarial review gate is enforced.
 Push without it. If no reviewer was available, record that honestly instead:
   bash scripts/record-review.sh bypass \"<why>\""

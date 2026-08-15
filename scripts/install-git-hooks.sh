@@ -15,12 +15,16 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 hooks_dir="$repo_root/.githooks"
 
 if [ ! -d "$hooks_dir" ]; then
-  # A linked worktree checked out on a commit without .githooks/ (main, a
-  # release branch, a tag) inherits the shared --local setting and silently
-  # has no hook. Say so on stdout, which is the stream that reaches the agent.
-  echo "install-git-hooks: WARNING — $hooks_dir does not exist in this checkout."
-  echo "install-git-hooks: the pre-push review gate will NOT run here."
-  exit 0
+  # A checkout without .githooks/ (main, a release branch, a tag). Do NOT
+  # conclude the gate is off: a linked worktree shares the main worktree's
+  # --local hooksPath, which is absolute and still resolves, so the gate does
+  # run there. Fall through to the probe, which settles it by observation.
+  echo "install-git-hooks: note — $hooks_dir does not exist in this checkout; verifying by probe."
+  hooks_dir="$(git -C "$repo_root" config --get core.hooksPath 2>/dev/null || true)"
+  if [ -z "$hooks_dir" ] || [ ! -x "$hooks_dir/pre-push" ]; then
+    echo "install-git-hooks: WARNING — no usable pre-push hook resolves here; the review gate will NOT run."
+    exit 0
+  fi
 fi
 
 current="$(git -C "$repo_root" config --local --get core.hooksPath 2>/dev/null || true)"
@@ -59,7 +63,11 @@ fi
 # So: check the wiring directly, and exercise the hook against a synthetic
 # unreviewed commit it must refuse. Neither step pushes this repo's history
 # anywhere, which also keeps the SessionStart cost flat.
-hooks_path="$(git -C "$repo_root" config --local --get core.hooksPath 2>/dev/null || true)"
+# `git config --get`, NOT `--local --get`: a `--worktree` value outranks the
+# local one, so reading --local reported "gate active" while the effective
+# hooksPath was /dev/null. Unlike `git -c …`, that override persists, and the
+# probe re-announced the gate as working every session.
+hooks_path="$(git -C "$repo_root" config --get core.hooksPath 2>/dev/null || true)"
 if [ "$hooks_path" != "$hooks_dir" ]; then
   echo "install-git-hooks: WARNING — core.hooksPath is '${hooks_path:-unset}', not '$hooks_dir'. The gate will NOT run."
   exit 0
@@ -69,7 +77,11 @@ if [ ! -x "$hooks_dir/pre-push" ]; then
   exit 0
 fi
 
-probe="$(mktemp -d)"
+probe="$(mktemp -d 2>/dev/null || true)"
+if [ -z "$probe" ]; then
+  echo "install-git-hooks: WARNING — could not create a temp dir, so the hook could not be verified."
+  exit 0
+fi
 trap 'rm -rf "$probe"' EXIT INT TERM HUP
 (
   set -e
@@ -89,7 +101,7 @@ trap 'rm -rf "$probe"' EXIT INT TERM HUP
 probe_rc="${probe_rc:-0}"
 # Explicit capture, because `set -e` aborts on the failing subshell before a
 # bare `$?` test can run — the refusal we are looking for IS a failure.
-if [ "$probe_rc" -ne 0 ] && grep -q 'review-gate: BLOCKED' "$probe/out"; then
+if [ "$probe_rc" -ne 0 ] && grep -qE 'review-gate: (BLOCKED|.*[Ff]ailing closed)' "$probe/out"; then
   echo "install-git-hooks: pre-push review gate active (it refused a synthetic unreviewed commit)."
 else
   echo "install-git-hooks: WARNING — the gate did NOT refuse a synthetic unreviewed commit."

@@ -33,12 +33,17 @@ git -C "$REPO" init -q 2>/dev/null || true
 SUITE="$REPO/scripts/review-gate-test.sh"
 [ -f "$SUITE" ] || { echo "mutation-test: could not stage a copy of the repo"; exit 1; }
 
-for f in .githooks/pre-push scripts/review-gate-ci.sh scripts/review-gate.sh; do
-  cp "$REPO/$f" "$work/$(basename "$f").orig"
+GATE_FILES='.githooks/pre-push
+scripts/review-gate-ci.sh
+scripts/review-gate.sh
+scripts/install-git-hooks.sh
+scripts/record-review.sh'
+printf '%s\n' "$GATE_FILES" | while read -r f; do
+  [ -n "$f" ] && cp "$REPO/$f" "$work/$(basename "$f").orig"
 done
 restore() {
-  for f in .githooks/pre-push scripts/review-gate-ci.sh scripts/review-gate.sh; do
-    cp "$work/$(basename "$f").orig" "$REPO/$f"
+  printf '%s\n' "$GATE_FILES" | while read -r f; do
+    [ -n "$f" ] && cp "$work/$(basename "$f").orig" "$REPO/$f"
   done
 }
 
@@ -84,13 +89,17 @@ mutate 'pre-push ignores the reviewer'     .githooks/pre-push          's/if \[ 
 mutate 'pre-push accepts a blocking verdict' .githooks/pre-push        's/      clean|lows-only)/      clean|lows-only|fix-first)/'
 mutate 'pre-push ignores the recorded sha' .githooks/pre-push          's/if \[ "$recorded_sha" != "$sha" \]; then/if false; then/'
 mutate 'pre-push follows renames'          .githooks/pre-push          's/git diff --no-renames --name-only "$from"/git diff --name-only "$from"/'
-# NOT mutation-testable on this layer: widening the record exemption to all of
-# .claude/ makes the record-walk step PAST the offending commit to the base,
-# which has no record either, so pre-push still refuses — for the wrong
-# reason. The mutant is equivalent here. The CI-side version of the same
-# widening is caught ('CI exempts all of .claude' below), and that is the
-# layer the outcome depends on. The suite pins the behavior directly via
-# 'pre-push: .claude/settings.json is NOT exempt'.
+mutate 'pre-push fails OPEN in a bare repo' .githooks/pre-push         's#^REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"$#REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0#'
+# This WAS annotated as an equivalent mutant. It is not — a later reviewer
+# showed the widening is a real bypass whenever a reviewed commit precedes the
+# offending one, because then the walk has somewhere to step back to and
+# resolves to a commit that IS recorded. The old reasoning generalized from a
+# suite case with no such predecessor, where pre-push refused for the wrong
+# reason. Both sites are mutated now, and the suite carries the shape that
+# distinguishes them. Documenting a mutant as equivalent tells the next
+# maintainer not to write the missing case, so it has to be earned.
+mutate 'pre-push widens the DOCS exemption'  .githooks/pre-push        "s#grep -v '\\^\\\\.claude/review-records/\\.\\*\\\\.json\\$'#grep -v '^\\\\.claude/'#"
+mutate 'pre-push widens the WALK exemption'  .githooks/pre-push        "s#grep -qvE '\\^\\\\.claude/review-records/\\.\\*\\\\.json\\$'#grep -qvE '^\\\\.claude/'#"
 
 echo
 echo "review-gate-ci.sh (the reported check)"
@@ -117,13 +126,15 @@ mutate 'installer never sets hooksPath'    scripts/install-git-hooks.sh 's/  git
 mutate 'installer writes a relative path'  scripts/install-git-hooks.sh 's#^hooks_dir="$repo_root/.githooks"#hooks_dir=".githooks"#'
 mutate 'installer skips chmod +x'          scripts/install-git-hooks.sh 's/^if ! chmod +x "$hooks_dir\/pre-push" 2>\/dev\/null; then/if false; then/'
 
-mutate 'installer calls a dead hook active'  scripts/install-git-hooks.sh 's/if \[ "$probe_rc" -ne 0 \] \&\& grep -q .review-gate: BLOCKED. "$probe\/out"; then/if true; then/'
+mutate 'installer drops the refusal check'  scripts/install-git-hooks.sh 's/if \[ "$probe_rc" -ne 0 \] && grep -qE/if [ "$probe_rc" -ne 0 ] || grep -qE/'
+mutate 'installer reads --local hooksPath'  scripts/install-git-hooks.sh '70s/config --get core.hooksPath/config --local --get core.hooksPath/'
+mutate 'installer calls a dead hook active'  scripts/install-git-hooks.sh 's/^if \[ "$probe_rc" -ne 0 \] \&\& grep -qE .*$/if true; then/'
 mutate 'installer skips the wiring check'   scripts/install-git-hooks.sh 's/^if \[ "$hooks_path" != "$hooks_dir" \]; then/if false; then/'
 mutate 'pre-push goes quiet on a bypass'    .githooks/pre-push          's/BYPASSED for/QUIETLY ALLOWED for/'
 mutate 'CI drops the bypass annotation'     scripts/review-gate-ci.sh   's/^    echo "::warning title=.*$/    true/'
 mutate 'pre-push fails OPEN without jq'     .githooks/pre-push          's/^  echo "review-gate: jq is not installed/  exit 0; echo "review-gate: jq is not installed/'
 mutate 'CI fails OPEN without jq'           scripts/review-gate-ci.sh   's/{ echo "review-gate-ci: jq missing"; exit 1; }/{ exit 0; }/'
-mutate 'PreToolUse allows gh pr merge'      scripts/review-gate.sh      's/gh\[\[:space:\]\]+pr\[\[:space:\]\]+merge/gh[[:space:]]+NEVERMERGE/'
+mutate 'PreToolUse allows a PR merge'      scripts/review-gate.sh      's/if \[ "$hit" = "MERGE" \]; then/if false; then/'
 
 echo
 echo "record-review.sh (never mutated before this round)"

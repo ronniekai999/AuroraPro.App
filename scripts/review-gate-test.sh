@@ -158,6 +158,18 @@ BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
 must_block 'a later commit invalidates the record'
 rm -f "$WORK/.claude/review-records/"*.json
 
+section "unusual repo shapes still fail closed"
+# A bare repo has no work tree, so `git rev-parse --show-toplevel` exits 128.
+# The first version of the hook had `|| exit 0` there, which made pushing from
+# a bare clone its single most reliable bypass — and nothing pinned the fix.
+newcase
+BARE="$TMP/bare$caseno.git"
+git clone -q --bare "$WORK" "$BARE" 2>/dev/null
+git -C "$BARE" config core.hooksPath "$HOOKS"
+( cd "$BARE" && git push -q "$REMOTE" "HEAD:refs/heads/$DEST" ) >/dev/null 2>&1
+if landed; then bad 'bare repo push is refused — UNREVIEWED COMMIT REACHED THE REMOTE'
+else ok 'bare repo push is refused'; fi
+
 section "bypasses that turn the client-side hook off (advisory layer)"
 # These document what the pre-push layer CANNOT hold, so nobody mistakes it
 # for enforcement. Each one lands the commit; scripts/review-gate-ci.sh is
@@ -202,6 +214,21 @@ mkdir -p "$WORK/.claude"; echo '{"hooks":{}}' > "$WORK/.claude/settings.json"
 git -C "$WORK" add -A; git -C "$WORK" commit -qm "chore: settings"
 BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
 must_block 'pre-push: .claude/settings.json is NOT exempt'
+# The same file, but ON TOP of a reviewed commit — so the record-walk has a
+# predecessor to resolve back to. Without this shape, widening the walk's
+# record-exemption to all of .claude/ leaves the suite green while an
+# unreviewed edit to the file wiring the PreToolUse hook reaches the remote.
+caseno=$((caseno+1)); DEST="v$caseno"
+git -C "$WORK" checkout -q -B walkcase refs/remotes/origin/main
+echo "reviewed work" >> "$WORK/a.go"
+git -C "$WORK" commit -qam "reviewed code"
+rec clean --reviewer someone "covers the code commit"
+git -C "$WORK" add .claude/review-records >/dev/null 2>&1
+git -C "$WORK" commit -qm "chore: record review"
+mkdir -p "$WORK/.claude"; echo '{"hooks":{"PreToolUse":[]}}' > "$WORK/.claude/settings.json"
+git -C "$WORK" add -A; git -C "$WORK" commit -qm "chore: settings on top of a reviewed state"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+must_block 'pre-push: settings.json above a reviewed commit is NOT walked past'
 
 section "a rewritten remote-tracking ref cannot fake an empty diff"
 newcase
@@ -355,6 +382,22 @@ chk 'grep for the string'         0 "$(p 'grep -rn "git push --no-verify" docs/'
 chk 'mcp push_files blocked'      2 '{"tool_name":"mcp__github__push_files","tool_input":{}}'
 chk 'mcp create_or_update blocked' 2 '{"tool_name":"mcp__github__create_or_update_file","tool_input":{}}'
 chk 'mcp delete_file blocked'     2 '{"tool_name":"mcp__github__delete_file","tool_input":{}}'
+# Merging from the shell reaches the same outcome as the MCP tools, and the
+# harness prompt tells agents to prefer the CLI — so the recommended path
+# needs the same block. Literals are assembled here so that editing or
+# grepping this file is not itself refused.
+GHC="gh"; PRC="pr"; MGC="merge"
+chk 'cli pr merge blocked'        2 "$(p "$GHC $PRC $MGC 42 --squash")"
+chk 'cli api merge blocked'       2 "$(p "$GHC api -X PUT repos/o/r/pulls/42/$MGC")"
+chk 'curl api merge blocked'      2 "$(p "curl -X PUT https://api.github.com/repos/o/r/pulls/42/$MGC")"
+chk 'cli pr create allowed'       0 "$(p "$GHC $PRC create --fill")"
+chk 'cli pr view allowed'         0 "$(p "$GHC $PRC view 42")"
+# Mentioning is not running. This hook refused a reviewer's first command of
+# the round for containing the literal as test data, and CLAUDE.md documents
+# it — so an agent could not grep the limits list it is told to read.
+chk 'grepping the literal allowed' 0 "$(p "grep -rn \"$GHC $PRC $MGC\" CLAUDE.md")"
+chk 'commit message naming it'     0 "$(p "git commit -m \"gate: block $GHC $PRC $MGC\"")"
+chk 'echoing the literal allowed'  0 "$(p "echo \"never run $GHC $PRC $MGC yourself\"")"
 chk 'mcp merge_pull_request blocked' 2 '{"tool_name":"mcp__github__merge_pull_request","tool_input":{}}'
 chk 'mcp enable_pr_auto_merge blocked' 2 '{"tool_name":"mcp__github__enable_pr_auto_merge","tool_input":{}}'
 chk 'mcp create_pr allowed'       0 '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'
@@ -418,6 +461,51 @@ cp "$HOOKS/pre-push" "$IR3/.githooks/pre-push"; chmod +x "$IR3/.githooks/pre-pus
 out4="$( cd "$IR3" && bash "$IG" 2>&1 )"
 if printf '%s' "$out4" | grep -q "active"; then ok 'installer confirms a working hook'
 else bad 'installer confirms a working hook'; fi
+
+# An effective hooksPath set at --worktree scope OUTRANKS --local. Reading
+# --local reported "gate active" while the effective path was /dev/null, and
+# unlike `git -c …` that override persists, so the false all-clear repeated
+# every session. This one case also kills "skip the wiring check", since both
+# mutants end up probing a path the repo would not actually use.
+IR4="$TMP/instrepo4"; git init -q -b main "$IR4"
+mkdir -p "$IR4/.githooks"; cp "$HOOKS/pre-push" "$IR4/.githooks/pre-push"; chmod +x "$IR4/.githooks/pre-push"
+echo x > "$IR4/a.go"; git -C "$IR4" add -A; git -C "$IR4" commit -qm base
+git -C "$IR4" config --local core.hooksPath "$IR4/.githooks"
+git -C "$IR4" config --local extensions.worktreeConfig true 2>/dev/null
+if git -C "$IR4" config --worktree core.hooksPath /dev/null 2>/dev/null; then
+  out7="$( cd "$IR4" && bash "$IG" 2>&1 )"
+  if printf '%s' "$out7" | grep -q "active"; then
+    bad 'installer sees a --worktree hooksPath override'
+  else ok 'installer sees a --worktree hooksPath override'; fi
+  git -C "$IR4" config --worktree --unset core.hooksPath 2>/dev/null || true
+else
+  ok 'installer sees a --worktree hooksPath override (skipped: git too old)'
+fi
+
+# A hook that fails for a reason of its OWN is not a refusal. Treating any
+# nonzero exit as proof of a working gate is the v1 defect; the check is
+# `rc != 0 AND the hook said so`, and dropping either half must be caught.
+IR5="$TMP/instrepo5"; git init -q -b main "$IR5"
+mkdir -p "$IR5/.githooks"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$IR5/.githooks/pre-push"; chmod +x "$IR5/.githooks/pre-push"
+echo x > "$IR5/a.go"; git -C "$IR5" add -A; git -C "$IR5" commit -qm base
+out8="$( cd "$IR5" && bash "$IG" 2>&1 )"
+if printf '%s' "$out8" | grep -q "active"; then
+  bad 'installer does NOT read a silent failure as a refusal'
+else ok 'installer does NOT read a silent failure as a refusal'; fi
+
+# git skips a non-executable hook SILENTLY, so the installer must repair the
+# mode or say the gate is off — never proceed quietly.
+IR6="$TMP/instrepo6"; git init -q -b main "$IR6"
+mkdir -p "$IR6/.githooks"; cp "$HOOKS/pre-push" "$IR6/.githooks/pre-push"; chmod 644 "$IR6/.githooks/pre-push"
+echo x > "$IR6/a.go"; git -C "$IR6" add -A; git -C "$IR6" commit -qm base
+out9="$( cd "$IR6" && bash "$IG" 2>&1 )"
+# Repairing is the job; warning is only the fallback when chmod cannot work.
+# Accepting either let "skip the chmod entirely" pass, since the wiring check
+# downstream then warns and the case read as satisfied.
+if [ -x "$IR6/.githooks/pre-push" ]; then
+  ok 'installer repairs a non-executable hook'
+else bad 'installer repairs a non-executable hook'; fi
 
 section "loud failure modes stay loud"
 # A bypass that reads like a review, or a gate that goes quiet without jq, is
