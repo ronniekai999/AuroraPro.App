@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# THE enforcement boundary for the adversarial review gate.
+#
+# git runs this after the shell has already resolved everything: the repo is
+# unambiguous ($GIT_DIR is set by git itself), and the exact refs and shas
+# being pushed arrive on stdin. Nothing about how the command was typed can
+# change what this sees.
+#
+# That is the whole reason it exists. The PreToolUse hook that used to be the
+# boundary tried to recognize a push by parsing the shell command, and four
+# review rounds walked through it: `git push;`, `git push&&x`, `git -c k=v
+# push`, `env FOO=1 git push`, `bash -c "git push"`, `bash -c 'echo x; git
+# push'`, `pushd other && git push`, `cd other && git push`, `sudo -i git
+# push`, `timeout -k 5 60 git push`, `git -C $(pwd) push`, `ssh box 'cd /srv
+# && git push'`, and two pushes in one call where only the first was checked.
+# Each fix was correct and each left the next one reachable, because an
+# allowlist of shell shapes cannot be finished. This layer has no such list.
+#
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one per ref.
+# Exit non-zero to refuse the push.
+#
+# Installed via core.hooksPath=.githooks (see scripts/install-git-hooks.sh,
+# run automatically by the SessionStart hook in .claude/settings.json).
+# `git push --no-verify` skips ALL pre-push hooks — that is git's design, not
+# a hole in this script — so the PreToolUse hook refuses --no-verify
+# separately, and a bypass that gets past both still has to be reported.
+
+set -uo pipefail
+
+ZERO='0000000000000000000000000000000000000000'
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+RECORDS_DIR="$REPO_ROOT/.claude/review-records"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "review-gate: jq is not installed, so review records cannot be read. Failing closed." >&2
+  exit 1
+fi
+
+# Base for the docs-only exemption.
+base=""
+for candidate in origin/main origin/master; do
+  if git rev-parse --verify --quiet "$candidate" >/dev/null; then base="$candidate"; break; fi
+done
+
+# Returns 0 when every path in the range is documentation. Files that GOVERN
+# agent behavior are excluded: the rules an agent follows are not a place for
+# unreviewed edits.
+docs_only() {
+  local from="$1" to="$2" changed
+  # No base at all — a brand-new repo or an unrelated first push. Diff
+  # against the empty tree so the commit's whole file list is still
+  # inspectable, rather than failing closed on a legitimate docs push.
+  [ -n "$from" ] || from="$(git hash-object -t tree /dev/null)"
+  [ -n "$from" ] || return 1
+  changed="$(git diff --name-only "$from" "$to" 2>/dev/null)" || return 1
+  [ -n "$changed" ] || return 0
+  printf '%s\n' "$changed" | grep -qvE '\.(md|txt)$' && return 1
+  printf '%s\n' "$changed" | grep -qE '(^|/)(CLAUDE|AGENTS)\.md$|^docs/dev-workflow\.md$' && return 1
+  return 0
+}
+
+blocked=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -n "${local_sha:-}" ] || continue
+  [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
+
+  from=""
+  if [ -n "${remote_sha:-}" ] && [ "$remote_sha" != "$ZERO" ]; then
+    from="$remote_sha"                            # only the new commits
+  elif [ -n "$base" ]; then
+    from="$(git merge-base "$base" "$local_sha" 2>/dev/null || true)"
+  fi
+  if docs_only "$from" "$local_sha"; then continue; fi
+
+  record="$RECORDS_DIR/$local_sha.json"
+  if [ ! -f "$record" ]; then
+    echo "review-gate: BLOCKED — no independent adversarial review on record for ${local_ref:-HEAD} ($local_sha)." >&2
+    blocked=1
+    continue
+  fi
+  verdict="$(jq -r '.verdict // ""' "$record" 2>/dev/null)" || verdict=""
+  recorded_sha="$(jq -r '.sha // ""' "$record" 2>/dev/null)" || recorded_sha=""
+  reviewer="$(jq -r '.reviewer // ""' "$record" 2>/dev/null)" || reviewer=""
+
+  if [ "$recorded_sha" != "$local_sha" ]; then
+    echo "review-gate: BLOCKED — the record for $local_sha describes ${recorded_sha:-nothing}. Re-record." >&2
+    blocked=1; continue
+  fi
+  case "$verdict" in
+    clean|lows-only)
+      if [ -z "$reviewer" ]; then
+        echo "review-gate: BLOCKED — the record for $local_sha names no reviewer. Re-record with --reviewer <id>." >&2
+        blocked=1
+      fi
+      ;;
+    bypass)
+      echo "review-gate: BYPASSED for $local_sha — NO review happened. Report the gate as INCOMPLETE in your handoff and on the PR." >&2
+      ;;
+    "")
+      echo "review-gate: BLOCKED — the record for $local_sha has no verdict. Re-record." >&2; blocked=1 ;;
+    *)
+      echo "review-gate: BLOCKED — the review for $local_sha has verdict \"$verdict\". Resolve the findings, re-review the final diff, re-record." >&2
+      blocked=1 ;;
+  esac
+done
+
+if [ "$blocked" = 1 ]; then
+  cat >&2 <<'EOF'
+
+This repo requires an independent adversarial review before code is pushed
+(AGENTS.md "Mandatory independent adversarial review"; docs/dev-workflow.md
+stage 5). A self-review by the implementing agent does NOT satisfy it.
+
+  1. Dispatch a SEPARATE, fresh-context, read-only reviewer over the full
+     diff. Do not prime it with your own conclusions.
+  2. Resolve every high/critical finding, then re-review the FINAL diff.
+  3. bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
+
+Records are keyed to the exact commit, so amending or adding one invalidates
+them. If no reviewer is available the gate is INCOMPLETE — say so plainly;
+`record-review.sh bypass` records that honestly.
+EOF
+  exit 1
+fi
+exit 0

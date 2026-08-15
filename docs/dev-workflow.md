@@ -61,17 +61,19 @@ flowchart TD
    never substitute or relabel a self-review.
 
    **Record the verdict — this gate is enforced at PUSH time, not merge time.**
-   `scripts/review-gate.sh` runs as a PreToolUse hook and blocks the push until
-   a record exists for the commit being pushed:
+   `.githooks/pre-push` (a real git hook, installed by
+   `scripts/install-git-hooks.sh`) blocks the push until a record exists for
+   every commit being pushed:
 
    ```bash
    bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
    ```
 
    `fix-first` records a blocking verdict; `bypass` records that no review
-   happened and obliges you to report the gate as incomplete. Because the hook
-   runs *before* the command, a chained `git commit … && git push` is refused —
-   the sha it could see is the pre-commit one. Push as a separate call.
+   happened and obliges you to report the gate as incomplete. Records are keyed
+   to the exact commit, so amending or adding one invalidates them — record
+   after the final commit. See CLAUDE.md for the two-layer design and its
+   known limits.
 6. **Merge gate** —
    - **Clean** (no unresolved high/critical; lows/nits noted) → squash-merge to
      `main` and delete the merged branch.

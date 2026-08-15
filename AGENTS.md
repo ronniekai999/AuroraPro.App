@@ -28,9 +28,10 @@ merge. A self-review by the implementing agent does **not** satisfy this gate.
 
 ## Recording the verdict
 
-The gate is enforced mechanically, at **push** time — not at merge time. A
-PreToolUse hook (`scripts/review-gate.sh`, wired in `.claude/settings.json`)
-blocks the push until a record exists for the commit being pushed:
+The gate is enforced mechanically, at **push** time — not at merge time, and
+by a real git `pre-push` hook (`.githooks/pre-push`) rather than by anything
+that inspects your shell command. It blocks the push until a record exists for
+every commit being pushed:
 
 ```bash
 bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"

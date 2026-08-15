@@ -56,10 +56,16 @@ describe('admin stat tile labels', () => {
 
       for (const idx of sites) {
         const before = text.slice(Math.max(0, idx - 800), idx)
-        const labels = [...before.matchAll(/label:\s*'([^']*)'|label:\s*"([^"]*)"/g)]
+        // Backticks included: with only quoted forms, a template-literal
+        // label did not fail the check — it fell back to the PREVIOUS tile's
+        // quoted label and asserted on that instead, passing while the bug
+        // it names was present. The same line already uses a template
+        // literal for `value`, so that is a plausible edit, not a contrived
+        // one.
+        const labels = [...before.matchAll(/label:\s*'([^']*)'|label:\s*"([^"]*)"|label:\s*`([^`]*)`/g)]
         expect(labels.length, `no label precedes stats.movie_count at ${idx}`).toBeGreaterThan(0)
         const last = labels[labels.length - 1]
-        const labelText = (last[1] ?? last[2]).toLowerCase()
+        const labelText = (last[1] ?? last[2] ?? last[3]).toLowerCase()
         expect(labelText, `"${labelText}" calls title rows files`).not.toMatch(/\bfiles?\b/)
         expect(labelText, `"${labelText}" claims to count episodes`).not.toMatch(/\bepisodes?\b/)
       }

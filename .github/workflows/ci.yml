@@ -118,3 +118,18 @@ jobs:
 
       - name: Test
         run: npm test
+
+  review-gate:
+    name: Review gate self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The gate is the only thing standing between an unreviewed commit and
+      # the remote, and its suite is the only thing standing between the gate
+      # and a silent regression. Four review rounds each found a bypass the
+      # suite did not model, so it runs here rather than when someone
+      # remembers. It performs real pushes to a temp bare remote and asserts
+      # what landed; no network, no dependence on this checkout's state.
+      - name: Review gate tests
+        run: bash scripts/review-gate-test.sh

@@ -1,223 +1,201 @@
 #!/usr/bin/env bash
-# Tests for scripts/review-gate.sh.
+# Tests for the adversarial review gate.
 #
 #   bash scripts/review-gate-test.sh
 #
-# Every case runs against a SYNTHETIC repo built in a temp dir, never the
-# working checkout. The first version of this suite invoked the gate in the
-# live repo, so its "should block" cases passed only while HEAD happened to
-# lack a clean record — they would have flipped to failing in exactly the
-# state a developer is in when running the suite before pushing. It also
-# hardcoded one machine's path and so could not run in a clone or in CI.
+# Part 1 exercises .githooks/pre-push by performing REAL pushes to a real
+# (local, temp) bare remote and then asserting what actually landed on it.
+# Asserting the remote rather than the hook's exit code is the point: three
+# earlier rounds of this suite asserted exit codes and stayed green while
+# unreviewed commits reached a remote through shapes the suite did not model.
+# Here, a bypass shows up as a commit on the remote no matter how it got
+# there — including through shells, wrappers and directory changes the old
+# parser could not see.
 #
-# Cases assert exit codes AND, where the distinction matters, the reason —
-# because "allowed" alone cannot tell "not a push" from "a record exists"
-# from "the gate silently broke".
+# Part 2 covers the PreToolUse layer, which now only guards --no-verify and
+# the content-writing MCP tools.
+#
+# Everything runs in synthetic repos under a temp dir; nothing touches this
+# checkout, and no case depends on its state.
 
 set -uo pipefail
 
-GATE="$(cd "$(dirname "$0")" && pwd)/review-gate.sh"
-RECORD="$(cd "$(dirname "$0")" && pwd)/record-review.sh"
-[ -f "$GATE" ] || { echo "cannot find review-gate.sh next to this test"; exit 1; }
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GATE="$ROOT/scripts/review-gate.sh"
+RECORD="$ROOT/scripts/record-review.sh"
+HOOKS="$ROOT/.githooks"
+[ -f "$HOOKS/pre-push" ] || { echo "cannot find .githooks/pre-push"; exit 1; }
 
 pass=0; fail=0
 section() { printf '\n%s\n' "$1"; }
+ok()   { printf '  ok   %s\n' "$1"; pass=$((pass+1)); }
+bad()  { printf '  FAIL %s\n' "$1"; fail=$((fail+1)); }
 
-# run <repo> <payload-json> -> sets RC and OUT
-run() {
-  OUT="$(cd "$1" && printf '%s' "$2" | bash "$GATE" 2>&1)"
-  RC=$?
-}
-# The payload carries the session cwd; the gate must honor it rather than
-# trusting its own process cwd, and must follow the command out of it.
-bash_payload() {
-  printf '%s' "$1" | jq -Rs --arg cwd "${2:-}" \
-    '{tool_name:"Bash", cwd:$cwd, tool_input:{command:.}}'
-}
-
-check() { # name want_rc repo payload [want_substring]
-  local name="$1" want="$2" repo="$3" payload="$4" want_sub="${5:-}"
-  run "$repo" "$payload"
-  if [ "$RC" != "$want" ]; then
-    printf '  FAIL %-42s exit=%s want=%s\n' "$name" "$RC" "$want"; fail=$((fail+1)); return
-  fi
-  if [ -n "$want_sub" ] && ! printf '%s' "$OUT" | grep -qF "$want_sub"; then
-    printf '  FAIL %-42s exit ok but reason missing: %s\n' "$name" "$want_sub"; fail=$((fail+1)); return
-  fi
-  printf '  ok   %-42s exit=%s\n' "$name" "$RC"; pass=$((pass+1))
-}
-cmd() { check "$1" "$2" "$3" "$(bash_payload "$4" "$3")" "${5:-}"; }
-
-# --- synthetic repo ---------------------------------------------------
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-REPO="$TMP/repo"
-git init -q -b main "$REPO"
-git -C "$REPO" config user.email t@t; git -C "$REPO" config user.name t
-mkdir -p "$REPO/src"
-echo "base" > "$REPO/src/a.go"
-git -C "$REPO" add -A && git -C "$REPO" commit -qm base
-git -C "$REPO" update-ref refs/remotes/origin/main HEAD   # base == origin/main
-echo "code" >> "$REPO/src/a.go"
-git -C "$REPO" commit -qam "change code"
-CODE_SHA="$(git -C "$REPO" rev-parse HEAD)"
 
-section "detects a push through ordinary shell punctuation (all must BLOCK)"
-for c in 'git push -u origin main' 'git push;' 'echo a; git push;' 'git push&&echo done' \
-         'git push|cat' 'git push&' '(git push)' 'if true; then git push; fi' \
-         'for i in 1; do git push; done' 'git push --tags'; do
-  cmd "$c" 2 "$REPO" "$c" "no independent adversarial review"
-done
-# `cd` into a non-repo still blocks, but for the honest reason: the gate now
-# follows the command's target rather than reporting on its own checkout.
-cmd 'cd /tmp && git push' 2 "$REPO" 'cd /tmp && git push' 'not a git working tree'
+# --- a repo whose pushes are gated, wired to a bare remote --------------
+REMOTE="$TMP/remote.git"; git init -q --bare -b main "$REMOTE"
+WORK="$TMP/work"; git init -q -b main "$WORK"
+git -C "$WORK" config user.email t@t; git -C "$WORK" config user.name t
+git -C "$WORK" remote add origin "$REMOTE"
+echo base > "$WORK/a.go"; git -C "$WORK" add -A; git -C "$WORK" commit -qm base
+git -C "$WORK" push -q origin main
+# Hook goes on AFTER the fixture exists: the gate would (correctly) refuse
+# to push an unreviewed base commit, leaving the remote empty and every
+# later assertion measuring the wrong thing.
+git -C "$WORK" config core.hooksPath "$HOOKS"
+echo unreviewed >> "$WORK/a.go"; git -C "$WORK" commit -qam "unreviewed code"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
 
-section "detects a push reached indirectly (all must BLOCK)"
-cmd 'git -c user.email=x push'  2 "$REPO" 'git -c user.email=x push origin main'
-cmd 'git -c a=b -C . push'      2 "$REPO" 'git -c a=b -C . push'
-cmd 'git --no-pager push'       2 "$REPO" 'git --no-pager push'
-cmd 'env FOO=1 git push'        2 "$REPO" 'env FOO=1 git push'
-cmd 'VAR=off git push'          2 "$REPO" 'AURORA_REVIEW_GATE=off git push origin main'
-cmd 'time git push'             2 "$REPO" 'time git push'
-cmd '/usr/bin/git push'         2 "$REPO" '/usr/bin/git push'
-cmd 'bash -c "git push"'        2 "$REPO" 'bash -c "git push"'
-cmd 'xargs git push'            2 "$REPO" 'echo x | xargs -I{} git push'
-cmd 'gh pr create'              2 "$REPO" 'gh pr create --fill'
-cmd 'gh pr merge'               2 "$REPO" 'gh pr merge 12 --squash'
+# Capture first, then match. Piping `git log` straight into `grep -q` breaks
+# under `set -o pipefail`: grep exits on the first hit, git log dies of
+# SIGPIPE, and the pipeline reports failure even though the commit WAS found.
+# It only bites once the log is long enough to still be writing, so it read
+# as flakiness — a reviewed push reported as "refused" in later cases only.
+landed() {
+  local log
+  log="$(git -C "$REMOTE" log --all --oneline 2>/dev/null || true)"
+  printf '%s' "$log" | grep -q "${BAD_SHA:0:7}"
+}
 
-section "env assignments whose values contain spaces (must BLOCK)"
-cmd 'GIT_SSH_COMMAND="ssh -i k" push' 2 "$REPO" 'GIT_SSH_COMMAND="ssh -i ~/.ssh/id" git push origin main'
-cmd 'GIT_AUTHOR_NAME="Jane Doe" push' 2 "$REPO" 'GIT_AUTHOR_NAME="Jane Doe" git push origin main'
-cmd 'env with quoted spaces'          2 "$REPO" 'env GIT_SSH_COMMAND="ssh -i k" git push origin main'
+# try <name> <command...> — runs the command, then asserts the unreviewed
+# commit did NOT reach the remote.
+try() {
+  local name="$1"; shift
+  ( cd "$WORK" && eval "$*" ) >/dev/null 2>&1
+  if landed; then
+    bad "$name — UNREVIEWED COMMIT REACHED THE REMOTE"
+    git -C "$REMOTE" update-ref -d refs/heads/leak 2>/dev/null || true
+    git -C "$REMOTE" push -q . ":refs/heads/leak" 2>/dev/null || true
+  else
+    ok "$name"
+  fi
+}
 
-section "wrappers that take their own argument (must BLOCK)"
-cmd 'timeout 60 git push'  2 "$REPO" 'timeout 60 git push origin main'
-cmd 'nice -n 19 git push'  2 "$REPO" 'nice -n 19 git push origin main'
-cmd 'flock /tmp/l git push' 2 "$REPO" 'flock /tmp/l git push origin main'
-cmd 'setsid git push'      2 "$REPO" 'setsid git push origin main'
-cmd 'stdbuf -oL git push'  2 "$REPO" 'stdbuf -oL git push origin main'
-cmd 'git subtree push'     2 "$REPO" 'git subtree push --prefix=x origin main'
-cmd 'push --branches'      2 "$REPO" 'git push --branches origin' 'unknown set of refs'
+section "pre-push blocks the shapes that defeated the parser (nothing may land)"
+try 'git push'                       'git push origin main'
+try 'git push;'                      'git push origin main;'
+try 'chained with &&'                'echo x && git push origin main'
+try 'commit && push in one call'     'git commit -q --allow-empty -m more && git push origin main'
+try 'bash -c with a separator'       'bash -c "echo building; git push origin main"'
+try 'bash -c with &&'                'bash -c "true && git push origin main"'
+try 'bash -c commit && push'         'bash -c "git commit -q --allow-empty -m x && git push origin main"'
+try 'pushd then push'                'pushd . >/dev/null && git push origin main'
+try 'cd then push'                   "cd '$WORK' && git push origin main"
+try 'git -C'                         "git -C '$WORK' push origin main"
+try 'git -C command substitution'    'git -C $(pwd) push origin main'
+try 'GIT_DIR='                       "GIT_DIR='$WORK/.git' GIT_WORK_TREE='$WORK' git push origin main"
+try 'sudo -i style opt'              'env -i PATH="$PATH" HOME="$HOME" git push origin main'
+try 'timeout -k'                     'timeout -k 5 60 git push origin main'
+try 'nice with flag'                 'nice -n 19 git push origin main'
+try 'env with quoted spaces'         'GIT_AUTHOR_NAME="Jane Doe" git push origin main'
+try 'two pushes in one call'         'git push origin main && git push origin main:refs/heads/other'
+try 'explicit refspec'               'git push origin main:refs/heads/sneak'
+try 'push --all'                     'git push --all origin'
+try 'push --mirror'                  'git push --mirror origin'
+try 'git -c option'                  'git -c user.email=x push origin main'
 
-section "quoted prose that merely CONTAINS a compound push (must ALLOW)"
-cmd 'echo with && push inside'  0 "$REPO" 'echo "step 1: build && git push"'
-cmd 'commit -m with && push'    0 "$REPO" 'git commit -m "gate: block cd x && git push"'
-cmd 'log --grep with && push'   0 "$REPO" 'git log --oneline --grep="cd x && git push"'
+section "verdicts"
+# Each case gets its own commit and its own destination branch, so no case
+# depends on the remote state another case left behind.
+caseno=0
+newcase() {
+  caseno=$((caseno+1))
+  rm -f "$WORK/.claude/review-records/"*.json 2>/dev/null || true
+  echo "case $caseno" >> "$WORK/a.go"
+  git -C "$WORK" commit -qam "case $caseno"
+  BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+  DEST="v$caseno"
+}
+push_case() { ( cd "$WORK" && git push -q origin "HEAD:refs/heads/$DEST" ) >/dev/null 2>&1; }
+must_block() { push_case; if landed; then bad "$1 — UNREVIEWED COMMIT REACHED THE REMOTE"; else ok "$1"; fi; }
+must_allow() { push_case; if landed; then ok "$1"; else bad "$1 — a reviewed push was refused"; fi; }
+rec() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }
 
-section "non-Bash publish tools (must BLOCK)"
-check 'mcp github push_files'      2 "$REPO" '{"tool_name":"mcp__github__push_files","tool_input":{}}'
-check 'mcp github create_pr'       2 "$REPO" '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'
-check 'mcp github create_or_update' 2 "$REPO" '{"tool_name":"mcp__github__create_or_update_file","tool_input":{}}'
-check 'mcp github delete_file'      2 "$REPO" '{"tool_name":"mcp__github__delete_file","tool_input":{}}'
-check 'mcp github update_pr_branch' 2 "$REPO" '{"tool_name":"mcp__github__update_pull_request_branch","tool_input":{}}'
-check 'mcp github actions_run'      2 "$REPO" '{"tool_name":"mcp__github__actions_run_trigger","tool_input":{}}'
-check 'mcp github unknown future'   2 "$REPO" '{"tool_name":"mcp__github__some_future_writer","tool_input":{}}'
-check 'mcp github get_ is a read'   0 "$REPO" '{"tool_name":"mcp__github__get_file_contents","tool_input":{}}'
-check 'mcp github list_ is a read'  0 "$REPO" '{"tool_name":"mcp__github__list_commits","tool_input":{}}'
+newcase; rec fix-first "high found";                       must_block 'fix-first blocks'
+newcase; rec clean --reviewer someone "reviewed";           must_allow 'clean record allows'
+newcase; rec lows-only --reviewer someone "only nits";      must_allow 'lows-only allows'
+newcase; rec bypass "no reviewer available";                must_allow 'bypass allows'
+newcase;                                                    must_block 'no record blocks'
 
-section "mentions rather than invocations (all must ALLOW)"
-cmd 'grep for the string'  0 "$REPO" 'grep -rn "git push" docs/'
-cmd 'echo mentioning'      0 "$REPO" 'echo "run git push when ready"'
-cmd 'commit -m mentioning' 0 "$REPO" 'git commit -m "document git push flow"'
-cmd 'log --grep=push'      0 "$REPO" 'git log --grep=push'
-cmd 'pushd'                0 "$REPO" 'pushd /tmp'
-cmd 'unrelated'            0 "$REPO" 'ls -la'
-cmd 'empty'                0 "$REPO" ''
-cmd 'heredoc prose'        0 "$REPO" "$(printf 'git commit -F - <<EOF\nfails `git push` unless reviewed\nEOF')"
+newcase; rec clean --reviewer x "named"
+jq '.reviewer = ""' "$WORK/.claude/review-records/$BAD_SHA.json" > "$TMP/r.json"
+mv "$TMP/r.json" "$WORK/.claude/review-records/$BAD_SHA.json"
+must_block 'anonymous verdict blocks'
 
-section "chained commit+push cannot be verified (must BLOCK with advice)"
-cmd 'add && commit && push' 2 "$REPO" 'git add -A && git commit -m wip && git push origin main' \
-    "both moves HEAD and pushes"
-cmd 'rebase && push'        2 "$REPO" 'git rebase main && git push' "separate calls"
+newcase; rec clean --reviewer x "named"
+jq --arg s deadbeef '.sha=$s' "$WORK/.claude/review-records/$BAD_SHA.json" > "$TMP/r.json"
+mv "$TMP/r.json" "$WORK/.claude/review-records/$BAD_SHA.json"
+must_block 'record for another sha blocks'
 
-section "unverifiable ref sets (must BLOCK)"
-cmd 'push --all'    2 "$REPO" 'git push --all origin' "unknown set of refs"
-cmd 'push --mirror' 2 "$REPO" 'git push --mirror origin' "unknown set of refs"
+newcase; rec clean --reviewer x "named"
+echo 'not json' > "$WORK/.claude/review-records/$BAD_SHA.json"
+must_block 'corrupt record blocks'
 
-section "verdict handling"
-( cd "$REPO" && bash "$RECORD" clean --reviewer test --findings 0 "synthetic" >/dev/null )
-cmd 'clean record allows'    0 "$REPO" 'git push origin main'
-( cd "$REPO" && bash "$RECORD" lows-only "synthetic" >/dev/null )
-cmd 'lows-only allows'       0 "$REPO" 'git push origin main'
-( cd "$REPO" && bash "$RECORD" fix-first "synthetic" >/dev/null )
-cmd 'fix-first still blocks' 2 "$REPO" 'git push origin main' 'verdict "fix-first"'
-( cd "$REPO" && bash "$RECORD" bypass "no reviewer available" >/dev/null )
-cmd 'bypass allows, loudly'  0 "$REPO" 'git push origin main' 'INCOMPLETE'
-
-echo '{"verdict":"clean"}' > "$REPO/.claude/review-records/$CODE_SHA.json"
-cmd 'record missing its sha blocks' 2 "$REPO" 'git push origin main' 'describes nothing'
-echo '{"sha":"deadbeef","verdict":"clean"}' > "$REPO/.claude/review-records/$CODE_SHA.json"
-cmd 'record for another sha blocks' 2 "$REPO" 'git push origin main' 'not '"$CODE_SHA"
-echo 'not json' > "$REPO/.claude/review-records/$CODE_SHA.json"
-cmd 'corrupt record blocks'         2 "$REPO" 'git push origin main'
-rm -f "$REPO/.claude/review-records/$CODE_SHA.json"
-
-section "the gate follows the ref being pushed, not the checkout"
-git -C "$REPO" checkout -q -b feat/x
-echo "more" >> "$REPO/src/a.go"
-git -C "$REPO" commit -qam "feature work"
-git -C "$REPO" checkout -q main
-git -C "$REPO" reset -q --hard refs/remotes/origin/main   # HEAD is now clean vs origin
-cmd 'pushing another branch is checked' 2 "$REPO" 'git push origin feat/x'
-cmd 'refspec form is checked'           2 "$REPO" 'git push origin feat/x:refs/heads/feat/x'
-git -C "$REPO" checkout -q feat/x
-
-section "the gate follows the command into another repo, not its own cwd"
-# The hole that let a reviewer land unreviewed commits on a real remote:
-# the hook inspected the repo it was standing in while the command pushed
-# from a different one. OTHER has no record; REPO's record must not cover it.
-OTHER="$TMP/other"; git init -q -b main "$OTHER"
-git -C "$OTHER" config user.email t@t; git -C "$OTHER" config user.name t
-echo code > "$OTHER/x.go"; git -C "$OTHER" add -A; git -C "$OTHER" commit -qm base
-git -C "$OTHER" update-ref refs/remotes/origin/main HEAD
-echo more >> "$OTHER/x.go"; git -C "$OTHER" commit -qam unreviewed
-# REPO is on feat/x here, which carries real changes — pushing `main` would
-# be a no-op and would pass for the wrong reason.
-( cd "$REPO" && bash "$RECORD" clean --reviewer test "covers THIS repo only" >/dev/null )
-cmd 'cd other && push'        2 "$REPO" "cd $OTHER && git push origin main"
-cmd 'git -C other push'       2 "$REPO" "git -C $OTHER push origin main"
-cmd 'git --git-dir=other'     2 "$REPO" "git --git-dir=$OTHER/.git --work-tree=$OTHER push origin main"
-cmd 'GIT_DIR=other git push'  2 "$REPO" "GIT_DIR=$OTHER/.git GIT_WORK_TREE=$OTHER git push origin main"
-cmd 'own repo still allowed'  0 "$REPO" 'git push origin feat/x'
-rm -f "$REPO/.claude/review-records/"*.json
-
-section "a passing verdict must name a reviewer"
-( cd "$REPO" && bash "$RECORD" clean --reviewer someone "named" >/dev/null )
-cmd 'named reviewer allows' 0 "$REPO" 'git push origin feat/x'
-sha="$(git -C "$REPO" rev-parse HEAD)"
-jq '.reviewer = ""' "$REPO/.claude/review-records/$sha.json" > "$TMP/r.json"
-mv "$TMP/r.json" "$REPO/.claude/review-records/$sha.json"
-cmd 'anonymous verdict blocks' 2 "$REPO" 'git push origin feat/x' 'names no reviewer'
-if ( cd "$REPO" && bash "$RECORD" clean "no reviewer flag" >/dev/null 2>&1 ); then
-  printf '  FAIL %-42s record-review accepted clean without --reviewer\n' 'record-review requires reviewer'; fail=$((fail+1))
-else
-  printf '  ok   %-42s rejected\n' 'record-review requires reviewer'; pass=$((pass+1))
-fi
-rm -f "$REPO/.claude/review-records/"*.json
+# A clean record for the PREVIOUS commit must not cover a new one.
+newcase; rec clean --reviewer x "named"
+echo amended >> "$WORK/a.go"; git -C "$WORK" commit -qam "extra work"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+must_block 'a later commit invalidates the record'
+rm -f "$WORK/.claude/review-records/"*.json
 
 section "docs-only exemption"
-DOCS="$TMP/docs"; git init -q -b main "$DOCS"
-git -C "$DOCS" config user.email t@t; git -C "$DOCS" config user.name t
-echo x > "$DOCS/README.md"; git -C "$DOCS" add -A; git -C "$DOCS" commit -qm base
-git -C "$DOCS" update-ref refs/remotes/origin/main HEAD
-echo more >> "$DOCS/README.md"; git -C "$DOCS" commit -qam docs
-cmd 'markdown-only push allowed' 0 "$DOCS" 'git push origin main'
-mkdir -p "$DOCS/docs"; echo 'server {}' > "$DOCS/docs/nginx.conf"
-git -C "$DOCS" add -A; git -C "$DOCS" commit -qm conf
-cmd 'config under docs/ is NOT exempt' 2 "$DOCS" 'git push origin main'
-git -C "$DOCS" reset -q --hard HEAD~1
-echo 'rule' >> "$DOCS/CLAUDE.md"; git -C "$DOCS" add -A; git -C "$DOCS" commit -qm rules
-cmd 'CLAUDE.md is NOT exempt'          2 "$DOCS" 'git push origin main'
-git -C "$DOCS" reset -q --hard HEAD~1
-echo 'code' > "$DOCS/x.go"; git -C "$DOCS" add -A; git -C "$DOCS" commit -qm ride
-cmd 'code riding along with docs'      2 "$DOCS" 'git push origin main'
+DR="$TMP/docsremote.git"; git init -q --bare -b main "$DR"
+DW="$TMP/docswork"; git init -q -b main "$DW"
+git -C "$DW" config user.email t@t; git -C "$DW" config user.name t
+git -C "$DW" config core.hooksPath "$HOOKS"; git -C "$DW" remote add origin "$DR"
+echo x > "$DW/README.md"; git -C "$DW" add -A; git -C "$DW" commit -qm base
+git -C "$DW" push -q origin main
+dpush() { ( cd "$DW" && git push -q origin main ) >/dev/null 2>&1; }
+echo more >> "$DW/README.md"; git -C "$DW" commit -qam docs
+if dpush; then ok 'markdown-only push allowed'; else bad 'markdown-only push allowed'; fi
+mkdir -p "$DW/docs"; echo 'server {}' > "$DW/docs/nginx.conf"
+git -C "$DW" add -A; git -C "$DW" commit -qm conf
+if dpush; then bad 'config under docs/ must NOT be exempt'; else ok 'config under docs/ is NOT exempt'; fi
+git -C "$DW" reset -q --hard HEAD~1
+echo rule >> "$DW/CLAUDE.md"; git -C "$DW" add -A; git -C "$DW" commit -qm rules
+if dpush; then bad 'CLAUDE.md must NOT be exempt'; else ok 'CLAUDE.md is NOT exempt'; fi
 
-section "fail-closed states"
-NOBASE="$TMP/nobase"; git init -q -b main "$NOBASE"
-git -C "$NOBASE" config user.email t@t; git -C "$NOBASE" config user.name t
-echo c > "$NOBASE/a.go"; git -C "$NOBASE" add -A; git -C "$NOBASE" commit -qm base
-cmd 'no origin/main still blocks' 2 "$NOBASE" 'git push origin main'
-cmd 'outside a git repo blocks'   2 "$TMP"    'git push origin main' 'not a git working tree'
+section "PreToolUse layer: --no-verify and content-writing MCP tools"
+p() { printf '%s' "$1" | jq -Rs '{tool_name:"Bash", tool_input:{command:.}}'; }
+chk() { # name want_rc payload
+  local out rc
+  out="$(printf '%s' "$3" | bash "$GATE" 2>&1)"; rc=$?
+  if [ "$rc" = "$2" ]; then ok "$1"; else bad "$1 (exit=$rc want=$2)"; fi
+}
+chk 'push --no-verify blocked'    2 "$(p 'git push --no-verify origin main')"
+# `git push -n` is --dry-run, not --no-verify. Matching a bare -n made this
+# hook block its own test run over a `sed -n` that mentioned a push.
+chk 'push -n (dry-run) allowed'   0 "$(p 'git push -n origin main')"
+chk 'sed -n near the word push'   0 "$(p "bash x.sh | sed -n '/push/p'")"
+chk 'tail -n near the word push'  0 "$(p 'git log --oneline | tail -n 5 # find the push')"
+# A commit MESSAGE that discusses --no-verify is not a use of it: this check
+# blocked the very commit that introduced it.
+chk 'heredoc commit body mentioning it' 0 "$(p 'git commit -F - <<EOF
+gate: block git push --no-verify
+EOF')"
+chk 'no-verify in a bash -c'      2 "$(p 'bash -c "git push --no-verify origin main"')"
+chk 'ordinary push allowed here'  0 "$(p 'git push origin main')"
+chk 'commit -m mentioning push'   0 "$(p 'git commit -m "document git push flow"')"
+chk 'echo with && push inside'    0 "$(p 'echo "build && git push"')"
+chk 'npm run build'               0 "$(p 'npm run build')"
+chk 'grep for the string'         0 "$(p 'grep -rn "git push --no-verify" docs/')"
+chk 'mcp push_files blocked'      2 '{"tool_name":"mcp__github__push_files","tool_input":{}}'
+chk 'mcp create_or_update blocked' 2 '{"tool_name":"mcp__github__create_or_update_file","tool_input":{}}'
+chk 'mcp delete_file blocked'     2 '{"tool_name":"mcp__github__delete_file","tool_input":{}}'
+chk 'mcp create_pr allowed'       0 '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'
+chk 'mcp get_file allowed'        0 '{"tool_name":"mcp__github__get_file_contents","tool_input":{}}'
+
+section "record-review argument handling"
+r() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }
+if r clean "no reviewer flag";       then bad 'clean without --reviewer rejected'; else ok 'clean without --reviewer rejected'; fi
+if r lows-only "no reviewer flag";   then bad 'lows-only without --reviewer rejected'; else ok 'lows-only without --reviewer rejected'; fi
+if r clean --reviewer x "";          then bad 'empty summary rejected'; else ok 'empty summary rejected'; fi
+if r clean --reviewer x "   ";       then bad 'whitespace summary rejected'; else ok 'whitespace summary rejected'; fi
+if r bogus --reviewer x "s";         then bad 'unknown verdict rejected'; else ok 'unknown verdict rejected'; fi
+if r clean --reviewer x --findings n "s"; then bad 'non-numeric --findings rejected'; else ok 'non-numeric --findings rejected'; fi
+if r bypass "no reviewer available"; then ok 'bypass needs no reviewer'; else bad 'bypass needs no reviewer'; fi
 
 printf '\npass=%s fail=%s\n' "$pass" "$fail"
 [ "$fail" = 0 ]

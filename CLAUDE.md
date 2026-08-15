@@ -53,23 +53,40 @@ present a self-review as equivalent. `record-review.sh bypass "<why>"` records
 that honestly and lets the push through; it is the only way past, and it
 obliges you to report the gate as incomplete. There is no silent bypass.
 
-**This is enforced mechanically.** `.claude/settings.json` runs
-`scripts/review-gate.sh` as a PreToolUse hook over `Bash` and the
-`mcp__github__*` tools, and blocks a push unless a review record exists for
-**the commit being pushed** — resolved from the command itself: the ref it
-names, in the repo it acts on (`cd`, `-C`, `--git-dir`, `GIT_DIR`), not
-whatever the session happens to be standing in. Amending or adding a commit
-invalidates the record.
-A call that both moves HEAD and pushes (`git commit … && git push`) is refused
-outright: the hook runs *before* the command, so the sha it can see is the one
-before your commit. Run them as separate calls.
+**This is enforced mechanically, in two layers.**
 
-Coverage is honest but not total: `scripts/review-gate-test.sh` pins what is
-enforced, against synthetic repos with no dependence on this checkout's state.
-The gate verifies that a record exists and names a reviewer — it CANNOT verify
-that a review actually happened. Anyone who can write the record can author
-one by hand; the reviewer field and the recorded diff digest make a hollow
-record auditable, not impossible. Treat the hook as a floor, not a guarantee.
+1. **`.githooks/pre-push` is the enforcement boundary.** git runs it with the
+   refs and shas already resolved, in the repo actually being pushed, so no
+   shell shape changes what it sees — `bash -c "…"`, `pushd other && git
+   push`, `git -C … push`, `timeout 60 git push`, `git push a && git push b`
+   all reach the same check. It refuses the push unless every ref being
+   pushed has a record naming a reviewer. Installed via
+   `core.hooksPath=.githooks` by `scripts/install-git-hooks.sh`, which the
+   SessionStart hook runs for you.
+2. **`scripts/review-gate.sh` (PreToolUse) covers what a git hook cannot
+   see**: `git push --no-verify`, which skips pre-push hooks by design, and
+   the `mcp__github__` tools that write file content over the API without
+   touching git at all.
+
+This replaced an earlier design that tried to recognize a push by parsing the
+shell command. Four review rounds walked through that parser, each bypass
+ordinary rather than adversarial. An allowlist of shell shapes cannot be
+finished; the git layer has no such list.
+
+Known limits, so you don't over-trust it:
+
+- **The gate cannot verify a review happened**, only that a record exists and
+  names a reviewer. Anyone who can write the record can author one by hand.
+  The reviewer field and diff digest make a hollow record auditable, not
+  impossible.
+- **`--no-verify` genuinely bypasses layer 1**; only the weaker layer 2
+  catches it, and only when it can see the command.
+- **A fresh clone has no hook until `core.hooksPath` is set** — that is the
+  cost of enforcing at the git layer.
+
+`scripts/review-gate-test.sh` (run in CI) pins the behavior by performing real
+pushes to a temp remote and asserting what actually landed, rather than
+trusting exit codes.
 
 Only `*.md`/`*.txt` diffs are exempt, and `CLAUDE.md`, `AGENTS.md` and
 `docs/dev-workflow.md` are excluded from that exemption: the rules an agent
