@@ -50,3 +50,9 @@ node_modules/
 
 # Claude Code local (machine-specific) settings — keep personal
 .claude/settings.local.json
+
+# Adversarial-review records (scripts/record-review.sh, checked by
+# scripts/review-gate.sh). A verdict is a statement about one exact diff
+# on one machine — it must not travel to another clone or survive an
+# amend, so these stay local while the hook config itself is committed.
+.claude/review-records/
