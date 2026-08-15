@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { formatSkipMarkers, skipCoverage, skipMarkerTotals } from './adminDashboardTiles'
+import type { SkipMarkerTotals } from './adminDashboardTiles'
 import type { SkipMarkerStatus } from './api'
 
 const status = (over: Partial<SkipMarkerStatus> = {}): SkipMarkerStatus =>
@@ -19,7 +20,7 @@ describe('skipCoverage', () => {
       episode_files_total: 7405, episode_files_analyzed: 7405,
       movie_files_total: 772, movie_files_analyzed: 772,
     }))
-    expect(c).toEqual({ analyzed: 8177, total: 8177, behind: false })
+    expect(c).toEqual({ analyzed: 8177, total: 8177, behind: false, empty: false })
   })
 
   it('is behind while files are outstanding', () => {
@@ -37,37 +38,64 @@ describe('skipCoverage', () => {
   })
 
   it('treats missing fields as zero so an old binary cannot NaN the tile', () => {
-    expect(skipCoverage(status())).toEqual({ analyzed: 0, total: 0, behind: false })
+    expect(skipCoverage(status())).toEqual({ analyzed: 0, total: 0, behind: false, empty: true })
+  })
+
+  it('marks an empty library empty rather than fully covered', () => {
+    // 0 / 0 is not an accomplishment — a fresh install has nothing to be
+    // complete about, and the tile must not tint it the same green as a
+    // finished sweep.
+    const c = skipCoverage(status({ episode_files_total: 0, movie_files_total: 0 }))
+    expect(c.empty).toBe(true)
+    expect(c.behind).toBe(false)
+    expect(skipCoverage(status({ episode_files_total: 10, episode_files_analyzed: 10 })).empty).toBe(false)
   })
 })
 
 describe('skipMarkerTotals', () => {
-  it('totals the three kinds and keeps manual separate', () => {
-    // manual is counted by detector, not kind — it overlaps the kinds
-    // rather than adding to them, so total must exclude it.
+  it('totals the three kinds, with manual a subset and suppressed outside', () => {
+    // The server counts manual with the same visibility filter as the
+    // kinds, so it is CONTAINED in total; suppressions (zero-length manual
+    // rows, migration 043) are not markers and are outside it entirely.
     expect(skipMarkerTotals(status({
-      intro_markers: 6210, recap_markers: 1003, credits_markers: 4830, manual_markers: 12,
-    }))).toEqual({ intro: 6210, recap: 1003, credits: 4830, manual: 12, total: 12043 })
+      intro_markers: 6210, recap_markers: 1003, credits_markers: 4830,
+      manual_markers: 12, suppressed_markers: 4,
+    }))).toEqual({ intro: 6210, recap: 1003, credits: 4830, manual: 12, suppressed: 4, total: 12043 })
   })
 })
 
 describe('formatSkipMarkers', () => {
+  const t = (over: Partial<SkipMarkerTotals> = {}): SkipMarkerTotals =>
+    ({ intro: 0, recap: 0, credits: 0, manual: 0, suppressed: 0, total: 0, ...over })
+
   it('leads with the total and breaks down by kind', () => {
-    expect(formatSkipMarkers({ intro: 6210, recap: 1003, credits: 4830, manual: 12, total: 12043 }))
-      .toBe('12,043 markers · 6,210 intro · 1,003 recap · 4,830 credits · 12 manual')
+    expect(formatSkipMarkers(t({
+      intro: 6210, recap: 1003, credits: 4830, manual: 12, total: 12043,
+    }))).toBe('12,043 markers · 6,210 intro · 1,003 recap · 4,830 credits · 12 hand-edited')
   })
 
   it('drops zero kinds so a movies-only library reads cleanly', () => {
-    expect(formatSkipMarkers({ intro: 0, recap: 0, credits: 340, manual: 0, total: 340 }))
-      .toBe('340 markers · 340 credits')
+    expect(formatSkipMarkers(t({ credits: 340, total: 340 }))).toBe('340 markers · 340 credits')
   })
 
-  it('returns empty when nothing was detected, so no sub-line renders', () => {
-    expect(formatSkipMarkers({ intro: 0, recap: 0, credits: 0, manual: 0, total: 0 })).toBe('')
+  it('reports suppressions even when no marker was ever detected', () => {
+    // Regression, HIGH: the guard tested `total === 0` alone, and manual
+    // rows are excluded from total — so an operator who had suppressed
+    // false positives on a library with no positive-length markers saw
+    // their edits vanish from the only surface that reports them.
+    expect(formatSkipMarkers(t({ suppressed: 5 }))).toBe('5 suppressed')
+  })
+
+  it('appends suppressions after the breakdown they are not part of', () => {
+    expect(formatSkipMarkers(t({ credits: 10, manual: 2, suppressed: 3, total: 10 })))
+      .toBe('10 markers · 10 credits · 2 hand-edited · 3 suppressed')
+  })
+
+  it('returns empty only when there is genuinely nothing to say', () => {
+    expect(formatSkipMarkers(t())).toBe('')
   })
 
   it('singularizes one marker', () => {
-    expect(formatSkipMarkers({ intro: 1, recap: 0, credits: 0, manual: 0, total: 1 }))
-      .toBe('1 marker · 1 intro')
+    expect(formatSkipMarkers(t({ intro: 1, total: 1 }))).toBe('1 marker · 1 intro')
   })
 })

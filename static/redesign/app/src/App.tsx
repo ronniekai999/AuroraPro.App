@@ -1609,13 +1609,17 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
       { label: 'Memory', value: `${stats.memory_alloc_mb} MB`, icon: 'zap', tone: 'ok',
         hint: "Aurora's Go process RSS after the last GC. FFmpeg transcoders run as separate subprocesses and aren't counted here. PostgreSQL runs in its own container with its own memory budget." },
       { label: 'Library Size', value: fmtBytes(stats.total_file_size_bytes), icon: 'film', tone: 'ok' },
-      // QA BUG-002 — label as "Files" not "Titles" so users
-      // don't read this as conflicting with the Movies/Shows
-      // browse header (deduped library titles). Raw count
-      // includes cross-library duplicates (e.g. a film present
-      // in BOTH "Movies" and "4K Movies" libraries is counted
-      // twice here, once on the browse page).
-      { label: 'Files: Movies · Shows', value: `${stats.movie_count.toLocaleString()} · ${stats.show_count.toLocaleString()}`, icon: 'film', tone: 'ok' },
+      // QA BUG-002 labelled this "Files" rather than "Titles" so it would
+      // not read as conflicting with the deduped Movies/Shows browse
+      // header. But movie_count/show_count are COUNT(*) over media_items
+      // (queries_phase4.go GetMediaCounts) — title rows, zero files, no
+      // episodes. "Files" was the one noun it could not be, and it
+      // contradicted the admin dashboard tile fed by these same two
+      // fields. Says "rows" now, which is the honest distinction from the
+      // browse header: raw count, so a film in both "Movies" and "4K
+      // Movies" is counted twice here and once there.
+      { label: 'Rows: Movies · Shows', value: `${stats.movie_count.toLocaleString()} · ${stats.show_count.toLocaleString()}`, icon: 'film', tone: 'ok',
+        hint: 'Title rows in the catalog, not files and not episodes — a show counts once here however many episodes it has. Raw count, so a title present in two libraries is counted twice.' },
       { label: 'Users', value: String(stats.user_count), icon: 'users', tone: 'ok' },
       { label: 'Active Parties', value: String(stats.active_parties), icon: 'users', tone: 'ok' },
       { label: 'Uptime', value: stats.uptime, icon: 'activity', tone: 'ok' },

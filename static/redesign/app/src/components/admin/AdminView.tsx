@@ -2671,8 +2671,13 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     }]
                   : []),
                 ...(skipStatus && skipStatus.enabled
-                  ? (() => {
-                      const { analyzed, total, behind } = skipCoverage(skipStatus)
+                  // Return type annotated, not left to `satisfies` on the
+                  // enclosing array: contextual typing does not flow into an
+                  // IIFE return, so excess-property checking silently stops
+                  // at this element. A `hnit:` typo would compile clean and
+                  // drop the tooltip this change exists to add.
+                  ? ((): StatTileProps[] => {
+                      const { analyzed, total, behind, empty } = skipCoverage(skipStatus)
                       return [{
                         // Was "Skip Markers", which named the wrong noun:
                         // the figure counts FILES the detector has been
@@ -2682,8 +2687,8 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                         label: 'Skip Analysis',
                         value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`,
                         icon: 'film',
-                        color: behind ? 'text-amber-400' : 'text-emerald-400',
-                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Counts files — the Movies + Shows tile counts titles, so the two are not comparable.',
+                        color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',
+                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Counts FILES — the Movies + Shows tile counts titles, and the Server panel\'s Episodes counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
                         sub: formatSkipMarkers(skipMarkerTotals(skipStatus)),
                       }]
                     })()
@@ -2712,7 +2717,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     value: (stats.movie_count + stats.show_count).toLocaleString(),
                     icon: 'film',
                     color: 'text-purple-400',
-                    hint: 'Title rows: movies plus series. Episodes are NOT included — see Episodes in the Server panel below. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
+                    hint: 'Title rows: movies plus series. Episodes are NOT included — the Server panel below counts those separately. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
                   },
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
