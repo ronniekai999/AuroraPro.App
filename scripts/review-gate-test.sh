@@ -386,7 +386,7 @@ chk 'mcp delete_file blocked'     2 '{"tool_name":"mcp__github__delete_file","to
 # harness prompt tells agents to prefer the CLI — so the recommended path
 # needs the same block. Literals are assembled here so that editing or
 # grepping this file is not itself refused.
-GHC="gh"; PRC="pr"; MGC="merge"
+GHC="gh"; PRC="pr"; MGC="merge"; NVF="--no-""verify"
 chk 'cli pr merge blocked'        2 "$(p "$GHC $PRC $MGC 42 --squash")"
 chk 'cli api merge blocked'       2 "$(p "$GHC api -X PUT repos/o/r/pulls/42/$MGC")"
 chk 'curl api merge blocked'      2 "$(p "curl -X PUT https://api.github.com/repos/o/r/pulls/42/$MGC")"
@@ -398,6 +398,36 @@ chk 'cli pr view allowed'         0 "$(p "$GHC $PRC view 42")"
 chk 'grepping the literal allowed' 0 "$(p "grep -rn \"$GHC $PRC $MGC\" CLAUDE.md")"
 chk 'commit message naming it'     0 "$(p "git commit -m \"gate: block $GHC $PRC $MGC\"")"
 chk 'echoing the literal allowed'  0 "$(p "echo \"never run $GHC $PRC $MGC yourself\"")"
+
+# Wrappers. Folding the merge check into the peeler silently DROPPED these —
+# the old bare regex caught them and the refactor did not, in the one layer
+# covering a self-merge. Neither the suite nor the mutation harness noticed,
+# which is why they are pinned individually now.
+for w in "timeout 60" "timeout -k 5 60" "nice -n 5" "setsid" "stdbuf -o0" \
+         "sudo -u root" "env -u FOO" "flock /tmp/l"; do
+  chk "wrapped merge blocked: $w"  2 "$(p "$w $GHC $PRC $MGC 42")"
+done
+chk 'wrapped no-verify blocked'    2 "$(p "timeout 60 git push $NVF origin main")"
+chk 'wrapper alone is allowed'     0 "$(p 'timeout 60 npm run build')"
+chk 'nice alone is allowed'        0 "$(p 'nice -n 5 go test ./...')"
+
+# Segment splitting. Every existing compound case was an ALLOW case, so
+# replacing the separator split with `cat` left the suite green while
+# anything after a `;` or `&&` stopped being seen at all.
+chk 'merge after a semicolon'      2 "$(p "echo hi; $GHC $PRC $MGC 42")"
+chk 'merge after &&'               2 "$(p "go build ./... && $GHC $PRC $MGC 42")"
+chk 'no-verify after a semicolon'  2 "$(p "echo hi; git push $NVF origin main")"
+chk 'no-verify after &&'           2 "$(p "make test && git push $NVF origin main")"
+
+# The commit-message skip is load-bearing: without it this exact command is
+# refused. The existing "commit message naming it" case uses the merge
+# literal, which anchoring alone already allows, so it never exercised this.
+chk 'commit msg naming the flag'   0 "$(p "git commit -m \"gate: block git push $NVF\"")"
+# Heredoc stripping still matters for a NON-commit heredoc whose body line
+# starts with the literal; the commit skip short-circuits the commit form.
+chk 'heredoc body starting with it' 0 "$(p "cat > n.txt <<EOF
+git push $NVF is banned here
+EOF")"
 chk 'mcp merge_pull_request blocked' 2 '{"tool_name":"mcp__github__merge_pull_request","tool_input":{}}'
 chk 'mcp enable_pr_auto_merge blocked' 2 '{"tool_name":"mcp__github__enable_pr_auto_merge","tool_input":{}}'
 chk 'mcp create_pr allowed'       0 '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'

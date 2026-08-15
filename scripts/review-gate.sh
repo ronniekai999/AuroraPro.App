@@ -65,7 +65,8 @@ Commit locally and push instead, so the gate can verify the commit:
 esac
 
 # ---------------------------------------------------------------------
-# 2. --no-verify / -n on a push skips every pre-push hook. Detection here is
+# 2. --no-verify on a push skips every pre-push hook (NOT -n, which is
+#    git's --dry-run and harmless). Detection here is
 #    intentionally crude and over-eager: a false positive costs one retry
 #    without the flag, and the flag has no legitimate use in this repo.
 # ---------------------------------------------------------------------
@@ -119,9 +120,27 @@ if [ -n "$command_text" ]; then
         gsub(/^[ \t(]+/, "", s)
         while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
         n = split(s, t, /[ \t]+/)
-        while (n > 0 && basename(t[1]) ~ /^(sudo|env|time|nohup|command|exec|doas|xargs|bash|sh|zsh|ksh|dash)$/) {
+        # Wrapper peel. The previous form dropped argv[2] and kept the rest,
+        # which mishandled every wrapper taking a value: `sudo -u root X`
+        # left "root" as the command word, and timeout/nice/stdbuf were not
+        # recognized at all. Folding the merge check into this peeler
+        # therefore LOST coverage the old bare regex had — `timeout 60 <cli>
+        # pr merge` went from blocked to allowed. That matters more here than
+        # for --no-verify, which pre-push and CI still see: the merge block is
+        # the only layer covering a self-merge.
+        while (n > 0 && basename(t[1]) ~ /^(sudo|doas|env|time|timeout|nohup|command|exec|xargs|builtin|nice|ionice|chrt|flock|setsid|stdbuf|script|bash|sh|zsh|ksh|dash)$/) {
+          w = basename(t[1])
+          j = 2
+          while (j <= n && substr(t[j], 1, 1) == "-") {
+            # Options that take a separate value, minus the shell -c case,
+            # whose value IS the command we still need to read.
+            if (t[j] ~ /^-(u|n|o|i|e|p|k|s|g|c)$/ && !(w ~ /^(bash|sh|zsh|ksh|dash)$/ && t[j] == "-c")) j++
+            j++
+          }
+          # Wrappers whose first non-option argument is their own.
+          if (w ~ /^(timeout|flock|ionice|chrt|script)$/ && j <= n) j++
           s = ""
-          for (i = 2; i <= n; i++) if (t[i] !~ /^-/ || i > 2) s = s (s == "" ? "" : " ") t[i]
+          for (i = j; i <= n; i++) s = s (s == "" ? "" : " ") t[i]
           gsub(/^[ \t(]+/, "", s)
           while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
           n = split(s, t, /[ \t]+/)

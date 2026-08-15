@@ -135,6 +135,10 @@ mutate 'CI drops the bypass annotation'     scripts/review-gate-ci.sh   's/^    
 mutate 'pre-push fails OPEN without jq'     .githooks/pre-push          's/^  echo "review-gate: jq is not installed/  exit 0; echo "review-gate: jq is not installed/'
 mutate 'CI fails OPEN without jq'           scripts/review-gate-ci.sh   's/{ echo "review-gate-ci: jq missing"; exit 1; }/{ exit 0; }/'
 mutate 'PreToolUse allows a PR merge'      scripts/review-gate.sh      's/if \[ "$hit" = "MERGE" \]; then/if false; then/'
+mutate 'PreToolUse stops splitting segments' scripts/review-gate.sh     "s/tr ';&|' '\\\\n\\\\n\\\\n'/cat/"
+mutate 'PreToolUse drops the commit skip'  scripts/review-gate.sh      's/if (cmd == "git" \&\& n > 1 \&\& t\[2\] == "commit") next/if (0) next/'
+mutate 'PreToolUse forgets wrappers'       scripts/review-gate.sh      's/sudo|doas|env|time|timeout|nohup/sudo|doas|env|time|nohup/'
+mutate 'PreToolUse mis-peels wrapper args' scripts/review-gate.sh      's/if (w ~ \/\^(timeout|flock|ionice|chrt|script)\$\/ \&\& j <= n) j++/if (0) j++/'
 
 echo
 echo "record-review.sh (never mutated before this round)"
