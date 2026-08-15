@@ -151,6 +151,16 @@ newcase; rec clean --reviewer x "named"
 echo 'not json' > "$WORK/.claude/review-records/$BAD_SHA.json"
 must_block 'corrupt record blocks'
 
+newcase; rec clean --reviewer x "named"
+jq '.verdict = ""' "$WORK/.claude/review-records/$BAD_SHA.json" > "$TMP/r.json"
+mv "$TMP/r.json" "$WORK/.claude/review-records/$BAD_SHA.json"
+must_block 'pre-push: an empty verdict blocks'
+
+newcase; rec clean --reviewer x "named"
+jq '.verdict = "something-else"' "$WORK/.claude/review-records/$BAD_SHA.json" > "$TMP/r.json"
+mv "$TMP/r.json" "$WORK/.claude/review-records/$BAD_SHA.json"
+must_block 'pre-push: an unknown verdict blocks'
+
 # A clean record for the PREVIOUS commit must not cover a new one.
 newcase; rec clean --reviewer x "named"
 echo amended >> "$WORK/a.go"; git -C "$WORK" commit -qam "extra work"
@@ -403,10 +413,42 @@ chk 'echoing the literal allowed'  0 "$(p "echo \"never run $GHC $PRC $MGC yours
 # the old bare regex caught them and the refactor did not, in the one layer
 # covering a self-merge. Neither the suite nor the mutation harness noticed,
 # which is why they are pinned individually now.
-for w in "timeout 60" "timeout -k 5 60" "nice -n 5" "setsid" "stdbuf -o0" \
-         "sudo -u root" "env -u FOO" "flock /tmp/l"; do
+# Derived from each wrapper documented option syntax, NOT from the
+# implementation. A flat "options that take a value" table looked right and
+# silently ate the command word wherever the letters collide: -i takes a
+# value for stdbuf and none for sudo, -n for nice and none for sudo, -k for
+# timeout and none for sudo. `sudo -i git push --no-verify` was allowed for a
+# whole round — the shape this repo names as its motivating bypass — because
+# the cases had been written from the code that had just been changed.
+for w in "timeout 60" "timeout -k 5 60" "timeout --kill-after 5 60" \
+         "timeout -s TERM 60" "nice -n 5" "nice" "setsid" "stdbuf -o0" \
+         "stdbuf -o 0" "sudo -i" "sudo -s" "sudo -n" "sudo -k" "sudo -E" \
+         "sudo -u root" "sudo -g wheel" "env -i" "env -u FOO" \
+         "ionice" "ionice -c 3" "ionice -c3" "ionice -c 2 -n 7" \
+         "flock /tmp/l" "flock -w 5 /tmp/l" "chrt 1" "/usr/bin/timeout 60"; do
   chk "wrapped merge blocked: $w"  2 "$(p "$w $GHC $PRC $MGC 42")"
+  chk "wrapped push blocked: $w"   2 "$(p "$w git push $NVF origin main")"
 done
+# -c's value IS the command for a shell and for script(1); the file argument
+# comes after it, so neither may be treated as taking a positional.
+chk 'script -qc merge blocked'   2 "$(p "script -qc \"$GHC $PRC $MGC 42\" /dev/null")"
+chk 'script -c push blocked'     2 "$(p "script -c \"git push $NVF origin main\" /dev/null")"
+chk 'nested wrappers blocked'    2 "$(p "sudo -i timeout 60 $GHC $PRC $MGC 42")"
+chk 'env -i then a shell'        2 "$(p "env -i bash -c \"$GHC $PRC $MGC 42\"")"
+chk 'brace group blocked'        2 "$(p "{ $GHC $PRC $MGC 42; }")"
+# The same wrappers must not swallow ordinary work.
+chk 'wrapped build allowed'      0 "$(p 'timeout --kill-after 5 60 go test ./...')"
+chk 'sudo -u psql allowed'       0 "$(p "sudo -u postgres psql -c \"select 1\"")"
+chk 'sudo -i systemctl allowed'  0 "$(p 'sudo -i systemctl status aurora')"
+chk 'ionice make allowed'        0 "$(p 'ionice -c 3 make build')"
+chk 'flock make allowed'         0 "$(p 'flock -w 5 /tmp/l make build')"
+chk 'script npm allowed'         0 "$(p 'script -qc "npm test" /dev/null')"
+chk 'stdbuf go test allowed'     0 "$(p 'stdbuf -o0 go test ./...')"
+# git's own options must not defeat the commit-message skip.
+chk 'git -C commit msg allowed'  0 "$(p "git -C . commit -m \"gate: block git push $NVF\"")"
+chk 'git -c commit msg allowed'  0 "$(p "git -c user.email=x commit -m \"block git push $NVF\"")"
+# Absolute paths resolve through basename().
+chk 'absolute path merge blocked' 2 "$(p "/usr/bin/$GHC $PRC $MGC 42")"
 chk 'wrapped no-verify blocked'    2 "$(p "timeout 60 git push $NVF origin main")"
 chk 'wrapper alone is allowed'     0 "$(p 'timeout 60 npm run build')"
 chk 'nice alone is allowed'        0 "$(p 'nice -n 5 go test ./...')"
@@ -565,6 +607,22 @@ if ( cd "$WORK" && PATH="$NOJQ" git push -q origin "HEAD:refs/heads/$DEST" ) >/d
 if ( cd "$CIR" && PATH="$NOJQ" bash "$CI" mainbase HEAD ) >/dev/null 2>&1; then
   bad 'CI check fails CLOSED without jq'; else ok 'CI check fails CLOSED without jq'; fi
 
+section "the gate scripts parse"
+# A stray apostrophe inside an awk comment closed the quoted program and made
+# review-gate.sh unrunnable, which took down every Bash call until repaired.
+# `bash -n` costs nothing and catches that class immediately.
+for gs in scripts/review-gate.sh scripts/review-gate-ci.sh scripts/record-review.sh \
+          scripts/install-git-hooks.sh scripts/review-gate-test.sh \
+          scripts/review-gate-mutation-test.sh .githooks/pre-push; do
+  if bash -n "$ROOT/$gs" 2>/dev/null; then ok "parses: $gs"; else bad "parses: $gs"; fi
+done
+# review-gate.sh embeds an awk program; a broken one silently stops matching.
+if printf '%s' 'x' | awk 'BEGIN{}' >/dev/null 2>&1 &&
+   printf '{"tool_name":"Bash","tool_input":{"command":"echo hi"}}' |
+     bash "$GATE" >/dev/null 2>&1; then
+  ok 'gate runs end to end on a trivial payload'
+else bad 'gate runs end to end on a trivial payload'; fi
+
 section "record-review argument handling"
 r() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }
 if r clean "no reviewer flag";       then bad 'clean without --reviewer rejected'; else ok 'clean without --reviewer rejected'; fi
@@ -574,6 +632,10 @@ if r clean --reviewer x "   ";       then bad 'whitespace summary rejected'; els
 if r bogus --reviewer x "s";         then bad 'unknown verdict rejected'; else ok 'unknown verdict rejected'; fi
 if r clean --reviewer x --findings n "s"; then bad 'non-numeric --findings rejected'; else ok 'non-numeric --findings rejected'; fi
 if r bypass "no reviewer available"; then ok 'bypass needs no reviewer'; else bad 'bypass needs no reviewer'; fi
+if r clean --reviewer x summary words unquoted; then
+  bad 'unquoted multi-word summary rejected'; else ok 'unquoted multi-word summary rejected'; fi
+if r clean --bogus-flag x "s"; then
+  bad 'unknown flag rejected'; else ok 'unknown flag rejected'; fi
 # CLAUDE.md cites the diff digest as what makes a hollow record auditable.
 # Nothing asserted it, and nothing reads it — so at minimum it must be
 # present and match the diff it claims to describe.

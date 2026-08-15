@@ -136,9 +136,16 @@ mutate 'pre-push fails OPEN without jq'     .githooks/pre-push          's/^  ec
 mutate 'CI fails OPEN without jq'           scripts/review-gate-ci.sh   's/{ echo "review-gate-ci: jq missing"; exit 1; }/{ exit 0; }/'
 mutate 'PreToolUse allows a PR merge'      scripts/review-gate.sh      's/if \[ "$hit" = "MERGE" \]; then/if false; then/'
 mutate 'PreToolUse stops splitting segments' scripts/review-gate.sh     "s/tr ';&|' '\\\\n\\\\n\\\\n'/cat/"
-mutate 'PreToolUse drops the commit skip'  scripts/review-gate.sh      's/if (cmd == "git" \&\& n > 1 \&\& t\[2\] == "commit") next/if (0) next/'
+mutate 'PreToolUse drops the commit skip'  scripts/review-gate.sh      's/if (gj <= n \&\& t\[gj\] == "commit") next/if (0) next/'
 mutate 'PreToolUse forgets wrappers'       scripts/review-gate.sh      's/sudo|doas|env|time|timeout|nohup/sudo|doas|env|time|nohup/'
-mutate 'PreToolUse mis-peels wrapper args' scripts/review-gate.sh      's/if (w ~ \/\^(timeout|flock|ionice|chrt|script)\$\/ \&\& j <= n) j++/if (0) j++/'
+mutate 'PreToolUse mis-keys sudo options'  scripts/review-gate.sh      's/if (w == "sudo")    return (opt ~ \/\^-(u|g|p|C|U|r|t|T|h|R)\$\//if (w == "sudo")    return (opt ~ \/^-(u|g|p|C|U|r|t|T|h|R|i|n|s|k)$\//'
+mutate 'PreToolUse eats ionice positional' scripts/review-gate.sh      's/function eats_positional(w) { return (w ~ \/\^(timeout|flock|chrt)\$\/) }/function eats_positional(w) { return (w ~ \/^(timeout|flock|chrt|ionice|script)$\/) }/'
+mutate 'PreToolUse drops basename'         scripts/review-gate.sh      's/function basename(p) { sub(\/\^\.\*\\\/\/, "", p); return p }/function basename(p) { return p }/'
+# NOT mutation-testable: deleting the empty-verdict arm lets "" fall through
+# to the *) catch-all, which also blocks (verified — the push is refused
+# either way, only the message differs). Equivalent mutant. The behavior
+# itself is pinned by 'pre-push: an empty verdict blocks' in the suite.
+mutate 'record accepts extra arguments'    scripts/record-review.sh    '41s/if \[ -n "$summary" \]; then/if false; then/'
 
 echo
 echo "record-review.sh (never mutated before this round)"

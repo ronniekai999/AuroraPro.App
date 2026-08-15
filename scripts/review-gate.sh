@@ -115,33 +115,58 @@ if [ -n "$command_text" ]; then
   # data.
   hit="$(printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
       function basename(p) { sub(/^.*\//, "", p); return p }
+      function is_wrapper(w) {
+        return (w ~ /^(sudo|doas|env|time|timeout|nohup|command|exec|xargs|builtin|nice|ionice|chrt|flock|setsid|stdbuf|script|bash|sh|zsh|ksh|dash)$/)
+      }
+      # Wrappers where the value of -c IS the command we still need to read.
+      # For these, no option ending in "c" consumes its argument.
+      function cmd_follows_dash_c(w) { return (w ~ /^(bash|sh|zsh|ksh|dash|script)$/) }
+      # Does `opt` take a SEPARATE value for this wrapper? Long forms spelled
+      # with "=" carry their own value and are never listed here.
+      function takes_value(w, opt) {
+        if (cmd_follows_dash_c(w) && opt ~ /^-[A-Za-z]*c$/) return 0
+        if (w == "sudo")    return (opt ~ /^-(u|g|p|C|U|r|t|T|h|R)$/ || opt ~ /^--(user|group|prompt|close-from|other-user|role|type|chdir|host)$/)
+        if (w == "doas")    return (opt ~ /^-(u|C)$/)
+        if (w == "env")     return (opt ~ /^-(u|C|S)$/ || opt ~ /^--(unset|chdir|split-string)$/)
+        if (w == "timeout") return (opt ~ /^-(s|k)$/ || opt ~ /^--(signal|kill-after)$/)
+        if (w == "nice")    return (opt ~ /^-(n)$/ || opt == "--adjustment")
+        if (w == "ionice")  return (opt ~ /^-(c|n|p|P|u)$/ || opt ~ /^--(class|classdata|pid|pgid|uid)$/)
+        if (w == "chrt")    return (opt ~ /^-(p)$/ || opt == "--pid")
+        if (w == "flock")   return (opt ~ /^-(w|E|c)$/ || opt ~ /^--(wait|timeout|conflict-exit-code|command)$/)
+        if (w == "stdbuf")  return (opt ~ /^-(i|o|e)$/ || opt ~ /^--(input|output|error)$/)
+        if (w == "xargs")   return (opt ~ /^-(I|L|n|P|s|d|E|a)$/)
+        return 0
+      }
+      # Wrappers whose first NON-option token is their own argument, not the
+      # command. ionice and script are NOT among them: `ionice [-c N] CMD`
+      # takes no positional, and `script -c CMD FILE` puts its file last —
+      # listing them ate the command word outright.
+      function eats_positional(w) { return (w ~ /^(timeout|flock|chrt)$/) }
       {
         s = $0
-        gsub(/^[ \t(]+/, "", s)
+        gsub(/^[ \t({]+/, "", s)
         while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
         n = split(s, t, /[ \t]+/)
-        # Wrapper peel. The previous form dropped argv[2] and kept the rest,
-        # which mishandled every wrapper taking a value: `sudo -u root X`
-        # left "root" as the command word, and timeout/nice/stdbuf were not
-        # recognized at all. Folding the merge check into this peeler
-        # therefore LOST coverage the old bare regex had — `timeout 60 <cli>
-        # pr merge` went from blocked to allowed. That matters more here than
-        # for --no-verify, which pre-push and CI still see: the merge block is
-        # the only layer covering a self-merge.
-        while (n > 0 && basename(t[1]) ~ /^(sudo|doas|env|time|timeout|nohup|command|exec|xargs|builtin|nice|ionice|chrt|flock|setsid|stdbuf|script|bash|sh|zsh|ksh|dash)$/) {
+        # Wrapper peel, with PER-WRAPPER option semantics. A single flat
+        # table of "options that take a value" was wrong in both directions:
+        # -i takes one for stdbuf and none for sudo, -n takes one for nice
+        # and none for sudo, -k takes one for timeout and none for sudo. So
+        # `sudo -i git push --no-verify` had its command word eaten and was
+        # allowed — the exact shape this file names as a historical bypass
+        # two dozen lines above. Cases written FROM an implementation cannot
+        # catch that; these sets come from each wrapper option syntax as
+        # documented, not from what this code happens to do.
+        while (n > 0 && is_wrapper(basename(t[1]))) {
           w = basename(t[1])
           j = 2
           while (j <= n && substr(t[j], 1, 1) == "-") {
-            # Options that take a separate value, minus the shell -c case,
-            # whose value IS the command we still need to read.
-            if (t[j] ~ /^-(u|n|o|i|e|p|k|s|g|c)$/ && !(w ~ /^(bash|sh|zsh|ksh|dash)$/ && t[j] == "-c")) j++
+            if (takes_value(w, t[j])) j++
             j++
           }
-          # Wrappers whose first non-option argument is their own.
-          if (w ~ /^(timeout|flock|ionice|chrt|script)$/ && j <= n) j++
+          if (eats_positional(w) && j <= n) j++
           s = ""
           for (i = j; i <= n; i++) s = s (s == "" ? "" : " ") t[i]
-          gsub(/^[ \t(]+/, "", s)
+          gsub(/^[ \t({]+/, "", s)
           while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
           n = split(s, t, /[ \t]+/)
           if (n == 0) break
@@ -151,7 +176,15 @@ if [ -n "$command_text" ]; then
         # A commit message is data. Heredoc bodies are stripped upstream;
         # -m/-F values were not, which is how this check blocked the very
         # commit that introduced it.
-        if (cmd == "git" && n > 1 && t[2] == "commit") next
+        if (cmd == "git") {
+          gj = 2
+          while (gj <= n && substr(t[gj], 1, 1) == "-") {
+            if (t[gj] ~ /^-(c|C)$/) gj++
+            gj++
+          }
+          # A commit message is data, whatever git options precede it.
+          if (gj <= n && t[gj] == "commit") next
+        }
         if (cmd == "git") {
           hasPush = 0; hasFlag = 0
           for (i = 2; i <= n; i++) {
