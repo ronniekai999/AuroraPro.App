@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Second layer of the adversarial review gate. The FIRST layer — and the
-# actual enforcement boundary — is .githooks/pre-push, which git runs with
-# the refs and shas already resolved, in the right repo, whatever the shell
-# command looked like.
+# Best-effort layer of the adversarial review gate. Nothing here binds, and
+# neither does anything else in this repo — see CLAUDE.md's known-limits list.
+# .githooks/pre-push sees pushes more reliably than this does (git resolves
+# the refs and repo before calling it), but it is advisory too: core.hooksPath
+# is the pusher's to unset.
 #
 # This hook covers only the two things a git hook structurally cannot see:
 #
@@ -29,9 +30,9 @@ fail() { printf '%s\n' "$*" >&2; exit 2; }
 payload="$(cat)"
 
 if ! command -v jq >/dev/null 2>&1; then
-  # The pre-push hook fails closed on its own when jq is missing, so this
-  # layer going quiet does not open the gate.
-  echo "review-gate: jq not installed; --no-verify and MCP-write checks are inactive (pre-push hook still enforces)." >&2
+  # pre-push also fails closed without jq, but it is advisory, so this is a
+  # gap rather than a covered case. Nothing here is a boundary.
+  echo "review-gate: jq not installed; --no-verify and MCP-write checks are INACTIVE." >&2
   exit 0
 fi
 
@@ -43,11 +44,16 @@ command_text="$(jqr '.tool_input.command // ""')"
 # 1. MCP tools that write repository content over the API. These never run
 #    git locally, so .githooks/pre-push cannot see them. Content has to
 #    arrive through git, which is where the gate lives.
-#    PR-management tools are NOT blocked: the code they reference already
-#    reached the remote through git, and blocking them would make the PR
-#    step of the documented workflow impossible.
+#    Opening/updating a PR is NOT blocked: that code already reached the
+#    remote through git, and blocking it would make the documented workflow
+#    impossible. MERGING is blocked — the outcome the gate exists to prevent
+#    is unreviewed code on main, and a self-merge produces exactly that.
 # ---------------------------------------------------------------------
 case "$tool_name" in
+  mcp__github__merge_pull_request)
+    fail "review-gate: BLOCKED — merging your own PR over the API skips the review the gate exists to require, and lands code on main with the review-record check possibly red.
+A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for one."
+    ;;
   mcp__github__push_files|mcp__github__create_or_update_file|mcp__github__delete_file)
     fail "review-gate: BLOCKED — $tool_name writes repository content over the API, bypassing git and therefore the review gate in .githooks/pre-push.
 Commit locally and push instead, so the gate can verify the commit:

@@ -17,27 +17,37 @@
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SUITE="$ROOT/scripts/review-gate-test.sh"
 
 pass=0; fail=0
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-cp "$ROOT/.githooks/pre-push" "$work/pre-push.orig"
-cp "$ROOT/scripts/review-gate-ci.sh" "$work/ci.orig"
-cp "$ROOT/scripts/review-gate.sh" "$work/gate.orig"
+# Work on a COPY of the repo, never on the tracked files. An earlier version
+# mutated them in place with only an EXIT trap: kill -9 the run and the
+# working tree was left holding a pre-push hook that no longer checked the
+# recorded sha, one `git add -A` away from being committed.
+work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT INT TERM HUP
+REPO="$work/repo"
+mkdir -p "$REPO"
+tar -C "$ROOT" -cf - \
+  .githooks scripts .claude .github .gitignore CLAUDE.md AGENTS.md 2>/dev/null |
+  tar -C "$REPO" -xf - 2>/dev/null
+git -C "$REPO" init -q 2>/dev/null || true
+SUITE="$REPO/scripts/review-gate-test.sh"
+[ -f "$SUITE" ] || { echo "mutation-test: could not stage a copy of the repo"; exit 1; }
 
+for f in .githooks/pre-push scripts/review-gate-ci.sh scripts/review-gate.sh; do
+  cp "$REPO/$f" "$work/$(basename "$f").orig"
+done
 restore() {
-  cp "$work/pre-push.orig" "$ROOT/.githooks/pre-push"
-  cp "$work/ci.orig" "$ROOT/scripts/review-gate-ci.sh"
-  cp "$work/gate.orig" "$ROOT/scripts/review-gate.sh"
+  for f in .githooks/pre-push scripts/review-gate-ci.sh scripts/review-gate.sh; do
+    cp "$work/$(basename "$f").orig" "$REPO/$f"
+  done
 }
-trap 'restore; rm -rf "$work"' EXIT
 
 # mutate <name> <file> <sed-expression>
 mutate() {
   local name="$1" file="$2" expr="$3" before after
-  before="$(md5sum "$ROOT/$file" | cut -d' ' -f1)"
-  sed -i "$expr" "$ROOT/$file"
-  after="$(md5sum "$ROOT/$file" | cut -d' ' -f1)"
+  before="$(md5sum "$REPO/$file" | cut -d' ' -f1)"
+  sed -i "$expr" "$REPO/$file"
+  after="$(md5sum "$REPO/$file" | cut -d' ' -f1)"
   if [ "$before" = "$after" ]; then
     printf '  SKIP %-52s mutation did not apply (pattern drifted)\n' "$name"
     fail=$((fail+1)); restore; return
@@ -84,6 +94,7 @@ mutate 'CI ignores the recorded sha'       scripts/review-gate-ci.sh   's/if \[ 
 mutate 'CI follows renames'                scripts/review-gate-ci.sh   's/git diff --no-renames --name-only "$merge_base"/git diff --name-only "$merge_base"/'
 mutate 'CI exempts all of .claude'         scripts/review-gate-ci.sh   "s#RECORD_PATH_RE='\\^\\\\.claude/review-records/\\.\\*\\\\.json\\\$'#RECORD_PATH_RE='^\\\\.claude/'#"
 mutate 'CI walks past real code commits'   scripts/review-gate-ci.sh   's/  ! printf .%s\\n. "$changed" | grep -qvE "$RECORD_PATH_RE"/  true/'
+mutate 'CI exempts the agent instructions'  scripts/review-gate-ci.sh   "s#(\\^|/)(CLAUDE|AGENTS)\\\\.md\\\$|\\^docs/dev-workflow\\\\.md\\\$#^NEVERMATCH\\\$#" 
 
 echo
 echo "review-gate.sh (PreToolUse layer)"

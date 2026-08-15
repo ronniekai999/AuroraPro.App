@@ -115,8 +115,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     effective="$parent"
   done
 
-  for sha in "$effective"; do
-    if docs_only "$from" "$sha"; then continue; fi
+  sha="$effective"
+  if ! docs_only "$from" "$sha"; then
 
     record="$RECORDS_DIR/$sha.json"
     if [ ! -f "$record" ]; then
@@ -148,7 +148,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         echo "review-gate: BLOCKED — the review for $sha has verdict \"$verdict\". Resolve the findings, re-review the final diff, re-record." >&2
         blocked=1 ;;
     esac
-  done
+  fi
 done
 
 if [ "$blocked" = 1 ]; then

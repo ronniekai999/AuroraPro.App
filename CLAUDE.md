@@ -50,8 +50,10 @@ Run it like this, in this order:
 
 If no independent reviewer is available, say the gate is **incomplete** — never
 present a self-review as equivalent. `record-review.sh bypass "<why>"` records
-that honestly and lets the push through; it is the only way past, and it
-obliges you to report the gate as incomplete. There is no silent bypass.
+that honestly and lets the push through; it is the only *sanctioned* way past,
+and it obliges you to report the gate as incomplete. Silent bypasses do exist
+— see the known-limits list below — which is exactly why using one and saying
+nothing is a reporting failure rather than a technical one.
 
 **There is tooling for this, but read what it does and does not do.**
 

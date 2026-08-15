@@ -111,6 +111,11 @@ case "$verdict" in
     echo "ok       $effective  $verdict (reviewer: $reviewer)  $subject"
     exit 0 ;;
   bypass)
+    # Exit 0, because a bypass is a sanctioned (if unhappy) outcome — but a
+    # green tick that reads exactly like a reviewed one is how "incomplete"
+    # goes unnoticed. The annotation surfaces it in the PR's Checks summary
+    # rather than only in the job log.
+    echo "::warning title=Review gate INCOMPLETE::No adversarial review happened for $effective — a bypass was recorded. Do not merge this as if it were reviewed."
     echo "BYPASS   $effective  NO review happened  $subject"
     echo
     echo "The adversarial review gate is INCOMPLETE for this PR."

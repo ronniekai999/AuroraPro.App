@@ -251,13 +251,24 @@ echo 'not json' > "$(cirec)"
 ciexp 'CI: corrupt record blocks' 1
 printf '%s' "$orig" | jq '.verdict = "bypass"' > "$(cirec)"
 ciexp 'CI: bypass passes (and says so)' 0
-printf '%s' "$orig" > "$(cirec)"
+printf '%s\n' "$orig" > "$(cirec)"
+git -C "$CLONE_CI" checkout -q -- . 2>/dev/null   # drop any whitespace drift
 # The exemption must cover records ONLY — settings.json wires the hooks.
 git -C "$CLONE_CI" checkout -q -B settingscase mainbase
 mkdir -p "$CLONE_CI/.claude"; echo '{}' > "$CLONE_CI/.claude/settings.json"
 git -C "$CLONE_CI" add -A; git -C "$CLONE_CI" commit -qm "chore: settings"
 if cichk; then bad 'CI: .claude/settings.json is NOT exempt'; else ok 'CI: .claude/settings.json is NOT exempt'; fi
-git -C "$CLONE_CI" checkout -q - 2>/dev/null
+# The files that GOVERN agent behavior are excluded from the docs exemption.
+# pre-push had a case for this; the CI side — the layer the docs call
+# strongest — did not, and a reviewer's mutation of that clause went unnoticed.
+for gov in CLAUDE.md AGENTS.md docs/dev-workflow.md; do
+  git -C "$CLONE_CI" checkout -q -B "gov$(basename "$gov" .md)" mainbase
+  mkdir -p "$CLONE_CI/$(dirname "$gov")"
+  echo "a rule" >> "$CLONE_CI/$gov"
+  git -C "$CLONE_CI" add -A; git -C "$CLONE_CI" commit -qm "docs: edit $gov"
+  if cichk; then bad "CI: $gov is NOT docs-exempt"; else ok "CI: $gov is NOT docs-exempt"; fi
+done
+git -C "$CLONE_CI" checkout -q --force settingscase 2>/dev/null || true
 # The client-side bypasses above are exactly what this must still catch.
 echo more >> "$CIR/a.go"; git -C "$CIR" commit -qam "pushed around the hook"
 if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then

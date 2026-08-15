@@ -50,10 +50,17 @@ fi
 # the gate's failure mode is indistinguishable from success without this.
 probe="$(mktemp -d)"
 trap 'rm -rf "$probe"' EXIT
+head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
 if git init -q --bare -b main "$probe/r.git" 2>/dev/null &&
    git -C "$repo_root" push -q "$probe/r.git" "HEAD:refs/heads/gate-probe" 2>/dev/null; then
-  echo "install-git-hooks: WARNING — a test push of the current HEAD was NOT blocked."
-  echo "install-git-hooks: either HEAD is already reviewed (fine) or the gate is off."
+  # A push that succeeds is only alarming if HEAD had nothing to allow it.
+  # Warning on every reviewed HEAD trains people to ignore the message.
+  if [ -n "$head_sha" ] && [ -f "$repo_root/.claude/review-records/$head_sha.json" ]; then
+    echo "install-git-hooks: pre-push review gate active (HEAD is already recorded, so the probe push was allowed)."
+  else
+    echo "install-git-hooks: WARNING — a test push was NOT blocked and HEAD has no review record."
+    echo "install-git-hooks: the gate may be off. Check core.hooksPath and that .githooks/pre-push is executable."
+  fi
 else
   echo "install-git-hooks: pre-push review gate active (verified by test push)."
 fi

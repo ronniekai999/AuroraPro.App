@@ -134,6 +134,12 @@ jobs:
       - name: Review gate tests
         run: bash scripts/review-gate-test.sh
 
+      # Guards the suite itself. Twice the suite was green against a gate that
+      # was genuinely broken, and "the suite passes" was quoted as evidence
+      # both times. This applies known-bad patches and asserts each is caught.
+      - name: Review gate mutation tests
+        run: bash scripts/review-gate-mutation-test.sh
+
   review-record:
     name: Review record present
     runs-on: ubuntu-latest
@@ -143,15 +149,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      # THE binding check. The client-side hooks are advisory: core.hooksPath
-      # is per-clone config the pushing process controls, so
-      # `git -c core.hooksPath=/dev/null push` or a throwaway clone turns them
-      # off in one token. This job runs where the pusher cannot unset it.
+      # The strongest of the three checks, which is not the same as binding:
+      # this script and this workflow are tracked files in the branch under
+      # review, so a branch can neuter either in one line. It blocks only once
+      # an admin (a) requires this check in branch protection AND (b) requires
+      # CODEOWNERS review on .github/** and scripts/review-gate*.sh. Until
+      # both, it reports and nothing enforces. See CLAUDE.md's known limits.
       #
-      # It only actually BLOCKS once a human marks it a required status check
-      # in branch protection. Until then it reports and nothing enforces.
+      # Through env, never interpolated into the script body: branch names may
+      # legally contain quotes, ';' and '$( )', which would otherwise execute
+      # on the runner. `git check-ref-format --branch 'main";id;"'` is VALID.
       - name: Check for an adversarial review record
-        run: |
-          bash scripts/review-gate-ci.sh \
-            "origin/${{ github.base_ref }}" \
-            "${{ github.event.pull_request.head.sha }}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/review-gate-ci.sh "origin/$BASE_REF" "$HEAD_SHA"
