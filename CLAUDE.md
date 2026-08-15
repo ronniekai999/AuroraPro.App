@@ -118,8 +118,8 @@ softening it above:
 - **The PreToolUse command parser is knowably incomplete, and that is the
   end state, not a to-do.** It recognizes ~25 wrappers with per-wrapper
   option syntax (`scripts/review-gate-wrapper-spec.sh` pins 155 shapes), and
-  reviewers have still found new ones every round: `systemd-run`, `watch`,
-  and `sudo --chroot` are known to slip today. That layer is advisory by
+  reviewers have still found new ones every round: `systemd-run` and `watch`
+  are known to slip today. That layer is advisory by
   construction — a missed shape costs nothing that `.githooks/pre-push` and
   the `review-record` CI job do not still see, EXCEPT for `--no-verify` and
   a merge, which is why those two are the only things it tries to catch.

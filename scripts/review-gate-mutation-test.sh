@@ -127,7 +127,7 @@ mutate 'CI accepts lows-only as clean only' scripts/review-gate-ci.sh "s/  clean
 mutate 'CI drops the argument guard'       scripts/review-gate-ci.sh   's/^if \[ "$#" -gt 2 \]; then/if false; then/'
 
 echo
-echo "install-git-hooks.sh (never mutated before this round)"
+echo "install-git-hooks.sh"
 mutate 'installer never sets hooksPath'    scripts/install-git-hooks.sh 's/  git -C "$repo_root" config --local core.hooksPath "$hooks_dir"/  true/'
 mutate 'installer writes a relative path'  scripts/install-git-hooks.sh 's#^hooks_dir="$repo_root/.githooks"#hooks_dir=".githooks"#'
 mutate 'installer skips chmod +x'          scripts/install-git-hooks.sh 's/^if ! chmod +x "$hooks_dir\/pre-push" 2>\/dev\/null; then/if false; then/'
@@ -148,6 +148,7 @@ mutate 'PreToolUse ignores bundled options' scripts/review-gate.sh      's/\^-\[
 mutate 'PreToolUse drops value_is_command' scripts/review-gate.sh      's/function value_is_command(w, opt) {/function value_is_command(w, opt) { return 0;/'
 mutate 'PreToolUse forgets su and eval'    scripts/review-gate.sh      's/sudo|doas|su|runuser|env/sudo|doas|env/'
 mutate 'PreToolUse mis-keys sudo options'  scripts/review-gate.sh      's/(u|g|p|C|U|r|t|T|R|D)\$/(u|g|p|C|U|r|t|T|R|D|i|n|s|k)$/'
+mutate 'PreToolUse mis-keys the positional' scripts/review-gate.sh     's/if (!got_cmd \&\& !got_pos \&\& eats_positional(w) \&\&/if (!got_cmd \&\& !(w ~ \/^(taskset|chrt)$\/ \&\& j > 2) \&\& eats_positional(w) \&\&/'
 mutate 'PreToolUse eats ionice positional' scripts/review-gate.sh      's/(timeout|flock|chrt|su|runuser|taskset)/(timeout|flock|chrt|su|runuser|taskset|ionice|script)/'
 mutate 'PreToolUse drops basename'         scripts/review-gate.sh      's/^      function basename(p) .*$/      function basename(p) { return p }/'
 # NOT mutation-testable: deleting the empty-verdict arm lets "" fall through
@@ -157,7 +158,7 @@ mutate 'PreToolUse drops basename'         scripts/review-gate.sh      's/^     
 mutate 'record accepts extra arguments'    scripts/record-review.sh    '41s/if \[ -n "$summary" \]; then/if false; then/'
 
 echo
-echo "record-review.sh (never mutated before this round)"
+echo "record-review.sh"
 mutate 'record always writes clean'        scripts/record-review.sh    's/^verdict="\${1:-}"; shift || true/verdict=clean; shift || true/'
 mutate 'record drops the reviewer rule'    scripts/record-review.sh    '73s/if \[ -z /if [ -n /'
 

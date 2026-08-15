@@ -162,6 +162,17 @@ if [ -n "$command_text" ]; then
       # `script -c CMD FILE`), and listing them ate the command word.
       # su/runuser take an optional user; taskset an optional mask.
       function eats_positional(w) { return (w ~ /^(timeout|flock|chrt|su|runuser|taskset)$/) }
+      # Options that supply the wrapper own positional argument, so it is NOT
+      # also taken from the argument list. Only these replace it: the chrt
+      # policy flags (-f/-r/-o/-b/-i/-a) and taskset --all-tasks take no
+      # value and leave the positional in place, so keying on "any option was
+      # consumed" dropped the command word instead.
+      function supplies_positional(w, opt) {
+        if (w == "chrt")    return (opt ~ /^-[A-Za-z]*p$/ || opt == "--pid")
+        if (w == "taskset") return (opt ~ /^-[A-Za-z]*(c|p)$/ || opt ~ /^--(cpu-list|pid)$/)
+        if (w ~ /^(su|runuser)$/) return (opt ~ /^-[A-Za-z]*u$/ || opt == "--user")
+        return 0
+      }
       {
         s = $0
         gsub(/^[ \t({]+/, "", s)
@@ -180,17 +191,20 @@ if [ -n "$command_text" ]; then
           w = basename(t[1])
           j = 2
           got_cmd = 0
+          got_pos = 0
           while (j <= n && substr(t[j], 1, 1) == "-") {
             if (t[j] == "--") { j++; got_cmd = 1; break }
             if (value_is_command(w, t[j])) { j++; got_cmd = 1; break }
+            if (supplies_positional(w, t[j])) got_pos = 1
             if (takes_value(w, t[j])) j++
             j++
           }
-          # Only claim the positional if the command has not already started.
-          # taskset and chrt take their argument EITHER as a positional or
-          # via an option (`taskset 0x1 CMD` vs `taskset -c 0 CMD`), never
-          # both — eating one after the other consumed the command word.
-          if (!got_cmd && eats_positional(w) && !(w ~ /^(taskset|chrt)$/ && j > 2) &&
+          # Only claim the positional if the command has not already started,
+          # and only if no option already supplied it. "Any option was
+          # consumed" was the wrong proxy: the chrt policy flags take no
+          # value and leave the priority positional, so `chrt -f 1 CMD` read
+          # `1` as the command.
+          if (!got_cmd && !got_pos && eats_positional(w) &&
               j <= n && substr(t[j], 1, 1) != "-") j++
           if (!got_cmd)
             while (j <= n && substr(t[j], 1, 1) == "-") {

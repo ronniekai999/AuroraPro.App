@@ -134,15 +134,16 @@ jobs:
       - name: Review gate tests
         run: bash scripts/review-gate-test.sh
 
-      # Guards the suite itself. Twice the suite was green against a gate that
-      # was genuinely broken, and "the suite passes" was quoted as evidence
-      # both times. This applies known-bad patches and asserts each is caught.
-      # Wrapper shapes, derived from the wrappers' own option syntax rather
-      # than from the implementation. Shipped unreferenced once, which is the
-      # same as deleted — it cannot rot loudly if nothing runs it.
+      # Wrapper shapes, derived from each wrapper's documented option syntax
+      # rather than from the implementation. Shipped unreferenced once, which
+      # is the same as deleted — it cannot rot loudly if nothing runs it.
       - name: Review gate wrapper spec
         run: bash scripts/review-gate-wrapper-spec.sh
 
+      # Guards the harnesses themselves. Twice a suite was green against a
+      # gate that was genuinely broken, and "the tests pass" was quoted as
+      # evidence both times. This applies known-bad patches and asserts each
+      # one is caught by the suite or the spec.
       - name: Review gate mutation tests
         run: bash scripts/review-gate-mutation-test.sh
 

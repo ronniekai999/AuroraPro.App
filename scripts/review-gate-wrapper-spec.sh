@@ -60,11 +60,17 @@ for w in "timeout 60" "timeout -k 5 60" "timeout --kill-after 5 60" \
          "timeout --foreground 60"; do both 2 "$w"; done
 
 echo "== nice / ionice / chrt / stdbuf / taskset =="
+# chrt and taskset take their argument EITHER positionally or via an option.
+# The policy flags (-f/-r/-o/-b/-i/-a) and --all-tasks take NO value, so the
+# priority/mask stays positional — keying the peel on "an option was seen"
+# read that argument as the command and dropped the whole segment.
 for w in "nice" "nice -n 5" "nice -5" "nice --adjustment 5" \
          "ionice" "ionice -c 3" "ionice -c3" "ionice -c 2 -n 7" \
-         "chrt 1" "chrt -p 1" \
+         "chrt 1" "chrt -p 1" "chrt -f 1" "chrt -r 1" "chrt -b 0" \
+         "chrt -i 0" "chrt -o 0" "chrt -a -f 1" \
          "stdbuf -o0" "stdbuf -o 0" "stdbuf -oL -eL" \
-         "taskset -c 0" "taskset 0x1"; do both 2 "$w"; done
+         "taskset -c 0" "taskset 0x1" "taskset -a 0x1" \
+         "taskset --all-tasks 0x1"; do both 2 "$w"; done
 
 echo "== flock: FILE positional, and -c AFTER it whose value is the command =="
 for w in "flock /tmp/l" "flock -w 5 /tmp/l" "flock --wait 5 /tmp/l" \
@@ -81,6 +87,9 @@ run 2 "script -c \"git push $NV origin main\" /dev/null"
 run 2 "su -c \"$G $P $M 42\""
 run 2 "su root -c \"$G $P $M 42\""
 run 2 "runuser -u root -- $G $P $M 42"
+run 2 "runuser -u root $G $P $M 42"
+run 2 "runuser --user root $G $P $M 42"
+run 2 "su -l root -c \"$G $P $M 42\""
 
 echo "== misc wrappers and escapes =="
 for w in "setsid" "nohup" "eval" "unshare -r" "command" "exec" \
@@ -106,6 +115,9 @@ run 0 "env -S \"make build\""
 run 0 "stdbuf -o0 go test ./..."
 run 0 "script -qc \"npm test\" /dev/null"
 run 0 "su -c \"systemctl status aurora\""
+run 0 "runuser -u postgres pg_dump aurora"
+run 0 "chrt -f 1 make build"
+run 0 "taskset -a 0x1 go test ./..."
 run 0 "taskset -c 0 go test ./..."
 
 echo "== MUST NOT BLOCK: mentioning it, and git's own options =="
