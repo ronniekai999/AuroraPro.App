@@ -55,4 +55,7 @@ node_modules/
 # scripts/review-gate.sh). A verdict is a statement about one exact diff
 # on one machine — it must not travel to another clone or survive an
 # amend, so these stay local while the hook config itself is committed.
-.claude/review-records/
+# .claude/review-records/ is deliberately TRACKED: scripts/review-gate-ci.sh
+# is the binding check and runs on a CI checkout, where untracked files do
+# not exist. A commit that only adds records is exempt from needing its own
+# record (see scripts/review-gate-ci.sh), which is what stops the regress.

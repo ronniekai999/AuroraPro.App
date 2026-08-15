@@ -1,0 +1,7 @@
+{
+  "sha": "21966044acd74209471f5882e73d65cfc4816214",
+  "verdict": "fix-first",
+  "summary": "independent agent — 1 HIGH (manual markers dropped from tile), 4 MEDIUM (manual filter basis, App.tsx Files label, detector scoping, untested SQL)",
+  "branch": "claude/skip-markers-media-files-yyoavj",
+  "recorded_at": "2026-08-15T04:34:50Z"
+}

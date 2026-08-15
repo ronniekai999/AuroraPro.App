@@ -78,18 +78,17 @@ if [ -n "$command_text" ]; then
       print line
     }')"
   norm="$(printf '%s' "$stripped" | tr -d "\"'")"
-  # Searching or printing the flag is not using it. A missed --no-verify
-  # costs a warning here (pre-push is the boundary), so this stays a short
-  # list of obviously-read-only leading commands rather than real parsing.
-  first="$(printf '%s' "$norm" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]].*//' -e 's#.*/##')"
-  case "$first" in
-    grep|rg|ag|ack|echo|printf|cat|less|more|head|tail|awk|sed|find|jq|man|comm|diff) exit 0 ;;
-  esac
-  # Only the long flag. `git push -n` is --dry-run, which is harmless, and
-  # matching a bare -n flagged every `sed -n`, `grep -n` and `tail -n` that
-  # happened to mention a push — this hook blocked its own test run that way.
-  if printf '%s' "$norm" | grep -qE '(^|[^-[:alnum:]])push([^[:alnum:]]|$)' &&
-     printf '%s' "$norm" | grep -q -- '--no-verify'; then
+  # Fire only on a segment that IS a git push carrying the flag — not on any
+  # command that happens to contain both words. Mentioning the flag is not
+  # using it: this check blocked a `sed -n` probe, a `python3 -c` echo, and
+  # the very commit that introduced it. Over-blocking read-only work trains
+  # an agent to route around the gate, which costs more than the rare miss
+  # (pre-push and CI both still see the push).
+  # Anchored at the START of a segment, so `grep -rn "git push --no-verify"`
+  # (whose command is grep, not git) does not match.
+  if printf '%s' "$norm" | tr ';&|' '\n\n\n' |
+     grep -E '^[[:space:]]*((sudo|env|time|nohup|command|exec)[[:space:]]+|(bash|sh|zsh|ksh)([[:space:]]+-[a-z]+)*[[:space:]]+)*git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' |
+     grep -q -- '--no-verify'; then
     fail "review-gate: BLOCKED — --no-verify skips .githooks/pre-push, which is where the adversarial review gate is enforced.
 Push without it. If no reviewer was available, record that honestly instead:
   bash scripts/record-review.sh bypass \"<why>\""

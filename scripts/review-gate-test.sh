@@ -100,9 +100,14 @@ section "verdicts"
 # Each case gets its own commit and its own destination branch, so no case
 # depends on the remote state another case left behind.
 caseno=0
+# Each case branches fresh off the pushed base, so the range under test is
+# exactly ONE commit. The hook requires a record for every commit in the
+# range, so reusing an accumulating branch would (correctly) block on the
+# earlier cases' unreviewed commits and tell us nothing about this one.
 newcase() {
   caseno=$((caseno+1))
   rm -f "$WORK/.claude/review-records/"*.json 2>/dev/null || true
+  git -C "$WORK" checkout -q -B "case$caseno" refs/remotes/origin/main 2>/dev/null
   echo "case $caseno" >> "$WORK/a.go"
   git -C "$WORK" commit -qam "case $caseno"
   BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
@@ -113,7 +118,10 @@ must_block() { push_case; if landed; then bad "$1 — UNREVIEWED COMMIT REACHED 
 must_allow() { push_case; if landed; then ok "$1"; else bad "$1 — a reviewed push was refused"; fi; }
 rec() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }
 
-newcase; rec fix-first "high found";                       must_block 'fix-first blocks'
+# --reviewer matters here: without it the reviewer check blocks first and the
+# VERDICT branch is never exercised, so adding `fix-first` to the passing
+# verdicts left this case green.
+newcase; rec fix-first --reviewer someone "high found";     must_block 'fix-first blocks'
 newcase; rec clean --reviewer someone "reviewed";           must_allow 'clean record allows'
 newcase; rec lows-only --reviewer someone "only nits";      must_allow 'lows-only allows'
 newcase; rec bypass "no reviewer available";                must_allow 'bypass allows'
@@ -139,6 +147,83 @@ echo amended >> "$WORK/a.go"; git -C "$WORK" commit -qam "extra work"
 BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
 must_block 'a later commit invalidates the record'
 rm -f "$WORK/.claude/review-records/"*.json
+
+section "bypasses that turn the client-side hook off (advisory layer)"
+# These document what the pre-push layer CANNOT hold, so nobody mistakes it
+# for enforcement. Each one lands the commit; scripts/review-gate-ci.sh is
+# what catches them, and it is tested in its own section below.
+newcase
+( cd "$WORK" && git -c core.hooksPath=/dev/null push -q origin "HEAD:refs/heads/$DEST" ) >/dev/null 2>&1
+if landed; then ok 'core.hooksPath override DOES bypass (known, CI catches it)'
+else bad 'core.hooksPath override unexpectedly blocked — update the docs'; fi
+newcase
+CLONE="$TMP/clone$caseno"; git clone -q "$WORK" "$CLONE" 2>/dev/null
+( cd "$CLONE" && git push -q "$REMOTE" "HEAD:refs/heads/$DEST" ) >/dev/null 2>&1
+if landed; then ok 'a fresh clone DOES bypass (known, CI catches it)'
+else bad 'fresh clone unexpectedly blocked — update the docs'; fi
+
+section "the docs exemption cannot smuggle code"
+# The range must be exactly this ONE rename commit. With any other unreviewed
+# commit beneath it the push blocks regardless of the exemption, and the case
+# passes without ever exercising it — it did, until a mutation run showed
+# turning rename detection back on changed nothing.
+caseno=$((caseno+1)); DEST="v$caseno"
+rm -f "$WORK/.claude/review-records/"*.json 2>/dev/null || true
+git -C "$WORK" checkout -q -B renamecase refs/remotes/origin/main
+mkdir -p "$WORK/docs"
+git -C "$WORK" mv a.go docs/archived.md 2>/dev/null
+git -C "$WORK" commit -qm "docs: archive notes"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+must_block 'renaming code into docs/*.md is NOT exempt'
+# Sanity: a genuinely markdown-only commit off the same base IS exempt, so
+# the case above is testing rename detection and not a blanket refusal.
+caseno=$((caseno+1)); DEST="v$caseno"
+git -C "$WORK" checkout -q -B realdocs refs/remotes/origin/main
+echo note > "$WORK/NOTES.md"; git -C "$WORK" add -A
+git -C "$WORK" commit -qm "docs: a real note"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+must_allow 'a genuinely markdown-only commit IS exempt'
+
+section "a rewritten remote-tracking ref cannot fake an empty diff"
+newcase
+git -C "$WORK" update-ref refs/remotes/origin/main "$BAD_SHA"
+must_block 'self-set merge-base does not exempt'
+git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$REMOTE" rev-parse main 2>/dev/null || echo "$BAD_SHA")" 2>/dev/null || true
+
+section "review-gate-ci.sh (the binding check)"
+CI="$ROOT/scripts/review-gate-ci.sh"
+CIR="$TMP/cirepo"; git init -q -b main "$CIR"
+git -C "$CIR" config user.email t@t; git -C "$CIR" config user.name t
+echo base > "$CIR/a.go"; git -C "$CIR" add -A; git -C "$CIR" commit -qm base
+git -C "$CIR" branch -f mainbase
+echo change >> "$CIR/a.go"; git -C "$CIR" commit -qam "unreviewed code"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  bad 'CI check flags an unreviewed commit'; else ok 'CI check flags an unreviewed commit'; fi
+( cd "$CIR" && bash "$RECORD" clean --reviewer someone "reviewed" >/dev/null 2>&1 )
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  ok 'CI check passes a recorded commit'; else bad 'CI check passes a recorded commit'; fi
+# The client-side bypasses above are exactly what this must still catch.
+echo more >> "$CIR/a.go"; git -C "$CIR" commit -qam "pushed around the hook"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  bad 'CI check catches a commit that bypassed the hook'
+else ok 'CI check catches a commit that bypassed the hook'; fi
+# Branch off the base so the CUMULATIVE diff is markdown-only — that is what
+# the check reads, so a docs commit sitting on top of code is not exempt.
+git -C "$CIR" checkout -q -B docsbranch mainbase
+echo doc > "$CIR/NOTES.md"; git -C "$CIR" add -A; git -C "$CIR" commit -qm "docs: notes"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  ok 'CI check exempts a markdown-only branch'; else bad 'CI check exempts a markdown-only branch'; fi
+git -C "$CIR" checkout -q -B renamebranch mainbase
+git -C "$CIR" mv a.go archived.md
+git -C "$CIR" commit -qm "docs: archive"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  bad 'CI check catches code renamed into a .md'; else ok 'CI check catches code renamed into a .md'; fi
+# Docs sitting ON TOP of unreviewed code is not a docs-only change.
+git -C "$CIR" checkout -q -B stacked mainbase
+echo code >> "$CIR/a.go"; git -C "$CIR" commit -qam "code"
+echo d > "$CIR/D.md"; git -C "$CIR" add -A; git -C "$CIR" commit -qm "docs on top"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  bad 'CI check sees code beneath a docs tip'; else ok 'CI check sees code beneath a docs tip'; fi
 
 section "docs-only exemption"
 DR="$TMP/docsremote.git"; git init -q --bare -b main "$DR"

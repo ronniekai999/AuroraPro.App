@@ -60,10 +60,9 @@ flowchart TD
    that verdict. If no independent agent is available, mark the gate incomplete;
    never substitute or relabel a self-review.
 
-   **Record the verdict — this gate is enforced at PUSH time, not merge time.**
-   `.githooks/pre-push` (a real git hook, installed by
-   `scripts/install-git-hooks.sh`) blocks the push until a record exists for
-   every commit being pushed:
+   **Record the verdict.** `.githooks/pre-push` checks it locally (advisory —
+   `core.hooksPath` is yours to unset) and the `review-record` CI job checks
+   it on the PR, which is the one that counts. Both key on the head commit:
 
    ```bash
    bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"

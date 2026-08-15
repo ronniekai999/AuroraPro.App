@@ -28,10 +28,10 @@ merge. A self-review by the implementing agent does **not** satisfy this gate.
 
 ## Recording the verdict
 
-The gate is enforced mechanically, at **push** time — not at merge time, and
-by a real git `pre-push` hook (`.githooks/pre-push`) rather than by anything
-that inspects your shell command. It blocks the push until a record exists for
-every commit being pushed:
+Record the verdict. A client-side `pre-push` hook checks it, and the
+`review-record` CI job checks it where you cannot switch it off — the CI job
+is the one that counts. Both key on the **head commit**, whose diff against
+the base is what the reviewer actually read:
 
 ```bash
 bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
@@ -40,6 +40,10 @@ bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
 Verdicts: `clean` / `lows-only` open the gate, `fix-first` keeps it closed,
 `bypass` opens it while recording that NO review happened — use that only when
 no independent reviewer is available, and say so in the handoff. Records are
-keyed to the exact commit, so amending or adding one invalidates them. See
-CLAUDE.md's "Adversarial review gate" section for the full procedure and for
-what the hook does and does not enforce.
+keyed to the exact commit, so amending or adding one invalidates them; record
+after the final commit, then commit the record itself (record-only commits are
+exempt, and records are tracked so CI can read them).
+
+Read CLAUDE.md's "Adversarial review gate" section before relying on any of
+this: the client-side hooks are advisory and one `git config` from off, and
+the CI job blocks nothing until a human makes it a required status check.

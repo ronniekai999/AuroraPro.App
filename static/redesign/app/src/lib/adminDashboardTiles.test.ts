@@ -69,9 +69,13 @@ describe('formatSkipMarkers', () => {
     ({ intro: 0, recap: 0, credits: 0, manual: 0, suppressed: 0, total: 0, ...over })
 
   it('leads with the total and breaks down by kind', () => {
+    // Grouping separators come from toLocaleString, so the expected string is
+    // built the same way rather than hardcoded: under LC_ALL=de_DE this read
+    // '12.043' and the case failed on a correct implementation.
+    const n = (v: number) => v.toLocaleString()
     expect(formatSkipMarkers(t({
       intro: 6210, recap: 1003, credits: 4830, manual: 12, total: 12043,
-    }))).toBe('12,043 markers · 6,210 intro · 1,003 recap · 4,830 credits · 12 hand-edited')
+    }))).toBe(`${n(12043)} markers · ${n(6210)} intro · ${n(1003)} recap · ${n(4830)} credits · ${n(12)} hand-edited`)
   })
 
   it('drops zero kinds so a movies-only library reads cleanly', () => {

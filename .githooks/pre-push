@@ -28,7 +28,18 @@
 set -uo pipefail
 
 ZERO='0000000000000000000000000000000000000000'
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# Fail CLOSED when the repo shape is unexpected. `--show-toplevel` exits 128
+# in a bare repo, and `|| exit 0` there made the first line of the gate its
+# most reliable bypass: pushing from a bare clone was simply allowed.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$REPO_ROOT" ]; then
+  REPO_ROOT="$(git rev-parse --git-dir 2>/dev/null)"
+fi
+if [ -z "$REPO_ROOT" ]; then
+  echo "review-gate: BLOCKED — cannot resolve this repository, so the review gate cannot verify the push." >&2
+  exit 1
+fi
 RECORDS_DIR="$REPO_ROOT/.claude/review-records"
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -52,7 +63,19 @@ docs_only() {
   # inspectable, rather than failing closed on a legitimate docs push.
   [ -n "$from" ] || from="$(git hash-object -t tree /dev/null)"
   [ -n "$from" ] || return 1
-  changed="$(git diff --name-only "$from" "$to" 2>/dev/null)" || return 1
+  # --no-renames is load-bearing: with rename detection on, `git diff
+  # --name-only` prints only the DESTINATION path, so `git mv internal/db/q.go
+  # docs/q.md` reads as a docs-only change. A reviewer deleted this hook, the
+  # PreToolUse hook, and Go source from a remote through exactly that.
+  changed="$(git diff --no-renames --name-only "$from" "$to" 2>/dev/null)" || return 1
+  # An empty diff is not evidence of a docs-only change — `from` is computed
+  # from a remote-tracking ref the pusher can rewrite locally
+  # (`git update-ref refs/remotes/origin/main <any-sha>`), which made any
+  # commit look like a no-op. Fail closed and let the record check decide.
+  [ -n "$changed" ] || return 1
+  # Adding a review record is not a code change; records are tracked so CI
+  # can read them, and without this a record commit would need its own.
+  changed="$(printf '%s\n' "$changed" | grep -v '^\.claude/review-records/.*\.json$')"
   [ -n "$changed" ] || return 0
   printf '%s\n' "$changed" | grep -qvE '\.(md|txt)$' && return 1
   printf '%s\n' "$changed" | grep -qE '(^|/)(CLAUDE|AGENTS)\.md$|^docs/dev-workflow\.md$' && return 1
@@ -70,38 +93,45 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   elif [ -n "$base" ]; then
     from="$(git merge-base "$base" "$local_sha" 2>/dev/null || true)"
   fi
-  if docs_only "$from" "$local_sha"; then continue; fi
+  # The TIP commit, not every commit in the range. A review is of the
+  # cumulative diff (base...head), so that is what a record describes —
+  # requiring one per intermediate commit would demand reviews nobody
+  # performs and that the recorded digest could not represent. The tip is
+  # the state that reaches the remote, and a new tip needs a new record.
+  for sha in "$local_sha"; do
+    if docs_only "$from" "$sha"; then continue; fi
 
-  record="$RECORDS_DIR/$local_sha.json"
-  if [ ! -f "$record" ]; then
-    echo "review-gate: BLOCKED — no independent adversarial review on record for ${local_ref:-HEAD} ($local_sha)." >&2
-    blocked=1
-    continue
-  fi
-  verdict="$(jq -r '.verdict // ""' "$record" 2>/dev/null)" || verdict=""
-  recorded_sha="$(jq -r '.sha // ""' "$record" 2>/dev/null)" || recorded_sha=""
-  reviewer="$(jq -r '.reviewer // ""' "$record" 2>/dev/null)" || reviewer=""
+    record="$RECORDS_DIR/$sha.json"
+    if [ ! -f "$record" ]; then
+      echo "review-gate: BLOCKED — no review on record for $sha ($(git log -1 --format=%s "$sha" 2>/dev/null))." >&2
+      blocked=1
+      continue
+    fi
+    verdict="$(jq -r '.verdict // ""' "$record" 2>/dev/null)" || verdict=""
+    recorded_sha="$(jq -r '.sha // ""' "$record" 2>/dev/null)" || recorded_sha=""
+    reviewer="$(jq -r '.reviewer // ""' "$record" 2>/dev/null)" || reviewer=""
 
-  if [ "$recorded_sha" != "$local_sha" ]; then
-    echo "review-gate: BLOCKED — the record for $local_sha describes ${recorded_sha:-nothing}. Re-record." >&2
-    blocked=1; continue
-  fi
-  case "$verdict" in
-    clean|lows-only)
-      if [ -z "$reviewer" ]; then
-        echo "review-gate: BLOCKED — the record for $local_sha names no reviewer. Re-record with --reviewer <id>." >&2
-        blocked=1
-      fi
-      ;;
-    bypass)
-      echo "review-gate: BYPASSED for $local_sha — NO review happened. Report the gate as INCOMPLETE in your handoff and on the PR." >&2
-      ;;
-    "")
-      echo "review-gate: BLOCKED — the record for $local_sha has no verdict. Re-record." >&2; blocked=1 ;;
-    *)
-      echo "review-gate: BLOCKED — the review for $local_sha has verdict \"$verdict\". Resolve the findings, re-review the final diff, re-record." >&2
-      blocked=1 ;;
-  esac
+    if [ "$recorded_sha" != "$sha" ]; then
+      echo "review-gate: BLOCKED — the record for $sha describes ${recorded_sha:-nothing}. Re-record." >&2
+      blocked=1; continue
+    fi
+    case "$verdict" in
+      clean|lows-only)
+        if [ -z "$reviewer" ]; then
+          echo "review-gate: BLOCKED — the record for $sha names no reviewer. Re-record with --reviewer <id>." >&2
+          blocked=1
+        fi
+        ;;
+      bypass)
+        echo "review-gate: BYPASSED for $sha — NO review happened. Report the gate as INCOMPLETE in your handoff and on the PR." >&2
+        ;;
+      "")
+        echo "review-gate: BLOCKED — the record for $sha has no verdict. Re-record." >&2; blocked=1 ;;
+      *)
+        echo "review-gate: BLOCKED — the review for $sha has verdict \"$verdict\". Resolve the findings, re-review the final diff, re-record." >&2
+        blocked=1 ;;
+    esac
+  done
 done
 
 if [ "$blocked" = 1 ]; then

@@ -133,3 +133,25 @@ jobs:
       # what landed; no network, no dependence on this checkout's state.
       - name: Review gate tests
         run: bash scripts/review-gate-test.sh
+
+  review-record:
+    name: Review record present
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # THE binding check. The client-side hooks are advisory: core.hooksPath
+      # is per-clone config the pushing process controls, so
+      # `git -c core.hooksPath=/dev/null push` or a throwaway clone turns them
+      # off in one token. This job runs where the pusher cannot unset it.
+      #
+      # It only actually BLOCKS once a human marks it a required status check
+      # in branch protection. Until then it reports and nothing enforces.
+      - name: Check for an adversarial review record
+        run: |
+          bash scripts/review-gate-ci.sh \
+            "origin/${{ github.base_ref }}" \
+            "${{ github.event.pull_request.head.sha }}"

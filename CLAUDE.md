@@ -53,40 +53,50 @@ present a self-review as equivalent. `record-review.sh bypass "<why>"` records
 that honestly and lets the push through; it is the only way past, and it
 obliges you to report the gate as incomplete. There is no silent bypass.
 
-**This is enforced mechanically, in two layers.**
+**There is tooling for this, but read what it does and does not do.**
 
-1. **`.githooks/pre-push` is the enforcement boundary.** git runs it with the
-   refs and shas already resolved, in the repo actually being pushed, so no
-   shell shape changes what it sees — `bash -c "…"`, `pushd other && git
-   push`, `git -C … push`, `timeout 60 git push`, `git push a && git push b`
-   all reach the same check. It refuses the push unless every ref being
-   pushed has a record naming a reviewer. Installed via
-   `core.hooksPath=.githooks` by `scripts/install-git-hooks.sh`, which the
-   SessionStart hook runs for you.
-2. **`scripts/review-gate.sh` (PreToolUse) covers what a git hook cannot
-   see**: `git push --no-verify`, which skips pre-push hooks by design, and
-   the `mcp__github__` tools that write file content over the API without
-   touching git at all.
+**The binding check is `scripts/review-gate-ci.sh`**, run by the
+`review-record` CI job on every PR. It verifies that the PR's head commit has
+a record naming a reviewer, keyed to that exact sha. It runs where you cannot
+turn it off — and it is only truly binding once a human marks it a **required
+status check** in branch protection. Until someone does, it reports and
+nothing blocks.
 
-This replaced an earlier design that tried to recognize a push by parsing the
-shell command. Four review rounds walked through that parser, each bypass
-ordinary rather than adversarial. An allowlist of shell shapes cannot be
-finished; the git layer has no such list.
+**Everything client-side is advisory**, and you should treat it that way:
 
-Known limits, so you don't over-trust it:
+- `.githooks/pre-push` refuses a push whose tip has no record. It sees the
+  resolved refs and repo, so no shell shape gets around it — but
+  `core.hooksPath` is per-clone config *your own process controls*, so
+  `git -c core.hooksPath=/dev/null push`, a throwaway `git clone`, or one
+  `git config` disables it in a single token. A reviewer demonstrated seven
+  such bypasses.
+- `scripts/review-gate.sh` (PreToolUse) catches `git push --no-verify` and
+  the `mcp__github__` tools that write content over the API. It is
+  best-effort by construction.
 
-- **The gate cannot verify a review happened**, only that a record exists and
-  names a reviewer. Anyone who can write the record can author one by hand.
-  The reviewer field and diff digest make a hollow record auditable, not
-  impossible.
-- **`--no-verify` genuinely bypasses layer 1**; only the weaker layer 2
-  catches it, and only when it can see the command.
-- **A fresh clone has no hook until `core.hooksPath` is set** — that is the
-  cost of enforcing at the git layer.
+Two designs were tried and retired here, both instructive. Parsing the shell
+command to recognize a push was defeated four rounds running — `bash -c
+'echo x; git push'`, `pushd other && git push`, `sudo -i git push`, two
+pushes in one call. Moving to a git hook fixed all of those and then
+relocated the problem to "is the hook installed?", which has just as many
+wrong answers. Enforcement has to live where the pushing process has no say.
 
-`scripts/review-gate-test.sh` (run in CI) pins the behavior by performing real
-pushes to a temp remote and asserting what actually landed, rather than
-trusting exit codes.
+Known limits, stated plainly:
+
+- **Nothing here verifies a review happened** — only that a record exists,
+  names a reviewer, and matches the sha. Anyone who can write the record can
+  author one by hand. The reviewer field and diff digest make a hollow record
+  auditable, not impossible.
+- **The client-side hooks are one `git config` from off.** Do not rely on
+  them to catch you; they exist to make the honest path convenient.
+- **The CI job blocks nothing until branch protection requires it.**
+- Records live in `.claude/review-records/` and are **tracked**, because CI
+  reads them from the checkout. A commit that only adds records is exempt
+  from needing one — otherwise recording a review would need a review.
+
+`scripts/review-gate-test.sh` (also in CI) pins all of this by performing real
+pushes to a temp remote and asserting what actually landed, and it carries
+cases for the known bypasses so they stay documented rather than forgotten.
 
 Only `*.md`/`*.txt` diffs are exempt, and `CLAUDE.md`, `AGENTS.md` and
 `docs/dev-workflow.md` are excluded from that exemption: the rules an agent
