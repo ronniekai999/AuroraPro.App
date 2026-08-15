@@ -320,6 +320,14 @@ type SkipMarkerStatus struct {
 // endpoint. The four marker counts share ONE scan via COUNT FILTER;
 // the remaining subqueries are per-table counts — cheap enough for the
 // dashboard's load-on-mount fetch (this is not wired to a poller).
+//
+// Both movie subqueries join media_items on type = 'movie', matching
+// FetchPendingSkipMovieFiles — media_files' FK is to media_items at
+// large, not to movies, so an unscoped analyzed count could exceed its
+// own denominator (a manual marker on a non-movie media_file, or an
+// item retyped movie -> show after analysis) and render as 8,178/8,177.
+// Episode files need no such scoping: episode_files -> tv_episodes is
+// the only shape they have.
 func (q *Queries) GetSkipMarkerStatus(ctx context.Context, detector string) (*SkipMarkerStatus, error) {
 	s := &SkipMarkerStatus{}
 	err := q.pool.QueryRow(ctx, `
@@ -327,7 +335,10 @@ func (q *Queries) GetSkipMarkerStatus(ctx context.Context, detector string) (*Sk
 		  (SELECT COUNT(*) FROM episode_files),
 		  (SELECT COUNT(*) FROM skip_marker_analysis WHERE episode_file_id IS NOT NULL AND detector = $1),
 		  (SELECT COUNT(*) FROM media_files mf JOIN media_items mi ON mi.id = mf.media_item_id AND mi.type = 'movie'),
-		  (SELECT COUNT(*) FROM skip_marker_analysis WHERE media_file_id IS NOT NULL AND detector = $1),
+		  (SELECT COUNT(*) FROM skip_marker_analysis a
+		     JOIN media_files mf ON mf.id = a.media_file_id
+		     JOIN media_items mi ON mi.id = mf.media_item_id AND mi.type = 'movie'
+		   WHERE a.media_file_id IS NOT NULL AND a.detector = $1),
 		  m.intro, m.recap, m.credits, m.manual
 		FROM (
 		  SELECT
