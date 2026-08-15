@@ -19,20 +19,25 @@
 // that is the point. A clever assertion would be one more thing to keep in
 // sync.
 
-import { readFileSync } from 'node:fs'
+// Sources arrive via Vite's `?raw`, NOT node:fs. tsconfig.app.json pins
+// "types": ["vite/client"] and includes all of src/, so a node builtin here
+// fails `tsc -b` — which is what `npm run build` runs, which is what
+// scripts/aurora-update.sh runs on the box. `npm test` stays green through
+// all of it (vitest.config.ts documents that exact trap), so the first
+// symptom would have been every auto-deploy failing on main. `?raw` is
+// declared by vite/client, so it typechecks with the config as it stands.
+import adminViewSrc from '../components/admin/AdminView.tsx?raw'
+import appSrc from '../App.tsx?raw'
 import { describe, expect, it } from 'vitest'
 
-const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8')
-
-const SURFACES = [
-  { name: 'AdminView dashboard tile', src: '../components/admin/AdminView.tsx' },
-  { name: 'App stage status panel', src: '../App.tsx' },
+const SURFACES: { name: string; text: string }[] = [
+  { name: 'AdminView dashboard tile', text: adminViewSrc },
+  { name: 'App stage status panel', text: appSrc },
 ]
 
 describe('admin stat tile labels', () => {
-  for (const { name, src } of SURFACES) {
+  for (const { name, text } of SURFACES) {
     it(`${name} does not label media_items rows as files`, () => {
-      const text = read(src)
       // Find each place the value is RENDERED, then read back to the
       // nearest preceding label. Searching a window rather than a single
       // line, because a tile literal may span lines — and comment lines
@@ -65,8 +70,8 @@ describe('admin stat tile labels', () => {
     // It counts files ANALYZED — a file the detector found nothing in
     // still counts. "Skip Markers" named the wrong noun and invited the
     // comparison that started all this.
-    const text = read('../components/admin/AdminView.tsx')
-    const line = text.split('\n').find(l => l.includes('skipCoverage(skipStatus)'))
+    const text = adminViewSrc
+    const line = text.split('\n').find((l: string) => l.includes('skipCoverage(skipStatus)'))
     expect(line, 'skip tile no longer derives from skipCoverage').toBeDefined()
     const tile = text.slice(text.indexOf(line!), text.indexOf(line!) + 1200)
     expect(tile).toMatch(/label:\s*'Skip Analysis'/)

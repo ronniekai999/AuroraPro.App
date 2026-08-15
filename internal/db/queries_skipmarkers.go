@@ -325,9 +325,11 @@ type SkipMarkerStatus struct {
 	// length, which silently folded suppressions in and made "N manual"
 	// disjoint from the total it was displayed beside.
 	ManualMarkers int64 `json:"manual_markers"`
-	// SuppressedMarkers counts zero-length manual rows, which migration 043
-	// defines as "admin suppressed this marker" — a hidden window, not a
-	// skippable one. Disjoint from every count above, hence its own field.
+	// SuppressedMarkers counts manual rows with no length (end_ms == start_ms),
+	// which is how migration 043 represents "admin suppressed this marker" — a
+	// hidden window, not a skippable one. The migration's prose says 0..0; this
+	// counts any zero-LENGTH row, matching what the player actually filters out.
+	// Disjoint from every count above, hence its own field.
 	SuppressedMarkers int64 `json:"suppressed_markers"`
 }
 

@@ -64,6 +64,18 @@ func TestGetSkipMarkerStatusScopesAndClassifies(t *testing.T) {
 		}
 	}
 
+	// Baseline BEFORE any fixture. The shared harness explicitly expects a
+	// test DB that may already hold data (queries_jsonb_integration_test.go
+	// notes people run `aurora` against it), so absolute assertions are
+	// wrong twice over: they fail on a dirty DB, and — worse — the
+	// analyzed-vs-total assertion passes with the UNFIXED query as soon as
+	// one extra un-analyzed movie file exists, because the over-count no
+	// longer crosses the total. Deltas hold either way.
+	before, err := q.GetSkipMarkerStatus(ctx, detector)
+	if err != nil {
+		t.Fatalf("baseline GetSkipMarkerStatus: %v", err)
+	}
+
 	movie := item("movie", "Scoped Movie "+randomSuffix(t))
 	movieFile := file(movie, "/tmp/aurora-test/"+randomSuffix(t)+".mkv")
 	analyzed(movieFile, detector)
@@ -85,40 +97,43 @@ func TestGetSkipMarkerStatusScopesAndClassifies(t *testing.T) {
 		t.Fatalf("GetSkipMarkerStatus: %v", err)
 	}
 
+	delta := func(name string, now, was, want int64) {
+		t.Helper()
+		if now-was != want {
+			t.Errorf("%s changed by %d, want %d (baseline %d, now %d)", name, now-was, want, was, now)
+		}
+	}
+
+	// Two movie files were added; only ONE of them belongs to a movie.
+	// Under the unfixed query the show-owned ledger row also counted here,
+	// making this delta 2. Asserting the delta rather than `analyzed > total`
+	// is what makes the over-count visible on a non-empty database.
+	delta("movie_total", got.MovieTotal, before.MovieTotal, 1)
+	delta("movie_analyzed", got.MovieAnalyzed, before.MovieAnalyzed, 1)
 	if got.MovieAnalyzed > got.MovieTotal {
-		t.Errorf("analyzed (%d) exceeds total (%d): the show-owned media_file leaked into the analyzed count",
-			got.MovieAnalyzed, got.MovieTotal)
+		t.Errorf("analyzed (%d) exceeds total (%d)", got.MovieAnalyzed, got.MovieTotal)
 	}
 
 	// Scoped to this detector (+ manual): the stale-v0 credits marker must
 	// not be counted, or a detector bump shows "0 analyzed, N markers".
-	if got.CreditsMarkers != 1 {
-		t.Errorf("credits = %d, want 1 (the manual one; stale-v0 must be excluded)", got.CreditsMarkers)
-	}
-	if got.IntroMarkers != 1 {
-		t.Errorf("intro = %d, want 1", got.IntroMarkers)
-	}
+	delta("credits", got.CreditsMarkers, before.CreditsMarkers, 1) // manual one only
+	delta("intro", got.IntroMarkers, before.IntroMarkers, 1)
 	// The zero-length manual row is a suppression, not a recap marker.
-	if got.RecapMarkers != 0 {
-		t.Errorf("recap = %d, want 0 (the only recap row is zero-length)", got.RecapMarkers)
-	}
-	if got.SuppressedMarkers != 1 {
-		t.Errorf("suppressed = %d, want 1", got.SuppressedMarkers)
-	}
+	delta("recap", got.RecapMarkers, before.RecapMarkers, 0)
+	delta("suppressed", got.SuppressedMarkers, before.SuppressedMarkers, 1)
 	// manual must be a SUBSET of the kind counts, not disjoint from them:
 	// the visible manual credits marker, and not the suppressed recap row.
-	if got.ManualMarkers != 1 {
-		t.Errorf("manual = %d, want 1 (visible manual markers only)", got.ManualMarkers)
-	}
+	delta("manual", got.ManualMarkers, before.ManualMarkers, 1)
 	if kinds := got.IntroMarkers + got.RecapMarkers + got.CreditsMarkers; got.ManualMarkers > kinds {
 		t.Errorf("manual (%d) exceeds intro+recap+credits (%d) — it must be a subset, since the tile "+
 			"renders it inside that total", got.ManualMarkers, kinds)
 	}
 }
 
-// Guards the assumption the status query is built on: episode markers and
-// movie markers use different columns, and a marker must attach to exactly
-// one side. If this ever stops holding, the per-kind counts double-count.
+// Pins which column each side writes to. This is NOT the guarantee that a
+// marker attaches to exactly one side — that is a CHECK constraint in
+// migration 043 — only that the accessor the status query is built around
+// keeps returning the columns that constraint is written against.
 func TestSkipMarkerFileColumnsAreExclusive(t *testing.T) {
 	for _, isEpisode := range []bool{true, false} {
 		col := skipMarkerFileColumn(isEpisode)

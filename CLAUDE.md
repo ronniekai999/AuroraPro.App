@@ -56,20 +56,24 @@ obliges you to report the gate as incomplete. There is no silent bypass.
 **This is enforced mechanically.** `.claude/settings.json` runs
 `scripts/review-gate.sh` as a PreToolUse hook over `Bash` and the
 `mcp__github__*` tools, and blocks a push unless a review record exists for
-**the commit being pushed** — which is the ref named in the command, not
-necessarily your checkout. Amending or adding a commit invalidates the record.
+**the commit being pushed** — resolved from the command itself: the ref it
+names, in the repo it acts on (`cd`, `-C`, `--git-dir`, `GIT_DIR`), not
+whatever the session happens to be standing in. Amending or adding a commit
+invalidates the record.
 A call that both moves HEAD and pushes (`git commit … && git push`) is refused
 outright: the hook runs *before* the command, so the sha it can see is the one
 before your commit. Run them as separate calls.
 
 Coverage is honest but not total: `scripts/review-gate-test.sh` pins what is
-enforced (52 cases, synthetic repos, no dependence on this checkout's state).
-The gate verifies that a record exists — it cannot verify that a review
-actually happened, so the record captures the reviewer and a digest of the
-reviewed diff to make a hollow one visible. Only `*.md`/`*.txt` diffs are
-exempt, and `CLAUDE.md`, `AGENTS.md` and `docs/dev-workflow.md` are excluded
-from that exemption: the rules an agent follows are not a place for unreviewed
-edits.
+enforced, against synthetic repos with no dependence on this checkout's state.
+The gate verifies that a record exists and names a reviewer — it CANNOT verify
+that a review actually happened. Anyone who can write the record can author
+one by hand; the reviewer field and the recorded diff digest make a hollow
+record auditable, not impossible. Treat the hook as a floor, not a guarantee.
+
+Only `*.md`/`*.txt` diffs are exempt, and `CLAUDE.md`, `AGENTS.md` and
+`docs/dev-workflow.md` are excluded from that exemption: the rules an agent
+follows are not a place for unreviewed edits.
 
 The hook exists because prose alone did not work: this gate was written down
 in `AGENTS.md`, `docs/dev-workflow.md`, and a pointer here, and was still

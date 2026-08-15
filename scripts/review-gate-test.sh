@@ -28,7 +28,12 @@ run() {
   OUT="$(cd "$1" && printf '%s' "$2" | bash "$GATE" 2>&1)"
   RC=$?
 }
-bash_payload() { printf '%s' "$1" | jq -Rs '{tool_name:"Bash", tool_input:{command:.}}'; }
+# The payload carries the session cwd; the gate must honor it rather than
+# trusting its own process cwd, and must follow the command out of it.
+bash_payload() {
+  printf '%s' "$1" | jq -Rs --arg cwd "${2:-}" \
+    '{tool_name:"Bash", cwd:$cwd, tool_input:{command:.}}'
+}
 
 check() { # name want_rc repo payload [want_substring]
   local name="$1" want="$2" repo="$3" payload="$4" want_sub="${5:-}"
@@ -41,7 +46,7 @@ check() { # name want_rc repo payload [want_substring]
   fi
   printf '  ok   %-42s exit=%s\n' "$name" "$RC"; pass=$((pass+1))
 }
-cmd() { check "$1" "$2" "$3" "$(bash_payload "$4")" "${5:-}"; }
+cmd() { check "$1" "$2" "$3" "$(bash_payload "$4" "$3")" "${5:-}"; }
 
 # --- synthetic repo ---------------------------------------------------
 TMP="$(mktemp -d)"
@@ -60,9 +65,12 @@ CODE_SHA="$(git -C "$REPO" rev-parse HEAD)"
 section "detects a push through ordinary shell punctuation (all must BLOCK)"
 for c in 'git push -u origin main' 'git push;' 'echo a; git push;' 'git push&&echo done' \
          'git push|cat' 'git push&' '(git push)' 'if true; then git push; fi' \
-         'for i in 1; do git push; done' 'git push --tags' 'cd /tmp && git push'; do
+         'for i in 1; do git push; done' 'git push --tags'; do
   cmd "$c" 2 "$REPO" "$c" "no independent adversarial review"
 done
+# `cd` into a non-repo still blocks, but for the honest reason: the gate now
+# follows the command's target rather than reporting on its own checkout.
+cmd 'cd /tmp && git push' 2 "$REPO" 'cd /tmp && git push' 'not a git working tree'
 
 section "detects a push reached indirectly (all must BLOCK)"
 cmd 'git -c user.email=x push'  2 "$REPO" 'git -c user.email=x push origin main'
@@ -77,10 +85,35 @@ cmd 'xargs git push'            2 "$REPO" 'echo x | xargs -I{} git push'
 cmd 'gh pr create'              2 "$REPO" 'gh pr create --fill'
 cmd 'gh pr merge'               2 "$REPO" 'gh pr merge 12 --squash'
 
+section "env assignments whose values contain spaces (must BLOCK)"
+cmd 'GIT_SSH_COMMAND="ssh -i k" push' 2 "$REPO" 'GIT_SSH_COMMAND="ssh -i ~/.ssh/id" git push origin main'
+cmd 'GIT_AUTHOR_NAME="Jane Doe" push' 2 "$REPO" 'GIT_AUTHOR_NAME="Jane Doe" git push origin main'
+cmd 'env with quoted spaces'          2 "$REPO" 'env GIT_SSH_COMMAND="ssh -i k" git push origin main'
+
+section "wrappers that take their own argument (must BLOCK)"
+cmd 'timeout 60 git push'  2 "$REPO" 'timeout 60 git push origin main'
+cmd 'nice -n 19 git push'  2 "$REPO" 'nice -n 19 git push origin main'
+cmd 'flock /tmp/l git push' 2 "$REPO" 'flock /tmp/l git push origin main'
+cmd 'setsid git push'      2 "$REPO" 'setsid git push origin main'
+cmd 'stdbuf -oL git push'  2 "$REPO" 'stdbuf -oL git push origin main'
+cmd 'git subtree push'     2 "$REPO" 'git subtree push --prefix=x origin main'
+cmd 'push --branches'      2 "$REPO" 'git push --branches origin' 'unknown set of refs'
+
+section "quoted prose that merely CONTAINS a compound push (must ALLOW)"
+cmd 'echo with && push inside'  0 "$REPO" 'echo "step 1: build && git push"'
+cmd 'commit -m with && push'    0 "$REPO" 'git commit -m "gate: block cd x && git push"'
+cmd 'log --grep with && push'   0 "$REPO" 'git log --oneline --grep="cd x && git push"'
+
 section "non-Bash publish tools (must BLOCK)"
 check 'mcp github push_files'      2 "$REPO" '{"tool_name":"mcp__github__push_files","tool_input":{}}'
 check 'mcp github create_pr'       2 "$REPO" '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'
 check 'mcp github create_or_update' 2 "$REPO" '{"tool_name":"mcp__github__create_or_update_file","tool_input":{}}'
+check 'mcp github delete_file'      2 "$REPO" '{"tool_name":"mcp__github__delete_file","tool_input":{}}'
+check 'mcp github update_pr_branch' 2 "$REPO" '{"tool_name":"mcp__github__update_pull_request_branch","tool_input":{}}'
+check 'mcp github actions_run'      2 "$REPO" '{"tool_name":"mcp__github__actions_run_trigger","tool_input":{}}'
+check 'mcp github unknown future'   2 "$REPO" '{"tool_name":"mcp__github__some_future_writer","tool_input":{}}'
+check 'mcp github get_ is a read'   0 "$REPO" '{"tool_name":"mcp__github__get_file_contents","tool_input":{}}'
+check 'mcp github list_ is a read'  0 "$REPO" '{"tool_name":"mcp__github__list_commits","tool_input":{}}'
 
 section "mentions rather than invocations (all must ALLOW)"
 cmd 'grep for the string'  0 "$REPO" 'grep -rn "git push" docs/'
@@ -128,6 +161,39 @@ git -C "$REPO" reset -q --hard refs/remotes/origin/main   # HEAD is now clean vs
 cmd 'pushing another branch is checked' 2 "$REPO" 'git push origin feat/x'
 cmd 'refspec form is checked'           2 "$REPO" 'git push origin feat/x:refs/heads/feat/x'
 git -C "$REPO" checkout -q feat/x
+
+section "the gate follows the command into another repo, not its own cwd"
+# The hole that let a reviewer land unreviewed commits on a real remote:
+# the hook inspected the repo it was standing in while the command pushed
+# from a different one. OTHER has no record; REPO's record must not cover it.
+OTHER="$TMP/other"; git init -q -b main "$OTHER"
+git -C "$OTHER" config user.email t@t; git -C "$OTHER" config user.name t
+echo code > "$OTHER/x.go"; git -C "$OTHER" add -A; git -C "$OTHER" commit -qm base
+git -C "$OTHER" update-ref refs/remotes/origin/main HEAD
+echo more >> "$OTHER/x.go"; git -C "$OTHER" commit -qam unreviewed
+# REPO is on feat/x here, which carries real changes — pushing `main` would
+# be a no-op and would pass for the wrong reason.
+( cd "$REPO" && bash "$RECORD" clean --reviewer test "covers THIS repo only" >/dev/null )
+cmd 'cd other && push'        2 "$REPO" "cd $OTHER && git push origin main"
+cmd 'git -C other push'       2 "$REPO" "git -C $OTHER push origin main"
+cmd 'git --git-dir=other'     2 "$REPO" "git --git-dir=$OTHER/.git --work-tree=$OTHER push origin main"
+cmd 'GIT_DIR=other git push'  2 "$REPO" "GIT_DIR=$OTHER/.git GIT_WORK_TREE=$OTHER git push origin main"
+cmd 'own repo still allowed'  0 "$REPO" 'git push origin feat/x'
+rm -f "$REPO/.claude/review-records/"*.json
+
+section "a passing verdict must name a reviewer"
+( cd "$REPO" && bash "$RECORD" clean --reviewer someone "named" >/dev/null )
+cmd 'named reviewer allows' 0 "$REPO" 'git push origin feat/x'
+sha="$(git -C "$REPO" rev-parse HEAD)"
+jq '.reviewer = ""' "$REPO/.claude/review-records/$sha.json" > "$TMP/r.json"
+mv "$TMP/r.json" "$REPO/.claude/review-records/$sha.json"
+cmd 'anonymous verdict blocks' 2 "$REPO" 'git push origin feat/x' 'names no reviewer'
+if ( cd "$REPO" && bash "$RECORD" clean "no reviewer flag" >/dev/null 2>&1 ); then
+  printf '  FAIL %-42s record-review accepted clean without --reviewer\n' 'record-review requires reviewer'; fail=$((fail+1))
+else
+  printf '  ok   %-42s rejected\n' 'record-review requires reviewer'; pass=$((pass+1))
+fi
+rm -f "$REPO/.claude/review-records/"*.json
 
 section "docs-only exemption"
 DOCS="$TMP/docs"; git init -q -b main "$DOCS"

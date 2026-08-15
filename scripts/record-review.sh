@@ -62,6 +62,18 @@ if [ -n "$findings" ] && ! printf '%s' "$findings" | grep -qE '^[0-9]+$'; then
   exit 64
 fi
 
+# A passing verdict must name who gave it. The gate enforces this too — an
+# anonymous "clean" was previously the cheapest way through, which made the
+# reviewer field decoration rather than a record.
+case "$verdict" in
+  clean|lows-only)
+    if [ -z "$(printf '%s' "$reviewer" | tr -d '[:space:]')" ]; then
+      echo "record-review: --reviewer is required for '$verdict' — name the independent agent that reviewed this. Use 'bypass' if no review happened." >&2
+      exit 64
+    fi
+    ;;
+esac
+
 repo_root="$(git rev-parse --show-toplevel)"
 head_sha="$(git rev-parse HEAD)"
 records_dir="$repo_root/.claude/review-records"
