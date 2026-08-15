@@ -183,6 +183,15 @@ echo note > "$WORK/NOTES.md"; git -C "$WORK" add -A
 git -C "$WORK" commit -qm "docs: a real note"
 BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
 must_allow 'a genuinely markdown-only commit IS exempt'
+# The record exemption covers records ONLY. .claude/settings.json wires the
+# PreToolUse hook, so exempting the directory would let a branch disable a
+# gate layer with no review.
+caseno=$((caseno+1)); DEST="v$caseno"
+git -C "$WORK" checkout -q -B settingscase refs/remotes/origin/main
+mkdir -p "$WORK/.claude"; echo '{"hooks":{}}' > "$WORK/.claude/settings.json"
+git -C "$WORK" add -A; git -C "$WORK" commit -qm "chore: settings"
+BAD_SHA="$(git -C "$WORK" rev-parse HEAD)"
+must_block 'pre-push: .claude/settings.json is NOT exempt'
 
 section "a rewritten remote-tracking ref cannot fake an empty diff"
 newcase
@@ -202,6 +211,53 @@ if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
 ( cd "$CIR" && bash "$RECORD" clean --reviewer someone "reviewed" >/dev/null 2>&1 )
 if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
   ok 'CI check passes a recorded commit'; else bad 'CI check passes a recorded commit'; fi
+
+# THE case that matters, and the one whose absence hid an always-failing
+# gate through two rounds: commit the record (which moves HEAD, as the
+# documented flow requires) and run the check from a FRESH CLONE, which is
+# all a CI checkout ever sees. Testing an untracked record in the worktree
+# models a state CI is never in.
+git -C "$CIR" add .claude/review-records >/dev/null 2>&1
+git -C "$CIR" commit -qm "chore: record review"
+CLONE_CI="$TMP/cloneci"; rm -rf "$CLONE_CI"
+git clone -q "$CIR" "$CLONE_CI" 2>/dev/null
+git -C "$CLONE_CI" branch -f mainbase "$(git -C "$CIR" rev-parse mainbase)" 2>/dev/null
+if ( cd "$CLONE_CI" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  ok 'CI check passes with the record COMMITTED, from a clone'
+else
+  bad 'CI check passes with the record COMMITTED, from a clone — the documented flow must be satisfiable'
+fi
+# And a record commit must not launder code sitting above the reviewed state.
+echo sneak >> "$CLONE_CI/a.go"; git -C "$CLONE_CI" commit -qam "code after the review"
+if ( cd "$CLONE_CI" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  bad 'CI check catches code added after the record'
+else ok 'CI check catches code added after the record'; fi
+git -C "$CLONE_CI" reset -q --hard HEAD~1
+
+section "CI check: verdict handling (mutation-sensitive)"
+cisha() { git -C "$CLONE_CI" rev-parse HEAD~1; }   # the reviewed (non-record) commit
+cirec() { echo "$CLONE_CI/.claude/review-records/$(cisha).json"; }
+cichk() { ( cd "$CLONE_CI" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); }
+ciexp() { if cichk; then [ "$2" = 0 ] && ok "$1" || bad "$1 (passed, want blocked)"
+          else [ "$2" = 1 ] && ok "$1" || bad "$1 (blocked, want passed)"; fi; }
+orig="$(cat "$(cirec)")"
+printf '%s' "$orig" | jq '.reviewer = ""' > "$(cirec)"
+ciexp 'CI: anonymous verdict blocks' 1
+printf '%s' "$orig" | jq '.verdict = "fix-first"' > "$(cirec)"
+ciexp 'CI: fix-first blocks' 1
+printf '%s' "$orig" | jq '.sha = "deadbeef"' > "$(cirec)"
+ciexp 'CI: record for another sha blocks' 1
+echo 'not json' > "$(cirec)"
+ciexp 'CI: corrupt record blocks' 1
+printf '%s' "$orig" | jq '.verdict = "bypass"' > "$(cirec)"
+ciexp 'CI: bypass passes (and says so)' 0
+printf '%s' "$orig" > "$(cirec)"
+# The exemption must cover records ONLY — settings.json wires the hooks.
+git -C "$CLONE_CI" checkout -q -B settingscase mainbase
+mkdir -p "$CLONE_CI/.claude"; echo '{}' > "$CLONE_CI/.claude/settings.json"
+git -C "$CLONE_CI" add -A; git -C "$CLONE_CI" commit -qm "chore: settings"
+if cichk; then bad 'CI: .claude/settings.json is NOT exempt'; else ok 'CI: .claude/settings.json is NOT exempt'; fi
+git -C "$CLONE_CI" checkout -q - 2>/dev/null
 # The client-side bypasses above are exactly what this must still catch.
 echo more >> "$CIR/a.go"; git -C "$CIR" commit -qam "pushed around the hook"
 if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then

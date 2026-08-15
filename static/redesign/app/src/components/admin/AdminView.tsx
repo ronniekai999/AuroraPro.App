@@ -2688,7 +2688,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                         value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`,
                         icon: 'film',
                         color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',
-                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Both figures cover the CURRENT detector version only: after a detector bump they reset together while players keep using markers from the previous version until each file is re-swept. Counts FILES — the Movies + Shows tile counts titles, and the Server card below counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
+                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Both figures cover the CURRENT detector version, plus hand-edited markers, which survive a bump. So after a detector bump coverage drops to zero while the marker counts fall only to the hand-edited remainder, and players keep using markers from the previous version until each file is re-swept. Counts FILES — the Movies + Shows tile counts titles, and the Server card below counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
                         sub: formatSkipMarkers(skipMarkerTotals(skipStatus)),
                       }]
                     })()

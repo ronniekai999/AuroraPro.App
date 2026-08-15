@@ -14,9 +14,12 @@
 #               silently skipped its own warning when used as a command
 #               prefix. A bypass that hides itself is worse than none.
 #
-# Records are keyed by commit sha and gitignored: a verdict is a statement
-# about one exact diff, not about a branch, and it must not travel to
-# another machine or survive an amend.
+# Records are keyed by commit sha and TRACKED. A verdict is a statement about
+# one exact diff, not about a branch, so it never survives an amend — but it
+# does have to travel, because the CI check reads records from the checkout,
+# where untracked files do not exist. Commit the record after writing it; a
+# commit that only adds records is resolved past by both gates, so it needs
+# no record of its own.
 #
 # The record also captures a digest of the reviewed diff. It cannot prove a
 # review happened — nothing here can; anyone with write access can author a

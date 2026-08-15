@@ -313,7 +313,7 @@ type SkipMarkerStatus struct {
 	// Marker counts below are VISIBLE markers (end_ms > start_ms) produced
 	// by the CURRENT detector or by an admin, so they stay commensurable
 	// with the analyzed/total coverage above: bump skipmarkers.Detector and
-	// both the coverage and the marker counts reset together. Counting every
+	// both the coverage and the marker counts drop together (manual rows are carried by `detector IN ($1,'manual')` and survive). Counting every
 	// detector version here would render "0 / 8,177 analyzed" beside "12,043
 	// markers" on the same tile after an algorithm bump.
 	IntroMarkers   int64 `json:"intro_markers"`

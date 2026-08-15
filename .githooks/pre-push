@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# THE enforcement boundary for the adversarial review gate.
+# Advisory check for the adversarial review gate. NOT the boundary.
+#
+# core.hooksPath is per-clone config the pushing process controls, so
+# `git -c core.hooksPath=/dev/null push`, a throwaway clone, or one
+# `git config` disables this in a single token. It exists to catch honest
+# mistakes early, not to stop anyone. See CLAUDE.md for what actually binds.
 #
 # git runs this after the shell has already resolved everything: the repo is
 # unambiguous ($GIT_DIR is set by git itself), and the exact refs and shas
 # being pushed arrive on stdin. Nothing about how the command was typed can
 # change what this sees.
 #
-# That is the whole reason it exists. The PreToolUse hook that used to be the
-# boundary tried to recognize a push by parsing the shell command, and four
+# Within its reach it is at least unambiguous: the PreToolUse hook that used
+# to hold this role tried to recognize a push by parsing the shell command, and four
 # review rounds walked through it: `git push;`, `git push&&x`, `git -c k=v
 # push`, `env FOO=1 git push`, `bash -c "git push"`, `bash -c 'echo x; git
 # push'`, `pushd other && git push`, `cd other && git push`, `sudo -i git
@@ -73,10 +78,12 @@ docs_only() {
   # (`git update-ref refs/remotes/origin/main <any-sha>`), which made any
   # commit look like a no-op. Fail closed and let the record check decide.
   [ -n "$changed" ] || return 1
-  # Adding a review record is not a code change; records are tracked so CI
-  # can read them, and without this a record commit would need its own.
   changed="$(printf '%s\n' "$changed" | grep -v '^\.claude/review-records/.*\.json$')"
   [ -n "$changed" ] || return 0
+  # NOTE: stripping records from the CUMULATIVE diff is not what makes a
+  # record commit pushable — the code is still in the range. The record is
+  # resolved by walking back over record-only commits below; see
+  # effective_commit().
   printf '%s\n' "$changed" | grep -qvE '\.(md|txt)$' && return 1
   printf '%s\n' "$changed" | grep -qE '(^|/)(CLAUDE|AGENTS)\.md$|^docs/dev-workflow\.md$' && return 1
   return 0
@@ -93,12 +100,22 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   elif [ -n "$base" ]; then
     from="$(git merge-base "$base" "$local_sha" 2>/dev/null || true)"
   fi
-  # The TIP commit, not every commit in the range. A review is of the
-  # cumulative diff (base...head), so that is what a record describes —
-  # requiring one per intermediate commit would demand reviews nobody
-  # performs and that the recorded digest could not represent. The tip is
-  # the state that reaches the remote, and a new tip needs a new record.
-  for sha in "$local_sha"; do
+  # Resolve the commit a review DESCRIBES, walking back over commits that
+  # only add review records. Recording a review moves HEAD (records are
+  # tracked so CI can read them), so keying on the raw tip made the record
+  # commit itself unpushable — the flow AGENTS.md documents blocked on its
+  # own last step.
+  effective="$local_sha"
+  while [ "$effective" != "${from:-}" ]; do
+    parent="$(git rev-parse --verify --quiet "${effective}^" 2>/dev/null)" || break
+    [ -n "$parent" ] || break
+    ec="$(git diff --no-renames --name-only "$parent" "$effective" 2>/dev/null)"
+    [ -n "$ec" ] || break
+    printf '%s\n' "$ec" | grep -qvE '^\.claude/review-records/.*\.json$' && break
+    effective="$parent"
+  done
+
+  for sha in "$effective"; do
     if docs_only "$from" "$sha"; then continue; fi
 
     record="$RECORDS_DIR/$sha.json"

@@ -55,12 +55,19 @@ obliges you to report the gate as incomplete. There is no silent bypass.
 
 **There is tooling for this, but read what it does and does not do.**
 
-**The binding check is `scripts/review-gate-ci.sh`**, run by the
-`review-record` CI job on every PR. It verifies that the PR's head commit has
-a record naming a reviewer, keyed to that exact sha. It runs where you cannot
-turn it off — and it is only truly binding once a human marks it a **required
-status check** in branch protection. Until someone does, it reports and
-nothing blocks.
+**Nothing in this repository can bind you. Say that plainly rather than
+relying on the tooling to catch you.**
+
+`scripts/review-gate-ci.sh`, run by the `review-record` CI job, is the
+strongest of the three checks: it verifies the reviewed commit has a record
+naming a reviewer, keyed to that sha, and it runs on a machine you are not
+driving. But the script **and the workflow that runs it are files in the
+branch under review**, so a branch can neuter either in one line — a reviewer
+demonstrated exactly that and got a green check beside unreviewed code. It
+becomes real only when an admin (a) requires the check in branch protection
+and (b) requires CODEOWNERS review on `.github/**` and
+`scripts/review-gate*.sh` (see `.github/CODEOWNERS`). Neither is set from
+here.
 
 **Everything client-side is advisory**, and you should treat it that way:
 
@@ -81,8 +88,14 @@ pushes in one call. Moving to a git hook fixed all of those and then
 relocated the problem to "is the hook installed?", which has just as many
 wrong answers. Enforcement has to live where the pushing process has no say.
 
-Known limits, stated plainly:
+Known limits, stated plainly — this list is the repo's honesty ledger, so
+when something turns out weaker than advertised, add it here rather than
+softening it above:
 
+- **The branch owns its own checker.** `scripts/review-gate-ci.sh` and
+  `.github/workflows/ci.yml` are tracked files; editing them is a one-line
+  bypass needing no pretense of a review. CODEOWNERS plus branch protection
+  is the only answer, and both are repo settings, not code.
 - **Nothing here verifies a review happened** — only that a record exists,
   names a reviewer, and matches the sha. Anyone who can write the record can
   author one by hand. The reviewer field and diff digest make a hollow record
@@ -91,8 +104,10 @@ Known limits, stated plainly:
   them to catch you; they exist to make the honest path convenient.
 - **The CI job blocks nothing until branch protection requires it.**
 - Records live in `.claude/review-records/` and are **tracked**, because CI
-  reads them from the checkout. A commit that only adds records is exempt
-  from needing one — otherwise recording a review would need a review.
+  reads them from the checkout. Since committing a record moves HEAD, both
+  gates resolve the reviewed commit by walking back over record-only commits.
+  Getting that wrong makes the gate *unsatisfiable* rather than permissive —
+  it was, for two rounds, while three files claimed the opposite.
 
 `scripts/review-gate-test.sh` (also in CI) pins all of this by performing real
 pushes to a temp remote and asserting what actually landed, and it carries
