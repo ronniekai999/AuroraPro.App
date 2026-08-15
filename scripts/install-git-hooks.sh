@@ -51,12 +51,38 @@ fi
 probe="$(mktemp -d)"
 trap 'rm -rf "$probe"' EXIT
 head_sha="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
-if git init -q --bare -b main "$probe/r.git" 2>/dev/null &&
-   git -C "$repo_root" push -q "$probe/r.git" "HEAD:refs/heads/gate-probe" 2>/dev/null; then
+git init -q --bare -b main "$probe/r.git" 2>/dev/null || true
+probe_rc=0
+probe_out="$(git -C "$repo_root" push "$probe/r.git" "HEAD:refs/heads/gate-probe" 2>&1)" || probe_rc=$?
+# A FAILED push is only evidence of a working gate if the hook is what refused
+# it. This checkout is a shallow clone, and pushing shallow history to a fresh
+# bare repo fails with "shallow update not allowed" — so treating any failure
+# as success reported a completely disabled hook as "verified", in the default
+# environment, on every session start.
+if [ "$probe_rc" != 0 ] && printf '%s' "$probe_out" | grep -q 'review-gate: BLOCKED'; then
+  echo "install-git-hooks: pre-push review gate active (probe push refused by the hook)."
+  exit 0
+fi
+if [ "$probe_rc" != 0 ]; then
+  echo "install-git-hooks: WARNING — could not verify the hook: the probe push failed for an unrelated reason."
+  printf 'install-git-hooks: %s\n' "$(printf '%s' "$probe_out" | tail -1)"
+  exit 0
+fi
+if true; then
   # A push that succeeds is only alarming if HEAD had nothing to allow it.
   # Warning on every reviewed HEAD trains people to ignore the message.
+  docs_head=0
+  if base_ref="$(git -C "$repo_root" rev-parse --verify --quiet origin/main 2>/dev/null)" && [ -n "$base_ref" ]; then
+    mb="$(git -C "$repo_root" merge-base "$base_ref" HEAD 2>/dev/null || true)"
+    if [ -n "$mb" ]; then
+      ch="$(git -C "$repo_root" diff --no-renames --name-only "$mb" HEAD 2>/dev/null || true)"
+      if [ -n "$ch" ] && ! printf '%s\n' "$ch" | grep -qvE '\.(md|txt)$'; then docs_head=1; fi
+    fi
+  fi
   if [ -n "$head_sha" ] && [ -f "$repo_root/.claude/review-records/$head_sha.json" ]; then
     echo "install-git-hooks: pre-push review gate active (HEAD is already recorded, so the probe push was allowed)."
+  elif [ "$docs_head" = 1 ]; then
+    echo "install-git-hooks: pre-push review gate active (HEAD is documentation-only, which is exempt)."
   else
     echo "install-git-hooks: WARNING — a test push was NOT blocked and HEAD has no review record."
     echo "install-git-hooks: the gate may be off. Check core.hooksPath and that .githooks/pre-push is executable."

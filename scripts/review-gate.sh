@@ -50,8 +50,8 @@ command_text="$(jqr '.tool_input.command // ""')"
 #    is unreviewed code on main, and a self-merge produces exactly that.
 # ---------------------------------------------------------------------
 case "$tool_name" in
-  mcp__github__merge_pull_request)
-    fail "review-gate: BLOCKED — merging your own PR over the API skips the review the gate exists to require, and lands code on main with the review-record check possibly red.
+  mcp__github__merge_pull_request|mcp__github__enable_pr_auto_merge)
+    fail "review-gate: BLOCKED — merging your own PR (or arming auto-merge) over the API skips the review the gate exists to require, and lands code on main with the review-record check possibly red.
 A merge is a maintainer's decision, not the authoring agent's. Ask, or wait for one."
     ;;
   mcp__github__push_files|mcp__github__create_or_update_file|mcp__github__delete_file)
@@ -92,9 +92,40 @@ if [ -n "$command_text" ]; then
   # (pre-push and CI both still see the push).
   # Anchored at the START of a segment, so `grep -rn "git push --no-verify"`
   # (whose command is grep, not git) does not match.
-  if printf '%s' "$norm" | tr ';&|' '\n\n\n' |
-     grep -E '^[[:space:]]*((sudo|env|time|nohup|command|exec)[[:space:]]+|(bash|sh|zsh|ksh)([[:space:]]+-[a-z]+)*[[:space:]]+)*git([[:space:]]+-[^[:space:]]+)*[[:space:]]+push([[:space:]]|$)' |
-     grep -q -- '--no-verify'; then
+  # Peel leading parens, VAR=x assignments and wrappers, then require the
+  # command to BE git with push among its arguments. The previous single
+  # regex allowed `git -flag` but not `git -c k=v` (an option taking a
+  # value), allowed `env FOO=1` but not a bare `FOO=1`, and anchored at a
+  # segment start that `(` broke — so `git -c user.email=x push
+  # --no-verify`, `git -C dir push --no-verify`, `VAR=x git push
+  # --no-verify` and `( git push --no-verify )` all passed. Those are the
+  # same shapes listed in .githooks/pre-push as having defeated the old
+  # parser; repeating them here would be careless.
+  if printf '%s' "$norm" | tr ';&|' '\n\n\n' | awk '
+      function basename(p) { sub(/^.*\//, "", p); return p }
+      {
+        s = $0
+        gsub(/^[ \t(]+/, "", s)
+        while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
+        n = split(s, t, /[ \t]+/)
+        while (n > 0 && (basename(t[1]) ~ /^(sudo|env|time|nohup|command|exec|doas|xargs)$/ ||
+                         basename(t[1]) ~ /^(bash|sh|zsh|ksh|dash)$/)) {
+          s = ""
+          for (i = 2; i <= n; i++) if (t[i] !~ /^-/ || i > 2) s = s (s == "" ? "" : " ") t[i]
+          gsub(/^[ \t(]+/, "", s)
+          while (match(s, /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)) s = substr(s, RLENGTH + 1)
+          n = split(s, t, /[ \t]+/)
+          if (n == 0) break
+        }
+        if (n > 0 && basename(t[1]) == "git") {
+          hasPush = 0; hasFlag = 0
+          for (i = 2; i <= n; i++) {
+            if (t[i] == "push") hasPush = 1
+            if (t[i] == "--no-verify") hasFlag = 1
+          }
+          if (hasPush && hasFlag) { print "HIT"; exit }
+        }
+      }' | grep -q HIT; then
     fail "review-gate: BLOCKED — --no-verify skips .githooks/pre-push, which is where the adversarial review gate is enforced.
 Push without it. If no reviewer was available, record that honestly instead:
   bash scripts/record-review.sh bypass \"<why>\""

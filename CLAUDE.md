@@ -105,6 +105,12 @@ softening it above:
 - **The client-side hooks are one `git config` from off.** Do not rely on
   them to catch you; they exist to make the honest path convenient.
 - **The CI job blocks nothing until branch protection requires it.**
+- **`git checkout main` turns the local hook off with no config change at
+  all** — `core.hooksPath` points into the worktree, and `main` has no
+  `.githooks/`. Weaker than "one `git config` away".
+- **`scripts/review-gate-test.sh` does not pin everything.** What is pinned
+  is what `scripts/review-gate-mutation-test.sh` can kill; two behaviors are
+  documented there as equivalent mutants rather than covered.
 - Records live in `.claude/review-records/` and are **tracked**, because CI
   reads them from the checkout. Since committing a record moves HEAD, both
   gates resolve the reviewed commit by walking back over record-only commits.

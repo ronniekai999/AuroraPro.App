@@ -32,8 +32,9 @@ Record the verdict. A client-side `pre-push` hook checks it, and the
 `review-record` CI job reports it on the PR. Neither binds: the job and the
 script it runs are tracked files in this branch, so editing them is a one-line
 bypass. Read CLAUDE.md's known-limits list before describing this gate as
-enforcement. Both key on the **head commit**, whose diff against
-the base is what the reviewer actually read:
+enforcement. Both key on the **reviewed commit** — the head with any
+record-only commits walked back — whose diff against the base is what the
+reviewer actually read:
 
 ```bash
 bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"

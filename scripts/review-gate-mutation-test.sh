@@ -62,12 +62,19 @@ mutate() {
   restore
 }
 
+# A red baseline is FATAL, not one line in a wall of green. mutate() can only
+# see that the suite went red, not why — so with a globally broken suite every
+# mutation reports "caught" and the harness certifies a gate it never tested.
+# That is the exact failure this file exists to prevent, one level up.
 echo "Baseline: the suite must pass unmutated."
 if bash "$SUITE" >/dev/null 2>&1; then
   printf '  ok   %-52s\n' "unmutated suite passes"; pass=$((pass+1))
 else
-  printf '  FAIL %-52s suite is red before any mutation\n' "unmutated suite passes"
-  fail=$((fail+1))
+  printf '  FAIL %-52s suite is red BEFORE any mutation\n' "unmutated suite passes"
+  echo
+  echo "Aborting: every mutation below would report a false 'caught'."
+  echo "Fix the suite first — run: bash scripts/review-gate-test.sh"
+  exit 1
 fi
 
 echo
@@ -96,10 +103,30 @@ mutate 'CI exempts all of .claude'         scripts/review-gate-ci.sh   "s#RECORD
 mutate 'CI walks past real code commits'   scripts/review-gate-ci.sh   's/  ! printf .%s\\n. "$changed" | grep -qvE "$RECORD_PATH_RE"/  true/'
 mutate 'CI exempts the agent instructions'  scripts/review-gate-ci.sh   "s#(\\^|/)(CLAUDE|AGENTS)\\\\.md\\\$|\\^docs/dev-workflow\\\\.md\\\$#^NEVERMATCH\\\$#" 
 
+mutate 'CI accepts lows-only as clean only' scripts/review-gate-ci.sh "s/  clean|lows-only)/  clean)/"
+# NOT mutation-testable: dropping the merge-base stop only changes behavior
+# when the BASE branch's own tip is record-only, which no realistic history
+# produces — the walk halts at the first code commit either way. The property
+# (a record-only branch resolves to "nothing to check" rather than walking
+# into main's history) is pinned directly by 'CI: a record-only branch'.
+mutate 'CI drops the argument guard'       scripts/review-gate-ci.sh   's/^if \[ "$#" -gt 2 \]; then/if false; then/'
+
+echo
+echo "install-git-hooks.sh (never mutated before this round)"
+mutate 'installer never sets hooksPath'    scripts/install-git-hooks.sh 's/  git -C "$repo_root" config --local core.hooksPath "$hooks_dir"/  true/'
+mutate 'installer writes a relative path'  scripts/install-git-hooks.sh 's#^hooks_dir="$repo_root/.githooks"#hooks_dir=".githooks"#'
+mutate 'installer skips chmod +x'          scripts/install-git-hooks.sh 's/^if ! chmod +x "$hooks_dir\/pre-push" 2>\/dev\/null; then/if false; then/'
+
+echo
+echo "record-review.sh (never mutated before this round)"
+mutate 'record always writes clean'        scripts/record-review.sh    's/^verdict="\${1:-}"; shift || true/verdict=clean; shift || true/'
+mutate 'record drops the reviewer rule'    scripts/record-review.sh    '73s/if \[ -z /if [ -n /'
+
 echo
 echo "review-gate.sh (PreToolUse layer)"
-mutate 'PreToolUse allows --no-verify'     scripts/review-gate.sh      's/^  if printf/  if false \&\& printf/'
+mutate 'PreToolUse allows --no-verify'     scripts/review-gate.sh      's/if (hasPush \&\& hasFlag)/if (0)/'
 mutate 'PreToolUse allows MCP writes'      scripts/review-gate.sh      's/^  mcp__github__push_files|/  mcp__github__NEVER|/'
+mutate 'PreToolUse allows self-merge'      scripts/review-gate.sh      's/^  mcp__github__merge_pull_request|/  mcp__github__NEVERMERGE|/'
 
 printf '\nmutations caught=%s missed=%s\n' "$pass" "$fail"
 [ "$fail" = 0 ]

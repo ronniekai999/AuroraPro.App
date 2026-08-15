@@ -26,6 +26,16 @@ RECORD="$ROOT/scripts/record-review.sh"
 HOOKS="$ROOT/.githooks"
 [ -f "$HOOKS/pre-push" ] || { echo "cannot find .githooks/pre-push"; exit 1; }
 
+# Hermetic by construction. The suite makes commits, and it used to rely on
+# an ambient global git identity — which GitHub-hosted runners do not set, so
+# the CI job added last round would have been red on every PR, including the
+# one adding it. Pinning the identity here (and ignoring global/system config)
+# also keeps a contributor's commit.gpgsign from hanging the run.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_AUTHOR_NAME=review-gate-test GIT_AUTHOR_EMAIL=test@example.invalid
+export GIT_COMMITTER_NAME=review-gate-test GIT_COMMITTER_EMAIL=test@example.invalid
+
 pass=0; fail=0
 section() { printf '\n%s\n' "$1"; }
 ok()   { printf '  ok   %s\n' "$1"; pass=$((pass+1)); }
@@ -251,6 +261,8 @@ echo 'not json' > "$(cirec)"
 ciexp 'CI: corrupt record blocks' 1
 printf '%s' "$orig" | jq '.verdict = "bypass"' > "$(cirec)"
 ciexp 'CI: bypass passes (and says so)' 0
+printf '%s\n' "$orig" | jq '.verdict = "lows-only"' > "$(cirec)"
+ciexp 'CI: lows-only passes' 0
 printf '%s\n' "$orig" > "$(cirec)"
 git -C "$CLONE_CI" checkout -q -- . 2>/dev/null   # drop any whitespace drift
 # The exemption must cover records ONLY — settings.json wires the hooks.
@@ -328,6 +340,13 @@ chk 'heredoc commit body mentioning it' 0 "$(p 'git commit -F - <<EOF
 gate: block git push --no-verify
 EOF')"
 chk 'no-verify in a bash -c'      2 "$(p 'bash -c "git push --no-verify origin main"')"
+# Shapes that reached the remote past BOTH client layers, since --no-verify
+# skips pre-push by design. These are the same forms that defeated the old
+# push parser, so letting them back in here would repeat the round trip.
+chk 'no-verify after git -c k=v'  2 "$(p 'git -c user.email=x push --no-verify origin main')"
+chk 'no-verify after git -C dir'  2 "$(p 'git -C /tmp push --no-verify origin main')"
+chk 'no-verify after bare VAR='   2 "$(p 'GIT_AUTHOR_NAME=x git push --no-verify origin main')"
+chk 'no-verify inside parens'     2 "$(p '( git push --no-verify origin main )')"
 chk 'ordinary push allowed here'  0 "$(p 'git push origin main')"
 chk 'commit -m mentioning push'   0 "$(p 'git commit -m "document git push flow"')"
 chk 'echo with && push inside'    0 "$(p 'echo "build && git push"')"
@@ -336,8 +355,53 @@ chk 'grep for the string'         0 "$(p 'grep -rn "git push --no-verify" docs/'
 chk 'mcp push_files blocked'      2 '{"tool_name":"mcp__github__push_files","tool_input":{}}'
 chk 'mcp create_or_update blocked' 2 '{"tool_name":"mcp__github__create_or_update_file","tool_input":{}}'
 chk 'mcp delete_file blocked'     2 '{"tool_name":"mcp__github__delete_file","tool_input":{}}'
+chk 'mcp merge_pull_request blocked' 2 '{"tool_name":"mcp__github__merge_pull_request","tool_input":{}}'
+chk 'mcp enable_pr_auto_merge blocked' 2 '{"tool_name":"mcp__github__enable_pr_auto_merge","tool_input":{}}'
 chk 'mcp create_pr allowed'       0 '{"tool_name":"mcp__github__create_pull_request","tool_input":{}}'
 chk 'mcp get_file allowed'        0 '{"tool_name":"mcp__github__get_file_contents","tool_input":{}}'
+
+section "review-gate-ci.sh argument handling and degenerate branches"
+# A branch carrying ONLY record commits resolves to the merge base and stops
+# there, rather than walking back into the base branch's history.
+git -C "$CIR" checkout -q -B recordsonly mainbase
+mkdir -p "$CIR/.claude/review-records"
+echo '{"sha":"x","verdict":"clean","reviewer":"y"}' > "$CIR/.claude/review-records/x.json"
+git -C "$CIR" add -A; git -C "$CIR" commit -qm "chore: record"
+if ( cd "$CIR" && bash "$CI" mainbase HEAD >/dev/null 2>&1 ); then
+  ok 'CI: a record-only branch needs no record'; else bad 'CI: a record-only branch needs no record'; fi
+# Asserted from a state the check would otherwise PASS, so the rejection is
+# attributable to the guard rather than to the branch being unreviewed.
+if ( cd "$CIR" && bash "$CI" mainbase HEAD extra >/dev/null 2>&1 ); then
+  bad 'CI rejects extra arguments'; else ok 'CI rejects extra arguments'; fi
+
+section "install-git-hooks.sh"
+IG="$ROOT/scripts/install-git-hooks.sh"
+IR="$TMP/instrepo"; git init -q -b main "$IR"
+mkdir -p "$IR/.githooks" "$IR/scripts"
+cp "$HOOKS/pre-push" "$IR/.githooks/pre-push"
+echo x > "$IR/a.go"; git -C "$IR" add -A; git -C "$IR" commit -qm base
+( cd "$IR" && bash "$IG" >/dev/null 2>&1 )
+hp="$(git -C "$IR" config --local --get core.hooksPath 2>/dev/null || true)"
+case "$hp" in
+  /*) ok 'installer sets an ABSOLUTE core.hooksPath' ;;
+  *)  bad "installer sets an ABSOLUTE core.hooksPath (got '$hp')" ;;
+esac
+if [ -x "$IR/.githooks/pre-push" ]; then ok 'installer makes the hook executable'
+else bad 'installer makes the hook executable'; fi
+# It must not silently stomp a deliberate custom hooks dir.
+git -C "$IR" config --local core.hooksPath /some/other/hooks
+out="$( cd "$IR" && bash "$IG" 2>&1 )"
+hp2="$(git -C "$IR" config --local --get core.hooksPath)"
+if [ "$hp2" = "/some/other/hooks" ] && printf '%s' "$out" | grep -q "WARNING"; then
+  ok 'installer leaves a custom hooksPath alone and warns'
+else bad 'installer leaves a custom hooksPath alone and warns'; fi
+git -C "$IR" config --local --unset core.hooksPath 2>/dev/null || true
+# A checkout without .githooks/ must say so rather than silently do nothing.
+IR2="$TMP/instrepo2"; git init -q -b main "$IR2"
+echo x > "$IR2/a.go"; git -C "$IR2" add -A; git -C "$IR2" commit -qm base
+out2="$( cd "$IR2" && bash "$IG" 2>&1 )"
+if printf '%s' "$out2" | grep -q "WARNING"; then ok 'installer warns when .githooks is absent'
+else bad 'installer warns when .githooks is absent'; fi
 
 section "record-review argument handling"
 r() { ( cd "$WORK" && bash "$RECORD" "$@" >/dev/null 2>&1 ); }

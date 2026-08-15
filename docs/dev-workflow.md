@@ -61,8 +61,9 @@ flowchart TD
    never substitute or relabel a self-review.
 
    **Record the verdict.** `.githooks/pre-push` checks it locally (advisory —
-   `core.hooksPath` is yours to unset) and the `review-record` CI job checks
-   it on the PR, which is the one that counts. Both key on the head commit:
+   `core.hooksPath` is yours to unset) and the `review-record` CI job reports it on the
+   PR. Neither binds until an admin requires the check and CODEOWNERS review
+   — see CLAUDE.md's known limits. Both key on the reviewed commit:
 
    ```bash
    bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
