@@ -1,0 +1,10 @@
+{
+  "sha": "1cc6058951aedb425df95321f539fbbee236cd8b",
+  "verdict": "clean",
+  "summary": "Fifteenth independent adversarial review, read-only, fresh context. Verified the full branch across 15 rounds; this round ran all three harnesses in a scrubbed env (suite 200/200, wrapper spec 177/177, mutation harness 47/47 caught, no SKIPs), plus a 2656-shape differential against the prior commit: 208 shapes strengthened, 2 weakened and both verified non-invocations. Deliverable 1 (skip-marker counting + tile labels) re-verified against real PostgreSQL 16: movie scoping drops the rogue show-owned ledger row, detector scoping drops stale markers, manual is a strict subset of the kind counts, suppressed is disjoint. Deliverable 2 checked specifically for enforcement overclaims in CLAUDE.md, AGENTS.md, dev-workflow.md and every script header; none found. Verdict: merge as-is / ready to push. Two lows: a stale 155-vs-177 count in the ledger, and two over-peeled shapes (su -u, chrt -m) that cannot execute a command. Code state reviewed is 8707bd6; the only change after the verdict is 1cc6058, which is documentation-only (the ledger count plus the two residuals recorded as stated limits).",
+  "reviewer": "independent-agent-r15",
+  "findings": "2",
+  "diff_digest": "f7f51ee263e76abab17c0e9c82b37a8e4923236f4d2334620362d4cb139afbb8",
+  "branch": "claude/skip-markers-media-files-yyoavj",
+  "recorded_at": "2026-08-15T19:12:47Z"
+}
