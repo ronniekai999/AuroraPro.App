@@ -164,10 +164,9 @@ export function needsHlsSessionRebuild(
  * The periodic guest drift-correction tick (VideoPlayer.tsx) converts the
  * party's canonical absolute position into THIS session's HLS-relative
  * seconds via `Math.max(0, absMs/1000 - sessionStartSec)`. When the
- * canonical target falls before this session's own anchor — e.g. a guest
- * joined a party by resuming a personal bookmark far into the file while
- * the party clock sat near its start — that clamp maps the target to 0,
- * pinning the correction ladder's target at the session anchor forever:
+ * canonical target falls before this session's own anchor, that clamp maps
+ * the target to 0, pinning the correction ladder's target at the session
+ * anchor forever:
  * currentTime advances away from 0, drift grows past the hard-snap
  * threshold, hard-snap teleports back to the anchor, and the cycle repeats
  * every ~2s (a visible, looping stutter — NOT a silent "reads as in sync",
@@ -175,6 +174,15 @@ export function needsHlsSessionRebuild(
  * stays pinned `sessionStartSec` seconds ahead of the party with no way to
  * actually close the gap (neither rate-adjust nor hard-snap can seek to a
  * position before this session's own anchor).
+ *
+ * Reachable via: a guest already IN an active party starts the party's
+ * title from their own personal bookmark (VideoPlayer.tsx `handlePlay`),
+ * anchoring their session ahead of the party's current position — NOT via
+ * joining a party that's already ahead, since the sync socket's `hello`
+ * synthesizes a one-shot rebase seek on join that the explicit-seek branch
+ * a few dozen lines above already rebuilds correctly via
+ * needsHlsSessionRebuild's own backward arm. The gap this function closes
+ * is specifically the case where no such rebase frame follows.
  *
  * Deliberately narrower than needsHlsSessionRebuild's forward/buffered-edge
  * arm: applied every 250ms against a continuously advancing target, that
@@ -199,7 +207,11 @@ export function needsHlsSessionRebuild(
  * rounding noise right at the boundary, not a fix for any known scenario —
  * every anchor-setting path floors its target in whole seconds and the
  * server echoes it verbatim, so a genuine sub-second backward gap isn't
- * expected to occur in practice.
+ * expected to occur in practice. It does mean a gap inside the tolerance
+ * window still hits the ~2s hard-seek loop described above, just bounded
+ * to that window's amplitude instead of running away — rebuilding a whole
+ * session to close a sub-second gap would trade a small, self-limiting
+ * stutter for a strictly worse one.
  */
 export function needsBackwardSessionRebuild(
   targetAbsSec: number,

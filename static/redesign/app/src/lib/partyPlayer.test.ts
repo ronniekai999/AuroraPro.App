@@ -174,9 +174,11 @@ describe('sequential HLS seek policy', () => {
 
   describe('needsBackwardSessionRebuild (issue #488 guest drift loop)', () => {
     it('rebuilds when the canonical target is before this session\'s own anchor', () => {
-      // Guest's session is anchored at 20:00 (e.g. resumed from a bookmark)
-      // while the party clock is still at 1:40 — the clamp in
-      // absMsToHlsSec would otherwise read this as "in sync".
+      // Guest's session is anchored at 20:00 (e.g. started the party's
+      // title from their own bookmark) while the party clock is still at
+      // 1:40 — the clamp in absMsToHlsSec would otherwise pin the
+      // correction loop's target at 20:00 forever (see the doc comment
+      // for the concrete repeating-hard-seek failure mode).
       expect(needsBackwardSessionRebuild(100, 1200)).toBe(true)
     })
 

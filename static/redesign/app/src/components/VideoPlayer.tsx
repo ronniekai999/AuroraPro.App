@@ -3054,7 +3054,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // cast connect/disconnect, or a party media change all clear it too.
     // That's still safe: the guard against a stuck-true flag isn't "this
     // resets exactly once" but that the play-boot effect zeroes
-    // startSecRef/playerReadyRef (:1767, :1770) before the swapped-in
+    // startSecRef/playerReadyRef (:1768, :1771) before the swapped-in
     // session is ready, so no tick can re-evaluate the rebuild condition
     // against stale state in between.
     let driftRebuildInFlight = false
@@ -3252,19 +3252,28 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // past the hard-snap threshold, hard-snap teleports back to 0, repeat
       // every ~2s (a visible looping stutter, not a silent "in sync"). The
       // guest stays pinned `start_sec` seconds ahead of the party with no
-      // way to actually close the gap. This is the case for e.g. a guest
-      // who joined a party by resuming a personal bookmark far into the
-      // file while the party clock sat near its start. Rebuild a fresh
-      // session anchored at the real target instead — the same path an
-      // explicit host seek already takes just above.
+      // way to actually close the gap. Rebuild a fresh session anchored at
+      // the real target instead — the same path an explicit host seek
+      // already takes just above.
       //
-      // See needsBackwardSessionRebuild's doc comment for why this checks
-      // ONLY the backward case, and for the known gaps left open (the
-      // mirror-image forward case, and the Chromecast guest path).
+      // See needsBackwardSessionRebuild's doc comment for the concrete
+      // scenario this is reachable from, for why this checks ONLY the
+      // backward case, and for the known gaps left open (the mirror-image
+      // forward case, and the Chromecast guest path).
       const targetAbsSec = projectedAbsMs / 1000
+      // partyEpisodeId isn't in this effect's dep array (only isHost/
+      // isPlaying/partyMediaItemId/cast.connected are — party itself is a
+      // fresh literal every App render, so the effect deliberately doesn't
+      // rebind on every field of it). Read it through partySyncRef, which
+      // is reassigned on every render, instead of the closure-captured
+      // `party` — otherwise a room-socket reconnect that patches episodeId
+      // without touching any of those four deps (verified in useParty.tsx:
+      // a `party-state` snapshot mid-episode-advance does exactly this)
+      // would leave this guard checking a stale episode id and silently
+      // fail to block the very race it exists for.
       if (
         !driftRebuildInFlight &&
-        !isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId) &&
+        !isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId) &&
         playerReadyRef.current &&
         sessionIdRef.current !== null &&
         keepaliveRecoveryRef.current.onSeekRebuild &&
