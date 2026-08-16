@@ -158,6 +158,11 @@ func (q *Queries) ConsumeOAuthTransaction(ctx context.Context, tokenHash []byte)
 //     sweep must not second-guess that.
 //   - used_by IS NULL — never touch an invite somebody actually redeemed. Even
 //     if a consumed row somehow slipped through, a spent invite stays spent.
+//   - used_at IS NOT NULL — only a row that is actually a PENDING claim. Without
+//     it the join also matches invites that were never claimed or were already
+//     released; the UPDATE is a no-op either way, but it inflates the released
+//     count, and that count is logged as "codes recovered from abandoned
+//     signups".
 //
 // Consumed rows are otherwise left until they expire so a replay attempt within
 // the window finds the row consumed rather than absent, keeping consumed_at
@@ -177,6 +182,7 @@ func (q *Queries) DeleteExpiredOAuthTransactions(ctx context.Context) (deleted, 
 		      WHERE ic.id = e.invite_id
 		        AND e.consumed_at IS NULL
 		        AND ic.used_by IS NULL
+		        AND ic.used_at IS NOT NULL
 		     RETURNING ic.id
 		 )
 		 SELECT (SELECT COUNT(*) FROM expired), (SELECT COUNT(*) FROM freed)`,

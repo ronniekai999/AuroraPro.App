@@ -113,7 +113,7 @@ func callbackRequest(token, state string) *http.Request {
 }
 
 // mintTxn writes a transaction row and returns the raw token addressing it.
-func mintTxn(t *testing.T, q *db.Queries, mode db.OAuthTxnMode, provider, state string, userID, inviteID *int64) string {
+func mintTxn(t *testing.T, q *db.Queries, pool *pgxpool.Pool, mode db.OAuthTxnMode, provider, state string, userID, inviteID *int64) string {
 	t.Helper()
 	token, err := generateOAuthTxnToken()
 	if err != nil {
@@ -124,9 +124,10 @@ func mintTxn(t *testing.T, q *db.Queries, mode db.OAuthTxnMode, provider, state 
 	if err != nil {
 		t.Fatalf("create transaction: %v", err)
 	}
+	// Delete exactly this row. Sweeping globally here would leave the row
+	// behind (it is not expired) AND mutate other fixtures' invite claims.
 	t.Cleanup(func() {
-		_, _, _ = q.DeleteExpiredOAuthTransactions(context.Background())
-		_ = id
+		_, _ = pool.Exec(context.Background(), `DELETE FROM oauth_transactions WHERE id = $1`, id)
 	})
 	return token
 }
@@ -138,7 +139,7 @@ func TestConsumeOAuthTxn_LinkRoundTrip(t *testing.T) {
 	h := newTxnTestHandler(t, q)
 	userID := seedTxnTestUser(t, pool)
 
-	token := mintTxn(t, q, db.OAuthTxnModeLink, "google", "state-1", &userID, nil)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLink, "google", "state-1", &userID, nil)
 	w := httptest.NewRecorder()
 
 	out, ok := h.consumeOAuthTxn(w, callbackRequest(token, "state-1"), "google", "state-1")
@@ -158,7 +159,7 @@ func TestConsumeOAuthTxn_RejectsStateMismatch(t *testing.T) {
 	h := newTxnTestHandler(t, q)
 	userID := seedTxnTestUser(t, pool)
 
-	token := mintTxn(t, q, db.OAuthTxnModeLink, "google", "state-minted", &userID, nil)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLink, "google", "state-minted", &userID, nil)
 	w := httptest.NewRecorder()
 
 	out, ok := h.consumeOAuthTxn(w, callbackRequest(token, "state-other"), "google", "state-other")
@@ -178,7 +179,7 @@ func TestConsumeOAuthTxn_RejectsProviderMismatch(t *testing.T) {
 	h := newTxnTestHandler(t, q)
 	userID := seedTxnTestUser(t, pool)
 
-	token := mintTxn(t, q, db.OAuthTxnModeLink, "discord", "state-1", &userID, nil)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLink, "discord", "state-1", &userID, nil)
 	w := httptest.NewRecorder()
 
 	if _, ok := h.consumeOAuthTxn(w, callbackRequest(token, "state-1"), "google", "state-1"); ok {
@@ -219,7 +220,7 @@ func TestConsumeOAuthTxn_ReplayFailsClosed(t *testing.T) {
 	h := newTxnTestHandler(t, q)
 	userID := seedTxnTestUser(t, pool)
 
-	token := mintTxn(t, q, db.OAuthTxnModeLink, "google", "state-1", &userID, nil)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLink, "google", "state-1", &userID, nil)
 
 	if _, ok := h.consumeOAuthTxn(httptest.NewRecorder(), callbackRequest(token, "state-1"), "google", "state-1"); !ok {
 		t.Fatal("first consume should succeed")
@@ -353,7 +354,7 @@ func TestCallback_DeclinedConsentReleasesInviteClaim(t *testing.T) {
 		t.Fatalf("claim invite: %v", err)
 	}
 	const state = "state-decline"
-	token := mintTxn(t, q, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
 
 	// Callback with NO ?code= — exactly what the provider sends when the user
 	// declines consent.
@@ -402,7 +403,7 @@ func TestRetireStaleOAuthTxn_ReleasesItsInvite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim invite: %v", err)
 	}
-	token := mintTxn(t, q, db.OAuthTxnModeLogin, "google", "abandoned-state", nil, &claimID)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "abandoned-state", nil, &claimID)
 
 	r := httptest.NewRequest(http.MethodGet, "/api/auth/oauth/google/start", nil)
 	r.AddCookie(&http.Cookie{Name: oauthTxnCookieName, Value: token})
@@ -501,7 +502,7 @@ func TestStartLink_ReleasesPreviousFlowsInviteClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim invite: %v", err)
 	}
-	stale := mintTxn(t, q, db.OAuthTxnModeLogin, "google", "abandoned", nil, &claimID)
+	stale := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "abandoned", nil, &claimID)
 
 	claims := &auth.JWTClaims{UserID: userID, Username: "linker", Role: "user"}
 	r := authedRequest(http.MethodPost, "/api/auth/oauth/google/link", claims)
@@ -567,7 +568,7 @@ func TestStart_ReleasesPreviousFlowsInviteClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim A: %v", err)
 	}
-	staleToken := mintTxn(t, q, db.OAuthTxnModeLogin, "google", "abandoned-A", nil, &claimA)
+	staleToken := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "abandoned-A", nil, &claimA)
 
 	// Second Start, this time with code B — the cookie for A is about to be
 	// overwritten, so A must be released on the way through.
@@ -598,7 +599,7 @@ func TestCallback_StateMismatchReleasesInviteClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim invite: %v", err)
 	}
-	token := mintTxn(t, q, db.OAuthTxnModeLogin, "google", "the-real-state", nil, &claimID)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "the-real-state", nil, &claimID)
 
 	// Callback whose state cookie disagrees with the query parameter.
 	r := callbackRequest(token, "the-real-state")
@@ -749,7 +750,7 @@ func TestCallback_EmptyEmailReleasesInviteClaim(t *testing.T) {
 		t.Fatalf("claim invite: %v", err)
 	}
 	const state = "state-noemail"
-	token := mintTxn(t, q, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
 
 	r := callbackRequest(token, state)
 	r.URL.RawQuery = "state=" + state + "&code=auth-code"
@@ -790,7 +791,7 @@ func TestCallback_ExistingUserReleasesUnusedInviteClaim(t *testing.T) {
 		t.Fatalf("claim invite: %v", err)
 	}
 	const state = "state-tier1"
-	token := mintTxn(t, q, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
 
 	r := callbackRequest(token, state)
 	r.URL.RawQuery = "state=" + state + "&code=auth-code"
@@ -801,5 +802,211 @@ func TestCallback_ExistingUserReleasesUnusedInviteClaim(t *testing.T) {
 
 	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
 		t.Errorf("an existing-user login must not consume the invite: %v", err)
+	}
+}
+
+// TestConsumeOAuthTxn_MismatchReleasesInviteClaim is the regression test for the
+// last abandonment hole.
+//
+// The binding checks run AFTER the row is consumed, so their fail-closed
+// returns own the claim's fate: the sweep deliberately skips consumed rows, so
+// walking away here strands the invite at used_at-set/used_by-null with nothing
+// left in the system able to repair it. Worse than the paths already fixed,
+// because the repair mechanism is switched off for it by design.
+func TestConsumeOAuthTxn_MismatchReleasesInviteClaim(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	h := newTxnTestHandler(t, q)
+	owner := seedTxnTestUser(t, pool)
+	ctx := context.Background()
+
+	code, _ := seedClaimableInvite(t, q, pool, owner, "bindmis")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	// Minted for discord, completing on google's callback.
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "discord", "state-1", nil, &claimID)
+
+	w := httptest.NewRecorder()
+	if _, ok := h.consumeOAuthTxn(w, callbackRequest(token, "state-1"), "google", "state-1"); ok {
+		t.Fatal("a provider mismatch must abort the flow")
+	}
+	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
+		t.Errorf("a mismatch must release the claim — the sweep cannot, the row is consumed: %v", err)
+	}
+}
+
+// TestConsumeOAuthTxn_StateMismatchReleasesInviteClaim covers the state half of
+// the same guard.
+func TestConsumeOAuthTxn_StateMismatchReleasesInviteClaim(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	h := newTxnTestHandler(t, q)
+	owner := seedTxnTestUser(t, pool)
+	ctx := context.Background()
+
+	code, _ := seedClaimableInvite(t, q, pool, owner, "bindstate")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "state-minted", nil, &claimID)
+
+	w := httptest.NewRecorder()
+	if _, ok := h.consumeOAuthTxn(w, callbackRequest(token, "state-other"), "google", "state-other"); ok {
+		t.Fatal("a state mismatch must abort the flow")
+	}
+	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
+		t.Errorf("a state mismatch must release the claim: %v", err)
+	}
+}
+
+// TestSweep_SkipsConsumedTransactions pins the guard that keeps the sweep from
+// second-guessing a callback that already decided a claim's fate. Removing it
+// would let the sweep reopen an invite whose flow deliberately kept it.
+func TestSweep_SkipsConsumedTransactions(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	owner := seedTxnTestUser(t, pool)
+	ctx := context.Background()
+
+	code, inviteID := seedClaimableInvite(t, q, pool, owner, "sweepconsumed")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	// An expired row that WAS consumed: the callback already ran.
+	hash := hashOAuthTxnToken("consumed-" + itoaTxn(time.Now().UnixNano()))
+	if _, err := q.CreateOAuthTransaction(ctx, hash, db.OAuthTxnModeLogin, "google", "s",
+		nil, &claimID, 10*time.Minute); err != nil {
+		t.Fatalf("create transaction: %v", err)
+	}
+	if _, err := q.ConsumeOAuthTransaction(ctx, hash); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE oauth_transactions SET expires_at = NOW() - INTERVAL '1 minute' WHERE token_hash = $1`,
+		hash); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+
+	_, freed, err := q.DeleteExpiredOAuthTransactions(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if freed != 0 {
+		t.Errorf("freed = %d, want 0 — a consumed transaction's claim is not the sweep's to release", freed)
+	}
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT used_at FROM invite_codes WHERE id = $1`, inviteID).Scan(&usedAt); err != nil {
+		t.Fatalf("read invite: %v", err)
+	}
+	if usedAt == nil {
+		t.Error("the sweep must not have touched a consumed transaction's claim")
+	}
+}
+
+// TestSweep_FreedCountCountsOnlyRealReleases pins the accuracy of the number
+// that gets logged as "codes recovered from abandoned signups". Without the
+// used_at predicate the join also matches never-claimed invites and inflates it.
+func TestSweep_FreedCountCountsOnlyRealReleases(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	owner := seedTxnTestUser(t, pool)
+	ctx := context.Background()
+
+	// An expired, unconsumed transaction pointing at an invite that was never
+	// claimed — nothing to recover.
+	_, inviteID := seedClaimableInvite(t, q, pool, owner, "sweepcount")
+	if _, err := q.CreateOAuthTransaction(ctx, hashOAuthTxnToken("noclaim-"+itoaTxn(time.Now().UnixNano())),
+		db.OAuthTxnModeLogin, "google", "s", nil, &inviteID, -1*time.Minute); err != nil {
+		t.Fatalf("create transaction: %v", err)
+	}
+
+	_, freed, err := q.DeleteExpiredOAuthTransactions(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if freed != 0 {
+		t.Errorf("freed = %d, want 0 — nothing was actually recovered", freed)
+	}
+}
+
+// TestCallback_MissingStateCookieReleasesInviteClaim pins the retire call on the
+// missing-state-cookie branch, the sibling of the state-mismatch branch.
+func TestCallback_MissingStateCookieReleasesInviteClaim(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	h := newTxnTestHandler(t, q)
+	owner := seedTxnTestUser(t, pool)
+	ctx := context.Background()
+
+	code, _ := seedClaimableInvite(t, q, pool, owner, "nostate")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", "s", nil, &claimID)
+
+	// No state cookie at all.
+	r := callbackRequest(token, "s")
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+
+	if !strings.Contains(strings.ToLower(w.Body.String()), "missing state cookie") {
+		t.Fatalf("expected the missing-state page, got: %q", w.Body.String())
+	}
+	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
+		t.Errorf("a missing state cookie must not strand the invite: %v", err)
+	}
+}
+
+// TestCallback_ResolveFailureReleasesInviteClaim pins the caller-side unclaim on
+// resolveOAuthUser's error return.
+//
+// That release became single-sourced when the duplicate inside
+// resolveOAuthUser's finalize rollback was removed (the duplicate opened a
+// window where a concurrent registration's fresh claim could be wiped). The
+// argument for removing it was "the caller unclaims on every error return" —
+// which holds, but left the surviving call untested.
+//
+// The error used here is tier 2's already-linked conflict: the email matches an
+// existing verified account that already has a different identity for this
+// provider. Nothing was consumed, so the invite must go back.
+func TestCallback_ResolveFailureReleasesInviteClaim(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	ctx := context.Background()
+	owner := seedTxnTestUser(t, pool)
+	existing := seedTxnTestUser(t, pool)
+
+	var email string
+	if err := pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, existing).Scan(&email); err != nil {
+		t.Fatalf("read email: %v", err)
+	}
+	// The account already has a google identity, so tier 2's auto-link of a
+	// SECOND google subject onto it is refused.
+	if err := q.AddOAuthIdentity(ctx, existing, "google", "already-linked-subject"); err != nil {
+		t.Fatalf("seed identity: %v", err)
+	}
+	h := newExchangingHandler(t, q, &OAuthProfile{
+		Subject: "a-different-subject", Email: email, EmailVerified: true,
+	})
+
+	code, _ := seedClaimableInvite(t, q, pool, owner, "resolvefail")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	const state = "state-resolvefail"
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
+
+	r := callbackRequest(token, state)
+	r.URL.RawQuery = "state=" + state + "&code=auth-code"
+	r.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: state})
+	w := httptest.NewRecorder()
+
+	h.Callback(w, r)
+
+	if !strings.Contains(strings.ToLower(w.Body.String()), "authentication failed") {
+		t.Fatalf("expected the resolve-failure page, got: %q", w.Body.String())
+	}
+	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
+		t.Errorf("a failed resolve must release the invite claim: %v", err)
 	}
 }

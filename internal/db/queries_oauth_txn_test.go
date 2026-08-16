@@ -397,3 +397,27 @@ func TestReleaseInviteCodeForUser_WontStealAnotherUsersInvite(t *testing.T) {
 		t.Errorf("another user's redemption must be untouched, got used_by=%v used_at=%v", usedBy, usedAt)
 	}
 }
+
+// TestReleaseInviteCodeForUser_IgnoresAPendingClaim pins the exact-match
+// predicate. Accepting `used_by IS NULL` as well would make this a scope-free
+// unclaim for any caller passing a stale id — the shape this whole change set
+// exists to remove. A not-yet-finalized claim is UnclaimInviteCode's business.
+func TestReleaseInviteCodeForUser_IgnoresAPendingClaim(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	other := seedTestUser(t, q)
+
+	inviteID := seedInviteCode(t, q, owner)
+	if _, err := q.pool.Exec(ctx, `UPDATE invite_codes SET used_at = NOW() WHERE id = $1`, inviteID); err != nil {
+		t.Fatalf("mark claimed: %v", err)
+	}
+
+	if err := q.ReleaseInviteCodeForUser(ctx, inviteID, other); err != nil {
+		t.Fatalf("release should be a no-op, not an error: %v", err)
+	}
+	_, usedAt := inviteState(t, q, inviteID)
+	if usedAt == nil {
+		t.Error("a pending claim belonging to no one must not be released by the user-scoped rollback")
+	}
+}

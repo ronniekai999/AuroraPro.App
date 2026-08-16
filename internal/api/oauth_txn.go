@@ -101,10 +101,11 @@ func oauthTxnTTL() time.Duration {
 // "Enter code A, go back, enter code B" and "start an invited signup, then
 // click Connect in Settings" both take that path.
 //
-// Errors are swallowed deliberately: this is best-effort cleanup on the way
-// into a new flow, and a stale row that survives is harmless — it is bound to a
-// state this flow will not present, it expires on its own, and the sweep
-// releases its claim.
+// A consume failure is harmless and swallowed: the row is bound to a state this
+// flow will not present, it expires on its own, and the sweep releases its
+// claim. A release failure AFTER a successful consume is not harmless — the
+// sweep skips consumed rows — so that one is logged rather than dropped, since
+// it leaves an invite needing manual repair.
 func (h *OAuthHandler) releaseStaleOAuthTxn(ctx context.Context, r *http.Request) {
 	c, err := r.Cookie(oauthTxnCookieName)
 	if err != nil || c.Value == "" {
@@ -115,7 +116,11 @@ func (h *OAuthHandler) releaseStaleOAuthTxn(ctx context.Context, r *http.Request
 		return
 	}
 	if txn.InviteID != nil && *txn.InviteID > 0 {
-		_ = h.queries.UnclaimInviteCode(ctx, *txn.InviteID)
+		if uerr := h.queries.UnclaimInviteCode(ctx, *txn.InviteID); uerr != nil {
+			slog.Error("oauth: could not release an abandoned invite claim; "+
+				"the transaction is consumed so the sweep will not retry it",
+				"invite_id", *txn.InviteID, "error", uerr)
+		}
 	}
 }
 
@@ -206,6 +211,17 @@ func (h *OAuthHandler) consumeOAuthTxn(
 		return out, false
 	}
 
+	// Past this point the row is CONSUMED, so every remaining failure must
+	// release the invite claim itself. The sweep cannot clean up after these:
+	// it deliberately skips consumed rows (their fate was decided here), so an
+	// abandoned claim on one of these paths is stranded at
+	// used_at-set/used_by-null with nothing left that can repair it.
+	releaseClaim := func() {
+		if txn.InviteID != nil && *txn.InviteID > 0 {
+			_ = h.queries.UnclaimInviteCode(r.Context(), *txn.InviteID)
+		}
+	}
+
 	// Bind the transaction to the flow actually completing. The state cookie
 	// was already matched against the query parameter by the caller; requiring
 	// the ROW to carry that same state stops a transaction minted for one flow
@@ -215,6 +231,7 @@ func (h *OAuthHandler) consumeOAuthTxn(
 		subtle.ConstantTimeCompare([]byte(txn.State), []byte(state)) != 1 {
 		slog.Warn("oauth callback: transaction does not match this flow",
 			"provider", providerName, "txn_provider", txn.Provider)
+		releaseClaim()
 		h.renderError(w, "Authentication failed: mismatched sign-in session. Please try again.")
 		return out, false
 	}
@@ -225,6 +242,7 @@ func (h *OAuthHandler) consumeOAuthTxn(
 			// The table's check constraint makes this unreachable; treat it as
 			// corruption rather than falling through to a login.
 			slog.Error("oauth callback: link transaction has no user", "provider", providerName, "txn_id", txn.ID)
+			releaseClaim()
 			h.renderError(w, "Could not link the account. Please try again.")
 			return out, false
 		}
@@ -236,6 +254,7 @@ func (h *OAuthHandler) consumeOAuthTxn(
 		}
 	default:
 		slog.Error("oauth callback: unknown transaction mode", "provider", providerName, "mode", string(txn.Mode))
+		releaseClaim()
 		h.renderError(w, "Authentication failed. Please try again.")
 		return out, false
 	}
