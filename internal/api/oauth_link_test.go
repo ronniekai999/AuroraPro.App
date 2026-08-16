@@ -131,11 +131,16 @@ func TestHandleLinkCallback_UIDMismatch(t *testing.T) {
 
 // TestLinkSessionMatches_RejectsScopedToken pins that a narrow-scoped token
 // cannot authorize a link. Cast tokens authenticate a playback device, not a
-// person managing their account's sign-in methods, and they are minted with a
-// far longer reach than an ordinary access token.
+// person managing their account's sign-in methods.
 //
-// Note this reject path returns before any database access, which is why it is
-// exercisable with a nil Queries.
+// Note WHERE the refusal comes from: ValidateAccessToken already rejects any
+// token with a non-empty Scope, so the cast token fails validation and falls
+// through to the (absent) refresh cookie. linkSessionMatches has its own Scope
+// check as well, but it is not the control doing the work here. The property
+// under test is the outcome, which holds either way.
+//
+// This path returns before any database access, which is why it is exercisable
+// with a nil Queries.
 func TestLinkSessionMatches_RejectsScopedToken(t *testing.T) {
 	h := newLinkTestHandler()
 	castToken, _, err := h.authSvc.GenerateCastToken(7, "seven", "user", 0, "0123456789abcdef0123456789abcdef")

@@ -77,12 +77,36 @@ func (h *OAuthHandler) setOAuthTxnCookie(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-// oauthTxnExpiry is the row's server-side deadline. It matches the state
-// cookie's MaxAge, but it is the row — checked in SQL against the database
-// clock — that actually bounds the flow; the cookie MaxAge is only a hint the
-// client is free to ignore.
-func oauthTxnExpiry() time.Time {
-	return time.Now().Add(time.Duration(oauthStateCookieMaxAge) * time.Second)
+// oauthTxnTTL is the row's server-side lifetime. It matches the state cookie's
+// MaxAge, but it is the row — whose deadline is computed AND compared against
+// the database clock — that actually bounds the flow; the cookie MaxAge is only
+// a hint the client is free to ignore.
+//
+// It is a duration rather than an absolute time on purpose: computing the
+// deadline here would put it on the application clock while the consume query
+// compares against the database clock, so a skewed app host would silently
+// widen (or narrow) the real window. Both ends live in SQL instead.
+func oauthTxnTTL() time.Duration {
+	return time.Duration(oauthStateCookieMaxAge) * time.Second
+}
+
+// retireStaleOAuthTxn consumes whatever transaction the caller's cookie still
+// points at and releases any invite claim it was holding, then clears the
+// cookie. Used when a new flow starts without a transaction of its own.
+//
+// Errors are swallowed deliberately: this is best-effort cleanup on the way
+// into a new flow, and a stale row that survives is harmless — it is bound to a
+// state this flow will not present, and it expires on its own.
+func (h *OAuthHandler) retireStaleOAuthTxn(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(oauthTxnCookieName)
+	if err == nil && c.Value != "" {
+		if txn, cerr := h.queries.ConsumeOAuthTransaction(r.Context(), hashOAuthTxnToken(c.Value)); cerr == nil {
+			if txn.InviteID != nil && *txn.InviteID > 0 {
+				_ = h.queries.UnclaimInviteCode(r.Context(), *txn.InviteID)
+			}
+		}
+	}
+	h.clearOAuthCookie(w, r, oauthTxnCookieName)
 }
 
 // startOAuthTxn mints a transaction row and sets the cookie. Callers pass the
@@ -105,7 +129,7 @@ func (h *OAuthHandler) startOAuthTxn(
 		return err
 	}
 	if _, err := h.queries.CreateOAuthTransaction(
-		ctx, hashOAuthTxnToken(token), mode, provider, state, userID, inviteID, oauthTxnExpiry(),
+		ctx, hashOAuthTxnToken(token), mode, provider, state, userID, inviteID, oauthTxnTTL(),
 	); err != nil {
 		return err
 	}
@@ -223,8 +247,11 @@ func (h *OAuthHandler) consumeOAuthTxn(
 func (h *OAuthHandler) linkSessionMatches(ctx context.Context, r *http.Request, linkUID int64) bool {
 	if c, err := r.Cookie(auth.AccessCookieName); err == nil && c.Value != "" {
 		if claims, verr := h.authSvc.ValidateAccessToken(c.Value); verr == nil {
-			// A narrow-scoped token (e.g. a cast token) authenticates a device
-			// for playback, not an account-management action like linking.
+			// Belt-and-braces only: ValidateAccessToken already refuses a
+			// scoped token (auth.go's Scope != "" check), so a cast token
+			// lands in the verr != nil branch below rather than here. Kept so
+			// the rule "a playback-scoped token cannot manage sign-in methods"
+			// is enforced locally too if that validator ever loosens.
 			if claims.Scope != "" {
 				return false
 			}

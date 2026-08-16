@@ -150,17 +150,19 @@ func TestConsumeOAuthTxn_EmptyCookieIsCleanLogin(t *testing.T) {
 	}
 }
 
-// TestOAuthTxnExpiry_MatchesStateWindow pins that the row's server-side
-// deadline tracks the state cookie's window. The row is the authority — the
-// cookie's MaxAge is only a hint the client may ignore — so a drift between the
-// two would silently widen or narrow the real window.
-func TestOAuthTxnExpiry_MatchesStateWindow(t *testing.T) {
-	got := oauthTxnExpiry()
-	wantSeconds := float64(oauthStateCookieMaxAge)
-	gotSeconds := time.Until(got).Seconds()
-	// Generous tolerance: this asserts the window, not the clock.
-	if gotSeconds < wantSeconds-5 || gotSeconds > wantSeconds+5 {
-		t.Errorf("expiry is %.0fs out, want ~%.0fs", gotSeconds, wantSeconds)
+// TestOAuthTxnTTL_MatchesStateWindow pins that the row's server-side lifetime
+// tracks the state cookie's window. The row is the authority — the cookie's
+// MaxAge is only a hint the client may ignore — so a drift between the two
+// would silently widen or narrow the real window.
+//
+// The TTL is a DURATION, not an absolute time: the deadline is computed by the
+// database (NOW() + interval) so that both ends of the window sit on the same
+// clock. Returning a time.Time here would put the deadline on the application
+// clock while the consume query compares against the database clock, and a
+// skewed app host would quietly widen the window.
+func TestOAuthTxnTTL_MatchesStateWindow(t *testing.T) {
+	if got, want := oauthTxnTTL(), time.Duration(oauthStateCookieMaxAge)*time.Second; got != want {
+		t.Errorf("oauthTxnTTL() = %v, want %v", got, want)
 	}
 }
 

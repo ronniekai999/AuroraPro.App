@@ -296,14 +296,19 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 				"error", err)
 		}
 	}
-	// This login has no transaction of its own, so drop any left over from an
+	// This login has no transaction of its own, so retire any left over from an
 	// abandoned flow — most importantly an abandoned LINK. The transaction
 	// cookie outlives the flow that set it by up to its 10-minute window, and
 	// the callback binds each transaction to the state it was minted with, so
 	// a survivor would fail this login closed with a mismatch error instead of
 	// signing the user in.
+	//
+	// Retiring it means consuming the row, not just dropping the cookie: if
+	// the abandoned flow was an invited signup, the cookie is the only handle
+	// to its pending claim, and clearing it alone would strand that invite in
+	// the unclaimable used_at-set/used_by-null state.
 	if !txnSet {
-		h.clearOAuthCookie(w, r, oauthTxnCookieName)
+		h.retireStaleOAuthTxn(w, r)
 	}
 
 	// Phase D — PKCE for providers that require it (X/Twitter).
@@ -433,11 +438,30 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Capture the invite claim BEFORE the exchange, and release it on every
+	// path that abandons the flow.
+	//
+	// The transaction is consumed above, so unlike the old cookie it cannot
+	// survive an abort and be retried — which makes releasing the claim here
+	// mandatory rather than optional. Declining the provider's consent screen
+	// is an ordinary user action (the exchange helper renders it as "Sign-in
+	// cancelled"), and leaving the claim stamped would put the invite in
+	// used_at-set/used_by-null: a state ClaimInviteCode can never claim again
+	// and no reaper or admin endpoint can repair. Declining consent would
+	// silently destroy the invite.
+	inviteClaimID := txn.InviteClaimID
+	releaseInviteClaim := func() {
+		if inviteClaimID > 0 {
+			_ = h.queries.UnclaimInviteCode(r.Context(), inviteClaimID)
+		}
+	}
+
 	// Exchange code + fetch profile (shared with link mode via
 	// exchangeAndFetchProfile). Returns false after rendering the appropriate
 	// error page, so we just return.
 	profile, ok := h.exchangeAndFetchProfile(w, r, provider, cfg)
 	if !ok {
+		releaseInviteClaim()
 		return
 	}
 	// Login requires a usable email (Tier-2 auto-link + Tier-3 create both key
@@ -445,18 +469,18 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// a non-empty Subject.
 	if profile.Email == "" {
 		slog.Warn("oauth callback: incomplete profile", "provider", provider.Name(), "subject", profile.Subject, "has_email", false)
+		releaseInviteClaim()
 		h.renderError(w, "Authentication failed: the provider did not return a complete profile.")
 		return
 	}
 
-	// The invite claim, if any, came from the consumed transaction above —
-	// server-written, so tier 3 can trust that the caller really did present a
-	// valid code at Start. Whether it's used or rolled back depends on which
-	// tier of resolveOAuthUser fires: existing-user paths (tier 1, 2) unclaim
-	// the reservation so the invite isn't wasted; new-user creation (tier 3)
+	// The invite claim came from the consumed transaction — server-written, so
+	// tier 3 can trust that the caller really did present a valid code at
+	// Start. Whether it's used or rolled back depends on which tier of
+	// resolveOAuthUser fires: existing-user paths (tier 1, 2) unclaim the
+	// reservation so the invite isn't wasted; new-user creation (tier 3)
 	// consumes the claim atomically.
-	inviteClaimID := txn.InviteClaimID
-
+	//
 	// Resolve to an Aurora user via the three-tier lookup. Pass the
 	// invite-claim ID through so the tier-3 path can finalize it (and
 	// tier-1/2 paths can ignore it — we'll unclaim below if it went
@@ -598,7 +622,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 // clearOAuthCookie expires one of the path-scoped OAuth round-trip cookies
-// (state/provider/pkce/join/invite/link). Single-use enforcement: every
+// (state/provider/pkce/join/txn). Single-use enforcement: every
 // callback clears the cookies it consumed regardless of outcome. Centralized so
 // the Path/HttpOnly/Secure/SameSite attributes can't drift between call sites —
 // they MUST match the attributes used when the cookie was set or the browser
@@ -620,8 +644,7 @@ func (h *OAuthHandler) clearOAuthCookie(w http.ResponseWriter, r *http.Request, 
 // declined-consent (empty code) case, the PKCE verifier cookie (read + single-
 // use clear + required-but-missing fast-fail), and validates that the provider
 // returned a non-empty Subject (the (provider, subject) anchor every flow
-// needs). It also single-use-clears the link-UID cookie so a login that finds a
-// stale link cookie (and an abandoned link flow) doesn't leave it lingering.
+// needs).
 //
 // On any failure it renders the appropriate error page and returns
 // (nil, false); callers just return. It intentionally does NOT enforce a
@@ -692,8 +715,8 @@ func (h *OAuthHandler) exchangeAndFetchProfile(w http.ResponseWriter, r *http.Re
 // tier 3 fired — used by the caller to finalize-or-unclaim the optional
 // invite-claim from the pre-flight cookie.
 //
-// inviteClaimID is the claim ID stashed in the oauthInviteClaimCookieName
-// cookie at Start time (already atomically claimed via ClaimInviteCode).
+// inviteClaimID is the claim ID recorded in the server-side OAuth transaction
+// at Start time (already atomically claimed via ClaimInviteCode).
 // Tier 3 finalizes it against the new user; tier 1/2 ignore it (caller
 // unclaims so the code isn't wasted). When the provider's invite-bypass
 // setting is on, tier 3 doesn't need a claim — anyone with a verified

@@ -769,9 +769,10 @@ func NewRouter(deps RouterDeps) http.Handler {
 
 				// Multi-provider OAuth account linking (audit carve-out D).
 				// Authenticated: a signed-in user lists/connects/disconnects
-				// their linked providers. The link START sets a server-side
-				// link-uid cookie that flips the PUBLIC /oauth/{provider}/callback
-				// above into link mode (handleLinkCallback) instead of login.
+				// their linked providers. The link START records a server-side
+				// transaction naming the caller, which flips the PUBLIC
+				// /oauth/{provider}/callback above into link mode
+				// (handleLinkCallback) instead of login.
 				// DELETE refuses to remove the user's last sign-in method.
 				r.Get("/oauth/links", oauthH.LinksStatus)
 				r.Post("/oauth/{provider}/link", oauthH.StartLink)

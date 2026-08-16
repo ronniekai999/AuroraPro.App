@@ -65,7 +65,7 @@ func (q *Queries) CreateOAuthTransaction(
 	mode OAuthTxnMode,
 	provider, state string,
 	userID, inviteID *int64,
-	expiresAt time.Time,
+	ttl time.Duration,
 ) (int64, error) {
 	switch mode {
 	case OAuthTxnModeLogin, OAuthTxnModeLink:
@@ -82,13 +82,17 @@ func (q *Queries) CreateOAuthTransaction(
 		return 0, errors.New("create oauth transaction: provider and state are required")
 	}
 
+	// The deadline is computed from the DATABASE clock, matching the
+	// consume/sweep queries. Deriving it from the application clock instead
+	// would let a skewed app host widen the real window, since only the
+	// comparison side runs in SQL.
 	var id int64
 	err := q.pool.QueryRow(ctx,
 		`INSERT INTO oauth_transactions
 		     (token_hash, mode, provider, state, user_id, invite_id, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW() + make_interval(secs => $7))
 		 RETURNING id`,
-		tokenHash, string(mode), provider, state, userID, inviteID, expiresAt,
+		tokenHash, string(mode), provider, state, userID, inviteID, ttl.Seconds(),
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create oauth transaction: %w", err)
@@ -102,8 +106,9 @@ func (q *Queries) CreateOAuthTransaction(
 // and exactly one sees a returned row, because the loser's predicate no longer
 // holds once the winner commits.
 //
-// Expiry is evaluated in the database (NOW()) rather than in Go so a skewed
-// application clock cannot widen the window.
+// Expiry is evaluated in the database (NOW()), and CreateOAuthTransaction
+// computes the deadline the same way, so both ends of the window sit on the
+// database clock and a skewed application host cannot widen it.
 //
 // Returns ErrOAuthTxnNotFound when nothing was live to consume. The caller must
 // treat that as a hard failure — this is the path a forged token lands on.

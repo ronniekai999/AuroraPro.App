@@ -585,18 +585,17 @@ func (q *Queries) FinalizeInviteCode(ctx context.Context, inviteID, userID int64
 	if err != nil {
 		return err
 	}
-	// A zero-row update means the claim id does not exist, and the ONLY way
-	// the caller obtained one is the aurora_oauth_invite_claim cookie — which
-	// is a plain unsigned integer that any client can set on its own request
-	// (HttpOnly stops JavaScript from reading it; it does nothing to stop an
-	// attacker crafting the header directly).
+	// A zero row count means the id names no pending claim. Reporting success
+	// here let a bogus claim id walk an OAuth signup past the invite gate:
+	// resolveOAuthUser's tier-3 check only asks whether inviteClaimID > 0, the
+	// finalize then quietly matched nothing, and the rollback that exists for
+	// exactly this case never fired. Erroring makes the caller roll the signup
+	// back, which is the behavior that code was already written for.
 	//
-	// Reporting success here let a forged claim id walk the OAuth signup past
-	// the invite gate: resolveOAuthUser's tier-3 check only asks whether
-	// inviteClaimID > 0, the finalize then quietly matched nothing, and the
-	// rollback that exists for exactly this case never fired. The user was
-	// enrolled without ever holding an invite. Erroring makes the caller roll
-	// the signup back, which is the behavior that code was already written for.
+	// The claim id used to reach the callback in a client-writable cookie,
+	// which is what made forging one trivial; it now comes from a server-side
+	// transaction row. The predicates above and this error are the layer that
+	// holds regardless of how the id arrived.
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("finalize invite code: claim %d is not a pending claim", inviteID)
 	}
@@ -623,6 +622,33 @@ func (q *Queries) UnclaimInviteCode(ctx context.Context, inviteID int64) error {
 		  WHERE id = $1
 		    AND used_by IS NULL`,
 		inviteID,
+	)
+	return err
+}
+
+// ReleaseInviteCodeForUser rolls back a claim that was ALREADY finalized to
+// userID, for the one caller that has to compensate past its own successful
+// FinalizeInviteCode: register's rollbackUser, which deletes the new user when
+// token issuance fails afterwards.
+//
+// UnclaimInviteCode cannot serve that case. Its `used_by IS NULL` predicate is
+// what stops a spent invite being reopened, and by this point used_by is set —
+// so it would no-op, and the subsequent DeleteUser would leave the row with
+// used_by NULL'd by the FK but used_at still stamped, a state ClaimInviteCode
+// (which requires used_at IS NULL) can never claim again. The invite would be
+// destroyed rather than returned.
+//
+// Scoping the release to `used_by = $2` keeps the security property intact: a
+// caller can only release an invite that this very user holds, never one
+// somebody else redeemed. `used_by IS NULL` is accepted too so the call is
+// idempotent and safe if the finalize never landed.
+func (q *Queries) ReleaseInviteCodeForUser(ctx context.Context, inviteID, userID int64) error {
+	_, err := q.pool.Exec(ctx,
+		`UPDATE invite_codes
+		    SET used_by = NULL, used_at = NULL
+		  WHERE id = $1
+		    AND (used_by IS NULL OR used_by = $2)`,
+		inviteID, userID,
 	)
 	return err
 }

@@ -315,12 +315,13 @@ func TestCreateOAuthUserWithIdentity_ReferralPending(t *testing.T) {
 // TestFinalizeInviteCodeRejectsUnknownClaim pins the invite gate against a
 // forged claim id.
 //
-// The id reaches the server in aurora_oauth_invite_claim, a plain unsigned
-// integer cookie that any client can set on its own request. resolveOAuthUser's
-// tier-3 check only asks whether it is > 0, so the finalize is the ONLY thing
-// standing between a made-up number and an account created without an invite.
-// While this returned nil on a zero-row update, the rollback that exists for
-// exactly this case never fired and the signup succeeded.
+// The id used to reach the server in aurora_oauth_invite_claim, a plain
+// unsigned integer cookie any client could set on its own request; it now comes
+// from a server-side transaction row. Either way resolveOAuthUser's tier-3
+// check only asks whether it is > 0, so the finalize is the last thing standing
+// between a bogus number and an account created without an invite. While this
+// returned nil on a zero-row update, the rollback that exists for exactly this
+// case never fired and the signup succeeded.
 func TestFinalizeInviteCodeRejectsUnknownClaim(t *testing.T) {
 	q := requireIntegrationDB(t)
 	ctx := context.Background()

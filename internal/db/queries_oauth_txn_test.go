@@ -66,7 +66,7 @@ func TestOAuthTransaction_CreateConsumeRoundTrip(t *testing.T) {
 
 	hash := txnHash("token-" + randomSuffix(t))
 	id, err := q.CreateOAuthTransaction(ctx, hash, OAuthTxnModeLink, "google", "state-abc",
-		&userID, nil, time.Now().Add(10*time.Minute))
+		&userID, nil, 10*time.Minute)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestOAuthTransaction_ConsumeIsSingleUse(t *testing.T) {
 
 	hash := txnHash("token-" + randomSuffix(t))
 	id, err := q.CreateOAuthTransaction(ctx, hash, OAuthTxnModeLink, "google", "s",
-		&userID, nil, time.Now().Add(10*time.Minute))
+		&userID, nil, 10*time.Minute)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestOAuthTransaction_ExpiredIsNotConsumable(t *testing.T) {
 
 	hash := txnHash("token-" + randomSuffix(t))
 	id, err := q.CreateOAuthTransaction(ctx, hash, OAuthTxnModeLink, "google", "s",
-		&userID, nil, time.Now().Add(-1*time.Minute)) // already past
+		&userID, nil, -1*time.Minute) // already past
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestOAuthTransaction_UnknownTokenIsNotFound(t *testing.T) {
 func TestOAuthTransaction_LinkModeRequiresUser(t *testing.T) {
 	q := requireIntegrationDB(t)
 	_, err := q.CreateOAuthTransaction(context.Background(), txnHash("x-"+randomSuffix(t)),
-		OAuthTxnModeLink, "google", "s", nil, nil, time.Now().Add(10*time.Minute))
+		OAuthTxnModeLink, "google", "s", nil, nil, 10*time.Minute)
 	if err == nil {
 		t.Error("a link transaction with no user id must be rejected")
 	}
@@ -167,7 +167,7 @@ func TestOAuthTransaction_LinkModeRequiresUser(t *testing.T) {
 func TestOAuthTransaction_RejectsUnknownMode(t *testing.T) {
 	q := requireIntegrationDB(t)
 	_, err := q.CreateOAuthTransaction(context.Background(), txnHash("y-"+randomSuffix(t)),
-		OAuthTxnMode("elevate"), "google", "s", nil, nil, time.Now().Add(10*time.Minute))
+		OAuthTxnMode("elevate"), "google", "s", nil, nil, 10*time.Minute)
 	if err == nil {
 		t.Error("an unknown transaction mode must be rejected")
 	}
@@ -183,13 +183,13 @@ func TestDeleteExpiredOAuthTransactions(t *testing.T) {
 	liveHash := txnHash("live-" + randomSuffix(t))
 	deadHash := txnHash("dead-" + randomSuffix(t))
 	liveID, err := q.CreateOAuthTransaction(ctx, liveHash, OAuthTxnModeLink, "google", "s",
-		&userID, nil, time.Now().Add(10*time.Minute))
+		&userID, nil, 10*time.Minute)
 	if err != nil {
 		t.Fatalf("create live: %v", err)
 	}
 	t.Cleanup(func() { _, _ = q.pool.Exec(ctx, `DELETE FROM oauth_transactions WHERE id = $1`, liveID) })
 	if _, err := q.CreateOAuthTransaction(ctx, deadHash, OAuthTxnModeLink, "google", "s",
-		&userID, nil, time.Now().Add(-1*time.Minute)); err != nil {
+		&userID, nil, -1*time.Minute); err != nil {
 		t.Fatalf("create dead: %v", err)
 	}
 
@@ -329,5 +329,71 @@ func TestUnclaimInviteCode_ReleasesPendingClaim(t *testing.T) {
 	usedBy, usedAt := inviteState(t, q, inviteID)
 	if usedBy != nil || usedAt != nil {
 		t.Errorf("pending claim must be released, got used_by=%v used_at=%v", usedBy, usedAt)
+	}
+}
+
+// TestReleaseInviteCodeForUser_UndoesOwnFinalize is the regression test for the
+// register-rollback path.
+//
+// rollbackUser compensates past its OWN successful FinalizeInviteCode, so by
+// then used_by is set and UnclaimInviteCode deliberately refuses to touch the
+// row. Using the plain unclaim there made the rollback a no-op, and the
+// DeleteUser that follows then NULLed used_by via the FK while leaving used_at
+// stamped — a state ClaimInviteCode (which requires used_at IS NULL) can never
+// claim again. The invite was destroyed rather than returned.
+func TestReleaseInviteCodeForUser_UndoesOwnFinalize(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	newUser := seedTestUser(t, q)
+
+	inviteID := seedInviteCode(t, q, owner)
+	if _, err := q.pool.Exec(ctx, `UPDATE invite_codes SET used_at = NOW() WHERE id = $1`, inviteID); err != nil {
+		t.Fatalf("mark claimed: %v", err)
+	}
+	if err := q.FinalizeInviteCode(ctx, inviteID, newUser); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+
+	if err := q.ReleaseInviteCodeForUser(ctx, inviteID, newUser); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	usedBy, usedAt := inviteState(t, q, inviteID)
+	if usedBy != nil || usedAt != nil {
+		t.Fatalf("invite must be fully released, got used_by=%v used_at=%v", usedBy, usedAt)
+	}
+	// The point of releasing it is that it becomes usable again.
+	var code string
+	if err := q.pool.QueryRow(ctx, `SELECT code FROM invite_codes WHERE id = $1`, inviteID).Scan(&code); err != nil {
+		t.Fatalf("read code: %v", err)
+	}
+	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
+		t.Errorf("released invite should be claimable again: %v", err)
+	}
+}
+
+// TestReleaseInviteCodeForUser_WontStealAnotherUsersInvite pins that the
+// rollback stays scoped: it can undo this user's finalize, never somebody
+// else's redemption. Losing that predicate would reintroduce the
+// invite-reopening hole through the rollback door.
+func TestReleaseInviteCodeForUser_WontStealAnotherUsersInvite(t *testing.T) {
+	q := requireIntegrationDB(t)
+	ctx := context.Background()
+	owner := seedTestUser(t, q)
+	redeemer := seedTestUser(t, q)
+	attacker := seedTestUser(t, q)
+
+	inviteID := seedInviteCode(t, q, owner)
+	if _, err := q.pool.Exec(ctx,
+		`UPDATE invite_codes SET used_at = NOW(), used_by = $1 WHERE id = $2`, redeemer, inviteID); err != nil {
+		t.Fatalf("mark redeemed: %v", err)
+	}
+
+	if err := q.ReleaseInviteCodeForUser(ctx, inviteID, attacker); err != nil {
+		t.Fatalf("release should be a no-op, not an error: %v", err)
+	}
+	usedBy, usedAt := inviteState(t, q, inviteID)
+	if usedBy == nil || *usedBy != redeemer || usedAt == nil {
+		t.Errorf("another user's redemption must be untouched, got used_by=%v used_at=%v", usedBy, usedAt)
 	}
 }
