@@ -73,15 +73,11 @@ const (
 	// consumed in Callback. Same hardening as the state cookie.
 	oauthJoinCookieName = "aurora_oauth_join"
 
-	// oauthInviteClaimCookieName carries the CLAIM ID (not the raw
-	// invite code) of an invite that was atomically reserved in Start.
-	// The Claim → Finalize 2-phase flow mirrors password registration
-	// (auth_handlers.go's Register handler) — if the OAuth round-trip
-	// fails for any reason, the claim is rolled back via UnclaimInviteCode
-	// so the code isn't wasted. Storing the claim ID instead of the raw
-	// code means the cookie can't be replayed: the code is already
-	// reserved server-side once Start completes.
-	oauthInviteClaimCookieName = "aurora_oauth_invite_claim"
+	// The invite claim and the link target used to ride here as their own
+	// cookies, each carrying a bare database row id. Both now live in a
+	// server-side transaction row addressed by the opaque aurora_oauth_txn
+	// token — see oauth_txn.go for why a client-writable cookie could not
+	// carry either one safely.
 
 	// oauthProviderCookieName carries the provider name across the OAuth
 	// round-trip. Phase A: when callback fires we still know which
@@ -98,19 +94,6 @@ const (
 	// exchange time, not by JS. Cleared on callback regardless of
 	// outcome to enforce single-use.
 	oauthPKCEVerifierCookieName = "aurora_oauth_pkce"
-
-	// oauthLinkUIDCookieName carries the authenticated user's ID across the
-	// OAuth round-trip when the flow was started in LINK mode (the Settings
-	// "Connect <provider>" button, POST /oauth/{provider}/link) rather than
-	// login mode. Its presence is what tells Callback "this is a link, attach
-	// the identity to this existing user — do NOT issue new tokens."
-	//
-	// Security: the cookie is set SERVER-SIDE and HttpOnly, so an attacker
-	// cannot forge or read it from JS. Callback additionally cross-checks it
-	// against the caller's access cookie when that cookie is present on the
-	// callback path (defense in depth — see the Callback link branch). Carved
-	// out (carve-out D) — multi-provider linking.
-	oauthLinkUIDCookieName = "aurora_oauth_link_uid"
 )
 
 // OAuthHandler exposes the OAuth start + callback endpoints. Depends on
@@ -279,32 +262,57 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Invite-code pre-flight: if the caller passed ?invite=CODE on the
-	// register form, atomically claim it now via ClaimInviteCode. Storing
-	// the CLAIM ID (not the raw code) in a path-scoped cookie means the
-	// cookie can't be replayed; the code is already reserved server-side.
-	// On callback we finalize the claim if a new user gets created, or
-	// roll back via UnclaimInviteCode if anything fails.
+	// register form, atomically claim it now via ClaimInviteCode, then park
+	// the resulting claim id in a server-side transaction row. The client
+	// gets only the opaque transaction token.
+	//
+	// The claim id used to ride in the cookie directly. Because invite_codes
+	// ids are sequential and the cookie is client-writable, that let an
+	// uninvited caller name any existing invite row and walk straight past the
+	// invite gate on an invite-only server. The id is now recovered from the
+	// row on callback and never leaves the server.
 	//
 	// Invalid invite codes are NOT a hard failure here — we let the user
 	// continue to the provider sign-in, then the callback decides based
 	// on whether they're an existing user (no invite needed) or a new
 	// signup (invite-or-bypass required). This way "invalid invite +
 	// existing-user OAuth login" succeeds rather than spuriously failing.
+	// Retire the previous flow's transaction before minting this one's. Doing
+	// it here rather than only in the !txnSet branch below matters: an invited
+	// Start overwrites the cookie, and the cookie is the only handle to the
+	// prior row's pending invite claim.
+	h.releaseStaleOAuthTxn(r.Context(), r)
+
+	txnSet := false
 	if inviteCode := strings.TrimSpace(r.URL.Query().Get("invite")); inviteCode != "" {
 		if claimID, err := h.queries.ClaimInviteCode(r.Context(), inviteCode); err == nil && claimID > 0 {
-			http.SetCookie(w, &http.Cookie{
-				Name:     oauthInviteClaimCookieName,
-				Value:    fmt.Sprintf("%d", claimID),
-				Path:     "/api/auth/oauth/",
-				MaxAge:   oauthStateCookieMaxAge,
-				HttpOnly: true,
-				Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
-				SameSite: http.SameSiteLaxMode,
-			})
+			if terr := h.startOAuthTxn(r.Context(), w, r,
+				db.OAuthTxnModeLogin, provider.Name(), state, nil, &claimID); terr != nil {
+				// No transaction means the callback can never finalize this
+				// claim, and a claim left pending burns the code for everyone.
+				// Release it and continue as an un-invited flow.
+				_ = h.queries.UnclaimInviteCode(r.Context(), claimID)
+				slog.Error("oauth start: create invite transaction (continuing without)",
+					"provider", provider.Name(), "error", terr)
+			} else {
+				txnSet = true
+			}
 		} else {
 			slog.Debug("oauth start: invite code claim failed (continuing without)",
 				"error", err)
 		}
+	}
+	// This login has no transaction of its own, so retire any left over from an
+	// abandoned flow — most importantly an abandoned LINK. The transaction
+	// cookie outlives the flow that set it by up to its 10-minute window, and
+	// the callback binds each transaction to the state it was minted with, so
+	// a survivor would fail this login closed with a mismatch error instead of
+	// signing the user in.
+	//
+	// The row itself was already consumed and its claim released above; this
+	// just drops the now-dangling cookie.
+	if !txnSet {
+		h.clearOAuthCookie(w, r, oauthTxnCookieName)
 	}
 
 	// Phase D — PKCE for providers that require it (X/Twitter).
@@ -382,6 +390,12 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	stateCookie, err := r.Cookie(oauthStateCookieName)
 	if err != nil || stateCookie.Value == "" {
 		slog.Warn("oauth callback: state cookie missing", "provider", provider.Name())
+		// Retire the transaction too. These branches return before
+		// consumeOAuthTxn, so without this the row stays live and an invited
+		// signup's claim stays pending — the user then needs two more attempts
+		// to get back to a usable state (the retry can't re-claim the code, and
+		// the attempt after that has no claim at all).
+		h.retireStaleOAuthTxn(w, r)
 		h.renderError(w, "Authentication failed: missing state cookie. Please try again.")
 		return
 	}
@@ -408,18 +422,49 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	})
 	if gotState == "" || gotState != stateCookie.Value {
 		slog.Warn("oauth callback: state mismatch", "provider", provider.Name())
+		h.retireStaleOAuthTxn(w, r)
 		h.renderError(w, "Authentication failed: state mismatch. Please try again.")
 		return
 	}
 
-	// LINK MODE branch. If Start was invoked via POST /oauth/{provider}/link
-	// (the Settings "Connect" button), it set oauthLinkUIDCookieName to the
-	// authenticated user's ID. Its presence means "attach this provider to that
-	// existing user" — NOT a login. We handle it entirely here and return; the
-	// login path below never runs for a link flow (no tokens issued).
-	if linkUID, isLink := h.readLinkUID(r); isLink {
-		h.handleLinkCallback(w, r, provider, cfg, linkUID)
+	// Recover the server-side transaction, if this flow has one. It carries
+	// whatever Start needed to remember: the link target, or a pre-flight
+	// invite claim. Both were previously client-supplied row ids; see
+	// oauth_txn.go for what that allowed.
+	//
+	// A present-but-unusable transaction aborts the flow — consumeOAuthTxn has
+	// already rendered the error page.
+	txn, ok := h.consumeOAuthTxn(w, r, provider.Name(), gotState)
+	if !ok {
 		return
+	}
+
+	// LINK MODE branch. Start came in via POST /oauth/{provider}/link (the
+	// Settings "Connect" button), which recorded the authenticated caller's
+	// user id server-side. This means "attach this provider to that existing
+	// user" — NOT a login. We handle it entirely here and return; the login
+	// path below never runs for a link flow (no tokens issued).
+	if txn.IsLink {
+		h.handleLinkCallback(w, r, provider, cfg, txn.LinkUID)
+		return
+	}
+
+	// Capture the invite claim BEFORE the exchange, and release it on every
+	// path that abandons the flow.
+	//
+	// The transaction is consumed above, so unlike the old cookie it cannot
+	// survive an abort and be retried — which makes releasing the claim here
+	// mandatory rather than optional. Declining the provider's consent screen
+	// is an ordinary user action (the exchange helper renders it as "Sign-in
+	// cancelled"), and leaving the claim stamped would put the invite in
+	// used_at-set/used_by-null: a state ClaimInviteCode can never claim again
+	// and no reaper or admin endpoint can repair. Declining consent would
+	// silently destroy the invite.
+	inviteClaimID := txn.InviteClaimID
+	releaseInviteClaim := func() {
+		if inviteClaimID > 0 {
+			_ = h.queries.UnclaimInviteCode(r.Context(), inviteClaimID)
+		}
 	}
 
 	// Exchange code + fetch profile (shared with link mode via
@@ -427,6 +472,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// error page, so we just return.
 	profile, ok := h.exchangeAndFetchProfile(w, r, provider, cfg)
 	if !ok {
+		releaseInviteClaim()
 		return
 	}
 	// Login requires a usable email (Tier-2 auto-link + Tier-3 create both key
@@ -434,30 +480,18 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	// a non-empty Subject.
 	if profile.Email == "" {
 		slog.Warn("oauth callback: incomplete profile", "provider", provider.Name(), "subject", profile.Subject, "has_email", false)
+		releaseInviteClaim()
 		h.renderError(w, "Authentication failed: the provider did not return a complete profile.")
 		return
 	}
 
-	// Read + clear the invite-claim cookie. Whether it's used or rolled
-	// back depends on which tier of resolveOAuthUser fires: existing-user
-	// paths (tier 1, 2) unclaim the reservation so the invite isn't
-	// wasted; new-user creation (tier 3) consumes the claim atomically.
-	var inviteClaimID int64
-	if c, err := r.Cookie(oauthInviteClaimCookieName); err == nil && c.Value != "" {
-		if n, perr := strconv.ParseInt(c.Value, 10, 64); perr == nil && n > 0 {
-			inviteClaimID = n
-		}
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthInviteClaimCookieName,
-		Value:    "",
-		Path:     "/api/auth/oauth/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   cookieSecureFor(r, h.secureCookies), // deep-debug MED — Secure attr works behind a TLS-terminating proxy (r.TLS is nil there); matches renderSuccess/writeAuthCookies
-		SameSite: http.SameSiteLaxMode,
-	})
-
+	// The invite claim came from the consumed transaction — server-written, so
+	// tier 3 can trust that the caller really did present a valid code at
+	// Start. Whether it's used or rolled back depends on which tier of
+	// resolveOAuthUser fires: existing-user paths (tier 1, 2) unclaim the
+	// reservation so the invite isn't wasted; new-user creation (tier 3)
+	// consumes the claim atomically.
+	//
 	// Resolve to an Aurora user via the three-tier lookup. Pass the
 	// invite-claim ID through so the tier-3 path can finalize it (and
 	// tier-1/2 paths can ignore it — we'll unclaim below if it went
@@ -599,7 +633,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 }
 
 // clearOAuthCookie expires one of the path-scoped OAuth round-trip cookies
-// (state/provider/pkce/join/invite/link). Single-use enforcement: every
+// (state/provider/pkce/join/txn). Single-use enforcement: every
 // callback clears the cookies it consumed regardless of outcome. Centralized so
 // the Path/HttpOnly/Secure/SameSite attributes can't drift between call sites —
 // they MUST match the attributes used when the cookie was set or the browser
@@ -621,8 +655,7 @@ func (h *OAuthHandler) clearOAuthCookie(w http.ResponseWriter, r *http.Request, 
 // declined-consent (empty code) case, the PKCE verifier cookie (read + single-
 // use clear + required-but-missing fast-fail), and validates that the provider
 // returned a non-empty Subject (the (provider, subject) anchor every flow
-// needs). It also single-use-clears the link-UID cookie so a login that finds a
-// stale link cookie (and an abandoned link flow) doesn't leave it lingering.
+// needs).
 //
 // On any failure it renders the appropriate error page and returns
 // (nil, false); callers just return. It intentionally does NOT enforce a
@@ -653,11 +686,6 @@ func (h *OAuthHandler) exchangeAndFetchProfile(w http.ResponseWriter, r *http.Re
 		pkceVerifier = c.Value
 	}
 	h.clearOAuthCookie(w, r, oauthPKCEVerifierCookieName)
-	// Also single-use-clear the link-UID cookie here. handleLinkCallback has
-	// already read it before delegating to this helper, and the login path
-	// reached here only because no valid link cookie was present — clearing it
-	// unconditionally guarantees a stale/garbage value can't survive a flow.
-	h.clearOAuthCookie(w, r, oauthLinkUIDCookieName)
 
 	exchangeOpts := []oauth2.AuthCodeOption{}
 	if pkce, ok := provider.(PKCEProvider); ok && pkce.WantsPKCE() {
@@ -698,8 +726,8 @@ func (h *OAuthHandler) exchangeAndFetchProfile(w http.ResponseWriter, r *http.Re
 // tier 3 fired — used by the caller to finalize-or-unclaim the optional
 // invite-claim from the pre-flight cookie.
 //
-// inviteClaimID is the claim ID stashed in the oauthInviteClaimCookieName
-// cookie at Start time (already atomically claimed via ClaimInviteCode).
+// inviteClaimID is the claim ID recorded in the server-side OAuth transaction
+// at Start time (already atomically claimed via ClaimInviteCode).
 // Tier 3 finalizes it against the new user; tier 1/2 ignore it (caller
 // unclaims so the code isn't wasted). When the provider's invite-bypass
 // setting is on, tier 3 doesn't need a claim — anyone with a verified
@@ -827,9 +855,11 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 					if _, derr := h.queries.DeleteUser(ctx, newUser.ID); derr != nil {
 						slog.Warn("oauth: rollback DeleteUser failed", "user_id", newUser.ID, "error", derr)
 					}
-					if uerr := h.queries.UnclaimInviteCode(ctx, inviteClaimID); uerr != nil {
-						slog.Warn("oauth: rollback UnclaimInviteCode failed", "claim_id", inviteClaimID, "error", uerr)
-					}
+					// The claim is released by Callback, which unclaims on
+					// every error return from this function. Releasing here as
+					// well opened a window between the two calls in which a
+					// concurrent registration could claim the freed code and
+					// have its pending claim wiped by the second release.
 					return nil, false, fmt.Errorf("invite finalize failed: %w", ferr)
 				}
 			}

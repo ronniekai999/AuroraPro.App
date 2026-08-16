@@ -357,7 +357,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	rollbackUser := func(reason error) {
 		slog.Warn("register: rolling back user creation", "user_id", user.ID, "error", reason)
 		if inviteClaimID > 0 {
-			_ = h.queries.UnclaimInviteCode(r.Context(), inviteClaimID)
+			// ReleaseInviteCodeForUser, not UnclaimInviteCode: by this point
+			// FinalizeInviteCode has already stamped used_by with this user,
+			// and the plain unclaim deliberately refuses to touch a finalized
+			// invite. Releasing it scoped to this user's id undoes our own
+			// finalize without being able to reopen anyone else's.
+			_ = h.queries.ReleaseInviteCodeForUser(r.Context(), inviteClaimID, user.ID)
 		}
 		_, _ = h.queries.DeleteUser(r.Context(), user.ID)
 	}

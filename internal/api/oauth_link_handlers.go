@@ -7,11 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/aurora-media/aurora/internal/auth"
 	"github.com/aurora-media/aurora/internal/db"
 	"github.com/aurora-media/aurora/internal/models"
 	"golang.org/x/oauth2"
@@ -28,9 +26,10 @@ import (
 //	DELETE /api/auth/oauth/{provider}/link  — unlink a provider (LOCKOUT-GUARDED)
 //
 // All three sit behind RequireAuth. The link START sets the SAME CSRF cookies
-// as the login Start PLUS oauthLinkUIDCookieName (the caller's user ID), which
-// the shared Callback uses to branch into handleLinkCallback instead of the
-// login/token path. The DELETE refuses to remove a user's LAST sign-in method.
+// as the login Start, plus an opaque transaction cookie whose server-side row
+// records the caller's user ID; the shared Callback consumes that row and
+// branches into handleLinkCallback instead of the login/token path. The DELETE
+// refuses to remove a user's LAST sign-in method.
 
 // oauthLinkResponse is the GET /links payload. `available` is the set of
 // configured-but-not-yet-linked providers the UI can offer a "Connect" button
@@ -128,7 +127,7 @@ func (h *OAuthHandler) LinksStatus(w http.ResponseWriter, r *http.Request) {
 // StartLink handles POST /api/auth/oauth/{provider}/link (RequireAuth) — the
 // LINK-MODE counterpart to Start. It validates the provider is known + enabled,
 // generates a CSRF state, sets the same state/provider/PKCE cookies Start sets,
-// PLUS oauthLinkUIDCookieName carrying the authenticated user's ID so the
+// plus a link-mode transaction recording the authenticated user's ID so the
 // shared Callback knows to attach (not log in). It returns {auth_url: ...} as
 // JSON rather than 302-redirecting, because the SPA performs the navigation
 // itself (window.location = auth_url) from a fetch() call.
@@ -185,19 +184,29 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
-	// Link-mode marker: the authenticated user's ID. HttpOnly + server-set so
-	// an attacker can neither read nor forge it. This is what flips Callback
-	// into handleLinkCallback. Same lifetime as the state cookie — they must
-	// complete together.
-	http.SetCookie(w, &http.Cookie{
-		Name:     oauthLinkUIDCookieName,
-		Value:    strconv.FormatInt(claims.UserID, 10),
-		Path:     "/api/auth/oauth/",
-		MaxAge:   oauthStateCookieMaxAge,
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: http.SameSiteLaxMode,
-	})
+	// Link-mode marker. The authenticated caller's user id is recorded in a
+	// server-side transaction row and the client receives only the opaque
+	// token that addresses it; the presence of a link-mode transaction is what
+	// flips Callback into handleLinkCallback.
+	//
+	// The id used to be the cookie's literal value. HttpOnly kept page scripts
+	// from reading it but placed no constraint at all on what a caller could
+	// SEND, so substituting a victim's id here attached the attacker's
+	// provider identity to the victim's account. Bound to `state` so the row
+	// is usable only by the flow it was minted for.
+	// Retire any transaction left over from an earlier flow before minting
+	// this one — most importantly an abandoned invited signup, whose pending
+	// claim this cookie is the only handle to.
+	h.releaseStaleOAuthTxn(r.Context(), r)
+
+	linkUID := claims.UserID
+	if err := h.startOAuthTxn(r.Context(), w, r,
+		db.OAuthTxnModeLink, provider.Name(), state, &linkUID, nil); err != nil {
+		slog.Error("oauth link start: create transaction",
+			"provider", provider.Name(), "user_id", linkUID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	authOpts := []oauth2.AuthCodeOption{
 		oauth2.SetAuthURLParam("prompt", "select_account"),
@@ -305,59 +314,34 @@ func wouldLockOutUnlink(hasPassword bool, nIdentities int) bool {
 	return !hasPassword && nIdentities <= 1
 }
 
-// readLinkUID reads + parses the oauthLinkUIDCookieName cookie. Returns
-// (uid, true) only when the cookie is present, non-empty, and parses to a
-// positive int64 — the signal that Callback is handling a LINK flow. Any other
-// shape returns (0, false) and Callback proceeds as a normal login (the stale
-// cookie is cleared downstream by exchangeAndFetchProfile).
-func (h *OAuthHandler) readLinkUID(r *http.Request) (int64, bool) {
-	c, err := r.Cookie(oauthLinkUIDCookieName)
-	if err != nil || c.Value == "" {
-		return 0, false
-	}
-	uid, perr := strconv.ParseInt(c.Value, 10, 64)
-	if perr != nil || uid <= 0 {
-		return 0, false
-	}
-	return uid, true
-}
-
 // handleLinkCallback is the LINK-MODE branch of Callback: the user is already
 // signed in and chose to connect a provider, so we attach the identity to
 // linkUID and redirect back to the app — NO new tokens are issued, renderSuccess
 // is never called.
 //
-// SECURITY — uid cross-check. linkUID comes from oauthLinkUIDCookieName, which
-// is HttpOnly + server-set (StartLink), so an attacker can't forge it directly.
-// As defense in depth we ALSO validate it against the caller's access cookie
-// when that cookie rides along: the access cookie is Path="/" so it IS sent on
-// this callback path. If a valid access cookie is present we require its uid ==
-// linkUID — this catches the scenario where the user's session changed (logged
-// out / switched accounts in another tab) mid-link, which should abort rather
-// than attach the new provider to whoever the link cookie names. If the access
-// cookie is ABSENT or unparseable we fall back to trusting the HttpOnly
-// server-set link cookie alone (it can't be forged), so the link still
-// completes for a user whose access token simply expired during the round-trip.
+// linkUID does NOT come from the request. Callback recovered it by consuming
+// the server-side transaction row that StartLink wrote from a verified session,
+// so the caller had no opportunity to choose it. On top of that we require the
+// caller to still hold a live session for that account — see
+// linkSessionMatches, which fails closed where the old cross-check fell through
+// to trusting the (then client-writable) cookie.
 func (h *OAuthHandler) handleLinkCallback(w http.ResponseWriter, r *http.Request, provider Provider, cfg *oauth2.Config, linkUID int64) {
 	providerName := provider.Name()
 
-	// Cross-check against the session access cookie when present.
-	if c, cerr := r.Cookie(auth.AccessCookieName); cerr == nil && c.Value != "" {
-		if claims, verr := h.authSvc.ValidateAccessToken(c.Value); verr == nil {
-			if claims.UserID != linkUID {
-				slog.Warn("oauth link callback: session uid mismatch",
-					"provider", providerName, "link_uid", linkUID, "session_uid", claims.UserID)
-				h.clearOAuthCookie(w, r, oauthLinkUIDCookieName)
-				h.renderError(w, "Session changed during linking. Please try again from Settings.")
-				return
-			}
-		}
-		// A present-but-invalid/expired access token is NOT a mismatch — fall
-		// through to trusting the unforgeable HttpOnly link cookie.
+	// Require a live session for the account being linked. This catches both
+	// the benign case (the user logged out or switched accounts in another tab
+	// mid-link, which should abort rather than attach the provider to whoever
+	// the transaction names) and the adversarial one (somebody replaying a
+	// transaction token they should not hold).
+	if !h.linkSessionMatches(r.Context(), r, linkUID) {
+		slog.Warn("oauth link callback: no live session for link target",
+			"provider", providerName, "link_uid", linkUID)
+		h.renderError(w, "Session changed or expired during linking. Sign in and try again from Settings.")
+		return
 	}
 
 	// Exchange + fetch profile via the shared helper (also single-use-clears
-	// the PKCE + link cookies). Link mode requires only a non-empty Subject,
+	// the PKCE cookie). Link mode requires only a non-empty Subject,
 	// which the helper already validated — the email-verified gate does NOT
 	// apply here because the user is authenticated and explicitly chose to link.
 	profile, ok := h.exchangeAndFetchProfile(w, r, provider, cfg)

@@ -692,7 +692,11 @@ func main() {
 		}
 	}
 
-	// Background cleanup of expired/revoked refresh tokens (hourly)
+	// Background cleanup of expired/revoked refresh tokens (hourly), plus the
+	// OAuth transaction rows from migration 057. Those live 10 minutes and one
+	// is written per link start and per invited OAuth signup, so the table
+	// would otherwise accumulate a row per attempt forever. Expiry is enforced
+	// in the consume query itself — this sweep is housekeeping, not a control.
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
@@ -704,6 +708,16 @@ func main() {
 					slog.Error("token cleanup failed", "error", err)
 				} else if purged > 0 {
 					slog.Info("purged expired tokens", "count", purged)
+				}
+				sweptTxns, freedInvites, err := queries.DeleteExpiredOAuthTransactions(context.Background())
+				if err != nil {
+					slog.Error("oauth transaction cleanup failed", "error", err)
+				} else if sweptTxns > 0 {
+					// freed_invites counts codes recovered from signups that
+					// were abandoned at the provider's consent screen; without
+					// the sweep those stay permanently unclaimable.
+					slog.Info("purged expired oauth transactions",
+						"count", sweptTxns, "freed_invites", freedInvites)
 				}
 			case <-ctx.Done():
 				return
