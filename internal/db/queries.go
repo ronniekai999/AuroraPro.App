@@ -561,8 +561,25 @@ func (q *Queries) ClaimInviteCode(ctx context.Context, code string) (int64, erro
 
 // FinalizeInviteCode sets the real user ID on a previously claimed invite code.
 func (q *Queries) FinalizeInviteCode(ctx context.Context, inviteID, userID int64) error {
+	// The predicates matter as much as the assignment. `used_at IS NOT NULL`
+	// requires that THIS invite went through ClaimInviteCode (i.e. it is a
+	// pending claim, not an untouched row someone named by id), and
+	// `used_by IS NULL` requires that it has not already been spent by another
+	// signup. Without them, finalizing an arbitrary id succeeded against any
+	// existing invite row — including one already consumed by a different
+	// user, which both let the uninvited signup through and silently
+	// reassigned someone else's invite.
+	//
+	// Expiry is deliberately NOT re-checked here: ClaimInviteCode already
+	// required `expires_at > NOW()` when it reserved the row, and an invite
+	// that expires during the OAuth round-trip should still finalize for the
+	// user who legitimately holds the claim.
 	tag, err := q.pool.Exec(ctx,
-		`UPDATE invite_codes SET used_by = $1 WHERE id = $2`,
+		`UPDATE invite_codes
+		    SET used_by = $1
+		  WHERE id = $2
+		    AND used_by IS NULL
+		    AND used_at IS NOT NULL`,
 		userID, inviteID,
 	)
 	if err != nil {
@@ -581,15 +598,30 @@ func (q *Queries) FinalizeInviteCode(ctx context.Context, inviteID, userID int64
 	// enrolled without ever holding an invite. Erroring makes the caller roll
 	// the signup back, which is the behavior that code was already written for.
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("finalize invite code: claim %d does not exist", inviteID)
+		return fmt.Errorf("finalize invite code: claim %d is not a pending claim", inviteID)
 	}
 	return nil
 }
 
-// UnclaimInviteCode releases a previously claimed invite code so it can be used again.
+// UnclaimInviteCode releases a PENDING invite claim so the code can be used
+// again. It is the rollback half of ClaimInviteCode, called when the signup
+// that reserved the code did not end up creating a user.
+//
+// `used_by IS NULL` is the load-bearing predicate: it scopes the release to
+// claims that were never finalized. Without it, naming the id of an invite
+// somebody had already redeemed reopened that invite for reuse — a consumed
+// invite is not this flow's to release, and on an invite-only server handing
+// one back is handing out an account.
+//
+// A no-op is not an error. The rollback runs on failure paths that may or may
+// not have gotten as far as claiming anything, so "there was nothing pending to
+// release" is a normal outcome.
 func (q *Queries) UnclaimInviteCode(ctx context.Context, inviteID int64) error {
 	_, err := q.pool.Exec(ctx,
-		`UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE id = $1`,
+		`UPDATE invite_codes
+		    SET used_by = NULL, used_at = NULL
+		  WHERE id = $1
+		    AND used_by IS NULL`,
 		inviteID,
 	)
 	return err
