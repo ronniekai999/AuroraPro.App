@@ -50,3 +50,10 @@ node_modules/
 
 # Claude Code local (machine-specific) settings — keep personal
 .claude/settings.local.json
+
+# Adversarial-review records (scripts/record-review.sh) are deliberately
+# NOT ignored. scripts/review-gate-ci.sh reads them from a CI checkout,
+# where untracked files do not exist, so they have to be committed. Since
+# committing one moves HEAD, both gates resolve the reviewed commit by
+# walking back over record-only commits — otherwise recording a review
+# would itself need a review, forever.

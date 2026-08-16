@@ -13,7 +13,7 @@ Status: ✅ **IMPLEMENTED** (all three phases, in one cut) · Author: prepared f
 > - [`internal/db/queries_skipmarkers.go`](../../../internal/db/queries_skipmarkers.go) — marker CRUD, pending-season/movie fetches, coverage counts.
 > - Markers ride the existing stream-info payload ([`GetStreamInfo`](../../../internal/api/phase2_handlers.go)) — no extra playback round-trip. Admin surface in [`skipmarker_handlers.go`](../../../internal/api/skipmarker_handlers.go): `GET /api/admin/skip-markers/status`, `POST …/sweep`, `GET/PUT/DELETE …/{fileID}` (manual correction / suppression / re-detect).
 > - Triggers: boot sweep + `Scanner.OnScanComplete` hook + 6 h periodic tick ([`cmd/aurora/main.go`](../../../cmd/aurora/main.go)). Kill switch: server setting `skip_markers_enabled=false`.
-> - Frontend ([`VideoPlayer.tsx`](../../../static/redesign/app/src/components/VideoPlayer.tsx)): **Skip Intro / Skip Recap** pill (advisory; party-guest- and cast-aware), credits-triggered **Next Episode** card driving the existing auto-advance path (5 s countdown with the autoplay pref on, explicit button when off), movie **Skip Credits**, and the admin in-player marker editor ("Start = now / End = now / Off / Auto"). Admin dashboard gets a Skip Markers coverage tile.
+> - Frontend ([`VideoPlayer.tsx`](../../../static/redesign/app/src/components/VideoPlayer.tsx)): **Skip Intro / Skip Recap** pill (advisory; party-guest- and cast-aware), credits-triggered **Next Episode** card driving the existing auto-advance path (5 s countdown with the autoplay pref on, explicit button when off), movie **Skip Credits**, and the admin in-player marker editor ("Start = now / End = now / Off / Auto"). Admin dashboard gets a Skip Analysis coverage tile (files analyzed, not markers found).
 
 ---
 

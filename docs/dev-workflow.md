@@ -59,6 +59,21 @@ flowchart TD
    final diff again. Any substantive code change after a clean verdict invalidates
    that verdict. If no independent agent is available, mark the gate incomplete;
    never substitute or relabel a self-review.
+
+   **Record the verdict.** `.githooks/pre-push` checks it locally (advisory —
+   `core.hooksPath` is yours to unset) and the `review-record` CI job reports it on the
+   PR. Neither binds until an admin requires the check and CODEOWNERS review
+   — see CLAUDE.md's known limits. Both key on the reviewed commit:
+
+   ```bash
+   bash scripts/record-review.sh clean --reviewer <id> --findings <n> "<summary>"
+   ```
+
+   `fix-first` records a blocking verdict; `bypass` records that no review
+   happened and obliges you to report the gate as incomplete. Records are keyed
+   to the exact commit, so amending or adding one invalidates them — record
+   after the final commit. See CLAUDE.md for the two-layer design and its
+   known limits.
 6. **Merge gate** —
    - **Clean** (no unresolved high/critical; lows/nits noted) → squash-merge to
      `main` and delete the merged branch.

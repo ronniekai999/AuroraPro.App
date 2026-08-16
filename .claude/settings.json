@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/install-git-hooks.sh\"",
+            "timeout": 15,
+            "statusMessage": "Installing review-gate git hooks"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/review-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking adversarial review gate"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__github__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/review-gate.sh\"",
+            "timeout": 15,
+            "statusMessage": "Checking adversarial review gate"
+          }
+        ]
+      }
+    ]
+  }
+}

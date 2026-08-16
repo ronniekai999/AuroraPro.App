@@ -310,16 +310,43 @@ type SkipMarkerStatus struct {
 	EpisodeAnalyzed int64 `json:"episode_files_analyzed"`
 	MovieTotal      int64 `json:"movie_files_total"`
 	MovieAnalyzed   int64 `json:"movie_files_analyzed"`
-	IntroMarkers    int64 `json:"intro_markers"`
-	RecapMarkers    int64 `json:"recap_markers"`
-	CreditsMarkers  int64 `json:"credits_markers"`
-	ManualMarkers   int64 `json:"manual_markers"`
+	// Marker counts below are VISIBLE markers (end_ms > start_ms) produced
+	// by the CURRENT detector or by an admin, so they stay commensurable
+	// with the analyzed/total coverage above: bump skipmarkers.Detector and
+	// both the coverage and the marker counts drop together (manual rows are carried by `detector IN ($1,'manual')` and survive). Counting every
+	// detector version here would render "0 / 8,177 analyzed" beside "12,043
+	// markers" on the same tile after an algorithm bump.
+	IntroMarkers   int64 `json:"intro_markers"`
+	RecapMarkers   int64 `json:"recap_markers"`
+	CreditsMarkers int64 `json:"credits_markers"`
+	// ManualMarkers is the admin-authored SUBSET of the three above — same
+	// visibility filter, so intro+recap+credits is a true total that manual
+	// is contained in. It previously counted every manual row regardless of
+	// length, which silently folded suppressions in and made "N manual"
+	// disjoint from the total it was displayed beside.
+	ManualMarkers int64 `json:"manual_markers"`
+	// SuppressedMarkers counts manual rows with no length (end_ms == start_ms),
+	// which is how migration 043 represents "admin suppressed this marker" — a
+	// hidden window, not a skippable one. The migration's prose says 0..0; this
+	// counts any zero-LENGTH row, matching what the player actually filters out.
+	// Disjoint from every count above, hence its own field.
+	SuppressedMarkers int64 `json:"suppressed_markers"`
 }
 
 // GetSkipMarkerStatus aggregates coverage counts for the admin status
 // endpoint. The four marker counts share ONE scan via COUNT FILTER;
 // the remaining subqueries are per-table counts — cheap enough for the
 // dashboard's load-on-mount fetch (this is not wired to a poller).
+//
+// Both movie subqueries join media_items on type = 'movie', matching
+// FetchPendingSkipMovieFiles. media_files' FK is to media_items at large,
+// not to movies, so an unscoped analyzed count is not bounded by its own
+// denominator. No current code path can produce such a row — the only
+// ledger writer is fed by FetchPendingSkipMovieFiles, which is already
+// movie-scoped, and nothing in production updates media_items.type — so
+// this is hardening against a future writer, not a fix for an observed
+// over-count. Episode files need no equivalent scoping: episode_files ->
+// tv_episodes is the only shape they have.
 func (q *Queries) GetSkipMarkerStatus(ctx context.Context, detector string) (*SkipMarkerStatus, error) {
 	s := &SkipMarkerStatus{}
 	err := q.pool.QueryRow(ctx, `
@@ -327,20 +354,30 @@ func (q *Queries) GetSkipMarkerStatus(ctx context.Context, detector string) (*Sk
 		  (SELECT COUNT(*) FROM episode_files),
 		  (SELECT COUNT(*) FROM skip_marker_analysis WHERE episode_file_id IS NOT NULL AND detector = $1),
 		  (SELECT COUNT(*) FROM media_files mf JOIN media_items mi ON mi.id = mf.media_item_id AND mi.type = 'movie'),
-		  (SELECT COUNT(*) FROM skip_marker_analysis WHERE media_file_id IS NOT NULL AND detector = $1),
-		  m.intro, m.recap, m.credits, m.manual
+		  (SELECT COUNT(*) FROM skip_marker_analysis a
+		     JOIN media_files mf ON mf.id = a.media_file_id
+		     JOIN media_items mi ON mi.id = mf.media_item_id AND mi.type = 'movie'
+		   WHERE a.detector = $1),
+		  m.intro, m.recap, m.credits, m.manual, m.suppressed
 		FROM (
 		  SELECT
-		    COUNT(*) FILTER (WHERE kind = 'intro' AND end_ms > start_ms)   AS intro,
-		    COUNT(*) FILTER (WHERE kind = 'recap' AND end_ms > start_ms)   AS recap,
-		    COUNT(*) FILTER (WHERE kind = 'credits' AND end_ms > start_ms) AS credits,
-		    COUNT(*) FILTER (WHERE detector = 'manual')                    AS manual
-		  FROM skip_markers
+		    COUNT(*) FILTER (WHERE kind = 'intro'   AND visible AND current) AS intro,
+		    COUNT(*) FILTER (WHERE kind = 'recap'   AND visible AND current) AS recap,
+		    COUNT(*) FILTER (WHERE kind = 'credits' AND visible AND current) AS credits,
+		    COUNT(*) FILTER (WHERE detector = 'manual' AND visible)          AS manual,
+		    COUNT(*) FILTER (WHERE detector = 'manual' AND NOT visible)      AS suppressed
+		  FROM (
+		    SELECT kind, detector,
+		           end_ms > start_ms                        AS visible,
+		           detector IN ($1, 'manual')               AS current
+		    FROM skip_markers
+		  ) f
 		) m`,
 		detector).Scan(
 		&s.EpisodeTotal, &s.EpisodeAnalyzed,
 		&s.MovieTotal, &s.MovieAnalyzed,
-		&s.IntroMarkers, &s.RecapMarkers, &s.CreditsMarkers, &s.ManualMarkers)
+		&s.IntroMarkers, &s.RecapMarkers, &s.CreditsMarkers,
+		&s.ManualMarkers, &s.SuppressedMarkers)
 	if err != nil {
 		return nil, err
 	}

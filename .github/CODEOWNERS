@@ -1,0 +1,36 @@
+# Ownership for the files that decide whether a change was reviewed.
+#
+# This file is HALF of a fix, and the other half is a repo setting only an
+# admin can make. A reviewer demonstrated the hole it addresses: the
+# `review-record` CI job runs a script that lives in the branch it inspects,
+# so a branch can add one line to scripts/review-gate-ci.sh, or edit the
+# workflow's run step, and hand itself a green check beside unreviewed code.
+#
+# To make it real, in repository settings:
+#   1. Protect `main`, requiring the `review-record` and `Review gate
+#      self-test` checks.
+#   2. Require review from Code Owners on protected branches.
+#   3. Ideally also "Require review of the most recent push", so a change to
+#      these paths cannot be slipped in after approval.
+#
+# Without step 2 this file is documentation. With it, changing the gate needs
+# a human who is not the branch's author.
+
+# The gate itself.
+/.githooks/                      @ronniekai999
+/scripts/review-gate.sh          @ronniekai999
+/scripts/review-gate-ci.sh       @ronniekai999
+/scripts/review-gate-test.sh     @ronniekai999
+/scripts/review-gate-mutation-test.sh @ronniekai999
+/scripts/review-gate-wrapper-spec.sh @ronniekai999
+/scripts/record-review.sh        @ronniekai999
+/scripts/install-git-hooks.sh    @ronniekai999
+/.claude/settings.json           @ronniekai999
+
+# CI, including the job that runs the gate.
+/.github/                        @ronniekai999
+
+# The instructions agents follow.
+/CLAUDE.md                       @ronniekai999
+/AGENTS.md                       @ronniekai999
+/docs/dev-workflow.md            @ronniekai999

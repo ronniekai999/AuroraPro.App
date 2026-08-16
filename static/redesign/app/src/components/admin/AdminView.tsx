@@ -13,6 +13,7 @@ import { createPortal } from 'react-dom'
 import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
+import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
 import ManualMatchModal from './ManualMatchModal'
 import {
   parseReferralOptionsSetting,
@@ -2235,7 +2236,21 @@ function UserRowMenu({
 //
 // Extracted because the dashboard rendered this same block twice, verbatim, for
 // the two stat rows (core stats, and the optional embedding/skip-marker pair).
-function StatTile({ label, value, icon, color }: { label: string; value: string; icon: string; color: string }) {
+export type StatTileProps = {
+  label: string
+  value: string
+  icon: string
+  color: string
+  /** Tooltip on the label. Use it wherever a tile's denominator isn't
+   *  what the label implies — these numbers sit in one row and read as
+   *  comparable when several of them count different populations. */
+  hint?: string
+  /** Optional second line under the label, for a breakdown the headline
+   *  figure doesn't carry. */
+  sub?: string
+}
+
+function StatTile({ label, value, icon, color, hint, sub }: StatTileProps) {
   return (
     <div className="glass-panel rounded-2xl px-[18px] py-4">
       {/* tabular-nums so a row of tiles does not jitter its digits as the
@@ -2243,10 +2258,15 @@ function StatTile({ label, value, icon, color }: { label: string; value: string;
       <p className="text-white font-display font-extrabold text-[26px] leading-none tracking-tight tabular-nums">
         {value}
       </p>
-      <div className="text-white/60 text-[11px] mt-1.5 flex items-center gap-[7px]">
+      <div
+        className={`text-white/60 text-[11px] mt-1.5 flex items-center gap-[7px] ${hint ? 'cursor-help' : ''}`}
+        title={hint}
+      >
         <Icon name={icon} size={13} className={color} />
         {label}
+        {hint && <span className="text-white/30">ⓘ</span>}
       </div>
+      {sub && <p className="text-white/35 text-[10px] mt-1 tabular-nums">{sub}</p>}
     </div>
   )
 }
@@ -2354,7 +2374,7 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
   const [logsLoading, setLogsLoading] = useState(false)
   const [logsErr, setLogsErr] = useState<string | null>(null)
 
-  // Side-cards (Skip Markers, Embedded) load once on mount, on their
+  // Side-cards (Skip Analysis, Titles Embedded) load once on mount, on their
   // own effect. They used to share the dashboard-stats effect below,
   // but that effect's cleanup fires the moment stats first resolves
   // (its [stats] dep flips null -> object), which aborted these
@@ -2640,19 +2660,40 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           )}
           {(skipStatus?.enabled || embStatus?.enabled) && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-4 mb-6">
-              {[
+              {([
                 ...(embStatus && embStatus.enabled
-                  ? [{ label: 'Embedded', value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`, icon: 'cpu', color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400' }]
+                  ? [{
+                      label: 'Titles Embedded',
+                      value: `${embStatus.embedded.toLocaleString()} / ${embStatus.total.toLocaleString()}`,
+                      icon: 'cpu',
+                      color: embStatus.pending > 0 ? 'text-amber-400' : 'text-emerald-400',
+                      hint: 'Media items with a semantic-search embedding — one per title (movie or show), not one per file. Shares its denominator with the Movies + Shows tile, not with Skip Analysis.',
+                    }]
                   : []),
                 ...(skipStatus && skipStatus.enabled
-                  ? (() => {
-                      const analyzed = (skipStatus.episode_files_analyzed ?? 0) + (skipStatus.movie_files_analyzed ?? 0)
-                      const total = (skipStatus.episode_files_total ?? 0) + (skipStatus.movie_files_total ?? 0)
-                      const behind = analyzed < total || !!skipStatus.worker?.running
-                      return [{ label: 'Skip Markers', value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`, icon: 'film', color: behind ? 'text-amber-400' : 'text-emerald-400' }]
+                  // Return type annotated, not left to `satisfies` on the
+                  // enclosing array: contextual typing does not flow into an
+                  // IIFE return, so excess-property checking silently stops
+                  // at this element. A `hnit:` typo would compile clean and
+                  // drop the tooltip this change exists to add.
+                  ? ((): StatTileProps[] => {
+                      const { analyzed, total, behind, empty } = skipCoverage(skipStatus)
+                      return [{
+                        // Was "Skip Markers", which named the wrong noun:
+                        // the figure counts FILES the detector has been
+                        // through, and a file it found nothing in still
+                        // counts. The marker counts the endpoint already
+                        // returns now ride the sub-line.
+                        label: 'Skip Analysis',
+                        value: `${analyzed.toLocaleString()} / ${total.toLocaleString()}`,
+                        icon: 'film',
+                        color: empty ? 'text-white/40' : behind ? 'text-amber-400' : 'text-emerald-400',
+                        hint: 'Video files scanned for intro/recap/credits: every episode file plus every movie file. A file the detector found nothing in still counts as analyzed, so this is coverage, not markers found. Both figures cover the CURRENT detector version, plus hand-edited markers, which survive a bump. So after a detector bump coverage drops to zero while the marker counts fall only to the hand-edited remainder, and players keep using markers from the previous version until each file is re-swept. Counts FILES — the Movies + Shows tile counts titles, and the Server card below counts episode rows, so neither will reconcile against this exactly (a dual-version episode is two files, one row).',
+                        sub: formatSkipMarkers(skipMarkerTotals(skipStatus)),
+                      }]
                     })()
                   : []),
-              ].map(s => (
+              ] satisfies StatTileProps[]).map(s => (
                 <StatTile key={s.label} {...s} />
               ))}
             </div>
@@ -2660,17 +2701,28 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
           {stats && (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                {[
-                  // QA BUG-002 — relabel "Total Media" → "Media File
-                  // Entries" so it reads as raw row count, not the
-                  // deduped title count users see on browse pages.
-                  // Same source as the Server Status tile: raw COUNT
-                  // includes cross-library duplicates.
-                  { label: 'Media File Entries', value: (stats.movie_count + stats.show_count).toLocaleString(), icon: 'film', color: 'text-purple-400' },
+                {([
+                  // QA BUG-002 relabelled "Total Media" -> "Media File
+                  // Entries" to stress this is a raw row count, not the
+                  // deduped title count on browse pages. That fixed one
+                  // reading and broke another: the figure counts no
+                  // files at all. It is movie_count + show_count from
+                  // media_items, so every episode is excluded — which
+                  // parked "846 media FILES" next to a Skip Analysis
+                  // tile counting 8,177 actual files and made a correct
+                  // dashboard look broken. Name the rows it counts, and
+                  // send episodes to the Server card below.
+                  {
+                    label: 'Movies + Shows',
+                    value: (stats.movie_count + stats.show_count).toLocaleString(),
+                    icon: 'film',
+                    color: 'text-purple-400',
+                    hint: 'Title rows: movies plus series. Episodes are NOT included — the Server card below counts those separately. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
+                  },
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
                   { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
-                ].map(s => (
+                ] satisfies StatTileProps[]).map(s => (
                   <StatTile key={s.label} {...s} />
                 ))}
               </div>

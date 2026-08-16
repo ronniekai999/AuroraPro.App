@@ -1488,7 +1488,10 @@ export interface SkipMarkerStatus {
   intro_markers?: number
   recap_markers?: number
   credits_markers?: number
+  /** Admin-authored subset of the three kind counts above, not an addend. */
   manual_markers?: number
+  /** Zero-length manual rows — suppressed markers. Disjoint from the rest. */
+  suppressed_markers?: number
 }
 
 export async function getSkipMarkerStatus(signal?: AbortSignal): Promise<SkipMarkerStatus> {
