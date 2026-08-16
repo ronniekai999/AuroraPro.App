@@ -90,22 +90,39 @@ func oauthTxnTTL() time.Duration {
 	return time.Duration(oauthStateCookieMaxAge) * time.Second
 }
 
-// retireStaleOAuthTxn consumes whatever transaction the caller's cookie still
-// points at and releases any invite claim it was holding, then clears the
-// cookie. Used when a new flow starts without a transaction of its own.
+// releaseStaleOAuthTxn consumes whatever transaction the caller's cookie still
+// points at and releases any invite claim it was holding. It does NOT touch the
+// cookie, so callers are free to mint a replacement immediately afterwards.
+//
+// EVERY new flow must call this, not just one that ends up without a
+// transaction of its own. Overwriting the cookie orphans the previous row, and
+// if that row held an invite claim the cookie was the only handle to it — the
+// invite would sit at used_at-set/used_by-null until the hourly sweep noticed.
+// "Enter code A, go back, enter code B" and "start an invited signup, then
+// click Connect in Settings" both take that path.
 //
 // Errors are swallowed deliberately: this is best-effort cleanup on the way
 // into a new flow, and a stale row that survives is harmless — it is bound to a
-// state this flow will not present, and it expires on its own.
-func (h *OAuthHandler) retireStaleOAuthTxn(w http.ResponseWriter, r *http.Request) {
+// state this flow will not present, it expires on its own, and the sweep
+// releases its claim.
+func (h *OAuthHandler) releaseStaleOAuthTxn(ctx context.Context, r *http.Request) {
 	c, err := r.Cookie(oauthTxnCookieName)
-	if err == nil && c.Value != "" {
-		if txn, cerr := h.queries.ConsumeOAuthTransaction(r.Context(), hashOAuthTxnToken(c.Value)); cerr == nil {
-			if txn.InviteID != nil && *txn.InviteID > 0 {
-				_ = h.queries.UnclaimInviteCode(r.Context(), *txn.InviteID)
-			}
-		}
+	if err != nil || c.Value == "" {
+		return
 	}
+	txn, cerr := h.queries.ConsumeOAuthTransaction(ctx, hashOAuthTxnToken(c.Value))
+	if cerr != nil {
+		return
+	}
+	if txn.InviteID != nil && *txn.InviteID > 0 {
+		_ = h.queries.UnclaimInviteCode(ctx, *txn.InviteID)
+	}
+}
+
+// retireStaleOAuthTxn is releaseStaleOAuthTxn plus clearing the cookie, for
+// callers that are abandoning the flow rather than replacing it.
+func (h *OAuthHandler) retireStaleOAuthTxn(w http.ResponseWriter, r *http.Request) {
+	h.releaseStaleOAuthTxn(r.Context(), r)
 	h.clearOAuthCookie(w, r, oauthTxnCookieName)
 }
 

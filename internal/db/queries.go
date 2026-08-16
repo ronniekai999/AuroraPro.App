@@ -640,14 +640,16 @@ func (q *Queries) UnclaimInviteCode(ctx context.Context, inviteID int64) error {
 //
 // Scoping the release to `used_by = $2` keeps the security property intact: a
 // caller can only release an invite that this very user holds, never one
-// somebody else redeemed. `used_by IS NULL` is accepted too so the call is
-// idempotent and safe if the finalize never landed.
+// somebody else redeemed. That is the ONLY row this may touch — matching an
+// unclaimed row as well would make this a scope-free unclaim for any future
+// caller that passes a stale id, which is exactly the shape being fixed here.
+// UnclaimInviteCode is the right call for a not-yet-finalized claim.
 func (q *Queries) ReleaseInviteCodeForUser(ctx context.Context, inviteID, userID int64) error {
 	_, err := q.pool.Exec(ctx,
 		`UPDATE invite_codes
 		    SET used_by = NULL, used_at = NULL
 		  WHERE id = $1
-		    AND (used_by IS NULL OR used_by = $2)`,
+		    AND used_by = $2`,
 		inviteID, userID,
 	)
 	return err

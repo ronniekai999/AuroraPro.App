@@ -139,16 +139,50 @@ func (q *Queries) ConsumeOAuthTransaction(ctx context.Context, tokenHash []byte)
 	return &txn, nil
 }
 
-// DeleteExpiredOAuthTransactions removes rows past expiry. Consumed rows are
-// left until they expire so a replay attempt within the window still finds the
-// row absent-or-consumed rather than absent-because-swept — the outcome is the
-// same either way, but keeping them makes the consumed_at timestamp available
-// for incident review. Returns the number of rows removed.
-func (q *Queries) DeleteExpiredOAuthTransactions(ctx context.Context) (int64, error) {
-	tag, err := q.pool.Exec(ctx,
-		`DELETE FROM oauth_transactions WHERE expires_at <= NOW()`)
+// DeleteExpiredOAuthTransactions removes rows past expiry AND releases any
+// invite claim an expired row was still holding. Returns (deleted, released).
+//
+// The release half is the important one. An invited OAuth signup claims the
+// code at Start and finalizes it at callback; if the user simply closes the tab
+// at the provider's consent screen there is no callback, and the claim sits at
+// used_at-set/used_by-null. ClaimInviteCode requires used_at IS NULL, so that
+// invite can never be claimed again, and nothing else in the codebase can
+// repair it — there is no invite reaper and no admin endpoint that lists or
+// deletes invites. Deleting the transaction row without releasing the claim
+// would discard the only remaining pointer to the stranded invite.
+//
+// Two predicates keep this from becoming a way to reopen invites:
+//
+//   - consumed_at IS NULL — a consumed transaction reached the callback, which
+//     already decided the claim's fate (finalize, or an explicit unclaim). The
+//     sweep must not second-guess that.
+//   - used_by IS NULL — never touch an invite somebody actually redeemed. Even
+//     if a consumed row somehow slipped through, a spent invite stays spent.
+//
+// Consumed rows are otherwise left until they expire so a replay attempt within
+// the window finds the row consumed rather than absent, keeping consumed_at
+// available for incident review.
+func (q *Queries) DeleteExpiredOAuthTransactions(ctx context.Context) (deleted, released int64, err error) {
+	// One statement so the delete and the release cannot be interleaved by
+	// another sweep or a concurrent callback.
+	err = q.pool.QueryRow(ctx,
+		`WITH expired AS (
+		     DELETE FROM oauth_transactions
+		      WHERE expires_at <= NOW()
+		     RETURNING invite_id, consumed_at
+		 ), freed AS (
+		     UPDATE invite_codes ic
+		        SET used_by = NULL, used_at = NULL
+		       FROM expired e
+		      WHERE ic.id = e.invite_id
+		        AND e.consumed_at IS NULL
+		        AND ic.used_by IS NULL
+		     RETURNING ic.id
+		 )
+		 SELECT (SELECT COUNT(*) FROM expired), (SELECT COUNT(*) FROM freed)`,
+	).Scan(&deleted, &released)
 	if err != nil {
-		return 0, fmt.Errorf("delete expired oauth transactions: %w", err)
+		return 0, 0, fmt.Errorf("delete expired oauth transactions: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	return deleted, released, nil
 }

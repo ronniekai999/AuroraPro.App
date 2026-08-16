@@ -277,6 +277,12 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	// on whether they're an existing user (no invite needed) or a new
 	// signup (invite-or-bypass required). This way "invalid invite +
 	// existing-user OAuth login" succeeds rather than spuriously failing.
+	// Retire the previous flow's transaction before minting this one's. Doing
+	// it here rather than only in the !txnSet branch below matters: an invited
+	// Start overwrites the cookie, and the cookie is the only handle to the
+	// prior row's pending invite claim.
+	h.releaseStaleOAuthTxn(r.Context(), r)
+
 	txnSet := false
 	if inviteCode := strings.TrimSpace(r.URL.Query().Get("invite")); inviteCode != "" {
 		if claimID, err := h.queries.ClaimInviteCode(r.Context(), inviteCode); err == nil && claimID > 0 {
@@ -303,12 +309,10 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	// a survivor would fail this login closed with a mismatch error instead of
 	// signing the user in.
 	//
-	// Retiring it means consuming the row, not just dropping the cookie: if
-	// the abandoned flow was an invited signup, the cookie is the only handle
-	// to its pending claim, and clearing it alone would strand that invite in
-	// the unclaimable used_at-set/used_by-null state.
+	// The row itself was already consumed and its claim released above; this
+	// just drops the now-dangling cookie.
 	if !txnSet {
-		h.retireStaleOAuthTxn(w, r)
+		h.clearOAuthCookie(w, r, oauthTxnCookieName)
 	}
 
 	// Phase D — PKCE for providers that require it (X/Twitter).
@@ -386,6 +390,12 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	stateCookie, err := r.Cookie(oauthStateCookieName)
 	if err != nil || stateCookie.Value == "" {
 		slog.Warn("oauth callback: state cookie missing", "provider", provider.Name())
+		// Retire the transaction too. These branches return before
+		// consumeOAuthTxn, so without this the row stays live and an invited
+		// signup's claim stays pending — the user then needs two more attempts
+		// to get back to a usable state (the retry can't re-claim the code, and
+		// the attempt after that has no claim at all).
+		h.retireStaleOAuthTxn(w, r)
 		h.renderError(w, "Authentication failed: missing state cookie. Please try again.")
 		return
 	}
@@ -412,6 +422,7 @@ func (h *OAuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	})
 	if gotState == "" || gotState != stateCookie.Value {
 		slog.Warn("oauth callback: state mismatch", "provider", provider.Name())
+		h.retireStaleOAuthTxn(w, r)
 		h.renderError(w, "Authentication failed: state mismatch. Please try again.")
 		return
 	}
@@ -844,9 +855,11 @@ func (h *OAuthHandler) resolveOAuthUser(ctx context.Context, provider Provider, 
 					if _, derr := h.queries.DeleteUser(ctx, newUser.ID); derr != nil {
 						slog.Warn("oauth: rollback DeleteUser failed", "user_id", newUser.ID, "error", derr)
 					}
-					if uerr := h.queries.UnclaimInviteCode(ctx, inviteClaimID); uerr != nil {
-						slog.Warn("oauth: rollback UnclaimInviteCode failed", "claim_id", inviteClaimID, "error", uerr)
-					}
+					// The claim is released by Callback, which unclaims on
+					// every error return from this function. Releasing here as
+					// well opened a window between the two calls in which a
+					// concurrent registration could claim the freed code and
+					// have its pending claim wiped by the second release.
 					return nil, false, fmt.Errorf("invite finalize failed: %w", ferr)
 				}
 			}

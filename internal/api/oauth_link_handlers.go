@@ -194,6 +194,11 @@ func (h *OAuthHandler) StartLink(w http.ResponseWriter, r *http.Request) {
 	// SEND, so substituting a victim's id here attached the attacker's
 	// provider identity to the victim's account. Bound to `state` so the row
 	// is usable only by the flow it was minted for.
+	// Retire any transaction left over from an earlier flow before minting
+	// this one — most importantly an abandoned invited signup, whose pending
+	// claim this cookie is the only handle to.
+	h.releaseStaleOAuthTxn(r.Context(), r)
+
 	linkUID := claims.UserID
 	if err := h.startOAuthTxn(r.Context(), w, r,
 		db.OAuthTxnModeLink, provider.Name(), state, &linkUID, nil); err != nil {

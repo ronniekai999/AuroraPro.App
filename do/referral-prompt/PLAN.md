@@ -32,7 +32,7 @@ Ask **only** when all four hold at the OAuth callback:
 1. a NEW user is being created (not a login, not an account link), and
 2. creation came via an OAuth provider, and
 3. that provider's `BypassInviteEnabled` was true, and
-4. no invite claim was redeemed (`oauthInviteClaimCookieName` absent or rolled back).
+4. no invite claim was redeemed (the OAuth transaction carried no invite id, or it was rolled back).
 
 (4) is not redundant with (3): a user may present a valid invite *and* use a
 bypassed provider. If they came through an invite, attribution already exists and

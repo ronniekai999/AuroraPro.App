@@ -709,11 +709,15 @@ func main() {
 				} else if purged > 0 {
 					slog.Info("purged expired tokens", "count", purged)
 				}
-				sweptTxns, err := queries.DeleteExpiredOAuthTransactions(context.Background())
+				sweptTxns, freedInvites, err := queries.DeleteExpiredOAuthTransactions(context.Background())
 				if err != nil {
 					slog.Error("oauth transaction cleanup failed", "error", err)
 				} else if sweptTxns > 0 {
-					slog.Info("purged expired oauth transactions", "count", sweptTxns)
+					// freed_invites counts codes recovered from signups that
+					// were abandoned at the provider's consent screen; without
+					// the sweep those stay permanently unclaimable.
+					slog.Info("purged expired oauth transactions",
+						"count", sweptTxns, "freed_invites", freedInvites)
 				}
 			case <-ctx.Done():
 				return

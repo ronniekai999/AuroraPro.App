@@ -193,7 +193,7 @@ func TestDeleteExpiredOAuthTransactions(t *testing.T) {
 		t.Fatalf("create dead: %v", err)
 	}
 
-	if _, err := q.DeleteExpiredOAuthTransactions(ctx); err != nil {
+	if _, _, err := q.DeleteExpiredOAuthTransactions(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if _, err := q.ConsumeOAuthTransaction(ctx, liveHash); err != nil {
