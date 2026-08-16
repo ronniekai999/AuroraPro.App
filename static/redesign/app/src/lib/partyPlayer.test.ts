@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
+  isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
@@ -195,21 +196,41 @@ describe('sequential HLS seek policy', () => {
 
     it('normalizes both a negative target and a negative session anchor to 0', () => {
       expect(needsBackwardSessionRebuild(1, -5)).toBe(false)
-      // Both clamp to 0 — no genuine backward gap, so no rebuild (an
+      // Both clamp to 0 — no genuine backward gap, so no rebuild. An
       // earlier version of this fix clamped only the anchor, not the
-      // target, and wrongly rebuilt here forever: -1 < 0 is true, but the
-      // rebuild's own Math.max(0, …) call re-anchors at 0, reproducing the
-      // same "target < start" state on every subsequent tick).
+      // target: a negative target compared against a 0-clamped anchor
+      // read as permanently behind, and the rebuild's own
+      // Math.max(0, …) call re-anchored at 0 without ever changing that
+      // comparison — an unbounded rebuild loop for any negative target
+      // (not reachable today; abs_ms can't go negative — see doc comment).
       expect(needsBackwardSessionRebuild(-1, -5)).toBe(false)
       expect(needsBackwardSessionRebuild(-1, 5)).toBe(true)
     })
 
-    it('ignores a sub-tolerance gap (e.g. a TV party racing a local episode change)', () => {
-      // 0.3s behind the party's canonical target must not pay for a full
-      // session rebuild — only a genuine, minutes-scale gap should.
+    it('ignores a sub-tolerance gap', () => {
+      // Defensive insurance against rounding noise right at the boundary,
+      // not a fix for any known scenario (every anchor-setting path floors
+      // to whole seconds) — but a genuine, minutes-scale gap like the
+      // reported bug must still rebuild well past this margin.
       expect(needsBackwardSessionRebuild(99.7, 100)).toBe(false)
       // Just past the default 1s tolerance: still rebuilds.
       expect(needsBackwardSessionRebuild(98.9, 100)).toBe(true)
+    })
+  })
+
+  describe('isPartyEpisodeMismatch (issue #488 review — TV episode-advance race)', () => {
+    it('blocks when both sides know an episode and they disagree', () => {
+      expect(isPartyEpisodeMismatch(9001, 9000)).toBe(true)
+    })
+
+    it('does not block when they agree', () => {
+      expect(isPartyEpisodeMismatch(9000, 9000)).toBe(false)
+    })
+
+    it('does not block when either side is unknown (movies, or a party not yet carrying an episode id)', () => {
+      expect(isPartyEpisodeMismatch(undefined, 9000)).toBe(false)
+      expect(isPartyEpisodeMismatch(9000, undefined)).toBe(false)
+      expect(isPartyEpisodeMismatch(undefined, undefined)).toBe(false)
     })
   })
 

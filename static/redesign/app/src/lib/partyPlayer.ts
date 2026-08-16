@@ -166,11 +166,15 @@ export function needsHlsSessionRebuild(
  * seconds via `Math.max(0, absMs/1000 - sessionStartSec)`. When the
  * canonical target falls before this session's own anchor — e.g. a guest
  * joined a party by resuming a personal bookmark far into the file while
- * the party clock sat near its start — that clamp maps the target to 0 and
- * the ordinary drift math reads "in sync" while the guest is actually
- * pinned `sessionStartSec` seconds ahead, with no way to correct (neither
- * rate-adjust nor hard-snap can seek to a position before this session's
- * own anchor).
+ * the party clock sat near its start — that clamp maps the target to 0,
+ * pinning the correction ladder's target at the session anchor forever:
+ * currentTime advances away from 0, drift grows past the hard-snap
+ * threshold, hard-snap teleports back to the anchor, and the cycle repeats
+ * every ~2s (a visible, looping stutter — NOT a silent "reads as in sync",
+ * the anomaly telemetry logs a `hard-seek` every cycle) while the guest
+ * stays pinned `sessionStartSec` seconds ahead of the party with no way to
+ * actually close the gap (neither rate-adjust nor hard-snap can seek to a
+ * position before this session's own anchor).
  *
  * Deliberately narrower than needsHlsSessionRebuild's forward/buffered-edge
  * arm: applied every 250ms against a continuously advancing target, that
@@ -180,18 +184,22 @@ export function needsHlsSessionRebuild(
  * those transient, already-correctly-handled states into a session-rebuild
  * storm on nearly every guest.
  *
- * This is NOT a fix for the mirror-image case (a guest anchored far BEHIND
- * the party, past this session's produced window) — that direction hits
- * the same "no way to correct" dead end and is a known, separate gap;
- * closing it needs a hysteresis-gated version of the forward arm (e.g.
- * sustained across several ticks) so it doesn't reintroduce the storm this
- * function exists to avoid. Left for a follow-up rather than guessed at
- * under this fix's time budget.
+ * Known gaps, left as follow-ups rather than guessed at under this fix's
+ * time budget:
+ *  - The mirror-image case (a guest anchored far BEHIND the party, past
+ *    this session's produced window) hits the same dead end and isn't
+ *    fixed here. Closing it needs a hysteresis-gated version of the
+ *    forward arm (e.g. sustained across several ticks) so it doesn't
+ *    reintroduce the storm this function exists to avoid.
+ *  - The Chromecast-connected-guest path (VideoPlayer.tsx `absMsToCastSec`)
+ *    has the identical clamp and no rebuild path either; this fix only
+ *    covers the local-<video> guest loop.
  *
- * `toleranceSec` keeps a merely-microscopic backward gap (e.g. the few
- * hundred ms of a party's TV-episode boundary racing this guest's local
- * media-change resolve) from paying for a full session rebuild — the
- * reported bug (#488) was a gap of minutes, not milliseconds.
+ * `toleranceSec` is defensive insurance against sub-second floating-point/
+ * rounding noise right at the boundary, not a fix for any known scenario —
+ * every anchor-setting path floors its target in whole seconds and the
+ * server echoes it verbatim, so a genuine sub-second backward gap isn't
+ * expected to occur in practice.
  */
 export function needsBackwardSessionRebuild(
   targetAbsSec: number,
@@ -201,6 +209,22 @@ export function needsBackwardSessionRebuild(
   const target = Math.max(0, targetAbsSec)
   const start = Math.max(0, sessionStartSec)
   return target < start - toleranceSec
+}
+
+/**
+ * For a TV show, the party's mediaItemId is the SERIES id and stays
+ * constant across an episode advance — it can't tell needsBackwardSessionRebuild's
+ * caller that `target` is momentarily the OLD episode while the party has
+ * already moved to a new one (App.tsx's resolve from a party media-change
+ * event to a new `target` is documented as taking "seconds on a long
+ * series"). During that window a stale-but-series-matching `target` reads
+ * as a genuine backward gap and would trigger a session rebuild of the
+ * wrong episode. True only when both sides know an episode and they
+ * disagree — undefined on either side (movies, or a party not yet
+ * carrying an episode id) means "don't know, don't block".
+ */
+export function isPartyEpisodeMismatch(partyEpisodeId: number | undefined, targetEpisodeId: number | undefined): boolean {
+  return partyEpisodeId !== undefined && targetEpisodeId !== undefined && partyEpisodeId !== targetEpisodeId
 }
 
 /** Preserve the state that was authoritative when a seek forced a reboot. */

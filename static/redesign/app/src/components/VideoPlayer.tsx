@@ -79,6 +79,7 @@ import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSampl
 import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
+  isPartyEpisodeMismatch,
   needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
@@ -134,6 +135,18 @@ export interface PartySync {
   // current target.mediaItemId; otherwise we'd seek the wrong
   // movie to the party's currentTimeMs.
   partyMediaItemId?: number
+  // 2026-08 fix (issue #488 review) — for a TV show, partyMediaItemId is
+  // the SERIES id and stays constant across an episode advance, so it
+  // can't by itself tell the drift-rebuild check (below) that `target`
+  // is momentarily the OLD episode while the party has already moved to
+  // a new one — the async resolve that updates `target` to the new
+  // episode is documented (App.tsx) as taking seconds, long enough for a
+  // stale-but-matching-series `target` to read as a genuine backward gap
+  // and trigger a session rebuild of the wrong file. Only used to gate
+  // that one check; deliberately NOT folded into the existing H3
+  // mediaItemId guard used elsewhere in this file, which intentionally
+  // stays series-level for content unrelated to this specific race.
+  partyEpisodeId?: number
   // Host actions — fire when the host's video element generates a
   // local event that should propagate to guests.
   requestPlay: () => void
@@ -3041,7 +3054,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // cast connect/disconnect, or a party media change all clear it too.
     // That's still safe: the guard against a stuck-true flag isn't "this
     // resets exactly once" but that the play-boot effect zeroes
-    // startSecRef/playerReadyRef (:1757-1758) before the swapped-in
+    // startSecRef/playerReadyRef (:1767, :1770) before the swapped-in
     // session is ready, so no tick can re-evaluate the rebuild condition
     // against stale state in between.
     let driftRebuildInFlight = false
@@ -3234,28 +3247,24 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
 
       // Issue #488 — a target BEFORE this session's own FFmpeg -ss anchor
       // can't be expressed as drift: absMsToHlsSec's Math.max(0, …) clamp
-      // maps it to hls-relative 0, and the ordinary drift math below reads
-      // that as "in sync" — while the guest is actually pinned `start_sec`
-      // seconds ahead of the party with no way to correct (rate-adjust and
-      // hard-snap can only move currentTime within this session's own
-      // window). This is the case for e.g. a guest who joined a party by
-      // resuming a personal bookmark far into the file while the party
-      // clock sat near its start. Rebuild a fresh session anchored at the
-      // real target instead — the same path an explicit host seek already
-      // takes just above.
+      // maps it to hls-relative 0, pinning the correction ladder's target at
+      // the anchor forever — currentTime advances away from 0, drift grows
+      // past the hard-snap threshold, hard-snap teleports back to 0, repeat
+      // every ~2s (a visible looping stutter, not a silent "in sync"). The
+      // guest stays pinned `start_sec` seconds ahead of the party with no
+      // way to actually close the gap. This is the case for e.g. a guest
+      // who joined a party by resuming a personal bookmark far into the
+      // file while the party clock sat near its start. Rebuild a fresh
+      // session anchored at the real target instead — the same path an
+      // explicit host seek already takes just above.
       //
-      // Deliberately checks ONLY the backward case (needsBackwardSessionRebuild) —
-      // NOT needsHlsSessionRebuild's forward/buffered-edge arm (an earlier
-      // version of this fix reused it and, applied every 250ms against a
-      // continuously advancing target, it turned the ordinary "just booted"
-      // and "buffer momentarily thin" states of a healthy session — and the
-      // last half-second of every title — into a session-rebuild storm on
-      // nearly every guest). The mirror-image forward case (a guest anchored
-      // far BEHIND the party) is a real, separate, still-open gap; see
-      // needsBackwardSessionRebuild's doc comment.
+      // See needsBackwardSessionRebuild's doc comment for why this checks
+      // ONLY the backward case, and for the known gaps left open (the
+      // mirror-image forward case, and the Chromecast guest path).
       const targetAbsSec = projectedAbsMs / 1000
       if (
         !driftRebuildInFlight &&
+        !isPartyEpisodeMismatch(party.partyEpisodeId, target.episodeId) &&
         playerReadyRef.current &&
         sessionIdRef.current !== null &&
         keepaliveRecoveryRef.current.onSeekRebuild &&
