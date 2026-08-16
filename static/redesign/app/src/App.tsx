@@ -6176,6 +6176,11 @@ export default function App() {
           // Thread the party's mediaItemId so the player can refuse
           // to mirror when local content doesn't match.
           partyMediaItemId: party.state.mediaItemId,
+          // Issue #488 review — episode-level companion to partyMediaItemId
+          // (which is series-level and unchanged across an episode
+          // advance) so the guest drift-rebuild check can tell a stale
+          // `target` from a genuine cross-session anchor mismatch.
+          partyEpisodeId: party.state.episodeId,
           requestPlay: party.requestPlay,
           requestPause: party.requestPause,
           requestSeek: party.requestSeek,

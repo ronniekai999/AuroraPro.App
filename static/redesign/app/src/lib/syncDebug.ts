@@ -11,10 +11,10 @@
 // How it surfaces:
 //   1. console.debug('[party-sync] …') — captured by diagnosticBuffer.ts
 //      (it patches console.debug), so it ships inside a Report-a-Bug
-//      submission with zero extra work for the user. Anomalies
-//      (hard-seek / stale-tick / buffering) are ALWAYS logged; steady
-//      state is throttled to ~1/sec so a long session doesn't evict the
-//      anomalies from the 500-entry console buffer.
+//      submission with zero extra work for the user. Anomalies (see the
+//      ANOMALY set below) are ALWAYS logged; steady state is throttled to
+//      ~1/sec so a long session doesn't evict the anomalies from the
+//      500-entry console buffer.
 //   2. A full per-tick ring buffer (getSyncSamples / window.auroraSyncDump)
 //      for live inspection in DevTools — unthrottled, so you can read the
 //      complete drift trajectory.
@@ -38,6 +38,7 @@ export type SyncDecision =
   | 'rate-up'     // behind — playbackRate bumped up to catch up
   | 'rate-down'   // ahead — playbackRate eased down
   | 'hard-seek'   // |drift| >= hard threshold — teleported (the visible "skip")
+  | 'rebuild'     // target outside this session's window — new session anchored at target
   | 'stale'       // tick older than the staleness guard — free-running
   | 'buffering'   // local video paused/buffering — correction skipped
   | 'no-tick'     // no server tick yet
@@ -77,7 +78,7 @@ const STEADY_LOG_INTERVAL_MS = 1000 // throttle non-anomaly console output
 // Decisions worth logging to the console on EVERY occurrence (the rest
 // are throttled). These are the events that explain a skip.
 const ANOMALY: ReadonlySet<SyncDecision> = new Set<SyncDecision>([
-  'hard-seek', 'stale', 'buffering',
+  'hard-seek', 'rebuild', 'stale', 'buffering',
 ])
 
 const ring: SyncSample[] = []
@@ -180,6 +181,7 @@ const DECISION_COLOR: Record<SyncDecision, string> = {
   'rate-up': '#79c0ff',
   'rate-down': '#79c0ff',
   'hard-seek': '#ff7b72',
+  'rebuild': '#ff7b72',
   'stale': '#d29922',
   'buffering': '#d29922',
   'no-tick': '#8b949e',

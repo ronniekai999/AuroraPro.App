@@ -79,6 +79,8 @@ import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSampl
 import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
+  isPartyEpisodeMismatch,
+  needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
   projectPartyTickAbsMs,
@@ -133,6 +135,26 @@ export interface PartySync {
   // current target.mediaItemId; otherwise we'd seek the wrong
   // movie to the party's currentTimeMs.
   partyMediaItemId?: number
+  // 2026-08 fix (issue #488 review) — for a TV show, partyMediaItemId is
+  // the SERIES id and stays constant across an episode advance, so it
+  // can't by itself tell the drift-rebuild check (below) that `target`
+  // is momentarily the OLD episode while the party has already moved to
+  // a new one — the async resolve that updates `target` to the new
+  // episode is documented (App.tsx) as taking seconds, long enough for a
+  // stale-but-matching-series `target` to read as a genuine backward gap
+  // and trigger a session rebuild of the wrong file. Only used to gate
+  // that one check; deliberately NOT folded into the existing H3
+  // mediaItemId guard used elsewhere in this file, which intentionally
+  // stays series-level for content unrelated to this specific race.
+  // Typed to admit `null` (not just `undefined`) because that's the REAL
+  // runtime value for a no-episode party: the server always includes
+  // episode_id in party-state, serializing an absent one as JSON null
+  // (a nil *int64 into a map — struct tags like `omitempty` don't apply),
+  // and useParty.tsx stores it verbatim. isPartyEpisodeMismatch handles
+  // both; keep this type honest so a future second use of this field
+  // doesn't silently reintroduce the same "null read as a real,
+  // disagreeing episode" defect this fix closed.
+  partyEpisodeId?: number | null
   // Host actions — fire when the host's video element generates a
   // local event that should propagate to guests.
   requestPlay: () => void
@@ -3033,6 +3055,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       } catch { /* TimeRanges can throw if the element is torn down */ }
       return 0
     }
+    // 2026-08 fix (issue #488) — without this, every 250ms tick between
+    // calling rebuild() and React actually swapping `target` would re-fire
+    // it. Scoped to this effect instance, so it resets on ANY rebind (not
+    // only the one caused by the rebuild landing) — a host pause/resume, a
+    // cast connect/disconnect, or a party media change all clear it too.
+    // That's still safe: the guard against a stuck-true flag isn't "this
+    // resets exactly once" but that the play-boot effect zeroes
+    // startSecRef/playerReadyRef (:1768, :1771) before the swapped-in
+    // session is ready, so no tick can re-evaluate the rebuild condition
+    // against stale state in between.
+    let driftRebuildInFlight = false
     const id = window.setInterval(() => {
       const dbg = isSyncDebugEnabled()
       const explicitSeek = party.seekRef.current
@@ -3219,6 +3252,57 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         tickAgeMs + 500,
       )
       const projectedAbsMs = t.abs_ms + elapsedMs
+
+      // Issue #488 — a target BEFORE this session's own FFmpeg -ss anchor
+      // can't be expressed as drift: absMsToHlsSec's Math.max(0, …) clamp
+      // maps it to hls-relative 0, pinning the correction ladder's target at
+      // the anchor forever — currentTime advances away from 0, drift grows
+      // past the hard-snap threshold, hard-snap teleports back to 0, repeat
+      // every ~2s (a visible looping stutter, not a silent "in sync"). The
+      // guest stays pinned `start_sec` seconds ahead of the party with no
+      // way to actually close the gap. Rebuild a fresh session anchored at
+      // the real target instead — the same path an explicit host seek
+      // already takes just above.
+      //
+      // See needsBackwardSessionRebuild's doc comment for the concrete
+      // scenario this is reachable from, for why this checks ONLY the
+      // backward case, and for the known gaps left open (the mirror-image
+      // forward case, and the Chromecast guest path).
+      const targetAbsSec = projectedAbsMs / 1000
+      // partyEpisodeId isn't in this effect's dep array — target and
+      // Boolean(party) are (so a content/party-presence change does rebind),
+      // but of party's OWN fields only isHost/isPlaying/partyMediaItemId/
+      // cast.connected are (party itself is a fresh literal every App
+      // render, so the effect deliberately doesn't rebind on every field of
+      // it). Read it through partySyncRef, which is reassigned on every
+      // render, instead of the closure-captured `party` — otherwise a
+      // room-socket reconnect that patches episodeId without touching any
+      // of those four fields (verified in useParty.tsx: a `party-state`
+      // snapshot mid-episode-advance does exactly this) would leave this
+      // guard checking a stale episode id and silently fail to block the
+      // very race it exists for.
+      if (
+        !driftRebuildInFlight &&
+        !isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId) &&
+        playerReadyRef.current &&
+        sessionIdRef.current !== null &&
+        keepaliveRecoveryRef.current.onSeekRebuild &&
+        needsBackwardSessionRebuild(targetAbsSec, startSecRef.current ?? 0)
+      ) {
+        driftRebuildInFlight = true
+        const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
+        // Reachable only while party.isPlaying (the `!party.isPlaying`
+        // early-return above), so there is never a pause to preserve here.
+        const bootIntent = { preservePause: false, partyRevision: t.rev ?? partySyncRef.current?.rev ?? party.rev }
+        pauseAfterSeekRebuildRef.current = bootIntent
+        inFlightPauseIntentRef.current = bootIntent
+        extendSuppression(500)
+        setStatus('Syncing to party…')
+        if (dbg) recordSyncSample(mkSample('rebuild', { localSec: vid.currentTime, projectedAbsMs, tickAgeMs }))
+        rebuild(Math.max(0, targetAbsSec))
+        return
+      }
+
       const targetSec = absMsToHlsSec(projectedAbsMs)
       const localSec = vid.currentTime
       const driftMs = (localSec - targetSec) * 1000

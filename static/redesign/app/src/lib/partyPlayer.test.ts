@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
+  isPartyEpisodeMismatch,
   isPlaybackResolutionCurrent,
+  needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
   partyPlayerAutoOpenKey,
@@ -168,6 +170,84 @@ describe('sequential HLS seek policy', () => {
 
   it('does not rebuild again when the new session is anchored at the target', () => {
     expect(needsHlsSessionRebuild(13 * 60 + 11, 13 * 60 + 11, 0)).toBe(false)
+  })
+
+  describe('needsBackwardSessionRebuild (issue #488 guest drift loop)', () => {
+    it('rebuilds when the canonical target is before this session\'s own anchor', () => {
+      // Guest's session is anchored at 20:00 (e.g. started the party's
+      // title from their own bookmark) while the party clock is still at
+      // 1:40 — the clamp in absMsToHlsSec would otherwise pin the
+      // correction loop's target at 20:00 forever (see the doc comment
+      // for the concrete repeating-hard-seek failure mode).
+      expect(needsBackwardSessionRebuild(100, 1200)).toBe(true)
+    })
+
+    it('does not rebuild for ordinary forward drift within the session', () => {
+      expect(needsBackwardSessionRebuild(1200, 1200)).toBe(false)
+      expect(needsBackwardSessionRebuild(1300, 1200)).toBe(false)
+    })
+
+    it('does not rebuild for a target far beyond the buffered edge (issue #488 review)', () => {
+      // An earlier version of this fix reused needsHlsSessionRebuild's
+      // forward/buffered-edge arm here, which fires on the ordinary
+      // "just booted" and "buffer momentarily thin" states of a healthy
+      // session — needsBackwardSessionRebuild must not, regardless of how
+      // far ahead of any buffered edge the target is.
+      expect(needsBackwardSessionRebuild(999_999, 0)).toBe(false)
+    })
+
+    it('normalizes both a negative target and a negative session anchor to 0', () => {
+      expect(needsBackwardSessionRebuild(1, -5)).toBe(false)
+      // Both clamp to 0 — no genuine backward gap, so no rebuild. An
+      // earlier version of this fix clamped only the anchor, not the
+      // target: a negative target compared against a 0-clamped anchor
+      // read as permanently behind, and the rebuild's own
+      // Math.max(0, …) call re-anchored at 0 without ever changing that
+      // comparison — an unbounded rebuild loop for any negative target
+      // (not reachable today: the tick's abs_ms and elapsedMs are both
+      // non-negative, so projectedAbsMs — and this function's targetAbsSec
+      // argument — can't go negative in practice).
+      expect(needsBackwardSessionRebuild(-1, -5)).toBe(false)
+      expect(needsBackwardSessionRebuild(-1, 5)).toBe(true)
+    })
+
+    it('ignores a sub-tolerance gap', () => {
+      // Defensive insurance against rounding noise right at the boundary,
+      // not a fix for any known scenario (every anchor-setting path floors
+      // to whole seconds) — but a genuine, minutes-scale gap like the
+      // reported bug must still rebuild well past this margin.
+      expect(needsBackwardSessionRebuild(99.7, 100)).toBe(false)
+      // Just past the default 1s tolerance: still rebuilds.
+      expect(needsBackwardSessionRebuild(98.9, 100)).toBe(true)
+    })
+  })
+
+  describe('isPartyEpisodeMismatch (issue #488 review — TV episode-advance race)', () => {
+    it('blocks when both sides know an episode and they disagree', () => {
+      expect(isPartyEpisodeMismatch(9001, 9000)).toBe(true)
+    })
+
+    it('does not block when they agree', () => {
+      expect(isPartyEpisodeMismatch(9000, 9000)).toBe(false)
+    })
+
+    it('does not block when either side is unknown (movies, or a party not yet carrying an episode id)', () => {
+      expect(isPartyEpisodeMismatch(undefined, 9000)).toBe(false)
+      expect(isPartyEpisodeMismatch(9000, undefined)).toBe(false)
+      expect(isPartyEpisodeMismatch(undefined, undefined)).toBe(false)
+    })
+
+    it('treats a `null` partyEpisodeId the same as undefined (the actual wire value for a no-episode party)', () => {
+      // The server always includes episode_id in party-state, serializing
+      // an absent one as JSON null (manager.go's *int64 into a map) —
+      // useParty.tsx stores that verbatim, so this is the REAL runtime
+      // value for a TV party missing episode context, not `undefined`.
+      // A strict `!== undefined` check here would read `null` as a known,
+      // disagreeing episode and permanently block the #488 fix for that
+      // party.
+      expect(isPartyEpisodeMismatch(null, 9000)).toBe(false)
+      expect(isPartyEpisodeMismatch(null, undefined)).toBe(false)
+    })
   })
 
   it('preserves a paused party across a session rebuild', () => {

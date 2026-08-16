@@ -160,6 +160,110 @@ export function needsHlsSessionRebuild(
   return target >= bufferedEndSec - edgeToleranceSec
 }
 
+/**
+ * The periodic guest drift-correction tick (VideoPlayer.tsx) converts the
+ * party's canonical absolute position into THIS session's HLS-relative
+ * seconds via `Math.max(0, absMs/1000 - sessionStartSec)`. When the
+ * canonical target falls before this session's own anchor, that clamp maps
+ * the target to 0, pinning the correction ladder's target at the session
+ * anchor forever:
+ * currentTime advances away from 0, drift grows past the hard-snap
+ * threshold, hard-snap teleports back to the anchor, and the cycle repeats
+ * every ~2s (a visible, looping stutter — NOT a silent "reads as in sync",
+ * the anomaly telemetry logs a `hard-seek` every cycle) while the guest
+ * stays pinned `sessionStartSec` seconds ahead of the party with no way to
+ * actually close the gap (neither rate-adjust nor hard-snap can seek to a
+ * position before this session's own anchor).
+ *
+ * Reachable via: App.tsx's `handlePlayContinue` uses the party's CURRENT
+ * position instead of a guest's personal bookmark — EXCEPT for a party
+ * still in its lobby (`!isPlaying && currentTimeMs === 0`), where it
+ * deliberately falls back to the bookmark (`App.tsx` ~4491-4492, so a
+ * not-yet-started party doesn't force everyone to 0). A guest who resumes
+ * that way from deep in the file, then has the host start the room, ends
+ * up anchored ahead of the party's real (now non-zero) position — NOT via
+ * joining a party that's already ahead, since the sync socket's `hello`
+ * synthesizes a one-shot rebase seek on join that the explicit-seek branch
+ * a few dozen lines above already rebuilds correctly via
+ * needsHlsSessionRebuild's own backward arm. The gap this function closes
+ * is specifically the case where no such rebase frame follows.
+ *
+ * Deliberately narrower than needsHlsSessionRebuild's forward/buffered-edge
+ * arm: applied every 250ms against a continuously advancing target, that
+ * arm is true for the ordinary "just booted" and "buffer momentarily thin"
+ * states of a healthy session (and for the last half-second of every
+ * title) — reusing it here (an earlier version of this fix did) turned
+ * those transient, already-correctly-handled states into a session-rebuild
+ * storm on nearly every guest.
+ *
+ * Known gaps, left as follow-ups rather than guessed at under this fix's
+ * time budget:
+ *  - The mirror-image case (a guest anchored far BEHIND the party, past
+ *    this session's produced window) hits the same dead end and isn't
+ *    fixed here. Closing it needs a hysteresis-gated version of the
+ *    forward arm (e.g. sustained across several ticks) so it doesn't
+ *    reintroduce the storm this function exists to avoid.
+ *  - The Chromecast-connected-guest path (VideoPlayer.tsx `absMsToCastSec`)
+ *    has the identical clamp and no rebuild path either; this fix only
+ *    covers the local-<video> guest loop.
+ *  - The explicit-seek branch (VideoPlayer.tsx, a few dozen lines above
+ *    this function's call site) has no equivalent isPartyEpisodeMismatch
+ *    guard and runs BEFORE the drift-loop check in the same tick, so on a
+ *    room-socket reconnect (which always re-sends a `hello` and its
+ *    one-shot rebase seek) it's that branch, not this one, that ends up
+ *    handling a stale `target` during a TV episode advance — meaning the
+ *    episode guard here is hardening against a narrower window than it
+ *    may read as covering. Worth the same guard if that branch turns out
+ *    to hit it in practice.
+ *
+ * `toleranceSec` is defensive insurance against sub-second floating-point/
+ * rounding noise right at the boundary, not a fix for any known scenario —
+ * every anchor-setting path floors its target in whole seconds and the
+ * server echoes it verbatim, so a genuine sub-second backward gap isn't
+ * expected to occur in practice. It does mean a gap inside the tolerance
+ * window still hits the ~2s hard-seek loop described above, just bounded
+ * to that window's amplitude instead of running away — rebuilding a whole
+ * session to close a sub-second gap would trade a small, self-limiting
+ * stutter for a strictly worse one.
+ */
+export function needsBackwardSessionRebuild(
+  targetAbsSec: number,
+  sessionStartSec: number,
+  toleranceSec = 1,
+): boolean {
+  const target = Math.max(0, targetAbsSec)
+  const start = Math.max(0, sessionStartSec)
+  return target < start - toleranceSec
+}
+
+/**
+ * For a TV show, the party's mediaItemId is the SERIES id and stays
+ * constant across an episode advance — it can't tell needsBackwardSessionRebuild's
+ * caller that `target` is momentarily the OLD episode while the party has
+ * already moved to a new one (App.tsx's resolve from a party media-change
+ * event to a new `target` is documented as taking "seconds on a long
+ * series"). During that window a stale-but-series-matching `target` reads
+ * as a genuine backward gap and would trigger a session rebuild of the
+ * wrong episode. True only when both sides know an episode and they
+ * disagree — missing on either side (movies, or a party not yet carrying
+ * an episode id) means "don't know, don't block".
+ *
+ * `partyEpisodeId` is typed `number | undefined` on PartySync, but the
+ * server always includes `episode_id` in party-state and serializes an
+ * absent one as JSON `null` (manager.go's *int64 into a map), which
+ * useParty.tsx stores verbatim — so a no-episode party's live value is
+ * `null` at runtime, not `undefined`. `!= null` (loose) catches both;
+ * `!== undefined` (strict) would not, and would leave the #488 fix
+ * permanently disabled for any TV party missing episode context (a state
+ * App.tsx already warns about elsewhere).
+ */
+export function isPartyEpisodeMismatch(
+  partyEpisodeId: number | null | undefined,
+  targetEpisodeId: number | undefined,
+): boolean {
+  return partyEpisodeId != null && targetEpisodeId != null && partyEpisodeId !== targetEpisodeId
+}
+
 /** Preserve the state that was authoritative when a seek forced a reboot. */
 export function shouldPreservePauseOnSeekRebuild(
   partyRunning: boolean | null,
