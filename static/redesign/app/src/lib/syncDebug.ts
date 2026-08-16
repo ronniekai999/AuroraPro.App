@@ -11,10 +11,10 @@
 // How it surfaces:
 //   1. console.debug('[party-sync] …') — captured by diagnosticBuffer.ts
 //      (it patches console.debug), so it ships inside a Report-a-Bug
-//      submission with zero extra work for the user. Anomalies
-//      (hard-seek / stale-tick / buffering) are ALWAYS logged; steady
-//      state is throttled to ~1/sec so a long session doesn't evict the
-//      anomalies from the 500-entry console buffer.
+//      submission with zero extra work for the user. Anomalies (see the
+//      ANOMALY set below) are ALWAYS logged; steady state is throttled to
+//      ~1/sec so a long session doesn't evict the anomalies from the
+//      500-entry console buffer.
 //   2. A full per-tick ring buffer (getSyncSamples / window.auroraSyncDump)
 //      for live inspection in DevTools — unthrottled, so you can read the
 //      complete drift trajectory.

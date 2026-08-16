@@ -3261,16 +3261,18 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // backward case, and for the known gaps left open (the mirror-image
       // forward case, and the Chromecast guest path).
       const targetAbsSec = projectedAbsMs / 1000
-      // partyEpisodeId isn't in this effect's dep array (only isHost/
-      // isPlaying/partyMediaItemId/cast.connected are — party itself is a
-      // fresh literal every App render, so the effect deliberately doesn't
-      // rebind on every field of it). Read it through partySyncRef, which
-      // is reassigned on every render, instead of the closure-captured
-      // `party` — otherwise a room-socket reconnect that patches episodeId
-      // without touching any of those four deps (verified in useParty.tsx:
-      // a `party-state` snapshot mid-episode-advance does exactly this)
-      // would leave this guard checking a stale episode id and silently
-      // fail to block the very race it exists for.
+      // partyEpisodeId isn't in this effect's dep array — target and
+      // Boolean(party) are (so a content/party-presence change does rebind),
+      // but of party's OWN fields only isHost/isPlaying/partyMediaItemId/
+      // cast.connected are (party itself is a fresh literal every App
+      // render, so the effect deliberately doesn't rebind on every field of
+      // it). Read it through partySyncRef, which is reassigned on every
+      // render, instead of the closure-captured `party` — otherwise a
+      // room-socket reconnect that patches episodeId without touching any
+      // of those four fields (verified in useParty.tsx: a `party-state`
+      // snapshot mid-episode-advance does exactly this) would leave this
+      // guard checking a stale episode id and silently fail to block the
+      // very race it exists for.
       if (
         !driftRebuildInFlight &&
         !isPartyEpisodeMismatch(partySyncRef.current?.partyEpisodeId, target.episodeId) &&
@@ -3283,7 +3285,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
         // Reachable only while party.isPlaying (the `!party.isPlaying`
         // early-return above), so there is never a pause to preserve here.
-        const bootIntent = { preservePause: false, partyRevision: t.rev ?? party.rev }
+        const bootIntent = { preservePause: false, partyRevision: t.rev ?? partySyncRef.current?.rev ?? party.rev }
         pauseAfterSeekRebuildRef.current = bootIntent
         inFlightPauseIntentRef.current = bootIntent
         extendSuppression(500)

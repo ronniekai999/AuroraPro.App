@@ -204,7 +204,9 @@ describe('sequential HLS seek policy', () => {
       // read as permanently behind, and the rebuild's own
       // Math.max(0, …) call re-anchored at 0 without ever changing that
       // comparison — an unbounded rebuild loop for any negative target
-      // (not reachable today; abs_ms can't go negative — see doc comment).
+      // (not reachable today: the tick's abs_ms and elapsedMs are both
+      // non-negative, so projectedAbsMs — and this function's targetAbsSec
+      // argument — can't go negative in practice).
       expect(needsBackwardSessionRebuild(-1, -5)).toBe(false)
       expect(needsBackwardSessionRebuild(-1, 5)).toBe(true)
     })
@@ -233,6 +235,18 @@ describe('sequential HLS seek policy', () => {
       expect(isPartyEpisodeMismatch(undefined, 9000)).toBe(false)
       expect(isPartyEpisodeMismatch(9000, undefined)).toBe(false)
       expect(isPartyEpisodeMismatch(undefined, undefined)).toBe(false)
+    })
+
+    it('treats a `null` partyEpisodeId the same as undefined (the actual wire value for a no-episode party)', () => {
+      // The server always includes episode_id in party-state, serializing
+      // an absent one as JSON null (manager.go's *int64 into a map) —
+      // useParty.tsx stores that verbatim, so this is the REAL runtime
+      // value for a TV party missing episode context, not `undefined`.
+      // A strict `!== undefined` check here would read `null` as a known,
+      // disagreeing episode and permanently block the #488 fix for that
+      // party.
+      expect(isPartyEpisodeMismatch(null, 9000)).toBe(false)
+      expect(isPartyEpisodeMismatch(null, undefined)).toBe(false)
     })
   })
 

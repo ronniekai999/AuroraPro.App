@@ -175,9 +175,13 @@ export function needsHlsSessionRebuild(
  * actually close the gap (neither rate-adjust nor hard-snap can seek to a
  * position before this session's own anchor).
  *
- * Reachable via: a guest already IN an active party starts the party's
- * title from their own personal bookmark (VideoPlayer.tsx `handlePlay`),
- * anchoring their session ahead of the party's current position — NOT via
+ * Reachable via: App.tsx's `handlePlayContinue` uses the party's CURRENT
+ * position instead of a guest's personal bookmark — EXCEPT for a party
+ * still in its lobby (`!isPlaying && currentTimeMs === 0`), where it
+ * deliberately falls back to the bookmark (`App.tsx` ~4491-4492, so a
+ * not-yet-started party doesn't force everyone to 0). A guest who resumes
+ * that way from deep in the file, then has the host start the room, ends
+ * up anchored ahead of the party's real (now non-zero) position — NOT via
  * joining a party that's already ahead, since the sync socket's `hello`
  * synthesizes a one-shot rebase seek on join that the explicit-seek branch
  * a few dozen lines above already rebuilds correctly via
@@ -202,6 +206,15 @@ export function needsHlsSessionRebuild(
  *  - The Chromecast-connected-guest path (VideoPlayer.tsx `absMsToCastSec`)
  *    has the identical clamp and no rebuild path either; this fix only
  *    covers the local-<video> guest loop.
+ *  - The explicit-seek branch (VideoPlayer.tsx, a few dozen lines above
+ *    this function's call site) has no equivalent isPartyEpisodeMismatch
+ *    guard and runs BEFORE the drift-loop check in the same tick, so on a
+ *    room-socket reconnect (which always re-sends a `hello` and its
+ *    one-shot rebase seek) it's that branch, not this one, that ends up
+ *    handling a stale `target` during a TV episode advance — meaning the
+ *    episode guard here is hardening against a narrower window than it
+ *    may read as covering. Worth the same guard if that branch turns out
+ *    to hit it in practice.
  *
  * `toleranceSec` is defensive insurance against sub-second floating-point/
  * rounding noise right at the boundary, not a fix for any known scenario —
@@ -232,11 +245,23 @@ export function needsBackwardSessionRebuild(
  * series"). During that window a stale-but-series-matching `target` reads
  * as a genuine backward gap and would trigger a session rebuild of the
  * wrong episode. True only when both sides know an episode and they
- * disagree — undefined on either side (movies, or a party not yet
- * carrying an episode id) means "don't know, don't block".
+ * disagree — missing on either side (movies, or a party not yet carrying
+ * an episode id) means "don't know, don't block".
+ *
+ * `partyEpisodeId` is typed `number | undefined` on PartySync, but the
+ * server always includes `episode_id` in party-state and serializes an
+ * absent one as JSON `null` (manager.go's *int64 into a map), which
+ * useParty.tsx stores verbatim — so a no-episode party's live value is
+ * `null` at runtime, not `undefined`. `!= null` (loose) catches both;
+ * `!== undefined` (strict) would not, and would leave the #488 fix
+ * permanently disabled for any TV party missing episode context (a state
+ * App.tsx already warns about elsewhere).
  */
-export function isPartyEpisodeMismatch(partyEpisodeId: number | undefined, targetEpisodeId: number | undefined): boolean {
-  return partyEpisodeId !== undefined && targetEpisodeId !== undefined && partyEpisodeId !== targetEpisodeId
+export function isPartyEpisodeMismatch(
+  partyEpisodeId: number | null | undefined,
+  targetEpisodeId: number | undefined,
+): boolean {
+  return partyEpisodeId != null && targetEpisodeId != null && partyEpisodeId !== targetEpisodeId
 }
 
 /** Preserve the state that was authoritative when a seek forced a reboot. */
