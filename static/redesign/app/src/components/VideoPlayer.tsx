@@ -79,6 +79,7 @@ import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSampl
 import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
+  needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
   projectPartyTickAbsMs,
@@ -3228,33 +3229,44 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       )
       const projectedAbsMs = t.abs_ms + elapsedMs
 
-      // Issue #488 — a target outside this session's servable window (before
-      // its FFmpeg -ss anchor, or past its buffered edge) can't be expressed
-      // as drift: absMsToHlsSec's Math.max(0, …) clamp would map it to
-      // hls-relative 0, and the ordinary drift math below would read that as
-      // "in sync" — while the guest is actually pinned `start_sec` seconds
-      // ahead or behind the party with no way to correct (rate-adjust and
-      // hard-snap both only operate inside this session's window). This is
-      // the case for e.g. a guest who joined a party by resuming a personal
-      // bookmark far into the file while the party clock sat near its start.
-      // Rebuild a fresh session anchored at the real target instead — the
-      // same path an explicit host seek already takes just above.
+      // Issue #488 — a target BEFORE this session's own FFmpeg -ss anchor
+      // can't be expressed as drift: absMsToHlsSec's Math.max(0, …) clamp
+      // maps it to hls-relative 0, and the ordinary drift math below reads
+      // that as "in sync" — while the guest is actually pinned `start_sec`
+      // seconds ahead of the party with no way to correct (rate-adjust and
+      // hard-snap can only move currentTime within this session's own
+      // window). This is the case for e.g. a guest who joined a party by
+      // resuming a personal bookmark far into the file while the party
+      // clock sat near its start. Rebuild a fresh session anchored at the
+      // real target instead — the same path an explicit host seek already
+      // takes just above.
+      //
+      // Deliberately checks ONLY the backward case (needsBackwardSessionRebuild),
+      // not needsHlsSessionRebuild's forward/buffered-edge arm: applied every
+      // 250ms against a continuously advancing target, that arm is true for
+      // the ordinary "just booted" and "buffer momentarily thin" states of a
+      // healthy session (and for the last half-second of every title) — an
+      // adversarial review of an earlier version of this fix caught that it
+      // turned those transient, already-correctly-handled states into a
+      // session-rebuild storm on nearly every guest.
       const targetAbsSec = projectedAbsMs / 1000
       if (
         !driftRebuildInFlight &&
         playerReadyRef.current &&
         sessionIdRef.current !== null &&
         keepaliveRecoveryRef.current.onSeekRebuild &&
-        needsHlsSessionRebuild(targetAbsSec, startSecRef.current ?? 0, bufferedSecRef.current)
+        needsBackwardSessionRebuild(targetAbsSec, startSecRef.current ?? 0)
       ) {
         driftRebuildInFlight = true
         const rebuild = keepaliveRecoveryRef.current.onSeekRebuild
-        const bootIntent = { preservePause: !party.isPlaying, partyRevision: party.rev }
+        // Reachable only while party.isPlaying (the `!party.isPlaying`
+        // early-return above), so there is never a pause to preserve here.
+        const bootIntent = { preservePause: false, partyRevision: t.rev ?? party.rev }
         pauseAfterSeekRebuildRef.current = bootIntent
         inFlightPauseIntentRef.current = bootIntent
         extendSuppression(500)
         setStatus('Syncing to party…')
-        if (dbg) recordSyncSample(mkSample('rebuild', { projectedAbsMs, tickAgeMs }))
+        if (dbg) recordSyncSample(mkSample('rebuild', { localSec: vid.currentTime, projectedAbsMs, tickAgeMs }))
         rebuild(Math.max(0, targetAbsSec))
         return
       }

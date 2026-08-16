@@ -3,6 +3,7 @@ import {
   castPlayPauseMismatch,
   isCastHostSeekJump,
   isPlaybackResolutionCurrent,
+  needsBackwardSessionRebuild,
   needsHlsSessionRebuild,
   pauseIntentForReplacementSeek,
   partyPlayerAutoOpenKey,
@@ -168,6 +169,35 @@ describe('sequential HLS seek policy', () => {
 
   it('does not rebuild again when the new session is anchored at the target', () => {
     expect(needsHlsSessionRebuild(13 * 60 + 11, 13 * 60 + 11, 0)).toBe(false)
+  })
+
+  describe('needsBackwardSessionRebuild (issue #488 guest drift loop)', () => {
+    it('rebuilds when the canonical target is before this session\'s own anchor', () => {
+      // Guest's session is anchored at 20:00 (e.g. resumed from a bookmark)
+      // while the party clock is still at 1:40 — the clamp in
+      // absMsToHlsSec would otherwise read this as "in sync".
+      expect(needsBackwardSessionRebuild(100, 1200)).toBe(true)
+    })
+
+    it('does not rebuild for ordinary forward drift within the session', () => {
+      expect(needsBackwardSessionRebuild(1200, 1200)).toBe(false)
+      expect(needsBackwardSessionRebuild(1300, 1200)).toBe(false)
+    })
+
+    it('does not rebuild for a target far beyond the buffered edge (issue #488 review)', () => {
+      // An earlier version of this fix reused needsHlsSessionRebuild's
+      // forward/buffered-edge arm here, which fires on the ordinary
+      // "just booted" and "buffer momentarily thin" states of a healthy
+      // session — needsBackwardSessionRebuild must not, regardless of how
+      // far ahead of any buffered edge the target is.
+      expect(needsBackwardSessionRebuild(999_999, 0)).toBe(false)
+    })
+
+    it('normalizes a negative session anchor to 0', () => {
+      expect(needsBackwardSessionRebuild(1, -5)).toBe(false)
+      expect(needsBackwardSessionRebuild(-1, -5)).toBe(true)
+      expect(needsBackwardSessionRebuild(-1, 5)).toBe(true)
+    })
   })
 
   it('preserves a paused party across a session rebuild', () => {

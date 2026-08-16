@@ -160,6 +160,30 @@ export function needsHlsSessionRebuild(
   return target >= bufferedEndSec - edgeToleranceSec
 }
 
+/**
+ * The periodic guest drift-correction tick (VideoPlayer.tsx) converts the
+ * party's canonical absolute position into THIS session's HLS-relative
+ * seconds via `Math.max(0, absMs/1000 - sessionStartSec)`. When the
+ * canonical target falls before this session's own anchor — e.g. a guest
+ * joined a party by resuming a personal bookmark far into the file while
+ * the party clock sat near its start — that clamp maps the target to 0 and
+ * the ordinary drift math reads "in sync" while the guest is actually
+ * pinned `sessionStartSec` seconds ahead, with no way to correct (neither
+ * rate-adjust nor hard-snap can seek to a position before this session's
+ * own anchor).
+ *
+ * Deliberately narrower than needsHlsSessionRebuild's forward/buffered-edge
+ * arm: applied every 250ms against a continuously advancing target, that
+ * arm is true for the ordinary "just booted" and "buffer momentarily thin"
+ * states of a healthy session (and for the last half-second of every
+ * title), which would turn transient conditions the existing rate-adjust/
+ * hard-snap ladder already handles into session-rebuild storms. Only the
+ * backward case is unrepresentable without a rebuild.
+ */
+export function needsBackwardSessionRebuild(targetAbsSec: number, sessionStartSec: number): boolean {
+  return targetAbsSec < Math.max(0, sessionStartSec)
+}
+
 /** Preserve the state that was authoritative when a seek forced a reboot. */
 export function shouldPreservePauseOnSeekRebuild(
   partyRunning: boolean | null,
