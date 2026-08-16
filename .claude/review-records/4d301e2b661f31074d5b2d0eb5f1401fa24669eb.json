@@ -1,0 +1,10 @@
+{
+  "sha": "4d301e2b661f31074d5b2d0eb5f1401fa24669eb",
+  "verdict": "lows-only",
+  "summary": "Four independent fresh-context adversarial passes over the OAuth transaction change (C-01 account takeover, H-01 invite-gate bypass). Pass 1: 2 high (both regressions this branch introduced: consuming the transaction before the code exchange destroyed the invite on declined consent; the tightened unclaim predicate no-op'd password registration's rollback). Pass 2: criteria 1-4 confirmed, no high/critical; fix-first on a data-destruction medium (the sweep discarding the only pointer to a stranded invite) plus an untested StartLink link-target write. Pass 3: no high/critical; one medium reproduced live (post-consume binding failures stranded the claim where the sweep is switched off by design). Pass 4 (scoped to pass 3's delta): delta correct and complete, no new production defect; one test-coverage medium (nothing pinned the invite lifecycle's SUCCESS path) plus lows. All findings from all four passes resolved. 12 mutants demonstrated surviving across the passes, plus 2 found in pass 4 - all 14 now fail. Criteria 1-4 (no client-supplied link authorization, fail-closed live-session requirement, opaque one-time state/provider-bound transaction, no invite-gate bypass or reopening) independently verified in passes 2, 3 and 4. CAVEAT: the pass-4 fixes in the final commit were NOT themselves independently re-reviewed.",
+  "reviewer": "independent-adversarial-agents-x4",
+  "findings": "21",
+  "diff_digest": "af6449e2c96a94a1407f1823d851b6a964199a3e27b515bb208e72fad4867dea",
+  "branch": "claude/auroraapp-audit-findings-58oh4c",
+  "recorded_at": "2026-08-16T08:49:10Z"
+}
