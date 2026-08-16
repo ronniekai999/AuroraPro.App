@@ -3034,13 +3034,16 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       } catch { /* TimeRanges can throw if the element is torn down */ }
       return 0
     }
-    // 2026-08 fix (issue #488) — at most one drift-triggered rebuild per
-    // session. Scoped to this effect instance (reset whenever the effect
-    // re-runs, e.g. once the rebuilt session lands as a new `target` and
-    // this whole effect rebinds), same one-shot reasoning as
-    // hostBroadcastRecoveryFiredRef above: without it, every 250ms tick
-    // between calling rebuild() and React actually swapping `target` would
-    // re-fire it.
+    // 2026-08 fix (issue #488) — without this, every 250ms tick between
+    // calling rebuild() and React actually swapping `target` would re-fire
+    // it. Scoped to this effect instance, so it resets on ANY rebind (not
+    // only the one caused by the rebuild landing) — a host pause/resume, a
+    // cast connect/disconnect, or a party media change all clear it too.
+    // That's still safe: the guard against a stuck-true flag isn't "this
+    // resets exactly once" but that the play-boot effect zeroes
+    // startSecRef/playerReadyRef (:1757-1758) before the swapped-in
+    // session is ready, so no tick can re-evaluate the rebuild condition
+    // against stale state in between.
     let driftRebuildInFlight = false
     const id = window.setInterval(() => {
       const dbg = isSyncDebugEnabled()
@@ -3241,14 +3244,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // real target instead — the same path an explicit host seek already
       // takes just above.
       //
-      // Deliberately checks ONLY the backward case (needsBackwardSessionRebuild),
-      // not needsHlsSessionRebuild's forward/buffered-edge arm: applied every
-      // 250ms against a continuously advancing target, that arm is true for
-      // the ordinary "just booted" and "buffer momentarily thin" states of a
-      // healthy session (and for the last half-second of every title) — an
-      // adversarial review of an earlier version of this fix caught that it
-      // turned those transient, already-correctly-handled states into a
-      // session-rebuild storm on nearly every guest.
+      // Deliberately checks ONLY the backward case (needsBackwardSessionRebuild) —
+      // NOT needsHlsSessionRebuild's forward/buffered-edge arm (an earlier
+      // version of this fix reused it and, applied every 250ms against a
+      // continuously advancing target, it turned the ordinary "just booted"
+      // and "buffer momentarily thin" states of a healthy session — and the
+      // last half-second of every title — into a session-rebuild storm on
+      // nearly every guest). The mirror-image forward case (a guest anchored
+      // far BEHIND the party) is a real, separate, still-open gap; see
+      // needsBackwardSessionRebuild's doc comment.
       const targetAbsSec = projectedAbsMs / 1000
       if (
         !driftRebuildInFlight &&

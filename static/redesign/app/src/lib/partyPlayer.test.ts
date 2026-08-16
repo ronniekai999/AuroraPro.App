@@ -193,10 +193,23 @@ describe('sequential HLS seek policy', () => {
       expect(needsBackwardSessionRebuild(999_999, 0)).toBe(false)
     })
 
-    it('normalizes a negative session anchor to 0', () => {
+    it('normalizes both a negative target and a negative session anchor to 0', () => {
       expect(needsBackwardSessionRebuild(1, -5)).toBe(false)
-      expect(needsBackwardSessionRebuild(-1, -5)).toBe(true)
+      // Both clamp to 0 — no genuine backward gap, so no rebuild (an
+      // earlier version of this fix clamped only the anchor, not the
+      // target, and wrongly rebuilt here forever: -1 < 0 is true, but the
+      // rebuild's own Math.max(0, …) call re-anchors at 0, reproducing the
+      // same "target < start" state on every subsequent tick).
+      expect(needsBackwardSessionRebuild(-1, -5)).toBe(false)
       expect(needsBackwardSessionRebuild(-1, 5)).toBe(true)
+    })
+
+    it('ignores a sub-tolerance gap (e.g. a TV party racing a local episode change)', () => {
+      // 0.3s behind the party's canonical target must not pay for a full
+      // session rebuild — only a genuine, minutes-scale gap should.
+      expect(needsBackwardSessionRebuild(99.7, 100)).toBe(false)
+      // Just past the default 1s tolerance: still rebuilds.
+      expect(needsBackwardSessionRebuild(98.9, 100)).toBe(true)
     })
   })
 

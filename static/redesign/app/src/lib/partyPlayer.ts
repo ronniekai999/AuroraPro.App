@@ -176,12 +176,31 @@ export function needsHlsSessionRebuild(
  * arm: applied every 250ms against a continuously advancing target, that
  * arm is true for the ordinary "just booted" and "buffer momentarily thin"
  * states of a healthy session (and for the last half-second of every
- * title), which would turn transient conditions the existing rate-adjust/
- * hard-snap ladder already handles into session-rebuild storms. Only the
- * backward case is unrepresentable without a rebuild.
+ * title) — reusing it here (an earlier version of this fix did) turned
+ * those transient, already-correctly-handled states into a session-rebuild
+ * storm on nearly every guest.
+ *
+ * This is NOT a fix for the mirror-image case (a guest anchored far BEHIND
+ * the party, past this session's produced window) — that direction hits
+ * the same "no way to correct" dead end and is a known, separate gap;
+ * closing it needs a hysteresis-gated version of the forward arm (e.g.
+ * sustained across several ticks) so it doesn't reintroduce the storm this
+ * function exists to avoid. Left for a follow-up rather than guessed at
+ * under this fix's time budget.
+ *
+ * `toleranceSec` keeps a merely-microscopic backward gap (e.g. the few
+ * hundred ms of a party's TV-episode boundary racing this guest's local
+ * media-change resolve) from paying for a full session rebuild — the
+ * reported bug (#488) was a gap of minutes, not milliseconds.
  */
-export function needsBackwardSessionRebuild(targetAbsSec: number, sessionStartSec: number): boolean {
-  return targetAbsSec < Math.max(0, sessionStartSec)
+export function needsBackwardSessionRebuild(
+  targetAbsSec: number,
+  sessionStartSec: number,
+  toleranceSec = 1,
+): boolean {
+  const target = Math.max(0, targetAbsSec)
+  const start = Math.max(0, sessionStartSec)
+  return target < start - toleranceSec
 }
 
 /** Preserve the state that was authoritative when a seek forced a reboot. */
