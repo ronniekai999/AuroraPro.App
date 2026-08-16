@@ -217,8 +217,16 @@ func (h *OAuthHandler) consumeOAuthTxn(
 	// abandoned claim on one of these paths is stranded at
 	// used_at-set/used_by-null with nothing left that can repair it.
 	releaseClaim := func() {
-		if txn.InviteID != nil && *txn.InviteID > 0 {
-			_ = h.queries.UnclaimInviteCode(r.Context(), *txn.InviteID)
+		if txn.InviteID == nil || *txn.InviteID <= 0 {
+			return
+		}
+		if uerr := h.queries.UnclaimInviteCode(r.Context(), *txn.InviteID); uerr != nil {
+			// Same reasoning as releaseStaleOAuthTxn: the row is consumed, so
+			// the sweep will not retry this. A silent failure here leaves an
+			// invite needing manual repair with nothing recording that fact.
+			slog.Error("oauth: could not release an invite claim after a failed binding check; "+
+				"the transaction is consumed so the sweep will not retry it",
+				"invite_id", *txn.InviteID, "provider", providerName, "error", uerr)
 		}
 	}
 
@@ -248,6 +256,15 @@ func (h *OAuthHandler) consumeOAuthTxn(
 		}
 		out.IsLink = true
 		out.LinkUID = *txn.UserID
+		// StartLink never sets an invite id, and the login-side release is
+		// unreachable from the link branch (Callback returns straight into
+		// handleLinkCallback). Release defensively so a future link path that
+		// did carry one could not strand it.
+		if txn.InviteID != nil && *txn.InviteID > 0 {
+			slog.Warn("oauth: link transaction unexpectedly carried an invite claim; releasing it",
+				"provider", providerName, "invite_id", *txn.InviteID)
+			releaseClaim()
+		}
 	case db.OAuthTxnModeLogin:
 		if txn.InviteID != nil && *txn.InviteID > 0 {
 			out.InviteClaimID = *txn.InviteID

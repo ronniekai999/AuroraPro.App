@@ -888,12 +888,10 @@ func TestSweep_SkipsConsumedTransactions(t *testing.T) {
 		t.Fatalf("expire: %v", err)
 	}
 
-	_, freed, err := q.DeleteExpiredOAuthTransactions(ctx)
-	if err != nil {
+	// Assert on THIS fixture's invite, not the process-wide freed count: the
+	// sweep is global and `go test ./...` runs packages against one database.
+	if _, _, err := q.DeleteExpiredOAuthTransactions(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
-	}
-	if freed != 0 {
-		t.Errorf("freed = %d, want 0 — a consumed transaction's claim is not the sweep's to release", freed)
 	}
 	var usedAt *time.Time
 	if err := pool.QueryRow(ctx, `SELECT used_at FROM invite_codes WHERE id = $1`, inviteID).Scan(&usedAt); err != nil {
@@ -920,12 +918,20 @@ func TestSweep_FreedCountCountsOnlyRealReleases(t *testing.T) {
 		t.Fatalf("create transaction: %v", err)
 	}
 
-	_, freed, err := q.DeleteExpiredOAuthTransactions(ctx)
-	if err != nil {
+	// Scoped to this fixture: the invite was never claimed, so the sweep must
+	// leave it exactly as it found it. Asserting on the process-wide freed
+	// count would couple this to every other test sharing the database.
+	if _, _, err := q.DeleteExpiredOAuthTransactions(ctx); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if freed != 0 {
-		t.Errorf("freed = %d, want 0 — nothing was actually recovered", freed)
+	var usedBy *int64
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT used_by, used_at FROM invite_codes WHERE id = $1`, inviteID).Scan(&usedBy, &usedAt); err != nil {
+		t.Fatalf("read invite: %v", err)
+	}
+	if usedBy != nil || usedAt != nil {
+		t.Errorf("an unclaimed invite must be untouched, got used_by=%v used_at=%v", usedBy, usedAt)
 	}
 }
 
@@ -1008,5 +1014,74 @@ func TestCallback_ResolveFailureReleasesInviteClaim(t *testing.T) {
 	}
 	if _, err := q.ClaimInviteCode(ctx, code); err != nil {
 		t.Errorf("a failed resolve must release the invite claim: %v", err)
+	}
+}
+
+// TestCallback_InvitedSignupFinalizesTheInvite pins the invite lifecycle's
+// POSITIVE terminal state, which nothing else asserts.
+//
+// Every other invite test in this file checks that a claim was RELEASED. That
+// asymmetry let two lifecycle-breaking mutants live: adding a release to the
+// login success path (which would break every invited OAuth signup, since
+// FinalizeInviteCode then fails its used_at predicate and the new user is
+// rolled back), and skipping FinalizeInviteCode entirely (which enrols the user
+// and strands the invite at used_at-set/used_by-null on the SUCCESS path, with
+// the sweep switched off for it because the transaction is consumed).
+//
+// Tier 3 is reached with a verified email matching no existing account.
+func TestCallback_InvitedSignupFinalizesTheInvite(t *testing.T) {
+	q, pool := requireOAuthTxnTestDB(t)
+	ctx := context.Background()
+	owner := seedTxnTestUser(t, pool)
+
+	newEmail := "invited_" + itoaTxn(time.Now().UnixNano()) + "@example.com"
+	h := newExchangingHandler(t, q, &OAuthProfile{
+		Subject: "brand-new-subject-" + itoaTxn(time.Now().UnixNano()),
+		Email:   newEmail, EmailVerified: true,
+	})
+	// Tier 3 creates a real user; clean it up whatever the outcome.
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE email = $1`, newEmail)
+	})
+
+	code, inviteID := seedClaimableInvite(t, q, pool, owner, "invitedok")
+	claimID, err := q.ClaimInviteCode(ctx, code)
+	if err != nil {
+		t.Fatalf("claim invite: %v", err)
+	}
+	const state = "state-invited"
+	token := mintTxn(t, q, pool, db.OAuthTxnModeLogin, "google", state, nil, &claimID)
+
+	r := callbackRequest(token, state)
+	r.URL.RawQuery = "state=" + state + "&code=auth-code"
+	r.AddCookie(&http.Cookie{Name: oauthStateCookieName, Value: state})
+	w := httptest.NewRecorder()
+
+	h.Callback(w, r)
+
+	// The signup must have succeeded.
+	created, err := q.GetUserByEmail(ctx, newEmail)
+	if err != nil {
+		t.Fatalf("look up created user: %v", err)
+	}
+	if created == nil {
+		t.Fatalf("the invited signup did not create a user; page was: %q", w.Body.String())
+	}
+
+	// …and the invite must be SPENT BY THEM — neither released nor stranded.
+	var usedBy *int64
+	var usedAt *time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT used_by, used_at FROM invite_codes WHERE id = $1`, inviteID).Scan(&usedBy, &usedAt); err != nil {
+		t.Fatalf("read invite: %v", err)
+	}
+	if usedBy == nil {
+		if usedAt != nil {
+			t.Fatal("invite is STRANDED: used_at set with no used_by, and the sweep skips consumed transactions")
+		}
+		t.Fatal("invite was released instead of finalized — the signup consumed it")
+	}
+	if *usedBy != created.ID {
+		t.Errorf("invite used_by = %d, want the new user %d", *usedBy, created.ID)
 	}
 }
