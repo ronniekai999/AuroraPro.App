@@ -146,7 +146,15 @@ export interface PartySync {
   // that one check; deliberately NOT folded into the existing H3
   // mediaItemId guard used elsewhere in this file, which intentionally
   // stays series-level for content unrelated to this specific race.
-  partyEpisodeId?: number
+  // Typed to admit `null` (not just `undefined`) because that's the REAL
+  // runtime value for a no-episode party: the server always includes
+  // episode_id in party-state, serializing an absent one as JSON null
+  // (a nil *int64 into a map — struct tags like `omitempty` don't apply),
+  // and useParty.tsx stores it verbatim. isPartyEpisodeMismatch handles
+  // both; keep this type honest so a future second use of this field
+  // doesn't silently reintroduce the same "null read as a real,
+  // disagreeing episode" defect this fix closed.
+  partyEpisodeId?: number | null
   // Host actions — fire when the host's video element generates a
   // local event that should propagate to guests.
   requestPlay: () => void
