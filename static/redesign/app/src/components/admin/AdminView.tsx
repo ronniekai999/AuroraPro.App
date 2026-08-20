@@ -14,6 +14,7 @@ import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
+import { groupCastStreams } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
 import {
   parseReferralOptionsSetting,
@@ -268,30 +269,69 @@ function NowPlayingWidget() {
     return () => { cancelled = true; window.clearInterval(id) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  if (items.length === 0) return (
+  const nameFor = (s: ActiveStreamRow) => s.username || users.get(s.user_id) || `User ${s.user_id}`
+  // One group per VIEWER: a Chromecast's receiver session nests under the
+  // local session driving it instead of standing beside it as an identical
+  // second row. See lib/activeStreams for the orphan/cycle rules.
+  const groups = groupCastStreams(items)
+  if (groups.length === 0) return (
     <div className="glass-panel rounded-2xl p-6">
       <h2 className="text-white font-semibold mb-2">Now Playing</h2>
       <p className="text-white/40 text-sm">No active streams.</p>
     </div>
   )
+  const kindBadge = (s: ActiveStreamRow) => (
+    <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
+  )
   return (
     <div className="glass-panel rounded-2xl p-6">
-      <h2 className="text-white font-semibold mb-4">Now Playing ({items.length})</h2>
+      <h2 className="text-white font-semibold mb-4">Now Playing ({groups.length})</h2>
       <div className="space-y-3">
-        {items.map(s => (
-          <div key={s.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-              {(s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()}
+        {groups.map(({ row: s, castRows }) => (
+          <div key={s.id} className="border-b border-white/[0.03] last:border-0">
+            <div className="flex items-center gap-4 py-2">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                {nameFor(s)[0]?.toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white/90 text-sm font-medium truncate">{nameFor(s)}</p>
+                <p className="text-white/40 text-xs truncate">
+                  {s.file_name}
+                  {s.resolution && ` · ${s.resolution}`}
+                  {s.kind === 'direct' && ` · Direct Play`}
+                  {/* A cast with no clone under it: either AirPlay (never
+                      cloned) or the shared-session case (already H.264 +
+                      AAC, no subtitles). The TV IS this row. */}
+                  {castRows.length === 0 && s.cast_held && ` · Casting`}
+                  {/* Otherwise the encoder here is stopped: the sender
+                      paused this element and the idle reaper cancels its
+                      FFmpeg after 75s. Saying so is the whole point — this
+                      row costs a session slot and disk, not CPU. */}
+                  {castRows.length > 0 && ` · paused, casting below`}
+                </p>
+              </div>
+              {kindBadge(s)}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white/90 text-sm font-medium truncate">{s.username || users.get(s.user_id) || `User ${s.user_id}`}</p>
-              <p className="text-white/40 text-xs truncate">
-                {s.file_name}
-                {s.resolution && ` · ${s.resolution}`}
-                {s.kind === 'direct' && ` · Direct Play`}
-              </p>
-            </div>
-            <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
+            {castRows.map(c => (
+              <div key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-white/10">
+                <Icon name="tv" size={16} className="text-purple-300 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-white/70 text-sm truncate">
+                    Cast receiver
+                    {/* A clone the receiver has not fetched from yet: minted,
+                        not yet leased (MarkCastHeld is earned by a real
+                        fetch). Usually a blink; a persistent one is a clone
+                        the TV never took. */}
+                    {!c.cast_held && <span className="text-white/40"> · connecting</span>}
+                  </p>
+                  <p className="text-white/40 text-xs truncate">
+                    {c.file_name}
+                    {c.resolution && ` · ${c.resolution}`}
+                  </p>
+                </div>
+                {kindBadge(c)}
+              </div>
+            ))}
           </div>
         ))}
       </div>
@@ -939,11 +979,23 @@ function AdminSessionsTab() {
             <tr><th>Session</th><th>Kind</th><th>User</th><th>File</th><th>Detail</th><th>Started</th><th></th></tr>
           </thead>
           <tbody>
-            {items.map(s => {
+            {/* One <tr> per SESSION — Diag and Kill act on a session, and an
+                operator killing a cast needs to reach the receiver's clone
+                and the local player's session separately. Grouping only
+                orders and indents them: a receiver's clone sits directly
+                under the session it was cloned from, so the two rows a cast
+                produces read as one cast instead of a duplicate. */}
+            {groupCastStreams(items).flatMap(g => [
+              { s: g.row, isCastRow: false },
+              ...g.castRows.map(c => ({ s: c, isCastRow: true })),
+            ]).map(({ s, isCastRow }) => {
               const isTranscode = s.kind === 'transcode'
               return (
                 <tr key={s.id}>
-                  <td className="font-mono text-xs">{s.id.slice(0, 10)}</td>
+                  <td className="font-mono text-xs">
+                    {isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}
+                    {s.id.slice(0, 10)}
+                  </td>
                   <td>
                     <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
                       isTranscode
@@ -952,6 +1004,21 @@ function AdminSessionsTab() {
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
+                    {/* Cast-safe clone the receiver pulls. Killing it stops
+                        the TV; killing the row above it does not. */}
+                    {isCastRow && (
+                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30" title={`Cast receiver session, cloned from ${s.cast_clone_of ?? 'the session above'}`}>
+                        Cast
+                      </span>
+                    )}
+                    {/* AirPlay, or a Chromecast sharing the local session
+                        (already H.264 + AAC, no subtitles): no clone exists,
+                        so this row IS the one feeding the TV. */}
+                    {!isCastRow && s.cast_held && (
+                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30" title="A receiver has fetched from this session — it is on the 30-minute cast lease">
+                        Cast
+                      </span>
+                    )}
                   </td>
                   <td>{s.username || s.user_id}</td>
                   <td className="max-w-[280px] truncate" title={s.file_name}>{s.file_name}</td>
@@ -2720,7 +2787,13 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     hint: 'Title rows: movies plus series. Episodes are NOT included — the Server card below counts those separately. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
                   },
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
-                  { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
+                  {
+                    label: 'Active Streams',
+                    value: String(stats.active_streams),
+                    icon: 'monitor',
+                    color: 'text-emerald-400',
+                    hint: 'Streams being watched — transcode plus direct play. A Chromecast holds two server sessions for one viewer (the paused browser session and the cast-safe clone the TV pulls); they count once here and are nested together under Now Playing.',
+                  },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
                 ] satisfies StatTileProps[]).map(s => (
                   <StatTile key={s.label} {...s} />

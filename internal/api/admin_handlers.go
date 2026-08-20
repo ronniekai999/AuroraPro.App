@@ -1003,13 +1003,16 @@ func (h *AdminHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	activeParties, _ := h.queries.GetActivePartyCount(r.Context())
 
 	stats := models.ServerStats{
-		Version:            h.version,
-		Uptime:             time.Since(h.startTime).Round(time.Second).String(),
-		MemoryAllocMB:      int64(memStats.Alloc / 1024 / 1024),
-		Goroutines:         runtime.NumGoroutine(),
-		CPUCores:           float64(runtime.NumCPU()),
-		DiskFreeGB:         diskFreeGB,
-		ActiveStreams:      h.transcode.ActiveSessions() + directPlayCount(h.directPlay),
+		Version:       h.version,
+		Uptime:        time.Since(h.startTime).Round(time.Second).String(),
+		MemoryAllocMB: int64(memStats.Alloc / 1024 / 1024),
+		Goroutines:    runtime.NumGoroutine(),
+		CPUCores:      float64(runtime.NumCPU()),
+		DiskFreeGB:    diskFreeGB,
+		// ActiveStreamCount, not ActiveSessions: a Chromecast holds two
+		// sessions for one viewer (the paused local one and the receiver's
+		// clone) and the tile counted both. See ActiveStreamCount.
+		ActiveStreams:      h.transcode.ActiveStreamCount() + directPlayCount(h.directPlay),
 		WebSocketClients:   h.hub.ClientCount(),
 		LibraryCount:       libCount,
 		MovieCount:         movieCount,
@@ -1119,6 +1122,16 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		Variants   []string                    `json:"active_variants,omitempty"`
 		Resources  *streaming.SessionResources `json:"resources,omitempty"`
 		Remux      bool                        `json:"remux,omitempty"`
+		// A receiver is pulling this session, and (for a Chromecast) which
+		// session it was cloned from. The UI pairs the two rows a cast
+		// produces; without these they are indistinguishable — same user,
+		// same file, same "transcode" badge, twice.
+		//
+		// NOT omitempty on CastHeld: "false" is the meaningful, common case
+		// and the client reads it as a tri-state against `undefined` from an
+		// older server.
+		CastHeld    bool   `json:"cast_held"`
+		CastCloneOf string `json:"cast_clone_of,omitempty"`
 		// Direct-play only
 		FileType string `json:"file_type,omitempty"`
 		FileID   int64  `json:"file_id,omitempty"`
@@ -1141,17 +1154,19 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 			resolution = fmt.Sprintf("%dx%d", s.SourceWidth, s.SourceHeight)
 		}
 		out = append(out, unifiedSession{
-			ID:         s.ID,
-			Kind:       "transcode",
-			UserID:     s.UserID,
-			Username:   s.Username,
-			FileName:   s.FileName,
-			StartedAt:  s.StartedAt,
-			Resolution: resolution,
-			Profiles:   s.Profiles,
-			Variants:   s.ActiveVariants,
-			Resources:  s.Resources,
-			Remux:      s.Remux,
+			ID:          s.ID,
+			Kind:        "transcode",
+			UserID:      s.UserID,
+			Username:    s.Username,
+			FileName:    s.FileName,
+			StartedAt:   s.StartedAt,
+			Resolution:  resolution,
+			Profiles:    s.Profiles,
+			Variants:    s.ActiveVariants,
+			Resources:   s.Resources,
+			Remux:       s.Remux,
+			CastHeld:    s.CastHeld,
+			CastCloneOf: s.CastCloneOf,
 		})
 	}
 	for _, dp := range dpList {

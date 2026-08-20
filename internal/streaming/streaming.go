@@ -952,6 +952,12 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	if err != nil {
 		return nil, fmt.Errorf("create cast-safe session: %w", err)
 	}
+	// Record where the clone came from so the admin surface can pair the two
+	// rows a cast produces (see TranscodeSession.castCloneOf). Set under
+	// tm.mu, which is the lock ListSessions reads it under.
+	tm.mu.Lock()
+	clone.castCloneOf = sessionID
+	tm.mu.Unlock()
 	slog.Info("cast: created cast-safe clone of session for receiver compatibility",
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
 		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
@@ -1340,6 +1346,18 @@ type TranscodeSession struct {
 	// idle timeout — see sessionIdleTimeout for why. Guarded by tm.mu, like
 	// LastAccess, because the cleanup loop reads both in the same pass.
 	castHeld bool
+	// castCloneOf names the session this one was cloned FROM by
+	// CloneForCast, or "" for an ordinary session. Purely descriptive — no
+	// lifecycle hangs off it, and it is deliberately NOT a parent pointer
+	// the reaper consults: the clone outlives its source routinely (the
+	// local player is torn down while the TV keeps playing), so treating a
+	// missing source as "this clone is orphaned, kill it" would end casts.
+	//
+	// It exists because a cast is TWO sessions — the paused local one and
+	// the receiver's clone — and until now nothing distinguished them: the
+	// admin surface showed the same user, file and "transcode" badge twice
+	// with no way to tell which was the TV. Guarded by tm.mu, like castHeld.
+	castCloneOf string
 }
 
 // castHeldTimeout is how long a cast-held session survives with nothing
@@ -1548,6 +1566,15 @@ type SessionInfo struct {
 	ActiveVariants   []string         `json:"active_variants"`
 	Remux            bool             `json:"remux"`
 	AudioPassthrough bool             `json:"audio_passthrough"`
+	// CastHeld: a Chromecast or AirPlay receiver has actually fetched from
+	// this session (see MarkCastHeld — the flag is earned by a real cast-
+	// token fetch, not granted at mint). True on the receiver's clone, and
+	// on an AirPlay session, which skips CloneForCast and IS the cast.
+	CastHeld bool `json:"cast_held"`
+	// CastCloneOf is the session this one was cloned from for a receiver,
+	// or "" for an ordinary session. Pairs the two rows a Chromecast
+	// produces so an admin can see one cast rather than two mystery streams.
+	CastCloneOf string `json:"cast_clone_of,omitempty"`
 	// Resource tracking (Feature 3)
 	Resources *SessionResources `json:"resources,omitempty"`
 }
@@ -2643,6 +2670,10 @@ func (tm *TranscodeManager) ListSessions() []SessionInfo {
 				StartedAt:        s.StartedAt,
 				Remux:            s.Remux,
 				AudioPassthrough: s.AudioPassthrough,
+				// Both are tm.mu-guarded, and this phase holds tm.mu — the
+				// only place in this function where reading them is legal.
+				CastHeld:    s.castHeld,
+				CastCloneOf: s.castCloneOf,
 			},
 		}
 		snapshots = append(snapshots, snap)
@@ -2689,6 +2720,37 @@ func (tm *TranscodeManager) ActiveSessions() int {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return len(tm.sessions)
+}
+
+// ActiveStreamCount is ActiveSessions counted the way an operator reads the
+// dashboard tile: how many things are being WATCHED, not how many session
+// rows exist.
+//
+// The two diverge for exactly one reason. Casting to a Chromecast produces a
+// pair — the local browser session, which is force-paused the moment the
+// receiver connects and whose encoder the idle reaper stops 75 seconds
+// later, plus the cast-safe clone the TV actually pulls (see CloneForCast).
+// Counting both reported one person watching one movie as two active
+// streams, which is what sent an admin looking for a leak that was not
+// there.
+//
+// A clone is folded into its source only while that source is still here. An
+// orphaned clone — the local player closed, the TV still playing, which is
+// the ordinary end state of a cast — is a stream in its own right and counts
+// as one. So the tile never reads lower than the number of people watching.
+func (tm *TranscodeManager) ActiveStreamCount() int {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	n := 0
+	for _, s := range tm.sessions {
+		if s.castCloneOf != "" {
+			if _, sourceLive := tm.sessions[s.castCloneOf]; sourceLive {
+				continue
+			}
+		}
+		n++
+	}
+	return n
 }
 
 // VariantDiagnostic is the admin-visible shape of a single variant's

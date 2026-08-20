@@ -1673,6 +1673,16 @@ export interface ActiveStreamRow {
     bandwidth_bps?: number
   }
   remux?: boolean
+  // Casting (transcode-only). A Chromecast produces TWO sessions for one
+  // viewer — the paused local one and the cast-safe clone the receiver
+  // pulls — so `cast_clone_of` names the session a clone came from and
+  // `cast_held` marks any session a receiver has actually fetched from
+  // (true on the clone; also true on an AirPlay session, which is never
+  // cloned and so has no `cast_clone_of`). Both are optional: a bundle can
+  // run ahead of the binary serving it, and lib/activeStreams degrades to a
+  // flat list when they're absent. See lib/activeStreams.
+  cast_held?: boolean
+  cast_clone_of?: string
   // Direct-play only
   file_type?: 'media' | 'episode'
   file_id?: number
