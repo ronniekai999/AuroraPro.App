@@ -3573,15 +3573,26 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // the very next tick trust an unconfirmed reading outright. Refs survive
   // the effect re-running so the confirmation state survives it too.
   //
-  // Deliberately NOT reset when `target`/`party.partyMediaItemId`/
-  // `party.isHost` change (a genuine identity change, unlike `isPlaying`):
-  // switching content requires the receiver to load it, which cycles
-  // `isMediaLoaded` through false — the gate itself re-arms
-  // wasGated/seqAwaitingConfirm naturally in that case. Adding a second,
-  // separate reset path for identity changes would duplicate that
-  // coverage without a demonstrated gap; if that assumption ever proves
-  // wrong in practice, the fix is a targeted reset keyed on identity, not
-  // reverting to effect-scoped state (which is what created this bug).
+  // Deliberately NOT reset when `target`/`party.partyMediaItemId` change (a
+  // genuine identity change, unlike `isPlaying`): switching content
+  // requires the receiver to load it, which cycles `isMediaLoaded` through
+  // false — the gate itself re-arms wasGated/seqAwaitingConfirm naturally
+  // in that case. Adding a second, separate reset path for identity
+  // changes would duplicate that coverage without a demonstrated gap; if
+  // that assumption ever proves wrong in practice, the fix is a targeted
+  // reset keyed on identity, not reverting to effect-scoped state (which
+  // is what created this bug).
+  //
+  // `party.isHost` flipping is different: host and guest keep SEPARATE
+  // refs, so the newly-active branch starts unarmed (trusted) rather than
+  // inheriting the other branch's confirmation state — there is no gate to
+  // "naturally re-arm" here, since isMediaLoaded doesn't necessarily change
+  // on a role flip. This IS a real, if narrow, gap (a role flip landing
+  // inside another branch's pending confirmation window skips it), but the
+  // blast radius is the same bounded one the fallback timeout already
+  // accepts by design: a redundant seek to the receiver's own true
+  // position, or a play/pause toggle that self-corrects on the next tick —
+  // not a destructive action. Not worth a cross-branch reset for that.
   const hostLastSnapshotRef = useRef<{ paused: boolean; sec: number; atMs: number } | null>(null)
   const hostWasGatedRef = useRef(false)
   const hostSeqAwaitingConfirmRef = useRef<number | null>(null)
