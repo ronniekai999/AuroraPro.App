@@ -25,6 +25,7 @@
 // those bugs violated.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useEffect } from 'react'
 import { act, render, screen } from '@testing-library/react'
 import { useCast, type CastLoadArgs } from './cast'
 
@@ -83,12 +84,21 @@ function installFakeSdk() {
     loadMedia: vi.fn(async () => undefined),
     getMediaSession: () => ({ idleReason: null }),
     endSession: () => {
-      // Real CAF: SESSION_ENDING fires with CastState STILL reading
-      // CONNECTED, and only the later SESSION_ENDED actually drops it.
-      fireCtx('session_state_changed')
-      castState = CAST_STATE.NOT_CONNECTED
-      session = null
-      fireCtx('session_state_changed')
+      // Genuinely asynchronous, matching the real SDK (its whole reason for
+      // existing here): SESSION_STATE_CHANGED fires on a later microtask,
+      // not synchronously inside this call. That asynchrony is exactly what
+      // stoppedRef exists to survive — a fake that fired synchronously would
+      // let stop()'s OWN trailing setStatus (the last synchronous write)
+      // paper over a missing guard, making the regression test pass whether
+      // or not the guard code exists at all.
+      queueMicrotask(() => {
+        // SESSION_ENDING: CastState STILL reads CONNECTED at this point.
+        fireCtx('session_state_changed')
+        castState = CAST_STATE.NOT_CONNECTED
+        session = null
+        // SESSION_ENDED: only now does it actually drop.
+        fireCtx('session_state_changed')
+      })
     },
   })
 
@@ -124,11 +134,14 @@ function installFakeSdk() {
       },
       AutoJoinPolicy: { ORIGIN_SCOPED: 'ORIGIN_SCOPED' },
       RemotePlayer: FakeRemotePlayer as unknown as new () => CastRemotePlayer,
-      RemotePlayerController: class extends FakeRemotePlayerController {
-        constructor(player: CastRemotePlayer) {
-          super(player as unknown as FakeRemotePlayer)
-          remoteController = this
-        }
+      // A constructor may return a different object than the one `new`
+      // would otherwise produce — used here instead of subclassing so the
+      // created controller can be captured for the test helpers below
+      // without aliasing `this`.
+      RemotePlayerController: function (player: CastRemotePlayer) {
+        const controller = new FakeRemotePlayerController(player as unknown as FakeRemotePlayer)
+        remoteController = controller
+        return controller
       } as unknown as new (player: CastRemotePlayer) => CastRemotePlayerController,
       RemotePlayerEventType: {
         ANY_CHANGE: 'any_change', IS_CONNECTED_CHANGED: 'icc', IS_MEDIA_LOADED_CHANGED: 'imlc',
@@ -203,15 +216,25 @@ function installFakeSdk() {
   }
 }
 
+// Captured on every render so tests can call start()/stop() directly and
+// `await` their full internal promise chain, rather than firing a DOM click
+// and guessing how many ticks its async work needs — that guesswork is what
+// let a real network call and a dangling post-test promise slip through
+// undetected (2026-08 review fix).
+let latestCast: ReturnType<typeof useCast> | null = null
+
 function Harness({ currentLoad }: { currentLoad?: () => CastLoadArgs | null }) {
   const cast = useCast(currentLoad ?? (() => null))
+  // Captured after render (not during it — an in-render assignment to a
+  // module-level variable is a side effect React's rules disallow), so
+  // tests always read the latest hook instance from the last commit.
+  useEffect(() => { latestCast = cast })
   return (
     <div>
       <span data-testid="connected">{String(cast.status.connected)}</span>
       <span data-testid="settling">{String(cast.status.settling)}</span>
       <span data-testid="supported">{String(cast.status.supported)}</span>
       <span data-testid="playerState">{cast.remote.playerState ?? ''}</span>
-      <button onClick={() => { void cast.start() }}>start</button>
       <button onClick={() => cast.stop()}>stop</button>
     </div>
   )
@@ -222,13 +245,32 @@ const settling = () => screen.getByTestId('settling').textContent
 const supported = () => screen.getByTestId('supported').textContent
 const playerState = () => screen.getByTestId('playerState').textContent
 
+// Lets any pending queueMicrotask (endSession's deferred SESSION_STATE_CHANGED
+// echo) resolve and apply its state updates before the test asserts or ends —
+// required so a test never leaves a promise dangling into the next one.
+const flush = () => act(async () => {
+  await Promise.resolve()
+  await Promise.resolve()
+})
+
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true })
+  // loadCurrent()'s URL self-test calls fetch(); stub it so tests never make
+  // a real network request (slow, flaky, and unavailable in sandboxed CI).
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/vnd.apple.mpegurl' },
+    text: async () => '#EXTM3U',
+  })))
 })
-afterEach(() => {
+afterEach(async () => {
+  await flush()
   vi.useRealTimers()
+  vi.unstubAllGlobals()
   delete (window as { cast?: unknown }).cast
   delete (window as { chrome?: unknown }).chrome
+  latestCast = null
 })
 
 describe('useCast disconnect debounce', () => {
@@ -243,7 +285,9 @@ describe('useCast disconnect debounce', () => {
     const sdk = installFakeSdk()
     render(<Harness />)
     act(() => sdk.triggerReconnect())
+    act(() => sdk.emitRemoteChange()) // establish a live remote baseline
     expect(connected()).toBe('true')
+    expect(settling()).toBe('false')
 
     act(() => sdk.triggerBlip())
     expect(connected()).toBe('true') // not yet confirmed
@@ -251,6 +295,11 @@ describe('useCast disconnect debounce', () => {
 
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
+    // remote hasn't been resynced yet — still settling until the receiver's
+    // own next update lands (see regression #4 below for why that matters).
+    expect(settling()).toBe('true')
+
+    act(() => sdk.emitRemoteChange())
     expect(settling()).toBe('false')
 
     // The stale timer must not still be armed and fire later.
@@ -271,19 +320,27 @@ describe('useCast disconnect debounce', () => {
     expect(settling()).toBe('false')
   })
 
-  it('stop() is not undone by the stale SESSION_ENDING echo endSession() dispatches (regression #2)', () => {
+  it('stop() is not undone by the stale SESSION_ENDING echo endSession() dispatches (regression #2)', async () => {
     const sdk = installFakeSdk()
     render(<Harness />)
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
 
     act(() => { screen.getByText('stop').click() })
+    // stop()'s own synchronous write already reports the disconnect...
+    expect(connected()).toBe('false')
+    expect(settling()).toBe('false')
 
+    // ...and the deferred SESSION_ENDING/SESSION_ENDED echo arriving after
+    // must not undo it (this is the actual behavior under test — without
+    // stoppedRef, the SESSION_ENDING echo's stale CONNECTED reading
+    // resurrects connected:true here).
+    await flush()
     expect(connected()).toBe('false')
     expect(settling()).toBe('false')
   })
 
-  it('stop() during a pending blip leaves settling cleared, not stuck true', () => {
+  it('stop() during a pending blip leaves settling cleared, not stuck true', async () => {
     const sdk = installFakeSdk()
     render(<Harness />)
     act(() => sdk.triggerReconnect())
@@ -294,7 +351,9 @@ describe('useCast disconnect debounce', () => {
     expect(connected()).toBe('false')
     expect(settling()).toBe('false')
 
-    // No timer should still be pending to fire later and misbehave.
+    // No timer, and no deferred echo, should still be pending to fire later
+    // and misbehave.
+    await flush()
     act(() => { vi.advanceTimersByTime(5000) })
     expect(connected()).toBe('false')
     expect(settling()).toBe('false')
@@ -310,6 +369,12 @@ describe('useCast disconnect debounce', () => {
     act(() => sdk.triggerReconnect())
     act(() => { screen.getByText('stop').click() })
     expect(connected()).toBe('false')
+    // Let the old session's own teardown echo fully resolve before starting
+    // a new one below — otherwise its deferred callback (closed over the
+    // OLD session/castState) would land mid-way through the new start()
+    // flow and corrupt it, which is a fake-SDK artifact, not something the
+    // real SDK — or the code under test — would ever produce.
+    await flush()
 
     // The SDK dispatches CONNECTED as part of establishing the session,
     // before its own promise resolves — i.e. before start()'s `await`
@@ -322,8 +387,7 @@ describe('useCast disconnect debounce', () => {
     })
 
     await act(async () => {
-      screen.getByText('start').click()
-      await vi.advanceTimersByTimeAsync(0)
+      await latestCast!.start()
     })
 
     expect(connected()).toBe('true')
@@ -338,8 +402,10 @@ describe('useCast disconnect debounce', () => {
     player.playerState = 'PLAYING'
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('PLAYING')
+    expect(settling()).toBe('false')
 
     act(() => sdk.triggerBlip())
+    expect(settling()).toBe('true')
     // The receiver's RemotePlayer object resets the instant the channel
     // drops — but that reset must not be published while unconfirmed.
     player.playerState = 'IDLE'
@@ -348,16 +414,19 @@ describe('useCast disconnect debounce', () => {
 
     // Reconnect lands, but the RemotePlayer's fields haven't caught up to
     // the receiver's real state yet (still show the mid-blip reset) — the
-    // fix must NOT eagerly read them at this exact instant.
+    // fix must NOT eagerly read them, or clear settling, at this exact
+    // instant.
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
-    expect(settling()).toBe('false')
+    expect(settling()).toBe('true') // still unresynced — no eager clear
     expect(playerState()).toBe('PLAYING') // unchanged — no eager resync
 
-    // The receiver's next genuine update is what actually refreshes it.
+    // The receiver's next genuine update is what actually refreshes remote
+    // AND clears settling, together.
     player.playerState = 'BUFFERING'
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('BUFFERING')
+    expect(settling()).toBe('false')
   })
 
   it('syncs remote to the disconnected RemotePlayer once a blip is confirmed (not left frozen forever)', () => {

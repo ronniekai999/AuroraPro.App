@@ -294,6 +294,15 @@ export function useCast(
   // SESSION_STATE_CHANGED events.
   const disconnectTimerRef = useRef<number | null>(null)
   const lastConnectedRef = useRef(false)
+  // True from the moment a disconnect debounce is armed until `remote` has
+  // actually been resynced by a genuine ANY_CHANGE (see onRemoteChange).
+  // Distinct from `disconnectTimerRef` being non-null: that only covers the
+  // ACTIVE debounce window, but on reconnect the timer clears (and connected
+  // goes back to true) before the receiver's next real update necessarily
+  // arrives — `remote` stays frozen at its pre-blip reading in that gap.
+  // status.settling stays true across that whole span so automatic
+  // consumers (party drift-correction) don't act on it as live data.
+  const remoteStaleRef = useRef(false)
   // True while an explicit stop() is tearing its session down. endSession()
   // fires SESSION_STATE_CHANGED asynchronously — a SESSION_ENDING event can
   // still report CastState CONNECTED before the final SESSION_ENDED lands.
@@ -398,20 +407,29 @@ export function useCast(
             disconnectTimerRef.current = null
           }
           lastConnectedRef.current = true
-          setStatus({ supported: true, available, connected: true, settling: false, deviceName })
-          // Deliberately NOT resyncing `remote` here (2026-08 review fix):
-          // the RemotePlayer's fields can still hold a reset/IDLE snapshot
-          // from the disconnect at the exact instant CastState flips back
-          // to CONNECTED — the receiver's own MEDIA_STATUS catch-up hasn't
-          // necessarily landed yet. Reading it now and publishing it in the
-          // SAME render as connected:true+settling:false would republish
-          // that reset state as if current, which is precisely what the
-          // freeze in onRemoteChange exists to prevent — just moved to the
-          // reconnect edge instead of the mid-blip one. Leave `remote` at
-          // its last frozen (pre-blip, not reset) reading instead; the
-          // receiver's next genuine ANY_CHANGE — which arrives promptly,
-          // since onRemoteChange's freeze is lifted now that the timer is
-          // cleared — republishes fresh values on its own.
+          // settling is NOT cleared here (2026-08 review fix, round 2): it
+          // stays whatever it currently is — still true if a blip was
+          // pending, since `remote` isn't resynced yet either (see below).
+          // onRemoteChange clears both together once the receiver's next
+          // genuine update actually lands. Clearing settling HERE, before
+          // that, would tell automatic consumers (party drift-correction)
+          // "remote is live" while it's still the frozen pre-blip reading —
+          // a stale `currentTime` compared against the party's
+          // continuously-advancing position looks exactly like a seek and
+          // triggers a spurious corrective broadcast.
+          setStatus((prev) => ({ supported: true, available, connected: true, settling: prev.settling, deviceName }))
+          // Deliberately NOT resyncing `remote` here either (round 1 of this
+          // fix): the RemotePlayer's fields can still hold a reset/IDLE
+          // snapshot from the disconnect at the exact instant CastState
+          // flips back to CONNECTED — the receiver's own MEDIA_STATUS
+          // catch-up hasn't necessarily landed yet. Reading it now would
+          // republish that reset state as if current, which is exactly what
+          // the freeze in onRemoteChange exists to prevent, just moved to
+          // the reconnect edge instead of the mid-blip one. Leave `remote`
+          // frozen; the receiver's next genuine ANY_CHANGE — which arrives
+          // promptly, since onRemoteChange's freeze is lifted now that the
+          // timer is cleared — republishes fresh values (and clears
+          // settling) on its own.
           return
         }
 
@@ -426,12 +444,14 @@ export function useCast(
         // already pending must not push the deadline back out).
         setStatus((prev) => ({ ...prev, supported: true, available }))
         if (!lastConnectedRef.current || disconnectTimerRef.current != null) return
+        remoteStaleRef.current = true
         setStatus((prev) => ({ ...prev, settling: true }))
         disconnectTimerRef.current = window.setTimeout(() => {
           disconnectTimerRef.current = null
           if (!mounted) return
           if (ctx.getCastState() !== fw.CastState.CONNECTED) {
             lastConnectedRef.current = false
+            remoteStaleRef.current = false
             setStatus((prev) => ({ ...prev, connected: false, settling: false }))
             // Reconnect never came — sync remote to whatever the (now
             // truly disconnected) RemotePlayer currently reports, rather
@@ -443,12 +463,13 @@ export function useCast(
           }
           // CastState already reads CONNECTED here — a rare race where this
           // timer fired before the CAST_STATE_CHANGED for the reconnect was
-          // processed. Just clear settling defensively; don't leave it
-          // stuck true with no timer left to ever clear it. No resync (see
-          // the rawConnected branch's comment for why that's unsafe at this
-          // edge) — the reconnect's own refresh() call, whenever it lands,
-          // republishes connected/deviceName correctly regardless.
-          setStatus((prev) => ({ ...prev, settling: false }))
+          // processed. Nothing to do: disconnectTimerRef is already null
+          // (cleared above) and settling/remoteStaleRef are both still
+          // true, which is exactly the state the ordinary rawConnected
+          // reconnect path leaves behind too — the receiver's next real
+          // ANY_CHANGE resolves it the same way. Settling is NOT stuck:
+          // there's no pending timer left, but there doesn't need to be —
+          // onRemoteChange, not a timer, is what clears it from here.
         }, CAST_DISCONNECT_GRACE_MS)
       }
       const onCastState = () => refresh()
@@ -484,6 +505,16 @@ export function useCast(
           // confirmed and downstream effects tear the cast down anyway —
           // fresh ANY_CHANGE events flow through normally again.
           if (disconnectTimerRef.current != null) return
+          // The freeze just lifted (or was never active) and this is a
+          // genuine update — if `remote`/`settling` were left stale by a
+          // blip (see remoteStaleRef's declaration), THIS is the update
+          // that actually makes them current again, so clear both together
+          // rather than in refresh() eagerly (see the rawConnected branch's
+          // comment for why that was unsafe).
+          if (remoteStaleRef.current) {
+            remoteStaleRef.current = false
+            setStatus((prev) => ({ ...prev, settling: false }))
+          }
           // idleReason lives on the media session, not the RemotePlayer. Read
           // it here so it lands in the SAME state update as playerState — the
           // receiver delivers both in one MEDIA_STATUS, so when playerState
@@ -783,6 +814,7 @@ export function useCast(
       disconnectTimerRef.current = null
     }
     lastConnectedRef.current = false
+    remoteStaleRef.current = false
     setStatus((prev) => ({ ...prev, connected: false, settling: false }))
   }
 
