@@ -3562,6 +3562,33 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   //   - Cast-token renewal reuses the same expiry check as resumeCast: a
   //     correction after a long pause re-mints via loadCurrent instead of
   //     issuing a seek the receiver's already-expired URL can't serve.
+  //
+  // The confirmation state below (gate/await-confirm tracking for both
+  // branches) lives in REFS, not effect-scoped `let`s, for the same reason
+  // the auto-advance effect's does (2026-08 review fix, round 9): this
+  // effect's own dependency array includes `party.isPlaying`, which can
+  // flip during the few seconds a blip's confirmation is pending — a plain
+  // `let` would be torn down and recreated with the whole interval on that
+  // re-run, silently discarding "still awaiting confirmation" and letting
+  // the very next tick trust an unconfirmed reading outright. Refs survive
+  // the effect re-running so the confirmation state survives it too.
+  //
+  // Deliberately NOT reset when `target`/`party.partyMediaItemId`/
+  // `party.isHost` change (a genuine identity change, unlike `isPlaying`):
+  // switching content requires the receiver to load it, which cycles
+  // `isMediaLoaded` through false — the gate itself re-arms
+  // wasGated/seqAwaitingConfirm naturally in that case. Adding a second,
+  // separate reset path for identity changes would duplicate that
+  // coverage without a demonstrated gap; if that assumption ever proves
+  // wrong in practice, the fix is a targeted reset keyed on identity, not
+  // reverting to effect-scoped state (which is what created this bug).
+  const hostLastSnapshotRef = useRef<{ paused: boolean; sec: number; atMs: number } | null>(null)
+  const hostWasGatedRef = useRef(false)
+  const hostSeqAwaitingConfirmRef = useRef<number | null>(null)
+  const hostAwaitStartedAtMsRef = useRef(0)
+  const guestWasGatedRef = useRef(false)
+  const guestSeqAwaitingConfirmRef = useRef<number | null>(null)
+  const guestAwaitStartedAtMsRef = useRef(0)
   useEffect(() => {
     if (!target || !party || !partyControlsMedia || !cast.status.connected) return
 
@@ -3579,22 +3606,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const castSecToAbsMs = (sec: number) => Math.round((sec + (startSecRef.current ?? 0)) * 1000)
 
     if (party.isHost) {
-      let lastSnapshot: { paused: boolean; sec: number; atMs: number } | null = null
-      // True for any tick the settling gate below skipped. `lastSnapshot`
-      // isn't touched while gated, so once the gate lifts it's still
-      // whatever it was BEFORE the gate started — comparing against it
-      // would diff fresh data against a snapshot from possibly seconds
-      // earlier, with `elapsedSec` counting the whole gated span.
-      let wasGated = false
-      // Set the instant the gate lifts, to the updateSeq/clock reading at
-      // that moment — see its use below for why the gate lifting alone
-      // (settling false, isMediaLoaded true) does NOT prove `remote` is
-      // actually fresh (2026-08 review fix, round 8): isMediaLoaded stays
-      // true across a blip if the same item was already loaded, so it can
-      // read true on the exact not-yet-caught-up snapshot the freeze in
-      // cast.ts was built to keep from being acted on here.
-      let seqAwaitingConfirm: number | null = null
-      let awaitStartedAtMs = 0
       const id = window.setInterval(() => {
         const c = castRef.current
         // settling: a disconnect debounce is pending (see useCast's
@@ -3602,30 +3613,30 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // live. Corrective actions here (party position broadcasts) must
         // wait for it to resolve rather than react to stale data.
         if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
-          wasGated = true
+          hostWasGatedRef.current = true
           return
         }
-        if (wasGated) {
+        if (hostWasGatedRef.current) {
           // Gate just lifted — wait for a genuine update (updateSeq past
           // this snapshot) before trusting anything read here as a
           // comparison baseline, bounded by RECONNECT_SETTLE_MS so a
           // receiver that stays quiet doesn't disable corrections for the
           // rest of the cast (same trade-off as the auto-advance effect).
-          wasGated = false
-          seqAwaitingConfirm = c.remote.updateSeq
-          awaitStartedAtMs = Date.now()
-          lastSnapshot = null
+          hostWasGatedRef.current = false
+          hostSeqAwaitingConfirmRef.current = c.remote.updateSeq
+          hostAwaitStartedAtMsRef.current = Date.now()
+          hostLastSnapshotRef.current = null
           return
         }
-        if (seqAwaitingConfirm !== null) {
-          const confirmed = c.remote.updateSeq !== seqAwaitingConfirm
-          if (!confirmed && Date.now() - awaitStartedAtMs < RECONNECT_SETTLE_MS) return
-          seqAwaitingConfirm = null
+        if (hostSeqAwaitingConfirmRef.current !== null) {
+          const confirmed = c.remote.updateSeq !== hostSeqAwaitingConfirmRef.current
+          if (!confirmed && Date.now() - hostAwaitStartedAtMsRef.current < RECONNECT_SETTLE_MS) return
+          hostSeqAwaitingConfirmRef.current = null
         }
         const nowPaused = c.remote.isPaused
         const nowSec = c.remote.currentTime
-        const prev = lastSnapshot
-        lastSnapshot = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        const prev = hostLastSnapshotRef.current
+        hostLastSnapshotRef.current = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
         // First sample after (re)connect — nothing to compare against yet.
         // Avoids broadcasting a spurious event off the transient state
         // between loadMedia() resolving and the receiver reaching the
@@ -3676,9 +3687,6 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // being acted on, so every action past the gate additionally waits for
     // a confirmed (updateSeq-advanced) reading, bounded by
     // RECONNECT_SETTLE_MS (2026-08 review fix, round 8).
-    let guestWasGated = false
-    let guestSeqAwaitingConfirm: number | null = null
-    let guestAwaitStartedAtMs = 0
     const id = window.setInterval(() => {
       const c = castRef.current
       // settling: see the host branch's identical guard above — c.remote
@@ -3686,19 +3694,19 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       // against the party's continuously-advancing server position) is
       // frozen and stale while a disconnect is pending confirmation.
       if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
-        guestWasGated = true
+        guestWasGatedRef.current = true
         return
       }
-      if (guestWasGated) {
-        guestWasGated = false
-        guestSeqAwaitingConfirm = c.remote.updateSeq
-        guestAwaitStartedAtMs = Date.now()
+      if (guestWasGatedRef.current) {
+        guestWasGatedRef.current = false
+        guestSeqAwaitingConfirmRef.current = c.remote.updateSeq
+        guestAwaitStartedAtMsRef.current = Date.now()
         return
       }
-      if (guestSeqAwaitingConfirm !== null) {
-        const confirmed = c.remote.updateSeq !== guestSeqAwaitingConfirm
-        if (!confirmed && Date.now() - guestAwaitStartedAtMs < RECONNECT_SETTLE_MS) return
-        guestSeqAwaitingConfirm = null
+      if (guestSeqAwaitingConfirmRef.current !== null) {
+        const confirmed = c.remote.updateSeq !== guestSeqAwaitingConfirmRef.current
+        if (!confirmed && Date.now() - guestAwaitStartedAtMsRef.current < RECONNECT_SETTLE_MS) return
+        guestSeqAwaitingConfirmRef.current = null
       }
       // H3-equivalent guard: only mirror when this player is showing the
       // same content the party is. Belt-and-suspenders — the whole effect
