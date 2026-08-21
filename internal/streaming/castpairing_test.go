@@ -254,11 +254,16 @@ func TestCreateSession_AppliesTheCastCloneOfOption(t *testing.T) {
 	if clone.castCloneOf != plain.ID {
 		t.Errorf("clone castCloneOf = %q, want %q — SessionOpts.CastCloneOf was dropped", clone.castCloneOf, plain.ID)
 	}
-	// Published and paired in the same breath: the count already sees one
-	// stream, never two.
 	if got := len(tm.sessions); got != 2 {
 		t.Fatalf("expected 2 sessions in the manager, got %d", got)
 	}
+	// NOTE what is NOT pinned here: that the field is written BEFORE the
+	// session is published into tm.sessions. Moving the assignment after the
+	// insert passes every test in this package — the window is a few
+	// instructions wide and no test can observe it without reaching inside
+	// CreateSession. It is a real invariant (an unpaired clone is a transient
+	// double-count on the tile) held by construction and by the comment on
+	// SessionOpts.CastCloneOf, not by this test.
 }
 
 // The pairing rule is duplicated — castPairable here, groupCastStreams in

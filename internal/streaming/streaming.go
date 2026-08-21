@@ -2784,14 +2784,24 @@ func (tm *TranscodeManager) ActiveSessions() int {
 // viewer's session — two genuinely independent people watching. Folding on
 // the ID alone would report them as one.
 //
-// Known limit, so the comment does not overclaim: this counts SESSIONS, and
-// one session can serve more than one viewer. GetOrCreateSession reuses any
-// session matching (FilePath, UserID, StartSec), which a cast clone also
-// matches, so one account playing the same title at the same offset on a
-// second device via the legacy /api/stream/media route can end up sharing a
-// folded pair — two people, one counted. Narrow (same account, that route, an
-// identical resume offset) and not introduced here; noted because the fold is
-// what makes it invisible.
+// Known limits, so the comment does not overclaim. All three are the price of
+// folding, and all three are visible in the Sessions tab, which still lists
+// every session:
+//
+//  1. This counts SESSIONS, and one session can serve more than one viewer.
+//     GetOrCreateSession reuses any session matching (FilePath, UserID,
+//     StartSec), which a cast clone also matches, so one account playing the
+//     same title at the same offset on a second device via the legacy
+//     /api/stream/media route can share a folded pair — two people, one
+//     counted. That reuse also hands the second device a clone: it is
+//     subtitle-free stereo AAC in TS, and the admin surface labels its viewer
+//     as a cast receiver. Pre-existing reuse, but the labeling is new.
+//  2. A stranded clone is folded, so the tile cannot show the leak
+//     lib/castSession.ts exists to prevent. A local session plus two orphaned
+//     clones reads as 1 — at the moment that account's next mint 429s against
+//     the 3-session per-user cap, and ordinary playback starts failing.
+//  3. A cast runs two FFmpegs and counts as one, so this is a count of
+//     viewers, never of encoders. For load, read the Sessions tab.
 func (tm *TranscodeManager) ActiveStreamCount() int {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()

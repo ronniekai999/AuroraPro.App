@@ -1127,9 +1127,12 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		// produces; without these they are indistinguishable — same user,
 		// same file, same "transcode" badge, twice.
 		//
-		// NOT omitempty on CastHeld: "false" is the meaningful, common case
-		// and the client reads it as a tri-state against `undefined` from an
-		// older server.
+		// NOT omitempty on CastHeld: "false" is the meaningful, common case,
+		// and a field that disappears whenever it is false is a field whose
+		// absence means two different things. (The client reads it with plain
+		// truthiness, so this costs nothing there — it is for whoever reads
+		// the JSON next.) Direct-play rows carry it as false too, which is
+		// accurate if slightly redundant.
 		CastHeld    bool   `json:"cast_held"`
 		CastCloneOf string `json:"cast_clone_of,omitempty"`
 		// Direct-play only

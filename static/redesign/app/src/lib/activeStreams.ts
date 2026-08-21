@@ -33,23 +33,136 @@ export interface CastPairable {
   cast_clone_of?: string
 }
 
+/** The subset of ActiveStreamRow the LABEL rules need, on top of pairing. */
+export interface CastLabelable extends CastPairable {
+  /** Something fetched this session with a cast-scoped token. NOT evidence of
+   *  a receiver — see castRoleOf. */
+  cast_held?: boolean
+}
+
 /**
- * Is this row a RECEIVER's session — a clone CloneForCast made for a
- * Chromecast?
+ * What a row IS, as far as casting goes. One value per row, computed from the
+ * whole list, so both admin surfaces describe the same session the same way.
  *
- * `cast_clone_of` is the only positive evidence of a receiver that reaches
- * the client. `cast_held` is not: Safari and iOS put a minted cast token on
- * the local <video> src because native HLS cannot authenticate by cookie
- * (#317), so ordinary local playback in those browsers sets it with no
- * receiver anywhere. Anything that says "cast" to an operator must key off
- * this, never off `cast_held`.
- *
- * Deliberately independent of whether the row got NESTED. A receiver whose
- * source session is gone — the sender closed the tab while the TV plays on,
- * the ordinary end of a cast — renders top-level and is still a receiver.
+ *  - `receiver-*`: a clone CloneForCast made for a Chromecast. The suffix says
+ *    why it is or is not sitting under its source, because "top-level" has
+ *    three different causes and they are not interchangeable in prose.
+ *  - `driving`: an ordinary session with at least one receiver pulling a clone
+ *    of it — the paused local player behind a cast.
+ *  - `lease`: cast_held and nothing else. Explicitly NOT a receiver.
+ *  - `none`: an ordinary stream.
  */
-export function isReceiverSession(row: CastPairable): boolean {
-  return !!row.cast_clone_of
+export type CastRole =
+  | 'receiver-nested'
+  | 'receiver-source-missing'
+  | 'receiver-source-unpaired'
+  | 'driving'
+  | 'lease'
+  | 'none'
+
+/**
+ * Classify every row.
+ *
+ * THE RULE, in one place because it was previously spread across two JSX
+ * files and a regex that could not see half of them: a "cast"/"receiver"
+ * claim may come only from `cast_clone_of`. `cast_held` may never produce
+ * one — Safari and iOS put a minted cast token on the local <video> src
+ * because native HLS cannot authenticate by cookie (#317), so ordinary local
+ * playback in those browsers sets that flag with no receiver anywhere.
+ * Rendering it as casting mislabels a large share of ordinary viewers.
+ *
+ * `driving` is the one place cast_held is consulted, and it is not the
+ * evidence there: membership in castRows already proves a receiver, and
+ * cast_held only narrows it to one that has actually fetched. A clone minted
+ * but never loaded (load_failed, a receiver stall — what castSession's
+ * abandon() is for) leaves the local element playing normally, so claiming it
+ * is paused would be a lie the operator cannot check.
+ */
+export function castRoles<T extends CastLabelable>(rows: T[]): Map<string, CastRole> {
+  const byId = new Map<string, T>()
+  for (const r of rows) byId.set(r.id, r)
+  const groups = groupCastStreams(rows)
+
+  const out = new Map<string, CastRole>()
+  for (const row of rows) {
+    if (row.cast_clone_of) {
+      const src = byId.get(row.cast_clone_of)
+      if (!src || src === row) out.set(row.id, 'receiver-source-missing')
+      else if (sourcePairs(src, row)) out.set(row.id, 'receiver-nested')
+      else out.set(row.id, 'receiver-source-unpaired')
+      continue
+    }
+    out.set(row.id, row.cast_held ? 'lease' : 'none')
+  }
+  // A source only counts as "driving" once one of its receivers has fetched.
+  for (const g of groups) {
+    if (g.castRows.some(c => c.cast_held)) out.set(g.row.id, 'driving')
+  }
+  return out
+}
+
+/** Whether `row` folds into `src` — the pairing rule, shared by grouping and
+ *  classification so the two can never disagree about one row. */
+function sourcePairs<T extends CastPairable>(src: T, row: T): boolean {
+  return src !== row && !src.cast_clone_of && src.user_id === row.user_id
+}
+
+/** True for the roles that mean "a receiver is pulling this session". */
+export function isReceiverRole(role: CastRole): boolean {
+  return role.startsWith('receiver-')
+}
+
+/**
+ * The words each surface shows. Here rather than in JSX so the rule above is
+ * enforced by a unit test over real strings instead of by reading markup: no
+ * label derived from `lease` may contain cast wording, and every
+ * `receiver-*` label must.
+ */
+export interface CastLabel {
+  /** Appended to a row's detail line. Empty when there is nothing to say. */
+  detail: string
+  /** Sessions-tab pill, or null. */
+  badge: 'Cast' | 'Lease' | null
+  /** Sr-only expansion of the badge / detail. Empty when badge is null. */
+  description: string
+}
+
+const LEASE_DESCRIPTION =
+  'fetched with a scoped stream token: AirPlay, a Chromecast that needed no separate clone, ' +
+  'or Safari and iOS native HLS, which use one for ordinary local playback too. ' +
+  'It sits on the extended idle lease rather than the normal one.'
+
+export function castLabel(role: CastRole): CastLabel {
+  switch (role) {
+    case 'receiver-nested':
+      return {
+        detail: 'cast receiver',
+        badge: 'Cast',
+        description: 'receiver session, cloned from the session above',
+      }
+    case 'receiver-source-missing':
+      return {
+        detail: 'cast receiver, source session gone',
+        badge: 'Cast',
+        description: 'receiver session; the session it was cloned from is no longer active',
+      }
+    // Source is right there in the list — a different owner (an admin casting
+    // someone else's session), or itself a clone. Saying "gone" here would be
+    // provably false to anyone reading the same table.
+    case 'receiver-source-unpaired':
+      return {
+        detail: 'cast receiver, listed separately from its source',
+        badge: 'Cast',
+        description:
+          'receiver session; the session it was cloned from belongs to a different viewer, so it is listed on its own',
+      }
+    case 'driving':
+      return { detail: 'paused, casting below', badge: null, description: '' }
+    case 'lease':
+      return { detail: 'token lease', badge: 'Lease', description: LEASE_DESCRIPTION }
+    case 'none':
+      return { detail: '', badge: null, description: '' }
+  }
 }
 
 export interface StreamGroup<T> {
@@ -95,12 +208,12 @@ export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup
   for (const r of rows) byId.set(r.id, r)
 
   // The row this one files under, or null if it is a group of its own.
+  // Delegates to sourcePairs so grouping and castRoles cannot disagree about
+  // whether a given pair is a pair.
   const sourceOf = (row: T): T | null => {
     if (!row.cast_clone_of) return null
     const src = byId.get(row.cast_clone_of)
-    if (!src || src === row) return null
-    if (src.cast_clone_of) return null // source is itself a clone
-    if (src.user_id !== row.user_id) return null // different viewer
+    if (!src || !sourcePairs(src, row)) return null
     return src
   }
 

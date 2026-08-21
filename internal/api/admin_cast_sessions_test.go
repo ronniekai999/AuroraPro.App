@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aurora-media/aurora/internal/config"
 	"github.com/aurora-media/aurora/internal/streaming"
@@ -208,5 +209,29 @@ func TestActiveStreamTileCount_CountsOtherViewersAlongsideACast(t *testing.T) {
 func TestActiveStreamTileCount_NilManager(t *testing.T) {
 	if got := activeStreamTileCount(nil, nil); got != 0 {
 		t.Errorf("activeStreamTileCount(nil, nil) = %d, want 0", got)
+	}
+}
+
+// The tile is transcode streams PLUS direct plays, and every other test here
+// passes a nil registry — so dropping the direct-play term entirely (or
+// passing nil for it at the call site) went unnoticed. Direct play is a whole
+// delivery mode; it silently vanishing from the only number an operator
+// watches is the same class of bug as the double-count this change fixes.
+func TestActiveStreamTileCount_AddsDirectPlays(t *testing.T) {
+	tm, _, _ := castPairManager(t) // one cast pair → folds to 1
+	reg := streaming.NewDirectPlayRegistry(time.Minute)
+	t.Cleanup(reg.Close)
+	reg.Touch(9, "guest", "media", 101, "movie.mp4", "direct_play")
+	reg.Touch(11, "other", "episode", 202, "s01e01.mkv", "direct_play")
+
+	if got := reg.ActiveCount(); got != 2 {
+		t.Fatalf("fixture should hold 2 direct plays, got %d", got)
+	}
+	if got := activeStreamTileCount(tm, reg); got != 3 {
+		t.Errorf("Active Streams tile = %d, want 3 (one cast + two direct plays)", got)
+	}
+	// And the direct-play term alone, with no transcode manager at all.
+	if got := activeStreamTileCount(nil, reg); got != 2 {
+		t.Errorf("tile with no transcode manager = %d, want 2", got)
 	}
 }

@@ -14,7 +14,7 @@ import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
-import { groupCastStreams, isReceiverSession } from '@/lib/activeStreams'
+import { castLabel, castRoles, groupCastStreams } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
 import {
   parseReferralOptionsSetting,
@@ -277,6 +277,10 @@ function NowPlayingWidget() {
   // local session driving it instead of standing beside it as an identical
   // second row. See lib/activeStreams for the orphan/cycle rules.
   const groups = groupCastStreams(items)
+  // One classification for the whole list, so both the parent rows and the
+  // nested receiver rows describe the same session the same way.
+  const roles = castRoles(items)
+  const labelOf = (s: ActiveStreamRow) => castLabel(roles.get(s.id) ?? 'none')
   if (groups.length === 0) return (
     <div className="glass-panel rounded-2xl p-6">
       <h2 className="text-white font-semibold mb-2">Now Playing</h2>
@@ -309,31 +313,19 @@ function NowPlayingWidget() {
                   {s.file_name}
                   {s.resolution && ` · ${s.resolution}`}
                   {s.kind === 'direct' && ` · Direct Play`}
-                  {/* A receiver session that ended up top-level: its source is
-                      gone (the sender closed the tab while the TV played on —
-                      the ordinary end of a cast, since the player deletes the
-                      local session but deliberately not the clone), or the
-                      source belongs to someone else. cast_clone_of still
-                      proves what it is, so say so rather than falling through
-                      to the lease wording below. */}
-                  {isReceiverSession(s) && ` · cast receiver, source session gone`}
-                  {/* NOT "casting". cast_held only means a cast-scoped token
-                      fetched this session, and Safari/iOS put such a token on
-                      the LOCAL <video> src for native HLS auth (#317) — so
-                      ordinary Apple-browser playback sets it with no receiver
-                      anywhere. Calling that "Casting" would relabel a large
-                      share of ordinary viewers, recreating the mystery-row
-                      confusion this whole change exists to end. What IS true
-                      of every such session is the longer idle lease. */}
-                  {!isReceiverSession(s) && castRows.length === 0 && s.cast_held && ` · token lease`}
-                  {/* Only once a receiver has actually FETCHED from one of
-                      the clones. A clone that was minted but never loaded
-                      (load_failed, a receiver stall — the case
-                      lib/castSession's abandon() exists for) leaves this
-                      element playing normally, and calling it paused would
-                      be a lie the operator can't check. */}
-                  {castRows.some(c => c.cast_held) && ` · paused, casting below`}
+                  {/* Every cast-related word comes from castLabel(), never
+                      from a condition written here: the rule that cast_held
+                      must not read as "casting" is enforced where the strings
+                      are produced (lib/activeStreams, castLabels.test.ts),
+                      and markup that re-derives it would sit outside that. */}
+                  {labelOf(s).detail && ` · ${labelOf(s).detail}`}
                 </p>
+                {/* The dashboard has no hover affordance, so the badge's
+                    explanation rides along for everyone rather than only for
+                    the Sessions tab's screen-reader users. */}
+                {labelOf(s).description && (
+                  <p className="sr-only">{labelOf(s).description}</p>
+                )}
               </div>
               {kindBadge(s)}
             </div>
@@ -963,6 +955,26 @@ function AdminRequestsTab() {
   )
 }
 
+// One row per SESSION — Diag and Kill act on a session, and an operator
+// killing a cast needs to reach the receiver's clone and the local player's
+// session separately. Grouping only orders and indents them, and carries each
+// row's cast label along so the markup never re-derives one.
+function sessionRows(items: ActiveStreamRow[]) {
+  const roles = castRoles(items)
+  const labelFor = (s: ActiveStreamRow) => castLabel(roles.get(s.id) ?? 'none')
+  return groupCastStreams(items).flatMap(g => [
+    { s: g.row, isCastRow: false, label: labelFor(g.row) },
+    ...g.castRows.map(c => ({
+      s: c,
+      // Nested under its source in THIS table. Distinct from "is a receiver",
+      // which is the role's business: a receiver whose source is missing or
+      // unpaired renders top-level and still gets the Cast badge.
+      isCastRow: true,
+      label: labelFor(c),
+    })),
+  ])
+}
+
 function AdminSessionsTab() {
   const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -1014,10 +1026,7 @@ function AdminSessionsTab() {
                 orders and indents them: a receiver's clone sits directly
                 under the session it was cloned from, so the two rows a cast
                 produces read as one cast instead of a duplicate. */}
-            {groupCastStreams(items).flatMap(g => [
-              { s: g.row, isCastRow: false },
-              ...g.castRows.map(c => ({ s: c, isCastRow: true })),
-            ]).map(({ s, isCastRow }) => {
+            {sessionRows(items).map(({ s, isCastRow, label }) => {
               const isTranscode = s.kind === 'transcode'
               return (
                 <tr key={s.id}>
@@ -1039,43 +1048,30 @@ function AdminSessionsTab() {
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
-                    {/* Two different claims, deliberately worded differently.
-                        "Cast" is provable from cast_clone_of — this row is a
+                    {/* Every word here comes from castLabel(), keyed off the
+                        row's role rather than off a condition re-derived in
+                        markup — the rule that cast_held must never read as
+                        "casting" is enforced where those strings are produced
+                        (lib/activeStreams, castLabels.test.ts), and a
+                        condition written here would sit outside it.
+
+                        "Cast" is provable from cast_clone_of: the row is a
                         clone CloneForCast made for a receiver, so killing it
-                        stops the TV while killing its source does not. Keyed
-                        off the FIELD, not off isCastRow: a receiver whose
-                        source session is gone renders top-level and is still
-                        a receiver.
+                        stops the TV while killing its source does not.
+                        "Lease" is all cast_held supports on its own — it is
+                        not evidence of a receiver at all.
 
-                        "Lease" is all cast_held supports on its own, and it
-                        is not evidence of a receiver at all: Safari/iOS put a
-                        cast token on the local <video> src for native HLS
-                        auth (#317), so ordinary playback in those browsers
-                        sets it.
-
-                        Explanations are sr-only text rather than a `title`,
+                        The explanation is sr-only text rather than a `title`,
                         which never reaches a keyboard or a screen reader on a
                         non-focusable span. */}
-                    {isReceiverSession(s) && (
-                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30">
-                        Cast
-                        <span className="sr-only">
-                          {isCastRow
-                            ? ' receiver session, cloned from the session above'
-                            : ' receiver session; the session it was cloned from is no longer active'}
-                        </span>
-                      </span>
-                    )}
-                    {!isReceiverSession(s) && s.cast_held && (
-                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30">
-                        Lease
-                        {/* Three producers, not two — a Chromecast that needed
-                            no clone (already H.264 + AAC, no subtitle tracks)
-                            shares the local session and lands here as well.
-                            And the window is the CONFIGURED timeout whenever
-                            that is longer than 30 minutes (sessionIdleTimeout
-                            widens, never shortens), so don't promise 30. */}
-                        <span className="sr-only"> — fetched with a scoped stream token: AirPlay, a Chromecast that needed no separate clone, or Safari and iOS native HLS, which use one for ordinary local playback too. It sits on the extended idle lease rather than the normal one.</span>
+                    {label.badge && (
+                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                        label.badge === 'Cast'
+                          ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                          : 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                      }`}>
+                        {label.badge}
+                        <span className="sr-only"> {label.description}</span>
                       </span>
                     )}
                   </td>
