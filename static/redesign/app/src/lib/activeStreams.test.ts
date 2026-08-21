@@ -6,10 +6,12 @@
 // actually burning CPU).
 
 import { describe, expect, it } from 'vitest'
-import { groupCastStreams, streamCount } from './activeStreams'
+import { groupCastStreams } from './activeStreams'
 
-type Row = { id: string; cast_clone_of?: string; cast_held?: boolean }
-const row = (id: string, over: Partial<Row> = {}): Row => ({ id, ...over })
+type Row = { id: string; user_id: number; cast_clone_of?: string; cast_held?: boolean }
+// Same owner unless a test says otherwise — a cast pair is one person's.
+const row = (id: string, over: Partial<Row> = {}): Row => ({ id, user_id: 7, ...over })
+const groupIds = (rows: Row[]) => groupCastStreams(rows).map(g => g.row.id)
 
 describe('groupCastStreams', () => {
   it('nests the receiver session under the local session driving it', () => {
@@ -26,11 +28,11 @@ describe('groupCastStreams', () => {
   })
 
   it('counts a cast pair as one stream', () => {
-    expect(streamCount([
+    expect(groupIds([
       row('local'),
       row('tv', { cast_clone_of: 'local' }),
       row('guest'),
-    ])).toBe(2)
+    ])).toEqual(['local', 'guest'])
   })
 
   it('keeps a clone top-level once its source is gone', () => {
@@ -39,7 +41,19 @@ describe('groupCastStreams', () => {
     const groups = groupCastStreams([row('tv', { cast_clone_of: 'local-gone', cast_held: true })])
     expect(groups.map(g => g.row.id)).toEqual(['tv'])
     expect(groups[0].castRows).toEqual([])
-    expect(streamCount([row('tv', { cast_clone_of: 'local-gone' })])).toBe(1)
+  })
+
+  it('does not pair a clone with a source owned by someone else', () => {
+    // An admin can mint a cast token against another user's session, which
+    // produces a clone owned by the ADMIN pointing at the viewer's session.
+    // Two independent viewers: folding them would under-count, and would
+    // file the admin's TV under the viewer's name and avatar.
+    const groups = groupCastStreams([
+      row('viewer-local', { user_id: 42 }),
+      row('admin-tv', { user_id: 1, cast_clone_of: 'viewer-local', cast_held: true }),
+    ])
+    expect(groups.map(g => g.row.id)).toEqual(['viewer-local', 'admin-tv'])
+    expect(groups.every(g => g.castRows.length === 0)).toBe(true)
   })
 
   it('files a clone under its source even when it is listed first', () => {
@@ -94,11 +108,10 @@ describe('groupCastStreams', () => {
     const rows = [row('a'), row('b'), row('c')]
     const groups = groupCastStreams(rows)
     expect(groups.map(g => g.row.id)).toEqual(['a', 'b', 'c'])
-    expect(streamCount(rows)).toBe(3)
+    expect(groups.every(g => g.castRows.length === 0)).toBe(true)
   })
 
   it('returns nothing for an empty list', () => {
     expect(groupCastStreams([])).toEqual([])
-    expect(streamCount([])).toBe(0)
   })
 })

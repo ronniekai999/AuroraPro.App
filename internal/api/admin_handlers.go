@@ -1003,16 +1003,13 @@ func (h *AdminHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	activeParties, _ := h.queries.GetActivePartyCount(r.Context())
 
 	stats := models.ServerStats{
-		Version:       h.version,
-		Uptime:        time.Since(h.startTime).Round(time.Second).String(),
-		MemoryAllocMB: int64(memStats.Alloc / 1024 / 1024),
-		Goroutines:    runtime.NumGoroutine(),
-		CPUCores:      float64(runtime.NumCPU()),
-		DiskFreeGB:    diskFreeGB,
-		// ActiveStreamCount, not ActiveSessions: a Chromecast holds two
-		// sessions for one viewer (the paused local one and the receiver's
-		// clone) and the tile counted both. See ActiveStreamCount.
-		ActiveStreams:      h.transcode.ActiveStreamCount() + directPlayCount(h.directPlay),
+		Version:            h.version,
+		Uptime:             time.Since(h.startTime).Round(time.Second).String(),
+		MemoryAllocMB:      int64(memStats.Alloc / 1024 / 1024),
+		Goroutines:         runtime.NumGoroutine(),
+		CPUCores:           float64(runtime.NumCPU()),
+		DiskFreeGB:         diskFreeGB,
+		ActiveStreams:      activeStreamTileCount(h.transcode, h.directPlay),
 		WebSocketClients:   h.hub.ClientCount(),
 		LibraryCount:       libCount,
 		MovieCount:         movieCount,
@@ -1215,6 +1212,25 @@ func directPlayCount(r *streaming.DirectPlayRegistry) int {
 		return 0
 	}
 	return r.ActiveCount()
+}
+
+// activeStreamTileCount is the number behind the dashboard's "Active Streams"
+// tile: transcode-backed streams plus direct plays.
+//
+// ActiveStreamCount, NOT ActiveSessions. Casting to a Chromecast holds two
+// transcode sessions for one viewer — the local browser session, paused the
+// moment the receiver connects, and the cast-safe clone the TV pulls — and
+// counting both reported one person watching one movie as two streams.
+//
+// A function rather than an expression inline in Dashboard so the choice is
+// testable without a database: Dashboard needs four queries before it reaches
+// this line, which is how the tile went unpinned in the first place.
+func activeStreamTileCount(tc *streaming.TranscodeManager, dp *streaming.DirectPlayRegistry) int {
+	n := directPlayCount(dp)
+	if tc != nil {
+		n += tc.ActiveStreamCount()
+	}
+	return n
 }
 
 // GetSettings returns all server settings.

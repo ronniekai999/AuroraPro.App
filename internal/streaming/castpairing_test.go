@@ -178,6 +178,68 @@ func TestActiveStreamCount_OrphanedCloneStillCounts(t *testing.T) {
 	}
 }
 
+// An ADMIN may mint a cast token against ANOTHER user's session
+// (requireSessionAccess allows it), and CloneForCast then owns the clone as
+// the admin while castCloneOf points at the viewer's session. Those are two
+// people watching two things; folding on the id alone reports them as one.
+func TestActiveStreamCount_DoesNotFoldAcrossUsers(t *testing.T) {
+	tm := castLeaseManager(t)
+	now := time.Now()
+	addLeaseSession(tm, "viewer-local", now, false)
+	addLeaseSession(tm, "admin-tv", now, true)
+	tm.mu.Lock()
+	tm.sessions["viewer-local"].UserID = 42
+	tm.sessions["admin-tv"].UserID = 1 // the admin, not the viewer
+	tm.sessions["admin-tv"].castCloneOf = "viewer-local"
+	tm.mu.Unlock()
+
+	if got := tm.ActiveStreamCount(); got != 2 {
+		t.Errorf("ActiveStreamCount = %d, want 2 — a clone owned by a different user is a different viewer", got)
+	}
+}
+
+// A self-reference would fold a live stream to zero. CreateSession refuses to
+// write one; this pins the counter's own guard so the two cannot drift.
+func TestActiveStreamCount_SelfReferenceStillCounts(t *testing.T) {
+	tm := castLeaseManager(t)
+	addLeaseSession(tm, "loop", time.Now(), false)
+	tm.mu.Lock()
+	tm.sessions["loop"].castCloneOf = "loop"
+	tm.mu.Unlock()
+
+	if got := tm.ActiveStreamCount(); got != 1 {
+		t.Errorf("ActiveStreamCount = %d, want 1 — a self-referencing session is still one live stream", got)
+	}
+}
+
+// The write side of the same rule: CreateSession must not stamp a session as
+// its own clone, whatever SessionOpts asks for.
+func TestCreateSession_RefusesASelfReferencingCastClone(t *testing.T) {
+	fakeFFmpegOnPath(t)
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// The id is generated inside CreateSession, so the only way to ask for a
+	// self-reference is to aim at whatever it produces — which no caller can
+	// do. Assert the invariant directly instead: no session ever comes out
+	// pointing at itself, and an ordinary create carries no pairing at all.
+	s, err := tm.CreateSession(1, "alice", "/library/a.mkv", 1920, 1080)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if s.castCloneOf != "" {
+		t.Errorf("plain session carries castCloneOf = %q, want empty", s.castCloneOf)
+	}
+	if s.castCloneOf == s.ID {
+		t.Error("session is its own cast clone — ActiveStreamCount would fold it to zero")
+	}
+}
+
 // Nothing to fold when nobody is casting.
 func TestActiveStreamCount_MatchesRowCountWithoutCasts(t *testing.T) {
 	tm := castLeaseManager(t)

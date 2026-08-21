@@ -948,16 +948,16 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	src.variantMu.Lock()
 	disableHWDecode := src.swDecodeFallback
 	src.variantMu.Unlock()
-	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src, needsVideoTranscode, disableHWDecode))
+	cloneOpts := castCloneOpts(src, needsVideoTranscode, disableHWDecode)
+	// Record where the clone came from so the admin surface can pair the two
+	// rows a cast produces (see TranscodeSession.castCloneOf). Carried through
+	// SessionOpts rather than stamped afterwards so the clone is never
+	// visible unpaired.
+	cloneOpts.CastCloneOf = sessionID
+	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, cloneOpts)
 	if err != nil {
 		return nil, fmt.Errorf("create cast-safe session: %w", err)
 	}
-	// Record where the clone came from so the admin surface can pair the two
-	// rows a cast produces (see TranscodeSession.castCloneOf). Set under
-	// tm.mu, which is the lock ListSessions reads it under.
-	tm.mu.Lock()
-	clone.castCloneOf = sessionID
-	tm.mu.Unlock()
 	slog.Info("cast: created cast-safe clone of session for receiver compatibility",
 		"source_session", sessionID, "cast_session", clone.ID, "user_id", userID,
 		"source_audio_codec", src.AudioCodecOut, "video_transcode", needsVideoTranscode,
@@ -1341,8 +1341,11 @@ type TranscodeSession struct {
 	// Values: -1 = not probed, -2 = probe in progress, >= 0 = cached PTS.
 	initPTS90kHz int64
 	// castHeld marks a session that has been handed to a Chromecast or
-	// AirPlay receiver (set by MarkCastHeld when a cast token is minted for
-	// it). Such a session is kept for castHeldTimeout instead of the normal
+	// AirPlay receiver. Set by MarkCastHeld, which requireSessionAccess
+	// calls when a cast-scoped token actually FETCHES from the session —
+	// not at mint time (see the reasoning there: a mint whose response
+	// never reached the sender would otherwise lease a clone nobody can
+	// release). Such a session is kept for castHeldTimeout instead of the normal
 	// idle timeout — see sessionIdleTimeout for why. Guarded by tm.mu, like
 	// LastAccess, because the cleanup loop reads both in the same pass.
 	castHeld bool
@@ -2223,6 +2226,13 @@ type SessionOpts struct {
 	// hardware decode active — the clone reads the same file and would
 	// crash identically. See TranscodeSession.swDecodeFallback.
 	DisableHWDecode bool
+	// CastCloneOf names the session this one is a cast-safe clone of. Set
+	// only by CloneForCast. Applied to the session BEFORE it is published
+	// into tm.sessions, so no reader can ever observe the clone unpaired —
+	// stamping it afterwards left a window in which ListSessions and
+	// ActiveStreamCount saw it as an independent stream, which is precisely
+	// the double-count this field exists to remove.
+	CastCloneOf string
 }
 
 // CreateSession creates a new adaptive transcode session for a media file.
@@ -2333,6 +2343,16 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// Apply session options if provided
 	if len(opts) > 0 {
 		o := opts[0]
+		// Guarded by tm.mu once published, but written here before the
+		// insert below, while this goroutine is the only reference holder.
+		// A session must never be its own clone: ActiveStreamCount folds a
+		// clone into its source, so a self-reference would fold a live
+		// stream to zero. CloneForCast cannot produce one (the shared-
+		// session path returns before it sets this), and this makes that
+		// structural rather than incidental.
+		if o.CastCloneOf != sessionID {
+			session.castCloneOf = o.CastCloneOf
+		}
 		if o.ForceTS {
 			session.FMP4 = false
 		}
@@ -2734,17 +2754,26 @@ func (tm *TranscodeManager) ActiveSessions() int {
 // streams, which is what sent an admin looking for a leak that was not
 // there.
 //
-// A clone is folded into its source only while that source is still here. An
-// orphaned clone — the local player closed, the TV still playing, which is
-// the ordinary end state of a cast — is a stream in its own right and counts
-// as one. So the tile never reads lower than the number of people watching.
+// A clone is folded into its source only while that source is still here,
+// and only when both belong to the SAME user. An orphaned clone — the local
+// player closed, the TV still playing, which is the ordinary end state of a
+// cast — is a stream in its own right and counts as one. So the tile never
+// reads lower than the number of people watching.
+//
+// The same-user condition is not decoration. An ADMIN may mint a cast token
+// against another user's session (see requireSessionAccess), and the clone
+// is then owned by the admin while castCloneOf points at the viewer's
+// session — two genuinely independent people watching. Folding on the ID
+// alone would report them as one.
 func (tm *TranscodeManager) ActiveStreamCount() int {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	n := 0
 	for _, s := range tm.sessions {
-		if s.castCloneOf != "" {
-			if _, sourceLive := tm.sessions[s.castCloneOf]; sourceLive {
+		// s.castCloneOf != s.ID is belt-and-braces: CreateSession refuses to
+		// stamp a self-reference, and folding one would erase a live stream.
+		if s.castCloneOf != "" && s.castCloneOf != s.ID {
+			if src, sourceLive := tm.sessions[s.castCloneOf]; sourceLive && src.UserID == s.UserID {
 				continue
 			}
 		}

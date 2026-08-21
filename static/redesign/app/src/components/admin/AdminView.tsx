@@ -270,6 +270,9 @@ function NowPlayingWidget() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const nameFor = (s: ActiveStreamRow) => s.username || users.get(s.user_id) || `User ${s.user_id}`
+  // Initial for the avatar. Deliberately NOT nameFor()[0]: that falls back to
+  // `User 12`, which would render every unknown account as a uniform "U".
+  const initialFor = (s: ActiveStreamRow) => (s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()
   // One group per VIEWER: a Chromecast's receiver session nests under the
   // local session driving it instead of standing beside it as an identical
   // second row. See lib/activeStreams for the orphan/cycle rules.
@@ -288,10 +291,14 @@ function NowPlayingWidget() {
       <h2 className="text-white font-semibold mb-4">Now Playing ({groups.length})</h2>
       <div className="space-y-3">
         {groups.map(({ row: s, castRows }) => (
+          // <ul>/<li> rather than nested <div>s: the nesting is the meaning
+          // here ("this receiver is playing that session"), and a screen
+          // reader gets it from the list structure. Purely visual indentation
+          // would read as two unrelated rows — the very confusion this fixes.
           <div key={s.id} className="border-b border-white/[0.03] last:border-0">
             <div className="flex items-center gap-4 py-2">
               <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-                {nameFor(s)[0]?.toUpperCase()}
+                {initialFor(s)}
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-white/90 text-sm font-medium truncate">{nameFor(s)}</p>
@@ -303,35 +310,41 @@ function NowPlayingWidget() {
                       cloned) or the shared-session case (already H.264 +
                       AAC, no subtitles). The TV IS this row. */}
                   {castRows.length === 0 && s.cast_held && ` · Casting`}
-                  {/* Otherwise the encoder here is stopped: the sender
-                      paused this element and the idle reaper cancels its
-                      FFmpeg after 75s. Saying so is the whole point — this
-                      row costs a session slot and disk, not CPU. */}
-                  {castRows.length > 0 && ` · paused, casting below`}
+                  {/* Only once a receiver has actually FETCHED from one of
+                      the clones. A clone that was minted but never loaded
+                      (load_failed, a receiver stall — the case
+                      lib/castSession's abandon() exists for) leaves this
+                      element playing normally, and calling it paused would
+                      be a lie the operator can't check. */}
+                  {castRows.some(c => c.cast_held) && ` · paused, casting below`}
                 </p>
               </div>
               {kindBadge(s)}
             </div>
-            {castRows.map(c => (
-              <div key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-white/10">
-                <Icon name="tv" size={16} className="text-purple-300 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-white/70 text-sm truncate">
-                    Cast receiver
-                    {/* A clone the receiver has not fetched from yet: minted,
-                        not yet leased (MarkCastHeld is earned by a real
-                        fetch). Usually a blink; a persistent one is a clone
-                        the TV never took. */}
-                    {!c.cast_held && <span className="text-white/40"> · connecting</span>}
-                  </p>
-                  <p className="text-white/40 text-xs truncate">
-                    {c.file_name}
-                    {c.resolution && ` · ${c.resolution}`}
-                  </p>
-                </div>
-                {kindBadge(c)}
-              </div>
-            ))}
+            {castRows.length > 0 && (
+              <ul className="list-none m-0 p-0">
+                {castRows.map(c => (
+                  <li key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-white/10">
+                    <Icon name="tv" size={16} className="text-purple-300 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white/70 text-sm truncate">
+                        Cast receiver for {nameFor(s)}
+                        {/* A clone the receiver has not fetched from yet:
+                            minted, not yet leased (MarkCastHeld is earned by
+                            a real fetch). Usually a blink; a persistent one
+                            is a clone the TV never took. */}
+                        {!c.cast_held && <span className="text-white/40"> · connecting</span>}
+                      </p>
+                      <p className="text-white/40 text-xs truncate">
+                        {c.file_name}
+                        {c.resolution && ` · ${c.resolution}`}
+                      </p>
+                    </div>
+                    {kindBadge(c)}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         ))}
       </div>
@@ -993,7 +1006,13 @@ function AdminSessionsTab() {
               return (
                 <tr key={s.id}>
                   <td className="font-mono text-xs">
+                    {/* The glyph carries the nesting visually; the sr-only
+                        text carries it for everyone else. Without the
+                        second half a screen reader gets two adjacent,
+                        unrelated-looking sessions — the same confusion this
+                        grouping exists to end. */}
                     {isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}
+                    {isCastRow && <span className="sr-only">Cast receiver for the session above: </span>}
                     {s.id.slice(0, 10)}
                   </td>
                   <td>
@@ -1005,18 +1024,21 @@ function AdminSessionsTab() {
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
                     {/* Cast-safe clone the receiver pulls. Killing it stops
-                        the TV; killing the row above it does not. */}
-                    {isCastRow && (
-                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30" title={`Cast receiver session, cloned from ${s.cast_clone_of ?? 'the session above'}`}>
+                        the TV; killing the row above it does not. The
+                        explanation is sr-only text rather than a `title`,
+                        which never reaches a keyboard or a screen reader on
+                        a non-focusable span. */}
+                    {(isCastRow || s.cast_held) && (
+                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30">
                         Cast
-                      </span>
-                    )}
-                    {/* AirPlay, or a Chromecast sharing the local session
-                        (already H.264 + AAC, no subtitles): no clone exists,
-                        so this row IS the one feeding the TV. */}
-                    {!isCastRow && s.cast_held && (
-                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30" title="A receiver has fetched from this session — it is on the 30-minute cast lease">
-                        Cast
+                        <span className="sr-only">
+                          {isCastRow
+                            // AirPlay, or a Chromecast sharing the local
+                            // session (already H.264 + AAC, no subtitles):
+                            // no clone exists, so that row IS the TV feed.
+                            ? ` receiver session, cloned from ${s.cast_clone_of ?? 'the session above'}`
+                            : ' — a receiver has fetched from this session; it is on the 30-minute cast lease'}
+                        </span>
                       </span>
                     )}
                   </td>

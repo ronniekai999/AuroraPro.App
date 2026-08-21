@@ -21,6 +21,12 @@
  *  real API row and a test fixture satisfy it. */
 export interface CastPairable {
   id: string
+  /** Who owns the session. Nesting is same-owner only: an admin can mint a
+   *  cast token against another user's session, which produces a clone owned
+   *  by the admin whose `cast_clone_of` points at the viewer's session. Those
+   *  are two independent people watching, and folding them together would
+   *  both under-count and file the admin's TV under the viewer's name. */
+  user_id: number
   /** Session this row was cloned from for a receiver; absent on ordinary
    *  sessions. Older servers omit it entirely — everything degrades to a
    *  flat list, which is exactly the pre-existing behavior. */
@@ -51,12 +57,17 @@ const MAX_CHAIN = 8
  *    ordinary end state of a cast — the local player closes, the TV keeps
  *    playing — and it is a real stream someone is watching. Hiding it, or
  *    counting it as zero, would under-report live playback.
+ *  - A clone whose source belongs to a DIFFERENT user stays top-level. See
+ *    CastPairable.user_id — an admin casting someone else's session is the
+ *    one way the server produces this.
  *  - A self-referencing or cyclic `cast_clone_of` degrades to top-level
- *    rather than looping. The server does not emit either (the shared-
- *    session path leaves `cast_clone_of` unset precisely so a session is
- *    never its own parent), which is why this is a floor, not a feature.
- *  - Input order is preserved for groups and within each group's clones, so
- *    a 5-second poll cannot reshuffle the list under the operator's cursor.
+ *    rather than looping. The server does not emit either (CreateSession
+ *    refuses to stamp a self-reference, and the shared-session path leaves
+ *    `cast_clone_of` unset), which is why this is a floor, not a feature.
+ *  - Input order is preserved for groups and within each group's clones.
+ *    That keeps a clone adjacent to its source, but note it is NOT list
+ *    stability: /api/admin/sessions ranges a Go map, so the underlying order
+ *    already changes between polls and neither caller sorts.
  */
 export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup<T>[] {
   const byId = new Map<string, T>()
@@ -74,6 +85,8 @@ export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup
       if (seen.has(parentId)) return null // cycle (includes self-reference)
       const parent = byId.get(parentId)
       if (!parent) return cur === row ? null : cur // chain leaves the list
+      // Different owner: not a pair, whatever the ids say.
+      if (parent.user_id !== cur.user_id) return cur === row ? null : cur
       seen.add(parentId)
       cur = parent
     }
@@ -99,11 +112,4 @@ export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup
     groupById.get(root.id)?.castRows.push(row)
   }
   return groups
-}
-
-/** How many streams an operator is actually looking at — the count that
- *  belongs beside "Now Playing", and the client-side mirror of the server's
- *  ActiveStreamCount. */
-export function streamCount<T extends CastPairable>(rows: T[]): number {
-  return groupCastStreams(rows).length
 }
