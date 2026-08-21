@@ -286,6 +286,15 @@ export function useCast(
   // SESSION_STATE_CHANGED events.
   const disconnectTimerRef = useRef<number | null>(null)
   const lastConnectedRef = useRef(false)
+  // True while an explicit stop() is tearing its session down. endSession()
+  // fires SESSION_STATE_CHANGED asynchronously — a SESSION_ENDING event can
+  // still report CastState CONNECTED before the final SESSION_ENDED lands.
+  // Without this guard, refresh() reads that stale CONNECTED, undoes stop()'s
+  // immediate connected:false, and re-arms the disconnect debounce on the
+  // SESSION_ENDED that follows, so one user Stop produces two false
+  // transitions (double onClose(), double host-handoff rebuild). Cleared
+  // once a NEW session is actually requested.
+  const stoppedRef = useRef(false)
 
   // Stable ref to currentLoad so listeners don't need to be
   // re-attached when the player's state changes. Assigned in an
@@ -367,6 +376,15 @@ export function useCast(
         const available = castState !== fw.CastState.NO_DEVICES_AVAILABLE
 
         if (rawConnected) {
+          if (stoppedRef.current) {
+            // Stale CONNECTED reading from a stop() still tearing its
+            // session down (SESSION_ENDING fires before SESSION_ENDED) —
+            // see stoppedRef's declaration. Ignore it: applying it here
+            // would resurrect connected:true and let the SESSION_ENDED
+            // that follows re-arm the disconnect debounce for a stop the
+            // user already asked for.
+            return
+          }
           if (disconnectTimerRef.current != null) {
             window.clearTimeout(disconnectTimerRef.current)
             disconnectTimerRef.current = null
@@ -376,16 +394,16 @@ export function useCast(
           return
         }
 
-        // Not connected right now. `available` (cast-button visibility) isn't
-        // destructive, so reflect it immediately. `deviceName` is kept as-is
-        // while connected is still being reported true — the session has no
-        // device to name once disconnected, and blanking it now would show
-        // "connected" UI with no device while the debounce is pending.
-        // connected:false itself only propagates once it survives the grace
-        // window, and only one timer runs per disconnect (a second
-        // CAST_STATE_CHANGED while already pending must not push the
-        // deadline back out).
-        setStatus((prev) => ({ ...prev, available }))
+        // Not connected right now. `supported`/`available` (cast-button
+        // visibility) aren't destructive, so reflect them immediately.
+        // `deviceName` is kept as-is while connected is still being
+        // reported true — the session has no device to name once
+        // disconnected, and blanking it now would show "connected" UI with
+        // no device while the debounce is pending. connected:false itself
+        // only propagates once it survives the grace window, and only one
+        // timer runs per disconnect (a second CAST_STATE_CHANGED while
+        // already pending must not push the deadline back out).
+        setStatus((prev) => ({ ...prev, supported: true, available }))
         if (!lastConnectedRef.current || disconnectTimerRef.current != null) return
         disconnectTimerRef.current = window.setTimeout(() => {
           disconnectTimerRef.current = null
@@ -414,6 +432,21 @@ export function useCast(
         remoteControllerRef.current = remoteController
         onRemoteChange = () => {
           if (!mounted) return
+          // A disconnect is pending confirmation (see refresh()'s debounce):
+          // status.connected is still reporting true, but the RemotePlayer
+          // frequently resets to IDLE/zeroed fields the instant the
+          // underlying channel drops — well before we know whether this is
+          // a real disconnect or a blip that's about to self-heal. Freeze
+          // `remote` at its last good reading rather than publish that
+          // reset: surfacing playerState:'IDLE' here while connected still
+          // reads true is exactly what VideoPlayer's auto-advance effect
+          // treats as a genuine end-of-media, which would skip to the next
+          // episode (or close the player) on nothing more than the same
+          // blip connected's debounce exists to survive. Once the blip
+          // resolves — reconnect cancels the timer, or the disconnect gets
+          // confirmed and downstream effects tear the cast down anyway —
+          // fresh ANY_CHANGE events flow through normally again.
+          if (disconnectTimerRef.current != null) return
           // idleReason lives on the media session, not the RemotePlayer. Read
           // it here so it lands in the SAME state update as playerState — the
           // receiver delivers both in one MEDIA_STATUS, so when playerState
@@ -667,6 +700,10 @@ export function useCast(
       // instead of collapsing them to "unknown".
       throw new Error(describeCastError(rawErr))
     }
+    // A genuine new session is starting — any earlier stop() this hook
+    // instance ignored stale CONNECTED echoes for is over; let refresh()
+    // treat CONNECTED as real again.
+    stoppedRef.current = false
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
 
@@ -688,6 +725,12 @@ export function useCast(
     if (!window.cast?.framework) return
     const ctx = window.cast.framework.CastContext.getInstance()
     const session = ctx.getCurrentSession()
+    // Set before endSession(): its SESSION_STATE_CHANGED events fire
+    // asynchronously and SESSION_ENDING can still report CastState CONNECTED
+    // before the final SESSION_ENDED — refresh() checks this flag to ignore
+    // that stale reading rather than resurrecting connected:true and
+    // re-arming the disconnect debounce on the SESSION_ENDED that follows.
+    stoppedRef.current = true
     if (session) session.endSession(true)
     // This is an explicit, intentional stop (widget button, TV-finish
     // cast.stop()) — unlike a CastState blip, there's nothing to wait out.
