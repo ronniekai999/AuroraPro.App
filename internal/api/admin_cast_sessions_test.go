@@ -172,8 +172,13 @@ func TestDashboard_UsesTheCastAwareStreamCount(t *testing.T) {
 		body = body[:end]
 	}
 
-	if !strings.Contains(body, "activeStreamTileCount(") {
-		t.Error("Dashboard no longer calls activeStreamTileCount — the Active Streams tile counts one casting viewer as two streams again")
+	// The full call, arguments included. Matching only the function NAME let
+	// `activeStreamTileCount(h.transcode, nil)` pass — every direct play
+	// silently gone from the tile, whole suite green (a review demonstrated
+	// exactly that mutation).
+	const call = "activeStreamTileCount(h.transcode, h.directPlay)"
+	if !strings.Contains(body, call) {
+		t.Errorf("Dashboard does not call %s — the Active Streams tile either double-counts a casting viewer or drops direct plays", call)
 	}
 	if strings.Contains(body, "ActiveSessions()") {
 		t.Error("Dashboard calls ActiveSessions() — the raw session count, which double-counts every Chromecast viewer")

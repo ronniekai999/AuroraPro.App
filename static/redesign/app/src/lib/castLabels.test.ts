@@ -17,9 +17,12 @@
 // — castRoles + castLabel in lib/activeStreams — and this pins the strings
 // themselves. AdminView renders castLabel()'s output verbatim.
 //
-// The honest residual: nothing stops a future edit from hardcoding "Casting"
-// in JSX instead of calling castLabel. What this does guarantee is that the
-// labels the app actually has are correct, which the regex did not.
+// The honest residual, stated precisely because the previous version of this
+// paragraph overclaimed: this pins the STRINGS castLabel returns — exactly,
+// for the lease role, and against a denylist for the others. It does not and
+// cannot stop a future edit from hardcoding "Casting" in JSX instead of
+// calling castLabel. Nothing renders these labels under test; that wiring is
+// checked by reading AdminView, not by this file.
 
 import { describe, expect, it } from 'vitest'
 import { castLabel, castRoles, isReceiverRole } from './activeStreams'
@@ -37,16 +40,39 @@ const ALL_ROLES: CastRole[] = [
   'none',
 ]
 
-// "cast", "casting", "casts", "receiver" — the words that assert a TV.
-const CAST_WORDING = /\b(cast|casting|casts|receiver|receivers)\b/i
+// Words that assert a TV. Note "chromecast" and "airplay" as their own
+// alternatives: \bcast\b does NOT match inside "Chromecast", so a denylist
+// without them lets `detail: 'playing on a Chromecast'` through — which a
+// review demonstrated against this very file.
+const CAST_WORDING = /\b(cast|casting|casts|receiver|receivers|chromecast|airplay|tv|television|screen|beaming)\b/i
+
+// The exact lease label. A denylist can only reject the wordings someone
+// thought of; pinning the string means ANY change to what a Safari/iOS
+// viewer is called has to be made deliberately, in this test, by someone who
+// has read why it says what it says.
+const LEASE_LABEL = {
+  detail: 'token lease',
+  badge: 'Lease' as const,
+  description:
+    'fetched with a scoped stream token: AirPlay, a Chromecast that needed no separate clone, ' +
+    'or Safari and iOS native HLS, which use one for ordinary local playback too. ' +
+    'It sits on the extended idle lease rather than the normal one.',
+}
 
 describe('castLabel wording', () => {
   it('never claims a cast or a receiver for a lease', () => {
     // The whole point. `lease` is the role of every Safari/iOS viewer.
     const l = castLabel('lease')
     expect(l.detail).not.toMatch(CAST_WORDING)
-    expect(l.description).not.toMatch(CAST_WORDING)
     expect(l.badge).not.toBe('Cast')
+    // The description names the three producers, so it MAY say AirPlay and
+    // Chromecast — it is explaining what set the flag, not claiming this
+    // session is one. That is exactly why it is pinned exactly, below,
+    // rather than filtered.
+  })
+
+  it('pins the lease label exactly, wording included', () => {
+    expect(castLabel('lease')).toEqual(LEASE_LABEL)
   })
 
   it('claims a receiver for every receiver role', () => {
