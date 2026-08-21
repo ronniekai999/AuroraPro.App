@@ -73,7 +73,7 @@ import {
   viewingTerminal,
   type FailureKind,
 } from '@/lib/playbackQoESession'
-import { absoluteUrl, assertCastScopedToken, castSessionIdFromPlaylist, useCast } from '@/lib/cast'
+import { RECONNECT_SETTLE_MS, absoluteUrl, assertCastScopedToken, castSessionIdFromPlaylist, useCast } from '@/lib/cast'
 import { createCastSessionTracker, type CastSessionTracker } from '@/lib/castSession'
 import { isSyncDebugEnabled, recordSyncSample, type SyncDecision, type SyncSample } from '@/lib/syncDebug'
 import {
@@ -1206,16 +1206,86 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // re-pointed at the next episode. Gates the reload effect so unrelated
   // session reboots (audio-track switch, seek-rebuild) don't reload the cast.
   const castAdvancePendingRef = useRef(false)
+  // Set while cast.status.settling is true; used below to detect the
+  // settling true->false transition (see seqAtSettleClearRef).
+  const wasSettlingRef = useRef(false)
+  // Snapshot of cast.remote.updateSeq taken the instant settling clears.
+  // playerState is only trusted for the destructive branch below once
+  // updateSeq has advanced PAST this snapshot — i.e. a genuine update has
+  // landed STRICTLY AFTER settling cleared, not merely after the blip's
+  // freeze lifted at reconnect (which happens earlier, while settling is
+  // still true, and can itself carry a not-yet-caught-up snapshot: the
+  // fixed settle window bounds the WAIT, not the SDK's actual catch-up
+  // time, so a receiver that sends nothing further can clear settling with
+  // the exact reading this snapshot exists to distrust). null whenever no
+  // confirmation is currently owed (ordinary playback, or already
+  // confirmed) — the common, no-blip case never touches this at all.
+  const seqAtSettleClearRef = useRef<number | null>(null)
+  // Bounds the confirmation wait above (2026-08 review fix, round 8): if
+  // NOTHING confirms the reading — a receiver that genuinely goes quiet
+  // after reconnecting, e.g. paused — waiting forever means auto-advance
+  // (and the eventual onClose it leads to) can never fire again for the
+  // rest of this cast, which is worse than the small residual risk of
+  // acting on an unconfirmed reading. Mirrors RECONNECT_SETTLE_MS's own
+  // trade-off (pass 5): bound it, don't chase certainty the SDK can't
+  // promise.
+  const confirmFallbackTimerRef = useRef<number | null>(null)
   // Bumped by the main play effect once a new local session is established;
   // drives the reload effect at exactly the moment castLoadGetter can mint a
   // cast token for the new target.
   const [castReloadEpoch, setCastReloadEpoch] = useState(0)
   useEffect(() => {
+    const clearFallbackTimer = () => {
+      if (confirmFallbackTimerRef.current != null) {
+        window.clearTimeout(confirmFallbackTimerRef.current)
+        confirmFallbackTimerRef.current = null
+      }
+    }
+    // The actual PLAYING/IDLE decision, factored out so the fallback timer
+    // below can invoke it too. Always reads castRef.current (not the
+    // `cast` this render closed over) so a callback firing later — outside
+    // this render entirely — still sees whatever is truly current, not a
+    // stale snapshot from whenever this effect instance was created.
+    const evaluate = () => {
+      const c = castRef.current
+      if (c.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
+      if (castHasPlayedRef.current && c.remote.playerState === 'IDLE') {
+        // De-arm synchronously so a re-render mid-advance can't re-enter here.
+        castHasPlayedRef.current = false
+        // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
+        // remote reports CANCELLED/INTERRUPTED, and an ERROR shouldn't silently
+        // skip ahead — those close out instead (cast.stop → Chromecast-end →
+        // onClose). FINISHED, and null/unknown (to preserve the prior any-IDLE
+        // behavior on receivers that don't surface a reason), advance. idleReason
+        // rides the same MEDIA_STATUS as playerState, so it's current here.
+        const reason = c.remote.idleReason
+        if (reason === 'CANCELLED' || reason === 'INTERRUPTED' || reason === 'ERROR') {
+          c.stop()
+        } else {
+          // Arm BEFORE the async advance so the next session's epoch bump (which
+          // is network-bound and always lands later) can never beat the flag.
+          castAdvancePendingRef.current = true
+          void (async () => {
+            const advanced = await onEndedRef.current?.()
+            if (!advanced) {
+              // Nothing to advance to — clear the arm and close out (the prior
+              // end-of-media behavior: stop → Chromecast-end effect → onClose).
+              castAdvancePendingRef.current = false
+              c.stop()
+            }
+          })()
+        }
+      }
+    }
+
     if (!cast.status.connected) {
-      // Cast gone: disarm both flags so a stale advance can't survive a
+      // Cast gone: disarm every flag so a stale advance can't survive a
       // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
       castHasPlayedRef.current = false
       castAdvancePendingRef.current = false
+      wasSettlingRef.current = false
+      seqAtSettleClearRef.current = null
+      clearFallbackTimer()
       // Cast over. Release the clone the receiver was on — nothing will ever
       // fetch it again, and leaving it to age out holds one of the user's
       // three session slots for the full 30-minute lease. The tracker no-ops
@@ -1223,36 +1293,50 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       castSessionRef.current?.end()
       return
     }
-    if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
-    if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
-      // De-arm synchronously so a re-render mid-advance can't re-enter here.
-      castHasPlayedRef.current = false
-      // Only a NATURAL end-of-media should auto-advance. A user stop on the TV
-      // remote reports CANCELLED/INTERRUPTED, and an ERROR shouldn't silently
-      // skip ahead — those close out instead (cast.stop → Chromecast-end →
-      // onClose). FINISHED, and null/unknown (to preserve the prior any-IDLE
-      // behavior on receivers that don't surface a reason), advance. idleReason
-      // rides the same MEDIA_STATUS as playerState, so it's current here.
-      const reason = cast.remote.idleReason
-      if (reason === 'CANCELLED' || reason === 'INTERRUPTED' || reason === 'ERROR') {
-        cast.stop()
-      } else {
-        // Arm BEFORE the async advance so the next session's epoch bump (which
-        // is network-bound and always lands later) can never beat the flag.
-        castAdvancePendingRef.current = true
-        void (async () => {
-          const advanced = await onEndedRef.current?.()
-          if (!advanced) {
-            // Nothing to advance to — clear the arm and close out (the prior
-            // end-of-media behavior: stop → Chromecast-end effect → onClose).
-            castAdvancePendingRef.current = false
-            cast.stop()
-          }
-        })()
-      }
+    // settling: a disconnect debounce just resolved and remote hasn't been
+    // trusted for a fixed window yet (see useCast's refresh()) — its freeze
+    // already lifted at the reconnect edge, so an ANY_CHANGE landing during
+    // this window CAN republish a not-yet-caught-up playerState. This is
+    // the single most destructive remote consumer in the file (advances to
+    // the next episode, or stops the cast, off nothing more than that one
+    // reading) — the exact class of bug settling exists to prevent, so it
+    // must hold off here too, not just in the party polling loops.
+    if (cast.status.settling) {
+      wasSettlingRef.current = true
+      // A NEW blip superseding a still-pending confirmation from an
+      // EARLIER one (rare, but see the settle-timer's own equivalent
+      // handling in cast.ts) — that confirmation is moot now; this cycle
+      // owns the decision once it resolves.
+      seqAtSettleClearRef.current = null
+      clearFallbackTimer()
+      return
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cast.status.connected, cast.remote.playerState])
+    if (wasSettlingRef.current) {
+      // Just cleared — don't trust playerState yet even though we're no
+      // longer gated; require one more genuine update first (see
+      // seqAtSettleClearRef's comment above), bounded by the fallback timer.
+      wasSettlingRef.current = false
+      seqAtSettleClearRef.current = cast.remote.updateSeq
+      clearFallbackTimer()
+      confirmFallbackTimerRef.current = window.setTimeout(() => {
+        confirmFallbackTimerRef.current = null
+        // Only act if this specific confirmation is still the live one —
+        // still connected, not (yet again) settling, and nothing already
+        // confirmed it naturally in the meantime. Any of those false means
+        // a newer cycle already owns this decision.
+        if (!castRef.current.status.connected || castRef.current.status.settling) return
+        if (seqAtSettleClearRef.current === null) return
+        seqAtSettleClearRef.current = null
+        evaluate()
+      }, RECONNECT_SETTLE_MS)
+    }
+    if (seqAtSettleClearRef.current !== null) {
+      if (cast.remote.updateSeq === seqAtSettleClearRef.current) return
+      seqAtSettleClearRef.current = null
+      clearFallbackTimer()
+    }
+    evaluate()
+  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
 
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
@@ -3478,6 +3562,44 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   //   - Cast-token renewal reuses the same expiry check as resumeCast: a
   //     correction after a long pause re-mints via loadCurrent instead of
   //     issuing a seek the receiver's already-expired URL can't serve.
+  //
+  // The confirmation state below (gate/await-confirm tracking for both
+  // branches) lives in REFS, not effect-scoped `let`s, for the same reason
+  // the auto-advance effect's does (2026-08 review fix, round 9): this
+  // effect's own dependency array includes `party.isPlaying`, which can
+  // flip during the few seconds a blip's confirmation is pending — a plain
+  // `let` would be torn down and recreated with the whole interval on that
+  // re-run, silently discarding "still awaiting confirmation" and letting
+  // the very next tick trust an unconfirmed reading outright. Refs survive
+  // the effect re-running so the confirmation state survives it too.
+  //
+  // Deliberately NOT reset when `target`/`party.partyMediaItemId` change (a
+  // genuine identity change, unlike `isPlaying`): switching content
+  // requires the receiver to load it, which cycles `isMediaLoaded` through
+  // false — the gate itself re-arms wasGated/seqAwaitingConfirm naturally
+  // in that case. Adding a second, separate reset path for identity
+  // changes would duplicate that coverage without a demonstrated gap; if
+  // that assumption ever proves wrong in practice, the fix is a targeted
+  // reset keyed on identity, not reverting to effect-scoped state (which
+  // is what created this bug).
+  //
+  // `party.isHost` flipping is different: host and guest keep SEPARATE
+  // refs, so the newly-active branch starts unarmed (trusted) rather than
+  // inheriting the other branch's confirmation state — there is no gate to
+  // "naturally re-arm" here, since isMediaLoaded doesn't necessarily change
+  // on a role flip. This IS a real, if narrow, gap (a role flip landing
+  // inside another branch's pending confirmation window skips it), but the
+  // blast radius is the same bounded one the fallback timeout already
+  // accepts by design: a redundant seek to the receiver's own true
+  // position, or a play/pause toggle that self-corrects on the next tick —
+  // not a destructive action. Not worth a cross-branch reset for that.
+  const hostLastSnapshotRef = useRef<{ paused: boolean; sec: number; atMs: number } | null>(null)
+  const hostWasGatedRef = useRef(false)
+  const hostSeqAwaitingConfirmRef = useRef<number | null>(null)
+  const hostAwaitStartedAtMsRef = useRef(0)
+  const guestWasGatedRef = useRef(false)
+  const guestSeqAwaitingConfirmRef = useRef<number | null>(null)
+  const guestAwaitStartedAtMsRef = useRef(0)
   useEffect(() => {
     if (!target || !party || !partyControlsMedia || !cast.status.connected) return
 
@@ -3495,14 +3617,37 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     const castSecToAbsMs = (sec: number) => Math.round((sec + (startSecRef.current ?? 0)) * 1000)
 
     if (party.isHost) {
-      let lastSnapshot: { paused: boolean; sec: number; atMs: number } | null = null
       const id = window.setInterval(() => {
         const c = castRef.current
-        if (!c.status.connected || !c.remote.isMediaLoaded) return
+        // settling: a disconnect debounce is pending (see useCast's
+        // refresh()) — c.remote is frozen at its pre-blip reading, not
+        // live. Corrective actions here (party position broadcasts) must
+        // wait for it to resolve rather than react to stale data.
+        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+          hostWasGatedRef.current = true
+          return
+        }
+        if (hostWasGatedRef.current) {
+          // Gate just lifted — wait for a genuine update (updateSeq past
+          // this snapshot) before trusting anything read here as a
+          // comparison baseline, bounded by RECONNECT_SETTLE_MS so a
+          // receiver that stays quiet doesn't disable corrections for the
+          // rest of the cast (same trade-off as the auto-advance effect).
+          hostWasGatedRef.current = false
+          hostSeqAwaitingConfirmRef.current = c.remote.updateSeq
+          hostAwaitStartedAtMsRef.current = Date.now()
+          hostLastSnapshotRef.current = null
+          return
+        }
+        if (hostSeqAwaitingConfirmRef.current !== null) {
+          const confirmed = c.remote.updateSeq !== hostSeqAwaitingConfirmRef.current
+          if (!confirmed && Date.now() - hostAwaitStartedAtMsRef.current < RECONNECT_SETTLE_MS) return
+          hostSeqAwaitingConfirmRef.current = null
+        }
         const nowPaused = c.remote.isPaused
         const nowSec = c.remote.currentTime
-        const prev = lastSnapshot
-        lastSnapshot = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
+        const prev = hostLastSnapshotRef.current
+        hostLastSnapshotRef.current = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
         // First sample after (re)connect — nothing to compare against yet.
         // Avoids broadcasting a spurious event off the transient state
         // between loadMedia() resolving and the receiver reaching the
@@ -3546,9 +3691,34 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     }
 
     // Guest branch.
+    // See the host branch's identical pair above: the gate below lifting
+    // (settling false, isMediaLoaded true) does not by itself prove
+    // `remote` is fresh — isMediaLoaded can read true on the very
+    // not-yet-caught-up snapshot the freeze in cast.ts exists to keep from
+    // being acted on, so every action past the gate additionally waits for
+    // a confirmed (updateSeq-advanced) reading, bounded by
+    // RECONNECT_SETTLE_MS (2026-08 review fix, round 8).
     const id = window.setInterval(() => {
       const c = castRef.current
-      if (!c.status.connected || !c.remote.isMediaLoaded) return
+      // settling: see the host branch's identical guard above — c.remote
+      // (including currentTime, which the drift check below compares
+      // against the party's continuously-advancing server position) is
+      // frozen and stale while a disconnect is pending confirmation.
+      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+        guestWasGatedRef.current = true
+        return
+      }
+      if (guestWasGatedRef.current) {
+        guestWasGatedRef.current = false
+        guestSeqAwaitingConfirmRef.current = c.remote.updateSeq
+        guestAwaitStartedAtMsRef.current = Date.now()
+        return
+      }
+      if (guestSeqAwaitingConfirmRef.current !== null) {
+        const confirmed = c.remote.updateSeq !== guestSeqAwaitingConfirmRef.current
+        if (!confirmed && Date.now() - guestAwaitStartedAtMsRef.current < RECONNECT_SETTLE_MS) return
+        guestSeqAwaitingConfirmRef.current = null
+      }
       // H3-equivalent guard: only mirror when this player is showing the
       // same content the party is. Belt-and-suspenders — the whole effect
       // is already gated on partyControlsMedia, which is reactive to the

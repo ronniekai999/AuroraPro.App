@@ -20,6 +20,15 @@
 import { useEffect, useRef, useState } from 'react'
 
 const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
+// How long a connected:false reading must persist before useCast reports it
+// publicly. See the comment on refresh()'s disconnect-debounce for why.
+const CAST_DISCONNECT_GRACE_MS = 4000
+// How long status.settling stays true after a reconnect before `remote` is
+// trusted again. See remoteStaleRef's declaration for why this is a fixed
+// delay rather than waiting for a specific SDK event. Exported so consumers
+// that add their OWN bounded wait on top of settling (see VideoPlayer's
+// auto-advance effect) share the same tuning rather than drifting from it.
+export const RECONNECT_SETTLE_MS = 1500
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
 
@@ -207,6 +216,13 @@ export interface CastStatus {
   available: boolean
   // We have an active session with a receiver.
   connected: boolean
+  // True while a disconnect is suspected but not yet confirmed (mid grace
+  // window — see refresh()'s debounce comment). `connected` and `remote`
+  // both keep reporting their last known-good reading during this window,
+  // so anything that treats them as LIVE receiver data to act on (seek/sync
+  // corrections, not just display) should check this and hold off — the
+  // data may be stale, not current.
+  settling: boolean
   // Friendly device name when connected ("Living Room", etc.).
   deviceName: string | null
 }
@@ -243,6 +259,18 @@ export interface CastRemoteState {
   // session, not the RemotePlayer (which only carries playerState). The player
   // uses this to auto-advance only on a genuine finish.
   idleReason: string | null
+  // Bumped once for every update onRemoteChange actually applies (i.e. one
+  // that got past its freeze check) — never during an active blip, but
+  // still on every ordinary update once reconnected, INCLUDING the very
+  // first one after a blip, which can itself still be a not-yet-caught-up
+  // snapshot (settling covers the fixed wait, not the SDK's actual catch-up
+  // time). Consumers that need to be sure a reading is genuinely fresh
+  // rather than merely "not currently frozen" — i.e. landed strictly AFTER
+  // settling last cleared, not just after the freeze lifted at reconnect —
+  // compare this against a snapshot taken at the moment settling clears.
+  // Pure counter, not itself gated by settling — gating it would just move
+  // this same distinction one level deeper.
+  updateSeq: number
 }
 
 export function useCast(
@@ -260,6 +288,7 @@ export function useCast(
     supported: false,
     available: false,
     connected: false,
+    settling: false,
     deviceName: null,
   })
   const [remote, setRemote] = useState<CastRemoteState>({
@@ -271,11 +300,53 @@ export function useCast(
     duration: 0,
     playerState: null,
     idleReason: null,
+    updateSeq: 0,
   })
   // RemotePlayer + its controller, created once the framework is detected.
   // Held in refs so the play/pause/seek callbacks stay stable across renders.
   const remotePlayerRef = useRef<CastRemotePlayer | null>(null)
   const remoteControllerRef = useRef<CastRemotePlayerController | null>(null)
+  // Backing counter for CastRemoteState.updateSeq — a ref rather than
+  // reading the previous state back, since onRemoteChange always replaces
+  // the whole `remote` object and reading stale state out of a closure is
+  // exactly the class of bug this file has spent several rounds fixing.
+  const prevUpdateSeqRef = useRef(0)
+
+  // Pending "confirm the disconnect" timer + the last publicly-reported
+  // connected value, both read/written by refresh() (see its comment) to
+  // debounce connected:true -> false transitions across CAST_STATE_CHANGED /
+  // SESSION_STATE_CHANGED events.
+  const disconnectTimerRef = useRef<number | null>(null)
+  const lastConnectedRef = useRef(false)
+  // True from the moment a disconnect debounce is armed until `remote` is
+  // trusted again. Distinct from `disconnectTimerRef` being non-null: that
+  // only covers the ACTIVE debounce window, but on reconnect the timer
+  // clears (and connected goes back to true) before the receiver's next
+  // real update necessarily arrives — `remote` stays frozen at its pre-blip
+  // reading in that gap. status.settling stays true across that whole span
+  // so automatic consumers (party drift-correction) don't act on it as live
+  // data. Cleared by settleTimerRef below on a fixed delay, NOT by waiting
+  // for a specific ANY_CHANGE — the SDK gives no guarantee one arrives
+  // promptly (a paused, static receiver may fire nothing for a long time),
+  // and waiting for a "real" one still can't prove IT isn't itself a
+  // not-yet-caught-up reset snapshot. A short fixed wait is what bounds
+  // both problems at once: `remote` gets one un-gated window to pick up
+  // whatever the receiver actually sends (onRemoteChange only freezes
+  // while disconnectTimerRef is non-null, which clears at reconnect — same
+  // moment this timer starts), and settling can never be stuck forever.
+  const remoteStaleRef = useRef(false)
+  // Pending settle-timer handle — see RECONNECT_SETTLE_MS's declaration
+  // above for why this is a fixed delay, armed at the reconnect edge below.
+  const settleTimerRef = useRef<number | null>(null)
+  // True while an explicit stop() is tearing its session down. endSession()
+  // fires SESSION_STATE_CHANGED asynchronously — a SESSION_ENDING event can
+  // still report CastState CONNECTED before the final SESSION_ENDED lands.
+  // Without this guard, refresh() reads that stale CONNECTED, undoes stop()'s
+  // immediate connected:false, and re-arms the disconnect debounce on the
+  // SESSION_ENDED that follows, so one user Stop produces two false
+  // transitions (double onClose(), double host-handoff rebuild). Cleared
+  // once a NEW session is actually requested.
+  const stoppedRef = useRef(false)
 
   // Stable ref to currentLoad so listeners don't need to be
   // re-attached when the player's state changes. Assigned in an
@@ -332,16 +403,130 @@ export function useCast(
         console.warn('[Aurora Cast] setOptions threw:', e)
       }
 
+      // refresh() reflects most state changes immediately, but debounces the
+      // connected:true -> false transition specifically. Consumers (the
+      // player's cast-disconnect effects) react to connected going false by
+      // tearing down the receiver's stream session and closing the player —
+      // destructive, hard-to-reverse actions. A transient CastState blip (a
+      // brief Wi-Fi hiccup, a router-level connection block, a receiver
+      // re-handshake) flips CONNECTED away for one event and back moments
+      // later as the SDK's own resumeSavedSession reconnects the sender —
+      // but by then the clone the TV was streaming had already been
+      // deleted, forcing a full loadMedia rebuild (issue #492: "goes back to
+      // the beginning, then seeks to the right position"). Giving a real
+      // reconnect a few seconds to land before propagating the disconnect
+      // avoids that, at the cost of a short delay before a GENUINE stop
+      // (TV remote, explicit Stop, receiver power-off) is reflected — an
+      // acceptable trade since those all eventually settle to
+      // connected:false and are not time-critical to observe instantly.
       const refresh = () => {
         if (!mounted) return
         const castState = ctx.getCastState()
         const session = ctx.getCurrentSession()
-        setStatus({
-          supported: true,
-          available: castState !== fw.CastState.NO_DEVICES_AVAILABLE,
-          connected: castState === fw.CastState.CONNECTED,
-          deviceName: session ? session.getCastDevice().friendlyName : null,
-        })
+        const rawConnected = castState === fw.CastState.CONNECTED
+        const deviceName = session ? session.getCastDevice().friendlyName : null
+        const available = castState !== fw.CastState.NO_DEVICES_AVAILABLE
+
+        if (rawConnected) {
+          if (stoppedRef.current) {
+            // Stale CONNECTED reading from a stop() still tearing its
+            // session down (SESSION_ENDING fires before SESSION_ENDED) —
+            // see stoppedRef's declaration. Ignore it: applying it here
+            // would resurrect connected:true and let the SESSION_ENDED
+            // that follows re-arm the disconnect debounce for a stop the
+            // user already asked for.
+            return
+          }
+          if (disconnectTimerRef.current != null) {
+            window.clearTimeout(disconnectTimerRef.current)
+            disconnectTimerRef.current = null
+          }
+          lastConnectedRef.current = true
+          // settling is NOT cleared here (2026-08 review fix, round 2): it
+          // stays whatever it currently is — still true if a blip was
+          // pending, since `remote` isn't resynced yet either (see below).
+          // Clearing settling HERE, before `remote` is actually trustworthy,
+          // would tell automatic consumers (party drift-correction) "remote
+          // is live" while it's still the frozen pre-blip reading — a stale
+          // `currentTime` compared against the party's continuously-
+          // advancing position looks exactly like a seek and triggers a
+          // spurious corrective broadcast.
+          setStatus((prev) => ({ supported: true, available, connected: true, settling: prev.settling, deviceName }))
+          // Deliberately NOT resyncing `remote` here either (round 1 of this
+          // fix): the RemotePlayer's fields can still hold a reset/IDLE
+          // snapshot from the disconnect at the exact instant CastState
+          // flips back to CONNECTED — the receiver's own MEDIA_STATUS
+          // catch-up hasn't necessarily landed yet. Reading it now would
+          // republish that reset state as if current, which is exactly what
+          // the freeze in onRemoteChange exists to prevent, just moved to
+          // the reconnect edge instead of the mid-blip one. Leave `remote`
+          // frozen; onRemoteChange's freeze lifts now that the timer is
+          // cleared, so ordinary ANY_CHANGE events flow through and update
+          // it on their own from here — settling just gives them a fixed
+          // window to do so (below) before consumers trust it again.
+          if (remoteStaleRef.current && settleTimerRef.current == null) {
+            settleTimerRef.current = window.setTimeout(() => {
+              settleTimerRef.current = null
+              if (!mounted) return
+              // A NEW blip may have started since this was armed — in that
+              // case disconnectTimerRef is non-null again and that cycle's
+              // own resolution (confirmed disconnect, or another reconnect
+              // re-arming this same timer) owns clearing settling, not this
+              // stale firing.
+              if (disconnectTimerRef.current != null) return
+              remoteStaleRef.current = false
+              setStatus((prev) => ({ ...prev, settling: false }))
+            }, RECONNECT_SETTLE_MS)
+          }
+          return
+        }
+
+        // Not connected right now. `supported`/`available` (cast-button
+        // visibility) aren't destructive, so reflect them immediately.
+        // `deviceName` is kept as-is while connected is still being
+        // reported true — the session has no device to name once
+        // disconnected, and blanking it now would show "connected" UI with
+        // no device while the debounce is pending. connected:false itself
+        // only propagates once it survives the grace window, and only one
+        // timer runs per disconnect (a second CAST_STATE_CHANGED while
+        // already pending must not push the deadline back out).
+        setStatus((prev) => ({ ...prev, supported: true, available }))
+        if (!lastConnectedRef.current || disconnectTimerRef.current != null) return
+        remoteStaleRef.current = true
+        // A new disconnect cycle supersedes any settle-timer fallback left
+        // over from a PRIOR reconnect (see its arming site below) — clear it
+        // so the next reconnect gets the settle timer's full budget rather
+        // than whatever was left on an unrelated, already-ticking one.
+        if (settleTimerRef.current != null) {
+          window.clearTimeout(settleTimerRef.current)
+          settleTimerRef.current = null
+        }
+        setStatus((prev) => ({ ...prev, settling: true }))
+        disconnectTimerRef.current = window.setTimeout(() => {
+          disconnectTimerRef.current = null
+          if (!mounted) return
+          if (ctx.getCastState() !== fw.CastState.CONNECTED) {
+            lastConnectedRef.current = false
+            remoteStaleRef.current = false
+            setStatus((prev) => ({ ...prev, connected: false, settling: false }))
+            // Reconnect never came — sync remote to whatever the (now
+            // truly disconnected) RemotePlayer currently reports, rather
+            // than leaving it frozen at its pre-blip reading forever. Safe
+            // here (unlike the reconnect edge above): connected is false in
+            // this SAME update, so nothing treats `remote` as live data.
+            onRemoteChange?.()
+            return
+          }
+          // CastState already reads CONNECTED here — a rare race where this
+          // timer fired before the CAST_STATE_CHANGED for the reconnect was
+          // processed. Nothing to do: disconnectTimerRef is already null
+          // (cleared above) and settling/remoteStaleRef are both still
+          // true, which is exactly the state the ordinary rawConnected
+          // reconnect path leaves behind too — when that event's own
+          // refresh() call lands (which it still will), it arms the
+          // settle-timer fallback the same as any other reconnect. Settling
+          // is NOT stuck: nothing here needs to act on this race at all.
+        }, CAST_DISCONNECT_GRACE_MS)
       }
       const onCastState = () => refresh()
       const onSessionState = () => refresh()
@@ -361,6 +546,21 @@ export function useCast(
         remoteControllerRef.current = remoteController
         onRemoteChange = () => {
           if (!mounted) return
+          // A disconnect is pending confirmation (see refresh()'s debounce):
+          // status.connected is still reporting true, but the RemotePlayer
+          // frequently resets to IDLE/zeroed fields the instant the
+          // underlying channel drops — well before we know whether this is
+          // a real disconnect or a blip that's about to self-heal. Freeze
+          // `remote` at its last good reading rather than publish that
+          // reset: surfacing playerState:'IDLE' here while connected still
+          // reads true is exactly what VideoPlayer's auto-advance effect
+          // treats as a genuine end-of-media, which would skip to the next
+          // episode (or close the player) on nothing more than the same
+          // blip connected's debounce exists to survive. Once the blip
+          // resolves — reconnect cancels the timer, or the disconnect gets
+          // confirmed and downstream effects tear the cast down anyway —
+          // fresh ANY_CHANGE events flow through normally again.
+          if (disconnectTimerRef.current != null) return
           // idleReason lives on the media session, not the RemotePlayer. Read
           // it here so it lands in the SAME state update as playerState — the
           // receiver delivers both in one MEDIA_STATUS, so when playerState
@@ -380,6 +580,7 @@ export function useCast(
             duration: player.duration || 0,
             playerState: player.playerState ?? null,
             idleReason,
+            updateSeq: (prevUpdateSeqRef.current += 1),
           })
         }
         remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)
@@ -399,6 +600,14 @@ export function useCast(
         } catch { /* listener cleanup is best-effort */ }
         remotePlayerRef.current = null
         remoteControllerRef.current = null
+        if (disconnectTimerRef.current != null) {
+          window.clearTimeout(disconnectTimerRef.current)
+          disconnectTimerRef.current = null
+        }
+        if (settleTimerRef.current != null) {
+          window.clearTimeout(settleTimerRef.current)
+          settleTimerRef.current = null
+        }
       }
       refresh()
       // eslint-disable-next-line no-console
@@ -570,6 +779,15 @@ export function useCast(
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
       throw new Error('cast SDK not ready')
     }
+    // A genuine new session is starting — clear this BEFORE requestSession()
+    // (not after awaiting it): the SDK can dispatch CAST_STATE_CHANGED /
+    // SESSION_STATE_CHANGED synchronously as part of establishing the
+    // session, ahead of our `await` continuation resuming. If stoppedRef
+    // were still true when those fire, refresh() would ignore the very
+    // CONNECTED reading that starts this cast, and — since useCast lives for
+    // the app's whole lifetime, not per-cast — every cast after the first
+    // stop() would silently report connected:false while the receiver plays.
+    stoppedRef.current = false
     const ctx = window.cast.framework.CastContext.getInstance()
     // Belt-and-suspenders: re-apply setOptions right before requesting
     // a session. The CAF Sender will throw "Cannot start session
@@ -631,7 +849,28 @@ export function useCast(
     if (!window.cast?.framework) return
     const ctx = window.cast.framework.CastContext.getInstance()
     const session = ctx.getCurrentSession()
+    // Set before endSession(): its SESSION_STATE_CHANGED events fire
+    // asynchronously and SESSION_ENDING can still report CastState CONNECTED
+    // before the final SESSION_ENDED — refresh() checks this flag to ignore
+    // that stale reading rather than resurrecting connected:true and
+    // re-arming the disconnect debounce on the SESSION_ENDED that follows.
+    stoppedRef.current = true
     if (session) session.endSession(true)
+    // This is an explicit, intentional stop (widget button, TV-finish
+    // cast.stop()) — unlike a CastState blip, there's nothing to wait out.
+    // Bypass refresh()'s disconnect-debounce so the player closes right
+    // away instead of sitting connected:true for the grace window.
+    if (disconnectTimerRef.current != null) {
+      window.clearTimeout(disconnectTimerRef.current)
+      disconnectTimerRef.current = null
+    }
+    if (settleTimerRef.current != null) {
+      window.clearTimeout(settleTimerRef.current)
+      settleTimerRef.current = null
+    }
+    lastConnectedRef.current = false
+    remoteStaleRef.current = false
+    setStatus((prev) => ({ ...prev, connected: false, settling: false }))
   }
 
   // Toggle play/pause on the receiver. No-op until a RemotePlayer is bound.
