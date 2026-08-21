@@ -274,6 +274,10 @@ afterEach(async () => {
 })
 
 describe('useCast disconnect debounce', () => {
+  // Must match cast.ts's private RECONNECT_SETTLE_MS — how long settling
+  // stays true after a reconnect before `remote` is trusted again.
+  const RECONNECT_SETTLE_MS = 1500
+
   it('reports supported even when the SDK attaches while not connected (regression #1)', () => {
     installFakeSdk()
     render(<Harness />)
@@ -285,7 +289,6 @@ describe('useCast disconnect debounce', () => {
     const sdk = installFakeSdk()
     render(<Harness />)
     act(() => sdk.triggerReconnect())
-    act(() => sdk.emitRemoteChange()) // establish a live remote baseline
     expect(connected()).toBe('true')
     expect(settling()).toBe('false')
 
@@ -295,11 +298,12 @@ describe('useCast disconnect debounce', () => {
 
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
-    // remote hasn't been resynced yet — still settling until the receiver's
-    // own next update lands (see regression #4 below for why that matters).
+    // remote hasn't necessarily been resynced yet — still settling until the
+    // fixed settle window elapses (see regression #4 below for why this
+    // isn't event-driven).
     expect(settling()).toBe('true')
 
-    act(() => sdk.emitRemoteChange())
+    act(() => { vi.advanceTimersByTime(RECONNECT_SETTLE_MS) })
     expect(settling()).toBe('false')
 
     // The stale timer must not still be armed and fire later.
@@ -393,7 +397,7 @@ describe('useCast disconnect debounce', () => {
     expect(connected()).toBe('true')
   })
 
-  it('freezes remote during a pending blip and does not eagerly republish a stale snapshot on reconnect (regression #4)', () => {
+  it('does not eagerly read remote at the reconnect edge, but the freeze lifts immediately after (regression #4)', () => {
     const sdk = installFakeSdk()
     render(<Harness />)
     act(() => sdk.triggerReconnect())
@@ -412,20 +416,60 @@ describe('useCast disconnect debounce', () => {
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('PLAYING') // still the pre-blip reading, frozen
 
-    // Reconnect lands, but the RemotePlayer's fields haven't caught up to
-    // the receiver's real state yet (still show the mid-blip reset) — the
-    // fix must NOT eagerly read them, or clear settling, at this exact
-    // instant.
+    // Reconnect lands. The fix must NOT eagerly read the RemotePlayer's
+    // fields at this exact instant — they can still hold a not-yet-caught-up
+    // snapshot from the disconnect.
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
-    expect(settling()).toBe('true') // still unresynced — no eager clear
     expect(playerState()).toBe('PLAYING') // unchanged — no eager resync
 
-    // The receiver's next genuine update is what actually refreshes remote
-    // AND clears settling, together.
+    // But the freeze itself lifts immediately (disconnectTimerRef clears at
+    // reconnect) — ordinary ANY_CHANGE events flow through normally again
+    // from here, independent of settling (see the next two tests for why
+    // settling clearing is NOT tied to this event).
     player.playerState = 'BUFFERING'
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('BUFFERING')
+  })
+
+  it('keeps settling true for a fixed window after reconnect regardless of ANY_CHANGE timing, then clears it', () => {
+    const sdk = installFakeSdk()
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    act(() => sdk.triggerBlip())
+    expect(settling()).toBe('true')
+
+    act(() => sdk.triggerReconnect())
+    expect(settling()).toBe('true') // not cleared by the reconnect itself
+
+    // An ANY_CHANGE arriving during the settle window must not clear it
+    // early — settling is a fixed timer, not event-driven, specifically so
+    // a not-yet-caught-up event can't be mistaken for the real resync.
+    const player = sdk.getRemotePlayer()!
+    player.playerState = 'BUFFERING'
+    act(() => sdk.emitRemoteChange())
+    expect(settling()).toBe('true')
+
+    act(() => { vi.advanceTimersByTime(RECONNECT_SETTLE_MS - 1) })
+    expect(settling()).toBe('true')
+    act(() => { vi.advanceTimersByTime(1) })
+    expect(settling()).toBe('false')
+  })
+
+  it('clears settling via the fixed timer even if the receiver sends no further ANY_CHANGE at all (no unbounded wait)', () => {
+    const sdk = installFakeSdk()
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    act(() => sdk.triggerBlip())
+    expect(settling()).toBe('true')
+
+    // Reconnect lands, but the receiver stays static (e.g. genuinely
+    // paused) and never fires another ANY_CHANGE — settling must still
+    // resolve, not stay stuck true forever disabling party sync.
+    act(() => sdk.triggerReconnect())
+    expect(settling()).toBe('true')
+
+    act(() => { vi.advanceTimersByTime(RECONNECT_SETTLE_MS) })
     expect(settling()).toBe('false')
   })
 

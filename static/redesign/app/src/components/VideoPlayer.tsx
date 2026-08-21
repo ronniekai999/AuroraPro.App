@@ -3496,16 +3496,28 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
 
     if (party.isHost) {
       let lastSnapshot: { paused: boolean; sec: number; atMs: number } | null = null
+      // True for any tick the settling gate below skipped. `lastSnapshot`
+      // isn't touched while gated, so once settling clears it's still
+      // whatever it was BEFORE the gate started — comparing against it
+      // would diff fresh data against a snapshot from possibly seconds
+      // earlier, with `elapsedSec` counting the whole gated span. Treat the
+      // first tick after a gate the same as the first tick after (re)connect
+      // — a fresh baseline, not a comparison (2026-08 review fix).
+      let wasGated = false
       const id = window.setInterval(() => {
         const c = castRef.current
         // settling: a disconnect debounce is pending (see useCast's
         // refresh()) — c.remote is frozen at its pre-blip reading, not
         // live. Corrective actions here (party position broadcasts) must
         // wait for it to resolve rather than react to stale data.
-        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) return
+        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) {
+          wasGated = true
+          return
+        }
         const nowPaused = c.remote.isPaused
         const nowSec = c.remote.currentTime
-        const prev = lastSnapshot
+        const prev = wasGated ? null : lastSnapshot
+        wasGated = false
         lastSnapshot = { paused: nowPaused, sec: nowSec, atMs: Date.now() }
         // First sample after (re)connect — nothing to compare against yet.
         // Avoids broadcasting a spurious event off the transient state
