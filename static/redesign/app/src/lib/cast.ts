@@ -20,6 +20,9 @@
 import { useEffect, useRef, useState } from 'react'
 
 const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
+// How long a connected:false reading must persist before useCast reports it
+// publicly. See the comment on refresh()'s disconnect-debounce for why.
+const CAST_DISCONNECT_GRACE_MS = 4000
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
 
@@ -277,6 +280,13 @@ export function useCast(
   const remotePlayerRef = useRef<CastRemotePlayer | null>(null)
   const remoteControllerRef = useRef<CastRemotePlayerController | null>(null)
 
+  // Pending "confirm the disconnect" timer + the last publicly-reported
+  // connected value, both read/written by refresh() (see its comment) to
+  // debounce connected:true -> false transitions across CAST_STATE_CHANGED /
+  // SESSION_STATE_CHANGED events.
+  const disconnectTimerRef = useRef<number | null>(null)
+  const lastConnectedRef = useRef(false)
+
   // Stable ref to currentLoad so listeners don't need to be
   // re-attached when the player's state changes. Assigned in an
   // effect (not during render) per the react-hooks/refs rule —
@@ -332,16 +342,59 @@ export function useCast(
         console.warn('[Aurora Cast] setOptions threw:', e)
       }
 
+      // refresh() reflects most state changes immediately, but debounces the
+      // connected:true -> false transition specifically. Consumers (the
+      // player's cast-disconnect effects) react to connected going false by
+      // tearing down the receiver's stream session and closing the player —
+      // destructive, hard-to-reverse actions. A transient CastState blip (a
+      // brief Wi-Fi hiccup, a router-level connection block, a receiver
+      // re-handshake) flips CONNECTED away for one event and back moments
+      // later as the SDK's own resumeSavedSession reconnects the sender —
+      // but by then the clone the TV was streaming had already been
+      // deleted, forcing a full loadMedia rebuild (issue #492: "goes back to
+      // the beginning, then seeks to the right position"). Giving a real
+      // reconnect a few seconds to land before propagating the disconnect
+      // avoids that, at the cost of a short delay before a GENUINE stop
+      // (TV remote, explicit Stop, receiver power-off) is reflected — an
+      // acceptable trade since those all eventually settle to
+      // connected:false and are not time-critical to observe instantly.
       const refresh = () => {
         if (!mounted) return
         const castState = ctx.getCastState()
         const session = ctx.getCurrentSession()
-        setStatus({
-          supported: true,
-          available: castState !== fw.CastState.NO_DEVICES_AVAILABLE,
-          connected: castState === fw.CastState.CONNECTED,
-          deviceName: session ? session.getCastDevice().friendlyName : null,
-        })
+        const rawConnected = castState === fw.CastState.CONNECTED
+        const deviceName = session ? session.getCastDevice().friendlyName : null
+        const available = castState !== fw.CastState.NO_DEVICES_AVAILABLE
+
+        if (rawConnected) {
+          if (disconnectTimerRef.current != null) {
+            window.clearTimeout(disconnectTimerRef.current)
+            disconnectTimerRef.current = null
+          }
+          lastConnectedRef.current = true
+          setStatus({ supported: true, available, connected: true, deviceName })
+          return
+        }
+
+        // Not connected right now. `available` (cast-button visibility) isn't
+        // destructive, so reflect it immediately. `deviceName` is kept as-is
+        // while connected is still being reported true — the session has no
+        // device to name once disconnected, and blanking it now would show
+        // "connected" UI with no device while the debounce is pending.
+        // connected:false itself only propagates once it survives the grace
+        // window, and only one timer runs per disconnect (a second
+        // CAST_STATE_CHANGED while already pending must not push the
+        // deadline back out).
+        setStatus((prev) => ({ ...prev, available }))
+        if (!lastConnectedRef.current || disconnectTimerRef.current != null) return
+        disconnectTimerRef.current = window.setTimeout(() => {
+          disconnectTimerRef.current = null
+          if (!mounted) return
+          if (ctx.getCastState() !== fw.CastState.CONNECTED) {
+            lastConnectedRef.current = false
+            setStatus((prev) => ({ ...prev, connected: false }))
+          }
+        }, CAST_DISCONNECT_GRACE_MS)
       }
       const onCastState = () => refresh()
       const onSessionState = () => refresh()
@@ -399,6 +452,10 @@ export function useCast(
         } catch { /* listener cleanup is best-effort */ }
         remotePlayerRef.current = null
         remoteControllerRef.current = null
+        if (disconnectTimerRef.current != null) {
+          window.clearTimeout(disconnectTimerRef.current)
+          disconnectTimerRef.current = null
+        }
       }
       refresh()
       // eslint-disable-next-line no-console
@@ -632,6 +689,16 @@ export function useCast(
     const ctx = window.cast.framework.CastContext.getInstance()
     const session = ctx.getCurrentSession()
     if (session) session.endSession(true)
+    // This is an explicit, intentional stop (widget button, TV-finish
+    // cast.stop()) — unlike a CastState blip, there's nothing to wait out.
+    // Bypass refresh()'s disconnect-debounce so the player closes right
+    // away instead of sitting connected:true for the grace window.
+    if (disconnectTimerRef.current != null) {
+      window.clearTimeout(disconnectTimerRef.current)
+      disconnectTimerRef.current = null
+    }
+    lastConnectedRef.current = false
+    setStatus((prev) => ({ ...prev, connected: false }))
   }
 
   // Toggle play/pause on the receiver. No-op until a RemotePlayer is bound.
