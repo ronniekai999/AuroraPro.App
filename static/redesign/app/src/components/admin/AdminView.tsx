@@ -14,6 +14,7 @@ import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
+import { castLabel, castRoles, groupCastStreams } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
 import {
   parseReferralOptionsSetting,
@@ -268,30 +269,90 @@ function NowPlayingWidget() {
     return () => { cancelled = true; window.clearInterval(id) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-  if (items.length === 0) return (
+  const nameFor = (s: ActiveStreamRow) => s.username || users.get(s.user_id) || `User ${s.user_id}`
+  // Initial for the avatar. Deliberately NOT nameFor()[0]: that falls back to
+  // `User 12`, which would render every unknown account as a uniform "U".
+  const initialFor = (s: ActiveStreamRow) => (s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()
+  // One group per VIEWER: a Chromecast's receiver session nests under the
+  // local session driving it instead of standing beside it as an identical
+  // second row. See lib/activeStreams for the orphan/cycle rules.
+  const groups = groupCastStreams(items)
+  // One classification for the whole list, so both the parent rows and the
+  // nested receiver rows describe the same session the same way.
+  const roles = castRoles(items)
+  const labelOf = (s: ActiveStreamRow) => castLabel(roles.get(s.id) ?? 'none')
+  if (groups.length === 0) return (
     <div className="glass-panel rounded-2xl p-6">
       <h2 className="text-white font-semibold mb-2">Now Playing</h2>
       <p className="text-white/40 text-sm">No active streams.</p>
     </div>
   )
+  const kindBadge = (s: ActiveStreamRow) => (
+    <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
+  )
   return (
     <div className="glass-panel rounded-2xl p-6">
-      <h2 className="text-white font-semibold mb-4">Now Playing ({items.length})</h2>
+      <h2 className="text-white font-semibold mb-4">Now Playing ({groups.length})</h2>
       <div className="space-y-3">
-        {items.map(s => (
-          <div key={s.id} className="flex items-center gap-4 py-2 border-b border-white/[0.03] last:border-0">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
-              {(s.username || users.get(s.user_id) || '?')[0]?.toUpperCase()}
+        {groups.map(({ row: s, castRows }) => (
+          // The relationship is carried by the TEXT ("Cast receiver for
+          // {name}"), because that is what actually reaches assistive tech —
+          // the indent and the left border are decoration, and a screen
+          // reader would otherwise read two unrelated rows, the very
+          // confusion this change exists to end. The <ul>/<li> below groups
+          // the receivers of one session; it does not, on its own, tie them
+          // to the row above.
+          <div key={s.id} className="border-b border-white/[0.03] last:border-0">
+            <div className="flex items-center gap-4 py-2">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                {initialFor(s)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white/90 text-sm font-medium truncate">{nameFor(s)}</p>
+                <p className="text-white/40 text-xs truncate">
+                  {s.file_name}
+                  {s.resolution && ` · ${s.resolution}`}
+                  {s.kind === 'direct' && ` · Direct Play`}
+                  {/* Every cast-related word comes from castLabel(), never
+                      from a condition written here: the rule that cast_held
+                      must not read as "casting" is enforced where the strings
+                      are produced (lib/activeStreams, castLabels.test.ts),
+                      and markup that re-derives it would sit outside that. */}
+                  {labelOf(s).detail && ` · ${labelOf(s).detail}`}
+                </p>
+                {/* The dashboard has no hover affordance, so the badge's
+                    explanation rides along for everyone rather than only for
+                    the Sessions tab's screen-reader users. */}
+                {labelOf(s).description && (
+                  <p className="sr-only">{labelOf(s).description}</p>
+                )}
+              </div>
+              {kindBadge(s)}
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-white/90 text-sm font-medium truncate">{s.username || users.get(s.user_id) || `User ${s.user_id}`}</p>
-              <p className="text-white/40 text-xs truncate">
-                {s.file_name}
-                {s.resolution && ` · ${s.resolution}`}
-                {s.kind === 'direct' && ` · Direct Play`}
-              </p>
-            </div>
-            <span className={`badge-glass text-xs ${s.kind === 'transcode' ? 'bg-amber-500/10 text-amber-300 border-amber-500/20' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'}`}>{s.kind}</span>
+            {castRows.length > 0 && (
+              <ul className="list-none m-0 p-0">
+                {castRows.map(c => (
+                  <li key={c.id} className="flex items-center gap-4 py-2 pl-6 ml-5 border-l border-white/10">
+                    <Icon name="tv" size={16} className="text-purple-300 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white/70 text-sm truncate">
+                        Cast receiver for {nameFor(s)}
+                        {/* A clone the receiver has not fetched from yet:
+                            minted, not yet leased (MarkCastHeld is earned by
+                            a real fetch). Usually a blink; a persistent one
+                            is a clone the TV never took. */}
+                        {!c.cast_held && <span className="text-white/40"> · connecting</span>}
+                      </p>
+                      <p className="text-white/40 text-xs truncate">
+                        {c.file_name}
+                        {c.resolution && ` · ${c.resolution}`}
+                      </p>
+                    </div>
+                    {kindBadge(c)}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         ))}
       </div>
@@ -894,6 +955,26 @@ function AdminRequestsTab() {
   )
 }
 
+// One row per SESSION — Diag and Kill act on a session, and an operator
+// killing a cast needs to reach the receiver's clone and the local player's
+// session separately. Grouping only orders and indents them, and carries each
+// row's cast label along so the markup never re-derives one.
+function sessionRows(items: ActiveStreamRow[]) {
+  const roles = castRoles(items)
+  const labelFor = (s: ActiveStreamRow) => castLabel(roles.get(s.id) ?? 'none')
+  return groupCastStreams(items).flatMap(g => [
+    { s: g.row, isCastRow: false, label: labelFor(g.row) },
+    ...g.castRows.map(c => ({
+      s: c,
+      // Nested under its source in THIS table. Distinct from "is a receiver",
+      // which is the role's business: a receiver whose source is missing or
+      // unpaired renders top-level and still gets the Cast badge.
+      isCastRow: true,
+      label: labelFor(c),
+    })),
+  ])
+}
+
 function AdminSessionsTab() {
   const [items, setItems] = useState<ActiveStreamRow[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
@@ -939,11 +1020,26 @@ function AdminSessionsTab() {
             <tr><th>Session</th><th>Kind</th><th>User</th><th>File</th><th>Detail</th><th>Started</th><th></th></tr>
           </thead>
           <tbody>
-            {items.map(s => {
+            {/* One <tr> per SESSION — Diag and Kill act on a session, and an
+                operator killing a cast needs to reach the receiver's clone
+                and the local player's session separately. Grouping only
+                orders and indents them: a receiver's clone sits directly
+                under the session it was cloned from, so the two rows a cast
+                produces read as one cast instead of a duplicate. */}
+            {sessionRows(items).map(({ s, isCastRow, label }) => {
               const isTranscode = s.kind === 'transcode'
               return (
                 <tr key={s.id}>
-                  <td className="font-mono text-xs">{s.id.slice(0, 10)}</td>
+                  <td className="font-mono text-xs">
+                    {/* The glyph carries the nesting visually; the sr-only
+                        text carries it for everyone else. Without the
+                        second half a screen reader gets two adjacent,
+                        unrelated-looking sessions — the same confusion this
+                        grouping exists to end. */}
+                    {isCastRow && <span className="text-white/25 mr-1" aria-hidden="true">└</span>}
+                    {isCastRow && <span className="sr-only">Cast receiver for the session above: </span>}
+                    {s.id.slice(0, 10)}
+                  </td>
                   <td>
                     <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
                       isTranscode
@@ -952,6 +1048,32 @@ function AdminSessionsTab() {
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
+                    {/* Every word here comes from castLabel(), keyed off the
+                        row's role rather than off a condition re-derived in
+                        markup — the rule that cast_held must never read as
+                        "casting" is enforced where those strings are produced
+                        (lib/activeStreams, castLabels.test.ts), and a
+                        condition written here would sit outside it.
+
+                        "Cast" is provable from cast_clone_of: the row is a
+                        clone CloneForCast made for a receiver, so killing it
+                        stops the TV while killing its source does not.
+                        "Lease" is all cast_held supports on its own — it is
+                        not evidence of a receiver at all.
+
+                        The explanation is sr-only text rather than a `title`,
+                        which never reaches a keyboard or a screen reader on a
+                        non-focusable span. */}
+                    {label.badge && (
+                      <span className={`ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                        label.badge === 'Cast'
+                          ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30'
+                          : 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                      }`}>
+                        {label.badge}
+                        <span className="sr-only"> {label.description}</span>
+                      </span>
+                    )}
                   </td>
                   <td>{s.username || s.user_id}</td>
                   <td className="max-w-[280px] truncate" title={s.file_name}>{s.file_name}</td>
@@ -2720,7 +2842,13 @@ export default function AdminView({ currentAdminId }: { currentAdminId: number }
                     hint: 'Title rows: movies plus series. Episodes are NOT included — the Server card below counts those separately. Raw COUNT, so cross-library duplicates are counted twice and this can exceed the deduped total on browse pages.',
                   },
                   { label: 'Users', value: stats.user_count.toLocaleString(), icon: 'users', color: 'text-blue-400' },
-                  { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', color: 'text-emerald-400' },
+                  {
+                    label: 'Active Streams',
+                    value: String(stats.active_streams),
+                    icon: 'monitor',
+                    color: 'text-emerald-400',
+                    hint: 'Streams being watched — transcode plus direct play. A Chromecast holds two server sessions for one viewer (the paused browser session and the cast-safe clone the TV pulls); they count once here and are nested together under Now Playing.',
+                  },
                   { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', color: 'text-amber-400' },
                 ] satisfies StatTileProps[]).map(s => (
                   <StatTile key={s.label} {...s} />

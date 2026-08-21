@@ -1599,7 +1599,11 @@ function ServerPanel({ open, isAdmin, onClose }: { open: boolean; isAdmin: boole
   type StatTile = { label: string; value: string; icon: string; tone: string; hint?: string }
   const tiles: StatTile[] = stats && isAdmin
     ? [
-      { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', tone: 'ok' },
+      // Same number and same explanation as the Admin dashboard's tile — it
+      // reads from the same field, so it needs the same hint or the two
+      // surfaces disagree about what they are counting.
+      { label: 'Active Streams', value: String(stats.active_streams), icon: 'monitor', tone: 'ok',
+        hint: 'Streams being watched — transcode plus direct play. A Chromecast holds two server sessions for one viewer (the paused browser session and the cast-safe clone the TV pulls); they count once here.' },
       { label: 'Disk Free', value: `${stats.disk_free_gb.toFixed(1)} GB`, icon: 'hardDrive', tone: stats.disk_free_gb < 10 ? 'warn' : 'ok' },
       // QA 2026-05-25 — Memory shows the Go process's RSS, which on
       // a 65 TB media server reads suspiciously small (~10 MB) until

@@ -1790,8 +1790,13 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 // ListSessions lists all active streams (admin). Returns transcode
 // sessions (FFmpeg-backed) AND direct-play sessions (byte-range
 // serves without transcode) as two arrays so the UI can render them
-// distinctly. `count` is the combined total — what the admin
-// dashboard's "Active Streams" tile expects.
+// distinctly. `count` is the combined RAW total.
+//
+// Not the same number as the admin dashboard's "Active Streams" tile, which
+// is AdminHandler.Dashboard via activeStreamTileCount: that one folds a
+// Chromecast's two sessions (paused local + receiver clone) into the one
+// viewer they represent. This endpoint is a session inventory, so it counts
+// sessions.
 func (h *StreamHandler) ListSessions(w http.ResponseWriter, r *http.Request) {
 	sessions := h.transcode.ListSessions()
 	var directPlays []streaming.DirectPlaySession

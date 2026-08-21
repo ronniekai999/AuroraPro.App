@@ -1673,6 +1673,24 @@ export interface ActiveStreamRow {
     bandwidth_bps?: number
   }
   remux?: boolean
+  // Casting (transcode-only). A Chromecast produces TWO sessions for one
+  // viewer — the paused local one and the cast-safe clone the receiver pulls.
+  //
+  // `cast_clone_of` names the session a clone was made from. It is the ONLY
+  // field here that proves a receiver exists; use isReceiverSession().
+  //
+  // `cast_held` means "something fetched this session with a cast-scoped
+  // token", which is NOT the same as "a TV is playing it": Safari and iOS put
+  // a minted cast token on the local <video> src because native HLS cannot
+  // authenticate by cookie (#317), so ordinary local playback in those
+  // browsers sets it with no receiver anywhere. It is also false on a
+  // freshly minted clone the receiver has not fetched from yet. Render it as
+  // "casting" and you mislabel a large share of ordinary viewers.
+  //
+  // Both are optional: a bundle can run ahead of the binary serving it, and
+  // lib/activeStreams degrades to a flat list when they're absent.
+  cast_held?: boolean
+  cast_clone_of?: string
   // Direct-play only
   file_type?: 'media' | 'episode'
   file_id?: number

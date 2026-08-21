@@ -1009,7 +1009,7 @@ func (h *AdminHandler) Dashboard(w http.ResponseWriter, r *http.Request) {
 		Goroutines:         runtime.NumGoroutine(),
 		CPUCores:           float64(runtime.NumCPU()),
 		DiskFreeGB:         diskFreeGB,
-		ActiveStreams:      h.transcode.ActiveSessions() + directPlayCount(h.directPlay),
+		ActiveStreams:      activeStreamTileCount(h.transcode, h.directPlay),
 		WebSocketClients:   h.hub.ClientCount(),
 		LibraryCount:       libCount,
 		MovieCount:         movieCount,
@@ -1119,6 +1119,22 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		Variants   []string                    `json:"active_variants,omitempty"`
 		Resources  *streaming.SessionResources `json:"resources,omitempty"`
 		Remux      bool                        `json:"remux,omitempty"`
+		// CastCloneOf names the session a cast-safe clone was made from, and
+		// is the only one of the two that proves a receiver exists. CastHeld
+		// means "fetched with a cast-scoped token", which Safari and iOS also
+		// do for ordinary LOCAL playback (see streaming.SessionInfo.CastHeld)
+		// — never present it as casting. The UI pairs the two rows a cast
+		// produces; without these they are indistinguishable — same user,
+		// same file, same "transcode" badge, twice.
+		//
+		// NOT omitempty on CastHeld: "false" is the meaningful, common case,
+		// and a field that disappears whenever it is false is a field whose
+		// absence means two different things. (The client reads it with plain
+		// truthiness, so this costs nothing there — it is for whoever reads
+		// the JSON next.) Direct-play rows carry it as false too, which is
+		// accurate if slightly redundant.
+		CastHeld    bool   `json:"cast_held"`
+		CastCloneOf string `json:"cast_clone_of,omitempty"`
 		// Direct-play only
 		FileType string `json:"file_type,omitempty"`
 		FileID   int64  `json:"file_id,omitempty"`
@@ -1141,17 +1157,19 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 			resolution = fmt.Sprintf("%dx%d", s.SourceWidth, s.SourceHeight)
 		}
 		out = append(out, unifiedSession{
-			ID:         s.ID,
-			Kind:       "transcode",
-			UserID:     s.UserID,
-			Username:   s.Username,
-			FileName:   s.FileName,
-			StartedAt:  s.StartedAt,
-			Resolution: resolution,
-			Profiles:   s.Profiles,
-			Variants:   s.ActiveVariants,
-			Resources:  s.Resources,
-			Remux:      s.Remux,
+			ID:          s.ID,
+			Kind:        "transcode",
+			UserID:      s.UserID,
+			Username:    s.Username,
+			FileName:    s.FileName,
+			StartedAt:   s.StartedAt,
+			Resolution:  resolution,
+			Profiles:    s.Profiles,
+			Variants:    s.ActiveVariants,
+			Resources:   s.Resources,
+			Remux:       s.Remux,
+			CastHeld:    s.CastHeld,
+			CastCloneOf: s.CastCloneOf,
 		})
 	}
 	for _, dp := range dpList {
@@ -1200,6 +1218,25 @@ func directPlayCount(r *streaming.DirectPlayRegistry) int {
 		return 0
 	}
 	return r.ActiveCount()
+}
+
+// activeStreamTileCount is the number behind the dashboard's "Active Streams"
+// tile: transcode-backed streams plus direct plays.
+//
+// ActiveStreamCount, NOT ActiveSessions. Casting to a Chromecast holds two
+// transcode sessions for one viewer — the local browser session, paused the
+// moment the receiver connects, and the cast-safe clone the TV pulls — and
+// counting both reported one person watching one movie as two streams.
+//
+// A function rather than an expression inline in Dashboard so the choice is
+// testable without a database: Dashboard needs four queries before it reaches
+// this line, which is how the tile went unpinned in the first place.
+func activeStreamTileCount(tc *streaming.TranscodeManager, dp *streaming.DirectPlayRegistry) int {
+	n := directPlayCount(dp)
+	if tc != nil {
+		n += tc.ActiveStreamCount()
+	}
+	return n
 }
 
 // GetSettings returns all server settings.

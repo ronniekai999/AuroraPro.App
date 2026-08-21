@@ -948,7 +948,13 @@ func (tm *TranscodeManager) CloneForCast(userID int64, username, sessionID strin
 	src.variantMu.Lock()
 	disableHWDecode := src.swDecodeFallback
 	src.variantMu.Unlock()
-	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, castCloneOpts(src, needsVideoTranscode, disableHWDecode))
+	cloneOpts := castCloneOpts(src, needsVideoTranscode, disableHWDecode)
+	// Record where the clone came from so the admin surface can pair the two
+	// rows a cast produces (see TranscodeSession.castCloneOf). Carried through
+	// SessionOpts rather than stamped afterwards so the clone is never
+	// visible unpaired.
+	cloneOpts.CastCloneOf = sessionID
+	clone, err := tm.CreateSession(userID, username, src.FilePath, src.SourceWidth, src.SourceHeight, cloneOpts)
 	if err != nil {
 		return nil, fmt.Errorf("create cast-safe session: %w", err)
 	}
@@ -1334,12 +1340,34 @@ type TranscodeSession struct {
 	// populated on first subtitle segment request.
 	// Values: -1 = not probed, -2 = probe in progress, >= 0 = cached PTS.
 	initPTS90kHz int64
-	// castHeld marks a session that has been handed to a Chromecast or
-	// AirPlay receiver (set by MarkCastHeld when a cast token is minted for
-	// it). Such a session is kept for castHeldTimeout instead of the normal
+	// castHeld marks a session fetched with a CAST-SCOPED token. Set by
+	// MarkCastHeld, which requireSessionAccess calls on the fetch itself,
+	// not at mint time (see the reasoning there: a mint whose response
+	// never reached the sender would otherwise lease a clone nobody can
+	// release).
+	//
+	// It is NOT a reliable "a receiver is playing this" signal, and nothing
+	// should present it as one: Safari/iOS assign a minted cast token to the
+	// LOCAL <video> src for native HLS auth (#317), so ordinary Apple-browser
+	// playback trips this with no receiver involved. That over-inclusiveness
+	// is harmless for the lease (the cost is a longer idle window) and is why
+	// the lease is the only thing keyed off it.
+	// Such a session is kept for castHeldTimeout instead of the normal
 	// idle timeout — see sessionIdleTimeout for why. Guarded by tm.mu, like
 	// LastAccess, because the cleanup loop reads both in the same pass.
 	castHeld bool
+	// castCloneOf names the session this one was cloned FROM by
+	// CloneForCast, or "" for an ordinary session. Purely descriptive — no
+	// lifecycle hangs off it, and it is deliberately NOT a parent pointer
+	// the reaper consults: the clone outlives its source routinely (the
+	// local player is torn down while the TV keeps playing), so treating a
+	// missing source as "this clone is orphaned, kill it" would end casts.
+	//
+	// It exists because a cast is TWO sessions — the paused local one and
+	// the receiver's clone — and until now nothing distinguished them: the
+	// admin surface showed the same user, file and "transcode" badge twice
+	// with no way to tell which was the TV. Guarded by tm.mu, like castHeld.
+	castCloneOf string
 }
 
 // castHeldTimeout is how long a cast-held session survives with nothing
@@ -1548,6 +1576,22 @@ type SessionInfo struct {
 	ActiveVariants   []string         `json:"active_variants"`
 	Remux            bool             `json:"remux"`
 	AudioPassthrough bool             `json:"audio_passthrough"`
+	// CastHeld: something fetched this session with a CAST-SCOPED token, so
+	// it sits on the longer castHeldTimeout lease (see MarkCastHeld).
+	//
+	// Read it as "held by a scoped stream token", NOT as "a TV is playing
+	// this". Safari and iOS put a minted cast token straight onto the local
+	// <video> element's src — that is the only way native HLS can
+	// authenticate without cookies (VideoPlayer's usesNativeHls branch,
+	// issue #317) — so ORDINARY local playback in any Apple browser sets
+	// this flag with no receiver anywhere. A UI that renders it as "casting"
+	// is wrong for a large share of viewers; cast_clone_of is the only
+	// field that positively identifies a receiver.
+	CastHeld bool `json:"cast_held"`
+	// CastCloneOf is the session this one was cloned from for a receiver,
+	// or "" for an ordinary session. Pairs the two rows a Chromecast
+	// produces so an admin can see one cast rather than two mystery streams.
+	CastCloneOf string `json:"cast_clone_of,omitempty"`
 	// Resource tracking (Feature 3)
 	Resources *SessionResources `json:"resources,omitempty"`
 }
@@ -2196,6 +2240,13 @@ type SessionOpts struct {
 	// hardware decode active — the clone reads the same file and would
 	// crash identically. See TranscodeSession.swDecodeFallback.
 	DisableHWDecode bool
+	// CastCloneOf names the session this one is a cast-safe clone of. Set
+	// only by CloneForCast. Applied to the session BEFORE it is published
+	// into tm.sessions, so no reader can ever observe the clone unpaired —
+	// stamping it afterwards left a window in which ListSessions and
+	// ActiveStreamCount saw it as an independent stream, which is precisely
+	// the double-count this field exists to remove.
+	CastCloneOf string
 }
 
 // CreateSession creates a new adaptive transcode session for a media file.
@@ -2306,6 +2357,16 @@ func (tm *TranscodeManager) CreateSession(userID int64, username string, filePat
 	// Apply session options if provided
 	if len(opts) > 0 {
 		o := opts[0]
+		// Guarded by tm.mu once published, but written here before the
+		// insert below, while this goroutine is the only reference holder.
+		// A session must never be its own clone: ActiveStreamCount folds a
+		// clone into its source, so a self-reference would fold a live
+		// stream to zero. CloneForCast cannot produce one (the shared-
+		// session path returns before it sets this), and this makes that
+		// structural rather than incidental.
+		if o.CastCloneOf != sessionID {
+			session.castCloneOf = o.CastCloneOf
+		}
 		if o.ForceTS {
 			session.FMP4 = false
 		}
@@ -2516,11 +2577,17 @@ func (tm *TranscodeManager) IsCastHeld(sessionID string) bool {
 	return ok && s.castHeld
 }
 
-// MarkCastHeld records that a session has been handed to a Chromecast or
-// AirPlay receiver, moving it onto the longer castHeldTimeout idle window
-// (see sessionIdleTimeout). Called when a cast token is minted for the
-// session — that is the exact moment a surface Aurora cannot poll becomes
-// responsible for keeping it warm.
+// MarkCastHeld moves a session onto the longer castHeldTimeout idle window
+// (see sessionIdleTimeout). Called from requireSessionAccess when a
+// CAST-SCOPED token fetches the session — not when one is minted for it (see
+// the reasoning at that call site).
+//
+// "Cast-scoped fetch" is broader than "a receiver is playing this": Safari
+// and iOS assign a minted cast token to the local <video> src because native
+// HLS cannot authenticate by cookie (#317), so ordinary Apple-browser
+// playback lands here too. Deliberately tolerated — the flag only ever buys
+// a longer idle window — but it means castHeld must not be surfaced as
+// "casting" anywhere. Only castCloneOf positively identifies a receiver.
 //
 // One-way on purpose: there is no reliable "cast ended" signal to clear it
 // on (the sender may be frozen, backgrounded, or gone), and the flag only
@@ -2643,6 +2710,10 @@ func (tm *TranscodeManager) ListSessions() []SessionInfo {
 				StartedAt:        s.StartedAt,
 				Remux:            s.Remux,
 				AudioPassthrough: s.AudioPassthrough,
+				// Both are tm.mu-guarded, and this phase holds tm.mu — the
+				// only place in this function where reading them is legal.
+				CastHeld:    s.castHeld,
+				CastCloneOf: s.castCloneOf,
 			},
 		}
 		snapshots = append(snapshots, snap)
@@ -2689,6 +2760,81 @@ func (tm *TranscodeManager) ActiveSessions() int {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	return len(tm.sessions)
+}
+
+// ActiveStreamCount is ActiveSessions counted the way an operator reads the
+// dashboard tile: how many things are being WATCHED, not how many session
+// rows exist.
+//
+// The two diverge for exactly one reason. Casting to a Chromecast produces a
+// pair — the local browser session, which is force-paused the moment the
+// receiver connects and whose encoder the idle reaper stops 75 seconds
+// later, plus the cast-safe clone the TV actually pulls (see CloneForCast).
+// Counting both reported one person watching one movie as two active
+// streams, which is what sent an admin looking for a leak that was not
+// there.
+//
+// castPairable states when a clone folds into its source. An orphaned clone —
+// the local player closed, the TV still playing, the ordinary end state of a
+// cast — is a stream in its own right and counts as one.
+//
+// The same-user condition is not decoration. An ADMIN may mint a cast token
+// against another user's session (see CreateCastToken's admin bypass), and
+// the clone is then owned by the admin while castCloneOf points at the
+// viewer's session — two genuinely independent people watching. Folding on
+// the ID alone would report them as one.
+//
+// Known limits, so the comment does not overclaim. All three are the price of
+// folding, and all three are visible in the Sessions tab, which still lists
+// every session:
+//
+//  1. This counts SESSIONS, and one session can serve more than one viewer.
+//     GetOrCreateSession reuses any session matching (FilePath, UserID,
+//     StartSec), which a cast clone also matches, so one account playing the
+//     same title at the same offset on a second device via the legacy
+//     /api/stream/media route can share a folded pair — two people, one
+//     counted. That reuse also hands the second device a clone: it is
+//     subtitle-free stereo AAC in TS, and the admin surface labels its viewer
+//     as a cast receiver. Pre-existing reuse, but the labeling is new.
+//  2. A stranded clone is folded, so the tile cannot show the leak
+//     lib/castSession.ts exists to prevent. A local session plus two orphaned
+//     clones reads as 1 — at the moment that account's next mint 429s against
+//     the 3-session per-user cap, and ordinary playback starts failing.
+//  3. A cast runs two FFmpegs and counts as one, so this is a count of
+//     viewers, never of encoders. For load, read the Sessions tab.
+func (tm *TranscodeManager) ActiveStreamCount() int {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	n := 0
+	for _, s := range tm.sessions {
+		if s.castCloneOf != "" {
+			if src, ok := tm.sessions[s.castCloneOf]; ok && castPairable(s, src) {
+				continue
+			}
+		}
+		n++
+	}
+	return n
+}
+
+// castPairable decides whether clone folds into src — the ONE rule, mirrored
+// exactly by groupCastStreams in the SPA (static/redesign/app/src/lib/
+// activeStreams.ts). Keep the two in step: they feed a count and a row list
+// that an operator reads side by side, and a disagreement shows up as a
+// header that contradicts the list under it.
+//
+// Requiring the source to be a root (castCloneOf == "") is what makes a
+// one-level check total. Without it the rule has to say what a chain means,
+// and the two implementations answered that differently — a transitive walk
+// on one side, a single lookup on the other — which for a cycle had Go fold a
+// live stream to zero while the SPA showed two rows. Neither shape is
+// reachable (CloneForCast only ever clones a local session, and an id can
+// only point at a session that already existed), so the rule that costs
+// nothing to state is the right one.
+func castPairable(clone, src *TranscodeSession) bool {
+	return clone != src && // never fold a session into itself
+		src.castCloneOf == "" && // the source must be a root, not another clone
+		src.UserID == clone.UserID // and the same person's: an admin may cast someone else's session
 }
 
 // VariantDiagnostic is the admin-visible shape of a single variant's
