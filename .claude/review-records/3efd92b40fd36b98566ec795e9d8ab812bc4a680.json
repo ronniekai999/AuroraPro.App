@@ -1,0 +1,10 @@
+{
+  "sha": "3efd92b40fd36b98566ec795e9d8ab812bc4a680",
+  "verdict": "lows-only",
+  "summary": "Five independent adversarial review rounds over 820cce7..HEAD (fresh context each, given the diff and acceptance criteria, not primed). Round 5 returned no critical or high; its two mediums were guards with working exploits (a label denylist that missed 'Chromecast'/'AirPlay'/'TV', and a Dashboard source scan matching a function name without its arguments) and both are FIXED in 3efd92b, verified by re-running the reviewer's own mutations. Earlier rounds found and fixed: a cross-user fold that reported two viewers as one; a HIGH where the UI rendered cast_held as 'casting' though Safari/iOS set it for ordinary local playback (#317); an orphaned/cross-owner receiver labelled 'source session gone' while its source was listed alive; a HIGH where the guard test regexed JSX and was defeated by a negation and by nested braces. Round 5 verified exhaustively (1000 three-row shapes, then 8000 with cast_held) that Go ActiveStreamCount and TS groupCastStreams agree on every input and that no row without cast_clone_of ever gets a receiver label; locking on SessionOpts.CastCloneOf (written pre-publication, read under tm.mu) clean; no lifecycle, reaping, lease or per-user-cap behavior changed. Remaining findings are lows, documented in 3efd92b's message. Test-only fixes in 3efd92b post-date the round-5 verdict and were not themselves independently reviewed.",
+  "reviewer": "independent-agent-r5",
+  "findings": "7",
+  "diff_digest": "e9347d565f916812adc518c91ad5e9a2217d1d5df6ab9c82ccb6fb8ed8048150",
+  "branch": "claude/tv-casting-dual-streams-wd0wph",
+  "recorded_at": "2026-08-21T01:29:43Z"
+}
