@@ -25,8 +25,10 @@ const DEFAULT_MEDIA_RECEIVER_APP_ID = 'CC1AD845'
 const CAST_DISCONNECT_GRACE_MS = 4000
 // How long status.settling stays true after a reconnect before `remote` is
 // trusted again. See remoteStaleRef's declaration for why this is a fixed
-// delay rather than waiting for a specific SDK event.
-const RECONNECT_SETTLE_MS = 1500
+// delay rather than waiting for a specific SDK event. Exported so consumers
+// that add their OWN bounded wait on top of settling (see VideoPlayer's
+// auto-advance effect) share the same tuning rather than drifting from it.
+export const RECONNECT_SETTLE_MS = 1500
 const CAST_SDK_SRC =
   'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1'
 

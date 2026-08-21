@@ -484,6 +484,34 @@ describe('useCast disconnect debounce', () => {
     expect(settling()).toBe('false')
   })
 
+  it('the settle timer never bumps updateSeq itself — settling clearing is not, on its own, a confirmed update', () => {
+    // VideoPlayer's auto-advance effect (and the two party polling loops)
+    // snapshot updateSeq the instant settling clears and refuse to act
+    // until it advances PAST that snapshot — the whole point being that
+    // clearing settling on the fixed timer alone must NOT count as
+    // confirmation. If a future change made the settle timer call
+    // onRemoteChange() (the natural-looking symmetric counterpart of the
+    // call already in the confirmed-disconnect timer), it would satisfy
+    // every one of those checks with the exact stale reading they exist to
+    // distrust, silently undoing this fix. This test exists to catch that.
+    const sdk = installFakeSdk()
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    const player = sdk.getRemotePlayer()!
+    player.playerState = 'PLAYING'
+    act(() => sdk.emitRemoteChange())
+    const seqBeforeBlip = updateSeq()
+
+    act(() => sdk.triggerBlip())
+    act(() => sdk.triggerReconnect())
+    expect(settling()).toBe('true')
+    expect(updateSeq()).toBe(seqBeforeBlip) // no update has landed since reconnect
+
+    act(() => { vi.advanceTimersByTime(RECONNECT_SETTLE_MS) })
+    expect(settling()).toBe('false')
+    expect(updateSeq()).toBe(seqBeforeBlip) // the timer firing did not bump it
+  })
+
   it('clears a pending settle timer when a second blip starts, instead of letting it fire mid-blip', () => {
     const sdk = installFakeSdk()
     render(<Harness />)
