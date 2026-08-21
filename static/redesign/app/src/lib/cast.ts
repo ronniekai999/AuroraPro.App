@@ -257,6 +257,18 @@ export interface CastRemoteState {
   // session, not the RemotePlayer (which only carries playerState). The player
   // uses this to auto-advance only on a genuine finish.
   idleReason: string | null
+  // Bumped once for every update onRemoteChange actually applies (i.e. one
+  // that got past its freeze check) — never during an active blip, but
+  // still on every ordinary update once reconnected, INCLUDING the very
+  // first one after a blip, which can itself still be a not-yet-caught-up
+  // snapshot (settling covers the fixed wait, not the SDK's actual catch-up
+  // time). Consumers that need to be sure a reading is genuinely fresh
+  // rather than merely "not currently frozen" — i.e. landed strictly AFTER
+  // settling last cleared, not just after the freeze lifted at reconnect —
+  // compare this against a snapshot taken at the moment settling clears.
+  // Pure counter, not itself gated by settling — gating it would just move
+  // this same distinction one level deeper.
+  updateSeq: number
 }
 
 export function useCast(
@@ -286,11 +298,17 @@ export function useCast(
     duration: 0,
     playerState: null,
     idleReason: null,
+    updateSeq: 0,
   })
   // RemotePlayer + its controller, created once the framework is detected.
   // Held in refs so the play/pause/seek callbacks stay stable across renders.
   const remotePlayerRef = useRef<CastRemotePlayer | null>(null)
   const remoteControllerRef = useRef<CastRemotePlayerController | null>(null)
+  // Backing counter for CastRemoteState.updateSeq — a ref rather than
+  // reading the previous state back, since onRemoteChange always replaces
+  // the whole `remote` object and reading stale state out of a closure is
+  // exactly the class of bug this file has spent several rounds fixing.
+  const prevUpdateSeqRef = useRef(0)
 
   // Pending "confirm the disconnect" timer + the last publicly-reported
   // connected value, both read/written by refresh() (see its comment) to
@@ -560,6 +578,7 @@ export function useCast(
             duration: player.duration || 0,
             playerState: player.playerState ?? null,
             idleReason,
+            updateSeq: (prevUpdateSeqRef.current += 1),
           })
         }
         remoteController.addEventListener(fw.RemotePlayerEventType.ANY_CHANGE, onRemoteChange)

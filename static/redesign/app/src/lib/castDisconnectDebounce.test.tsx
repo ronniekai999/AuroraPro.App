@@ -235,6 +235,7 @@ function Harness({ currentLoad }: { currentLoad?: () => CastLoadArgs | null }) {
       <span data-testid="settling">{String(cast.status.settling)}</span>
       <span data-testid="supported">{String(cast.status.supported)}</span>
       <span data-testid="playerState">{cast.remote.playerState ?? ''}</span>
+      <span data-testid="updateSeq">{cast.remote.updateSeq}</span>
       <button onClick={() => cast.stop()}>stop</button>
     </div>
   )
@@ -244,6 +245,7 @@ const connected = () => screen.getByTestId('connected').textContent
 const settling = () => screen.getByTestId('settling').textContent
 const supported = () => screen.getByTestId('supported').textContent
 const playerState = () => screen.getByTestId('playerState').textContent
+const updateSeq = () => Number(screen.getByTestId('updateSeq').textContent)
 
 // Lets any pending queueMicrotask (endSession's deferred SESSION_STATE_CHANGED
 // echo) resolve and apply its state updates before the test asserts or ends —
@@ -407,14 +409,18 @@ describe('useCast disconnect debounce', () => {
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('PLAYING')
     expect(settling()).toBe('false')
+    const seqBeforeBlip = updateSeq()
 
     act(() => sdk.triggerBlip())
     expect(settling()).toBe('true')
     // The receiver's RemotePlayer object resets the instant the channel
-    // drops — but that reset must not be published while unconfirmed.
+    // drops — but that reset must not be published while unconfirmed, and
+    // updateSeq (what VideoPlayer's auto-advance effect relies on to know a
+    // reading is genuinely fresh — see cast.ts) must not advance either.
     player.playerState = 'IDLE'
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('PLAYING') // still the pre-blip reading, frozen
+    expect(updateSeq()).toBe(seqBeforeBlip)
 
     // Reconnect lands. The fix must NOT eagerly read the RemotePlayer's
     // fields at this exact instant — they can still hold a not-yet-caught-up
@@ -422,14 +428,19 @@ describe('useCast disconnect debounce', () => {
     act(() => sdk.triggerReconnect())
     expect(connected()).toBe('true')
     expect(playerState()).toBe('PLAYING') // unchanged — no eager resync
+    expect(updateSeq()).toBe(seqBeforeBlip)
 
     // But the freeze itself lifts immediately (disconnectTimerRef clears at
     // reconnect) — ordinary ANY_CHANGE events flow through normally again
     // from here, independent of settling (see the next two tests for why
-    // settling clearing is NOT tied to this event).
+    // settling clearing is NOT tied to this event) — and updateSeq advances
+    // right along with it, even though settling is still true. This is the
+    // exact case VideoPlayer's confirmation check exists for: a seq bump
+    // alone, while still settling, is NOT enough to trust the reading.
     player.playerState = 'BUFFERING'
     act(() => sdk.emitRemoteChange())
     expect(playerState()).toBe('BUFFERING')
+    expect(updateSeq()).toBe(seqBeforeBlip + 1)
   })
 
   it('keeps settling true for a fixed window after reconnect regardless of ANY_CHANGE timing, then clears it', () => {

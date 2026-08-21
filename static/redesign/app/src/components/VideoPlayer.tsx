@@ -1206,16 +1206,33 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
   // re-pointed at the next episode. Gates the reload effect so unrelated
   // session reboots (audio-track switch, seek-rebuild) don't reload the cast.
   const castAdvancePendingRef = useRef(false)
+  // Set while cast.status.settling is true; used below to detect the
+  // settling true->false transition (see seqAtSettleClearRef).
+  const wasSettlingRef = useRef(false)
+  // Snapshot of cast.remote.updateSeq taken the instant settling clears.
+  // playerState is only trusted for the destructive branch below once
+  // updateSeq has advanced PAST this snapshot — i.e. a genuine update has
+  // landed STRICTLY AFTER settling cleared, not merely after the blip's
+  // freeze lifted at reconnect (which happens earlier, while settling is
+  // still true, and can itself carry a not-yet-caught-up snapshot: the
+  // fixed settle window bounds the WAIT, not the SDK's actual catch-up
+  // time, so a receiver that sends nothing further can clear settling with
+  // the exact reading this snapshot exists to distrust). null whenever no
+  // confirmation is currently owed (ordinary playback, or already
+  // confirmed) — the common, no-blip case never touches this at all.
+  const seqAtSettleClearRef = useRef<number | null>(null)
   // Bumped by the main play effect once a new local session is established;
   // drives the reload effect at exactly the moment castLoadGetter can mint a
   // cast token for the new target.
   const [castReloadEpoch, setCastReloadEpoch] = useState(0)
   useEffect(() => {
     if (!cast.status.connected) {
-      // Cast gone: disarm both flags so a stale advance can't survive a
+      // Cast gone: disarm every flag so a stale advance can't survive a
       // disconnect→reconnect and misfire on a later session (e.g. a re-cast).
       castHasPlayedRef.current = false
       castAdvancePendingRef.current = false
+      wasSettlingRef.current = false
+      seqAtSettleClearRef.current = null
       // Cast over. Release the clone the receiver was on — nothing will ever
       // fetch it again, and leaving it to age out holds one of the user's
       // three session slots for the full 30-minute lease. The tracker no-ops
@@ -1230,10 +1247,22 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // the single most destructive remote consumer in the file (advances to
     // the next episode, or stops the cast, off nothing more than that one
     // reading) — the exact class of bug settling exists to prevent, so it
-    // must hold off here too, not just in the party polling loops. Once
-    // settling clears (settling is in the dep array below), this effect
-    // re-runs and reads whatever playerState is current at that point.
-    if (cast.status.settling) return
+    // must hold off here too, not just in the party polling loops.
+    if (cast.status.settling) {
+      wasSettlingRef.current = true
+      return
+    }
+    if (wasSettlingRef.current) {
+      // Just cleared — don't trust playerState yet even though we're no
+      // longer gated; require one more genuine update first (see
+      // seqAtSettleClearRef's comment above).
+      wasSettlingRef.current = false
+      seqAtSettleClearRef.current = cast.remote.updateSeq
+    }
+    if (seqAtSettleClearRef.current !== null) {
+      if (cast.remote.updateSeq === seqAtSettleClearRef.current) return
+      seqAtSettleClearRef.current = null
+    }
     if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
     if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
       // De-arm synchronously so a re-render mid-advance can't re-enter here.
@@ -1263,7 +1292,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cast.status.connected, cast.status.settling, cast.remote.playerState])
+  }, [cast.status.connected, cast.status.settling, cast.remote.playerState, cast.remote.updateSeq])
 
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for
