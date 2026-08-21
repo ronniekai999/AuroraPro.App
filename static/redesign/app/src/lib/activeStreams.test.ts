@@ -78,6 +78,10 @@ describe('groupCastStreams', () => {
     expect(groups[0].castRows.map(r => r.id)).toEqual(['tv-1', 'tv-2'])
   })
 
+  // As on the server, this is the ROOT condition doing the work — a
+  // self-referencing row's source is itself, which is not a root. The
+  // explicit `src === row` check in sourceOf is redundant intent, not
+  // something this test kills.
   it('does not lose or loop on a self-referencing row', () => {
     const groups = groupCastStreams([row('a', { cast_clone_of: 'a' }), row('b')])
     expect(groups.map(g => g.row.id)).toEqual(['a', 'b'])

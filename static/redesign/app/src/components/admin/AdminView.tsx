@@ -14,7 +14,7 @@ import { Icon } from '@/components/Icon'
 import { PageHeader } from '@/components/PageHeader'
 import { formatRequestDate } from '@/lib/format'
 import { skipCoverage, skipMarkerTotals, formatSkipMarkers } from '@/lib/adminDashboardTiles'
-import { groupCastStreams } from '@/lib/activeStreams'
+import { groupCastStreams, isReceiverSession } from '@/lib/activeStreams'
 import ManualMatchModal from './ManualMatchModal'
 import {
   parseReferralOptionsSetting,
@@ -309,6 +309,14 @@ function NowPlayingWidget() {
                   {s.file_name}
                   {s.resolution && ` · ${s.resolution}`}
                   {s.kind === 'direct' && ` · Direct Play`}
+                  {/* A receiver session that ended up top-level: its source is
+                      gone (the sender closed the tab while the TV played on —
+                      the ordinary end of a cast, since the player deletes the
+                      local session but deliberately not the clone), or the
+                      source belongs to someone else. cast_clone_of still
+                      proves what it is, so say so rather than falling through
+                      to the lease wording below. */}
+                  {isReceiverSession(s) && ` · cast receiver, source session gone`}
                   {/* NOT "casting". cast_held only means a cast-scoped token
                       fetched this session, and Safari/iOS put such a token on
                       the LOCAL <video> src for native HLS auth (#317) — so
@@ -317,7 +325,7 @@ function NowPlayingWidget() {
                       share of ordinary viewers, recreating the mystery-row
                       confusion this whole change exists to end. What IS true
                       of every such session is the longer idle lease. */}
-                  {castRows.length === 0 && s.cast_held && ` · token lease`}
+                  {!isReceiverSession(s) && castRows.length === 0 && s.cast_held && ` · token lease`}
                   {/* Only once a receiver has actually FETCHED from one of
                       the clones. A clone that was minted but never loaded
                       (load_failed, a receiver stall — the case
@@ -1032,25 +1040,42 @@ function AdminSessionsTab() {
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
                     {/* Two different claims, deliberately worded differently.
-                        "Cast" is provable — this row is a clone CloneForCast
-                        made for a receiver, so killing it stops the TV while
-                        killing the row above it does not. "Lease" is all
-                        cast_held supports: Safari/iOS put a cast token on the
-                        local <video> src for native HLS auth (#317), so that
-                        flag is set by ordinary Apple-browser playback with no
-                        receiver involved. Explanations are sr-only text, not
-                        a `title` — a title never reaches a keyboard or a
-                        screen reader on a non-focusable span. */}
-                    {isCastRow && (
+                        "Cast" is provable from cast_clone_of — this row is a
+                        clone CloneForCast made for a receiver, so killing it
+                        stops the TV while killing its source does not. Keyed
+                        off the FIELD, not off isCastRow: a receiver whose
+                        source session is gone renders top-level and is still
+                        a receiver.
+
+                        "Lease" is all cast_held supports on its own, and it
+                        is not evidence of a receiver at all: Safari/iOS put a
+                        cast token on the local <video> src for native HLS
+                        auth (#317), so ordinary playback in those browsers
+                        sets it.
+
+                        Explanations are sr-only text rather than a `title`,
+                        which never reaches a keyboard or a screen reader on a
+                        non-focusable span. */}
+                    {isReceiverSession(s) && (
                       <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30">
                         Cast
-                        <span className="sr-only"> receiver session, cloned from the session above</span>
+                        <span className="sr-only">
+                          {isCastRow
+                            ? ' receiver session, cloned from the session above'
+                            : ' receiver session; the session it was cloned from is no longer active'}
+                        </span>
                       </span>
                     )}
-                    {!isCastRow && s.cast_held && (
+                    {!isReceiverSession(s) && s.cast_held && (
                       <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30">
                         Lease
-                        <span className="sr-only"> — fetched with a scoped stream token (AirPlay, or Safari and iOS native HLS, which use one for ordinary local playback too), so it is on the 30-minute idle lease</span>
+                        {/* Three producers, not two — a Chromecast that needed
+                            no clone (already H.264 + AAC, no subtitle tracks)
+                            shares the local session and lands here as well.
+                            And the window is the CONFIGURED timeout whenever
+                            that is longer than 30 minutes (sessionIdleTimeout
+                            widens, never shortens), so don't promise 30. */}
+                        <span className="sr-only"> — fetched with a scoped stream token: AirPlay, a Chromecast that needed no separate clone, or Safari and iOS native HLS, which use one for ordinary local playback too. It sits on the extended idle lease rather than the normal one.</span>
                       </span>
                     )}
                   </td>

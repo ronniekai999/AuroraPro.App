@@ -33,6 +33,25 @@ export interface CastPairable {
   cast_clone_of?: string
 }
 
+/**
+ * Is this row a RECEIVER's session — a clone CloneForCast made for a
+ * Chromecast?
+ *
+ * `cast_clone_of` is the only positive evidence of a receiver that reaches
+ * the client. `cast_held` is not: Safari and iOS put a minted cast token on
+ * the local <video> src because native HLS cannot authenticate by cookie
+ * (#317), so ordinary local playback in those browsers sets it with no
+ * receiver anywhere. Anything that says "cast" to an operator must key off
+ * this, never off `cast_held`.
+ *
+ * Deliberately independent of whether the row got NESTED. A receiver whose
+ * source session is gone — the sender closed the tab while the TV plays on,
+ * the ordinary end of a cast — renders top-level and is still a receiver.
+ */
+export function isReceiverSession(row: CastPairable): boolean {
+  return !!row.cast_clone_of
+}
+
 export interface StreamGroup<T> {
   /** The row an operator should read as "this stream". */
   row: T

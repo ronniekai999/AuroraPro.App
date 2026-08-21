@@ -845,10 +845,16 @@ func main() {
 				hub.BroadcastToAdmins(ws.EventServerHealth, map[string]interface{}{
 					"memory_alloc_mb": memStats.Alloc / 1024 / 1024,
 					"goroutines":      runtime.NumGoroutine(),
-					"active_streams":  transcode.ActiveSessions(),
-					"ws_clients":      hub.ClientCount(),
-					"disk_free_gb":    diskFreeGB,
-					"cpu_cores":       runtime.NumCPU(),
+					// Raw session count, unlike the admin dashboard's
+					// "Active Streams" tile (activeStreamTileCount), which
+					// folds a Chromecast's local+clone pair into one viewer
+					// and adds direct plays. Nothing consumes this event
+					// today; if something starts to, reconcile the two
+					// rather than shipping two numbers under one name.
+					"active_streams": transcode.ActiveSessions(),
+					"ws_clients":     hub.ClientCount(),
+					"disk_free_gb":   diskFreeGB,
+					"cpu_cores":      runtime.NumCPU(),
 				})
 			case <-ctx.Done():
 				return

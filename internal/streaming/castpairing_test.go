@@ -198,8 +198,12 @@ func TestActiveStreamCount_DoesNotFoldAcrossUsers(t *testing.T) {
 	}
 }
 
-// A self-reference would fold a live stream to zero. CreateSession refuses to
-// write one; this pins the counter's own guard so the two cannot drift.
+// A self-reference would fold a live stream to zero. Note what this actually
+// pins: the ROOT condition rejects it (a self-referencing session's "source"
+// is itself, which has a non-empty castCloneOf), so the explicit
+// `clone != src` guard in castPairable is redundant and deleting it leaves
+// this green. The guard stays as a statement of intent; the coverage claim
+// belongs to the root condition.
 func TestActiveStreamCount_SelfReferenceStillCounts(t *testing.T) {
 	tm := castLeaseManager(t)
 	addLeaseSession(tm, "loop", time.Now(), false)

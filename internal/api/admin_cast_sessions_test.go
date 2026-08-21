@@ -162,9 +162,12 @@ func TestDashboard_UsesTheCastAwareStreamCount(t *testing.T) {
 	if start < 0 {
 		t.Fatalf("Dashboard handler not found — update this test's marker (%q)", marker)
 	}
-	// Bound the window to the handler body: up to the next top-level func.
+	// Bound the window to the handler body: its closing brace is the first
+	// "}" in column 0. Stopping at the next `func` instead would run through
+	// the following function's doc comment, where an innocent mention of
+	// ActiveSessions() would fail this test for no reason.
 	body := string(src[start+len(marker):])
-	if end := strings.Index(body, "\nfunc "); end >= 0 {
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
 		body = body[:end]
 	}
 

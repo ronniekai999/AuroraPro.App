@@ -1119,8 +1119,11 @@ func (h *AdminHandler) Sessions(w http.ResponseWriter, r *http.Request) {
 		Variants   []string                    `json:"active_variants,omitempty"`
 		Resources  *streaming.SessionResources `json:"resources,omitempty"`
 		Remux      bool                        `json:"remux,omitempty"`
-		// A receiver is pulling this session, and (for a Chromecast) which
-		// session it was cloned from. The UI pairs the two rows a cast
+		// CastCloneOf names the session a cast-safe clone was made from, and
+		// is the only one of the two that proves a receiver exists. CastHeld
+		// means "fetched with a cast-scoped token", which Safari and iOS also
+		// do for ordinary LOCAL playback (see streaming.SessionInfo.CastHeld)
+		// — never present it as casting. The UI pairs the two rows a cast
 		// produces; without these they are indistinguishable — same user,
 		// same file, same "transcode" badge, twice.
 		//
