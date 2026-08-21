@@ -3498,7 +3498,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       let lastSnapshot: { paused: boolean; sec: number; atMs: number } | null = null
       const id = window.setInterval(() => {
         const c = castRef.current
-        if (!c.status.connected || !c.remote.isMediaLoaded) return
+        // settling: a disconnect debounce is pending (see useCast's
+        // refresh()) — c.remote is frozen at its pre-blip reading, not
+        // live. Corrective actions here (party position broadcasts) must
+        // wait for it to resolve rather than react to stale data.
+        if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) return
         const nowPaused = c.remote.isPaused
         const nowSec = c.remote.currentTime
         const prev = lastSnapshot
@@ -3548,7 +3552,11 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
     // Guest branch.
     const id = window.setInterval(() => {
       const c = castRef.current
-      if (!c.status.connected || !c.remote.isMediaLoaded) return
+      // settling: see the host branch's identical guard above — c.remote
+      // (including currentTime, which the drift check below compares
+      // against the party's continuously-advancing server position) is
+      // frozen and stale while a disconnect is pending confirmation.
+      if (!c.status.connected || c.status.settling || !c.remote.isMediaLoaded) return
       // H3-equivalent guard: only mirror when this player is showing the
       // same content the party is. Belt-and-suspenders — the whole effect
       // is already gated on partyControlsMedia, which is reactive to the

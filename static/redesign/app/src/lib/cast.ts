@@ -210,6 +210,13 @@ export interface CastStatus {
   available: boolean
   // We have an active session with a receiver.
   connected: boolean
+  // True while a disconnect is suspected but not yet confirmed (mid grace
+  // window — see refresh()'s debounce comment). `connected` and `remote`
+  // both keep reporting their last known-good reading during this window,
+  // so anything that treats them as LIVE receiver data to act on (seek/sync
+  // corrections, not just display) should check this and hold off — the
+  // data may be stale, not current.
+  settling: boolean
   // Friendly device name when connected ("Living Room", etc.).
   deviceName: string | null
 }
@@ -263,6 +270,7 @@ export function useCast(
     supported: false,
     available: false,
     connected: false,
+    settling: false,
     deviceName: null,
   })
   const [remote, setRemote] = useState<CastRemoteState>({
@@ -385,12 +393,19 @@ export function useCast(
             // user already asked for.
             return
           }
-          if (disconnectTimerRef.current != null) {
-            window.clearTimeout(disconnectTimerRef.current)
+          const wasSettling = disconnectTimerRef.current != null
+          if (wasSettling) {
+            window.clearTimeout(disconnectTimerRef.current!)
             disconnectTimerRef.current = null
           }
           lastConnectedRef.current = true
-          setStatus({ supported: true, available, connected: true, deviceName })
+          setStatus({ supported: true, available, connected: true, settling: false, deviceName })
+          // The grace window may have frozen `remote` behind reality (see
+          // onRemoteChange's guard) — pull the RemotePlayer's current fields
+          // now instead of waiting for its next mutation, so a stale
+          // playerState/currentTime from before the blip can't be read as
+          // current once we're reporting connected again.
+          if (wasSettling) onRemoteChange?.()
           return
         }
 
@@ -405,13 +420,21 @@ export function useCast(
         // already pending must not push the deadline back out).
         setStatus((prev) => ({ ...prev, supported: true, available }))
         if (!lastConnectedRef.current || disconnectTimerRef.current != null) return
+        setStatus((prev) => ({ ...prev, settling: true }))
         disconnectTimerRef.current = window.setTimeout(() => {
           disconnectTimerRef.current = null
           if (!mounted) return
           if (ctx.getCastState() !== fw.CastState.CONNECTED) {
             lastConnectedRef.current = false
-            setStatus((prev) => ({ ...prev, connected: false }))
+            setStatus((prev) => ({ ...prev, connected: false, settling: false }))
+            // Reconnect never came — sync remote to whatever the (now
+            // truly disconnected) RemotePlayer currently reports, rather
+            // than leaving it frozen at its pre-blip reading forever.
+            onRemoteChange?.()
           }
+          // If CastState somehow already reads CONNECTED here, the
+          // rawConnected branch above already handled clearing settling
+          // and resyncing on the reconnect that beat this timer.
         }, CAST_DISCONNECT_GRACE_MS)
       }
       const onCastState = () => refresh()
@@ -660,6 +683,15 @@ export function useCast(
     if (!window.cast?.framework || !window.chrome?.cast?.media) {
       throw new Error('cast SDK not ready')
     }
+    // A genuine new session is starting — clear this BEFORE requestSession()
+    // (not after awaiting it): the SDK can dispatch CAST_STATE_CHANGED /
+    // SESSION_STATE_CHANGED synchronously as part of establishing the
+    // session, ahead of our `await` continuation resuming. If stoppedRef
+    // were still true when those fire, refresh() would ignore the very
+    // CONNECTED reading that starts this cast, and — since useCast lives for
+    // the app's whole lifetime, not per-cast — every cast after the first
+    // stop() would silently report connected:false while the receiver plays.
+    stoppedRef.current = false
     const ctx = window.cast.framework.CastContext.getInstance()
     // Belt-and-suspenders: re-apply setOptions right before requesting
     // a session. The CAF Sender will throw "Cannot start session
@@ -700,10 +732,6 @@ export function useCast(
       // instead of collapsing them to "unknown".
       throw new Error(describeCastError(rawErr))
     }
-    // A genuine new session is starting — any earlier stop() this hook
-    // instance ignored stale CONNECTED echoes for is over; let refresh()
-    // treat CONNECTED as real again.
-    stoppedRef.current = false
     const session = ctx.getCurrentSession()
     if (!session) throw new Error('cast session not established')
 
