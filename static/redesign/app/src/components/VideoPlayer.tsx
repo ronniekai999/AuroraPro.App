@@ -1223,6 +1223,17 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       castSessionRef.current?.end()
       return
     }
+    // settling: a disconnect debounce just resolved and remote hasn't been
+    // trusted for a fixed window yet (see useCast's refresh()) — its freeze
+    // already lifted at the reconnect edge, so an ANY_CHANGE landing during
+    // this window CAN republish a not-yet-caught-up playerState. This is
+    // the single most destructive remote consumer in the file (advances to
+    // the next episode, or stops the cast, off nothing more than that one
+    // reading) — the exact class of bug settling exists to prevent, so it
+    // must hold off here too, not just in the party polling loops. Once
+    // settling clears (settling is in the dep array below), this effect
+    // re-runs and reads whatever playerState is current at that point.
+    if (cast.status.settling) return
     if (cast.remote.playerState === 'PLAYING') { castHasPlayedRef.current = true; return }
     if (castHasPlayedRef.current && cast.remote.playerState === 'IDLE') {
       // De-arm synchronously so a re-render mid-advance can't re-enter here.
@@ -1252,7 +1263,7 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cast.status.connected, cast.remote.playerState])
+  }, [cast.status.connected, cast.status.settling, cast.remote.playerState])
 
   // Re-point a live receiver at a freshly-booted local session after a cast
   // auto-advance. Keyed on castReloadEpoch (bumped once sessionIdRef is set for

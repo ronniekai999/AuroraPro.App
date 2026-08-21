@@ -315,11 +315,9 @@ export function useCast(
   // while disconnectTimerRef is non-null, which clears at reconnect — same
   // moment this timer starts), and settling can never be stuck forever.
   const remoteStaleRef = useRef(false)
+  // Pending settle-timer handle — see RECONNECT_SETTLE_MS's declaration
+  // above for why this is a fixed delay, armed at the reconnect edge below.
   const settleTimerRef = useRef<number | null>(null)
-  // How long to keep `settling` true after a reconnect before trusting
-  // `remote` again, regardless of whether a fresh ANY_CHANGE has landed.
-  // Comfortably longer than CAF's typical ~1s MEDIA_STATUS cadence during
-  // active playback, comfortably shorter than CAST_DISCONNECT_GRACE_MS.
   // True while an explicit stop() is tearing its session down. endSession()
   // fires SESSION_STATE_CHANGED asynchronously — a SESSION_ENDING event can
   // still report CastState CONNECTED before the final SESSION_ENDED lands.

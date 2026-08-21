@@ -473,6 +473,32 @@ describe('useCast disconnect debounce', () => {
     expect(settling()).toBe('false')
   })
 
+  it('clears a pending settle timer when a second blip starts, instead of letting it fire mid-blip', () => {
+    const sdk = installFakeSdk()
+    render(<Harness />)
+    act(() => sdk.triggerReconnect())
+    act(() => sdk.triggerBlip())
+    act(() => sdk.triggerReconnect()) // arms a settle timer due 1500ms from now
+    expect(settling()).toBe('true')
+
+    act(() => { vi.advanceTimersByTime(500) })
+    act(() => sdk.triggerBlip()) // a second, unrelated blip starts
+    expect(settling()).toBe('true')
+
+    // The FIRST settle timer would fire here (500ms + 1000ms = 1500ms since
+    // it was armed) if the second blip hadn't cleared it — that would
+    // incorrectly clear settling while genuinely mid-disconnect again.
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(settling()).toBe('true')
+    expect(connected()).toBe('true') // still within the second blip's own grace window
+
+    // The second blip's OWN disconnect-confirm timer (a fresh
+    // CAST_DISCONNECT_GRACE_MS from when it started) is what actually
+    // resolves this.
+    act(() => { vi.advanceTimersByTime(3000) }) // 4000ms total since the 2nd blip
+    expect(connected()).toBe('false')
+  })
+
   it('syncs remote to the disconnected RemotePlayer once a blip is confirmed (not left frozen forever)', () => {
     const sdk = installFakeSdk()
     render(<Harness />)
