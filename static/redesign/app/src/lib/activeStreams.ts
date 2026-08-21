@@ -43,54 +43,46 @@ export interface StreamGroup<T> {
   castRows: T[]
 }
 
-// A clone chain should never exceed one link — the sender always clones from
-// the LOCAL session, never from a clone. The walk is bounded anyway, because
-// a malformed chain must not hang the admin dashboard.
-const MAX_CHAIN = 8
-
 /**
  * Nest each receiver session under the session it was cloned from.
  *
- * Rules that matter, all of them cases the live server actually produces:
+ * The pairing rule is ONE level and is mirrored exactly by castPairable in
+ * internal/streaming/streaming.go, which feeds the Active Streams tile. Keep
+ * them in step: a divergence renders as a header contradicting the list under
+ * it. A clone folds into its source only when all of these hold —
  *
- *  - A clone whose source is NOT in the list stays top-level. That is the
- *    ordinary end state of a cast — the local player closes, the TV keeps
- *    playing — and it is a real stream someone is watching. Hiding it, or
- *    counting it as zero, would under-report live playback.
- *  - A clone whose source belongs to a DIFFERENT user stays top-level. See
- *    CastPairable.user_id — an admin casting someone else's session is the
- *    one way the server produces this.
- *  - A self-referencing or cyclic `cast_clone_of` degrades to top-level
- *    rather than looping. The server does not emit either (CreateSession
- *    refuses to stamp a self-reference, and the shared-session path leaves
- *    `cast_clone_of` unset), which is why this is a floor, not a feature.
- *  - Input order is preserved for groups and within each group's clones.
- *    That keeps a clone adjacent to its source, but note it is NOT list
- *    stability: /api/admin/sessions ranges a Go map, so the underlying order
- *    already changes between polls and neither caller sorts.
+ *  - the source is in the list. A clone whose source is gone stays top-level:
+ *    that is the ordinary end state of a cast (the browser closed, the TV
+ *    plays on) and it is a real stream someone is watching, so hiding it or
+ *    counting it as zero would under-report live playback.
+ *  - the source belongs to the SAME user. See CastPairable.user_id — an admin
+ *    casting someone else's session is the one way the server produces a
+ *    cross-owner pair, and those are two independent viewers.
+ *  - the source is itself a root, not another clone. This is what keeps a
+ *    single lookup total: chains and cycles need no special case, they simply
+ *    do not fold. Requiring a transitive walk instead is what let the Go and
+ *    TypeScript sides answer a cycle differently — Go folding a live stream
+ *    to zero while this side showed two rows. Neither shape is reachable
+ *    (CloneForCast only clones a local session, and an id can only point at a
+ *    session that already existed), so the cheaper rule wins.
+ *
+ * Input order is preserved for groups and within each group's clones. That
+ * keeps a clone adjacent to its source, but it is NOT list stability:
+ * /api/admin/sessions ranges a Go map, so the underlying order already
+ * changes between polls and neither caller sorts.
  */
 export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup<T>[] {
   const byId = new Map<string, T>()
   for (const r of rows) byId.set(r.id, r)
 
-  // Resolve the row a clone should be filed under: walk up until a row with
-  // no (resolvable) source is found. Returns null when the row is itself a
-  // root, when the chain leaves the list, or when it loops.
-  const rootOf = (row: T): T | null => {
-    const seen = new Set<string>([row.id])
-    let cur = row
-    for (let i = 0; i < MAX_CHAIN; i++) {
-      const parentId = cur.cast_clone_of
-      if (!parentId) return cur === row ? null : cur
-      if (seen.has(parentId)) return null // cycle (includes self-reference)
-      const parent = byId.get(parentId)
-      if (!parent) return cur === row ? null : cur // chain leaves the list
-      // Different owner: not a pair, whatever the ids say.
-      if (parent.user_id !== cur.user_id) return cur === row ? null : cur
-      seen.add(parentId)
-      cur = parent
-    }
-    return null
+  // The row this one files under, or null if it is a group of its own.
+  const sourceOf = (row: T): T | null => {
+    if (!row.cast_clone_of) return null
+    const src = byId.get(row.cast_clone_of)
+    if (!src || src === row) return null
+    if (src.cast_clone_of) return null // source is itself a clone
+    if (src.user_id !== row.user_id) return null // different viewer
+    return src
   }
 
   const groups: StreamGroup<T>[] = []
@@ -99,7 +91,7 @@ export function groupCastStreams<T extends CastPairable>(rows: T[]): StreamGroup
   // clone listed BEFORE its source still lands under it (the API's order is
   // a Go map iteration — effectively random, and it changes every poll).
   const roots = new Map<string, T | null>()
-  for (const row of rows) roots.set(row.id, rootOf(row))
+  for (const row of rows) roots.set(row.id, sourceOf(row))
   for (const row of rows) {
     if (roots.get(row.id)) continue
     const g: StreamGroup<T> = { row, castRows: [] }

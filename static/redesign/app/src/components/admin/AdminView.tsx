@@ -291,10 +291,13 @@ function NowPlayingWidget() {
       <h2 className="text-white font-semibold mb-4">Now Playing ({groups.length})</h2>
       <div className="space-y-3">
         {groups.map(({ row: s, castRows }) => (
-          // <ul>/<li> rather than nested <div>s: the nesting is the meaning
-          // here ("this receiver is playing that session"), and a screen
-          // reader gets it from the list structure. Purely visual indentation
-          // would read as two unrelated rows — the very confusion this fixes.
+          // The relationship is carried by the TEXT ("Cast receiver for
+          // {name}"), because that is what actually reaches assistive tech —
+          // the indent and the left border are decoration, and a screen
+          // reader would otherwise read two unrelated rows, the very
+          // confusion this change exists to end. The <ul>/<li> below groups
+          // the receivers of one session; it does not, on its own, tie them
+          // to the row above.
           <div key={s.id} className="border-b border-white/[0.03] last:border-0">
             <div className="flex items-center gap-4 py-2">
               <div className="w-10 h-10 rounded-full bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
@@ -306,10 +309,15 @@ function NowPlayingWidget() {
                   {s.file_name}
                   {s.resolution && ` · ${s.resolution}`}
                   {s.kind === 'direct' && ` · Direct Play`}
-                  {/* A cast with no clone under it: either AirPlay (never
-                      cloned) or the shared-session case (already H.264 +
-                      AAC, no subtitles). The TV IS this row. */}
-                  {castRows.length === 0 && s.cast_held && ` · Casting`}
+                  {/* NOT "casting". cast_held only means a cast-scoped token
+                      fetched this session, and Safari/iOS put such a token on
+                      the LOCAL <video> src for native HLS auth (#317) — so
+                      ordinary Apple-browser playback sets it with no receiver
+                      anywhere. Calling that "Casting" would relabel a large
+                      share of ordinary viewers, recreating the mystery-row
+                      confusion this whole change exists to end. What IS true
+                      of every such session is the longer idle lease. */}
+                  {castRows.length === 0 && s.cast_held && ` · token lease`}
                   {/* Only once a receiver has actually FETCHED from one of
                       the clones. A clone that was minted but never loaded
                       (load_failed, a receiver stall — the case
@@ -1023,22 +1031,26 @@ function AdminSessionsTab() {
                     }`}>
                       {isTranscode ? 'Transcode' : 'Direct'}
                     </span>
-                    {/* Cast-safe clone the receiver pulls. Killing it stops
-                        the TV; killing the row above it does not. The
-                        explanation is sr-only text rather than a `title`,
-                        which never reaches a keyboard or a screen reader on
-                        a non-focusable span. */}
-                    {(isCastRow || s.cast_held) && (
+                    {/* Two different claims, deliberately worded differently.
+                        "Cast" is provable — this row is a clone CloneForCast
+                        made for a receiver, so killing it stops the TV while
+                        killing the row above it does not. "Lease" is all
+                        cast_held supports: Safari/iOS put a cast token on the
+                        local <video> src for native HLS auth (#317), so that
+                        flag is set by ordinary Apple-browser playback with no
+                        receiver involved. Explanations are sr-only text, not
+                        a `title` — a title never reaches a keyboard or a
+                        screen reader on a non-focusable span. */}
+                    {isCastRow && (
                       <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-purple-500/15 text-purple-300 border border-purple-500/30">
                         Cast
-                        <span className="sr-only">
-                          {isCastRow
-                            // AirPlay, or a Chromecast sharing the local
-                            // session (already H.264 + AAC, no subtitles):
-                            // no clone exists, so that row IS the TV feed.
-                            ? ` receiver session, cloned from ${s.cast_clone_of ?? 'the session above'}`
-                            : ' — a receiver has fetched from this session; it is on the 30-minute cast lease'}
-                        </span>
+                        <span className="sr-only"> receiver session, cloned from the session above</span>
+                      </span>
+                    )}
+                    {!isCastRow && s.cast_held && (
+                      <span className="ml-1 inline-block px-2 py-0.5 rounded-full text-[10px] font-medium bg-sky-500/15 text-sky-300 border border-sky-500/30">
+                        Lease
+                        <span className="sr-only"> — fetched with a scoped stream token (AirPlay, or Safari and iOS native HLS, which use one for ordinary local playback too), so it is on the 30-minute idle lease</span>
                       </span>
                     )}
                   </td>

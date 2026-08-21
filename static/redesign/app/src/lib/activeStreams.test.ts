@@ -92,14 +92,21 @@ describe('groupCastStreams', () => {
     expect(groups.every(g => g.castRows.length === 0)).toBe(true)
   })
 
-  it('flattens a longer chain onto its root rather than dropping links', () => {
+  // The rule is one level: a clone folds only into a source that is itself a
+  // root. A chain therefore folds its first link and stops — no transitive
+  // walk, no cycle special-case, and the same answer castPairable gives in
+  // internal/streaming/streaming.go (mirrored by
+  // TestActiveStreamCount_MirrorsTheClientGroupingRule). Unreachable in
+  // practice: CloneForCast only ever clones a local session.
+  it('folds only the first link of a chain, matching the server rule', () => {
     const groups = groupCastStreams([
       row('root'),
       row('mid', { cast_clone_of: 'root' }),
       row('leaf', { cast_clone_of: 'mid' }),
     ])
-    expect(groups.map(g => g.row.id)).toEqual(['root'])
-    expect(groups[0].castRows.map(r => r.id)).toEqual(['mid', 'leaf'])
+    expect(groups.map(g => g.row.id)).toEqual(['root', 'leaf'])
+    expect(groups[0].castRows.map(r => r.id)).toEqual(['mid'])
+    expect(groups[1].castRows).toEqual([])
   })
 
   it('degrades to a flat list when the server sends no pairing fields', () => {

@@ -13,11 +13,13 @@ package api
 // across the wire under the exact keys lib/api.ts reads.
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aurora-media/aurora/internal/config"
@@ -127,10 +129,55 @@ func TestAdminSessions_JSONCarriesTheCastPairing(t *testing.T) {
 	if got := clone["cast_held"]; got != false {
 		t.Errorf("freshly minted clone cast_held = %v, want false", got)
 	}
+	// user_id is load-bearing for the pairing, not just display: the client's
+	// same-owner rule turns on it (lib/activeStreams), so an admin casting
+	// another user's session does not get folded into that user's row.
+	for label, r := range map[string]map[string]any{"source": src, "clone": clone} {
+		uid, present := r["user_id"]
+		if !present {
+			t.Errorf("%s row has no user_id — the SPA cannot apply the same-owner pairing rule without it", label)
+			continue
+		}
+		if uid != float64(7) {
+			t.Errorf("%s row user_id = %v, want 7", label, uid)
+		}
+	}
 }
 
-// Criterion: one cast is one stream on the dashboard tile. This is the
-// arithmetic Dashboard uses; reverting it to ActiveSessions() fails here.
+// Dashboard makes four database queries before it reaches the tile, so no
+// unit test here can call it — which is how that line stayed unpinned while
+// the tile double-counted every cast. Read the source and assert the call
+// site instead, the same tactic TestSPAProbeEmitsNoNativeOnlyCapabilities
+// uses against streaming.ts.
+//
+// THIS is the test that fails if the handler is reverted to ActiveSessions();
+// the ones below only cover the helper it calls.
+func TestDashboard_UsesTheCastAwareStreamCount(t *testing.T) {
+	src, err := os.ReadFile("admin_handlers.go")
+	if err != nil {
+		t.Fatalf("read admin_handlers.go: %v", err)
+	}
+	const marker = "func (h *AdminHandler) Dashboard("
+	start := bytes.Index(src, []byte(marker))
+	if start < 0 {
+		t.Fatalf("Dashboard handler not found — update this test's marker (%q)", marker)
+	}
+	// Bound the window to the handler body: up to the next top-level func.
+	body := string(src[start+len(marker):])
+	if end := strings.Index(body, "\nfunc "); end >= 0 {
+		body = body[:end]
+	}
+
+	if !strings.Contains(body, "activeStreamTileCount(") {
+		t.Error("Dashboard no longer calls activeStreamTileCount — the Active Streams tile counts one casting viewer as two streams again")
+	}
+	if strings.Contains(body, "ActiveSessions()") {
+		t.Error("Dashboard calls ActiveSessions() — the raw session count, which double-counts every Chromecast viewer")
+	}
+}
+
+// Criterion: one cast is one stream on the dashboard tile. This covers the
+// arithmetic; the call site is pinned above.
 func TestActiveStreamTileCount_CastPairCountsOnce(t *testing.T) {
 	tm, _, _ := castPairManager(t)
 

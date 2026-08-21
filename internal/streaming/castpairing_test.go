@@ -212,9 +212,17 @@ func TestActiveStreamCount_SelfReferenceStillCounts(t *testing.T) {
 	}
 }
 
-// The write side of the same rule: CreateSession must not stamp a session as
-// its own clone, whatever SessionOpts asks for.
-func TestCreateSession_RefusesASelfReferencingCastClone(t *testing.T) {
+// The write side: CreateSession applies SessionOpts.CastCloneOf, and applies
+// it BEFORE publishing the session — a clone visible unpaired for even an
+// instant is a transient double-count on the tile.
+//
+// It also refuses a self-reference (streaming.go, the CastCloneOf branch).
+// That guard is unreachable by construction — the id is generated inside
+// CreateSession, so no caller can name it in advance — and is therefore left
+// untested rather than tested vacuously; the reachable half of the same
+// invariant is TestActiveStreamCount_SelfReferenceStillCounts on the read
+// side.
+func TestCreateSession_AppliesTheCastCloneOfOption(t *testing.T) {
 	fakeFFmpegOnPath(t)
 	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
 	if err != nil {
@@ -222,21 +230,75 @@ func TestCreateSession_RefusesASelfReferencingCastClone(t *testing.T) {
 	}
 	defer tm.Close()
 
-	// The id is generated inside CreateSession, so the only way to ask for a
-	// self-reference is to aim at whatever it produces — which no caller can
-	// do. Assert the invariant directly instead: no session ever comes out
-	// pointing at itself, and an ordinary create carries no pairing at all.
-	s, err := tm.CreateSession(1, "alice", "/library/a.mkv", 1920, 1080)
+	plain, err := tm.CreateSession(1, "alice", "/library/a.mkv", 1920, 1080)
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
+	clone, err := tm.CreateSession(1, "alice", "/library/a.mkv", 1920, 1080, SessionOpts{
+		AudioTrackIndex: -1,
+		CastCloneOf:     plain.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession with CastCloneOf: %v", err)
+	}
+
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	if s.castCloneOf != "" {
-		t.Errorf("plain session carries castCloneOf = %q, want empty", s.castCloneOf)
+	if plain.castCloneOf != "" {
+		t.Errorf("plain session carries castCloneOf = %q, want empty", plain.castCloneOf)
 	}
-	if s.castCloneOf == s.ID {
-		t.Error("session is its own cast clone — ActiveStreamCount would fold it to zero")
+	if clone.castCloneOf != plain.ID {
+		t.Errorf("clone castCloneOf = %q, want %q — SessionOpts.CastCloneOf was dropped", clone.castCloneOf, plain.ID)
+	}
+	// Published and paired in the same breath: the count already sees one
+	// stream, never two.
+	if got := len(tm.sessions); got != 2 {
+		t.Fatalf("expected 2 sessions in the manager, got %d", got)
+	}
+}
+
+// The pairing rule is duplicated — castPairable here, groupCastStreams in
+// static/redesign/app/src/lib/activeStreams.ts — because a count and a row
+// list are rendered side by side from the same data. Nothing can compile the
+// two against each other, so this table mirrors the cases in
+// activeStreams.test.ts one for one. If you change either side, change both
+// and update both tables.
+func TestActiveStreamCount_MirrorsTheClientGroupingRule(t *testing.T) {
+	type row struct {
+		id     string
+		userID int64
+		clone  string
+	}
+	cases := []struct {
+		name string
+		rows []row
+		want int
+	}{
+		{"cast pair plus a guest", []row{{"local", 7, ""}, {"tv", 7, "local"}, {"guest", 9, ""}}, 2},
+		{"orphaned clone still counts", []row{{"tv", 7, "local-gone"}}, 1},
+		{"two clones on one source", []row{{"local", 7, ""}, {"tv-1", 7, "local"}, {"tv-2", 7, "local"}}, 1},
+		{"cross-owner pair is two viewers", []row{{"viewer", 42, ""}, {"admin-tv", 1, "viewer"}}, 2},
+		{"self-reference", []row{{"a", 7, "a"}, {"b", 7, ""}}, 2},
+		{"cycle", []row{{"a", 7, "b"}, {"b", 7, "a"}}, 2},
+		{"chain folds one link only", []row{{"root", 7, ""}, {"mid", 7, "root"}, {"leaf", 7, "mid"}}, 2},
+		{"no casts at all", []row{{"a", 7, ""}, {"b", 7, ""}}, 2},
+		{"empty", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := castLeaseManager(t)
+			now := time.Now()
+			for _, r := range tc.rows {
+				addLeaseSession(tm, r.id, now, false)
+				tm.mu.Lock()
+				tm.sessions[r.id].UserID = r.userID
+				tm.sessions[r.id].castCloneOf = r.clone
+				tm.mu.Unlock()
+			}
+			if got := tm.ActiveStreamCount(); got != tc.want {
+				t.Errorf("ActiveStreamCount = %d, want %d (the SPA's groupCastStreams returns %d groups for this input)", got, tc.want, tc.want)
+			}
+		})
 	}
 }
 
