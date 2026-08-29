@@ -718,13 +718,24 @@ func startFirstVariant(t *testing.T, tm *TranscodeManager, path string, opts Ses
 		t.Fatalf("ensure variant %q: %v", profile, err)
 	}
 
+	// Err and StderrTail are written by the cmd.Wait goroutine under
+	// variantMu, and closing Ready gives no happens-before with those writes
+	// when it happens through the playlist-found branch — so snapshot them
+	// under the lock rather than reading the fields directly.
+	timedOut := false
 	select {
 	case <-variant.Ready:
 	case <-time.After(90 * time.Second):
-		t.Fatalf("variant %q never became ready\nffmpeg stderr tail:\n%s", profile, variant.StderrTail)
+		timedOut = true
 	}
-	if variant.Err != nil {
-		t.Fatalf("variant %q failed: %v\nffmpeg stderr tail:\n%s", profile, variant.Err, variant.StderrTail)
+	session.variantMu.Lock()
+	vErr, tail := variant.Err, variant.StderrTail
+	session.variantMu.Unlock()
+	if timedOut {
+		t.Fatalf("variant %q never became ready\nffmpeg stderr tail:\n%s", profile, tail)
+	}
+	if vErr != nil {
+		t.Fatalf("variant %q failed: %v\nffmpeg stderr tail:\n%s", profile, vErr, tail)
 	}
 	return session, variant
 }

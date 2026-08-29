@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -1430,10 +1431,10 @@ func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
 // through a Cmd field would race no matter what lock it held. (It did:
 // ListSessions read Cmd.Process.Pid under variantMu while Start() wrote
 // Cmd.Process, and ffmpegDone read Cmd.ProcessState while Wait() wrote it.)
-// The Cmd stays a local in startVariantImpl: built there, then handed to the
-// launch goroutine, which is the only thing that touches it once it exists.
-// Everything readers need — `pid`, `exited` — is published onto the
-// variantMu-guarded fields below at write time.
+// The Cmd stays a local in startVariantImpl: built and configured there, then
+// handed to the launch goroutine, which is the only thing that touches it
+// after that. Everything readers need — `pid`, `exited` — is published onto
+// the variantMu-guarded fields below at write time.
 type QualityVariant struct {
 	Profile   QualityProfile
 	OutputDir string
@@ -1452,6 +1453,12 @@ type QualityVariant struct {
 	// samples /proc from it; see the type comment for why it is a snapshot
 	// rather than a reach through Cmd.Process. 0 until the process is
 	// running, and reset by relaunchVariantLocked.
+	//
+	// Deliberately NOT cleared when the process exits, which is what the old
+	// Cmd.Process.Pid read did too (Wait leaves Process.Pid intact; only
+	// Release invalidates it). So an exited-but-not-relaunched variant still
+	// reports its last PID, and a recycled PID can be sampled — carried over
+	// as-is rather than fixed here, so this change stays a race fix.
 	pid int
 	// exited is set by the cmd.Wait goroutine when ffmpeg returns. The
 	// playback/poll paths read it (via ffmpegDone) to fail fast instead of
@@ -1533,6 +1540,13 @@ const defaultMaxCacheBytes = 20 << 30 // 20 GiB
 // attempts would mask a real underlying issue.
 const variantRestartMax = 1
 
+// variantWaitDelay bounds how long cmd.Wait spends draining FFmpeg's stderr
+// pipe once the process has exited or its context has been cancelled. The
+// drain is instantaneous whenever FFmpeg is the only holder of that
+// descriptor, which is every ordinary exit; the bound exists for the case
+// where it is not. See the Stderr comment in startVariantImpl.
+const variantWaitDelay = 5 * time.Second
+
 // ffmpegDone reports whether the variant's ffmpeg process has terminated.
 // The signal is our own `exited` flag, set by the cmd.Wait goroutine once
 // Wait has returned.
@@ -1545,12 +1559,15 @@ const variantRestartMax = 1
 // observed with v.Err still nil, and EnsureVariant reads a nil v.Err as a
 // clean completion and serves the dead variant as a finished one.
 //
-// `exited` narrows that window to the bookkeeping itself. It does NOT close
-// it, so do not read this as "v.Err is final": the post-Wait block publishes
-// Err only for a non-cancelled non-zero exit, and the "exited before producing
-// a playlist" error is appended later still, by the polling goroutine one
-// cmdDone hop after `exited` becomes visible. ServeVariantPlaylist re-reads
-// v.Err under the lock after Ready closes for exactly that reason.
+// `exited`, StderrTail and the post-Wait Err all land in ONE critical section,
+// so for a reader holding variantMu that window is zero. What survives is a
+// later write: the polling goroutine appends the "exited before producing a
+// playlist" error one cmdDone hop after `exited` becomes visible, and the
+// post-Wait block sets Err only when Wait actually reported a crash (a
+// cancelled context, a clean exit, or a stalled-pipe ErrWaitDelay all leave it
+// nil, as does an Err the polling goroutine already wrote). So do not read a
+// true return as "v.Err is final" — ServeVariantPlaylist re-reads v.Err under
+// the lock after Ready closes for exactly that reason.
 //
 // Caller MUST hold the session's variantMu: `exited` is written under it by
 // the lifecycle goroutines (review finding B4).
@@ -3761,6 +3778,18 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderrBuf limitedBuffer
 	cmd.Stderr = &stderrBuf
+	// Attaching a writer to Stderr changes Wait's contract: os/exec copies
+	// through a pipe, and Wait blocks until every holder of the child's stderr
+	// descriptor closes it — which an FFmpeg that leaves the fd to a
+	// subprocess can stretch indefinitely. runProbeFFmpegDiag bounds the same
+	// contract for the same reason (hwdecode.go).
+	//
+	// It matters more here than it did: `exited` is published after Wait
+	// returns and is now the only "terminated" signal, so an unbounded Wait
+	// strands the variant permanently. EnsureVariant would hand back the
+	// zombie on every poll, and once the reaper marked it `reaped`, the resume
+	// branch — which requires ffmpegDone — could never fire again.
+	cmd.WaitDelay = variantWaitDelay
 
 	v.started = true
 
@@ -3870,7 +3899,23 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			stderrTail = stderrTail[len(stderrTail)-stderrTailMax:]
 		}
 		stderrTail = strings.TrimSpace(stderrTail)
-		if waitErr != nil && ctx.Err() == nil {
+		// ErrWaitDelay says the PROCESS exited successfully — a non-zero exit
+		// takes precedence in Wait's own error — and only its stderr pipe
+		// outlived variantWaitDelay. That is not a crash and must not be
+		// reported as one: EnsureVariant answers a crash by restarting FFmpeg
+		// with -ss past EOF, which is issues #172/#174 and exactly what the
+		// clean-completion branch exists to prevent. hwdecode.go's probe
+		// carries the same carve-out.
+		pipeStalled := errors.Is(waitErr, exec.ErrWaitDelay)
+		crashed := waitErr != nil && !pipeStalled && ctx.Err() == nil
+		if pipeStalled {
+			slog.Warn("ffmpeg variant exited cleanly but left its stderr pipe open",
+				"session_id", session.ID,
+				"profile", p.Name,
+				"wait_delay", variantWaitDelay,
+			)
+		}
+		if crashed {
 			// Audit M5 — log the same trimmed stderr tail used in v.Err
 			// rather than the full (up to 64KB) buffer. Operators don't
 			// need megabytes of probe-time noise; the trailing error is
@@ -3898,7 +3943,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		if sameGeneration() {
 			v.exited = true
 			v.StderrTail = stderrTail
-			if waitErr != nil && ctx.Err() == nil && v.Err == nil {
+			if crashed && v.Err == nil {
 				if stderrTail != "" {
 					v.Err = fmt.Errorf("%w (ffmpeg stderr tail: %s)", waitErr, stderrTail)
 				} else {

@@ -2,6 +2,7 @@ package streaming
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -133,6 +134,80 @@ func TestStartVariant_PublishesThePIDAndRelaunchClearsIt(t *testing.T) {
 	if pidAfter != 0 {
 		t.Errorf("pid = %d immediately after relaunch, want 0 — a resumed variant would keep "+
 			"reporting the PID of the process that already died", pidAfter)
+	}
+}
+
+// `exited` is the only "this process is gone" signal there is now, and it is
+// published after cmd.Wait returns. Attaching a writer to Stderr makes Wait
+// block until every holder of the child's stderr descriptor closes it — so an
+// FFmpeg that leaves that fd to a subprocess would, without variantWaitDelay,
+// keep Wait (and therefore `exited`) pending for as long as the subprocess
+// lives. The variant would be stranded: EnsureVariant hands back the zombie on
+// every poll, and once the reaper marks it `reaped` the resume branch requires
+// ffmpegDone and can never fire again.
+//
+// The stub exits 0 immediately but leaves a background child holding stderr
+// well past the delay. The bound must win, and the resulting ErrWaitDelay must
+// NOT be recorded as a crash: the process succeeded, and EnsureVariant answers
+// a crash by restarting FFmpeg with -ss past EOF (issues #172/#174).
+func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) {
+	outDir := t.TempDir()
+	// Only the variant launch forks the lingering child: NewTranscodeManager's
+	// encoder probes shell out to ffmpeg too, and they read it through
+	// CombinedOutput, which has no WaitDelay of its own to escape with.
+	//
+	// The stub also writes the playlist, so the polling goroutine takes its
+	// playlist-found branch and records no Err of its own. That leaves v.Err
+	// saying exactly one thing: whether the post-Wait block called the stalled
+	// pipe a crash.
+	stubFFmpeg(t, "case \"$*\" in\n"+
+		"  *"+outDir+"*)\n"+
+		"    touch "+filepath.Join(outDir, "stream.m3u8")+"\n"+
+		"    sleep 30 &\n"+
+		"    exit 0\n"+
+		"    ;;\n"+
+		"esac\n"+
+		"exit 1\n")
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	v := &QualityVariant{
+		Profile:   QualityProfile{Name: "source"},
+		OutputDir: outDir,
+		Ready:     make(chan struct{}),
+	}
+	s := &TranscodeSession{
+		ID:         "sess-stalled-pipe",
+		FilePath:   "/tmp/x.mkv",
+		Variants:   map[string]*QualityVariant{"source": v},
+		LastAccess: time.Now(),
+		Remux:      true,
+	}
+	if _, err := tm.EnsureVariant(s, "source", 0); err != nil {
+		t.Fatalf("EnsureVariant: %v", err)
+	}
+
+	// Generous margin over variantWaitDelay, but far short of the child's
+	// lifetime — an unbounded Wait fails here rather than passing slowly.
+	deadline := time.Now().Add(variantWaitDelay + 10*time.Second)
+	for {
+		s.variantMu.Lock()
+		done, vErr := ffmpegDone(v), v.Err
+		s.variantMu.Unlock()
+		if done {
+			if vErr != nil {
+				t.Fatalf("a clean exit whose stderr pipe outlived the delay was recorded as a crash: %v", vErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("variant never reached exited: cmd.Wait is still draining a stderr pipe " +
+				"held open by a subprocess, and nothing else can mark this variant done")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
