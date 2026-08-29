@@ -1,8 +1,6 @@
 package streaming
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +9,7 @@ import (
 // stubFFmpeg puts a script named ffmpeg at the front of PATH.
 func stubFFmpeg(t *testing.T, body string) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-		t.Fatalf("write ffmpeg stub: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stubExecutable(t, "ffmpeg", body)
 }
 
 // Covers the seam the unit tests above can't: stderr actually arriving through
@@ -63,7 +57,7 @@ func TestRunProbeFFmpegDiag_SuccessWithALingeringPipeIsStillSuccess(t *testing.T
 	// It must also have stopped waiting, rather than blocking until the
 	// grandchild finished — that is the hang WaitDelay is here to prevent.
 	if elapsed >= 4*time.Second {
-		t.Fatalf("probe waited %s for a lingering pipe; WaitDelay is %s", elapsed, probeWaitDelay)
+		t.Fatalf("probe waited %s for a lingering pipe; WaitDelay is %s", elapsed, execWaitDelay)
 	}
 }
 

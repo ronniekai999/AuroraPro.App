@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -1779,7 +1780,11 @@ func (tm *TranscodeManager) HEVCEncodeEnabled() bool {
 // matching the manager's general posture that a missing ffmpeg surfaces at
 // session creation, not construction.
 func ffmpegSupportsReadrate() bool {
-	out, err := exec.Command("ffmpeg", "-version").Output()
+	// Bounded: this runs inside NewTranscodeManager, and capturing output is
+	// what lets Wait outlive the process (runBounded, execwait.go). There is
+	// no context here to lean on — and a context would not help anyway, since
+	// it can only kill the process, not close a descriptor its child kept.
+	out, err := boundedOutput(exec.Command("ffmpeg", "-version"))
 	if err != nil {
 		return false
 	}
@@ -3733,6 +3738,13 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderrBuf limitedBuffer
 	cmd.Stderr = &stderrBuf
+	// Attaching that buffer means Wait blocks until every holder of FFmpeg's
+	// stderr closes it, not until FFmpeg exits — so a subprocess that inherits
+	// it pins the cmd.Wait goroutine below forever: the variant is never marked
+	// exited, cmdDone never closes, and the session's watchers wait on an
+	// FFmpeg that is already gone. Bound it as the probes do (execwait.go);
+	// after a ctx kill the timer merely caps the drain that follows.
+	cmd.WaitDelay = execWaitDelay
 
 	v.Cmd = cmd
 	v.started = true
@@ -3820,6 +3832,15 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}()
 
 		waitErr := cmd.Wait()
+		// ErrWaitDelay is not a crash: Wait reports it in place of a NIL error
+		// (a non-zero exit is an ExitError and takes precedence), so it means
+		// FFmpeg finished cleanly and only its stderr outlived it. Reporting it
+		// would mark a healthy variant failed and log an "ffmpeg variant
+		// exited" error for a transcode that completed. Same reading as
+		// runBounded (execwait.go) and runProbeFFmpegDiag.
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			waitErr = nil
+		}
 		// Snapshot a bounded tail of FFmpeg's stderr so the typed v.Err
 		// surfaced to EnsureVariant callers carries the actual reason for
 		// the crash (OOM kill, codec failure, source EOF, etc.) — not
