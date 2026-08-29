@@ -1,0 +1,10 @@
+{
+  "sha": "1c955bbd75363123b08ab20bfb4cb59ad03fe8ef",
+  "verdict": "lows-only",
+  "summary": "Three independent fresh-context read-only passes over the full diff (git diff main...HEAD), each unprimed with the implementer's conclusions. Checked: non-strict mtime semantics and which staleness cases they give up; per-site condition fidelity against git show main:; test falsifiability under 25+ production mutations (revert to After, swapped args inside the helper and at each call site, neutered/inverted guard, dropped size half, cache-naming renames); vacuity; ffmpeg-present vs absent behavior; -race/-shuffle; missed sites repo-wide; concurrency and torn reads; and the accuracy of every factual claim in the comments and commit message. Verdict LOWS-ONLY on all three passes; no high or critical findings. All findings resolved: tests were direction-blind (added a source-is-newer case per site, which kills the argument-swap mutant), the zero-length test was vacuous (now truncates the entry the function itself returned instead of a hand-computed path), the commit message overstated production impact (corrected: ~one extra rebuild per entry, not per request), and three comment claims were wrong or unsupported (a daily 30-day cache sweep does exist; ties are not limited to coarse filesystems - measured 97.6 percent tie rate at ~4ms on this ext4; the clock-skew parenthetical implied a mitigation that does not exist). Edits after pass 3 were comment and commit-message text only; production logic unchanged since pass 2. Residual gaps: real ffmpeg unavailable (covered with stubs); tie measurements are one kernel/filesystem; the same-tick stale case is unfalsifiable by test and was reasoned, not reproduced.",
+  "reviewer": "independent-agent-3-passes",
+  "findings": "19",
+  "diff_digest": "dc4b8e53766d250dda30fda030792db1bf98764c5e38429c0f58453d46a5e94c",
+  "branch": "claude/eager-cray-hrrwjh",
+  "recorded_at": "2026-08-29T05:55:25Z"
+}
