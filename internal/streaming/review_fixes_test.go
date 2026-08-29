@@ -765,13 +765,11 @@ func TestResumePoint_ImplausibleSumFallsBackToIndexArithmetic(t *testing.T) {
 }
 
 // The two delivery paths get opposite FFmpeg seek modes and therefore want
-// opposite sides of the boundary. Remux (-noaccurate_seek) snaps BACK to the
-// greatest key frame <= target, so it must aim past. Transcode seeks
-// accurately and discards every frame before the target, so aiming past
-// throws the boundary frame away — and pushing the run's first PTS a frame
-// past the grid mark makes hlsenc's next forced key frame land short of
-// hls_time, so that segment comes out roughly double length and misaligned
-// against its sibling variants.
+// opposite sides of the boundary. Remux gets -noaccurate_seek, where no trim
+// filter is inserted and the demuxer's landing point IS the output start, so
+// it must aim past. Transcode seeks accurately and a trim filter discards
+// every frame before the target, so aiming past throws the boundary frame
+// away — the one choice that cannot land on it.
 func TestResumePoint_BiasesForwardOnlyForRemux(t *testing.T) {
 	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
 	if err != nil {
@@ -815,10 +813,77 @@ func TestResumePoint_BiasesForwardOnlyForRemux(t *testing.T) {
 			"comes out ~2x long", transSec, boundary)
 	}
 	// Still close enough that the first frame at or after the target IS the
-	// boundary frame (one 23.976fps interval is ~41.7ms).
-	if boundary-transSec > 0.010 {
+	// boundary frame. 2ms, not a frame interval: the tolerance has to be
+	// tight enough that a whole-second floor (which this fixture undershoots
+	// by ~9.9ms) fails, or the millisecond half of the change is unpinned.
+	if boundary-transSec > 0.002 {
 		t.Errorf("transcode seek %.6f undershoots the boundary %.6f by %.6fs — more than a "+
 			"frame interval and content is duplicated", transSec, boundary, boundary-transSec)
+	}
+}
+
+// An unknown session must take the conservative side. Overshooting costs a
+// frame; undershooting a remux costs a whole GOP, so "don't know" has to mean
+// "assume remux".
+func TestResumePoint_NilSessionTakesTheRemuxSide(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	const nSeg, dur = 99, 6.0001005
+	boundary := dur * nSeg
+
+	dir := t.TempDir()
+	var pl strings.Builder
+	pl.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:7\n")
+	for i := 0; i < nSeg; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		pl.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n%s\n", dur, name))
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 8192), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(pl.String()), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "720p"}, OutputDir: dir}
+	gotSec, _ := tm.resumePoint(nil, v, 0)
+
+	if gotSec < boundary {
+		t.Errorf("nil-session seek %.6f is before the boundary %.6f — an unknown session fell "+
+			"on the transcode side, which costs a remux a whole GOP", gotSec, boundary)
+	}
+}
+
+// pubSec > 0 does not cover the transcode branch: a sum under a millisecond
+// floors to nothing, and resuming from the seek origin numbered past the
+// existing tail would re-encode the file over live segments.
+func TestResumePoint_SubMillisecondSumFallsBackToIndexArithmetic(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	dir := t.TempDir()
+	body := "#EXTM3U\n#EXTINF:0.000500,\nseg_00000.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(body), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "seg_00000.ts"), make([]byte, 64*1024), 0o644); err != nil {
+		t.Fatalf("write segment: %v", err)
+	}
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "720p"}, OutputDir: dir}
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: false}, v, 0)
+
+	// Index fallback: 1 published segment * 6s.
+	if gotSeg != 1 || gotSec != 6 {
+		t.Errorf("resumePoint = (%v, %d), want (6, 1) from the index fallback — a sub-millisecond "+
+			"sum resumed from the seek origin over live segments", gotSec, gotSeg)
 	}
 }
 

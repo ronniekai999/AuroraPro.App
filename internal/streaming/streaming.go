@@ -3142,7 +3142,7 @@ func (tm *TranscodeManager) resumePoint(session *TranscodeSession, v *QualityVar
 		// boundary and that second, and on NTSC rates that is almost the
 		// whole second: -force_key_frames puts the key frame on the first
 		// frame at or after each grid mark, so 23.976/29.97fps boundaries
-		// land a few ms PAST an integer (594.010089, not 594.000), and a
+		// land a few ms PAST an integer (594.010083, not 594.000), and a
 		// whole-second Ceil drops ~0.99s of A/V on every resume. Only remux
 		// gets -noaccurate_seek and snaps back onto the boundary; a transcode
 		// seeks accurately to exactly what it is told, so what is asked for
@@ -3151,34 +3151,57 @@ func (tm *TranscodeManager) resumePoint(session *TranscodeSession, v *QualityVar
 		// Which side of the boundary to aim for depends ENTIRELY on which
 		// seek mode this session's FFmpeg gets, and the two want opposites:
 		//
-		//   remux     -noaccurate_seek: the demuxer snaps to the greatest key
-		//             frame <= target, so a target even fractionally short
-		//             lands on the PREVIOUS key frame and re-appends a whole
-		//             GOP. Aim past the boundary; resumeSeekBias covers the
-		//             EXTINF print rounding that could otherwise leave the
-		//             target short.
+		//   remux     -noaccurate_seek: no trim filter is inserted, so the
+		//             demuxer's landing point IS the output start. Aim past
+		//             the boundary so the keyframe search cannot fall short
+		//             of it; resumeSeekBias covers the EXTINF print rounding
+		//             that could otherwise leave the target under.
 		//   transcode accurate seek: FFmpeg decodes from the preceding key
-		//             frame and DISCARDS every frame with pts < target, so it
-		//             already rounds forward to the first frame at or after
-		//             the target on its own. Aiming past the boundary is the
-		//             one choice that cannot land on it — it throws the
-		//             boundary frame away, and pushing the run's first PTS a
-		//             frame past the grid mark makes hlsenc's next forced key
-		//             frame fall a frame short of hls_time, so that segment
-		//             comes out ~2x long and misaligned against its sibling
-		//             variants. Aim at or just under; undershoot is bounded
-		//             by the print error (<1e-3s) and is orders of magnitude
-		//             below one frame interval (~41.7ms at 23.976fps), so the
-		//             first frame at or after the target is still the
-		//             boundary frame.
+		//             frame and a trim filter DISCARDS every frame with
+		//             pts < target, so it already rounds forward to the first
+		//             frame at or after the target on its own. Aiming past
+		//             the boundary is the one choice that cannot land on it —
+		//             it throws the boundary frame away. Aim at or just
+		//             under: the undershoot is the millisecond floor below
+		//             plus the print error plus up to one frame interval
+		//             (generation 1 itself starts at the first frame at or
+		//             after startSec), so worst case is a frame or so and the
+		//             cost is one duplicated frame, which the next resume's
+		//             overshoot cancels.
+		//
+		// KNOWN LIMIT on the remux side, and it is larger than everything
+		// this function computes. For containers whose demuxer does not set
+		// AVFMT_SEEK_TO_PTS — Matroska, mpegts and avi, i.e. most of a real
+		// library — ffmpeg_demux applies a dts_heuristic when the video has
+		// B-frames and seeks to (target - 3*AV_TIME_BASE/23), 130.4ms early,
+		// before searching for a keyframe. With -noaccurate_seek nothing
+		// trims that back. So a remux resume can re-append up to a whole GOP
+		// regardless of how precisely the target is computed: the bias here
+		// is necessary but nowhere near sufficient, and the millisecond
+		// precision is not what decides the outcome on MKV. Compensating
+		// means subtracting that same offset for non-AVFMT_SEEK_TO_PTS
+		// containers, which needs validating against real FFmpeg output
+		// before it goes anywhere near a seek. Note ProbeSeekKeyframe in
+		// subtitles.go models input seek the same optimistic way and is off
+		// by the same amount on MKV.
 		//
 		// Float64 summation drift is not the binding term either way: it
 		// measures around 5e-8 at 20k segments against a bias of 1e-2 there.
-		var seek float64
-		if session != nil && session.Remux {
+		// NaN is the "no usable seek" sentinel — the validity check below
+		// rejects it and the index arithmetic takes over.
+		//
+		// An unknown session takes the remux side deliberately: overshooting
+		// costs a frame, undershooting a remux costs a whole GOP.
+		seek := math.NaN()
+		switch {
+		case session == nil || session.Remux:
 			seek = float64(startSec) + math.Ceil((pubSec+resumeSeekBias(pubSeg+1))*1000)/1000
-		} else {
+		case math.Floor(pubSec*1000) > 0:
 			seek = float64(startSec) + math.Floor(pubSec*1000)/1000
+			// else: floors to nothing. A sub-millisecond playlist would
+			// resume from the seek origin numbered past the existing tail —
+			// what the pubSec > 0 guard exists to prevent, which it does not
+			// actually cover for this branch.
 		}
 		// A corrupt playlist can sum to something non-finite or absurd; int()
 		// on that is not defined to anything useful and yields a negative -ss
@@ -3192,6 +3215,15 @@ func (tm *TranscodeManager) resumePoint(session *TranscodeSession, v *QualityVar
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
 		resumeSegNum = highestSeg + 1
 		resumeFromSec = float64(startSec + resumeSegNum*segDur)
+		// Reached only when the playlist is unreadable. This is the index
+		// arithmetic playlistCoverage exists to replace — wrong by minutes on
+		// a remux, whose segments are not SegmentDuration long — so say so
+		// rather than letting a guessed resume look like a measured one.
+		slog.Warn("resume anchored on the directory scan; playlist unreadable, seek is an estimate",
+			"profile", v.Profile.Name,
+			"resume_segment", resumeSegNum,
+			"resume_from_sec", resumeFromSec,
+		)
 	}
 	return resumeFromSec, resumeSegNum
 }
