@@ -275,6 +275,58 @@ func formatVTTTimestamp(sec float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d.%03d", hh, mm, ss, fff)
 }
 
+// cacheIsFresh reports whether a derived file (a shifted or converted
+// VTT) can be reused for the given source. The three source-derived
+// caches below — ShiftVTTCues, ConvertSRTtoVTT and ConvertSubtitleToVTT
+// — ask exactly this question, so they ask it through here rather than
+// repeating the comparison and drifting apart.
+//
+// ExtractSubtitleVTT deliberately does NOT come through here. Its
+// entries are keyed on path hash + stream index and are never
+// invalidated against the media file at all, so it checks only that the
+// file is non-empty. That is a weaker policy with its own trade-off (see
+// its comment), not an oversight to unify away.
+//
+// The mtime comparison is deliberately NON-STRICT. A cache is written
+// after its source is read, so a valid entry has mtime >= the source's
+// and the source can only be newer if it changed afterwards, which
+// shows up as strictly newer. (That holds while both stamps come from
+// one clock. Media on a network mount whose server clock runs ahead
+// breaks it and defeats the cache. Pre-existing, and this change does
+// nothing for it either way: for any non-zero skew the two rules agree,
+// since they differ only at exact equality.)
+//
+// Requiring the output to be strictly NEWER instead made a same-tick
+// write look stale, which is what made TestShiftVTTCuesCachesResult
+// fail intermittently in CI. A tie means current, not stale.
+//
+// Scope of that bug, stated precisely because it is easy to overstate:
+// an entry written inside its source's mtime tick is rebuilt on the
+// NEXT request, and that rebuild's os.Create usually lands in a later
+// tick and breaks the tie for good. So the cost was roughly one extra
+// rebuild per entry — repeated only while requests keep arriving inside
+// a single tick — not one per request.
+//
+// The residual case this gives up is a source rewritten within the same
+// mtime tick as the conversion that read it. Nothing detects it
+// afterwards — these caches are keyed on path alone, with no content
+// check — so it clears only via main.go's daily sweep of the subtitle
+// cache dir, i.e. up to ~31 days of serving a stale conversion.
+//
+// The window is one mtime tick wide on ANY filesystem, not just coarse
+// ones: ext4 stamps inodes from the kernel's coarse clock, measured
+// here at ~4ms, and back-to-back writes tie the large majority of the
+// time (that is exactly why the CI flake was reachable at all). It is
+// wider still on FAT/exFAT and some SMB mounts, where a tick is 1-2s.
+// Hitting it also needs a fetcher rewriting the sidecar inside that
+// window. Narrow, and accepted knowingly.
+//
+// A zero-length output is never fresh — that is a truncated write from
+// an interrupted conversion, not a cache entry.
+func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
+	return outInfo.Size() > 0 && !outInfo.ModTime().Before(srcInfo.ModTime())
+}
+
 // ShiftVTTCues reads vttPath and writes a NEW VTT file with every cue
 // timestamp shifted by -offsetSec seconds. Cues that become fully
 // negative (end < 0 after the shift) are dropped — they're already
@@ -324,8 +376,8 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	stem := strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath))
 	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%dms_%x.vtt", stem, offsetMs, h[:6]))
 
-	// Cache hit: existing shifted file newer than the source.
-	if outInfo, err := os.Stat(outPath); err == nil && outInfo.Size() > 0 && outInfo.ModTime().After(srcInfo.ModTime()) {
+	// Cache hit: existing shifted file non-empty and not older than the source.
+	if outInfo, err := os.Stat(outPath); err == nil && cacheIsFresh(outInfo, srcInfo) {
 		return outPath, nil
 	}
 
@@ -490,12 +542,15 @@ func ConvertSRTtoVTT(srtPath, cacheDir string) (string, error) {
 	baseName := strings.TrimSuffix(filepath.Base(srtPath), ".srt")
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
-	// Return cached version if it exists and is newer than the SRT
+	// Return cached version if it exists, is non-empty, and is not older
+	// than the SRT. The non-empty half matters here: a conversion killed
+	// mid-write leaves a 0-byte file that would otherwise be served
+	// forever as an empty subtitle track.
 	srtInfo, err := os.Stat(srtPath)
 	if err != nil {
 		return "", err
 	}
-	if vttInfo, err := os.Stat(vttPath); err == nil && vttInfo.ModTime().After(srtInfo.ModTime()) {
+	if vttInfo, err := os.Stat(vttPath); err == nil && cacheIsFresh(vttInfo, srtInfo) {
 		return vttPath, nil
 	}
 
@@ -555,12 +610,13 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 	baseName := strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
-	// Return cached version if it exists and is newer than the source
+	// Return cached version if it exists, is non-empty, and is not older
+	// than the source
 	srcInfo, err := os.Stat(subPath)
 	if err != nil {
 		return "", err
 	}
-	if vttInfo, err := os.Stat(vttPath); err == nil && vttInfo.Size() > 0 && vttInfo.ModTime().After(srcInfo.ModTime()) {
+	if vttInfo, err := os.Stat(vttPath); err == nil && cacheIsFresh(vttInfo, srcInfo) {
 		return vttPath, nil
 	}
 
