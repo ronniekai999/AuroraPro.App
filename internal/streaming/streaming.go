@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -3068,6 +3069,22 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 		segDur = 6 // matches the fallback in startVariantImpl
 	}
 	resumeFromSec = startSec
+
+	// Prefer the muxer's own durations — exact for remux, where segments are
+	// cut on source keyframes rather than the nominal grid (see
+	// playlistCoverage). Round UP: a remux segment boundary IS a source
+	// keyframe, and seeking even fractionally before it makes FFmpeg's input
+	// seek snap back to the PREVIOUS keyframe, duplicating a whole GOP into
+	// the resumed output and inflating this tier's cumulative EXTINF against
+	// its siblings. Landing at-or-after the boundary snaps onto it exactly.
+	//
+	// A playlist listing segments but carrying no parsable EXTINF is treated
+	// as unusable rather than as "resume from the seek origin", which would
+	// re-encode the whole file numbered past the existing tail.
+	if pubSeg, pubSec := playlistCoverage(filepath.Join(v.OutputDir, variantPlaylistName)); pubSeg >= 0 && pubSec > 0 {
+		return startSec + int(math.Ceil(pubSec)), pubSeg + 1
+	}
+
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
 		resumeSegNum = highestSeg + 1
 		resumeFromSec = startSec + resumeSegNum*segDur
@@ -3111,15 +3128,33 @@ func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *
 // segment of a short transcode.
 const minSegmentSizeBytes = 4096
 
+// variantPlaylistName is the per-variant playlist FFmpeg's HLS muxer writes
+// (startVariantImpl points -f hls at it). Every reader of that file must go
+// through this constant: a hardcoded name that drifted from the muxer's is
+// exactly how the BE-H5 resume anchor silently no-opped for months.
+const variantPlaylistName = "stream.m3u8"
+
 func highestSegmentNumber(varDir string) int {
 	// 2026-05-19 audit (BE-H5) — prefer the playlist as the source of
 	// truth for "what's a complete segment." FFmpeg writes the .m3u8
 	// only AFTER finishing each segment, so any segment number that
-	// appears in playlist.m3u8 was emitted intact. This handles the
-	// edge case of a legitimately small final segment (e.g. an EOF
-	// audio frame producing a 2 KB segment) that the size-heuristic
-	// path below would discard, leading to overwrite on restart.
-	if n := playlistHighestSegmentNumber(filepath.Join(varDir, "playlist.m3u8")); n >= 0 {
+	// appears in it was emitted intact. This handles the edge case of a
+	// legitimately small final segment (e.g. an EOF audio frame producing
+	// a 2 KB segment) that the size-heuristic path below would discard,
+	// leading to overwrite on restart.
+	//
+	// 2026-08 (#494) — this looked for "playlist.m3u8", which FFmpeg never
+	// writes: the muxer is pointed at variantPlaylistName. The lookup
+	// therefore always missed and BE-H5 had never once executed, leaving
+	// the size heuristic as the only anchor. Not merely a dead branch —
+	// CommandContext kills FFmpeg with SIGKILL, so a reaped or crashed
+	// encoder nearly always leaves a PARTIAL final segment, and a partial
+	// 720p/1080p segment comfortably clears minSegmentSizeBytes. The scan
+	// counted it, the resume anchored one past it, and +append_list
+	// appended after the playlist's real last entry — skipping 6s of
+	// content and leaving that tier's cumulative EXTINF permanently short
+	// against its siblings, on every single resume.
+	if n := playlistHighestSegmentNumber(filepath.Join(varDir, variantPlaylistName)); n >= 0 {
 		return n
 	}
 
@@ -3169,13 +3204,43 @@ func highestSegmentNumber(varDir string) int {
 // 2026-05-19 audit (BE-H5) — added to defend against the edge case
 // where a final segment is legitimately smaller than minSegmentSizeBytes.
 func playlistHighestSegmentNumber(playlistPath string) int {
+	highest, _ := playlistCoverage(playlistPath)
+	return highest
+}
+
+// playlistCoverage returns the highest segment number the playlist publishes
+// and the summed EXTINF duration of everything it publishes, or (-1, 0) if it
+// cannot be read.
+//
+// The duration matters because segments are NOT uniformly SegmentDuration
+// long. A transcode is pinned to the grid by -force_key_frames, but a remux
+// (-c:v copy) can only cut on source keyframes, so its segments run to
+// whatever the scene-cut cadence gives — CreateSession already warns that
+// remux segment lengths vary. Multiplying a segment index by SegmentDuration
+// to get a source position is therefore valid only for transcodes; an
+// 8s-GOP remux resuming at segment 151 seeks to 906s for content that
+// actually starts at 1208s, and the error compounds on every later resume.
+// Summing the durations the muxer itself wrote is right for both.
+func playlistCoverage(playlistPath string) (highestSeg int, publishedSec float64) {
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
-		return -1
+		return -1, 0
 	}
 	highest := -1
-	for _, line := range strings.Split(string(data), "\n") {
-		numStr, ok := segmentNumberPart(strings.TrimSpace(line))
+	total := 0.0
+	pending := 0.0
+	havePending := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if after, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
+			// "#EXTINF:6.000000,optional title" — duration up to the comma.
+			durStr := strings.TrimSpace(strings.SplitN(after, ",", 2)[0])
+			if d, convErr := strconv.ParseFloat(durStr, 64); convErr == nil && d >= 0 {
+				pending, havePending = d, true
+			}
+			continue
+		}
+		numStr, ok := segmentNumberPart(line)
 		if !ok {
 			continue
 		}
@@ -3186,8 +3251,15 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 		if n > highest {
 			highest = n
 		}
+		// Only count a duration that actually belongs to a published segment
+		// line, so a trailing EXTINF whose URI was never written (a torn
+		// final write) contributes nothing.
+		if havePending {
+			total += pending
+			havePending = false
+		}
 	}
-	return highest
+	return highest, total
 }
 
 // segmentNumberPart extracts the numeric part of a media segment name —
@@ -3384,7 +3456,7 @@ func (tm *TranscodeManager) startVariant(session *TranscodeSession, v *QualityVa
 
 func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
 	p := v.Profile
-	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
+	playlistPath := filepath.Join(v.OutputDir, variantPlaylistName)
 	segExt := ".ts"
 	if session.FMP4 {
 		segExt = ".m4s"
@@ -3988,7 +4060,7 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		return
 	}
 
-	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
+	playlistPath := filepath.Join(v.OutputDir, variantPlaylistName)
 
 	// Containment (audit LOW): the playlist must resolve to a real path inside
 	// the canonical transcode base. FFmpeg writes stream.m3u8 itself so this is

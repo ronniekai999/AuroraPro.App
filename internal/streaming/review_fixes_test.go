@@ -6,6 +6,7 @@ package streaming
 
 import (
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -482,6 +483,224 @@ func TestReapIdleVariants(t *testing.T) {
 	tm.reapIdleVariants()
 	if *staleCancelled {
 		t.Error("already-reaped variant was cancelled again")
+	}
+}
+
+// writeCoverage lays down a variant playlist of `through`+1 segments, each
+// `dur` seconds, plus the matching segment files.
+func writeCoverage(t *testing.T, dir string, through int, dur float64) {
+	t.Helper()
+	var pl strings.Builder
+	pl.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:9\n")
+	pl.WriteString("#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n")
+	for i := 0; i <= through; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		pl.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n%s\n", dur, name))
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 64*1024), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(pl.String()), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+}
+
+// The resume anchor must be the last PUBLISHED segment, not the newest file on
+// disk. FFmpeg appends to the playlist only after a segment is fully written,
+// so the playlist tail is the last complete one; the directory also holds the
+// partial that SIGKILL interrupted. Anchoring on the partial resumes one
+// segment too far and +append_list then appends past the playlist's real tail,
+// skipping that segment's content and leaving this tier's cumulative EXTINF
+// permanently short against its siblings.
+//
+// This regressed silently because the lookup named a file FFmpeg does not
+// write, and a partial 720p/1080p segment clears minSegmentSizeBytes easily so
+// the size heuristic did not catch it either.
+func TestHighestSegmentNumber_PrefersPlaylistOverPartialOnDisk(t *testing.T) {
+	varDir := t.TempDir()
+	writeCoverage(t, varDir, 87, 6.0)
+
+	// Mid-write when the kill landed: on disk, never published, well over
+	// minSegmentSizeBytes.
+	if err := os.WriteFile(filepath.Join(varDir, "seg_00088.ts"), make([]byte, 300*1024), 0o644); err != nil {
+		t.Fatalf("write partial: %v", err)
+	}
+
+	if got := highestSegmentNumber(varDir); got != 87 {
+		t.Errorf("highestSegmentNumber = %d, want 87 — anchored on the unpublished partial, "+
+			"so the resume would skip seg_00088's content entirely", got)
+	}
+}
+
+// resumePoint must seek by the durations the muxer wrote, not by
+// segmentIndex*SegmentDuration. A remux cuts on source keyframes, so its
+// segments are not SegmentDuration long and the index arithmetic seeks
+// minutes away from the segment number it simultaneously tells FFmpeg to
+// start writing at.
+func TestResumePoint_UsesPublishedDurationsNotSegmentIndex(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// 8s real segments against a nominal 6s grid, 0..150 published.
+	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: t.TempDir()}
+	writeCoverage(t, v.OutputDir, 150, 8.0)
+
+	gotSec, gotSeg := tm.resumePoint(v, 0)
+
+	if gotSeg != 151 {
+		t.Errorf("resumeSegNum = %d, want 151", gotSeg)
+	}
+	// 151 * 8s = 1208s. The index math would give 151*6 = 906s.
+	if gotSec != 1208 {
+		t.Errorf("resumeFromSec = %d, want 1208 — seeking by segment index puts a remux resume %ds off",
+			gotSec, 1208-gotSec)
+	}
+}
+
+// A remux boundary IS a source keyframe, so the seek must land at-or-after it.
+// Rounding down makes FFmpeg's input seek snap back to the previous keyframe
+// and duplicate a whole GOP into the resumed output.
+func TestResumePoint_RoundsSeekUpOntoTheKeyframeBoundary(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// 10 segments * 4.2s = 42.0 exactly? No: 4.17 * 10 = 41.7 -> must not
+	// round down to 41.
+	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: t.TempDir()}
+	writeCoverage(t, v.OutputDir, 9, 4.17)
+
+	gotSec, _ := tm.resumePoint(v, 0)
+	if gotSec != 42 {
+		t.Errorf("resumeFromSec = %d, want 42 (ceil of 41.7) — a seek before the boundary "+
+			"keyframe duplicates a GOP into the resumed output", gotSec)
+	}
+}
+
+func TestPlaylistCoverage(t *testing.T) {
+	write := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		return filepath.Join(dir, variantPlaylistName)
+	}
+
+	tests := []struct {
+		name    string
+		body    string
+		wantSeg int
+		wantSec float64
+	}{
+		{
+			name:    "missing file",
+			body:    "",
+			wantSeg: -1,
+		},
+		{
+			name:    "header only",
+			body:    "#EXTM3U\n#EXT-X-TARGETDURATION:6\n",
+			wantSeg: -1,
+		},
+		{
+			name:    "plain",
+			body:    "#EXTM3U\n#EXTINF:6.000000,\nseg_00000.ts\n#EXTINF:6.000000,\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 12,
+		},
+		{
+			name:    "CRLF and ENDLIST",
+			body:    "#EXTM3U\r\n#EXTINF:6.0,\r\nseg_00000.ts\r\n#EXT-X-ENDLIST\r\n",
+			wantSeg: 0,
+			wantSec: 6,
+		},
+		{
+			name: "fMP4 MAP and init are not segments",
+			body: "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6.0,\nseg_00000.m4s\n",
+			// init.mp4 must not count toward the highest segment number.
+			wantSeg: 0,
+			wantSec: 6,
+		},
+		{
+			name:    "discontinuity does not disturb the sum",
+			body:    "#EXTM3U\n#EXTINF:6.0,\nseg_00000.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:6.0,\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 12,
+		},
+		{
+			name:    "titled EXTINF",
+			body:    "#EXTM3U\n#EXTINF:6.5,some title\nseg_00003.ts\n",
+			wantSeg: 3,
+			wantSec: 6.5,
+		},
+		{
+			name:    "trailing EXTINF with no URI contributes nothing",
+			body:    "#EXTM3U\n#EXTINF:6.0,\nseg_00000.ts\n#EXTINF:6.0,\n",
+			wantSeg: 0,
+			wantSec: 6,
+		},
+		{
+			name:    "segments with no parsable EXTINF sum to zero",
+			body:    "#EXTM3U\nseg_00000.ts\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "absent.m3u8")
+			if tt.body != "" {
+				path = write(t, tt.body)
+			}
+			gotSeg, gotSec := playlistCoverage(path)
+			if gotSeg != tt.wantSeg {
+				t.Errorf("highestSeg = %d, want %d", gotSeg, tt.wantSeg)
+			}
+			if diff := gotSec - tt.wantSec; diff > 0.001 || diff < -0.001 {
+				t.Errorf("publishedSec = %v, want %v", gotSec, tt.wantSec)
+			}
+		})
+	}
+}
+
+// A playlist that lists segments but carries no usable EXTINF must NOT be
+// treated as "resume from the seek origin" — that would re-encode the whole
+// file numbered past the existing tail, overwriting live segments.
+func TestResumePoint_IgnoresPlaylistWithNoParsableDurations(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	dir := t.TempDir()
+	body := "#EXTM3U\nseg_00000.ts\nseg_00001.ts\nseg_00002.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(body), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+	for i := 0; i <= 2; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 64*1024), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: dir}
+	gotSec, gotSeg := tm.resumePoint(v, 0)
+
+	if gotSeg != 3 {
+		t.Errorf("resumeSegNum = %d, want 3", gotSeg)
+	}
+	// Falls back to the index arithmetic rather than returning startSec.
+	if gotSec != 18 {
+		t.Errorf("resumeFromSec = %d, want 18 (fallback), not the seek origin", gotSec)
 	}
 }
 
