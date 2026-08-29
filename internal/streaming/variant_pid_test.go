@@ -151,13 +151,14 @@ func TestStartVariant_PublishesThePIDAndRelaunchClearsIt(t *testing.T) {
 // NOT be recorded as a crash: the process succeeded, and EnsureVariant answers
 // a crash by restarting FFmpeg with -ss past EOF (issues #172/#174).
 func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) {
+	shrinkVariantWaitDelay(t)
 	// Writing the playlist first puts the polling goroutine on its
 	// playlist-found branch, where it records no Err of its own. That leaves
 	// v.Err saying exactly one thing: whether the post-Wait block called the
 	// stalled pipe a crash. The child need only outlive the deadline below.
 	s, v := stubVariantLaunch(t, "sess-stalled-pipe",
 		"    touch \"$out/stream.m3u8\"\n"+
-			"    sleep 12 &\n"+
+			"    sleep 8 &\n"+
 			"    exit 0\n")
 
 	// Comfortably past variantWaitDelay and comfortably short of the child's
@@ -188,15 +189,25 @@ func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) 
 // auto-restart nor the 500 that triggers the frontend's own recovery would
 // happen — playback simply stops at the crash point. That is issues #172/#174
 // with the sign flipped, and it would not show up in any other test here.
+//
+// The crash comes WITH a stalled pipe, because that combination is the only
+// state in which the carve-out could mask a crash — and it is the state a
+// plausible refactor gets wrong. Deriving `pipeStalled` from elapsed time
+// rather than from the error, say, still satisfies a crash-without-stall test
+// and a stall-without-crash test while swallowing exactly this case. Wait
+// gives Process.Wait's error precedence, so ErrWaitDelay cannot accompany a
+// non-zero exit: the crash must survive the stall.
 func TestStartVariant_RealCrashIsStillRecordedAsOne(t *testing.T) {
+	shrinkVariantWaitDelay(t)
 	const marker = "aurora-test-crash-marker"
 	// Playlist first, so Err can only have come from the post-Wait block.
 	s, v := stubVariantLaunch(t, "sess-real-crash",
 		"    touch \"$out/stream.m3u8\"\n"+
 			"    echo '"+marker+"' >&2\n"+
+			"    sleep 8 &\n"+
 			"    exit 1\n")
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
 	for {
 		s.variantMu.Lock()
 		done, vErr := ffmpegDone(v), v.Err
@@ -216,6 +227,21 @@ func TestStartVariant_RealCrashIsStillRecordedAsOne(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// shrinkVariantWaitDelay drops the stderr-drain bound for one test. The
+// stalled-pipe cases have to wait it out, and at the shipped 5s that is most
+// of the package's test time. The tests below still bound their own deadlines
+// by variantWaitDelay, so what they pin is the mechanism — that the drain is
+// bounded at all, and what the resulting error means — not the chosen value.
+//
+// Safe as a package-level write because these tests cannot run in parallel:
+// stubFFmpeg calls t.Setenv, which forbids it.
+func shrinkVariantWaitDelay(t *testing.T) {
+	t.Helper()
+	prev := variantWaitDelay
+	variantWaitDelay = 500 * time.Millisecond
+	t.Cleanup(func() { variantWaitDelay = prev })
 }
 
 // stubVariantLaunch puts a stub ffmpeg on PATH, launches one variant through

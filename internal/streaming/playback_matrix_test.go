@@ -718,13 +718,18 @@ func startFirstVariant(t *testing.T, tm *TranscodeManager, path string, opts Ses
 		t.Fatalf("ensure variant %q: %v", profile, err)
 	}
 
-	// Err and StderrTail are written by the cmd.Wait goroutine under
-	// variantMu, and closing Ready gives no happens-before with those writes
-	// when it happens through the playlist-found branch — so snapshot them
+	// Ready, Err and StderrTail are all written under variantMu by the
+	// lifecycle goroutines (Ready is replaced wholesale on relaunch), and
+	// closing Ready gives no happens-before with the Err/StderrTail writes
+	// when it happens through the playlist-found branch — so snapshot each
 	// under the lock rather than reading the fields directly.
+	session.variantMu.Lock()
+	ready := variant.Ready
+	session.variantMu.Unlock()
+
 	timedOut := false
 	select {
-	case <-variant.Ready:
+	case <-ready:
 	case <-time.After(90 * time.Second):
 		timedOut = true
 	}

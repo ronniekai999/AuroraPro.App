@@ -1428,7 +1428,7 @@ func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
 // The *exec.Cmd is deliberately NOT a field here. exec.Cmd's own fields are
 // written by Start() and Wait() from the launch goroutine, which cannot hold
 // variantMu across a fork/exec or a process wait — so a reader that reached
-// through a Cmd field would race no matter what lock it held. (It did:
+// through a Cmd field would race under any lock this design can hold. (It did:
 // ListSessions read Cmd.Process.Pid under variantMu while Start() wrote
 // Cmd.Process, and ffmpegDone read Cmd.ProcessState while Wait() wrote it.)
 // The Cmd stays a local in startVariantImpl: built and configured there, then
@@ -1545,7 +1545,15 @@ const variantRestartMax = 1
 // drain is instantaneous whenever FFmpeg is the only holder of that
 // descriptor, which is every ordinary exit; the bound exists for the case
 // where it is not. See the Stderr comment in startVariantImpl.
-const variantWaitDelay = 5 * time.Second
+//
+// It bounds the DRAIN, not Wait as a whole: Wait still blocks on reaping the
+// child first, so a process wedged in uninterruptible sleep (a failing SSHFS
+// source) is not covered by this and never was.
+//
+// A var rather than a const only so tests can shrink it — pinning the
+// behaviour at the shipped value costs seconds of wall time per case. Nothing
+// in production reassigns it.
+var variantWaitDelay = 5 * time.Second
 
 // ffmpegDone reports whether the variant's ffmpeg process has terminated.
 // The signal is our own `exited` flag, set by the cmd.Wait goroutine once
