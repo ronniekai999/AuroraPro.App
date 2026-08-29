@@ -57,6 +57,30 @@ var (
 	lingerSleep     = time.Duration(lingerSleepSecs) * time.Second
 )
 
+// assertBoundedWait checks BOTH ends of what a bounded wait on a real lingering
+// pipe looks like, and the lower end is the one that is easy to leave out.
+//
+// Upper: the call stopped at the bound instead of waiting the grandchild out.
+//
+// Lower: it did not return early — which would mean the stub left no grandchild
+// at all, so no descriptor outlived the process, no ErrWaitDelay was ever
+// produced, and every verdict the caller goes on to assert is vacuous. That is
+// not hypothetical: each of these tests has a control leg that runs exactly
+// that fixture and satisfies the same verdicts. Sound as a bound because the
+// WaitDelay timer starts no earlier than process exit and Go timers do not fire
+// early, so a genuine ErrWaitDelay run cannot come in under execWaitDelay.
+func assertBoundedWait(t *testing.T, elapsed time.Duration, what string) {
+	t.Helper()
+	if elapsed < execWaitDelay {
+		t.Fatalf("%s returned in %s, inside the %s bound: the stub left no lingering pipe, so ErrWaitDelay "+
+			"was never exercised and this test is proving nothing", what, elapsed, execWaitDelay)
+	}
+	if elapsed >= lingerBudget {
+		t.Errorf("%s took %s — it waited the grandchild out instead of stopping at the %s bound",
+			what, elapsed, execWaitDelay)
+	}
+}
+
 // The guard on the guards: whatever execWaitDelay is tuned to, a bounded call
 // must finish inside lingerBudget and an unbounded one must not. Asserted
 // against lingerSleep — the rounded value the shell really gets — not against
@@ -115,9 +139,7 @@ func TestFFmpegHasEncoder_ALingeringPipeChangesNeitherVerdictNorWait(t *testing.
 			if got != tc.want {
 				t.Errorf("a grandchild holding the pipe changed the verdict: got %v, want %v", got, tc.want)
 			}
-			if elapsed >= lingerBudget {
-				t.Errorf("waited %s for a lingering pipe; WaitDelay is %s — this blocks startup", elapsed, execWaitDelay)
-			}
+			assertBoundedWait(t, elapsed, "the encoder listing")
 		})
 	}
 }
@@ -146,9 +168,7 @@ func TestFFmpegSupportsReadrate_ALingeringPipeKeepsTheAnswer(t *testing.T) {
 	if !got {
 		t.Error("a grandchild holding the pipe turned readrate pacing off")
 	}
-	if elapsed >= lingerBudget {
-		t.Errorf("waited %s for a lingering pipe; WaitDelay is %s — this blocks startup", elapsed, execWaitDelay)
-	}
+	assertBoundedWait(t, elapsed, "the version probe")
 }
 
 // Off the boot path, the same reading has teeth of its own: ErrWaitDelay means
@@ -169,9 +189,7 @@ func TestExtractSubtitleVTT_LingeringPipeKeepsTheExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extraction that exited 0 reported failure: %v", err)
 	}
-	if elapsed >= lingerBudget {
-		t.Errorf("waited %s for a lingering pipe; WaitDelay is %s", elapsed, execWaitDelay)
-	}
+	assertBoundedWait(t, elapsed, "the extraction")
 	info, statErr := os.Stat(vtt)
 	if statErr != nil {
 		t.Fatalf("the extracted subtitle was deleted: %v", statErr)
@@ -249,6 +267,12 @@ func TestFilesThatAttachPipesBoundTheWait(t *testing.T) {
 	// several) must not be able to satisfy this. And the assignment has to set
 	// a BOUND — `WaitDelay = 0` is os/exec's "wait forever", i.e. the very bug,
 	// spelled in a way that would otherwise read as a fix.
+	//
+	// Only the literal 0 is rejected, so an indirect zero (a variable, or
+	// time.Duration(0)) would still read as bounded; and only an assignment
+	// written in the file counts, so routing the bound through a helper — the
+	// pattern execwait.go uses for the capture sites — would fail a correct
+	// file. Both are why this is a backstop and not the mechanism.
 	bounds := regexp.MustCompile(`(?m)^\s*[\w.]+\.WaitDelay\s*=\s*([^\s;/]+)`)
 
 	forEachPackageSource(t, func(t *testing.T, file, src string) {
@@ -371,10 +395,7 @@ func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
 	// for good: v.exited, v.Err and v.StderrTail are never written, while
 	// ffmpegDone still reports true from Cmd.ProcessState, so EnsureVariant
 	// serves a crashed transcode as a clean completion.
-	if elapsed := time.Since(start); elapsed >= lingerBudget {
-		t.Errorf("the variant's cmd.Wait took %s — it waited out the grandchild rather than the %s bound",
-			elapsed, execWaitDelay)
-	}
+	assertBoundedWait(t, time.Since(start), "the variant's cmd.Wait")
 
 	session.variantMu.Lock()
 	gotErr := v.Err

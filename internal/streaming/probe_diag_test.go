@@ -56,9 +56,7 @@ func TestRunProbeFFmpegDiag_SuccessWithALingeringPipeIsStillSuccess(t *testing.T
 	}
 	// It must also have stopped waiting, rather than blocking until the
 	// grandchild finished — that is the hang WaitDelay is here to prevent.
-	if elapsed >= lingerBudget {
-		t.Fatalf("probe waited %s for a lingering pipe; WaitDelay is %s", elapsed, execWaitDelay)
-	}
+	assertBoundedWait(t, elapsed, "the decode probe")
 }
 
 // Every decode probe still rides on runProbeFFmpeg's bool. Rewiring it through

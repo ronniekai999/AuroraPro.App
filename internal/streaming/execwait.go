@@ -13,9 +13,11 @@ import (
 // copies through a pipe, and Wait then blocks until EVERY holder of that pipe
 // closes it — not merely until the process exits. (Hand it an *os.File and
 // there is no pipe and no wait; a buffer is what creates one.) Both capture
-// methods produce buffers, and both on BOTH streams: CombinedOutput by
-// definition, Output because it installs its own stderr saver whenever Stderr
-// is nil, which is every call site here.
+// methods leave BOTH streams on buffers, so neither is exposed on stdout alone:
+// CombinedOutput by definition, Output because it installs its own stderr saver
+// whenever Stderr is nil, which is every call site here. (CombinedOutput points
+// both at one buffer, and os/exec then reuses a single pipe for the pair; one
+// holder is all it takes either way.)
 //
 // So a child that leaves a subprocess holding one stalls Wait for as long as
 // that subprocess lives, with no bound and past any context deadline — the
@@ -56,10 +58,17 @@ import (
 // closes the pipe, so bytes still in flight at that instant are lost and a
 // caller could scan a truncated capture — "complete as of the close" is the
 // honest guarantee, not "complete". It takes a copying goroutine starved for
-// the whole delay AFTER the process already exited, and every caller's
-// truncation behavior degrades the way its normal failure does.
+// the whole delay AFTER the process already exited, and every caller lands
+// somewhere its normal failure already lands: a device or encoder read as
+// absent, pacing off, no subtitle tracks. The one signature that differs is
+// ProbeSubtitles, where a half-read JSON document returns a parse error rather
+// than its usual (nil, nil) — every caller of it discards the error, so what
+// reaches a viewer is the same "no subtitles", but the shape is not identical.
 func runBounded(cmd *exec.Cmd, capture func() ([]byte, error)) ([]byte, error) {
-	// Must be set before Start: Cmd reads it when wiring up the watchdog.
+	// Must be set before Start. Not for the wiring — every caller here passes a
+	// context, so Cmd.Cancel already starts the watchdog either way — but
+	// because that watchdog goroutine READS WaitDelay, so writing it afterwards
+	// is a data race.
 	cmd.WaitDelay = execWaitDelay
 	out, err := capture()
 	if errors.Is(err, exec.ErrWaitDelay) {
