@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aurora-media/aurora/internal/models"
 )
@@ -180,22 +181,208 @@ func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) flo
 	return best
 }
 
+// mediaFingerprint digests a media file's identity as (size, mtime) — the
+// same pair internal/library/scanner.go hashes into media_files.file_hash
+// (and episode_files.file_hash). Same digest INPUT, different truncation
+// (6 bytes here, 16 there), so the two hex strings never compare equal:
+// this is not a drop-in for the stored column, and substituting one would
+// silently re-key the whole cache. Returns ok=false when the file cannot
+// be stat'd.
+//
+// The stored file_hash is deliberately NOT reused even though it is the
+// same construction: it is only as fresh as the last library scan, so a
+// file replaced between scans would still fingerprint as unchanged —
+// precisely the staleness this is meant to catch. Stat'ing at request
+// time costs one syscall against an ffmpeg run that reads a whole
+// container.
+func mediaFingerprint(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false
+	}
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())))
+	return fmt.Sprintf("%x", h[:6]), true
+}
+
+// extractedVTTPath computes the cache path for one extracted subtitle track.
+//
+// The key is (media path, stream index, media fingerprint). The path hash
+// avoids collisions between media files sharing a basename in different
+// directories; the fingerprint is the INVALIDATION mechanism.
+//
+// Why a fingerprint in the KEY rather than an mtime comparison through
+// cacheIsFresh, like the three sibling caches:
+//
+//   - An mtime comparison only catches a source that got NEWER. Media is
+//     routinely replaced by tools that preserve or restore timestamps —
+//     `rsync -a`, `cp -p`, a restore from backup — leaving the cached VTT
+//     newer than its "new" source, so the comparison reports fresh and the
+//     wrong subtitles are served indefinitely. That is the bug, unfixed.
+//   - Extraction is orders of magnitude more expensive than the sibling
+//     conversions: it reads through the entire container (minutes for an
+//     8+ GB MKV, hence the 10-minute timeout below). A one-way comparison
+//     degrades badly when a mount reports drifting mtimes — the cached file
+//     is written now, the source ticks past it, and the NEXT request
+//     re-extracts, forever. A key is immune only to the FLAPPING variant of
+//     that: a fingerprint alternating between two values lands back on an
+//     entry already on disk. Against a monotonically drifting mtime a key
+//     is no better — every request re-extracts either way, and this policy
+//     is in fact worse on disk, because each run writes a NEW file instead
+//     of overwriting one.
+//   - A different file at the same path can shift stream indices, so the
+//     cached track may not even be the same language. Re-keying retires the
+//     whole (path, index) family at once.
+//
+// Costs, accepted deliberately:
+//
+//   - A mount whose mtimes genuinely drift forward (never repeating) will
+//     re-extract per distinct fingerprint. Same for a file still being
+//     written at the served path (an in-progress copy or download): every
+//     request sees a new size and re-extracts, where the old code extracted
+//     once. Serving subtitles for the wrong cut of a film is the worse
+//     failure; the ffprobe gate in the API handler bounds the concurrency
+//     of the storm but not its total cost.
+//   - Superseded entries are orphaned rather than overwritten, and it is
+//     not just one file per track: ShiftVTTCues keys on (vttPath, offset),
+//     so re-keying also orphans every shifted derivative built from the old
+//     track — one per distinct resume position ever requested for it. Those
+//     were previously reused indefinitely. Bytes are small; the count is
+//     per (track × distinct start). They are collected by the
+//     subtitle-cache sweep in cmd/aurora/main.go, which runs at startup and
+//     then daily — it was moved ahead of its ticker precisely because this
+//     change made it load-bearing: with the purge inside `case <-ticker.C`
+//     it needed 24 uninterrupted hours to fire even once, which a box that
+//     auto-deploys on a 5-minute timer rarely gets. Entries still linger
+//     until they are 30 days old, so this bounds growth rather than
+//     preventing it.
+//   - Replacing a file with one of identical size AND mtime (`touch -r`
+//     plus a same-size replacement) is invisible to this, exactly as it is
+//     to the scanner's own file_hash. Content hashing is the only fix and
+//     costs a full read of every file.
+//   - The fingerprint is computed BEFORE a run that can take 10 minutes,
+//     so media replaced mid-extraction stores its result under a stale key
+//     where nothing will look for it, and the next request re-extracts.
+//     Which content lands there depends on how the replacement was done:
+//     replace-by-rename (rsync, mv, temp-file downloaders) leaves ffmpeg's
+//     open FD on the OLD inode once it has opened, so the old track is
+//     stored under its own matching fingerprint. A key/content mismatch
+//     needs either an in-place truncate-and-rewrite, or a rename landing
+//     in the window between the fingerprint (taken here) and ffmpeg's exec
+//     further down ExtractSubtitleVTT. Either way it is wasted work —
+//     serving wrong content from such an entry would additionally require
+//     a later revert to a byte-identical (size, mtime), so this is not a
+//     correctness hole.
+//   - On upgrade, every existing entry uses the old (fingerprint-less) key
+//     and is ignored; each track re-extracts once, and the old file is left
+//     for whenever the reaper does run.
+//
+// Invalidation is per-request rather than driven by the library scanner:
+// the scanner only learns a file changed when it next runs, so a file
+// replaced between scans would keep serving stale cues until then, and the
+// scanner would have to be taught the subtitle cache layout to fix it.
+//
+// When the media file cannot be stat'd we fall back to the legacy
+// fingerprint-less key, rather than keying on a fabricated fingerprint.
+// This is the one path that keeps the old bug, and it does so in BOTH
+// directions — read it before assuming a stat failure is harmless:
+//
+//   - It can HIT. Pre-fingerprint builds wrote exactly this filename, so
+//     any entry cached before the upgrade is still sitting at this key.
+//     If the media was replaced and a request arrives during a stat
+//     failure (a transient NFS ESTALE, a mount flap, an EACCES window),
+//     that pre-upgrade track is served — the original staleness, for that
+//     entry. Only its stem differs from what older builds wrote, and only
+//     when the basename MINUS its extension exceeds cacheStemMax.
+//   - It can WRITE. In the narrower case where stat fails but ffmpeg's
+//     own open succeeds, the extraction lands here, and that entry then
+//     has no invalidation at all until a reaper sweep removes it.
+//
+// Both need a stat failure to reach at all, and the fallback is still
+// strictly better than the unconditional staleness it replaces, so it is
+// left as-is. Namespacing this key would close the READ half only — a
+// stat failure could no longer be answered by a pre-upgrade entry, but an
+// entry written by an EARLIER stat failure would still be hit, since
+// nothing invalidates it either. That is a deliberate follow-up, not an
+// oversight.
+func extractedVTTPath(filePath string, streamIndex int, cacheDir string) string {
+	h := sha256.Sum256([]byte(filePath))
+	baseName := cacheStem(strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath)))
+	if fp, ok := mediaFingerprint(filePath); ok {
+		return filepath.Join(cacheDir, fmt.Sprintf("%s_%x_sub%d_%s.vtt", baseName, h[:6], streamIndex, fp))
+	}
+	return filepath.Join(cacheDir, fmt.Sprintf("%s_%x_sub%d.vtt", baseName, h[:6], streamIndex))
+}
+
+// cacheStemMax bounds the human-readable half of a cache filename.
+//
+// The stem is cosmetic — the path hash carries the uniqueness — but it is
+// not free: ShiftVTTCues derives ITS filename from this one, adding a net
+// ~29 bytes, and the fingerprint component added another 13. A long
+// release name could push the shifted file past NAME_MAX (255 bytes on
+// ext4/XFS), where os.Create fails with ENAMETOOLONG and subtitles break
+// for exactly the files with the longest names. 120 bytes leaves ample
+// room for both suffixes while keeping the file recognizable in an `ls`.
+//
+// The bound is applied at every point that CREATES a name: the extracted
+// path here, ConvertSRTtoVTT and ConvertSubtitleToVTT (whose own output
+// names can overrun for a long enough sidecar), and ShiftVTTCues, which
+// derives its name from whichever of those it was handed.
+//
+// ShiftVTTCues is the important one and was the last to get it. It is the
+// os.Create that actually failed, and the only one an external .vtt sidecar
+// reaches at all — such a sidecar is served straight from the media
+// directory and never passes through a cache-naming function, so bounding
+// the producers alone left it exposed. A ~230-character sidecar name made
+// the shift fail with ENAMETOOLONG, the handler logged "subtitle cue-shift
+// failed; serving unshifted", and cues were served offset by the resume
+// position: issue #131's bug, back for the longest filenames only.
+const cacheStemMax = 120
+
+// cacheStem truncates a filename stem to cacheStemMax bytes without splitting
+// a UTF-8 rune (a split rune would render as a replacement character in an
+// operator's `ls`, and could differ across filesystems' normalization).
+func cacheStem(stem string) string {
+	if len(stem) <= cacheStemMax {
+		return stem
+	}
+	cut := cacheStemMax
+	for cut > 0 && !utf8.RuneStart(stem[cut]) {
+		cut--
+	}
+	return stem[:cut]
+}
+
 // ExtractSubtitleVTT extracts a subtitle track and converts it to WebVTT format.
 // Returns the path to the generated .vtt file.
+//
+// The result is cached under a key that includes the media file's
+// (size, mtime) fingerprint, so replacing the media in place — a re-encode,
+// an upgraded rip, a corrected file at the same path — retires the cached
+// track instead of serving it forever. See extractedVTTPath for the policy
+// and its trade-offs.
+//
+// This is the server half of the fix; the client half is ServeSubtitle's
+// `Cache-Control: no-cache`. Both are needed. The SPA's track URL is keyed
+// on (fileId, index, type, start, remux) with nothing media-derived, and
+// nothing else churns it (withToken has been a no-op since the
+// httpOnly-cookie migration), so under the previous day-long max-age a
+// browser went on serving the old track for up to 24h and never asked the
+// server — making this invalidation invisible to exactly the viewer it was
+// meant to help.
 func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, cacheDir string) (string, error) {
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return "", fmt.Errorf("create subtitle cache dir: %w", err)
 	}
 
-	// Generate a stable filename using path hash to avoid collisions between
-	// media files with the same basename in different directories
-	h := sha256.Sum256([]byte(filePath))
-	baseName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filePath))
-	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x_sub%d.vtt", baseName, h[:6], streamIndex))
+	vttPath := extractedVTTPath(filePath, streamIndex, cacheDir)
 
 	// Return cached version if it exists and has content.
 	// A previous extraction may have been killed mid-write (timeout, signal),
 	// leaving a 0-byte or truncated file that would serve an empty subtitle.
+	//
+	// No mtime comparison here: the fingerprint is already in the key, so a
+	// changed source resolves to a DIFFERENT path rather than to a stale
+	// entry at this one.
 	if info, err := os.Stat(vttPath); err == nil && info.Size() > 0 {
 		return vttPath, nil
 	}
@@ -236,9 +423,57 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 }
 
 // ServeSubtitle serves a VTT subtitle file with proper headers.
+//
+// `no-cache` means "store it, but revalidate before reuse" — NOT "don't
+// cache". The body is still served from the browser's cache on a 304, so
+// the cost of this over the previous `max-age=86400` is one conditional
+// request per track load: http.ServeFile emits Last-Modified and answers
+// If-Modified-Since with a 304 and an empty body.
+//
+// It has to revalidate, because the track URL is not content-addressed.
+// The SPA keys it on (fileId, index, type, start, remux) and nothing else
+// churns it (withToken has been a no-op since the httpOnly-cookie
+// migration), so under a day-long max-age a browser kept serving the old
+// subtitles for up to 24h after the media was replaced in place — which
+// made ExtractSubtitleVTT's server-side invalidation invisible to exactly
+// the viewers it was meant to help.
+//
+// The revalidation is not per-seek: each distinct resume position is
+// already a distinct URL, so this is roughly one extra headers-only
+// round trip per track per page load.
+//
+// One cost this cannot avoid: a client that cached a track under the old
+// max-age=86400 will not ask again until that entry expires, so for up to
+// 24h after this deploys the staleness it fixes persists for exactly the
+// viewers it targets. Nothing server-side reaches them; the entry has to
+// age out (or they hard-reload). One-time, at rollout only.
+//
+// `private` because /api/stream/ is on the query-token promotion allowlist
+// and the SPA still builds this URL through withToken(): a shared cache
+// must never store a response whose URL may carry a ?token=. Same reasoning
+// as the segment endpoint in streaming.go.
+//
+// The ETag exists because Last-Modified alone is not a sufficient validator
+// HERE, and the fingerprint key is exactly why: the served file can move
+// BACKWARDS in time. Replace media A with B (new track, newer mtime), then
+// restore A preserving its size and mtime — the `rsync -a` case this whole
+// change exists for — and the key resolves back to A's older track. A
+// browser holding B would send If-Modified-Since with B's newer stamp,
+// http.ServeFile would answer 304, and the viewer would keep B's subtitles
+// over A's video. Deriving the validator from (name, size, mtime) instead
+// makes any change of key a change of validator regardless of ordering.
+// If-None-Match takes precedence over If-Modified-Since, so this wins.
 func ServeSubtitle(w http.ResponseWriter, r *http.Request, vttPath string) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=86400")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if info, err := os.Stat(vttPath); err == nil {
+		// The name carries the media fingerprint (extracted tracks) or the
+		// source path plus offset (shifted ones); size and mtime cover an
+		// external sidecar edited in place, whose name never changes.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d",
+			filepath.Base(vttPath), info.Size(), info.ModTime().UnixNano())))
+		w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%x", sum[:8])))
+	}
 	// CORS headers are set by the router-level CORS middleware based on AllowedOrigins.
 	// Do NOT set Access-Control-Allow-Origin here — it would bypass the CORS policy.
 	http.ServeFile(w, r, vttPath)
@@ -298,11 +533,14 @@ func formatVTTTimestamp(sec float64) string {
 // — ask exactly this question, so they ask it through here rather than
 // repeating the comparison and drifting apart.
 //
-// ExtractSubtitleVTT deliberately does NOT come through here. Its
-// entries are keyed on path hash + stream index and are never
-// invalidated against the media file at all, so it checks only that the
-// file is non-empty. That is a weaker policy with its own trade-off (see
-// its comment), not an oversight to unify away.
+// ExtractSubtitleVTT still does NOT come through here, but no longer
+// because it lacks a policy: it now invalidates against the media file
+// through a (size, mtime) fingerprint in its cache KEY rather than an
+// mtime comparison at this one. An mtime comparison would be the wrong
+// rule there — it cannot see a replacement that preserves or restores an
+// older timestamp, and re-reading an 8+ GB container is far too
+// expensive to retry on every request when the comparison goes one way.
+// See extractedVTTPath for the policy and its costs.
 //
 // The mtime comparison is deliberately NON-STRICT. A cache is written
 // after its source is read, so a valid entry has mtime >= the source's
@@ -390,7 +628,13 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	// keyframe probe doesn't fragment the cache.
 	offsetMs := int64(offsetSec*1000 + 0.5)
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", vttPath, offsetMs)))
-	stem := strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath))
+	// Bounded here as well as at the producers: this is the os.Create that
+	// actually fails, and it is the ONLY one reachable for an external .vtt
+	// sidecar, which is read straight from the media directory and never
+	// passes through a cache-naming function. The stem is cosmetic —
+	// uniqueness rides the (vttPath, offsetMs) hash — so truncating it costs
+	// nothing and covers any future producer automatically.
+	stem := cacheStem(strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath)))
 	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%dms_%x.vtt", stem, offsetMs, h[:6]))
 
 	// Cache hit: existing shifted file non-empty and not older than the source.
@@ -556,7 +800,7 @@ func ConvertSRTtoVTT(srtPath, cacheDir string) (string, error) {
 	// Use a hash of the full path to avoid collisions between SRT files
 	// with the same name in different directories
 	h := sha256.Sum256([]byte(srtPath))
-	baseName := strings.TrimSuffix(filepath.Base(srtPath), ".srt")
+	baseName := cacheStem(strings.TrimSuffix(filepath.Base(srtPath), ".srt"))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
 	// Return cached version if it exists, is non-empty, and is not older
@@ -624,7 +868,7 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 	}
 
 	h := sha256.Sum256([]byte(subPath))
-	baseName := strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath))
+	baseName := cacheStem(strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath)))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
 	// Return cached version if it exists, is non-empty, and is not older
