@@ -219,6 +219,14 @@ func (h HWAccelInfo) FullGPUHEVCEncoderArgs(width, height int, hdrTonemap bool, 
 
 // hwProbeTimeout bounds each individual probe FFmpeg run. Generous — these
 // are 5-frame 192x108 jobs; anything slower than this is effectively broken.
+//
+// It also bounds the two startup FFmpeg runs that are not encodes at all (the
+// encoder listing and the version banner, hwaccel.go and streaming.go): both
+// return in milliseconds on any working build, so the same generous ceiling
+// costs them nothing and one number keeps the startup path's worst case
+// legible. What it buys there is that a wrapper which never returns cannot
+// hang the boot — a WaitDelay cannot do that job, since Wait never reaches the
+// drain until the process is reaped.
 const hwProbeTimeout = 20 * time.Second
 
 // ProbeHWDecode augments a detected HWAccelInfo with decode-side
@@ -380,8 +388,11 @@ func runProbeFFmpegDiag(args []string) (string, error) {
 	// holding the descriptor open can stretch past the context deadline. These
 	// probes run in the startup path, so a hang here is a server that never
 	// finishes booting. WaitDelay bounds the wait; the previous nil Stderr had
-	// no pipe and so could not stall this way.
-	cmd.WaitDelay = probeWaitDelay
+	// no pipe and so could not stall this way. (Same contract, same bound, and
+	// the same ErrWaitDelay reading as every captured-output command in the
+	// package — see runBounded in execwait.go. This one stays hand-rolled
+	// because it needs the stderr tail, not the whole capture.)
+	cmd.WaitDelay = execWaitDelay
 	err := cmd.Run()
 	// WaitDelay's own failure mode: when the process exits SUCCESSFULLY but
 	// leaves a pipe open past the delay, Wait reports ErrWaitDelay instead of
@@ -399,11 +410,6 @@ func runProbeFFmpegDiag(args []string) (string, error) {
 	}
 	return probeErrorSummary(stderr.String()), err
 }
-
-// probeWaitDelay bounds how long Wait keeps draining stderr after the process
-// is done or the context has fired. Generous for a pipe that should already be
-// closed, short enough that startup cannot stall on it.
-const probeWaitDelay = 2 * time.Second
 
 // probeStderrLimit caps how much of a probe's stderr we hold. FFmpeg's banner
 // alone is ~2 KB, and a probe that fails by looping on a driver error can

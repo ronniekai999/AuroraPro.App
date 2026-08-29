@@ -31,7 +31,11 @@ func ProbeSubtitles(ctx context.Context, filePath string) ([]models.SubtitleTrac
 		filePath,
 	)
 
-	out, err := cmd.Output()
+	// Bounded: capturing output lets Wait outlive the process, and the context
+	// cannot close a descriptor a child inherited (runBounded, execwait.go).
+	// This runs during library scans and session setup — an unbounded wait
+	// pins that caller, not just this probe.
+	out, err := boundedOutput(cmd)
 	if err != nil {
 		// No subtitle streams is not an error
 		return nil, nil
@@ -129,7 +133,7 @@ func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) flo
 		"-print_format", "json",
 		filePath,
 	)
-	out, err := cmd.Output()
+	out, err := boundedOutput(cmd) // see runBounded (execwait.go)
 	if err != nil {
 		return target // probe failed → fall back to requested target
 	}
@@ -210,7 +214,20 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 		vttPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Bounded, and ErrWaitDelay is not a failure here (runBounded,
+	// execwait.go): the process we started exited 0, so deleting the .vtt and
+	// erroring would throw away an extraction that cost up to ten minutes of
+	// reading through the container.
+	//
+	// "Exited 0" is what os/exec can tell us, and it is not quite "the file is
+	// complete": the premise of the whole bound is that some OTHER process
+	// inherited the descriptors, so an ffmpeg wrapper that returns 0 while
+	// backgrounding the real work would leave a partial .vtt that the size
+	// check above then caches. The old behaviour in that same scenario was an
+	// unbounded hang the 10-minute context could not break (it kills the
+	// process, which has already exited), so this is the better failure — but
+	// it is a failure mode, not a guarantee.
+	if output, err := boundedCombinedOutput(cmd); err != nil {
 		os.Remove(vttPath) // Clean up partial file
 		return "", fmt.Errorf("extract subtitle: %w: %s", err, string(output))
 	}
@@ -630,7 +647,8 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 		vttPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Bounded, ErrWaitDelay not a failure — see ExtractSubtitleVTT above.
+	if output, err := boundedCombinedOutput(cmd); err != nil {
 		os.Remove(vttPath) // Clean up partial file
 		return "", fmt.Errorf("convert subtitle: %w: %s", err, string(output))
 	}
