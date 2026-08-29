@@ -15,9 +15,9 @@
 // its message describes an mtime tie, and the extraction cache makes no
 // mtime comparison at all, so it would misdiagnose a failure here.
 //
-// The ExtractSubtitleVTT cases never reach ffmpeg — the cache check returns
-// before it on a hit, and nothing asserted on a miss requires it — so they
-// run everywhere. The one exception is
+// The ExtractSubtitleVTT cases never DEPEND on ffmpeg: a hit returns before
+// it, and a miss does exec it, but nothing asserted on that path requires it
+// to be present or to succeed. So they run everywhere. The one exception is
 // TestConverterCacheNamesSurviveShift/ConvertSubtitleToVTT, which shells out
 // and is gated by requireFFmpeg.
 package streaming
@@ -337,9 +337,18 @@ func shiftedNameProbe(t *testing.T, cacheDir, extractedPath string) (string, err
 // #131's bug, reappearing only for the longest filenames. Asserted against a
 // real ShiftVTTCues call rather than a re-implementation of its naming.
 func TestConverterCacheNamesSurviveShift(t *testing.T) {
-	// 224 chars, legal as a filename but long enough to overrun once both
-	// suffixes are appended.
-	long := strings.Repeat("Some.Very.Long.Release.Name.", 8)
+	// The length is load-bearing and easy to get wrong. A converter's own
+	// output is stem + "_" + 12 hex + ".vtt", i.e. stem+17, so it only
+	// overruns NAME_MAX at stem >= 239. At 224 the converted name is 241
+	// bytes, ShiftVTTCues' own bound then covers the shift, and this test
+	// passes without the converters being bounded at all — which is exactly
+	// what it exists to pin. 245 puts the UNBOUNDED converter output at 262
+	// and fails without them, while the sidecar itself (245 + ".srt" = 249)
+	// is still a legal filename.
+	long := strings.Repeat("Some.Very.Long.Release.Name.", 8) + strings.Repeat("x", 21) // 245
+	if len(long)+17 <= 255 {
+		t.Fatalf("fixture stem is %d bytes; too short to overrun a converter's own output name", len(long))
+	}
 
 	t.Run("ConvertSRTtoVTT", func(t *testing.T) {
 		dir := t.TempDir()

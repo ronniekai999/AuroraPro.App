@@ -442,6 +442,12 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 // already a distinct URL, so this is roughly one extra headers-only
 // round trip per track per page load.
 //
+// One cost this cannot avoid: a client that cached a track under the old
+// max-age=86400 will not ask again until that entry expires, so for up to
+// 24h after this deploys the staleness it fixes persists for exactly the
+// viewers it targets. Nothing server-side reaches them; the entry has to
+// age out (or they hard-reload). One-time, at rollout only.
+//
 // `private` because /api/stream/ is on the query-token promotion allowlist
 // and the SPA still builds this URL through withToken(): a shared cache
 // must never store a response whose URL may carry a ?token=. Same reasoning

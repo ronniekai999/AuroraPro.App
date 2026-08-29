@@ -126,3 +126,74 @@ func TestServeSubtitleETagDistinguishesTracksRegardlessOfMtimeOrder(t *testing.T
 		t.Errorf("unchanged track revalidated to %d, want 304 — revalidation must stay cheap", same.Code)
 	}
 }
+
+// The ETag must actually be derived from (name, size, mtime) — each part
+// carries a case the others do not:
+//
+//   - name: the fingerprint key lives here, so a replaced media file changes
+//     the name while size and mtime may not move at all.
+//   - size and mtime: an external .vtt sidecar edited in place keeps its
+//     name forever, so the name alone would never invalidate it.
+//
+// Asserting only "an ETag is present" let either of name or mtime be dropped
+// from the input without any test failing.
+func TestServeSubtitleETagDerivation(t *testing.T) {
+	dir := t.TempDir()
+	stamp := time.Now().Add(-time.Hour).Truncate(time.Second)
+
+	etagOf := func(t *testing.T, path string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		ServeSubtitle(rec, httptest.NewRequest(http.MethodGet, "/subtitles/0", nil), path)
+		got := rec.Header().Get("ETag")
+		if got == "" {
+			t.Fatalf("no ETag served for %s", filepath.Base(path))
+		}
+		return got
+	}
+	write := func(t *testing.T, name, body string, mt time.Time) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	const body = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n"
+
+	// Vary ONLY the name: same byte length, same size, same mtime.
+	a := write(t, "track_aaaa.vtt", body, stamp)
+	b := write(t, "track_bbbb.vtt", body, stamp)
+	if etagOf(t, a) == etagOf(t, b) {
+		t.Error("ETag ignores the filename — a replaced media file resolves to a new cache " +
+			"key with the same size and mtime, and would revalidate as unchanged")
+	}
+
+	// Vary ONLY the mtime: same path, same size, rewritten in place.
+	// Each ETag must be captured BEFORE the next write, since these all share
+	// one path and etagOf stats whatever is there at call time.
+	sidecar := write(t, "sidecar.vtt", body, stamp)
+	original := etagOf(t, sidecar)
+
+	editedMtime := stamp.Add(time.Minute)
+	write(t, "sidecar.vtt", body[:len(body)-3]+"yo\n", editedMtime) // same byte length
+	if fi, err := os.Stat(sidecar); err != nil || fi.Size() != int64(len(body)) {
+		t.Fatalf("fixture must keep the size identical to isolate mtime (err=%v)", err)
+	}
+	afterEdit := etagOf(t, sidecar)
+	if afterEdit == original {
+		t.Error("ETag ignores mtime — a sidecar edited in place keeps its name and size, " +
+			"so nothing else would ever invalidate it")
+	}
+
+	// Vary ONLY the size: same path, and the SAME mtime as the edit above,
+	// so size is the only input that moved.
+	write(t, "sidecar.vtt", body+"00:00:03.000 --> 00:00:04.000\nmore\n", editedMtime)
+	if etagOf(t, sidecar) == afterEdit {
+		t.Error("ETag ignores size")
+	}
+}
