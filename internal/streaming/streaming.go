@@ -1430,9 +1430,10 @@ func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
 // through a Cmd field would race no matter what lock it held. (It did:
 // ListSessions read Cmd.Process.Pid under variantMu while Start() wrote
 // Cmd.Process, and ffmpegDone read Cmd.ProcessState while Wait() wrote it.)
-// The Cmd stays a local in startVariantImpl, owned start-to-finish by that
-// one goroutine, and everything readers need — `pid`, `exited` — is published
-// onto variantMu-guarded fields below at write time.
+// The Cmd stays a local in startVariantImpl: built there, then handed to the
+// launch goroutine, which is the only thing that touches it once it exists.
+// Everything readers need — `pid`, `exited` — is published onto the
+// variantMu-guarded fields below at write time.
 type QualityVariant struct {
 	Profile   QualityProfile
 	OutputDir string
@@ -1533,18 +1534,23 @@ const defaultMaxCacheBytes = 20 << 30 // 20 GiB
 const variantRestartMax = 1
 
 // ffmpegDone reports whether the variant's ffmpeg process has terminated.
-// The signal is our own `exited` flag, set by the cmd.Wait goroutine in the
-// same critical section that publishes Err and StderrTail — so a caller that
-// sees "done" also sees this generation's FINAL error, not a half-written one.
+// The signal is our own `exited` flag, set by the cmd.Wait goroutine once
+// Wait has returned.
 //
 // It deliberately does NOT consult exec.Cmd.ProcessState, which it used to
-// take as a second, earlier signal. That read was a data race (Wait() writes
-// the field from the launch goroutine, which holds no lock — see the
-// QualityVariant type comment), and being earlier was itself a hazard: it went
-// true in the window BEFORE v.Err was published, where EnsureVariant reads a
-// nil v.Err as "clean completion" and would hand back a crashed variant. The
-// flag arrives a stderr-tail copy later; every caller polls on a 500ms-plus
-// cadence and already tolerates observing a dying variant one round late.
+// take as a second, earlier signal. That read was a data race — Wait() writes
+// the field from the launch goroutine, which holds no lock of ours (see the
+// QualityVariant type comment) — and being earlier made it the weaker signal
+// anyway: it went true ahead of ALL the exit bookkeeping, so a crash could be
+// observed with v.Err still nil, and EnsureVariant reads a nil v.Err as a
+// clean completion and serves the dead variant as a finished one.
+//
+// `exited` narrows that window to the bookkeeping itself. It does NOT close
+// it, so do not read this as "v.Err is final": the post-Wait block publishes
+// Err only for a non-cancelled non-zero exit, and the "exited before producing
+// a playlist" error is appended later still, by the polling goroutine one
+// cmdDone hop after `exited` becomes visible. ServeVariantPlaylist re-reads
+// v.Err under the lock after Ready closes for exactly that reason.
 //
 // Caller MUST hold the session's variantMu: `exited` is written under it by
 // the lifecycle goroutines (review finding B4).
