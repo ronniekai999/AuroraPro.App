@@ -8,13 +8,17 @@ import (
 
 // Bounded output capture for the commands this package shells out to.
 //
-// Attaching a writer to Stdout or Stderr changes Wait's contract: os/exec
-// copies through a pipe, and Wait then blocks until EVERY holder of the child's
-// descriptors closes them, not merely until the process exits. Both capture
-// methods attach to BOTH streams — CombinedOutput by definition, and Output
-// because it installs its own stderr saver whenever Stderr is nil, which is
-// every call site here — so neither is exposed on stdout alone. A child that leaves a subprocess holding one stalls Wait for as long
-// as that subprocess lives, with no bound and past any context deadline — the
+// Attaching a writer that is not an *os.File to Stdout or Stderr changes Wait's
+// contract: os/exec cannot hand the child a descriptor it already has, so it
+// copies through a pipe, and Wait then blocks until EVERY holder of that pipe
+// closes it — not merely until the process exits. (Hand it an *os.File and
+// there is no pipe and no wait; a buffer is what creates one.) Both capture
+// methods produce buffers, and both on BOTH streams: CombinedOutput by
+// definition, Output because it installs its own stderr saver whenever Stderr
+// is nil, which is every call site here.
+//
+// So a child that leaves a subprocess holding one stalls Wait for as long as
+// that subprocess lives, with no bound and past any context deadline — the
 // deadline kills the process it started, it cannot close a descriptor someone
 // else inherited. Several of these commands run inside NewTranscodeManager, so
 // there the stall is a server that never finishes booting.

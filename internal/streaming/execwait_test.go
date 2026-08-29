@@ -3,6 +3,7 @@ package streaming
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,29 +30,41 @@ func stubExecutable(t *testing.T, name, body string) {
 // descriptors closes them — not until the process exits — and nothing bounds
 // how long a grandchild lives.
 func lingerAndExit(body string) string {
-	return fmt.Sprintf("%s( sleep %.0f ) &\nexit 0\n", body, lingerFor.Seconds())
+	return fmt.Sprintf("%s( sleep %d ) &\nexit 0\n", body, lingerSleepSecs)
 }
 
 // BOTH of these have to track execWaitDelay, or the timing assertions quietly
 // stop meaning anything: they exist to tell a bounded call (returns at
-// execWaitDelay) from an unbounded one (waits out the grandchild), so the
-// budget must sit strictly between the two. Pinning lingerFor to a literal
-// while deriving lingerBudget is what breaks that — raise execWaitDelay to 5s
-// against a fixed 5s linger and every assertion below becomes a tautology.
-// TestLingerBudgetSeparatesBoundedFromUnbounded pins the relation itself.
-// Spaced a full delay apart in each direction so a loaded runner has room:
-// a bounded call lands at 1×, the budget is 2×, the grandchild leaves at 3×.
+// execWaitDelay) from an unbounded one (which waits out the grandchild), so the
+// budget must sit strictly between the two. Pinning one to a literal while
+// deriving the other is what breaks that — a fixed 5s linger against an
+// execWaitDelay raised to 5s makes every assertion below a tautology. Spaced a
+// full delay apart in each direction so a loaded runner has room: a bounded
+// call lands at 1×, the budget is 2×, the grandchild leaves at 3×.
 const (
 	lingerFor    = 3 * execWaitDelay
 	lingerBudget = 2 * execWaitDelay
 )
 
+// What the stub ACTUALLY sleeps, and therefore the only number the assertions
+// may reason about. POSIX sh `sleep` takes whole seconds, so lingerFor has to
+// be rounded — UP, because rounding down can reach zero, and a stub that sleeps
+// 0 leaves no grandchild, produces no ErrWaitDelay, and turns every linger test
+// below into a green vacuum. TestLingerBudgetSeparatesBoundedFromUnbounded pins
+// the resulting relation.
+var (
+	lingerSleepSecs = int(math.Ceil(lingerFor.Seconds()))
+	lingerSleep     = time.Duration(lingerSleepSecs) * time.Second
+)
+
 // The guard on the guards: whatever execWaitDelay is tuned to, a bounded call
-// must finish inside lingerBudget and an unbounded one must not.
+// must finish inside lingerBudget and an unbounded one must not. Asserted
+// against lingerSleep — the rounded value the shell really gets — not against
+// lingerFor, or the rounding could break the separation without failing here.
 func TestLingerBudgetSeparatesBoundedFromUnbounded(t *testing.T) {
-	if !(execWaitDelay < lingerBudget && lingerBudget < lingerFor) {
-		t.Fatalf("execWaitDelay=%s lingerBudget=%s lingerFor=%s: the budget must sit strictly between "+
-			"the bound and the grandchild, or the timing assertions cannot fail", execWaitDelay, lingerBudget, lingerFor)
+	if !(execWaitDelay < lingerBudget && lingerBudget < lingerSleep) {
+		t.Fatalf("execWaitDelay=%s lingerBudget=%s grandchild sleeps %s: the budget must sit strictly between "+
+			"the bound and the grandchild, or the timing assertions cannot fail", execWaitDelay, lingerBudget, lingerSleep)
 	}
 }
 
@@ -215,11 +228,13 @@ func TestNoUnboundedOutputCapture(t *testing.T) {
 // being line-anchored on an assignment, it misses a writer attached in a
 // composite literal (`&exec.Cmd{Stderr: buf}`).
 //
-// It also over-reaches: it matches an assignment to ANY field named
-// Stdout/Stderr on any type, so an unrelated struct in a file with no
-// WaitDelay would fail with an exec-specific message. That direction is the
-// safe one to be wrong in, and the fix is then to look at the line rather than
-// to loosen the pattern.
+// It also over-reaches, in two ways. It matches an assignment to ANY field
+// named Stdout/Stderr on any type, so an unrelated struct in a file with no
+// WaitDelay would fail with an exec-specific message. And even on a real
+// exec.Cmd it cannot see that `cmd.Stdout = os.Stdout` needs no bound at all:
+// os/exec passes an *os.File straight through, so there is no pipe to wait on.
+// That direction is the safe one to be wrong in, and the fix is then to look at
+// the line rather than to loosen the pattern.
 //
 // The bounded helpers are what make the common case unmissable; this is only
 // the backstop for the two sites that hand-roll their own writers (hwdecode.go's
@@ -231,18 +246,28 @@ func TestFilesThatAttachPipesBoundTheWait(t *testing.T) {
 	// os.Stderr and pick up an unrelated `=` further down the file.
 	attaches := regexp.MustCompile(`(?m)^\s*[\w.]+\.Std(out|err)\b[^=\n]*=`)
 	// The ASSIGNMENT, not the word: a comment discussing WaitDelay (there are
-	// several) must not be able to satisfy this.
-	bounds := regexp.MustCompile(`(?m)^\s*[\w.]+\.WaitDelay\s*=`)
+	// several) must not be able to satisfy this. And the assignment has to set
+	// a BOUND — `WaitDelay = 0` is os/exec's "wait forever", i.e. the very bug,
+	// spelled in a way that would otherwise read as a fix.
+	bounds := regexp.MustCompile(`(?m)^\s*[\w.]+\.WaitDelay\s*=\s*([^\s;/]+)`)
 
 	forEachPackageSource(t, func(t *testing.T, file, src string) {
 		loc := attaches.FindStringIndex(src)
 		if loc == nil {
 			return
 		}
-		if !bounds.MatchString(src) {
+		bounded := false
+		for _, m := range bounds.FindAllStringSubmatch(src, -1) {
+			if m[1] != "0" {
+				bounded = true
+				break
+			}
+		}
+		if !bounded {
 			line := 1 + strings.Count(src[:loc[0]], "\n")
-			t.Errorf("%s:%d attaches a writer to a command's Stdout/Stderr but the file never sets WaitDelay — "+
-				"Wait will block until every holder of those descriptors closes them", file, line)
+			t.Errorf("%s:%d attaches a writer to a command's Stdout/Stderr but nothing in the file sets a "+
+				"non-zero WaitDelay — Wait will then block until every holder of those descriptors closes "+
+				"them, however long that takes", file, line)
 		}
 	})
 }
@@ -317,6 +342,7 @@ func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
 		AudioTrackIndex: -1,
 	}
 
+	start := time.Now()
 	session.variantMu.Lock() // startVariant's contract
 	err = tm.startVariant(session, v, 0)
 	session.variantMu.Unlock()
@@ -325,7 +351,7 @@ func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
 	}
 
 	// The Wait goroutine returns one WaitDelay after FFmpeg exits.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(4 * lingerFor)
 	for {
 		session.variantMu.Lock()
 		done := v.exited
@@ -337,6 +363,17 @@ func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
 			t.Fatal("the cmd.Wait goroutine never finished; a held descriptor is pinning it")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	// Not just "did it finish" — WHEN. Without this the test passes against an
+	// unbounded variant (cmd.WaitDelay left at 0), because the grandchild does
+	// eventually exit and the mapping below is never reached with anything to
+	// map. A real held descriptor never exits, and then the goroutine is pinned
+	// for good: v.exited, v.Err and v.StderrTail are never written, while
+	// ffmpegDone still reports true from Cmd.ProcessState, so EnsureVariant
+	// serves a crashed transcode as a clean completion.
+	if elapsed := time.Since(start); elapsed >= lingerBudget {
+		t.Errorf("the variant's cmd.Wait took %s — it waited out the grandchild rather than the %s bound",
+			elapsed, execWaitDelay)
 	}
 
 	session.variantMu.Lock()

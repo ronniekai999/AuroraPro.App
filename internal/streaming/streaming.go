@@ -3754,6 +3754,14 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// probes do (execwait.go). After a ctx kill the timer caps the drain that
 	// follows; if FFmpeg is wedged badly enough not to die within the delay,
 	// it also closes the pipes out from under a process already sent SIGKILL.
+	//
+	// What the bound costs, stated where it is paid: closing the pipe can cut
+	// the stderr capture short, and StderrTail keeps the LAST 600 bytes —
+	// exactly where FFmpeg puts the reason. So a crash whose stderr is still
+	// draining at the deadline yields a v.Err quoting the middle of the log
+	// instead of the error. The window is tightest after a ctx kill, where the
+	// timer starts at cancellation rather than at exit. A degraded diagnosis
+	// beats a pinned goroutine and a crash reported as a clean completion.
 	cmd.WaitDelay = execWaitDelay
 
 	v.Cmd = cmd
