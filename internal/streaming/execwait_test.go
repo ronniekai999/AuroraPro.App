@@ -395,9 +395,12 @@ func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
 	// unbounded variant (cmd.WaitDelay left at 0), because the grandchild does
 	// eventually exit and the mapping below is never reached with anything to
 	// map. A real held descriptor never exits, and then the goroutine is pinned
-	// for good: v.exited, v.Err and v.StderrTail are never written, while
-	// ffmpegDone still reports true from Cmd.ProcessState, so EnsureVariant
-	// serves a crashed transcode as a clean completion.
+	// for good: v.exited, v.Err and v.StderrTail are never written. That used to
+	// mean EnsureVariant served a crashed transcode as a clean completion, since
+	// ffmpegDone still reported true from Cmd.ProcessState; that read was a data
+	// race and is gone, so the variant is now STRANDED instead — ffmpegDone
+	// stays false, EnsureVariant hands back the zombie on every poll, and the
+	// reap-resume branch can never fire. Either way the bound is what saves it.
 	assertBoundedWait(t, time.Since(start), "the variant's cmd.Wait")
 
 	session.variantMu.Lock()

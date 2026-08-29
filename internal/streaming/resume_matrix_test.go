@@ -120,12 +120,12 @@ func rollbackToSegments(t *testing.T, v *QualityVariant, keep int) {
 // waitForExitLocked is waitForFFmpegExit with the session lock held around the
 // read, and it surfaces FFmpeg's stderr the way the shared helper does.
 //
-// The lock removes the v.exited half of the race the detector reports here
-// (that field IS written under variantMu) but NOT the other half: Cmd.
-// ProcessState is written inside os/exec.(*Cmd).Wait under no lock at all, so
-// this file still adds reports — measured 2 without it, 4 with. CI does not
-// pass -race, so nothing breaks; the unsynchronised reads are filed separately
-// and want fixing in ffmpegDone itself, not worked around here.
+// The lock covers v.exited, which IS written under variantMu. The other half —
+// ffmpegDone reaching into Cmd.ProcessState, written inside os/exec.(*Cmd).Wait
+// under no lock at all — was the reason this file still added race reports, and
+// it has since been fixed where the comment here said it wanted fixing: in
+// ffmpegDone itself, which no longer consults exec.Cmd at all. The lock stays
+// because reading v.exited without it would be a race in its own right.
 func waitForExitLocked(t *testing.T, s *TranscodeSession, v *QualityVariant, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
@@ -143,7 +143,15 @@ func waitForExitLocked(t *testing.T, s *TranscodeSession, v *QualityVariant, wit
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, v.StderrTail)
+	// Under the lock like every other read of this field: the timeout path is
+	// the one place a stranded variant is still being written to by the
+	// cmd.Wait goroutine, so reading it bare would report a race here and send
+	// whoever is debugging after that instead of the regression that caused
+	// the timeout.
+	s.variantMu.Lock()
+	tail := v.StderrTail
+	s.variantMu.Unlock()
+	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, tail)
 }
 
 // segmentStartSec reports where a segment's media actually begins on the

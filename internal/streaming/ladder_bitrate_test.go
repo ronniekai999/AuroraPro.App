@@ -246,7 +246,7 @@ func TestLadder_DeclaredBandwidthBoundsMeasuredPeak(t *testing.T) {
 
 	session, variant := startFirstVariant(t, tm, path,
 		SessionOpts{SourceVideoCodec: "h264", AudioTrackIndex: -1, AudioChannels: 2})
-	waitForFFmpegExit(t, variant, 120*time.Second)
+	waitForFFmpegExit(t, session, variant, 120*time.Second)
 
 	var declared int
 	for _, p := range session.Profiles {

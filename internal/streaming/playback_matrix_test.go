@@ -567,11 +567,11 @@ func TestPlaybackMatrix_SeekAnchoredSessionEncodesOnlyTheRemainder(t *testing.T)
 		AudioChannels:    2,
 		StartSec:         seekTo,
 	}
-	_, variant := startFirstVariant(t, tm, path, opts)
+	session, variant := startFirstVariant(t, tm, path, opts)
 
 	// Let the (short) encode run to completion so the playlist holds every
 	// segment the seek produced.
-	waitForFFmpegExit(t, variant, 90*time.Second)
+	waitForFFmpegExit(t, session, variant, 90*time.Second)
 
 	published := publishedPlaylistDuration(t, filepath.Join(variant.OutputDir, "stream.m3u8"))
 	remaining := fixtureDuration - seekTo
@@ -591,16 +591,27 @@ func TestPlaybackMatrix_SeekAnchoredSessionEncodesOnlyTheRemainder(t *testing.T)
 }
 
 // waitForFFmpegExit blocks until the variant's FFmpeg process has exited.
-func waitForFFmpegExit(t *testing.T, v *QualityVariant, within time.Duration) {
+//
+// `exited` and StderrTail are written by the cmd.Wait goroutine under
+// variantMu, so both reads take the lock — ffmpegDone's contract, and the
+// difference between this passing and tripping -race on a box that has a real
+// ffmpeg (these tests skip without one).
+func waitForFFmpegExit(t *testing.T, s *TranscodeSession, v *QualityVariant, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
-		if ffmpegDone(v) {
+		s.variantMu.Lock()
+		done := ffmpegDone(v)
+		s.variantMu.Unlock()
+		if done {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, v.StderrTail)
+	s.variantMu.Lock()
+	tail := v.StderrTail
+	s.variantMu.Unlock()
+	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, tail)
 }
 
 var extinfRe = regexp.MustCompile(`(?m)^#EXTINF:([0-9.]+)`)
@@ -707,13 +718,29 @@ func startFirstVariant(t *testing.T, tm *TranscodeManager, path string, opts Ses
 		t.Fatalf("ensure variant %q: %v", profile, err)
 	}
 
+	// Ready, Err and StderrTail are all written under variantMu by the
+	// lifecycle goroutines (Ready is replaced wholesale on relaunch), and
+	// closing Ready gives no happens-before with the Err/StderrTail writes
+	// when it happens through the playlist-found branch — so snapshot each
+	// under the lock rather than reading the fields directly.
+	session.variantMu.Lock()
+	ready := variant.Ready
+	session.variantMu.Unlock()
+
+	timedOut := false
 	select {
-	case <-variant.Ready:
+	case <-ready:
 	case <-time.After(90 * time.Second):
-		t.Fatalf("variant %q never became ready\nffmpeg stderr tail:\n%s", profile, variant.StderrTail)
+		timedOut = true
 	}
-	if variant.Err != nil {
-		t.Fatalf("variant %q failed: %v\nffmpeg stderr tail:\n%s", profile, variant.Err, variant.StderrTail)
+	session.variantMu.Lock()
+	vErr, tail := variant.Err, variant.StderrTail
+	session.variantMu.Unlock()
+	if timedOut {
+		t.Fatalf("variant %q never became ready\nffmpeg stderr tail:\n%s", profile, tail)
+	}
+	if vErr != nil {
+		t.Fatalf("variant %q failed: %v\nffmpeg stderr tail:\n%s", profile, vErr, tail)
 	}
 	return session, variant
 }
