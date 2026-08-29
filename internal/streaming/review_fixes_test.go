@@ -582,6 +582,51 @@ func TestResumePoint_RoundsSeekUpOntoTheKeyframeBoundary(t *testing.T) {
 	}
 }
 
+// 23.976fps on a 6s key-frame grid emits #EXTINF:6.006000 exactly, and 1000
+// of those sum to 6006.000000000062 in float64 against an exact 6006. A bare
+// Ceil turns that into 6007 and the resume skips a full second of A/V —
+// roughly 100 minutes into a feature, i.e. an ordinary late-movie reap.
+func TestResumePoint_FloatAccumulationDoesNotOvershootAWholeSecond(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: t.TempDir()}
+	writeCoverage(t, v.OutputDir, 999, 6.006) // 1000 segments
+
+	gotSec, gotSeg := tm.resumePoint(v, 0)
+	if gotSeg != 1000 {
+		t.Errorf("resumeSegNum = %d, want 1000", gotSeg)
+	}
+	if gotSec != 6006 {
+		t.Errorf("resumeFromSec = %d, want 6006 — float accumulation pushed the seek "+
+			"past the real boundary and the resume skips %ds of content", gotSec, gotSec-6006)
+	}
+}
+
+// The seek is relative to the session's own start, so a session built by a
+// seek must not have its published duration double-counted.
+func TestResumePoint_AddsPublishedDurationToStartSec(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "720p"}, OutputDir: t.TempDir()}
+	writeCoverage(t, v.OutputDir, 9, 6.0) // 60s published
+
+	gotSec, gotSeg := tm.resumePoint(v, 1200)
+	if gotSeg != 10 {
+		t.Errorf("resumeSegNum = %d, want 10", gotSeg)
+	}
+	if gotSec != 1260 {
+		t.Errorf("resumeFromSec = %d, want 1260 (startSec 1200 + 60s published)", gotSec)
+	}
+}
+
 func TestPlaylistCoverage(t *testing.T) {
 	write := func(t *testing.T, body string) string {
 		t.Helper()
@@ -650,6 +695,29 @@ func TestPlaylistCoverage(t *testing.T) {
 			body:    "#EXTM3U\nseg_00000.ts\nseg_00001.ts\n",
 			wantSeg: 1,
 			wantSec: 0,
+		},
+		{
+			// What havePending actually guards: a second URI under one
+			// EXTINF must not bill the duration twice, which would push the
+			// resume anchor past the real boundary.
+			name:    "two URIs after one EXTINF count the duration once",
+			body:    "#EXTM3U\n#EXTINF:6.0,\nseg_00000.ts\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 6,
+		},
+		{
+			name:    "negative duration is ignored",
+			body:    "#EXTM3U\n#EXTINF:-1,\nseg_00000.ts\n#EXTINF:6.0,\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 6,
+		},
+		{
+			// Inf parses and passes d >= 0; int(+Inf) is not defined to
+			// anything useful and would produce a negative -ss.
+			name:    "infinite duration is ignored",
+			body:    "#EXTM3U\n#EXTINF:Inf,\nseg_00000.ts\n#EXTINF:6.0,\nseg_00001.ts\n",
+			wantSeg: 1,
+			wantSec: 6,
 		},
 	}
 

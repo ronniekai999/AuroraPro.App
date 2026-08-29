@@ -3059,8 +3059,9 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 
 // resumePoint computes where a relaunched FFmpeg should continue for a
 // variant whose process stopped (crash or reap): the source-second to seek to
-// and the segment number to start writing at. The source was at
-// startSec + (highestCompleteSeg + 1) * segDuration when output stopped.
+// and the segment number to start writing at, derived from what the playlist
+// actually published rather than from a segment index times the nominal
+// segment duration (see playlistCoverage for why the latter is wrong).
 // Shared by the crash-restart and reap-resume paths in EnsureVariant so the
 // resume math can never diverge between them. Caller holds variantMu.
 func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec, resumeSegNum int) {
@@ -3082,7 +3083,14 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 	// as unusable rather than as "resume from the seek origin", which would
 	// re-encode the whole file numbered past the existing tail.
 	if pubSeg, pubSec := playlistCoverage(filepath.Join(v.OutputDir, variantPlaylistName)); pubSeg >= 0 && pubSec > 0 {
-		return startSec + int(math.Ceil(pubSec)), pubSeg + 1
+		// The epsilon is load-bearing, not defensive. A 23.976fps transcode on
+		// a 6s key-frame grid emits #EXTINF:6.006000 for every segment, and
+		// 1000 of those sum to 6006.000000000062 in float64 against an exact
+		// 6006 — so a bare Ceil returns 6007 and the resume skips a full
+		// second of A/V. That is ~100 minutes into a feature, i.e. an ordinary
+		// late-movie reap. One microsecond is far below any real segment
+		// boundary and cannot mask a genuine fractional remainder.
+		return startSec + int(math.Ceil(pubSec-1e-6)), pubSeg + 1
 	}
 
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
@@ -3151,9 +3159,11 @@ func highestSegmentNumber(varDir string) int {
 	// encoder nearly always leaves a PARTIAL final segment, and a partial
 	// 720p/1080p segment comfortably clears minSegmentSizeBytes. The scan
 	// counted it, the resume anchored one past it, and +append_list
-	// appended after the playlist's real last entry — skipping 6s of
-	// content and leaving that tier's cumulative EXTINF permanently short
-	// against its siblings, on every single resume.
+	// appended after the playlist's real last entry — skipping that
+	// segment's content and leaving the tier's cumulative EXTINF short
+	// against its siblings. Not literally every resume: a kill landing
+	// between segments leaves nothing partial and the scan agreed with the
+	// playlist. Most of them.
 	if n := playlistHighestSegmentNumber(filepath.Join(varDir, variantPlaylistName)); n >= 0 {
 		return n
 	}
@@ -3220,7 +3230,19 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 // to get a source position is therefore valid only for transcodes; an
 // 8s-GOP remux resuming at segment 151 seeks to 906s for content that
 // actually starts at 1208s, and the error compounds on every later resume.
-// Summing the durations the muxer itself wrote is right for both.
+// Summing the durations the muxer itself wrote fixes that.
+//
+// Known limit, for the ledger: the sum is the DURATION published, and callers
+// add it to startSec to get a source position. For a remux started mid-file
+// those differ. -noaccurate_seek makes generation 1 begin at the keyframe at
+// or before startSec, not at startSec itself, so the true next boundary is
+// that keyframe plus the sum — and startSec + sum overshoots by however far
+// startSec sat past its keyframe. The seek then snaps back to the greatest
+// keyframe at or before the target, which can drop content between the two.
+// The direction is always a forward skip, never an overlapping append, and it
+// is far smaller than the error it replaces; closing it properly means
+// anchoring on the probed origin (see ProbeSeekKeyframe) or persisting it on
+// the session at first launch.
 func playlistCoverage(playlistPath string) (highestSeg int, publishedSec float64) {
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
@@ -3235,7 +3257,11 @@ func playlistCoverage(playlistPath string) (highestSeg int, publishedSec float64
 		if after, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
 			// "#EXTINF:6.000000,optional title" — duration up to the comma.
 			durStr := strings.TrimSpace(strings.SplitN(after, ",", 2)[0])
-			if d, convErr := strconv.ParseFloat(durStr, 64); convErr == nil && d >= 0 {
+			// d >= 0 rejects NaN as a side effect; Inf needs its own check,
+			// since it parses, passes the comparison, and would make the
+			// total non-finite — int(+Inf) is not defined to any useful value
+			// and yields a negative -ss on amd64.
+			if d, convErr := strconv.ParseFloat(durStr, 64); convErr == nil && d >= 0 && !math.IsInf(d, 0) {
 				pending, havePending = d, true
 			}
 			continue
@@ -3251,9 +3277,11 @@ func playlistCoverage(playlistPath string) (highestSeg int, publishedSec float64
 		if n > highest {
 			highest = n
 		}
-		// Only count a duration that actually belongs to a published segment
-		// line, so a trailing EXTINF whose URI was never written (a torn
-		// final write) contributes nothing.
+		// Consume the pending duration exactly once. A trailing EXTINF whose
+		// URI was never written contributes nothing by virtue of the loop
+		// structure alone; what this flag actually guards is the inverse —
+		// two segment URIs after a single EXTINF, where counting the duration
+		// twice would push the anchor past the real boundary.
 		if havePending {
 			total += pending
 			havePending = false
