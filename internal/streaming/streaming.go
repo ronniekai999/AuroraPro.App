@@ -1552,7 +1552,12 @@ const variantRestartMax = 1
 //
 // A var rather than a const only so tests can shrink it — pinning the
 // behaviour at the shipped value costs seconds of wall time per case. Nothing
-// in production reassigns it.
+// in production reassigns it, and production reads it in exactly one place:
+// the cmd.WaitDelay assignment in startVariantImpl, on the caller's goroutine.
+// Everything downstream reads cmd.WaitDelay, which the launch goroutine owns.
+// Keep it that way — a second read from a launch goroutine would race with the
+// test that shrinks it, and the race detector would blame whichever test
+// happened to be running.
 var variantWaitDelay = 5 * time.Second
 
 // ffmpegDone reports whether the variant's ffmpeg process has terminated.
@@ -3931,7 +3936,9 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			slog.Warn("ffmpeg variant exited cleanly but left its stderr pipe open",
 				"session_id", session.ID,
 				"profile", p.Name,
-				"wait_delay", variantWaitDelay,
+				// cmd.WaitDelay, not the package var: this goroutine owns
+				// cmd, and it is the delay actually applied to THIS launch.
+				"wait_delay", cmd.WaitDelay,
 			)
 		}
 		if crashed {

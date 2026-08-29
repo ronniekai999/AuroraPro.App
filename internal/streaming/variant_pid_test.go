@@ -229,14 +229,71 @@ func TestStartVariant_RealCrashIsStillRecordedAsOne(t *testing.T) {
 	}
 }
 
+// The third arm of the same decision. A variant the idle reaper cancels dies
+// by SIGKILL, so cmd.Wait reports "signal: killed" — a non-nil error that must
+// NOT become v.Err, because nothing crashed. EnsureVariant's reaped branch
+// recovers playback either way, but ServeVariantPlaylist and ServeHLSSegment
+// snapshot v.Err without going through it, and would 500 every fetch between
+// the reap and the next playlist poll while the diagnose surface reported a
+// crash that never happened.
+//
+// `exec sleep`, not `sleep`, so the shell replaces itself: the cancel then
+// kills the process that holds the pipe rather than leaving an orphan.
+func TestStartVariant_ReaperCancelIsNotRecordedAsACrash(t *testing.T) {
+	shrinkVariantWaitDelay(t)
+	s, v := stubVariantLaunch(t, "sess-cancelled",
+		"    touch \"$out/stream.m3u8\"\n"+
+			"    exec sleep 30\n")
+
+	// Wait for the PID before cancelling. The launch is asynchronous, and a
+	// cancel that lands before cmd.Start() takes the Start-failure path
+	// instead — which sets v.Err and never sets `exited` at all (see the note
+	// on that path in startVariantImpl), so the reap this test is about would
+	// never happen.
+	waitForVariantPID(t, s, v)
+
+	s.variantMu.Lock()
+	cancel := v.Cancel
+	s.variantMu.Unlock()
+	if cancel == nil {
+		t.Fatal("variant has no Cancel — the reaper would have nothing to call")
+	}
+	cancel()
+
+	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
+	for {
+		s.variantMu.Lock()
+		done, vErr := ffmpegDone(v), v.Err
+		s.variantMu.Unlock()
+		if done {
+			if vErr != nil {
+				t.Fatalf("a cancelled variant recorded an error: %v — a reap is a deliberate "+
+					"stop, and every v.Err reader will report it as a failed transcode", vErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancelled variant never reached exited")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // shrinkVariantWaitDelay drops the stderr-drain bound for one test. The
 // stalled-pipe cases have to wait it out, and at the shipped 5s that is most
-// of the package's test time. The tests below still bound their own deadlines
-// by variantWaitDelay, so what they pin is the mechanism — that the drain is
-// bounded at all, and what the resulting error means — not the chosen value.
+// of the package's test time. The callers above still bound their own
+// deadlines by variantWaitDelay, so what they pin is the mechanism — that the
+// drain is bounded at all, and what the resulting error means — not the chosen
+// value.
 //
-// Safe as a package-level write because these tests cannot run in parallel:
-// stubFFmpeg calls t.Setenv, which forbids it.
+// What makes this write safe is NOT that these tests are serial: the restore
+// below runs at test end, while a launch goroutine from that same test may
+// still be alive. It is that production reads the var on the caller's
+// goroutine only — the cmd.WaitDelay assignment in startVariantImpl, which
+// EnsureVariant runs synchronously — and every later reader uses
+// cmd.WaitDelay, which the launch goroutine owns. A launch-goroutine read of
+// the var would race with the restore, and -race would blame whichever test
+// was running when it fired rather than this one.
 func shrinkVariantWaitDelay(t *testing.T) {
 	t.Helper()
 	prev := variantWaitDelay
