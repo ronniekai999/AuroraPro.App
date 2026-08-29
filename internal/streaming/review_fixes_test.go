@@ -535,6 +535,14 @@ func writeCoverage(t *testing.T, dir string, through int, dur float64) {
 // write, and a partial 720p/1080p segment clears minSegmentSizeBytes easily so
 // the size heuristic did not catch it either.
 func TestHighestSegmentNumber_PrefersPlaylistOverPartialOnDisk(t *testing.T) {
+	// The literal is deliberate: writing the fixture through
+	// variantPlaylistName would move both sides together, so a constant that
+	// drifted away from the muxer's output name again would go unnoticed —
+	// which is the exact regression this test is named for.
+	if variantPlaylistName != "stream.m3u8" {
+		t.Fatalf("variantPlaylistName = %q, but FFmpeg's HLS muxer is pointed at stream.m3u8; "+
+			"a drift here silently disables the playlist-preferred resume anchor", variantPlaylistName)
+	}
 	varDir := t.TempDir()
 	writeCoverage(t, varDir, 87, 6.0)
 
@@ -591,8 +599,8 @@ func TestResumePoint_RoundsSeekUpOntoTheKeyframeBoundary(t *testing.T) {
 	writeCoverage(t, v.OutputDir, 9, 4.17)
 
 	gotSec, _ := tm.resumePoint(v, 0)
-	// 10 * 4.17 = 41.7. The seek must land at or just after it, NOT back at
-	// 41 and not rounded away to 42 (which would drop 0.3s).
+	// 10 * 4.17 = 41.7. The seek must land at or just after it — a
+	// whole-second ceil would push it to 42 and drop 0.3s of content.
 	wantSeek(t, gotSec, 41.7, 0.002, "seek lands on the keyframe boundary")
 }
 
@@ -683,11 +691,18 @@ func TestResumePoint_EpsilonCoversEXTINFPrintRounding(t *testing.T) {
 	}
 	defer tm.Close()
 
-	// True duration carries more precision than the printed form: each entry
-	// is written as "6.000000" while really running 6.0000004s, so the
-	// playlist under-reports the boundary by 4e-5s over 100 segments.
-	const trueDur = 6.0000004
-	const nSeg = 100
+	// The true duration must carry MORE precision than the printed form, or
+	// there is no under-reporting to detect: 720058/90000 = 8.0006444444...
+	// prints as "8.000644", losing 4.444e-7s per entry. That is the worst
+	// constant-GOP case in the 1/90000 mpegts timebase FFmpeg computes
+	// segment durations in.
+	//
+	// nSeg is feature length on purpose. A fixed bias covers only
+	// 1e-4/5e-7 = 200 entries, so a short fixture proves nothing about the
+	// movies this actually runs on; at 1200 entries the shortfall is
+	// ~5.3e-4s, past a fixed budget and the millisecond ceil combined.
+	const trueDur = 720058.0 / 90000.0
+	const nSeg = 1200
 
 	dir := t.TempDir()
 	var pl strings.Builder
@@ -709,6 +724,44 @@ func TestResumePoint_EpsilonCoversEXTINFPrintRounding(t *testing.T) {
 	gotSec, _ := tm.resumePoint(v, 0)
 
 	wantSeek(t, gotSec, trueBoundary, 0.002, "printed sum under-reports the boundary")
+}
+
+// A corrupt playlist can sum to something absurd. int() on a non-finite or
+// out-of-range float is not defined to anything useful and yields a negative
+// -ss, which stops FFmpeg launching at all — so the variant would never
+// resume. Fall back to the index arithmetic instead.
+func TestResumePoint_ImplausibleSumFallsBackToIndexArithmetic(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	dir := t.TempDir()
+	// Finite and non-negative, so the per-entry guards pass; the SUM is what
+	// is implausible.
+	body := "#EXTM3U\n#EXTINF:1e300,\nseg_00000.ts\n#EXTINF:1e300,\nseg_00001.ts\n"
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(body), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+	for i := 0; i <= 1; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 64*1024), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: dir}
+	gotSec, gotSeg := tm.resumePoint(v, 0)
+
+	if gotSec < 0 {
+		t.Errorf("resumeFromSec = %v — a negative -ss stops FFmpeg launching and the "+
+			"variant never resumes", gotSec)
+	}
+	// Index fallback: 2 published segments * 6s.
+	if gotSeg != 2 || gotSec != 12 {
+		t.Errorf("resumePoint = (%v, %d), want (12, 2) from the index fallback", gotSec, gotSeg)
+	}
 }
 
 func TestFormatSeekSeconds(t *testing.T) {
@@ -771,6 +824,11 @@ func TestPlaylistCoverage(t *testing.T) {
 		{
 			name:    "missing file",
 			body:    "",
+			wantSeg: -1,
+		},
+		{
+			name:    "empty file",
+			body:    "\x00", // sentinel: written as a zero-byte file below
 			wantSeg: -1,
 		},
 		{
@@ -849,7 +907,12 @@ func TestPlaylistCoverage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "absent.m3u8")
-			if tt.body != "" {
+			switch tt.body {
+			case "":
+				// leave the path nonexistent
+			case "\x00":
+				path = write(t, "") // a real, zero-byte playlist
+			default:
 				path = write(t, tt.body)
 			}
 			gotSeg, gotSec := playlistCoverage(path)

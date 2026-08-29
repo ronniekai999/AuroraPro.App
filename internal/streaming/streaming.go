@@ -3057,13 +3057,39 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 	return v, nil
 }
 
-// resumeSeekEpsilon is the forward bias applied to a resume seek so it lands
-// at or AFTER the real segment boundary rather than a hair before it. FFmpeg
-// prints #EXTINF to 6 decimals, so each entry carries up to ±5e-7s of
-// rounding, accumulating to roughly 1e-4s across a feature-length playlist.
-// Landing before the boundary is the expensive direction: -noaccurate_seek
-// (remux) snaps back to the previous key frame and duplicates a whole GOP.
-const resumeSeekEpsilon = 1e-4
+// resumeSeekPrintError is FFmpeg's worst-case per-entry #EXTINF rounding:
+// durations are written with %f (6 decimals), so each one can under-report by
+// up to half an ulp of the last digit.
+//
+// The bias MUST scale with the number of entries. A fixed 1e-4 covers only
+// 1e-4/5e-7 = 200 segments, while a feature-length playlist runs 900-1400 —
+// at 1200 entries a constant-GOP remux can under-report its boundary by
+// ~5e-4s, more than a fixed budget and the millisecond ceil together, and the
+// seek then lands BEFORE the key frame. That is the expensive direction:
+// -noaccurate_seek (remux) snaps back to the PREVIOUS key frame, duplicating
+// a whole GOP of already-published content into the resumed output — and the
+// duplicate inflates the published sum, so every later resume starts from a
+// worse estimate.
+//
+// resumeSeekMinBias floors it so a short playlist still gets a sane margin.
+// That floor is an EQUIVALENT MUTANT and deliberately left uncovered: FFmpeg
+// always prints EXTINF to 6 decimals, so the scaled term already exceeds the
+// real accumulated error at every entry count, and no fixture can tell the
+// floor's presence from its absence. It is insurance against a muxer that
+// someday prints coarser durations, not behaviour under test.
+const (
+	resumeSeekPrintError = 5e-7
+	resumeSeekMinBias    = 1e-4
+	// maxResumeSeekSec is a plausibility ceiling on a computed seek — a
+	// thousand hours, far past any real runtime. Beyond it the playlist is
+	// corrupt, not long.
+	maxResumeSeekSec = 3600.0 * 1000
+)
+
+// resumeSeekBias is the forward bias for a playlist publishing n segments.
+func resumeSeekBias(n int) float64 {
+	return math.Max(resumeSeekMinBias, resumeSeekPrintError*float64(n))
+}
 
 // formatSeekSeconds renders an -ss value. Whole seconds stay integral so a
 // fresh start's command line is unchanged; a resume keeps its millisecond,
@@ -3113,13 +3139,20 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 		// seeks accurately to exactly what it is told, so what is asked for
 		// is what is lost.
 		//
-		// resumeSeekEpsilon then guarantees the target is at or AFTER the
+		// resumeSeekBias then guarantees the target is at or AFTER the
 		// boundary, which is what lets -noaccurate_seek snap onto it instead
 		// of back to the previous key frame (a duplicated GOP). It is sized
-		// against FFmpeg's 6-decimal EXTINF printing, whose per-entry ±5e-7
-		// accumulates to ~1e-4s over a feature — not against float64
-		// summation drift, which stays below 5e-8 even at 20k segments.
-		return float64(startSec) + math.Ceil((pubSec+resumeSeekEpsilon)*1000)/1000, pubSeg + 1
+		// against FFmpeg's 6-decimal EXTINF printing and scales with the
+		// entry count — not against float64 summation drift, which stays
+		// below 5e-8 even at 20k segments and is not the binding term.
+		seek := float64(startSec) + math.Ceil((pubSec+resumeSeekBias(pubSeg+1))*1000)/1000
+		// A corrupt playlist can sum to something non-finite or absurd; int()
+		// on that is not defined to anything useful and yields a negative -ss
+		// that stops FFmpeg launching at all, so the variant never resumes.
+		// Fall through to the index arithmetic instead.
+		if !math.IsInf(seek, 0) && !math.IsNaN(seek) && seek < maxResumeSeekSec {
+			return seek, pubSeg + 1
+		}
 	}
 
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
