@@ -83,7 +83,12 @@ func TestExtractSubtitleVTTServesCachedTrack(t *testing.T) {
 	if got != cached {
 		t.Errorf("returned %q, want the cached track %q", got, cached)
 	}
-	assertCacheReused(t, cached)
+	// Not assertCacheReused: its message is about an mtime tie, and there is
+	// no tie here — the extraction cache performs no mtime comparison at all,
+	// so a failure would point the reader at the wrong rule.
+	if !sentinelSurvived(t, cached) {
+		t.Error("cached track was rebuilt even though the media file did not change")
+	}
 }
 
 // TestExtractSubtitleVTTInvalidatesOnMediaChange is the regression this policy
@@ -178,15 +183,58 @@ func TestExtractedVTTPathCarriesFingerprint(t *testing.T) {
 	if !ok {
 		t.Fatal("mediaFingerprint failed on a file that exists")
 	}
-	// <stem>_<pathhash>_sub<idx>_<fingerprint>.vtt. Matched as a suffix
-	// rather than by splitting on "_": a realistic release name
+	// <stem>_<pathhash>_sub<idx>_<fingerprint>.vtt. Matched by prefix and
+	// suffix rather than by splitting on "_": a realistic release name
 	// ("Movie_2024_1080p") contains separators of its own, and a component
 	// count would break on the fixture name alone.
-	if want := "_sub3_" + fp + ".vtt"; !strings.HasSuffix(name, want) {
-		t.Errorf("cache filename %q does not end in %q — the fingerprint must be part of the key", name, want)
+	const prefix = "movie_"
+	suffix := "_sub3_" + fp + ".vtt"
+	if !strings.HasSuffix(name, suffix) {
+		t.Fatalf("cache filename %q does not end in %q — the fingerprint must be part of the key", name, suffix)
 	}
-	if !strings.HasPrefix(name, "movie_") {
-		t.Errorf("cache filename %q lost its human-readable stem", name)
+	if !strings.HasPrefix(name, prefix) {
+		t.Fatalf("cache filename %q lost its human-readable stem", name)
+	}
+	// Pin the path hash between them. Asserting only the ends left this
+	// component free on the branch production actually uses: without it,
+	// two files sharing a basename in different directories collide — see
+	// TestExtractedVTTPathDistinguishesDirectories.
+	hash := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+	if len(hash) != 12 {
+		t.Errorf("path-hash component of %q is %q (%d chars), want 12 hex", name, hash, len(hash))
+	}
+	if strings.Trim(hash, "0123456789abcdef") != "" {
+		t.Errorf("path-hash component of %q is not lowercase hex: %q", name, hash)
+	}
+}
+
+// The path hash is what keeps two same-basename files in different
+// directories apart. The fingerprint cannot do it: a library holding the same
+// rip in Movies/ and Movies (4K)/, a duplicated or hardlinked tree, or a
+// restore that preserves both copies gives two files with identical size AND
+// mtime — so without the hash they share one cache entry and each serves the
+// other's subtitles.
+func TestExtractedVTTPathDistinguishesDirectories(t *testing.T) {
+	cacheDir := t.TempDir()
+	stamp := mtimeBase()
+
+	dirA, dirB := t.TempDir(), t.TempDir()
+	a := writeMedia(t, dirA, "movie.mkv", "identical-bytes", stamp)
+	b := writeMedia(t, dirB, "movie.mkv", "identical-bytes", stamp)
+
+	// Precondition: the two are indistinguishable by fingerprint alone.
+	fpA, okA := mediaFingerprint(a)
+	fpB, okB := mediaFingerprint(b)
+	if !okA || !okB {
+		t.Fatal("mediaFingerprint failed on files that exist")
+	}
+	if fpA != fpB {
+		t.Fatalf("fixture is not the case under test: fingerprints differ (%s vs %s)", fpA, fpB)
+	}
+
+	if pa, pb := extractedVTTPath(a, 0, cacheDir), extractedVTTPath(b, 0, cacheDir); pa == pb {
+		t.Errorf("same-basename files in different directories share a cache entry:\n  %s\n  %s\n  %s",
+			a, b, pa)
 	}
 }
 
@@ -355,9 +403,16 @@ func TestCacheStem(t *testing.T) {
 		})
 	}
 
-	// A truncation must never split a rune: "日" is 3 bytes, so a cut at
-	// cacheStemMax lands mid-rune and must back up to the boundary.
-	multibyte := strings.Repeat("日", cacheStemMax) // 3*cacheStemMax bytes
+	// A truncation must never split a rune. The leading ASCII byte is what
+	// makes this case real: "日" is 3 bytes and cacheStemMax is divisible by
+	// 3, so a stem of bare kanji already ends on a rune boundary at the cut
+	// and the back-up loop never runs — that version of this test passed
+	// even with the loop deleted. Offsetting by one byte puts a
+	// continuation byte at the cut, which is the case under test.
+	multibyte := "a" + strings.Repeat("日", cacheStemMax)
+	if utf8.RuneStart(multibyte[cacheStemMax]) {
+		t.Fatalf("fixture does not cut mid-rune at %d — this test would be vacuous", cacheStemMax)
+	}
 	got := cacheStem(multibyte)
 	if len(got) > cacheStemMax {
 		t.Errorf("cacheStem() returned %d bytes, over the %d bound", len(got), cacheStemMax)
