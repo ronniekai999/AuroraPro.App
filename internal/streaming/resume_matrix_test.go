@@ -143,7 +143,15 @@ func waitForExitLocked(t *testing.T, s *TranscodeSession, v *QualityVariant, wit
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, v.StderrTail)
+	// Under the lock like every other read of this field: the timeout path is
+	// the one place a stranded variant is still being written to by the
+	// cmd.Wait goroutine, so reading it bare would report a race here and send
+	// whoever is debugging after that instead of the regression that caused
+	// the timeout.
+	s.variantMu.Lock()
+	tail := v.StderrTail
+	s.variantMu.Unlock()
+	t.Fatalf("ffmpeg did not exit within %v\nstderr tail:\n%s", within, tail)
 }
 
 // segmentStartSec reports where a segment's media actually begins on the
