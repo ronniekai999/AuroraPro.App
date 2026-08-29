@@ -247,13 +247,14 @@ func mediaFingerprint(path string) (string, bool) {
 //     so re-keying also orphans every shifted derivative built from the old
 //     track — one per distinct resume position ever requested for it. Those
 //     were previously reused indefinitely. Bytes are small; the count is
-//     per (track × distinct start). The reaper that collects them is also
-//     weaker than it looks: the daily subtitle-cache sweep in
-//     cmd/aurora/main.go does its work inside `case <-ticker.C`, with no
-//     run at boot, so its first purge needs 24 UNINTERRUPTED hours. This
-//     box auto-deploys on a 5-minute timer, so on an actively-developed
-//     instance that sweep may never fire and the orphans simply accumulate.
-//     Do not read this bullet as a bound.
+//     per (track × distinct start). They are collected by the
+//     subtitle-cache sweep in cmd/aurora/main.go, which runs at startup and
+//     then daily — it was moved ahead of its ticker precisely because this
+//     change made it load-bearing: with the purge inside `case <-ticker.C`
+//     it needed 24 uninterrupted hours to fire even once, which a box that
+//     auto-deploys on a 5-minute timer rarely gets. Entries still linger
+//     until they are 30 days old, so this bounds growth rather than
+//     preventing it.
 //   - Replacing a file with one of identical size AND mtime (`touch -r`
 //     plus a same-size replacement) is invisible to this, exactly as it is
 //     to the scanner's own file_hash. Content hashing is the only fix and
@@ -322,14 +323,19 @@ func extractedVTTPath(filePath string, streamIndex int, cacheDir string) string 
 // for exactly the files with the longest names. 120 bytes leaves ample
 // room for both suffixes while keeping the file recognizable in an `ls`.
 //
-// This closes the EXTRACTED path only, because that is the one this change
-// lengthened. ShiftVTTCues has two other input producers — ConvertSRTtoVTT
-// and ConvertSubtitleToVTT — that still build untruncated stems from a
-// sidecar's basename, and external .vtt sidecars reach it as their raw
-// media-directory path. A ~230-character sidecar name still overruns there:
-// the shift fails, the handler logs "subtitle cue-shift failed; serving
-// unshifted", and cues are served offset by the resume position. That is
-// pre-existing and untouched here, not covered by this bound.
+// Every producer of a ShiftVTTCues input goes through this: the extracted
+// path here, plus ConvertSRTtoVTT and ConvertSubtitleToVTT, which used to
+// build untruncated stems from a sidecar's basename. A ~230-character
+// sidecar name overran there — the shift failed, the handler logged
+// "subtitle cue-shift failed; serving unshifted", and cues were served
+// offset by the resume position, which is issue #131's bug reappearing
+// only for the longest filenames.
+//
+// One gap remains, and it is not fixable here: an external .vtt sidecar is
+// served from its own media-directory path without passing through any
+// cache-naming function, so ShiftVTTCues derives its name from that raw
+// path. Bounding it would mean copying the sidecar into the cache dir
+// first, which is a different change.
 const cacheStemMax = 120
 
 // cacheStem truncates a filename stem to cacheStemMax bytes without splitting
@@ -355,19 +361,14 @@ func cacheStem(stem string) string {
 // track instead of serving it forever. See extractedVTTPath for the policy
 // and its trade-offs.
 //
-// This is a SERVER-side guarantee only, and the client-side gap is NOT
-// mitigated. ServeSubtitle sends `Cache-Control: max-age=86400` with no
-// revalidation directive, and the SPA's track URL is keyed on
-// (fileId, index, type, start, remux) — nothing derived from the media file.
-// Nor does anything else churn it: withToken() has been a no-op since the
-// httpOnly-cookie migration (getAccessToken always returns nil), so the
-// URL is stable. A browser that fetched the old track therefore keeps
-// serving it from its own HTTP cache for up to a day, and this fix is
-// invisible to that viewer until the entry expires or they hard-reload.
-// Closing it means revalidation (http.ServeFile already emits
-// Last-Modified, so a no-cache response would 304 cheaply) or a
-// cache-busting term in the track URL; both change every subtitle
-// response and are deliberately left out of this change.
+// This is the server half of the fix; the client half is ServeSubtitle's
+// `Cache-Control: no-cache`. Both are needed. The SPA's track URL is keyed
+// on (fileId, index, type, start, remux) with nothing media-derived, and
+// nothing else churns it (withToken has been a no-op since the
+// httpOnly-cookie migration), so under the previous day-long max-age a
+// browser went on serving the old track for up to 24h and never asked the
+// server — making this invalidation invisible to exactly the viewer it was
+// meant to help.
 func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, cacheDir string) (string, error) {
 	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
 		return "", fmt.Errorf("create subtitle cache dir: %w", err)
@@ -422,9 +423,27 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 }
 
 // ServeSubtitle serves a VTT subtitle file with proper headers.
+//
+// `no-cache` means "store it, but revalidate before reuse" — NOT "don't
+// cache". The body is still served from the browser's cache on a 304, so
+// the cost of this over the previous `max-age=86400` is one conditional
+// request per track load: http.ServeFile emits Last-Modified and answers
+// If-Modified-Since with a 304 and an empty body.
+//
+// It has to revalidate, because the track URL is not content-addressed.
+// The SPA keys it on (fileId, index, type, start, remux) and nothing else
+// churns it (withToken has been a no-op since the httpOnly-cookie
+// migration), so under a day-long max-age a browser kept serving the old
+// subtitles for up to 24h after the media was replaced in place — which
+// made ExtractSubtitleVTT's server-side invalidation invisible to exactly
+// the viewers it was meant to help.
+//
+// The revalidation is not per-seek: each distinct resume position is
+// already a distinct URL, so this is roughly one extra headers-only
+// round trip per track per page load.
 func ServeSubtitle(w http.ResponseWriter, r *http.Request, vttPath string) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "max-age=86400")
+	w.Header().Set("Cache-Control", "no-cache")
 	// CORS headers are set by the router-level CORS middleware based on AllowedOrigins.
 	// Do NOT set Access-Control-Allow-Origin here — it would bypass the CORS policy.
 	http.ServeFile(w, r, vttPath)
@@ -745,7 +764,7 @@ func ConvertSRTtoVTT(srtPath, cacheDir string) (string, error) {
 	// Use a hash of the full path to avoid collisions between SRT files
 	// with the same name in different directories
 	h := sha256.Sum256([]byte(srtPath))
-	baseName := strings.TrimSuffix(filepath.Base(srtPath), ".srt")
+	baseName := cacheStem(strings.TrimSuffix(filepath.Base(srtPath), ".srt"))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
 	// Return cached version if it exists, is non-empty, and is not older
@@ -813,7 +832,7 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 	}
 
 	h := sha256.Sum256([]byte(subPath))
-	baseName := strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath))
+	baseName := cacheStem(strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath)))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
 	// Return cached version if it exists, is non-empty, and is not older

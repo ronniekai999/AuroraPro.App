@@ -279,6 +279,64 @@ func shiftedNameProbe(t *testing.T, cacheDir, extractedPath string) (string, err
 	return filepath.Base(out), nil
 }
 
+// The sidecar converters feed ShiftVTTCues too, and used to hand it an
+// untruncated stem: a ~230-character sidecar name made the shift fail with
+// ENAMETOOLONG, so the handler fell back to serving cues unshifted — issue
+// #131's bug, reappearing only for the longest filenames. Asserted against a
+// real ShiftVTTCues call rather than a re-implementation of its naming.
+func TestConverterCacheNamesSurviveShift(t *testing.T) {
+	// 224 chars, legal as a filename but long enough to overrun once both
+	// suffixes are appended.
+	long := strings.Repeat("Some.Very.Long.Release.Name.", 8)
+
+	t.Run("ConvertSRTtoVTT", func(t *testing.T) {
+		dir := t.TempDir()
+		cacheDir := filepath.Join(dir, "cache")
+		srt := filepath.Join(dir, long+".srt")
+		if err := os.WriteFile(srt, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		converted, err := ConvertSRTtoVTT(srt, cacheDir)
+		if err != nil {
+			t.Fatalf("ConvertSRTtoVTT: %v", err)
+		}
+		if n := len(filepath.Base(converted)); n > 255 {
+			t.Errorf("converted cache filename is %d bytes, over NAME_MAX", n)
+		}
+		// The shift is what actually failed before the bound.
+		shifted, err := ShiftVTTCues(converted, 5, cacheDir)
+		if err != nil {
+			t.Fatalf("ShiftVTTCues on a long sidecar name: %v", err)
+		}
+		if n := len(filepath.Base(shifted)); n > 255 {
+			t.Errorf("shifted cache filename is %d bytes, over NAME_MAX", n)
+		}
+	})
+
+	t.Run("ConvertSubtitleToVTT", func(t *testing.T) {
+		requireFFmpeg(t)
+		dir := t.TempDir()
+		cacheDir := filepath.Join(dir, "cache")
+		sub := filepath.Join(dir, long+".srt")
+		if err := os.WriteFile(sub, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		converted, err := ConvertSubtitleToVTT(context.Background(), sub, cacheDir)
+		if err != nil {
+			t.Fatalf("ConvertSubtitleToVTT: %v", err)
+		}
+		shifted, err := ShiftVTTCues(converted, 5, cacheDir)
+		if err != nil {
+			t.Fatalf("ShiftVTTCues on a long sidecar name: %v", err)
+		}
+		if n := len(filepath.Base(shifted)); n > 255 {
+			t.Errorf("shifted cache filename is %d bytes, over NAME_MAX", n)
+		}
+	})
+}
+
 func TestCacheStem(t *testing.T) {
 	tests := []struct {
 		name string

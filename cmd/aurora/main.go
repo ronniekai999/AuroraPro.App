@@ -794,42 +794,8 @@ func main() {
 		}
 	}()
 
-	// Background cleanup of stale subtitle cache files (daily, remove files older than 30 days)
-	go func() {
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				subDir := cfg.Cache.SubtitleDir
-				entries, err := os.ReadDir(subDir)
-				if err != nil {
-					continue
-				}
-				cutoff := time.Now().Add(-30 * 24 * time.Hour)
-				var purged int
-				for _, e := range entries {
-					if e.IsDir() {
-						continue
-					}
-					info, err := e.Info()
-					if err != nil {
-						continue
-					}
-					if info.ModTime().Before(cutoff) {
-						if os.Remove(filepath.Join(subDir, e.Name())) == nil {
-							purged++
-						}
-					}
-				}
-				if purged > 0 {
-					slog.Info("purged stale subtitle cache files", "count", purged)
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	// Background cleanup of stale subtitle cache files.
+	go runSubtitleCacheSweeper(ctx, cfg.Cache.SubtitleDir, 24*time.Hour, 30*24*time.Hour)
 
 	// Phase 4: Server health push to admin WebSocket clients
 	go func() {
@@ -1483,5 +1449,66 @@ func applyLLMOverrides(ctx context.Context, queries *db.Queries, cfg *llm.Config
 			"has_anthropic_key", cfg.AnthropicAPIKey != "",
 			"has_openai_key", cfg.OpenAIAPIKey != "",
 			"debug", cfg.Debug)
+	}
+}
+
+// sweepSubtitleCache removes files in subDir last modified more than maxAge
+// ago and reports how many it deleted. Directories are left alone, and any
+// entry that cannot be stat'd or removed is skipped rather than failing the
+// sweep — a cache reaper must never be the reason a boot goes sideways.
+func sweepSubtitleCache(subDir string, maxAge time.Duration) int {
+	entries, err := os.ReadDir(subDir)
+	if err != nil {
+		return 0
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var purged int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if os.Remove(filepath.Join(subDir, e.Name())) == nil {
+				purged++
+			}
+		}
+	}
+	return purged
+}
+
+// runSubtitleCacheSweeper sweeps subDir immediately and then every interval,
+// until ctx is done.
+//
+// Sweeping BEFORE the first tick is the point, and it matches the blurhash
+// backfill loop above. With the sweep inside `case <-ticker.C` it needed 24
+// uninterrupted hours to purge anything even once — and this box auto-deploys
+// on a 5-minute timer, so on an actively-developed instance the process
+// rarely lives that long and the sweep effectively never ran.
+//
+// That was harmless while the subtitle caches only ever overwrote entries in
+// place. It stopped being harmless once ExtractSubtitleVTT began keying on a
+// media fingerprint: replacing a media file now ORPHANS its old track, and
+// every resume-shifted derivative built from it, instead of overwriting it.
+// This sweep is what collects them, so it has to actually run.
+//
+// A sweep is one ReadDir plus a stat per entry, so running it on every
+// restart costs nothing worth pacing; the interval stays long for the
+// process that does stay up.
+func runSubtitleCacheSweeper(ctx context.Context, subDir string, interval, maxAge time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if purged := sweepSubtitleCache(subDir, maxAge); purged > 0 {
+			slog.Info("purged stale subtitle cache files", "count", purged)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
