@@ -2937,7 +2937,7 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 		// ffmpegDone is still false and we briefly return the dying variant;
 		// the next playlist poll (~3s) lands in this branch and resumes.
 		if v.reaped && ffmpegDone(v) {
-			resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
+			resumeFromSec, resumeSegNum := tm.resumePoint(session, v, startSec)
 			slog.Info("resuming reaped variant on renewed access",
 				"session_id", session.ID,
 				"profile", profileName,
@@ -3020,7 +3020,7 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 				// continuous video, subtitles end at the crash point.
 				// Operators see a Warn log so the limitation is
 				// visible in production.
-				resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
+				resumeFromSec, resumeSegNum := tm.resumePoint(session, v, startSec)
 				slog.Warn("variant FFmpeg crashed mid-stream, attempting auto-restart",
 					"session_id", session.ID,
 					"profile", profileName,
@@ -3072,11 +3072,11 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 // worse estimate.
 //
 // resumeSeekMinBias floors it so a short playlist still gets a sane margin.
-// That floor is an EQUIVALENT MUTANT and deliberately left uncovered: FFmpeg
-// always prints EXTINF to 6 decimals, so the scaled term already exceeds the
-// real accumulated error at every entry count, and no fixture can tell the
-// floor's presence from its absence. It is insurance against a muxer that
-// someday prints coarser durations, not behaviour under test.
+// The floor is observable — resumeSeekBias(10) is 1e-4 with it and 5e-6
+// without — and is pinned by a direct test; it is behaviourally harmless
+// either way, since the scaled term already exceeds the real accumulated
+// error at every entry count and the floor only ever adds under a
+// millisecond of extra forward skip on a short playlist.
 const (
 	resumeSeekPrintError = 5e-7
 	resumeSeekMinBias    = 1e-4
@@ -3096,6 +3096,15 @@ func resumeSeekBias(n int) float64 {
 // which FFmpeg accepts and which is the difference between landing on the
 // segment boundary and losing everything back to the previous whole second.
 func formatSeekSeconds(sec float64) string {
+	// Domain guard, not decoration: +Inf satisfies sec == Trunc(sec), so
+	// without this it would take the integer branch and int64(+Inf) renders
+	// as -9223372036854775808 — a negative -ss that stops FFmpeg launching
+	// at all, which is the failure resumePoint's own plausibility ceiling
+	// exists to prevent. Anything outside the domain seeks to the origin,
+	// which is always safe.
+	if math.IsNaN(sec) || sec <= 0 || sec >= maxResumeSeekSec {
+		return "0"
+	}
 	if sec == math.Trunc(sec) {
 		return strconv.FormatInt(int64(sec), 10)
 	}
@@ -3109,7 +3118,7 @@ func formatSeekSeconds(sec float64) string {
 // segment duration (see playlistCoverage for why the latter is wrong).
 // Shared by the crash-restart and reap-resume paths in EnsureVariant so the
 // resume math can never diverge between them. Caller holds variantMu.
-func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec float64, resumeSegNum int) {
+func (tm *TranscodeManager) resumePoint(session *TranscodeSession, v *QualityVariant, startSec int) (resumeFromSec float64, resumeSegNum int) {
 	segDur := tm.cfg.SegmentDuration
 	if segDur <= 0 {
 		segDur = 6 // matches the fallback in startVariantImpl
@@ -3139,13 +3148,38 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 		// seeks accurately to exactly what it is told, so what is asked for
 		// is what is lost.
 		//
-		// resumeSeekBias then guarantees the target is at or AFTER the
-		// boundary, which is what lets -noaccurate_seek snap onto it instead
-		// of back to the previous key frame (a duplicated GOP). It is sized
-		// against FFmpeg's 6-decimal EXTINF printing and scales with the
-		// entry count — not against float64 summation drift, which stays
-		// below 5e-8 even at 20k segments and is not the binding term.
-		seek := float64(startSec) + math.Ceil((pubSec+resumeSeekBias(pubSeg+1))*1000)/1000
+		// Which side of the boundary to aim for depends ENTIRELY on which
+		// seek mode this session's FFmpeg gets, and the two want opposites:
+		//
+		//   remux     -noaccurate_seek: the demuxer snaps to the greatest key
+		//             frame <= target, so a target even fractionally short
+		//             lands on the PREVIOUS key frame and re-appends a whole
+		//             GOP. Aim past the boundary; resumeSeekBias covers the
+		//             EXTINF print rounding that could otherwise leave the
+		//             target short.
+		//   transcode accurate seek: FFmpeg decodes from the preceding key
+		//             frame and DISCARDS every frame with pts < target, so it
+		//             already rounds forward to the first frame at or after
+		//             the target on its own. Aiming past the boundary is the
+		//             one choice that cannot land on it — it throws the
+		//             boundary frame away, and pushing the run's first PTS a
+		//             frame past the grid mark makes hlsenc's next forced key
+		//             frame fall a frame short of hls_time, so that segment
+		//             comes out ~2x long and misaligned against its sibling
+		//             variants. Aim at or just under; undershoot is bounded
+		//             by the print error (<1e-3s) and is orders of magnitude
+		//             below one frame interval (~41.7ms at 23.976fps), so the
+		//             first frame at or after the target is still the
+		//             boundary frame.
+		//
+		// Float64 summation drift is not the binding term either way: it
+		// measures around 5e-8 at 20k segments against a bias of 1e-2 there.
+		var seek float64
+		if session != nil && session.Remux {
+			seek = float64(startSec) + math.Ceil((pubSec+resumeSeekBias(pubSeg+1))*1000)/1000
+		} else {
+			seek = float64(startSec) + math.Floor(pubSec*1000)/1000
+		}
 		// A corrupt playlist can sum to something non-finite or absurd; int()
 		// on that is not defined to anything useful and yields a negative -ss
 		// that stops FFmpeg launching at all, so the variant never resumes.
@@ -3301,7 +3335,11 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 // that keyframe plus the sum — and startSec + sum overshoots by however far
 // startSec sat past its keyframe. The seek then snaps back to the greatest
 // keyframe at or before the target, which can drop content between the two.
-// The direction is always a forward skip, never an overlapping append, and it
+// The direction is a forward skip on the FIRST resume. It is not guaranteed
+// forever: each remux resume re-bases on whatever key frame -noaccurate_seek
+// actually landed on, so a later resume can target fractionally under its
+// boundary if a source key frame falls inside a sub-millisecond window
+// (~1.7ms/GOP, so on the order of 0.03% per resume) and duplicate a GOP. It
 // is far smaller than the error it replaces; closing it properly means
 // anchoring on the probed origin (see ProbeSeekKeyframe) or persisting it on
 // the session at first launch.

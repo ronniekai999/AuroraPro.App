@@ -574,7 +574,7 @@ func TestResumePoint_UsesPublishedDurationsNotSegmentIndex(t *testing.T) {
 	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: t.TempDir()}
 	writeCoverage(t, v.OutputDir, 150, 8.0)
 
-	gotSec, gotSeg := tm.resumePoint(v, 0)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 
 	if gotSeg != 151 {
 		t.Errorf("resumeSegNum = %d, want 151", gotSeg)
@@ -593,14 +593,12 @@ func TestResumePoint_RoundsSeekUpOntoTheKeyframeBoundary(t *testing.T) {
 	}
 	defer tm.Close()
 
-	// 10 segments * 4.2s = 42.0 exactly? No: 4.17 * 10 = 41.7 -> must not
-	// round down to 41.
 	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: t.TempDir()}
 	writeCoverage(t, v.OutputDir, 9, 4.17)
 
-	gotSec, _ := tm.resumePoint(v, 0)
-	// 10 * 4.17 = 41.7. The seek must land at or just after it — a
-	// whole-second ceil would push it to 42 and drop 0.3s of content.
+	gotSec, _ := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
+	// 10 * 4.17 = 41.7. On the remux path the seek must land at or just
+	// after it — a whole-second ceil would push it to 42 and drop 0.3s.
 	wantSeek(t, gotSec, 41.7, 0.002, "seek lands on the keyframe boundary")
 }
 
@@ -618,7 +616,7 @@ func TestResumePoint_FloatAccumulationDoesNotOvershootAWholeSecond(t *testing.T)
 	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: t.TempDir()}
 	writeCoverage(t, v.OutputDir, 999, 6.006) // 1000 segments
 
-	gotSec, gotSeg := tm.resumePoint(v, 0)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 	if gotSeg != 1000 {
 		t.Errorf("resumeSegNum = %d, want 1000", gotSeg)
 	}
@@ -663,13 +661,13 @@ func TestResumePoint_NTSCBoundariesDoNotLoseNearlyASecond(t *testing.T) {
 		t.Fatalf("write playlist: %v", err)
 	}
 
-	trueBoundary := boundary(nSeg) // ~594.010089, NOT 594.0
+	trueBoundary := boundary(nSeg) // ~594.010083, NOT 594.0
 	if trueBoundary == math.Trunc(trueBoundary) {
 		t.Fatalf("fixture is not exercising a fractional boundary: %v", trueBoundary)
 	}
 
 	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: dir}
-	gotSec, gotSeg := tm.resumePoint(v, 0)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 
 	if gotSeg != nSeg {
 		t.Errorf("resumeSegNum = %d, want %d", gotSeg, nSeg)
@@ -682,7 +680,7 @@ func TestResumePoint_NTSCBoundariesDoNotLoseNearlyASecond(t *testing.T) {
 // FFmpeg prints #EXTINF to six decimals, so the published sum can sit a
 // fraction BELOW the true boundary. Seeking to that sum lands before the key
 // frame, and -noaccurate_seek then snaps back to the previous one and
-// duplicates a whole GOP into the resumed output. resumeSeekEpsilon is what
+// duplicates a whole GOP into the resumed output. resumeSeekBias is what
 // keeps the target on the far side of that rounding.
 func TestResumePoint_EpsilonCoversEXTINFPrintRounding(t *testing.T) {
 	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
@@ -718,10 +716,12 @@ func TestResumePoint_EpsilonCoversEXTINFPrintRounding(t *testing.T) {
 		t.Fatalf("write playlist: %v", err)
 	}
 
-	trueBoundary := trueDur * nSeg // 600.00004; the playlist says 600.000000
+	// 1200 * 8.0006444... = 9600.773333; the playlist's printed sum is
+	// 9600.772800, short by ~5.3e-4s.
+	trueBoundary := trueDur * nSeg
 
 	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: dir}
-	gotSec, _ := tm.resumePoint(v, 0)
+	gotSec, _ := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 
 	wantSeek(t, gotSec, trueBoundary, 0.002, "printed sum under-reports the boundary")
 }
@@ -752,7 +752,7 @@ func TestResumePoint_ImplausibleSumFallsBackToIndexArithmetic(t *testing.T) {
 	}
 
 	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: dir}
-	gotSec, gotSeg := tm.resumePoint(v, 0)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 
 	if gotSec < 0 {
 		t.Errorf("resumeFromSec = %v — a negative -ss stops FFmpeg launching and the "+
@@ -761,6 +761,81 @@ func TestResumePoint_ImplausibleSumFallsBackToIndexArithmetic(t *testing.T) {
 	// Index fallback: 2 published segments * 6s.
 	if gotSeg != 2 || gotSec != 12 {
 		t.Errorf("resumePoint = (%v, %d), want (12, 2) from the index fallback", gotSec, gotSeg)
+	}
+}
+
+// The two delivery paths get opposite FFmpeg seek modes and therefore want
+// opposite sides of the boundary. Remux (-noaccurate_seek) snaps BACK to the
+// greatest key frame <= target, so it must aim past. Transcode seeks
+// accurately and discards every frame before the target, so aiming past
+// throws the boundary frame away — and pushing the run's first PTS a frame
+// past the grid mark makes hlsenc's next forced key frame land short of
+// hls_time, so that segment comes out roughly double length and misaligned
+// against its sibling variants.
+func TestResumePoint_BiasesForwardOnlyForRemux(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// A boundary that is NOT on a millisecond, so the two roundings differ.
+	const nSeg = 99
+	const dur = 6.0001005
+	boundary := dur * nSeg // 594.0099495
+
+	build := func(t *testing.T) *QualityVariant {
+		t.Helper()
+		dir := t.TempDir()
+		var pl strings.Builder
+		pl.WriteString("#EXTM3U\n#EXT-X-TARGETDURATION:7\n")
+		for i := 0; i < nSeg; i++ {
+			name := fmt.Sprintf("seg_%05d.ts", i)
+			pl.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n%s\n", dur, name))
+			if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 8192), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(pl.String()), 0o644); err != nil {
+			t.Fatalf("write playlist: %v", err)
+		}
+		return &QualityVariant{Profile: QualityProfile{Name: "720p"}, OutputDir: dir}
+	}
+
+	remuxSec, _ := tm.resumePoint(&TranscodeSession{Remux: true}, build(t), 0)
+	if remuxSec < boundary {
+		t.Errorf("remux seek %.6f is before the boundary %.6f — -noaccurate_seek snaps back "+
+			"to the previous key frame and duplicates a GOP", remuxSec, boundary)
+	}
+
+	transSec, _ := tm.resumePoint(&TranscodeSession{Remux: false}, build(t), 0)
+	if transSec > boundary {
+		t.Errorf("transcode seek %.6f is past the boundary %.6f — accurate seek discards every "+
+			"frame before the target, so the boundary frame is dropped and the next segment "+
+			"comes out ~2x long", transSec, boundary)
+	}
+	// Still close enough that the first frame at or after the target IS the
+	// boundary frame (one 23.976fps interval is ~41.7ms).
+	if boundary-transSec > 0.010 {
+		t.Errorf("transcode seek %.6f undershoots the boundary %.6f by %.6fs — more than a "+
+			"frame interval and content is duplicated", transSec, boundary, boundary-transSec)
+	}
+}
+
+func TestResumeSeekBias(t *testing.T) {
+	// Scales with entry count: a feature-length playlist needs far more than
+	// the floor, which covers only 1e-4/5e-7 = 200 entries.
+	if got, want := resumeSeekBias(1200), 6e-4; got < want*0.999 || got > want*1.001 {
+		t.Errorf("resumeSeekBias(1200) = %v, want ~%v — a fixed bias leaves a feature-length "+
+			"remux seeking before its boundary", got, want)
+	}
+	// Floored for short playlists, where the scaled term alone would be tiny.
+	if got := resumeSeekBias(10); got != resumeSeekMinBias {
+		t.Errorf("resumeSeekBias(10) = %v, want the %v floor", got, resumeSeekMinBias)
+	}
+	// Monotonic — a longer playlist never gets less margin.
+	if resumeSeekBias(500) > resumeSeekBias(1000) {
+		t.Error("bias must not decrease as the playlist grows")
 	}
 }
 
@@ -777,6 +852,13 @@ func TestFormatSeekSeconds(t *testing.T) {
 		{594.011, "594.011"},
 		{6006.001, "6006.001"},
 		{41.7, "41.700"},
+		// Domain guard: +Inf satisfies sec == Trunc(sec), so without it the
+		// integer branch renders int64(+Inf) as -9223372036854775808 — a
+		// negative -ss that stops FFmpeg launching at all.
+		{math.Inf(1), "0"},
+		{math.NaN(), "0"},
+		{-5, "0"},
+		{maxResumeSeekSec + 1, "0"},
 	}
 	for _, tt := range tests {
 		if got := formatSeekSeconds(tt.in); got != tt.want {
@@ -798,7 +880,7 @@ func TestResumePoint_AddsPublishedDurationToStartSec(t *testing.T) {
 	v := &QualityVariant{Profile: QualityProfile{Name: "720p"}, OutputDir: t.TempDir()}
 	writeCoverage(t, v.OutputDir, 9, 6.0) // 60s published
 
-	gotSec, gotSeg := tm.resumePoint(v, 1200)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 1200)
 	if gotSeg != 10 {
 		t.Errorf("resumeSegNum = %d, want 10", gotSeg)
 	}
@@ -949,7 +1031,7 @@ func TestResumePoint_IgnoresPlaylistWithNoParsableDurations(t *testing.T) {
 	}
 
 	v := &QualityVariant{Profile: QualityProfile{Name: "source"}, OutputDir: dir}
-	gotSec, gotSeg := tm.resumePoint(v, 0)
+	gotSec, gotSeg := tm.resumePoint(&TranscodeSession{Remux: true}, v, 0)
 
 	if gotSeg != 3 {
 		t.Errorf("resumeSegNum = %d, want 3", gotSeg)
