@@ -220,7 +220,26 @@ func ffmpegHasEncoder(name string) bool {
 	// whose second field happens to be an encoder name), and a false positive
 	// just means we run the test encode — which is the real gate. Every
 	// ambiguous case should land there rather than be decided here.
-	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders").CombinedOutput()
+	//
+	// Bounded because capturing output is what makes Wait able to outlive the
+	// process (runBounded, execwait.go): this runs from NewTranscodeManager,
+	// via both DetectHWAccel and ProbeHEVCEncoder, so an unbounded wait here
+	// is a server that never finishes starting.
+	//
+	// runBounded also decides that ErrWaitDelay is not a failure, and it is
+	// worth being explicit about which way that cuts HERE, because the error
+	// branch just below answers TRUE. Reading a lingering descriptor as a
+	// failure would therefore report an encoder the build does NOT have as
+	// present, hand it to the test encode, and leave the operator with a
+	// warning blaming their driver for an encoder that was never compiled in —
+	// the exact confusion this function exists to prevent. The process exited
+	// 0, so scan what it printed.
+	//
+	// The residual risk runs the other way and is smaller: WaitDelay closes
+	// the pipe, so a listing still in flight would be cut short and a present
+	// encoder read as absent — a silent drop to CPU encoding. That needs a
+	// copier starved for the whole delay after FFmpeg had already exited.
+	out, err := boundedCombinedOutput(exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders"))
 	if err != nil {
 		slog.Debug("could not list FFmpeg encoders; leaving the verdict to the test encode", "error", err)
 		return true
@@ -254,7 +273,9 @@ func detectNVIDIA() bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader").Output()
+	// Bounded: like every captured-output command on the startup path, Wait
+	// here can outlive the process itself (runBounded, execwait.go).
+	out, err := boundedOutput(exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=name", "--format=csv,noheader"))
 	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
 		slog.Debug("NVIDIA GPU found", "gpu", strings.TrimSpace(string(out)))
 		return true
@@ -268,7 +289,8 @@ func detectVAAPI() bool { return driDeviceExists() }
 func detectAMF() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "lspci").Output()
+	// Bounded: see detectNVIDIA and runBounded (execwait.go).
+	out, err := boundedOutput(exec.CommandContext(ctx, "lspci"))
 	if err != nil {
 		return false
 	}

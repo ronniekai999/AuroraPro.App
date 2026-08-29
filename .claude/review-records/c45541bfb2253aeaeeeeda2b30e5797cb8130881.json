@@ -1,0 +1,10 @@
+{
+  "sha": "c45541bfb2253aeaeeeeda2b30e5797cb8130881",
+  "verdict": "clean",
+  "summary": "Seventh independent pass over the resume-anchor/seek diff. Verdict: no critical, no high; explicitly 'sound enough to merge on correctness grounds', with the remaining objections being comment accuracy, which this commit fixes. Reviewer verified the FFmpeg seek-semantics claims against ffmpeg source on n6.1/n7.1/master, confirmed the remux/transcode discriminator (session.Remux) provably cannot diverge from the flag that emits -noaccurate_seek since it is assigned once at CreateSession before any variant starts, and mutation-tested 22 mutants with 20 killed. The 2 survivors (nil-session default, sub-millisecond guard) plus the transcode floor resolution are now pinned by direct tests and verified killed. Corrected this round: the remux branch overclaimed -noaccurate_seek precision (ffmpeg's dts_heuristic shifts the target 130.4ms early on non-AVFMT_SEEK_TO_PTS containers - Matroska, mpegts, avi - so the millisecond bias is necessary but not sufficient on MKV); a false 'segment comes out 2x long' justification; an understated transcode undershoot bound; and an NTSC boundary constant that contradicted its own test. Known gap, documented not hidden: no test here executes FFmpeg, so muxer behaviour is verified by source reading rather than observation - an end-to-end reap-and-resume using the repo's existing requireFFmpeg harness is the recommended follow-up and would settle the MKV seek-shift empirically. Scope: internal/streaming only. gofmt/vet/-race clean; ./... green except the pre-existing ffmpeg-in-PATH failure that reproduces on base.",
+  "reviewer": "adversarial-review-opus-r7",
+  "findings": "0",
+  "diff_digest": "a980ededc6c7eb7e45436dc903779afd622a811c59e7b4b72f9cf7384c9d860b",
+  "branch": "claude/modest-ramanujan-k7z2jt",
+  "recorded_at": "2026-08-29T04:50:50Z"
+}

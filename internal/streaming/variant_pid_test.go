@@ -1,7 +1,9 @@
 package streaming
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -137,119 +139,65 @@ func TestStartVariant_PublishesThePIDAndRelaunchClearsIt(t *testing.T) {
 	}
 }
 
-// `exited` is the only "this process is gone" signal there is now, and it is
-// published after cmd.Wait returns. Attaching a writer to Stderr makes Wait
-// block until every holder of the child's stderr descriptor closes it — so an
-// FFmpeg that leaves that fd to a subprocess would, without variantWaitDelay,
-// keep Wait (and therefore `exited`) pending for as long as the subprocess
-// lives. The variant would be stranded: EnsureVariant hands back the zombie on
-// every poll, and once the reaper marks it `reaped` the resume branch requires
-// ffmpegDone and can never fire again.
-//
-// The stub exits 0 immediately but leaves a background child holding stderr
-// well past the delay. The bound must win, and the resulting ErrWaitDelay must
-// NOT be recorded as a crash: the process succeeded, and EnsureVariant answers
-// a crash by restarting FFmpeg with -ss past EOF (issues #172/#174).
-func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) {
-	shrinkVariantWaitDelay(t)
-	// Writing the playlist first puts the polling goroutine on its
-	// playlist-found branch, where it records no Err of its own. That leaves
-	// v.Err saying exactly one thing: whether the post-Wait block called the
-	// stalled pipe a crash. The child need only outlive the deadline below.
-	s, v := stubVariantLaunch(t, "sess-stalled-pipe",
-		"    touch \"$out/stream.m3u8\"\n"+
-			"    sleep 8 &\n"+
-			"    exit 0\n")
+// The stalled-pipe case itself — a clean exit whose stderr outlives it — is
+// TestStartVariant_LingeringPipeIsNotACrash in execwait_test.go, which arrived
+// with the bound. These two cover the arms it does not: a crash that ALSO
+// stalls, and a reaper cancel.
 
-	// Comfortably past variantWaitDelay and comfortably short of the child's
-	// lifetime, so an unbounded Wait fails here rather than passing slowly.
-	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
-	for {
-		s.variantMu.Lock()
-		done, vErr := ffmpegDone(v), v.Err
-		s.variantMu.Unlock()
-		if done {
-			if vErr != nil {
-				t.Fatalf("a clean exit whose stderr pipe outlived the delay was recorded as a crash: %v", vErr)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("variant never reached exited: cmd.Wait is still draining a stderr pipe " +
-				"held open by a subprocess, and nothing else can mark this variant done")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-}
-
-// The other direction of the same decision, and the one with more to lose: the
-// stalled-pipe carve-out must not swallow a real crash. If it ever did, the
-// variant would publish `exited` with a nil Err, EnsureVariant would read that
-// as a clean completion and hand back the dead variant, and neither the P3
-// auto-restart nor the 500 that triggers the frontend's own recovery would
-// happen — playback simply stops at the crash point. That is issues #172/#174
-// with the sign flipped, and it would not show up in any other test here.
+// The direction with more to lose: the stalled-pipe carve-out must not swallow
+// a real crash. If it ever did, the variant would publish `exited` with a nil
+// Err, EnsureVariant would read that as a clean completion and hand back the
+// dead variant, and neither the P3 auto-restart nor the 500 that triggers the
+// frontend's own recovery would happen — playback simply stops at the crash
+// point. That is issues #172/#174 with the sign flipped.
 //
-// The crash comes WITH a stalled pipe, because that combination is the only
-// state in which the carve-out could mask a crash — and it is the state a
-// plausible refactor gets wrong. Deriving `pipeStalled` from elapsed time
-// rather than from the error, say, still satisfies a crash-without-stall test
-// and a stall-without-crash test while swallowing exactly this case. Wait
-// gives Process.Wait's error precedence, so ErrWaitDelay cannot accompany a
-// non-zero exit: the crash must survive the stall.
+// The crash comes WITH a lingering pipe, because that combination is the only
+// state in which the carve-out could mask a crash, and it is the state a
+// plausible refactor gets wrong: deriving "stalled" from elapsed time rather
+// than from the error satisfies both a crash-without-linger test and
+// LingeringPipe's clean-exit-with-linger, while swallowing exactly this case.
+// Wait gives Process.Wait's error precedence, so ErrWaitDelay cannot accompany
+// a non-zero exit — the crash must survive the linger.
 func TestStartVariant_RealCrashIsStillRecordedAsOne(t *testing.T) {
-	shrinkVariantWaitDelay(t)
 	const marker = "aurora-test-crash-marker"
-	// Playlist first, so Err can only have come from the post-Wait block.
+	// Playlist first, so the readiness poller takes its playlist-found branch
+	// and writes no Err of its own: v.Err can then only have come from the
+	// post-Wait block.
 	s, v := stubVariantLaunch(t, "sess-real-crash",
-		"    touch \"$out/stream.m3u8\"\n"+
-			"    echo '"+marker+"' >&2\n"+
-			"    sleep 8 &\n"+
-			"    exit 1\n")
+		writePlaylistThen("echo '"+marker+"' >&2\n")+
+			fmt.Sprintf("( sleep %d ) &\nexit 1\n", lingerSleepSecs))
 
-	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
-	for {
-		s.variantMu.Lock()
-		done, vErr := ffmpegDone(v), v.Err
-		s.variantMu.Unlock()
-		if done {
-			if vErr == nil {
-				t.Fatal("ffmpeg exited 1 but the variant reports no error — EnsureVariant will " +
-					"read this as a clean completion and serve the dead variant")
-			}
-			if !strings.Contains(vErr.Error(), marker) {
-				t.Errorf("v.Err = %v, want the FFmpeg stderr tail carried along with it", vErr)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("variant never reached exited after ffmpeg exited 1")
-		}
-		time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	vErr := waitForVariantExit(t, s, v, "ffmpeg exited 1")
+	assertBoundedWait(t, time.Since(start), "the variant's cmd.Wait")
+
+	if vErr == nil {
+		t.Fatal("ffmpeg exited 1 but the variant reports no error — EnsureVariant will " +
+			"read this as a clean completion and serve the dead variant")
+	}
+	if !strings.Contains(vErr.Error(), marker) {
+		t.Errorf("v.Err = %v, want the FFmpeg stderr tail carried along with it", vErr)
 	}
 }
 
-// The third arm of the same decision. A variant the idle reaper cancels dies
-// by SIGKILL, so cmd.Wait reports "signal: killed" — a non-nil error that must
-// NOT become v.Err, because nothing crashed. EnsureVariant's reaped branch
-// recovers playback either way, but ServeVariantPlaylist and ServeHLSSegment
-// snapshot v.Err without going through it, and would 500 every fetch between
-// the reap and the next playlist poll while the diagnose surface reported a
-// crash that never happened.
+// The third arm. A variant the idle reaper cancels dies by SIGKILL, so cmd.Wait
+// reports "signal: killed" — a non-nil error that must NOT become v.Err,
+// because nothing crashed. EnsureVariant's reaped branch recovers playback
+// either way, but ServeVariantPlaylist and ServeHLSSegment snapshot v.Err
+// without going through it, and would 500 every fetch between the reap and the
+// next playlist poll while the diagnose surface reported a crash that never
+// happened.
 //
 // `exec sleep`, not `sleep`, so the shell replaces itself: the cancel then
-// kills the process that holds the pipe rather than leaving an orphan.
+// kills the process holding the pipe rather than leaving a grandchild behind.
 func TestStartVariant_ReaperCancelIsNotRecordedAsACrash(t *testing.T) {
-	shrinkVariantWaitDelay(t)
 	s, v := stubVariantLaunch(t, "sess-cancelled",
-		"    touch \"$out/stream.m3u8\"\n"+
-			"    exec sleep 30\n")
+		writePlaylistThen("")+fmt.Sprintf("exec sleep %d\n", lingerSleepSecs))
 
 	// Wait for the PID before cancelling. The launch is asynchronous, and a
-	// cancel that lands before cmd.Start() takes the Start-failure path
-	// instead — which sets v.Err and never sets `exited` at all (see the note
-	// on that path in startVariantImpl), so the reap this test is about would
-	// never happen.
+	// cancel that lands before cmd.Start() takes the Start-failure path instead
+	// — which sets v.Err and never sets `exited` at all (see the note on that
+	// path in startVariantImpl), so the reap this test is about never happens.
 	waitForVariantPID(t, s, v)
 
 	s.variantMu.Lock()
@@ -260,89 +208,80 @@ func TestStartVariant_ReaperCancelIsNotRecordedAsACrash(t *testing.T) {
 	}
 	cancel()
 
-	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
+	if vErr := waitForVariantExit(t, s, v, "the variant was cancelled"); vErr != nil {
+		t.Fatalf("a cancelled variant recorded an error: %v — a reap is a deliberate "+
+			"stop, and every v.Err reader will report it as a failed transcode", vErr)
+	}
+}
+
+// writePlaylistThen emits the shell that satisfies the readiness poller —
+// FFmpeg writes a playlist wherever it was told to put one — followed by body.
+// Taken from TestStartVariant_LingeringPipeIsNotACrash so the two agree on what
+// a "started" variant looks like.
+func writePlaylistThen(body string) string {
+	return "for a in \"$@\"; do case \"$a\" in *stream.m3u8) printf '#EXTM3U\\n' > \"$a\";; esac; done\n" + body
+}
+
+// waitForVariantExit blocks until the launch goroutine publishes `exited`, then
+// returns the variant's error. Reads both under variantMu, per ffmpegDone's
+// contract. The budget is the same one execwait_test.go uses to tell a bounded
+// wait from an unbounded one, so a lost bound fails here rather than passing
+// slowly.
+func waitForVariantExit(t *testing.T, s *TranscodeSession, v *QualityVariant, what string) error {
+	t.Helper()
+	deadline := time.Now().Add(lingerBudget)
 	for {
 		s.variantMu.Lock()
 		done, vErr := ffmpegDone(v), v.Err
 		s.variantMu.Unlock()
 		if done {
-			if vErr != nil {
-				t.Fatalf("a cancelled variant recorded an error: %v — a reap is a deliberate "+
-					"stop, and every v.Err reader will report it as a failed transcode", vErr)
-			}
-			return
+			return vErr
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("cancelled variant never reached exited")
+			t.Fatalf("%s, but the variant never reached exited within %s: cmd.Wait is still "+
+				"draining a stderr pipe held open by a subprocess, and with the "+
+				"Cmd.ProcessState fallback gone nothing else can mark this variant done",
+				what, lingerBudget)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// shrinkVariantWaitDelay drops the stderr-drain bound for one test. The
-// stalled-pipe cases have to wait it out, and at the shipped 5s that is most
-// of the package's test time. The callers above still bound their own
-// deadlines by variantWaitDelay, so what they pin is the mechanism — that the
-// drain is bounded at all, and what the resulting error means — not the chosen
-// value.
+// stubVariantLaunch launches one variant through the real EnsureVariant path
+// against a stub ffmpeg, and returns its session and variant.
 //
-// What makes this write safe is NOT that these tests are serial: the restore
-// below runs at test end, while a launch goroutine from that same test may
-// still be alive. It is that production reads the var on the caller's
-// goroutine only — the cmd.WaitDelay assignment in startVariantImpl, which
-// EnsureVariant runs synchronously — and every later reader uses
-// cmd.WaitDelay, which the launch goroutine owns. A launch-goroutine read of
-// the var would race with the restore, and -race would blame whichever test
-// was running when it fired rather than this one.
-func shrinkVariantWaitDelay(t *testing.T) {
+// The manager is built BEFORE the stub goes on PATH, as
+// TestStartVariant_LingeringPipeIsNotACrash does: its startup probes shell out
+// to ffmpeg too, and a stub that lingers would make each of them wait out its
+// own bound for nothing these tests are asking about.
+func stubVariantLaunch(t *testing.T, sessionID, body string) (*TranscodeSession, *QualityVariant) {
 	t.Helper()
-	prev := variantWaitDelay
-	variantWaitDelay = 500 * time.Millisecond
-	t.Cleanup(func() { variantWaitDelay = prev })
-}
-
-// stubVariantLaunch puts a stub ffmpeg on PATH, launches one variant through
-// the real EnsureVariant path, and returns its session and variant.
-//
-// `arm` is the shell run for the VARIANT launch only, with "$out" bound to the
-// variant's output directory. Scoping it that way matters: NewTranscodeManager
-// probes ffmpeg too, and one of those probes — ffmpegHasEncoder
-// (hwaccel.go), reached via encoderAvailable — reads it through
-// CombinedOutput with no WaitDelay, so a stub that stalls there stalls
-// startup instead of the thing under test. (The HEVC test encode beside it
-// is bounded: runProbeFFmpegDiag sets one.) Probe invocations fall through
-// to `exit 1`, which is what fakeFFmpegOnPath does for every call.
-func stubVariantLaunch(t *testing.T, sessionID, arm string) (*TranscodeSession, *QualityVariant) {
-	t.Helper()
-	outDir := t.TempDir()
-	// $out is quoted at every use: a TMPDIR containing a space or a glob
-	// character would otherwise silently mis-target the playlist and fail this
-	// test for a reason that has nothing to do with the code under test.
-	stubFFmpeg(t, "out='"+outDir+"'\n"+
-		"case \"$*\" in\n"+
-		"  *\"$out\"*)\n"+
-		arm+
-		"    ;;\n"+
-		"esac\n"+
-		"exit 1\n")
-
-	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	base := t.TempDir()
+	tm, err := NewTranscodeManager(base, config.TranscodeConfig{})
 	if err != nil {
 		t.Fatalf("new transcode manager: %v", err)
 	}
 	t.Cleanup(tm.Close)
 
+	stubExecutable(t, "ffmpeg", body)
+
+	outDir := filepath.Join(base, "variant")
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		t.Fatalf("create variant dir: %v", err)
+	}
 	v := &QualityVariant{
 		Profile:   QualityProfile{Name: "source"},
 		OutputDir: outDir,
 		Ready:     make(chan struct{}),
 	}
 	s := &TranscodeSession{
-		ID:         sessionID,
-		FilePath:   "/tmp/x.mkv",
-		Variants:   map[string]*QualityVariant{"source": v},
-		LastAccess: time.Now(),
-		Remux:      true,
+		ID:              sessionID,
+		FilePath:        filepath.Join(base, "movie.mkv"),
+		OutputDir:       base,
+		Variants:        map[string]*QualityVariant{"source": v},
+		LastAccess:      time.Now(),
+		Remux:           true,
+		AudioTrackIndex: -1,
 	}
 	if _, err := tm.EnsureVariant(s, "source", 0); err != nil {
 		t.Fatalf("EnsureVariant: %v", err)
