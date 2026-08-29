@@ -45,7 +45,7 @@ func TestRunProbeFFmpegDiag_CarriesTheReasonThroughExec(t *testing.T) {
 func TestRunProbeFFmpegDiag_SuccessWithALingeringPipeIsStillSuccess(t *testing.T) {
 	// The grandchild inherits stderr and outlives its parent, so the pipe
 	// stays open well after the stub itself exits 0.
-	stubFFmpeg(t, "( sleep 5 ) &\nexit 0\n")
+	stubFFmpeg(t, lingerAndExit(""))
 
 	start := time.Now()
 	reason, err := runProbeFFmpegDiag([]string{"-hide_banner"})
@@ -56,7 +56,7 @@ func TestRunProbeFFmpegDiag_SuccessWithALingeringPipeIsStillSuccess(t *testing.T
 	}
 	// It must also have stopped waiting, rather than blocking until the
 	// grandchild finished — that is the hang WaitDelay is here to prevent.
-	if elapsed >= 4*time.Second {
+	if elapsed >= lingerBudget {
 		t.Fatalf("probe waited %s for a lingering pipe; WaitDelay is %s", elapsed, execWaitDelay)
 	}
 }

@@ -215,9 +215,18 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 	)
 
 	// Bounded, and ErrWaitDelay is not a failure here (runBounded,
-	// execwait.go): it means FFmpeg exited 0, so the .vtt below is complete —
-	// deleting it and erroring would throw away a good extraction that cost up
-	// to ten minutes of reading through the container.
+	// execwait.go): the process we started exited 0, so deleting the .vtt and
+	// erroring would throw away an extraction that cost up to ten minutes of
+	// reading through the container.
+	//
+	// "Exited 0" is what os/exec can tell us, and it is not quite "the file is
+	// complete": the premise of the whole bound is that some OTHER process
+	// inherited the descriptors, so an ffmpeg wrapper that returns 0 while
+	// backgrounding the real work would leave a partial .vtt that the size
+	// check above then caches. The old behaviour in that same scenario was an
+	// unbounded hang the 10-minute context could not break (it kills the
+	// process, which has already exited), so this is the better failure — but
+	// it is a failure mode, not a guarantee.
 	if output, err := boundedCombinedOutput(cmd); err != nil {
 		os.Remove(vttPath) // Clean up partial file
 		return "", fmt.Errorf("extract subtitle: %w: %s", err, string(output))

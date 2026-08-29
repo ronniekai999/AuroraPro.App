@@ -3746,10 +3746,14 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	cmd.Stderr = &stderrBuf
 	// Attaching that buffer means Wait blocks until every holder of FFmpeg's
 	// stderr closes it, not until FFmpeg exits — so a subprocess that inherits
-	// it pins the cmd.Wait goroutine below forever: the variant is never marked
-	// exited, cmdDone never closes, and the session's watchers wait on an
-	// FFmpeg that is already gone. Bound it as the probes do (execwait.go);
-	// after a ctx kill the timer merely caps the drain that follows.
+	// it pins the cmd.Wait goroutine below forever, and the damage is not that
+	// callers wait: ffmpegDone falls back to Cmd.ProcessState, which os/exec
+	// sets before it drains, so EnsureVariant sees a finished variant whose
+	// v.Err was never written and serves a CRASHED transcode as a clean
+	// completion — no restart, no StderrTail, no diagnosis. Bound it as the
+	// probes do (execwait.go). After a ctx kill the timer caps the drain that
+	// follows; if FFmpeg is wedged badly enough not to die within the delay,
+	// it also closes the pipes out from under a process already sent SIGKILL.
 	cmd.WaitDelay = execWaitDelay
 
 	v.Cmd = cmd

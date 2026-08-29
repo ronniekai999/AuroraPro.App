@@ -219,6 +219,14 @@ func (h HWAccelInfo) FullGPUHEVCEncoderArgs(width, height int, hdrTonemap bool, 
 
 // hwProbeTimeout bounds each individual probe FFmpeg run. Generous — these
 // are 5-frame 192x108 jobs; anything slower than this is effectively broken.
+//
+// It also bounds the two startup FFmpeg runs that are not encodes at all (the
+// encoder listing and the version banner, hwaccel.go and streaming.go): both
+// return in milliseconds on any working build, so the same generous ceiling
+// costs them nothing and one number keeps the startup path's worst case
+// legible. What it buys there is that a wrapper which never returns cannot
+// hang the boot — a WaitDelay cannot do that job, since Wait never reaches the
+// drain until the process is reaped.
 const hwProbeTimeout = 20 * time.Second
 
 // ProbeHWDecode augments a detected HWAccelInfo with decode-side

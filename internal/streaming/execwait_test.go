@@ -2,12 +2,15 @@ package streaming
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aurora-media/aurora/internal/config"
 )
 
 // stubExecutable puts a script of the given name at the front of PATH.
@@ -26,16 +29,31 @@ func stubExecutable(t *testing.T, name, body string) {
 // descriptors closes them — not until the process exits — and nothing bounds
 // how long a grandchild lives.
 func lingerAndExit(body string) string {
-	return body + "( sleep " + lingerSeconds + " ) &\nexit 0\n"
+	return fmt.Sprintf("%s( sleep %.0f ) &\nexit 0\n", body, lingerFor.Seconds())
 }
 
-const lingerSeconds = "5"
+// BOTH of these have to track execWaitDelay, or the timing assertions quietly
+// stop meaning anything: they exist to tell a bounded call (returns at
+// execWaitDelay) from an unbounded one (waits out the grandchild), so the
+// budget must sit strictly between the two. Pinning lingerFor to a literal
+// while deriving lingerBudget is what breaks that — raise execWaitDelay to 5s
+// against a fixed 5s linger and every assertion below becomes a tautology.
+// TestLingerBudgetSeparatesBoundedFromUnbounded pins the relation itself.
+// Spaced a full delay apart in each direction so a loaded runner has room:
+// a bounded call lands at 1×, the budget is 2×, the grandchild leaves at 3×.
+const (
+	lingerFor    = 3 * execWaitDelay
+	lingerBudget = 2 * execWaitDelay
+)
 
-// lingerBudget is what a bounded call may take. Derived from the real constant
-// so it tracks it, and it sits between the two outcomes it has to tell apart: a
-// bounded call returns at execWaitDelay (2s), an unbounded one waits out the
-// grandchild (5s). Neither margin is tight enough for a loaded runner to blur.
-const lingerBudget = execWaitDelay + 2*time.Second
+// The guard on the guards: whatever execWaitDelay is tuned to, a bounded call
+// must finish inside lingerBudget and an unbounded one must not.
+func TestLingerBudgetSeparatesBoundedFromUnbounded(t *testing.T) {
+	if !(execWaitDelay < lingerBudget && lingerBudget < lingerFor) {
+		t.Fatalf("execWaitDelay=%s lingerBudget=%s lingerFor=%s: the budget must sit strictly between "+
+			"the bound and the grandchild, or the timing assertions cannot fail", execWaitDelay, lingerBudget, lingerFor)
+	}
+}
 
 // A stub listing shaped like the real thing: "<flags> <name> <description>".
 const stubEncoderListing = "cat <<'LISTING'\n" +
@@ -161,18 +179,18 @@ func TestExtractSubtitleVTT_LingeringPipeKeepsTheExtraction(t *testing.T) {
 // neither carries a WaitDelay of its own.
 //
 // A text scan, so it is deliberately over-eager: any `.Output()` in the package
-// trips it, including one on a type that has nothing to do with os/exec, and
-// the fix is then to add that file here rather than to weaken the pattern. It
-// misses what any text scan misses — a call split across lines, a method value
-// passed elsewhere. Under-reaching is the failure mode worth avoiding, since
-// the helpers already make the honest path the shorter one.
+// trips it, including one on a type with nothing to do with os/exec. Exempt
+// such a line with the marker below, never the whole file — a file-wide
+// exemption would also blind this to every real exec capture in it, which is
+// the one place the guard has to work. It misses what any text scan misses: a
+// call split across lines, a method value passed elsewhere (execwait.go's own
+// `cmd.Output` reads that way, which is why the helpers need no exemption).
 func TestNoUnboundedOutputCapture(t *testing.T) {
+	const allow = "execwait:ok" // last resort, on the offending line
+
 	forEachPackageSource(t, func(t *testing.T, file, src string) {
-		if file == "execwait.go" {
-			return // the helpers themselves
-		}
 		for i, line := range strings.Split(src, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			if strings.HasPrefix(strings.TrimSpace(line), "//") || strings.Contains(line, allow) {
 				continue
 			}
 			for _, call := range []string{".CombinedOutput()", ".Output()"} {
@@ -189,13 +207,22 @@ func TestNoUnboundedOutputCapture(t *testing.T) {
 // capturing (hwdecode.go's stderr tail, streaming.go's variant FFmpeg): the
 // contract is identical, so the file must set a WaitDelay somewhere.
 //
-// Weaker than it looks, so take it for what it is. It is a FILE-level check:
-// it cannot tell WHICH cmd in a file got the WaitDelay, so it catches a new
-// attaching command in a file that has none — the realistic drift — and not a
-// second one added to streaming.go. Being line-anchored, it also misses a
-// writer attached in a composite literal (`&exec.Cmd{Stderr: buf}`). The
-// bounded helpers are what make the common case unmissable; this is only the
-// backstop for the two sites that hand-roll their own writers (hwdecode.go's
+// Weaker than it looks, in both directions, so take it for what it is.
+//
+// It under-reaches: it is a FILE-level check, so it cannot tell WHICH cmd in a
+// file got the WaitDelay — it catches a new attaching command in a file that
+// has none (the realistic drift), not a second one added to streaming.go. And
+// being line-anchored on an assignment, it misses a writer attached in a
+// composite literal (`&exec.Cmd{Stderr: buf}`).
+//
+// It also over-reaches: it matches an assignment to ANY field named
+// Stdout/Stderr on any type, so an unrelated struct in a file with no
+// WaitDelay would fail with an exec-specific message. That direction is the
+// safe one to be wrong in, and the fix is then to look at the line rather than
+// to loosen the pattern.
+//
+// The bounded helpers are what make the common case unmissable; this is only
+// the backstop for the two sites that hand-roll their own writers (hwdecode.go's
 // stderr tail, streaming.go's variant FFmpeg), where the contract is identical.
 func TestFilesThatAttachPipesBoundTheWait(t *testing.T) {
 	// [\w.]+ so a qualified target (v.Cmd.Stderr) is not missed, and [^=\n]
@@ -238,5 +265,97 @@ func forEachPackageSource(t *testing.T, check func(t *testing.T, file, src strin
 			t.Fatalf("read %s: %v", file, err)
 		}
 		check(t, file, string(src))
+	}
+}
+
+// ---------------------------------------------------------------------------
+
+// The variant FFmpeg's own ErrWaitDelay reading, which is the one place in this
+// package where getting it wrong is a user-visible regression rather than a
+// misjudged probe.
+//
+// A remux copies faster than realtime, so its FFmpeg routinely runs to EOF and
+// exits cleanly mid-viewing, having written a complete VOD playlist. If a
+// descendant is still holding stderr at that moment, Wait reports ErrWaitDelay
+// instead of nil — and startVariantImpl must NOT record that as a crash.
+// v.Err is exactly what EnsureVariant reads to tell a clean completion from a
+// mid-stream death (streaming.go, issues #172/#174): a non-nil Err there sends
+// a FINISHED transcode down the restart path, relaunching FFmpeg with -ss past
+// the end of the file, which produces nothing and then 500s every later
+// playlist fetch — the Chromecast break those issues were filed for.
+func TestStartVariant_LingeringPipeIsNotACrash(t *testing.T) {
+	base := t.TempDir()
+	// Built BEFORE the stub is on PATH: its startup probes would each linger
+	// out their own WaitDelay otherwise, for nothing this test is asking about.
+	tm, err := NewTranscodeManager(base, config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// Writes a playlist wherever FFmpeg was told to put one, so the readiness
+	// poller sees output, then leaves a grandchild holding stderr and exits 0.
+	stubExecutable(t, "ffmpeg", lingerAndExit(
+		"for a in \"$@\"; do case \"$a\" in *stream.m3u8) printf '#EXTM3U\\n#EXT-X-ENDLIST\\n' > \"$a\";; esac; done\n"))
+
+	outDir := filepath.Join(base, "variant")
+	if err := os.MkdirAll(outDir, 0o750); err != nil {
+		t.Fatalf("create variant dir: %v", err)
+	}
+	v := &QualityVariant{
+		Profile:   QualityProfile{Name: "source"},
+		OutputDir: outDir,
+		Ready:     make(chan struct{}),
+	}
+	session := &TranscodeSession{
+		ID:              "sess-linger",
+		FilePath:        filepath.Join(base, "movie.mkv"),
+		OutputDir:       base,
+		Variants:        map[string]*QualityVariant{"source": v},
+		LastAccess:      time.Now(),
+		Remux:           true,
+		AudioTrackIndex: -1,
+	}
+
+	session.variantMu.Lock() // startVariant's contract
+	err = tm.startVariant(session, v, 0)
+	session.variantMu.Unlock()
+	if err != nil {
+		t.Fatalf("startVariant: %v", err)
+	}
+
+	// The Wait goroutine returns one WaitDelay after FFmpeg exits.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		session.variantMu.Lock()
+		done := v.exited
+		session.variantMu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the cmd.Wait goroutine never finished; a held descriptor is pinning it")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	session.variantMu.Lock()
+	gotErr := v.Err
+	session.variantMu.Unlock()
+	if gotErr != nil {
+		t.Fatalf("a variant that exited 0 was recorded as crashed: %v", gotErr)
+	}
+
+	// And the consequence that actually reaches a viewer: EnsureVariant must
+	// serve the finished variant, not restart it past EOF.
+	got, err := tm.EnsureVariant(session, "source", 0)
+	if err != nil {
+		t.Fatalf("EnsureVariant on a completed variant: %v", err)
+	}
+	if got != v {
+		t.Fatal("EnsureVariant returned a different variant")
+	}
+	if v.restartAttempts != 0 {
+		t.Errorf("restartAttempts = %d, want 0 — a clean completion must not be restarted", v.restartAttempts)
 	}
 }

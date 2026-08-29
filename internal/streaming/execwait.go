@@ -8,18 +8,23 @@ import (
 
 // Bounded output capture for the commands this package shells out to.
 //
-// Attaching a writer to Stdout or Stderr — which Cmd.Output and
-// Cmd.CombinedOutput both do, the latter to both streams — changes Wait's
-// contract: os/exec copies through a pipe, and Wait then blocks until EVERY
-// holder of the child's descriptors closes them, not merely until the process
-// exits. A child that leaves a subprocess holding one stalls Wait for as long
+// Attaching a writer to Stdout or Stderr changes Wait's contract: os/exec
+// copies through a pipe, and Wait then blocks until EVERY holder of the child's
+// descriptors closes them, not merely until the process exits. Both capture
+// methods attach to BOTH streams — CombinedOutput by definition, and Output
+// because it installs its own stderr saver whenever Stderr is nil, which is
+// every call site here — so neither is exposed on stdout alone. A child that leaves a subprocess holding one stalls Wait for as long
 // as that subprocess lives, with no bound and past any context deadline — the
 // deadline kills the process it started, it cannot close a descriptor someone
 // else inherited. Several of these commands run inside NewTranscodeManager, so
 // there the stall is a server that never finishes booting.
 //
-// runBounded caps that wait exactly as runProbeFFmpegDiag caps it for the test
-// encodes (hwdecode.go), so the two cannot drift.
+// runBounded caps that wait with the same constant runProbeFFmpegDiag uses for
+// the test encodes (hwdecode.go). Note what is and is not shared: the bound is,
+// the READING below is not — hwdecode.go and startVariantImpl each spell out
+// their own, because each needs the process's output or error differently.
+// Three copies of one decision is three places it can drift, so each carries a
+// test that fails if it does.
 //
 // ErrWaitDelay — the failure mode the cap introduces — is deliberately NOT
 // treated as a failed command, for two reasons that hold at every call site:
