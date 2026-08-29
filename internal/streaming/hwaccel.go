@@ -224,10 +224,21 @@ func ffmpegHasEncoder(name string) bool {
 	// Bounded because capturing output is what makes Wait able to outlive the
 	// process (runBounded, execwait.go): this runs from NewTranscodeManager,
 	// via both DetectHWAccel and ProbeHEVCEncoder, so an unbounded wait here
-	// is a server that never finishes starting. runBounded also decides what
-	// ErrWaitDelay means — the process exited 0 and this listing is its real
-	// listing, so the name check below stands rather than being failed over
-	// descriptor hygiene.
+	// is a server that never finishes starting.
+	//
+	// runBounded also decides that ErrWaitDelay is not a failure, and it is
+	// worth being explicit about which way that cuts HERE, because the error
+	// branch just below answers TRUE. Reading a lingering descriptor as a
+	// failure would therefore report an encoder the build does NOT have as
+	// present, hand it to the test encode, and leave the operator with a
+	// warning blaming their driver for an encoder that was never compiled in —
+	// the exact confusion this function exists to prevent. The process exited
+	// 0, so scan what it printed.
+	//
+	// The residual risk runs the other way and is smaller: WaitDelay closes
+	// the pipe, so a listing still in flight would be cut short and a present
+	// encoder read as absent — a silent drop to CPU encoding. That needs a
+	// copier starved for the whole delay after FFmpeg had already exited.
 	out, err := boundedCombinedOutput(exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-encoders"))
 	if err != nil {
 		slog.Debug("could not list FFmpeg encoders; leaving the verdict to the test encode", "error", err)

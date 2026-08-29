@@ -1775,16 +1775,22 @@ func (tm *TranscodeManager) HEVCEncodeEnabled() bool {
 // ffmpegSupportsReadrate reports whether the ffmpeg on PATH is >= 5.0, the
 // release that introduced `-readrate` (the supported way to pace input
 // reads; the old `-re` forces exactly 1× and would stall seeks). Best-effort:
-// any probe failure (no ffmpeg, unparseable banner — e.g. distro builds
-// reporting "n5.1.4" or git snapshots) disables pacing rather than erroring,
-// matching the manager's general posture that a missing ffmpeg surfaces at
-// session creation, not construction.
+// any probe failure (no ffmpeg, a timeout, an unparseable banner — e.g. distro
+// builds reporting "n5.1.4" or git snapshots) disables pacing rather than
+// erroring, matching the manager's general posture that a missing ffmpeg
+// surfaces at session creation, not construction.
 func ffmpegSupportsReadrate() bool {
-	// Bounded: this runs inside NewTranscodeManager, and capturing output is
-	// what lets Wait outlive the process (runBounded, execwait.go). There is
-	// no context here to lean on — and a context would not help anyway, since
-	// it can only kill the process, not close a descriptor its child kept.
-	out, err := boundedOutput(exec.Command("ffmpeg", "-version"))
+	// Two bounds, and this startup path needs both. The CONTEXT bounds the
+	// process: `ffmpeg -version` returns instantly on any working build, so one
+	// that doesn't — a snap/flatpak shim waiting on its daemon, a binary on a
+	// wedged network mount — would otherwise hang NewTranscodeManager for good,
+	// and WaitDelay cannot help there because Wait never gets past reaping the
+	// process to start draining. WaitDelay bounds that drain, which the context
+	// in turn cannot help with: cancelling kills the process it started, not a
+	// descriptor the process's own child inherited (runBounded, execwait.go).
+	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
+	defer cancel()
+	out, err := boundedOutput(exec.CommandContext(ctx, "ffmpeg", "-version"))
 	if err != nil {
 		return false
 	}

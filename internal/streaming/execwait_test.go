@@ -26,8 +26,16 @@ func stubExecutable(t *testing.T, name, body string) {
 // descriptors closes them — not until the process exits — and nothing bounds
 // how long a grandchild lives.
 func lingerAndExit(body string) string {
-	return body + "( sleep 5 ) &\nexit 0\n"
+	return body + "( sleep " + lingerSeconds + " ) &\nexit 0\n"
 }
+
+const lingerSeconds = "5"
+
+// lingerBudget is what a bounded call may take. Derived from the real constant
+// so it tracks it, and it sits between the two outcomes it has to tell apart: a
+// bounded call returns at execWaitDelay (2s), an unbounded one waits out the
+// grandchild (5s). Neither margin is tight enough for a loaded runner to blur.
+const lingerBudget = execWaitDelay + 2*time.Second
 
 // A stub listing shaped like the real thing: "<flags> <name> <description>".
 const stubEncoderListing = "cat <<'LISTING'\n" +
@@ -44,10 +52,13 @@ const stubEncoderListing = "cat <<'LISTING'\n" +
 // Both verdicts are asserted against the SAME listing with and without the
 // lingering grandchild, because the decision this pins is that the grandchild
 // changes nothing: ErrWaitDelay means the process exited 0 and CombinedOutput
-// returns what it collected, so the listing is the real listing. Failing the
-// probe instead would report every encoder missing on a box whose FFmpeg has
-// them all; forcing it true would hand a doomed encoder to the test encode and
-// blame the operator's driver for a build that never had it.
+// returns what it collected, so the listing is scanned rather than discarded.
+//
+// The "absent" case is the one with teeth. ffmpegHasEncoder answers TRUE on
+// error, so treating ErrWaitDelay as a failure would report an encoder the
+// build lacks as present — and the "listed" case would keep passing, since
+// both readings answer true there. It stays for the timing assertion and as
+// the control that a lingering pipe does not flip a positive either.
 func TestFFmpegHasEncoder_ALingeringPipeChangesNeitherVerdictNorWait(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -73,19 +84,22 @@ func TestFFmpegHasEncoder_ALingeringPipeChangesNeitherVerdictNorWait(t *testing.
 			if got != tc.want {
 				t.Errorf("a grandchild holding the pipe changed the verdict: got %v, want %v", got, tc.want)
 			}
-			if elapsed >= 4*time.Second {
+			if elapsed >= lingerBudget {
 				t.Errorf("waited %s for a lingering pipe; WaitDelay is %s — this blocks startup", elapsed, execWaitDelay)
 			}
 		})
 	}
 }
 
-// ffmpegSupportsReadrate has no context to lean on, which is the point: the
-// WaitDelay timer for a context-less Cmd is started by Wait itself once the
-// process is reaped, so the bound holds here too. A context would not have
-// helped anyway — cancelling kills the process, and the descriptor is held by
-// someone else.
-func TestFFmpegSupportsReadrate_BoundedWithoutAContext(t *testing.T) {
+// The drain bound and the process bound are different bounds. This pins the
+// drain one: FFmpeg exits 0, a grandchild keeps the pipe, and the probe must
+// still answer from the banner it already printed. The context on that command
+// would not have helped — cancelling kills the process, and the descriptor is
+// held by someone else — just as WaitDelay would not have helped had FFmpeg
+// itself hung, since Wait never reaches the drain until the process is reaped.
+// That second case is the context's job and is not exercised here: asserting it
+// would mean waiting out hwProbeTimeout.
+func TestFFmpegSupportsReadrate_ALingeringPipeKeepsTheAnswer(t *testing.T) {
 	const banner = "echo 'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers'\n"
 
 	stubExecutable(t, "ffmpeg", banner+"exit 0\n")
@@ -101,7 +115,7 @@ func TestFFmpegSupportsReadrate_BoundedWithoutAContext(t *testing.T) {
 	if !got {
 		t.Error("a grandchild holding the pipe turned readrate pacing off")
 	}
-	if elapsed >= 4*time.Second {
+	if elapsed >= lingerBudget {
 		t.Errorf("waited %s for a lingering pipe; WaitDelay is %s — this blocks startup", elapsed, execWaitDelay)
 	}
 }
@@ -124,7 +138,7 @@ func TestExtractSubtitleVTT_LingeringPipeKeepsTheExtraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extraction that exited 0 reported failure: %v", err)
 	}
-	if elapsed >= 4*time.Second {
+	if elapsed >= lingerBudget {
 		t.Errorf("waited %s for a lingering pipe; WaitDelay is %s", elapsed, execWaitDelay)
 	}
 	info, statErr := os.Stat(vtt)
@@ -145,6 +159,13 @@ func TestExtractSubtitleVTT_LingeringPipeKeepsTheExtraction(t *testing.T) {
 // helpers. A bare cmd.Output()/cmd.CombinedOutput() is the exact shape of the
 // bug: both attach writers, both therefore let Wait outlive the process, and
 // neither carries a WaitDelay of its own.
+//
+// A text scan, so it is deliberately over-eager: any `.Output()` in the package
+// trips it, including one on a type that has nothing to do with os/exec, and
+// the fix is then to add that file here rather than to weaken the pattern. It
+// misses what any text scan misses — a call split across lines, a method value
+// passed elsewhere. Under-reaching is the failure mode worth avoiding, since
+// the helpers already make the honest path the shorter one.
 func TestNoUnboundedOutputCapture(t *testing.T) {
 	forEachPackageSource(t, func(t *testing.T, file, src string) {
 		if file == "execwait.go" {
@@ -168,16 +189,23 @@ func TestNoUnboundedOutputCapture(t *testing.T) {
 // capturing (hwdecode.go's stderr tail, streaming.go's variant FFmpeg): the
 // contract is identical, so the file must set a WaitDelay somewhere.
 //
-// This is a FILE-level check, not a per-command one — it cannot tell which cmd
-// in a file got the WaitDelay. It catches a new attaching command in a file
-// that has none (the realistic drift), not a second one in streaming.go. The
-// bounded helpers are what make the common case unmissable; this is the
-// backstop for the two hand-rolled sites.
+// Weaker than it looks, so take it for what it is. It is a FILE-level check:
+// it cannot tell WHICH cmd in a file got the WaitDelay, so it catches a new
+// attaching command in a file that has none — the realistic drift — and not a
+// second one added to streaming.go. Being line-anchored, it also misses a
+// writer attached in a composite literal (`&exec.Cmd{Stderr: buf}`). The
+// bounded helpers are what make the common case unmissable; this is only the
+// backstop for the two sites that hand-roll their own writers (hwdecode.go's
+// stderr tail, streaming.go's variant FFmpeg), where the contract is identical.
 func TestFilesThatAttachPipesBoundTheWait(t *testing.T) {
-	attaches := regexp.MustCompile(`(?m)^\s*\w+\.Std(out|err)\b[^=]*=`)
+	// [\w.]+ so a qualified target (v.Cmd.Stderr) is not missed, and [^=\n]
+	// rather than [^=] because a negated class matches newlines — with [^=]
+	// the pattern could run past the end of a line that merely READS from
+	// os.Stderr and pick up an unrelated `=` further down the file.
+	attaches := regexp.MustCompile(`(?m)^\s*[\w.]+\.Std(out|err)\b[^=\n]*=`)
 	// The ASSIGNMENT, not the word: a comment discussing WaitDelay (there are
 	// several) must not be able to satisfy this.
-	bounds := regexp.MustCompile(`(?m)^\s*\w+\.WaitDelay\s*=`)
+	bounds := regexp.MustCompile(`(?m)^\s*[\w.]+\.WaitDelay\s*=`)
 
 	forEachPackageSource(t, func(t *testing.T, file, src string) {
 		loc := attaches.FindStringIndex(src)

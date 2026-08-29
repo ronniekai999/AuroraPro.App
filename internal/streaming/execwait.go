@@ -34,10 +34,21 @@ import (
 //     goroutines before returning either way, so the buffer is complete as of
 //     the close and safe to read without a race.
 //
-// Reading it as a failure instead would report every encoder missing, every
-// GPU absent, and every finished subtitle extraction broken on a box where
-// FFmpeg works — the same mis-verdict runProbeFFmpegDiag documents, arrived at
-// from the opposite direction.
+// Reading it as a failure instead would take a command that WORKED and hand
+// every caller its error path: a GPU that is present reported absent, readrate
+// pacing disabled on an FFmpeg 7 build, a file's subtitle tracks reported as
+// none, and — worst, because it destroys work rather than just misjudging it —
+// a completed .vtt deleted and the request that asked for it failed. Note that
+// ffmpegHasEncoder's error path answers TRUE, so there the same mistake runs
+// the other way: an encoder the build does NOT have would be reported present.
+// The direction differs; that it is a mis-verdict does not.
+//
+// The residual risk is the mirror image, and it is much smaller. WaitDelay
+// closes the pipe, so bytes still in flight at that instant are lost and a
+// caller could scan a truncated capture — "complete as of the close" is the
+// honest guarantee, not "complete". It takes a copying goroutine starved for
+// the whole delay AFTER the process already exited, and every caller's
+// truncation behavior degrades the way its normal failure does.
 func runBounded(cmd *exec.Cmd, capture func() ([]byte, error)) ([]byte, error) {
 	// Must be set before Start: Cmd reads it when wiring up the watchdog.
 	cmd.WaitDelay = execWaitDelay
