@@ -1423,10 +1423,19 @@ func sessionIdleTimeout(castHeld bool, configured time.Duration) time.Duration {
 }
 
 // QualityVariant is a single FFmpeg process transcoding at one quality level.
+//
+// The *exec.Cmd is deliberately NOT a field here. exec.Cmd's own fields are
+// written by Start() and Wait() from the launch goroutine, which cannot hold
+// variantMu across a fork/exec or a process wait — so a reader that reached
+// through a Cmd field would race no matter what lock it held. (It did:
+// ListSessions read Cmd.Process.Pid under variantMu while Start() wrote
+// Cmd.Process, and ffmpegDone read Cmd.ProcessState while Wait() wrote it.)
+// The Cmd stays a local in startVariantImpl, owned start-to-finish by that
+// one goroutine, and everything readers need — `pid`, `exited` — is published
+// onto variantMu-guarded fields below at write time.
 type QualityVariant struct {
 	Profile   QualityProfile
 	OutputDir string
-	Cmd       *exec.Cmd
 	Cancel    context.CancelFunc
 	Ready     chan struct{}
 	Err       error
@@ -1437,6 +1446,12 @@ type QualityVariant struct {
 	// session diagnose path. Empty until the process exits.
 	StderrTail string
 	started    bool
+	// pid is this variant's FFmpeg process ID, published by the launch
+	// goroutine under variantMu once cmd.Start() has returned. ListSessions
+	// samples /proc from it; see the type comment for why it is a snapshot
+	// rather than a reach through Cmd.Process. 0 until the process is
+	// running, and reset by relaunchVariantLocked.
+	pid int
 	// exited is set by the cmd.Wait goroutine when ffmpeg returns. The
 	// playback/poll paths read it (via ffmpegDone) to fail fast instead of
 	// spinning a long retry budget on a process that's already dead.
@@ -1518,23 +1533,26 @@ const defaultMaxCacheBytes = 20 << 30 // 20 GiB
 const variantRestartMax = 1
 
 // ffmpegDone reports whether the variant's ffmpeg process has terminated.
-// Two signals: our own `exited` flag (set by the cmd.Wait goroutine on
-// normal exit) and Cmd.ProcessState (set by exec.Cmd after Wait returns).
-// Either being non-nil/true means we should stop waiting for outputs.
+// The signal is our own `exited` flag, set by the cmd.Wait goroutine in the
+// same critical section that publishes Err and StderrTail — so a caller that
+// sees "done" also sees this generation's FINAL error, not a half-written one.
 //
-// Caller MUST hold the session's variantMu: `exited` and `Cmd` are written
-// under it by the lifecycle goroutines (review finding B4).
+// It deliberately does NOT consult exec.Cmd.ProcessState, which it used to
+// take as a second, earlier signal. That read was a data race (Wait() writes
+// the field from the launch goroutine, which holds no lock — see the
+// QualityVariant type comment), and being earlier was itself a hazard: it went
+// true in the window BEFORE v.Err was published, where EnsureVariant reads a
+// nil v.Err as "clean completion" and would hand back a crashed variant. The
+// flag arrives a stderr-tail copy later; every caller polls on a 500ms-plus
+// cadence and already tolerates observing a dying variant one round late.
+//
+// Caller MUST hold the session's variantMu: `exited` is written under it by
+// the lifecycle goroutines (review finding B4).
 func ffmpegDone(v *QualityVariant) bool {
 	if v == nil {
 		return false
 	}
-	if v.exited {
-		return true
-	}
-	if v.Cmd != nil && v.Cmd.ProcessState != nil {
-		return true
-	}
-	return false
+	return v.exited
 }
 
 // readinessTimeout bounds how long the playlist/segment handlers — and the
@@ -2727,8 +2745,12 @@ func (tm *TranscodeManager) ListSessions() []SessionInfo {
 		for name, v := range s.Variants {
 			if v.started {
 				snapshots[i].info.ActiveVariants = append(snapshots[i].info.ActiveVariants, name)
-				if v.Cmd != nil && v.Cmd.Process != nil {
-					snapshots[i].pids = append(snapshots[i].pids, v.Cmd.Process.Pid)
+				// v.pid, not a reach through the *exec.Cmd: `started` is set
+				// before cmd.Start() runs, so this loop can land squarely in
+				// the middle of the fork/exec. The snapshot is published by
+				// that goroutine under this same lock (see QualityVariant).
+				if v.pid != 0 {
+					snapshots[i].pids = append(snapshots[i].pids, v.pid)
 				}
 			}
 		}
@@ -3086,7 +3108,7 @@ func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *
 	v.started = false
 	v.exited = false
 	v.Err = nil
-	v.Cmd = nil
+	v.pid = 0
 	// Also clear the previous generation's stderr snapshot — diagnostics
 	// would otherwise attribute the OLD FFmpeg's crash output to the
 	// relaunched process until its own exit overwrites it.
@@ -3734,19 +3756,19 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	var stderrBuf limitedBuffer
 	cmd.Stderr = &stderrBuf
 
-	v.Cmd = cmd
 	v.started = true
 
 	// Relaunch race guard (2026-07) — relaunchVariantLocked replaces v.Ready
 	// with a fresh channel while THIS launch's goroutines may still be alive:
-	// the serve path can observe the exit via ffmpegDone (Cmd.ProcessState is
-	// set the moment cmd.Wait returns) and relaunch before the post-Wait
-	// bookkeeping below runs. So this generation's goroutines must (a) close
-	// only their own captured channel — a stale close of the replacement
-	// channel is a premature "ready" for the relaunched FFmpeg and a
-	// double-close panic when the new generation closes it again — and
-	// (b) drop their lifecycle writes (Err/StderrTail/exited) once the
-	// variant has moved on. sameGeneration must be called under variantMu.
+	// once the post-Wait block below publishes `exited`, the serve path's next
+	// EnsureVariant can relaunch the variant while this generation's polling
+	// goroutine is still parked in its 500ms sleep. So this generation's
+	// goroutines must (a) close only their own captured channel — a stale
+	// close of the replacement channel is a premature "ready" for the
+	// relaunched FFmpeg and a double-close panic when the new generation
+	// closes it again — and (b) drop their lifecycle writes (Err/StderrTail/
+	// exited/pid) once the variant has moved on. sameGeneration must be
+	// called under variantMu.
 	readyCh := v.Ready
 	sameGeneration := func() bool { return v.Ready == readyCh }
 
@@ -3765,6 +3787,15 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			close(readyCh)
 			return
 		}
+
+		// Publish the PID for ListSessions' /proc sampling. This goroutine
+		// owns `cmd`, so reading Process here is safe; readers must never do
+		// the same reach themselves (QualityVariant type comment).
+		session.variantMu.Lock()
+		if sameGeneration() && cmd.Process != nil {
+			v.pid = cmd.Process.Pid
+		}
+		session.variantMu.Unlock()
 
 		// cmdDone is closed when cmd.Wait() returns, allowing the polling
 		// goroutine to exit early if FFmpeg crashes immediately.
@@ -3851,10 +3882,12 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		// StderrTail unconditionally — the polling goroutine may consult
 		// it even on the "exited cleanly but no playlist" path.
 		//
-		// Generation-guarded: ffmpegDone can observe Cmd.ProcessState the
-		// instant cmd.Wait returned (above), so a relaunch may already have
-		// reset this variant for a NEW FFmpeg — writing exited/Err here then
-		// would mark the healthy replacement as dead.
+		// Generation-guarded like every other lifecycle write in this
+		// launch: a relaunch that reset the variant for a NEW FFmpeg must
+		// not have the old process's death written over it, which would
+		// mark the healthy replacement as dead. Both relaunch paths key off
+		// ffmpegDone and so cannot fire before this block runs, but the
+		// guard is what keeps that true of a third one.
 		session.variantMu.Lock()
 		if sameGeneration() {
 			v.exited = true
