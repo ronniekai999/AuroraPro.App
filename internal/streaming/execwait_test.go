@@ -65,10 +65,13 @@ var (
 // Lower: it did not return early — which would mean the stub left no grandchild
 // at all, so no descriptor outlived the process, no ErrWaitDelay was ever
 // produced, and every verdict the caller goes on to assert is vacuous. That is
-// not hypothetical: each of these tests has a control leg that runs exactly
-// that fixture and satisfies the same verdicts. Sound as a bound because the
-// WaitDelay timer starts no earlier than process exit and Go timers do not fire
-// early, so a genuine ErrWaitDelay run cannot come in under execWaitDelay.
+// not hypothetical: two of these tests open with a control leg running exactly
+// that fixture, and it satisfies the same verdicts in milliseconds.
+//
+// Sound as a bound because the WaitDelay timer starts no earlier than Start —
+// at process exit (awaitGoroutines) or at ctx-done (watchCtx), both of them
+// after the call being measured began — and Go timers do not fire early. So a
+// genuine ErrWaitDelay run cannot come in under execWaitDelay, on any machine.
 func assertBoundedWait(t *testing.T, elapsed time.Duration, what string) {
 	t.Helper()
 	if elapsed < execWaitDelay {

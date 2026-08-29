@@ -62,8 +62,9 @@ import (
 // somewhere its normal failure already lands: a device or encoder read as
 // absent, pacing off, no subtitle tracks. The one signature that differs is
 // ProbeSubtitles, where a half-read JSON document returns a parse error rather
-// than its usual (nil, nil) — every caller of it discards the error, so what
-// reaches a viewer is the same "no subtitles", but the shape is not identical.
+// than its usual (nil, nil). Its callers either discard that error or take the
+// same branch for it as for zero tracks, so what reaches a viewer is still "no
+// subtitles" — but the shape is not identical.
 func runBounded(cmd *exec.Cmd, capture func() ([]byte, error)) ([]byte, error) {
 	// Must be set before Start. Not for the wiring — every caller here passes a
 	// context, so Cmd.Cancel already starts the watchdog either way — but
