@@ -10,12 +10,16 @@
 // Conventions are shared with the sibling tests: os.Chtimes rather than a
 // sleep, so nothing depends on the filesystem's mtime granularity, and
 // sentinel CONTENT rather than mtime comparison to tell reuse from rebuild.
-// The helpers (cacheSentinel, setMTime, seedSentinel, assertCacheReused,
-// mtimeBase) live in subtitles_cache_test.go.
+// The helpers borrowed from subtitles_cache_test.go are cacheSentinel,
+// setMTime, seedSentinel and mtimeBase. Deliberately NOT assertCacheReused:
+// its message describes an mtime tie, and the extraction cache makes no
+// mtime comparison at all, so it would misdiagnose a failure here.
 //
-// None of these reach ffmpeg on the hit path — the cache check returns
-// first — and none assert anything requiring it on the miss path, so they
-// run everywhere.
+// The ExtractSubtitleVTT cases never reach ffmpeg — the cache check returns
+// before it on a hit, and nothing asserted on a miss requires it — so they
+// run everywhere. The one exception is
+// TestConverterCacheNamesSurviveShift/ConvertSubtitleToVTT, which shells out
+// and is gated by requireFFmpeg.
 package streaming
 
 import (
@@ -383,6 +387,45 @@ func TestConverterCacheNamesSurviveShift(t *testing.T) {
 			t.Errorf("shifted cache filename is %d bytes, over NAME_MAX", n)
 		}
 	})
+}
+
+// An external .vtt sidecar never passes through a cache-naming function — it
+// is served straight from the media directory — so ShiftVTTCues is the only
+// place its derived name can be bounded, and the os.Create that actually
+// failed. Bounding only the producers left this case exposed: a long sidecar
+// made the shift fail with ENAMETOOLONG and the handler served cues offset by
+// the resume position.
+func TestShiftVTTCuesBoundsNameFromRawSidecarPath(t *testing.T) {
+	mediaDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// A sidecar living beside the media, with no cache naming applied — the
+	// shape FindExternalSubtitles hands to the handler.
+	long := strings.Repeat("Some.Very.Long.Release.Name.", 8) // 224 chars
+	sidecar := filepath.Join(mediaDir, long+".eng.vtt")
+	// The cue sits past the resume point so it SURVIVES the shift — a cue
+	// before it would be dropped as already-played, leaving a bare header
+	// that proves nothing about the output.
+	if err := os.WriteFile(sidecar, []byte("WEBVTT\n\n01:00:10.000 --> 01:00:12.000\nhi\n"), 0o644); err != nil {
+		t.Fatalf("write sidecar: %v", err)
+	}
+
+	// A one-hour offset also exercises a wide offsetMs component, which is
+	// part of what pushes the derived name toward NAME_MAX.
+	shifted, err := ShiftVTTCues(sidecar, 3600, cacheDir)
+	if err != nil {
+		t.Fatalf("ShiftVTTCues on a raw sidecar path: %v", err)
+	}
+	if n := len(filepath.Base(shifted)); n > 255 {
+		t.Errorf("shifted cache filename is %d bytes, over NAME_MAX", n)
+	}
+	body, err := os.ReadFile(shifted)
+	if err != nil {
+		t.Fatalf("read shifted vtt: %v", err)
+	}
+	if !strings.Contains(string(body), "00:00:10.000 --> 00:00:12.000") {
+		t.Errorf("cues were not shifted:\n%s", body)
+	}
 }
 
 func TestCacheStem(t *testing.T) {

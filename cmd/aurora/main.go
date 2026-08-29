@@ -1489,11 +1489,15 @@ func sweepSubtitleCache(subDir string, maxAge time.Duration) int {
 // on a 5-minute timer, so on an actively-developed instance the process
 // rarely lives that long and the sweep effectively never ran.
 //
-// That was harmless while the subtitle caches only ever overwrote entries in
-// place. It stopped being harmless once ExtractSubtitleVTT began keying on a
-// media fingerprint: replacing a media file now ORPHANS its old track, and
-// every resume-shifted derivative built from it, instead of overwriting it.
-// This sweep is what collects them, so it has to actually run.
+// These caches were never purely overwrite-in-place, so this sweep was
+// always the only thing collecting them: ShiftVTTCues keys on
+// (source, offset) and so accumulates one file per distinct resume position
+// ever requested, and the sidecar converters key on the sidecar's path, so
+// a renamed or deleted sidecar orphans its entry for good. The fingerprint
+// key in ExtractSubtitleVTT made the sweep load-bearing for extracted
+// tracks too — replacing a media file now orphans its old track and every
+// shifted derivative built from it — which is what turned a long-standing
+// slow leak into something that has to actually run.
 //
 // A sweep is one ReadDir plus a stat per entry, so running it on every
 // restart costs nothing worth pacing; the interval stays long for the

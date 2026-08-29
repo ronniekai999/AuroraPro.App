@@ -92,3 +92,26 @@ func TestSubtitleCacheSweeperSweepsBeforeFirstTick(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// The sweeper must return when its context is cancelled rather than live
+// until the process exits. Deleting the ctx.Done() arm left every other test
+// green, so without this the shutdown path is unpinned.
+func TestSubtitleCacheSweeperStopsOnContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		// A long interval means only cancellation can end this.
+		runSubtitleCacheSweeper(ctx, dir, time.Hour, time.Hour)
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweeper did not return after its context was cancelled; " +
+			"it would outlive shutdown and keep sweeping")
+	}
+}

@@ -323,19 +323,19 @@ func extractedVTTPath(filePath string, streamIndex int, cacheDir string) string 
 // for exactly the files with the longest names. 120 bytes leaves ample
 // room for both suffixes while keeping the file recognizable in an `ls`.
 //
-// Every producer of a ShiftVTTCues input goes through this: the extracted
-// path here, plus ConvertSRTtoVTT and ConvertSubtitleToVTT, which used to
-// build untruncated stems from a sidecar's basename. A ~230-character
-// sidecar name overran there — the shift failed, the handler logged
-// "subtitle cue-shift failed; serving unshifted", and cues were served
-// offset by the resume position, which is issue #131's bug reappearing
-// only for the longest filenames.
+// The bound is applied at every point that CREATES a name: the extracted
+// path here, ConvertSRTtoVTT and ConvertSubtitleToVTT (whose own output
+// names can overrun for a long enough sidecar), and ShiftVTTCues, which
+// derives its name from whichever of those it was handed.
 //
-// One gap remains, and it is not fixable here: an external .vtt sidecar is
-// served from its own media-directory path without passing through any
-// cache-naming function, so ShiftVTTCues derives its name from that raw
-// path. Bounding it would mean copying the sidecar into the cache dir
-// first, which is a different change.
+// ShiftVTTCues is the important one and was the last to get it. It is the
+// os.Create that actually failed, and the only one an external .vtt sidecar
+// reaches at all — such a sidecar is served straight from the media
+// directory and never passes through a cache-naming function, so bounding
+// the producers alone left it exposed. A ~230-character sidecar name made
+// the shift fail with ENAMETOOLONG, the handler logged "subtitle cue-shift
+// failed; serving unshifted", and cues were served offset by the resume
+// position: issue #131's bug, back for the longest filenames only.
 const cacheStemMax = 120
 
 // cacheStem truncates a filename stem to cacheStemMax bytes without splitting
@@ -441,9 +441,33 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 // The revalidation is not per-seek: each distinct resume position is
 // already a distinct URL, so this is roughly one extra headers-only
 // round trip per track per page load.
+//
+// `private` because /api/stream/ is on the query-token promotion allowlist
+// and the SPA still builds this URL through withToken(): a shared cache
+// must never store a response whose URL may carry a ?token=. Same reasoning
+// as the segment endpoint in streaming.go.
+//
+// The ETag exists because Last-Modified alone is not a sufficient validator
+// HERE, and the fingerprint key is exactly why: the served file can move
+// BACKWARDS in time. Replace media A with B (new track, newer mtime), then
+// restore A preserving its size and mtime — the `rsync -a` case this whole
+// change exists for — and the key resolves back to A's older track. A
+// browser holding B would send If-Modified-Since with B's newer stamp,
+// http.ServeFile would answer 304, and the viewer would keep B's subtitles
+// over A's video. Deriving the validator from (name, size, mtime) instead
+// makes any change of key a change of validator regardless of ordering.
+// If-None-Match takes precedence over If-Modified-Since, so this wins.
 func ServeSubtitle(w http.ResponseWriter, r *http.Request, vttPath string) {
 	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "private, no-cache")
+	if info, err := os.Stat(vttPath); err == nil {
+		// The name carries the media fingerprint (extracted tracks) or the
+		// source path plus offset (shifted ones); size and mtime cover an
+		// external sidecar edited in place, whose name never changes.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%d",
+			filepath.Base(vttPath), info.Size(), info.ModTime().UnixNano())))
+		w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%x", sum[:8])))
+	}
 	// CORS headers are set by the router-level CORS middleware based on AllowedOrigins.
 	// Do NOT set Access-Control-Allow-Origin here — it would bypass the CORS policy.
 	http.ServeFile(w, r, vttPath)
@@ -598,7 +622,13 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	// keyframe probe doesn't fragment the cache.
 	offsetMs := int64(offsetSec*1000 + 0.5)
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", vttPath, offsetMs)))
-	stem := strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath))
+	// Bounded here as well as at the producers: this is the os.Create that
+	// actually fails, and it is the ONLY one reachable for an external .vtt
+	// sidecar, which is read straight from the media directory and never
+	// passes through a cache-naming function. The stem is cosmetic —
+	// uniqueness rides the (vttPath, offsetMs) hash — so truncating it costs
+	// nothing and covers any future producer automatically.
+	stem := cacheStem(strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath)))
 	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%dms_%x.vtt", stem, offsetMs, h[:6]))
 
 	// Cache hit: existing shifted file non-empty and not older than the source.
