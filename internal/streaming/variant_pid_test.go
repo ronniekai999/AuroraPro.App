@@ -2,8 +2,8 @@ package streaming
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,48 +151,18 @@ func TestStartVariant_PublishesThePIDAndRelaunchClearsIt(t *testing.T) {
 // NOT be recorded as a crash: the process succeeded, and EnsureVariant answers
 // a crash by restarting FFmpeg with -ss past EOF (issues #172/#174).
 func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) {
-	outDir := t.TempDir()
-	// Only the variant launch forks the lingering child: NewTranscodeManager's
-	// encoder probes shell out to ffmpeg too, and they read it through
-	// CombinedOutput, which has no WaitDelay of its own to escape with.
-	//
-	// The stub also writes the playlist, so the polling goroutine takes its
-	// playlist-found branch and records no Err of its own. That leaves v.Err
-	// saying exactly one thing: whether the post-Wait block called the stalled
-	// pipe a crash.
-	stubFFmpeg(t, "case \"$*\" in\n"+
-		"  *"+outDir+"*)\n"+
-		"    touch "+filepath.Join(outDir, "stream.m3u8")+"\n"+
-		"    sleep 30 &\n"+
-		"    exit 0\n"+
-		"    ;;\n"+
-		"esac\n"+
-		"exit 1\n")
-	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
-	if err != nil {
-		t.Fatalf("new transcode manager: %v", err)
-	}
-	defer tm.Close()
+	// Writing the playlist first puts the polling goroutine on its
+	// playlist-found branch, where it records no Err of its own. That leaves
+	// v.Err saying exactly one thing: whether the post-Wait block called the
+	// stalled pipe a crash. The child need only outlive the deadline below.
+	s, v := stubVariantLaunch(t, "sess-stalled-pipe",
+		"    touch \"$out/stream.m3u8\"\n"+
+			"    sleep 12 &\n"+
+			"    exit 0\n")
 
-	v := &QualityVariant{
-		Profile:   QualityProfile{Name: "source"},
-		OutputDir: outDir,
-		Ready:     make(chan struct{}),
-	}
-	s := &TranscodeSession{
-		ID:         "sess-stalled-pipe",
-		FilePath:   "/tmp/x.mkv",
-		Variants:   map[string]*QualityVariant{"source": v},
-		LastAccess: time.Now(),
-		Remux:      true,
-	}
-	if _, err := tm.EnsureVariant(s, "source", 0); err != nil {
-		t.Fatalf("EnsureVariant: %v", err)
-	}
-
-	// Generous margin over variantWaitDelay, but far short of the child's
-	// lifetime — an unbounded Wait fails here rather than passing slowly.
-	deadline := time.Now().Add(variantWaitDelay + 10*time.Second)
+	// Comfortably past variantWaitDelay and comfortably short of the child's
+	// lifetime, so an unbounded Wait fails here rather than passing slowly.
+	deadline := time.Now().Add(variantWaitDelay + 4*time.Second)
 	for {
 		s.variantMu.Lock()
 		done, vErr := ffmpegDone(v), v.Err
@@ -209,6 +179,92 @@ func TestStartVariant_StalledStderrPipeStillMarksTheVariantExited(t *testing.T) 
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// The other direction of the same decision, and the one with more to lose: the
+// stalled-pipe carve-out must not swallow a real crash. If it ever did, the
+// variant would publish `exited` with a nil Err, EnsureVariant would read that
+// as a clean completion and hand back the dead variant, and neither the P3
+// auto-restart nor the 500 that triggers the frontend's own recovery would
+// happen — playback simply stops at the crash point. That is issues #172/#174
+// with the sign flipped, and it would not show up in any other test here.
+func TestStartVariant_RealCrashIsStillRecordedAsOne(t *testing.T) {
+	const marker = "aurora-test-crash-marker"
+	// Playlist first, so Err can only have come from the post-Wait block.
+	s, v := stubVariantLaunch(t, "sess-real-crash",
+		"    touch \"$out/stream.m3u8\"\n"+
+			"    echo '"+marker+"' >&2\n"+
+			"    exit 1\n")
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		s.variantMu.Lock()
+		done, vErr := ffmpegDone(v), v.Err
+		s.variantMu.Unlock()
+		if done {
+			if vErr == nil {
+				t.Fatal("ffmpeg exited 1 but the variant reports no error — EnsureVariant will " +
+					"read this as a clean completion and serve the dead variant")
+			}
+			if !strings.Contains(vErr.Error(), marker) {
+				t.Errorf("v.Err = %v, want the FFmpeg stderr tail carried along with it", vErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("variant never reached exited after ffmpeg exited 1")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// stubVariantLaunch puts a stub ffmpeg on PATH, launches one variant through
+// the real EnsureVariant path, and returns its session and variant.
+//
+// `arm` is the shell run for the VARIANT launch only, with "$out" bound to the
+// variant's output directory. Scoping it that way matters: NewTranscodeManager
+// probes ffmpeg too, and one of those probes — ffmpegHasEncoder
+// (hwaccel.go), reached via encoderAvailable — reads it through
+// CombinedOutput with no WaitDelay, so a stub that stalls there stalls
+// startup instead of the thing under test. (The HEVC test encode beside it
+// is bounded: runProbeFFmpegDiag sets one.) Probe invocations fall through
+// to `exit 1`, which is what fakeFFmpegOnPath does for every call.
+func stubVariantLaunch(t *testing.T, sessionID, arm string) (*TranscodeSession, *QualityVariant) {
+	t.Helper()
+	outDir := t.TempDir()
+	// $out is quoted at every use: a TMPDIR containing a space or a glob
+	// character would otherwise silently mis-target the playlist and fail this
+	// test for a reason that has nothing to do with the code under test.
+	stubFFmpeg(t, "out='"+outDir+"'\n"+
+		"case \"$*\" in\n"+
+		"  *\"$out\"*)\n"+
+		arm+
+		"    ;;\n"+
+		"esac\n"+
+		"exit 1\n")
+
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	t.Cleanup(tm.Close)
+
+	v := &QualityVariant{
+		Profile:   QualityProfile{Name: "source"},
+		OutputDir: outDir,
+		Ready:     make(chan struct{}),
+	}
+	s := &TranscodeSession{
+		ID:         sessionID,
+		FilePath:   "/tmp/x.mkv",
+		Variants:   map[string]*QualityVariant{"source": v},
+		LastAccess: time.Now(),
+		Remux:      true,
+	}
+	if _, err := tm.EnsureVariant(s, "source", 0); err != nil {
+		t.Fatalf("EnsureVariant: %v", err)
+	}
+	return s, v
 }
 
 // waitForVariantPID blocks until the launch goroutine has published a PID for

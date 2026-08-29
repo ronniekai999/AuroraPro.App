@@ -3814,6 +3814,17 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 			// and this goroutine is the one v.Err writer that ran outside
 			// it. close(readyCh) still publishes the value to pre-Ready
 			// waiters; the lock covers later readers.
+			//
+			// Note what this path does NOT do: there is no process, so no
+			// cmd.Wait goroutine, so `exited` is never set and ffmpegDone
+			// stays false for the life of the variant. EnsureVariant keeps
+			// returning it, every fetch 500s on v.Err, and once the reaper
+			// marks it `reaped` the resume branch — which requires
+			// ffmpegDone — can never fire. So a transient fork failure
+			// (EAGAIN under memory pressure) bricks that rung until the
+			// frontend builds a new session. Pre-existing and unchanged:
+			// Cmd.ProcessState was nil here too, so the signal this variant
+			// lost elsewhere was never available on this path either.
 			session.variantMu.Lock()
 			if sameGeneration() {
 				v.Err = fmt.Errorf("start ffmpeg: %w", err)
