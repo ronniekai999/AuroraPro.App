@@ -7,6 +7,7 @@ package streaming
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -486,6 +487,23 @@ func TestReapIdleVariants(t *testing.T) {
 	}
 }
 
+// wantSeek asserts a resume seek lands at or after `boundary` and no more
+// than `slackSec` past it. At-or-after is the load-bearing half: seeking even
+// fractionally before a boundary makes -noaccurate_seek snap back to the
+// previous key frame and duplicate a whole GOP.
+func wantSeek(t *testing.T, got, boundary, slackSec float64, what string) {
+	t.Helper()
+	if got < boundary {
+		t.Errorf("%s: seek %.6f is BEFORE the boundary %.6f — the resume duplicates a GOP",
+			what, got, boundary)
+		return
+	}
+	if got > boundary+slackSec {
+		t.Errorf("%s: seek %.6f is %.6fs past the boundary %.6f — that much A/V is dropped",
+			what, got, got-boundary, boundary)
+	}
+}
+
 // writeCoverage lays down a variant playlist of `through`+1 segments, each
 // `dur` seconds, plus the matching segment files.
 func writeCoverage(t *testing.T, dir string, through int, dur float64) {
@@ -554,10 +572,7 @@ func TestResumePoint_UsesPublishedDurationsNotSegmentIndex(t *testing.T) {
 		t.Errorf("resumeSegNum = %d, want 151", gotSeg)
 	}
 	// 151 * 8s = 1208s. The index math would give 151*6 = 906s.
-	if gotSec != 1208 {
-		t.Errorf("resumeFromSec = %d, want 1208 — seeking by segment index puts a remux resume %ds off",
-			gotSec, 1208-gotSec)
-	}
+	wantSeek(t, gotSec, 1208, 0.002, "remux resume by published duration")
 }
 
 // A remux boundary IS a source keyframe, so the seek must land at-or-after it.
@@ -576,10 +591,9 @@ func TestResumePoint_RoundsSeekUpOntoTheKeyframeBoundary(t *testing.T) {
 	writeCoverage(t, v.OutputDir, 9, 4.17)
 
 	gotSec, _ := tm.resumePoint(v, 0)
-	if gotSec != 42 {
-		t.Errorf("resumeFromSec = %d, want 42 (ceil of 41.7) — a seek before the boundary "+
-			"keyframe duplicates a GOP into the resumed output", gotSec)
-	}
+	// 10 * 4.17 = 41.7. The seek must land at or just after it, NOT back at
+	// 41 and not rounded away to 42 (which would drop 0.3s).
+	wantSeek(t, gotSec, 41.7, 0.002, "seek lands on the keyframe boundary")
 }
 
 // 23.976fps on a 6s key-frame grid emits #EXTINF:6.006000 exactly, and 1000
@@ -600,9 +614,122 @@ func TestResumePoint_FloatAccumulationDoesNotOvershootAWholeSecond(t *testing.T)
 	if gotSeg != 1000 {
 		t.Errorf("resumeSegNum = %d, want 1000", gotSeg)
 	}
-	if gotSec != 6006 {
-		t.Errorf("resumeFromSec = %d, want 6006 — float accumulation pushed the seek "+
-			"past the real boundary and the resume skips %ds of content", gotSec, gotSec-6006)
+	wantSeek(t, gotSec, 6006, 0.002, "1000 x 6.006 segments")
+}
+
+// The case a uniform-EXTINF fixture cannot express. -force_key_frames puts
+// the key frame on the first frame at or AFTER each grid mark, so on 23.976fps
+// content the real boundaries sit a few ms past each 6s multiple and the
+// per-segment EXTINFs are not identical. Quantising the seek to a whole second
+// there drops almost the entire second — and only remux gets
+// -noaccurate_seek, so a transcode seeks to exactly what it is told and keeps
+// nothing back.
+func TestResumePoint_NTSCBoundariesDoNotLoseNearlyASecond(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// 23.976fps: frames land on multiples of 1001/24000s. The key frame at or
+	// after each 6s mark puts boundary N at ceil(6N * 24000/1001) frames.
+	const frameNum, frameDen = 1001.0, 24000.0
+	boundary := func(n int) float64 {
+		frames := math.Ceil(float64(n) * 6 * frameDen / frameNum)
+		return frames * frameNum / frameDen
+	}
+
+	dir := t.TempDir()
+	var pl strings.Builder
+	pl.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:7\n")
+	const nSeg = 99
+	for i := 0; i < nSeg; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		// Exactly how FFmpeg prints it: six decimals.
+		pl.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n%s\n", boundary(i+1)-boundary(i), name))
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 8192), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(pl.String()), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+
+	trueBoundary := boundary(nSeg) // ~594.010089, NOT 594.0
+	if trueBoundary == math.Trunc(trueBoundary) {
+		t.Fatalf("fixture is not exercising a fractional boundary: %v", trueBoundary)
+	}
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: dir}
+	gotSec, gotSeg := tm.resumePoint(v, 0)
+
+	if gotSeg != nSeg {
+		t.Errorf("resumeSegNum = %d, want %d", gotSeg, nSeg)
+	}
+	// 2ms of slack. A whole-second Ceil would land on 595 — ~0.99s of A/V
+	// silently missing from this tier, on every reap-resume.
+	wantSeek(t, gotSec, trueBoundary, 0.002, "23.976fps resume")
+}
+
+// FFmpeg prints #EXTINF to six decimals, so the published sum can sit a
+// fraction BELOW the true boundary. Seeking to that sum lands before the key
+// frame, and -noaccurate_seek then snaps back to the previous one and
+// duplicates a whole GOP into the resumed output. resumeSeekEpsilon is what
+// keeps the target on the far side of that rounding.
+func TestResumePoint_EpsilonCoversEXTINFPrintRounding(t *testing.T) {
+	tm, err := NewTranscodeManager(t.TempDir(), config.TranscodeConfig{SegmentDuration: 6})
+	if err != nil {
+		t.Fatalf("new transcode manager: %v", err)
+	}
+	defer tm.Close()
+
+	// True duration carries more precision than the printed form: each entry
+	// is written as "6.000000" while really running 6.0000004s, so the
+	// playlist under-reports the boundary by 4e-5s over 100 segments.
+	const trueDur = 6.0000004
+	const nSeg = 100
+
+	dir := t.TempDir()
+	var pl strings.Builder
+	pl.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:7\n")
+	for i := 0; i < nSeg; i++ {
+		name := fmt.Sprintf("seg_%05d.ts", i)
+		pl.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n%s\n", trueDur, name))
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 8192), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, variantPlaylistName), []byte(pl.String()), 0o644); err != nil {
+		t.Fatalf("write playlist: %v", err)
+	}
+
+	trueBoundary := trueDur * nSeg // 600.00004; the playlist says 600.000000
+
+	v := &QualityVariant{Profile: QualityProfile{Name: "1080p"}, OutputDir: dir}
+	gotSec, _ := tm.resumePoint(v, 0)
+
+	wantSeek(t, gotSec, trueBoundary, 0.002, "printed sum under-reports the boundary")
+}
+
+func TestFormatSeekSeconds(t *testing.T) {
+	tests := []struct {
+		in   float64
+		want string
+	}{
+		// A fresh start's command line must be unchanged by the resume work.
+		{0, "0"},
+		{1200, "1200"},
+		// A resume keeps its millisecond — this is the difference between
+		// landing on the boundary and losing back to the previous second.
+		{594.011, "594.011"},
+		{6006.001, "6006.001"},
+		{41.7, "41.700"},
+	}
+	for _, tt := range tests {
+		if got := formatSeekSeconds(tt.in); got != tt.want {
+			t.Errorf("formatSeekSeconds(%v) = %q, want %q — a truncated -ss discards "+
+				"everything back to the previous whole second", tt.in, got, tt.want)
+		}
 	}
 }
 
@@ -622,9 +749,7 @@ func TestResumePoint_AddsPublishedDurationToStartSec(t *testing.T) {
 	if gotSeg != 10 {
 		t.Errorf("resumeSegNum = %d, want 10", gotSeg)
 	}
-	if gotSec != 1260 {
-		t.Errorf("resumeFromSec = %d, want 1260 (startSec 1200 + 60s published)", gotSec)
-	}
+	wantSeek(t, gotSec, 1260, 0.002, "startSec 1200 + 60s published")
 }
 
 func TestPlaylistCoverage(t *testing.T) {
@@ -768,7 +893,7 @@ func TestResumePoint_IgnoresPlaylistWithNoParsableDurations(t *testing.T) {
 	}
 	// Falls back to the index arithmetic rather than returning startSec.
 	if gotSec != 18 {
-		t.Errorf("resumeFromSec = %d, want 18 (fallback), not the seek origin", gotSec)
+		t.Errorf("resumeFromSec = %v, want 18 (fallback), not the seek origin", gotSec)
 	}
 }
 

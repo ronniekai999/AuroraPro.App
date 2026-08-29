@@ -3057,6 +3057,25 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 	return v, nil
 }
 
+// resumeSeekEpsilon is the forward bias applied to a resume seek so it lands
+// at or AFTER the real segment boundary rather than a hair before it. FFmpeg
+// prints #EXTINF to 6 decimals, so each entry carries up to ±5e-7s of
+// rounding, accumulating to roughly 1e-4s across a feature-length playlist.
+// Landing before the boundary is the expensive direction: -noaccurate_seek
+// (remux) snaps back to the previous key frame and duplicates a whole GOP.
+const resumeSeekEpsilon = 1e-4
+
+// formatSeekSeconds renders an -ss value. Whole seconds stay integral so a
+// fresh start's command line is unchanged; a resume keeps its millisecond,
+// which FFmpeg accepts and which is the difference between landing on the
+// segment boundary and losing everything back to the previous whole second.
+func formatSeekSeconds(sec float64) string {
+	if sec == math.Trunc(sec) {
+		return strconv.FormatInt(int64(sec), 10)
+	}
+	return strconv.FormatFloat(sec, 'f', 3, 64)
+}
+
 // resumePoint computes where a relaunched FFmpeg should continue for a
 // variant whose process stopped (crash or reap): the source-second to seek to
 // and the segment number to start writing at, derived from what the playlist
@@ -3064,12 +3083,12 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 // segment duration (see playlistCoverage for why the latter is wrong).
 // Shared by the crash-restart and reap-resume paths in EnsureVariant so the
 // resume math can never diverge between them. Caller holds variantMu.
-func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec, resumeSegNum int) {
+func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec float64, resumeSegNum int) {
 	segDur := tm.cfg.SegmentDuration
 	if segDur <= 0 {
 		segDur = 6 // matches the fallback in startVariantImpl
 	}
-	resumeFromSec = startSec
+	resumeFromSec = float64(startSec)
 
 	// Prefer the muxer's own durations — exact for remux, where segments are
 	// cut on source keyframes rather than the nominal grid (see
@@ -3083,19 +3102,29 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 	// as unusable rather than as "resume from the seek origin", which would
 	// re-encode the whole file numbered past the existing tail.
 	if pubSeg, pubSec := playlistCoverage(filepath.Join(v.OutputDir, variantPlaylistName)); pubSeg >= 0 && pubSec > 0 {
-		// The epsilon is load-bearing, not defensive. A 23.976fps transcode on
-		// a 6s key-frame grid emits #EXTINF:6.006000 for every segment, and
-		// 1000 of those sum to 6006.000000000062 in float64 against an exact
-		// 6006 — so a bare Ceil returns 6007 and the resume skips a full
-		// second of A/V. That is ~100 minutes into a feature, i.e. an ordinary
-		// late-movie reap. One microsecond is far below any real segment
-		// boundary and cannot mask a genuine fractional remainder.
-		return startSec + int(math.Ceil(pubSec-1e-6)), pubSeg + 1
+		// Ceil to the next MILLISECOND, not the next second. Quantising the
+		// seek to a whole second throws away everything between the real
+		// boundary and that second, and on NTSC rates that is almost the
+		// whole second: -force_key_frames puts the key frame on the first
+		// frame at or after each grid mark, so 23.976/29.97fps boundaries
+		// land a few ms PAST an integer (594.010089, not 594.000), and a
+		// whole-second Ceil drops ~0.99s of A/V on every resume. Only remux
+		// gets -noaccurate_seek and snaps back onto the boundary; a transcode
+		// seeks accurately to exactly what it is told, so what is asked for
+		// is what is lost.
+		//
+		// resumeSeekEpsilon then guarantees the target is at or AFTER the
+		// boundary, which is what lets -noaccurate_seek snap onto it instead
+		// of back to the previous key frame (a duplicated GOP). It is sized
+		// against FFmpeg's 6-decimal EXTINF printing, whose per-entry ±5e-7
+		// accumulates to ~1e-4s over a feature — not against float64
+		// summation drift, which stays below 5e-8 even at 20k segments.
+		return float64(startSec) + math.Ceil((pubSec+resumeSeekEpsilon)*1000)/1000, pubSeg + 1
 	}
 
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
 		resumeSegNum = highestSeg + 1
-		resumeFromSec = startSec + resumeSegNum*segDur
+		resumeFromSec = float64(startSec + resumeSegNum*segDur)
 	}
 	return resumeFromSec, resumeSegNum
 }
@@ -3105,7 +3134,7 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 // a fresh chan because the prior one was closed — reading from a closed chan
 // never blocks, so waiters on the stale chan would see "ready" immediately.
 // Caller holds variantMu (same contract as startVariantImpl).
-func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *QualityVariant, resumeFromSec, resumeSegNum int) error {
+func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *QualityVariant, resumeFromSec float64, resumeSegNum int) error {
 	v.reaped = false
 	v.Ready = make(chan struct{})
 	v.started = false
@@ -3474,15 +3503,15 @@ func timestampPrefixArgs(session *TranscodeSession) []string {
 // continues from where the prior (crashed) process left off, giving HLS.js
 // seamless playlist continuation. Compatibility shim startVariantAt below
 // is a thin wrapper retained for call-site clarity.
-func (tm *TranscodeManager) startVariantAt(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
+func (tm *TranscodeManager) startVariantAt(session *TranscodeSession, v *QualityVariant, startSec float64, resumeSegNum int) error {
 	return tm.startVariantImpl(session, v, startSec, resumeSegNum)
 }
 
 func (tm *TranscodeManager) startVariant(session *TranscodeSession, v *QualityVariant, startSec int) error {
-	return tm.startVariantImpl(session, v, startSec, 0)
+	return tm.startVariantImpl(session, v, float64(startSec), 0)
 }
 
-func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
+func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec float64, resumeSegNum int) error {
 	p := v.Profile
 	playlistPath := filepath.Join(v.OutputDir, variantPlaylistName)
 	segExt := ".ts"
@@ -3505,7 +3534,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// longer uses +genpts — #348).
 	args := timestampPrefixArgs(session)
 	if startSec > 0 {
-		args = append(args, "-ss", strconv.Itoa(startSec))
+		args = append(args, "-ss", formatSeekSeconds(startSec))
 	}
 
 	// Pace full-transcode input reads to readRateFactor× realtime so an
