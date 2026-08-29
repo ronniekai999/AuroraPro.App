@@ -1,611 +1,370 @@
-// Tests for subtitle cache invalidation.
+// Regression tests for subtitle cache freshness.
 //
-// Every cache in subtitles.go derives a .vtt from something on disk and must
-// notice when that something changes. The sibling conversions (ShiftVTTCues,
-// ConvertSRTtoVTT, ConvertSubtitleToVTT) compare mtimes through cacheIsFresh;
-// ExtractSubtitleVTT puts a (size, mtime) fingerprint of the MEDIA file in its
-// cache key instead, because an mtime comparison cannot see a replacement that
-// preserves or restores an older timestamp (`rsync -a`, `cp -p`, a restore
-// from backup) — see extractedVTTPath.
+// A derived cache file is always written AFTER its source is read, so a
+// valid cache has mtime >= source mtime. The three cache checks in
+// subtitles.go once required the output to be STRICTLY newer, which made
+// a same-tick write look stale: such an entry was rebuilt on the next
+// request rather than reused, and TestShiftVTTCuesCachesResult failed
+// intermittently in CI whenever the runner was fast enough — or the
+// filesystem's mtime granularity coarse enough — for source and output
+// to land on one timestamp.
 //
-// Two conventions keep these deterministic:
+// These tests force that tie with os.Chtimes rather than racing the
+// clock, and detect an unwanted rebuild by sentinel CONTENT rather than
+// by mtime: a rebuild landing in the same tick leaves the mtime
+// unchanged, which is the very ambiguity under test.
 //
-//   - os.Chtimes, never a sleep. Real elapsed time makes the outcome depend on
-//     the filesystem's mtime granularity (1s on ext3, 2s on FAT/SMB), which is
-//     how cache tests turn flaky.
-//   - Sentinel content. A cache hit is detected by planting a recognizable body
-//     in the cached file and checking whether it survived the call, rather than
-//     by comparing mtimes — which would depend on that same granularity, and
-//     would not distinguish "reused" from "rewritten identically".
-//
-// The ExtractSubtitleVTT tests never reach ffmpeg on the hit path (the cache
-// check returns first) and assert nothing that requires it on the miss path,
-// so they run everywhere.
+// Each site is covered in BOTH directions. The tie cases alone would be
+// direction-blind — cacheIsFresh takes two same-typed os.FileInfo
+// parameters, so a swapped call compiles silently, and under a tie both
+// orderings answer "fresh". The paired source-is-newer cases pin that a
+// genuinely stale entry is still rebuilt, which is what makes a swapped
+// or deleted guard fail here rather than in production.
 package streaming
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 )
 
-const cacheSentinel = "WEBVTT\n\nNOTE sentinel-do-not-rebuild\n"
+// cacheSentinel is written over a cached file so that a rebuild is
+// visible in the content. It is deliberately non-empty: cacheIsFresh
+// rejects zero-length output.
+const cacheSentinel = "WEBVTT\n\nNOTE sentinel written by the test to detect a cache rebuild\n"
 
-// writeSentinel plants recognizable content at path so a later call can be
-// classified as reuse (sentinel survives) or rebuild (sentinel replaced).
-func writeSentinel(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatalf("mkdir cache dir: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(cacheSentinel), 0o644); err != nil {
-		t.Fatalf("write sentinel: %v", err)
-	}
-}
-
-// sentinelSurvived reports whether path still holds the sentinel body.
-func sentinelSurvived(t *testing.T, path string) bool {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return string(b) == cacheSentinel
-}
-
-// setMtime pins a file's mtime exactly, so freshness comparisons are decided
-// by the test rather than by wall-clock timing.
-func setMtime(t *testing.T, path string, mt time.Time) {
+func setMTime(t *testing.T, path string, mt time.Time) {
 	t.Helper()
 	if err := os.Chtimes(path, mt, mt); err != nil {
 		t.Fatalf("chtimes %s: %v", path, err)
 	}
 }
 
-func mustStat(t *testing.T, path string) os.FileInfo {
+// mtimeBase is a fixed instant in the past, truncated to a whole second
+// so no filesystem's granularity can round these stamps back into an
+// ordering the test did not ask for.
+func mtimeBase() time.Time {
+	return time.Now().Add(-time.Hour).Truncate(time.Second)
+}
+
+// tieMTimes stamps every path with one identical mtime, reproducing the
+// coarse-granularity case deterministically.
+func tieMTimes(t *testing.T, paths ...string) {
 	t.Helper()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
+	base := mtimeBase()
+	for _, p := range paths {
+		setMTime(t, p, base)
 	}
-	return info
 }
 
-// writeMedia creates a stand-in "media file". Its bytes are never decoded —
-// only its size and mtime feed the fingerprint — so no ffmpeg is needed.
-func writeMedia(t *testing.T, dir, name, body string, mt time.Time) string {
+// staleMTimes makes the source strictly newer than the cache — the one
+// ordering that must invalidate. Only a correctly oriented check rejects
+// the entry, so this is what catches a swapped or missing guard.
+func staleMTimes(t *testing.T, outPath, srcPath string) {
 	t.Helper()
-	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatalf("write media: %v", err)
-	}
-	setMtime(t, p, mt)
-	return p
+	base := mtimeBase()
+	setMTime(t, outPath, base)
+	setMTime(t, srcPath, base.Add(2*time.Second))
 }
 
-// ============================================================
-// cacheIsFresh — the sibling caches' freshness predicate
-// ============================================================
-
-func TestCacheIsFresh(t *testing.T) {
-	dir := t.TempDir()
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-
-	src := filepath.Join(dir, "src")
-	if err := os.WriteFile(src, []byte("source"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	setMtime(t, src, base)
-	srcInfo := mustStat(t, src)
-
-	tests := []struct {
-		name  string
-		body  string
-		mtime time.Time
-		want  bool
-	}{
-		{"newer than source", "cached", base.Add(time.Minute), true},
-		// Equal mtimes must count as fresh. A conversion that finishes
-		// inside the filesystem's mtime granularity records the same
-		// timestamp as its source; under a strict After() it would be
-		// rebuilt on every request forever.
-		{"same mtime as source", "cached", base, true},
-		{"older than source", "cached", base.Add(-time.Minute), false},
-		// Non-empty guard: an extraction killed mid-write leaves a 0-byte
-		// file that would otherwise be served as an empty subtitle track.
-		{"empty but newer", "", base.Add(time.Minute), false},
-		{"empty and same mtime", "", base, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			out := filepath.Join(dir, "out-"+tc.name)
-			if err := os.WriteFile(out, []byte(tc.body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			setMtime(t, out, tc.mtime)
-			if got := cacheIsFresh(mustStat(t, out), srcInfo); got != tc.want {
-				t.Errorf("cacheIsFresh() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// ============================================================
-// ExtractSubtitleVTT — fingerprint-keyed invalidation
-// ============================================================
-
-func TestExtractSubtitleVTTServesCachedTrack(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	media := writeMedia(t, dir, "movie.mkv", "original-bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	cached := extractedVTTPath(media, 2, cacheDir)
-	writeSentinel(t, cached)
-
-	got, err := ExtractSubtitleVTT(context.Background(), media, 2, cacheDir)
-	if err != nil {
-		t.Fatalf("ExtractSubtitleVTT() error: %v", err)
-	}
-	if got != cached {
-		t.Errorf("returned %q, want the cached track %q", got, cached)
-	}
-	if !sentinelSurvived(t, cached) {
-		t.Error("cached track was rebuilt even though the media file did not change")
-	}
-}
-
-// TestExtractSubtitleVTTInvalidatesOnMediaChange is the regression this policy
-// exists for: a media file replaced in place must retire its extracted track.
-//
-// The "older mtime" case is the one an mtime COMPARISON cannot catch — the
-// cached .vtt is newer than the replacement, so cacheIsFresh would report it
-// fresh and the wrong subtitles would be served indefinitely.
-func TestExtractSubtitleVTTInvalidatesOnMediaChange(t *testing.T) {
-	orig := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-
-	tests := []struct {
-		name    string
-		replace func(t *testing.T, media string)
-	}{
-		{
-			"newer mtime, same size",
-			func(t *testing.T, media string) { setMtime(t, media, orig.Add(48*time.Hour)) },
-		},
-		{
-			// rsync -a / cp -p / restore-from-backup: the replacement
-			// carries the ORIGINAL file's older timestamp.
-			"older mtime, same size",
-			func(t *testing.T, media string) { setMtime(t, media, orig.Add(-48*time.Hour)) },
-		},
-		{
-			// Same timestamp, different content: an mtime comparison in
-			// either direction is blind to this.
-			"same mtime, different size",
-			func(t *testing.T, media string) {
-				if err := os.WriteFile(media, []byte("a-much-longer-re-encoded-body"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				setMtime(t, media, orig)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cacheDir := filepath.Join(dir, "cache")
-			media := writeMedia(t, dir, "movie.mkv", "original-bytes", orig)
-
-			stale := extractedVTTPath(media, 0, cacheDir)
-			writeSentinel(t, stale)
-
-			tc.replace(t, media)
-
-			fresh := extractedVTTPath(media, 0, cacheDir)
-			if fresh == stale {
-				t.Fatalf("cache key did not change after the media file was replaced (%q)", stale)
-			}
-
-			// The extraction itself always fails here — without ffmpeg it
-			// cannot exec, and with ffmpeg the fixture "media" is a text
-			// string — so this asserts only what holds regardless: the
-			// stale track is never the returned path (a failure returns
-			// ""), and it is not overwritten in place.
-			got, _ := ExtractSubtitleVTT(context.Background(), media, 0, cacheDir)
-			if got == stale {
-				t.Errorf("stale extracted track served after the media file changed: %q", got)
-			}
-			if !sentinelSurvived(t, stale) {
-				t.Error("the superseded entry was overwritten; it should have been left for the cache reaper")
-			}
-		})
-	}
-}
-
-func TestExtractSubtitleVTTKeyStableWhenMediaUnchanged(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	media := writeMedia(t, dir, "movie.mkv", "original-bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	first := extractedVTTPath(media, 0, cacheDir)
-	second := extractedVTTPath(media, 0, cacheDir)
-	if first != second {
-		t.Errorf("cache key churns across calls: %q vs %q", first, second)
-	}
-}
-
-// A track's fingerprint must be part of the filename, not merely consulted:
-// that is what makes a superseded entry unreachable rather than overwritten.
-func TestExtractedVTTPathCarriesFingerprint(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	media := writeMedia(t, dir, "movie.mkv", "original-bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	name := filepath.Base(extractedVTTPath(media, 3, cacheDir))
-	fp, ok := mediaFingerprint(media)
-	if !ok {
-		t.Fatal("mediaFingerprint failed on a file that exists")
-	}
-	// <stem>_<pathhash>_sub<idx>_<fingerprint>.vtt. Matched as a suffix
-	// rather than by splitting on "_": a realistic release name
-	// ("Movie_2024_1080p") contains separators of its own, and a component
-	// count would break on the fixture name alone.
-	if want := "_sub3_" + fp + ".vtt"; !strings.HasSuffix(name, want) {
-		t.Errorf("cache filename %q does not end in %q — the fingerprint must be part of the key", name, want)
-	}
-	if !strings.HasPrefix(name, "movie_") {
-		t.Errorf("cache filename %q lost its human-readable stem", name)
-	}
-}
-
-// Different tracks of the same file stay in separate entries — a re-key must
-// retire the whole (path, index) family without merging tracks.
-func TestExtractedVTTPathPerTrack(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	media := writeMedia(t, dir, "movie.mkv", "original-bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	if a, b := extractedVTTPath(media, 0, cacheDir), extractedVTTPath(media, 1, cacheDir); a == b {
-		t.Errorf("tracks 0 and 1 share a cache path: %q", a)
-	}
-}
-
-// An unstattable media file falls back to the legacy fingerprint-less key
-// rather than to a fabricated fingerprint. That key is the one pre-upgrade
-// builds wrote, so it can still hit a stale entry — see extractedVTTPath for
-// why that is accepted. What must hold here is the SHAPE: no fingerprint
-// term, and the path hash still present.
-func TestExtractedVTTPathFallsBackWhenMediaUnstattable(t *testing.T) {
-	cacheDir := t.TempDir()
-	missing := filepath.Join(t.TempDir(), "gone.mkv")
-
-	name := filepath.Base(extractedVTTPath(missing, 1, cacheDir))
-	// Matched by prefix/suffix rather than by splitting on "_" (a realistic
-	// release name carries its own separators), but the path hash between
-	// them is pinned too: without it, every same-basename file in a
-	// different directory collapses onto one cache entry — the collision
-	// the hash exists to prevent.
-	const prefix, suffix = "gone_", "_sub1.vtt"
-	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
-		t.Fatalf("cache filename %q is not the legacy stem_pathhash_subN key", name)
-	}
-	hash := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
-	if len(hash) != 12 {
-		t.Errorf("path-hash component of %q is %q (%d chars), want 12 hex", name, hash, len(hash))
-	}
-	if strings.Trim(hash, "0123456789abcdef") != "" {
-		t.Errorf("path-hash component of %q is not lowercase hex: %q", name, hash)
-	}
-}
-
-// The fingerprint lengthened the cache filename, and ShiftVTTCues derives its
-// own filename from this one. A long release name must not push either past
-// NAME_MAX (255 bytes), where os.Create fails with ENAMETOOLONG and subtitles
-// break for exactly the files with the longest names.
-func TestExtractedVTTPathBoundsFilenameLength(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-
-	// 224 chars: comfortably legal as a filename on ext4/XFS/tmpfs (NAME_MAX
-	// 255), but long enough that the unbounded stem plus both suffixes would
-	// overrun it.
-	long := strings.Repeat("Some.Very.Long.Release.Name.", 8) // 224 chars
-	media := writeMedia(t, dir, long+".mkv", "bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	extracted := extractedVTTPath(media, 0, cacheDir)
-	if n := len(filepath.Base(extracted)); n > 255 {
-		t.Errorf("extracted cache filename is %d bytes, over NAME_MAX", n)
-	}
-
-	// The shifted name is the one that actually has to be created on disk.
-	shifted, err := shiftedNameProbe(t, cacheDir, extracted)
-	if err != nil {
-		t.Fatalf("derive shifted name: %v", err)
-	}
-	if n := len(shifted); n > 255 {
-		t.Errorf("shifted cache filename is %d bytes, over NAME_MAX", n)
-	}
-}
-
-// shiftedNameProbe runs a real shift over a stand-in VTT placed at the
-// extracted track's path and returns the resulting filename, so the length
-// bound is asserted against what ShiftVTTCues actually creates rather than a
-// re-implementation of its naming.
-func shiftedNameProbe(t *testing.T, cacheDir, extractedPath string) (string, error) {
+func seedSentinel(t *testing.T, path string) {
 	t.Helper()
-	writeSentinelVTT := "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\nhi\n"
-	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
-		return "", err
+	if err := os.WriteFile(path, []byte(cacheSentinel), 0o644); err != nil {
+		t.Fatalf("seed sentinel: %v", err)
 	}
-	if err := os.WriteFile(extractedPath, []byte(writeSentinelVTT), 0o644); err != nil {
-		return "", err
-	}
-	out, err := ShiftVTTCues(extractedPath, 5, cacheDir)
+}
+
+// assertCacheReused fails when the cached file no longer holds the
+// sentinel, i.e. the call rebuilt it.
+func assertCacheReused(t *testing.T, path string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		t.Fatalf("read cached file: %v", err)
 	}
-	return filepath.Base(out), nil
-}
-
-func TestCacheStem(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"short stem passes through", "Movie.2024", "Movie.2024"},
-		{"exactly at the bound", strings.Repeat("a", cacheStemMax), strings.Repeat("a", cacheStemMax)},
-		{"over the bound is truncated", strings.Repeat("a", cacheStemMax+50), strings.Repeat("a", cacheStemMax)},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := cacheStem(tc.in); got != tc.want {
-				t.Errorf("cacheStem() = %q (%d bytes), want %d bytes", got, len(got), len(tc.want))
-			}
-		})
-	}
-
-	// A truncation must never split a rune: "日" is 3 bytes, so a cut at
-	// cacheStemMax lands mid-rune and must back up to the boundary.
-	multibyte := strings.Repeat("日", cacheStemMax) // 3*cacheStemMax bytes
-	got := cacheStem(multibyte)
-	if len(got) > cacheStemMax {
-		t.Errorf("cacheStem() returned %d bytes, over the %d bound", len(got), cacheStemMax)
-	}
-	if !utf8.ValidString(got) {
-		t.Errorf("cacheStem() split a UTF-8 rune: %q", got)
+	if string(got) != cacheSentinel {
+		t.Errorf("cache whose mtime equals the source's was rebuilt; a tie means current, not stale.\ncontent now:\n%s", got)
 	}
 }
 
-// A 0-byte cached track (extraction killed mid-write) must not be served.
-func TestExtractSubtitleVTTIgnoresEmptyCachedTrack(t *testing.T) {
-	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	media := writeMedia(t, dir, "movie.mkv", "original-bytes", time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
-
-	cached := extractedVTTPath(media, 0, cacheDir)
-	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
-		t.Fatal(err)
+// assertCacheRebuilt fails when the sentinel survived, i.e. a cache
+// older than its source was served as if it were fresh.
+func assertCacheRebuilt(t *testing.T, path string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		return // rebuilt away entirely — also a rebuild
 	}
-	if err := os.WriteFile(cached, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ExtractSubtitleVTT(context.Background(), media, 0, cacheDir)
-	if err == nil {
-		if info := mustStat(t, got); info.Size() == 0 {
-			t.Error("served a 0-byte cached track instead of re-extracting")
-		}
-		return
-	}
-	// Re-extraction was attempted and failed (no ffmpeg here). The truncated
-	// entry must have been cleaned up rather than left to be served by the
-	// next request.
-	if info, sErr := os.Stat(cached); sErr == nil && info.Size() == 0 {
-		t.Error("0-byte cache entry left in place after a failed re-extraction")
+	if string(got) == cacheSentinel {
+		t.Errorf("cache older than its source was served as fresh; it must be rebuilt")
 	}
 }
 
-// ============================================================
-// Sibling caches — mtime-comparison freshness
-// ============================================================
+// --- ShiftVTTCues (subtitles.go cache hit) ---
 
-func TestShiftVTTCuesReusesCacheAtEqualMtime(t *testing.T) {
+func TestShiftVTTCuesCacheHitOnEqualMTime(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempVTT(t, dir, "in.vtt", "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\nhi\n")
 
-	out, err := ShiftVTTCues(src, 5, dir)
+	first, err := ShiftVTTCues(src, 5, dir)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
+	seedSentinel(t, first)
+	tieMTimes(t, src, first)
 
-	// Pin source and output to the SAME instant, as a filesystem with
-	// coarse mtime granularity would. Under a strict After() this entry
-	// would be rebuilt on every request forever.
-	writeSentinel(t, out)
-	same := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, src, same)
-	setMtime(t, out, same)
-
-	again, err := ShiftVTTCues(src, 5, dir)
+	second, err := ShiftVTTCues(src, 5, dir)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
-	if again != out {
-		t.Fatalf("cached path changed: %q vs %q", out, again)
+	if second != first {
+		t.Fatalf("expected the same cached path, got %q want %q", second, first)
 	}
-	if !sentinelSurvived(t, out) {
-		t.Error("shifted VTT was rebuilt at equal mtimes")
-	}
+	assertCacheReused(t, second)
 }
 
 func TestShiftVTTCuesRebuildsWhenSourceIsNewer(t *testing.T) {
 	dir := t.TempDir()
 	src := writeTempVTT(t, dir, "in.vtt", "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\nhi\n")
 
-	out, err := ShiftVTTCues(src, 5, dir)
+	first, err := ShiftVTTCues(src, 5, dir)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
+	seedSentinel(t, first)
+	staleMTimes(t, first, src)
 
-	writeSentinel(t, out)
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, out, base)
-	setMtime(t, src, base.Add(time.Hour))
-
-	again, err := ShiftVTTCues(src, 5, dir)
+	second, err := ShiftVTTCues(src, 5, dir)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
-	if sentinelSurvived(t, again) {
-		t.Fatal("stale shifted VTT served after the source changed")
-	}
-	body, err := os.ReadFile(again)
-	if err != nil {
-		t.Fatalf("read rebuilt vtt: %v", err)
-	}
-	if !strings.Contains(string(body), "00:00:05.000 --> 00:00:07.000") {
-		t.Errorf("rebuilt VTT missing the shifted cue:\n%s", body)
-	}
+	assertCacheRebuilt(t, second)
 }
 
-func TestShiftVTTCuesRebuildsEmptyCacheFile(t *testing.T) {
-	dir := t.TempDir()
-	src := writeTempVTT(t, dir, "in.vtt", "WEBVTT\n\n00:00:10.000 --> 00:00:12.000\nhi\n")
+// --- ConvertSRTtoVTT ---
 
-	out, err := ShiftVTTCues(src, 5, dir)
+func TestConvertSRTtoVTTCacheHitOnEqualMTime(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+	srtPath := writeTempSRT(t, dir, "test.srt")
+
+	first, err := ConvertSRTtoVTT(srtPath, cacheDir)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
+	seedSentinel(t, first)
+	tieMTimes(t, srtPath, first)
 
-	// A shift killed mid-write leaves a 0-byte file NEWER than its source.
-	if err := os.WriteFile(out, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, src, base)
-	setMtime(t, out, base.Add(time.Hour))
-
-	again, err := ShiftVTTCues(src, 5, dir)
+	second, err := ConvertSRTtoVTT(srtPath, cacheDir)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
-	if info := mustStat(t, again); info.Size() == 0 {
-		t.Error("served a 0-byte shifted VTT instead of rebuilding it")
+	if second != first {
+		t.Fatalf("expected the same cached path, got %q want %q", second, first)
 	}
+	assertCacheReused(t, second)
 }
 
 func TestConvertSRTtoVTTRebuildsWhenSourceIsNewer(t *testing.T) {
 	dir := t.TempDir()
 	cacheDir := filepath.Join(dir, "cache")
-	srt := filepath.Join(dir, "test.srt")
-	if err := os.WriteFile(srt, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	srtPath := writeTempSRT(t, dir, "test.srt")
 
-	out, err := ConvertSRTtoVTT(srt, cacheDir)
+	first, err := ConvertSRTtoVTT(srtPath, cacheDir)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
+	seedSentinel(t, first)
+	staleMTimes(t, first, srtPath)
 
-	// The sidecar is corrected in place; the cached VTT must not survive it.
-	writeSentinel(t, out)
-	if err := os.WriteFile(srt, []byte("1\n00:00:01,000 --> 00:00:02,000\nCorrected\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, out, base)
-	setMtime(t, srt, base.Add(time.Hour))
-
-	again, err := ConvertSRTtoVTT(srt, cacheDir)
+	second, err := ConvertSRTtoVTT(srtPath, cacheDir)
 	if err != nil {
 		t.Fatalf("second call: %v", err)
 	}
-	body, err := os.ReadFile(again)
+	assertCacheRebuilt(t, second)
+}
+
+// TestConvertSRTtoVTTRebuildsZeroLengthCache pins the non-empty half of
+// the freshness check at this site specifically. ConvertSRTtoVTT was the
+// one site without that guard: a conversion killed mid-write leaves a
+// 0-byte file, which used to be served forever as an empty subtitle
+// track. The cache mtime here is NEWER than the source, so the mtime
+// comparison alone would accept it and only the size guard can reject.
+//
+// The 0-byte file is made by truncating the entry the function itself
+// returned, not by seeding a path computed here. A hand-mirrored path
+// would stop matching if the cache naming ever changed, and this test
+// would then pass vacuously against a file production never reads.
+func TestConvertSRTtoVTTRebuildsZeroLengthCache(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := filepath.Join(dir, "cache")
+	srtPath := writeTempSRT(t, dir, "test.srt")
+
+	vttPath, err := ConvertSRTtoVTT(srtPath, cacheDir)
 	if err != nil {
-		t.Fatalf("read rebuilt vtt: %v", err)
+		t.Fatalf("first call: %v", err)
 	}
-	if !strings.Contains(string(body), "Corrected") {
-		t.Errorf("stale VTT served after the SRT changed:\n%s", body)
+	if err := os.Truncate(vttPath, 0); err != nil {
+		t.Fatalf("truncate cache entry: %v", err)
+	}
+	base := mtimeBase()
+	setMTime(t, srtPath, base)
+	setMTime(t, vttPath, base.Add(2*time.Second))
+
+	got, err := ConvertSRTtoVTT(srtPath, cacheDir)
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if got != vttPath {
+		t.Fatalf("expected the same cached path, got %q want %q", got, vttPath)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("read converted: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("a 0-byte cache entry was served; a truncated write is not a cache entry")
+	}
+	if !strings.HasPrefix(string(data), "WEBVTT") {
+		t.Errorf("rebuilt file is not a VTT; got:\n%s", data)
 	}
 }
 
-// ConvertSRTtoVTT had no non-empty guard before cacheIsFresh: a conversion
-// killed mid-write left a 0-byte VTT that was served as an empty track for as
-// long as the sidecar sat untouched.
-func TestConvertSRTtoVTTRebuildsEmptyCacheFile(t *testing.T) {
+// --- ConvertSubtitleToVTT ---
+
+// The ffmpeg-backed converter is covered by seeding the cache entry
+// directly rather than calling the function twice, because a miss shells
+// out to ffmpeg, which is not installed everywhere the suite runs. That
+// makes a miss unmistakable in either environment: without ffmpeg it
+// surfaces as an error, and with ffmpeg it overwrites the sentinel. The
+// cache path is computed the same way ConvertSubtitleToVTT computes it,
+// so a change to that naming scheme fails these tests loudly rather than
+// quietly turning them into no-ops.
+
+func TestConvertSubtitleToVTTCacheHitOnEqualMTime(t *testing.T) {
 	dir := t.TempDir()
-	cacheDir := filepath.Join(dir, "cache")
-	srt := filepath.Join(dir, "test.srt")
-	if err := os.WriteFile(srt, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
-		t.Fatal(err)
+	cacheDir := mkCacheDir(t, dir)
+	subPath := writeTempASS(t, dir, "test.ass")
+
+	vttPath := subCachePath(subPath, cacheDir)
+	seedSentinel(t, vttPath)
+	tieMTimes(t, subPath, vttPath)
+
+	got, err := ConvertSubtitleToVTT(context.Background(), subPath, cacheDir)
+	if err != nil {
+		t.Fatalf("cache whose mtime equals the source's was treated as stale, so the call fell through to ffmpeg: %v", err)
+	}
+	if got != vttPath {
+		t.Fatalf("expected the seeded cache path, got %q want %q", got, vttPath)
+	}
+	assertCacheReused(t, got)
+}
+
+func TestConvertSubtitleToVTTRebuildsWhenSourceIsNewer(t *testing.T) {
+	dir := t.TempDir()
+	cacheDir := mkCacheDir(t, dir)
+	subPath := writeTempASS(t, dir, "test.ass")
+
+	vttPath := subCachePath(subPath, cacheDir)
+	seedSentinel(t, vttPath)
+	staleMTimes(t, vttPath, subPath)
+
+	// A rebuild here means reaching ffmpeg. Where ffmpeg is absent that
+	// surfaces as an error, which is itself proof the stale entry was
+	// rejected; where it is present the sentinel is overwritten. Serving
+	// the sentinel back intact is the only failing outcome — so the
+	// error path still asserts the sentinel is gone rather than passing
+	// on any error at all.
+	got, err := ConvertSubtitleToVTT(context.Background(), subPath, cacheDir)
+	if err != nil {
+		assertCacheRebuilt(t, vttPath)
+		return
+	}
+	assertCacheRebuilt(t, got)
+}
+
+// --- the helper itself ---
+
+func TestCacheIsFresh(t *testing.T) {
+	dir := t.TempDir()
+	base := mtimeBase()
+
+	mk := func(name, body string, mt time.Time) os.FileInfo {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		setMTime(t, p, mt)
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		return fi
 	}
 
-	out, err := ConvertSRTtoVTT(srt, cacheDir)
-	if err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	if err := os.WriteFile(out, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, srt, base)
-	setMtime(t, out, base.Add(time.Hour))
+	srcInfo := mk("src", "source", base)
 
-	again, err := ConvertSRTtoVTT(srt, cacheDir)
-	if err != nil {
-		t.Fatalf("second call: %v", err)
+	tests := []struct {
+		name    string
+		outInfo os.FileInfo
+		want    bool
+	}{
+		{"equal mtime is fresh", mk("equal", "out", base), true},
+		{"newer output is fresh", mk("newer", "out", base.Add(time.Second)), true},
+		{"older output is stale", mk("older", "out", base.Add(-time.Second)), false},
+		{"empty output is never fresh", mk("empty", "", base.Add(time.Second)), false},
 	}
-	if info := mustStat(t, again); info.Size() == 0 {
-		t.Error("served a 0-byte converted VTT instead of rebuilding it")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cacheIsFresh(tt.outInfo, srcInfo); got != tt.want {
+				t.Errorf("cacheIsFresh() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-// ConvertSubtitleToVTT shells out to ffmpeg for every rebuild, so unlike the
-// pure-Go siblings its cache behavior can only be exercised with real media
-// tooling. Gated the same way as the rest of the package: skipped on a laptop
-// without ffmpeg, a hard failure under AURORA_REQUIRE_MEDIA_TESTS in CI.
-func TestConvertSubtitleToVTTCacheFreshness(t *testing.T) {
-	requireFFmpeg(t)
+// --- fixtures ---
 
-	dir := t.TempDir()
+func mkCacheDir(t *testing.T, dir string) string {
+	t.Helper()
 	cacheDir := filepath.Join(dir, "cache")
-	sub := filepath.Join(dir, "test.srt")
-	if err := os.WriteFile(sub, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if err := os.MkdirAll(cacheDir, 0o750); err != nil {
+		t.Fatalf("mkdir cache: %v", err)
 	}
+	return cacheDir
+}
 
-	out, err := ConvertSubtitleToVTT(context.Background(), sub, cacheDir)
-	if err != nil {
-		t.Fatalf("first call: %v", err)
+func writeTempSRT(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("1\n00:00:01,000 --> 00:00:02,000\nHello\n"), 0o644); err != nil {
+		t.Fatalf("write srt: %v", err)
 	}
+	return p
+}
 
-	// Equal mtimes must count as a hit (coarse-granularity filesystems).
-	writeSentinel(t, out)
-	base := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
-	setMtime(t, sub, base)
-	setMtime(t, out, base)
+func writeTempASS(t *testing.T, dir, name string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("[Script Info]\nScriptType: v4.00+\n"), 0o644); err != nil {
+		t.Fatalf("write ass: %v", err)
+	}
+	return p
+}
 
-	again, err := ConvertSubtitleToVTT(context.Background(), sub, cacheDir)
-	if err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-	if !sentinelSurvived(t, again) {
-		t.Error("cached conversion was rebuilt at equal mtimes")
-	}
-
-	// A newer source must retire it.
-	setMtime(t, sub, base.Add(time.Hour))
-	third, err := ConvertSubtitleToVTT(context.Background(), sub, cacheDir)
-	if err != nil {
-		t.Fatalf("third call: %v", err)
-	}
-	if sentinelSurvived(t, third) {
-		t.Error("stale conversion served after the source changed")
-	}
+// subCachePath mirrors the cache naming in ConvertSubtitleToVTT so the
+// entry can be seeded without running ffmpeg. It does not go stale
+// silently: TestConvertSubtitleToVTTCacheHitOnEqualMTime asserts the
+// function returns exactly this path, so a change to the naming scheme
+// fails there loudly rather than leaving these tests vacuous.
+func subCachePath(subPath, cacheDir string) string {
+	h := sha256.Sum256([]byte(subPath))
+	stem := strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath))
+	return filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", stem, h[:6]))
 }

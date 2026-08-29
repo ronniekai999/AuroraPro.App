@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1774,12 +1776,22 @@ func (tm *TranscodeManager) HEVCEncodeEnabled() bool {
 // ffmpegSupportsReadrate reports whether the ffmpeg on PATH is >= 5.0, the
 // release that introduced `-readrate` (the supported way to pace input
 // reads; the old `-re` forces exactly 1× and would stall seeks). Best-effort:
-// any probe failure (no ffmpeg, unparseable banner — e.g. distro builds
-// reporting "n5.1.4" or git snapshots) disables pacing rather than erroring,
-// matching the manager's general posture that a missing ffmpeg surfaces at
-// session creation, not construction.
+// any probe failure (no ffmpeg, a timeout, an unparseable banner — e.g. distro
+// builds reporting "n5.1.4" or git snapshots) disables pacing rather than
+// erroring, matching the manager's general posture that a missing ffmpeg
+// surfaces at session creation, not construction.
 func ffmpegSupportsReadrate() bool {
-	out, err := exec.Command("ffmpeg", "-version").Output()
+	// Two bounds, and this startup path needs both. The CONTEXT bounds the
+	// process: `ffmpeg -version` returns instantly on any working build, so one
+	// that doesn't — a snap/flatpak shim waiting on its daemon, a binary on a
+	// wedged network mount — would otherwise hang NewTranscodeManager for good,
+	// and WaitDelay cannot help there because Wait never gets past reaping the
+	// process to start draining. WaitDelay bounds that drain, which the context
+	// in turn cannot help with: cancelling kills the process it started, not a
+	// descriptor the process's own child inherited (runBounded, execwait.go).
+	ctx, cancel := context.WithTimeout(context.Background(), hwProbeTimeout)
+	defer cancel()
+	out, err := boundedOutput(exec.CommandContext(ctx, "ffmpeg", "-version"))
 	if err != nil {
 		return false
 	}
@@ -2936,7 +2948,7 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 		// ffmpegDone is still false and we briefly return the dying variant;
 		// the next playlist poll (~3s) lands in this branch and resumes.
 		if v.reaped && ffmpegDone(v) {
-			resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
+			resumeFromSec, resumeSegNum := tm.resumePoint(session, v, startSec)
 			slog.Info("resuming reaped variant on renewed access",
 				"session_id", session.ID,
 				"profile", profileName,
@@ -3019,7 +3031,7 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 				// continuous video, subtitles end at the crash point.
 				// Operators see a Warn log so the limitation is
 				// visible in production.
-				resumeFromSec, resumeSegNum := tm.resumePoint(v, startSec)
+				resumeFromSec, resumeSegNum := tm.resumePoint(session, v, startSec)
 				slog.Warn("variant FFmpeg crashed mid-stream, attempting auto-restart",
 					"session_id", session.ID,
 					"profile", profileName,
@@ -3056,21 +3068,173 @@ func (tm *TranscodeManager) EnsureVariant(session *TranscodeSession, profileName
 	return v, nil
 }
 
+// resumeSeekPrintError is FFmpeg's worst-case per-entry #EXTINF rounding:
+// durations are written with %f (6 decimals), so each one can under-report by
+// up to half an ulp of the last digit.
+//
+// The bias MUST scale with the number of entries. A fixed 1e-4 covers only
+// 1e-4/5e-7 = 200 segments, while a feature-length playlist runs 900-1400 —
+// at 1200 entries a constant-GOP remux can under-report its boundary by
+// ~5e-4s, more than a fixed budget and the millisecond ceil together, and the
+// seek then lands BEFORE the key frame. That is the expensive direction:
+// -noaccurate_seek (remux) snaps back to the PREVIOUS key frame, duplicating
+// a whole GOP of already-published content into the resumed output — and the
+// duplicate inflates the published sum, so every later resume starts from a
+// worse estimate.
+//
+// resumeSeekMinBias floors it so a short playlist still gets a sane margin.
+// The floor is observable — resumeSeekBias(10) is 1e-4 with it and 5e-6
+// without — and is pinned by a direct test; it is behaviourally harmless
+// either way, since the scaled term already exceeds the real accumulated
+// error at every entry count and the floor only ever adds under a
+// millisecond of extra forward skip on a short playlist.
+const (
+	resumeSeekPrintError = 5e-7
+	resumeSeekMinBias    = 1e-4
+	// maxResumeSeekSec is a plausibility ceiling on a computed seek — a
+	// thousand hours, far past any real runtime. Beyond it the playlist is
+	// corrupt, not long.
+	maxResumeSeekSec = 3600.0 * 1000
+)
+
+// resumeSeekBias is the forward bias for a playlist publishing n segments.
+func resumeSeekBias(n int) float64 {
+	return math.Max(resumeSeekMinBias, resumeSeekPrintError*float64(n))
+}
+
+// formatSeekSeconds renders an -ss value. Whole seconds stay integral so a
+// fresh start's command line is unchanged; a resume keeps its millisecond,
+// which FFmpeg accepts and which is the difference between landing on the
+// segment boundary and losing everything back to the previous whole second.
+func formatSeekSeconds(sec float64) string {
+	// Domain guard, not decoration: +Inf satisfies sec == Trunc(sec), so
+	// without this it would take the integer branch and int64(+Inf) renders
+	// as -9223372036854775808 — a negative -ss that stops FFmpeg launching
+	// at all, which is the failure resumePoint's own plausibility ceiling
+	// exists to prevent. Anything outside the domain seeks to the origin,
+	// which is always safe.
+	if math.IsNaN(sec) || sec <= 0 || sec >= maxResumeSeekSec {
+		return "0"
+	}
+	if sec == math.Trunc(sec) {
+		return strconv.FormatInt(int64(sec), 10)
+	}
+	return strconv.FormatFloat(sec, 'f', 3, 64)
+}
+
 // resumePoint computes where a relaunched FFmpeg should continue for a
 // variant whose process stopped (crash or reap): the source-second to seek to
-// and the segment number to start writing at. The source was at
-// startSec + (highestCompleteSeg + 1) * segDuration when output stopped.
+// and the segment number to start writing at, derived from what the playlist
+// actually published rather than from a segment index times the nominal
+// segment duration (see playlistCoverage for why the latter is wrong).
 // Shared by the crash-restart and reap-resume paths in EnsureVariant so the
 // resume math can never diverge between them. Caller holds variantMu.
-func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resumeFromSec, resumeSegNum int) {
+func (tm *TranscodeManager) resumePoint(session *TranscodeSession, v *QualityVariant, startSec int) (resumeFromSec float64, resumeSegNum int) {
 	segDur := tm.cfg.SegmentDuration
 	if segDur <= 0 {
 		segDur = 6 // matches the fallback in startVariantImpl
 	}
-	resumeFromSec = startSec
+	resumeFromSec = float64(startSec)
+
+	// Prefer the muxer's own durations — exact for remux, where segments are
+	// cut on source keyframes rather than the nominal grid (see
+	// playlistCoverage). Round UP: a remux segment boundary IS a source
+	// keyframe, and seeking even fractionally before it makes FFmpeg's input
+	// seek snap back to the PREVIOUS keyframe, duplicating a whole GOP into
+	// the resumed output and inflating this tier's cumulative EXTINF against
+	// its siblings. Landing at-or-after the boundary snaps onto it exactly.
+	//
+	// A playlist listing segments but carrying no parsable EXTINF is treated
+	// as unusable rather than as "resume from the seek origin", which would
+	// re-encode the whole file numbered past the existing tail.
+	if pubSeg, pubSec := playlistCoverage(filepath.Join(v.OutputDir, variantPlaylistName)); pubSeg >= 0 && pubSec > 0 {
+		// Ceil to the next MILLISECOND, not the next second. Quantising the
+		// seek to a whole second throws away everything between the real
+		// boundary and that second, and on NTSC rates that is almost the
+		// whole second: -force_key_frames puts the key frame on the first
+		// frame at or after each grid mark, so 23.976/29.97fps boundaries
+		// land a few ms PAST an integer (594.010083, not 594.000), and a
+		// whole-second Ceil drops ~0.99s of A/V on every resume. Only remux
+		// gets -noaccurate_seek and snaps back onto the boundary; a transcode
+		// seeks accurately to exactly what it is told, so what is asked for
+		// is what is lost.
+		//
+		// Which side of the boundary to aim for depends ENTIRELY on which
+		// seek mode this session's FFmpeg gets, and the two want opposites:
+		//
+		//   remux     -noaccurate_seek: no trim filter is inserted, so the
+		//             demuxer's landing point IS the output start. Aim past
+		//             the boundary so the keyframe search cannot fall short
+		//             of it; resumeSeekBias covers the EXTINF print rounding
+		//             that could otherwise leave the target under.
+		//   transcode accurate seek: FFmpeg decodes from the preceding key
+		//             frame and a trim filter DISCARDS every frame with
+		//             pts < target, so it already rounds forward to the first
+		//             frame at or after the target on its own. Aiming past
+		//             the boundary is the one choice that cannot land on it —
+		//             it throws the boundary frame away. Aim at or just
+		//             under: the undershoot is the millisecond floor below
+		//             plus the print error plus up to one frame interval
+		//             (generation 1 itself starts at the first frame at or
+		//             after startSec), so worst case is a frame or so and the
+		//             cost is one duplicated frame, which the next resume's
+		//             overshoot cancels.
+		//
+		// KNOWN LIMIT on the remux side, and it is larger than everything
+		// this function computes. For containers whose demuxer does not set
+		// AVFMT_SEEK_TO_PTS — Matroska, mpegts and avi, i.e. most of a real
+		// library — ffmpeg_demux applies a dts_heuristic when the video has
+		// B-frames and seeks to (target - 3*AV_TIME_BASE/23), 130.4ms early,
+		// before searching for a keyframe. With -noaccurate_seek nothing
+		// trims that back. So a remux resume can re-append up to a whole GOP
+		// regardless of how precisely the target is computed: the bias here
+		// is necessary but nowhere near sufficient, and the millisecond
+		// precision is not what decides the outcome on MKV. Compensating
+		// means subtracting that same offset for non-AVFMT_SEEK_TO_PTS
+		// containers, which needs validating against real FFmpeg output
+		// before it goes anywhere near a seek. Note ProbeSeekKeyframe in
+		// subtitles.go models input seek the same optimistic way and is off
+		// by the same amount on MKV.
+		//
+		// Float64 summation drift is not the binding term either way: it
+		// measures around 5e-8 at 20k segments against a bias of 1e-2 there.
+		// NaN is the "no usable seek" sentinel — the validity check below
+		// rejects it and the index arithmetic takes over.
+		//
+		// An unknown session takes the remux side deliberately: overshooting
+		// costs a frame, undershooting a remux costs a whole GOP.
+		seek := math.NaN()
+		switch {
+		case session == nil || session.Remux:
+			seek = float64(startSec) + math.Ceil((pubSec+resumeSeekBias(pubSeg+1))*1000)/1000
+		case math.Floor(pubSec*1000) > 0:
+			seek = float64(startSec) + math.Floor(pubSec*1000)/1000
+			// else: floors to nothing. A sub-millisecond playlist would
+			// resume from the seek origin numbered past the existing tail —
+			// what the pubSec > 0 guard exists to prevent, which it does not
+			// actually cover for this branch.
+		}
+		// A corrupt playlist can sum to something non-finite or absurd; int()
+		// on that is not defined to anything useful and yields a negative -ss
+		// that stops FFmpeg launching at all, so the variant never resumes.
+		// Fall through to the index arithmetic instead.
+		if !math.IsInf(seek, 0) && !math.IsNaN(seek) && seek < maxResumeSeekSec {
+			return seek, pubSeg + 1
+		}
+	}
+
 	if highestSeg := highestSegmentNumber(v.OutputDir); highestSeg >= 0 {
 		resumeSegNum = highestSeg + 1
-		resumeFromSec = startSec + resumeSegNum*segDur
+		resumeFromSec = float64(startSec + resumeSegNum*segDur)
+		// Reached only when the playlist is unreadable. This is the index
+		// arithmetic playlistCoverage exists to replace — wrong by minutes on
+		// a remux, whose segments are not SegmentDuration long — so say so
+		// rather than letting a guessed resume look like a measured one.
+		slog.Warn("resume anchored on the directory scan; playlist unreadable, seek is an estimate",
+			"profile", v.Profile.Name,
+			"resume_segment", resumeSegNum,
+			"resume_from_sec", resumeFromSec,
+		)
 	}
 	return resumeFromSec, resumeSegNum
 }
@@ -3080,7 +3244,7 @@ func (tm *TranscodeManager) resumePoint(v *QualityVariant, startSec int) (resume
 // a fresh chan because the prior one was closed — reading from a closed chan
 // never blocks, so waiters on the stale chan would see "ready" immediately.
 // Caller holds variantMu (same contract as startVariantImpl).
-func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *QualityVariant, resumeFromSec, resumeSegNum int) error {
+func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *QualityVariant, resumeFromSec float64, resumeSegNum int) error {
 	v.reaped = false
 	v.Ready = make(chan struct{})
 	v.started = false
@@ -3111,15 +3275,35 @@ func (tm *TranscodeManager) relaunchVariantLocked(session *TranscodeSession, v *
 // segment of a short transcode.
 const minSegmentSizeBytes = 4096
 
+// variantPlaylistName is the per-variant playlist FFmpeg's HLS muxer writes
+// (startVariantImpl points -f hls at it). Every reader of that file must go
+// through this constant: a hardcoded name that drifted from the muxer's is
+// exactly how the BE-H5 resume anchor silently no-opped for months.
+const variantPlaylistName = "stream.m3u8"
+
 func highestSegmentNumber(varDir string) int {
 	// 2026-05-19 audit (BE-H5) — prefer the playlist as the source of
 	// truth for "what's a complete segment." FFmpeg writes the .m3u8
 	// only AFTER finishing each segment, so any segment number that
-	// appears in playlist.m3u8 was emitted intact. This handles the
-	// edge case of a legitimately small final segment (e.g. an EOF
-	// audio frame producing a 2 KB segment) that the size-heuristic
-	// path below would discard, leading to overwrite on restart.
-	if n := playlistHighestSegmentNumber(filepath.Join(varDir, "playlist.m3u8")); n >= 0 {
+	// appears in it was emitted intact. This handles the edge case of a
+	// legitimately small final segment (e.g. an EOF audio frame producing
+	// a 2 KB segment) that the size-heuristic path below would discard,
+	// leading to overwrite on restart.
+	//
+	// 2026-08 (#494) — this looked for "playlist.m3u8", which FFmpeg never
+	// writes: the muxer is pointed at variantPlaylistName. The lookup
+	// therefore always missed and BE-H5 had never once executed, leaving
+	// the size heuristic as the only anchor. Not merely a dead branch —
+	// CommandContext kills FFmpeg with SIGKILL, so a reaped or crashed
+	// encoder nearly always leaves a PARTIAL final segment, and a partial
+	// 720p/1080p segment comfortably clears minSegmentSizeBytes. The scan
+	// counted it, the resume anchored one past it, and +append_list
+	// appended after the playlist's real last entry — skipping that
+	// segment's content and leaving the tier's cumulative EXTINF short
+	// against its siblings. Not literally every resume: a kill landing
+	// between segments leaves nothing partial and the scan agreed with the
+	// playlist. Most of them.
+	if n := playlistHighestSegmentNumber(filepath.Join(varDir, variantPlaylistName)); n >= 0 {
 		return n
 	}
 
@@ -3169,13 +3353,63 @@ func highestSegmentNumber(varDir string) int {
 // 2026-05-19 audit (BE-H5) — added to defend against the edge case
 // where a final segment is legitimately smaller than minSegmentSizeBytes.
 func playlistHighestSegmentNumber(playlistPath string) int {
+	highest, _ := playlistCoverage(playlistPath)
+	return highest
+}
+
+// playlistCoverage returns the highest segment number the playlist publishes
+// and the summed EXTINF duration of everything it publishes, or (-1, 0) if it
+// cannot be read.
+//
+// The duration matters because segments are NOT uniformly SegmentDuration
+// long. A transcode is pinned to the grid by -force_key_frames, but a remux
+// (-c:v copy) can only cut on source keyframes, so its segments run to
+// whatever the scene-cut cadence gives — CreateSession already warns that
+// remux segment lengths vary. Multiplying a segment index by SegmentDuration
+// to get a source position is therefore valid only for transcodes; an
+// 8s-GOP remux resuming at segment 151 seeks to 906s for content that
+// actually starts at 1208s, and the error compounds on every later resume.
+// Summing the durations the muxer itself wrote fixes that.
+//
+// Known limit, for the ledger: the sum is the DURATION published, and callers
+// add it to startSec to get a source position. For a remux started mid-file
+// those differ. -noaccurate_seek makes generation 1 begin at the keyframe at
+// or before startSec, not at startSec itself, so the true next boundary is
+// that keyframe plus the sum — and startSec + sum overshoots by however far
+// startSec sat past its keyframe. The seek then snaps back to the greatest
+// keyframe at or before the target, which can drop content between the two.
+// The direction is a forward skip on the FIRST resume. It is not guaranteed
+// forever: each remux resume re-bases on whatever key frame -noaccurate_seek
+// actually landed on, so a later resume can target fractionally under its
+// boundary if a source key frame falls inside a sub-millisecond window
+// (~1.7ms/GOP, so on the order of 0.03% per resume) and duplicate a GOP. It
+// is far smaller than the error it replaces; closing it properly means
+// anchoring on the probed origin (see ProbeSeekKeyframe) or persisting it on
+// the session at first launch.
+func playlistCoverage(playlistPath string) (highestSeg int, publishedSec float64) {
 	data, err := os.ReadFile(playlistPath)
 	if err != nil {
-		return -1
+		return -1, 0
 	}
 	highest := -1
-	for _, line := range strings.Split(string(data), "\n") {
-		numStr, ok := segmentNumberPart(strings.TrimSpace(line))
+	total := 0.0
+	pending := 0.0
+	havePending := false
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if after, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
+			// "#EXTINF:6.000000,optional title" — duration up to the comma.
+			durStr := strings.TrimSpace(strings.SplitN(after, ",", 2)[0])
+			// d >= 0 rejects NaN as a side effect; Inf needs its own check,
+			// since it parses, passes the comparison, and would make the
+			// total non-finite — int(+Inf) is not defined to any useful value
+			// and yields a negative -ss on amd64.
+			if d, convErr := strconv.ParseFloat(durStr, 64); convErr == nil && d >= 0 && !math.IsInf(d, 0) {
+				pending, havePending = d, true
+			}
+			continue
+		}
+		numStr, ok := segmentNumberPart(line)
 		if !ok {
 			continue
 		}
@@ -3186,8 +3420,17 @@ func playlistHighestSegmentNumber(playlistPath string) int {
 		if n > highest {
 			highest = n
 		}
+		// Consume the pending duration exactly once. A trailing EXTINF whose
+		// URI was never written contributes nothing by virtue of the loop
+		// structure alone; what this flag actually guards is the inverse —
+		// two segment URIs after a single EXTINF, where counting the duration
+		// twice would push the anchor past the real boundary.
+		if havePending {
+			total += pending
+			havePending = false
+		}
 	}
-	return highest
+	return highest, total
 }
 
 // segmentNumberPart extracts the numeric part of a media segment name —
@@ -3374,17 +3617,17 @@ func timestampPrefixArgs(session *TranscodeSession) []string {
 // continues from where the prior (crashed) process left off, giving HLS.js
 // seamless playlist continuation. Compatibility shim startVariantAt below
 // is a thin wrapper retained for call-site clarity.
-func (tm *TranscodeManager) startVariantAt(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
+func (tm *TranscodeManager) startVariantAt(session *TranscodeSession, v *QualityVariant, startSec float64, resumeSegNum int) error {
 	return tm.startVariantImpl(session, v, startSec, resumeSegNum)
 }
 
 func (tm *TranscodeManager) startVariant(session *TranscodeSession, v *QualityVariant, startSec int) error {
-	return tm.startVariantImpl(session, v, startSec, 0)
+	return tm.startVariantImpl(session, v, float64(startSec), 0)
 }
 
-func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec, resumeSegNum int) error {
+func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *QualityVariant, startSec float64, resumeSegNum int) error {
 	p := v.Profile
-	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
+	playlistPath := filepath.Join(v.OutputDir, variantPlaylistName)
 	segExt := ".ts"
 	if session.FMP4 {
 		segExt = ".m4s"
@@ -3405,7 +3648,7 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	// longer uses +genpts — #348).
 	args := timestampPrefixArgs(session)
 	if startSec > 0 {
-		args = append(args, "-ss", strconv.Itoa(startSec))
+		args = append(args, "-ss", formatSeekSeconds(startSec))
 	}
 
 	// Pace full-transcode input reads to readRateFactor× realtime so an
@@ -3733,6 +3976,25 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	var stderrBuf limitedBuffer
 	cmd.Stderr = &stderrBuf
+	// Attaching that buffer means Wait blocks until every holder of FFmpeg's
+	// stderr closes it, not until FFmpeg exits — so a subprocess that inherits
+	// it pins the cmd.Wait goroutine below forever, and the damage is not that
+	// callers wait: ffmpegDone falls back to Cmd.ProcessState, which os/exec
+	// sets before it drains, so EnsureVariant sees a finished variant whose
+	// v.Err was never written and serves a CRASHED transcode as a clean
+	// completion — no restart, no StderrTail, no diagnosis. Bound it as the
+	// probes do (execwait.go). After a ctx kill the timer caps the drain that
+	// follows; if FFmpeg is wedged badly enough not to die within the delay,
+	// it also closes the pipes out from under a process already sent SIGKILL.
+	//
+	// What the bound costs, stated where it is paid: closing the pipe can cut
+	// the stderr capture short, and StderrTail keeps the LAST 600 bytes —
+	// exactly where FFmpeg puts the reason. So a crash whose stderr is still
+	// draining at the deadline yields a v.Err quoting the middle of the log
+	// instead of the error. The window is tightest after a ctx kill, where the
+	// timer starts at cancellation rather than at exit. A degraded diagnosis
+	// beats a pinned goroutine and a crash reported as a clean completion.
+	cmd.WaitDelay = execWaitDelay
 
 	v.Cmd = cmd
 	v.started = true
@@ -3820,6 +4082,15 @@ func (tm *TranscodeManager) startVariantImpl(session *TranscodeSession, v *Quali
 		}()
 
 		waitErr := cmd.Wait()
+		// ErrWaitDelay is not a crash: Wait reports it in place of a NIL error
+		// (a non-zero exit is an ExitError and takes precedence), so it means
+		// FFmpeg finished cleanly and only its stderr outlived it. Reporting it
+		// would mark a healthy variant failed and log an "ffmpeg variant
+		// exited" error for a transcode that completed. Same reading as
+		// runBounded (execwait.go) and runProbeFFmpegDiag.
+		if errors.Is(waitErr, exec.ErrWaitDelay) {
+			waitErr = nil
+		}
 		// Snapshot a bounded tail of FFmpeg's stderr so the typed v.Err
 		// surfaced to EnsureVariant callers carries the actual reason for
 		// the crash (OOM kill, codec failure, source EOF, etc.) — not
@@ -3988,7 +4259,7 @@ func (tm *TranscodeManager) ServeVariantPlaylist(w http.ResponseWriter, r *http.
 		return
 	}
 
-	playlistPath := filepath.Join(v.OutputDir, "stream.m3u8")
+	playlistPath := filepath.Join(v.OutputDir, variantPlaylistName)
 
 	// Containment (audit LOW): the playlist must resolve to a real path inside
 	// the canonical transcode base. FFmpeg writes stream.m3u8 itself so this is

@@ -32,7 +32,11 @@ func ProbeSubtitles(ctx context.Context, filePath string) ([]models.SubtitleTrac
 		filePath,
 	)
 
-	out, err := cmd.Output()
+	// Bounded: capturing output lets Wait outlive the process, and the context
+	// cannot close a descriptor a child inherited (runBounded, execwait.go).
+	// This runs during library scans and session setup — an unbounded wait
+	// pins that caller, not just this probe.
+	out, err := boundedOutput(cmd)
 	if err != nil {
 		// No subtitle streams is not an error
 		return nil, nil
@@ -130,7 +134,7 @@ func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) flo
 		"-print_format", "json",
 		filePath,
 	)
-	out, err := cmd.Output()
+	out, err := boundedOutput(cmd) // see runBounded (execwait.go)
 	if err != nil {
 		return target // probe failed → fall back to requested target
 	}
@@ -177,36 +181,6 @@ func ProbeSeekKeyframe(ctx context.Context, filePath string, target float64) flo
 	return best
 }
 
-// cacheIsFresh reports whether a derived subtitle cache file may be reused:
-// it must be non-empty AND not older than the source it was derived from.
-//
-// Non-empty, because a conversion killed mid-write (timeout, signal, full
-// disk) leaves a 0-byte or truncated file that would otherwise be served as
-// an empty subtitle track — the failure looks like "subtitles load but show
-// nothing", which is far harder to diagnose than a clean re-conversion.
-//
-// "Not older" rather than "strictly newer", because a conversion that
-// finishes inside the filesystem's mtime granularity (1s on ext3, 2s on
-// FAT/SMB) records the SAME timestamp as its source. Under a strict
-// After() such a cache entry is never fresh and gets rebuilt on every
-// single request, forever.
-//
-// That choice is a trade, not a free win, and the risk is symmetric: a
-// source EDITED after the derived file but landing in the same coarse
-// mtime bucket now reads as fresh, so that correction is never picked up
-// — where a strict After() would have rebuilt. Both directions need
-// source and cache on the same coarse-granularity filesystem, so both
-// are narrow; the perpetual-rebuild side was judged the worse failure
-// because it is unbounded work on every request rather than one missed
-// edit.
-//
-// ExtractSubtitleVTT deliberately does NOT use this helper: an mtime
-// comparison against the MEDIA file is the wrong policy there. See the
-// fingerprint discussion on extractedVTTPath for why.
-func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
-	return outInfo.Size() > 0 && !outInfo.ModTime().Before(srcInfo.ModTime())
-}
-
 // mediaFingerprint digests a media file's identity as (size, mtime) — the
 // same pair internal/library/scanner.go hashes into media_files.file_hash
 // (and episode_files.file_hash). Same digest INPUT, different truncation
@@ -215,11 +189,12 @@ func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
 // silently re-key the whole cache. Returns ok=false when the file cannot
 // be stat'd.
 //
-// The stored file_hash is deliberately NOT reused here even though it is the
-// same construction: it is only as fresh as the last library scan, so a file
-// replaced between scans would still fingerprint as unchanged — which is
-// precisely the staleness this is meant to catch. Stat'ing at request time
-// costs one syscall against an ffmpeg run that reads a whole container.
+// The stored file_hash is deliberately NOT reused even though it is the
+// same construction: it is only as fresh as the last library scan, so a
+// file replaced between scans would still fingerprint as unchanged —
+// precisely the staleness this is meant to catch. Stat'ing at request
+// time costs one syscall against an ffmpeg run that reads a whole
+// container.
 func mediaFingerprint(path string) (string, bool) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -235,8 +210,8 @@ func mediaFingerprint(path string) (string, bool) {
 // avoids collisions between media files sharing a basename in different
 // directories; the fingerprint is the INVALIDATION mechanism.
 //
-// Why a fingerprint in the KEY rather than an mtime comparison like the
-// sibling caches use (cacheIsFresh):
+// Why a fingerprint in the KEY rather than an mtime comparison through
+// cacheIsFresh, like the three sibling caches:
 //
 //   - An mtime comparison only catches a source that got NEWER. Media is
 //     routinely replaced by tools that preserve or restore timestamps —
@@ -273,12 +248,12 @@ func mediaFingerprint(path string) (string, bool) {
 //     track — one per distinct resume position ever requested for it. Those
 //     were previously reused indefinitely. Bytes are small; the count is
 //     per (track × distinct start). The reaper that collects them is also
-//     weaker than it looks: the daily
-//     subtitle-cache sweep in cmd/aurora/main.go does its work inside
-//     `case <-ticker.C`, with no run at boot, so its first purge needs 24
-//     UNINTERRUPTED hours. This box auto-deploys on a 5-minute timer, so on
-//     an actively-developed instance that sweep may never fire and the
-//     orphans simply accumulate. Do not read this bullet as a bound.
+//     weaker than it looks: the daily subtitle-cache sweep in
+//     cmd/aurora/main.go does its work inside `case <-ticker.C`, with no
+//     run at boot, so its first purge needs 24 UNINTERRUPTED hours. This
+//     box auto-deploys on a 5-minute timer, so on an actively-developed
+//     instance that sweep may never fire and the orphans simply accumulate.
+//     Do not read this bullet as a bound.
 //   - Replacing a file with one of identical size AND mtime (`touch -r`
 //     plus a same-size replacement) is invisible to this, exactly as it is
 //     to the scanner's own file_hash. Content hashing is the only fix and
@@ -291,11 +266,11 @@ func mediaFingerprint(path string) (string, bool) {
 //     open FD on the OLD inode once it has opened, so the old track is
 //     stored under its own matching fingerprint. A key/content mismatch
 //     needs either an in-place truncate-and-rewrite, or a rename landing
-//     in the window between the fingerprint (taken in extractedVTTPath)
-//     and ffmpeg's exec further down this function. Either way it is
-//     wasted work — serving wrong content from such an entry would
-//     additionally require a later revert to a byte-identical (size,
-//     mtime), so this is not a correctness hole.
+//     in the window between the fingerprint (taken here) and ffmpeg's exec
+//     further down ExtractSubtitleVTT. Either way it is wasted work —
+//     serving wrong content from such an entry would additionally require
+//     a later revert to a byte-identical (size, mtime), so this is not a
+//     correctness hole.
 //   - On upgrade, every existing entry uses the old (fingerprint-less) key
 //     and is ignored; each track re-extracts once, and the old file is left
 //     for whenever the reaper does run.
@@ -341,11 +316,11 @@ func extractedVTTPath(filePath string, streamIndex int, cacheDir string) string 
 //
 // The stem is cosmetic — the path hash carries the uniqueness — but it is
 // not free: ShiftVTTCues derives ITS filename from this one, adding a net
-// ~29 bytes, and the fingerprint component added another 13.
-// A long release name could push the shifted file past NAME_MAX (255 bytes
-// on ext4/XFS), where os.Create fails with ENAMETOOLONG and subtitles break
-// for exactly the files with the longest names. 120 bytes leaves ample room
-// for both suffixes while keeping the file recognizable in an `ls`.
+// ~29 bytes, and the fingerprint component added another 13. A long
+// release name could push the shifted file past NAME_MAX (255 bytes on
+// ext4/XFS), where os.Create fails with ENAMETOOLONG and subtitles break
+// for exactly the files with the longest names. 120 bytes leaves ample
+// room for both suffixes while keeping the file recognizable in an `ls`.
 //
 // This closes the EXTRACTED path only, because that is the one this change
 // lengthened. ShiftVTTCues has two other input producers — ConvertSRTtoVTT
@@ -425,7 +400,20 @@ func ExtractSubtitleVTT(ctx context.Context, filePath string, streamIndex int, c
 		vttPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Bounded, and ErrWaitDelay is not a failure here (runBounded,
+	// execwait.go): the process we started exited 0, so deleting the .vtt and
+	// erroring would throw away an extraction that cost up to ten minutes of
+	// reading through the container.
+	//
+	// "Exited 0" is what os/exec can tell us, and it is not quite "the file is
+	// complete": the premise of the whole bound is that some OTHER process
+	// inherited the descriptors, so an ffmpeg wrapper that returns 0 while
+	// backgrounding the real work would leave a partial .vtt that the size
+	// check above then caches. The old behaviour in that same scenario was an
+	// unbounded hang the 10-minute context could not break (it kills the
+	// process, which has already exited), so this is the better failure — but
+	// it is a failure mode, not a guarantee.
+	if output, err := boundedCombinedOutput(cmd); err != nil {
 		os.Remove(vttPath) // Clean up partial file
 		return "", fmt.Errorf("extract subtitle: %w: %s", err, string(output))
 	}
@@ -490,6 +478,61 @@ func formatVTTTimestamp(sec float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d.%03d", hh, mm, ss, fff)
 }
 
+// cacheIsFresh reports whether a derived file (a shifted or converted
+// VTT) can be reused for the given source. The three source-derived
+// caches below — ShiftVTTCues, ConvertSRTtoVTT and ConvertSubtitleToVTT
+// — ask exactly this question, so they ask it through here rather than
+// repeating the comparison and drifting apart.
+//
+// ExtractSubtitleVTT still does NOT come through here, but no longer
+// because it lacks a policy: it now invalidates against the media file
+// through a (size, mtime) fingerprint in its cache KEY rather than an
+// mtime comparison at this one. An mtime comparison would be the wrong
+// rule there — it cannot see a replacement that preserves or restores an
+// older timestamp, and re-reading an 8+ GB container is far too
+// expensive to retry on every request when the comparison goes one way.
+// See extractedVTTPath for the policy and its costs.
+//
+// The mtime comparison is deliberately NON-STRICT. A cache is written
+// after its source is read, so a valid entry has mtime >= the source's
+// and the source can only be newer if it changed afterwards, which
+// shows up as strictly newer. (That holds while both stamps come from
+// one clock. Media on a network mount whose server clock runs ahead
+// breaks it and defeats the cache. Pre-existing, and this change does
+// nothing for it either way: for any non-zero skew the two rules agree,
+// since they differ only at exact equality.)
+//
+// Requiring the output to be strictly NEWER instead made a same-tick
+// write look stale, which is what made TestShiftVTTCuesCachesResult
+// fail intermittently in CI. A tie means current, not stale.
+//
+// Scope of that bug, stated precisely because it is easy to overstate:
+// an entry written inside its source's mtime tick is rebuilt on the
+// NEXT request, and that rebuild's os.Create usually lands in a later
+// tick and breaks the tie for good. So the cost was roughly one extra
+// rebuild per entry — repeated only while requests keep arriving inside
+// a single tick — not one per request.
+//
+// The residual case this gives up is a source rewritten within the same
+// mtime tick as the conversion that read it. Nothing detects it
+// afterwards — these caches are keyed on path alone, with no content
+// check — so it clears only via main.go's daily sweep of the subtitle
+// cache dir, i.e. up to ~31 days of serving a stale conversion.
+//
+// The window is one mtime tick wide on ANY filesystem, not just coarse
+// ones: ext4 stamps inodes from the kernel's coarse clock, measured
+// here at ~4ms, and back-to-back writes tie the large majority of the
+// time (that is exactly why the CI flake was reachable at all). It is
+// wider still on FAT/exFAT and some SMB mounts, where a tick is 1-2s.
+// Hitting it also needs a fetcher rewriting the sidecar inside that
+// window. Narrow, and accepted knowingly.
+//
+// A zero-length output is never fresh — that is a truncated write from
+// an interrupted conversion, not a cache entry.
+func cacheIsFresh(outInfo, srcInfo os.FileInfo) bool {
+	return outInfo.Size() > 0 && !outInfo.ModTime().Before(srcInfo.ModTime())
+}
+
 // ShiftVTTCues reads vttPath and writes a NEW VTT file with every cue
 // timestamp shifted by -offsetSec seconds. Cues that become fully
 // negative (end < 0 after the shift) are dropped — they're already
@@ -539,7 +582,7 @@ func ShiftVTTCues(vttPath string, offsetSec float64, cacheDir string) (string, e
 	stem := strings.TrimSuffix(filepath.Base(vttPath), filepath.Ext(vttPath))
 	outPath := filepath.Join(cacheDir, fmt.Sprintf("%s_shift%dms_%x.vtt", stem, offsetMs, h[:6]))
 
-	// Cache hit: existing shifted file not older than the source.
+	// Cache hit: existing shifted file non-empty and not older than the source.
 	if outInfo, err := os.Stat(outPath); err == nil && cacheIsFresh(outInfo, srcInfo) {
 		return outPath, nil
 	}
@@ -706,7 +749,9 @@ func ConvertSRTtoVTT(srtPath, cacheDir string) (string, error) {
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
 	// Return cached version if it exists, is non-empty, and is not older
-	// than the SRT
+	// than the SRT. The non-empty half matters here: a conversion killed
+	// mid-write leaves a 0-byte file that would otherwise be served
+	// forever as an empty subtitle track.
 	srtInfo, err := os.Stat(srtPath)
 	if err != nil {
 		return "", err
@@ -771,7 +816,8 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 	baseName := strings.TrimSuffix(filepath.Base(subPath), filepath.Ext(subPath))
 	vttPath := filepath.Join(cacheDir, fmt.Sprintf("%s_%x.vtt", baseName, h[:6]))
 
-	// Return cached version if it exists and is not older than the source
+	// Return cached version if it exists, is non-empty, and is not older
+	// than the source
 	srcInfo, err := os.Stat(subPath)
 	if err != nil {
 		return "", err
@@ -790,7 +836,8 @@ func ConvertSubtitleToVTT(ctx context.Context, subPath string, cacheDir string) 
 		vttPath,
 	)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
+	// Bounded, ErrWaitDelay not a failure — see ExtractSubtitleVTT above.
+	if output, err := boundedCombinedOutput(cmd); err != nil {
 		os.Remove(vttPath) // Clean up partial file
 		return "", fmt.Errorf("convert subtitle: %w: %s", err, string(output))
 	}
