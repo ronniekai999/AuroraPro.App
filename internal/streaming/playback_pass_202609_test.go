@@ -35,6 +35,11 @@ func TestFFmpegVersionMinor(t *testing.T) {
 		{"ffmpeg version 5 Copyright", 5, 0}, // bare major
 		{"ffmpeg version 10.12.3", 10, 12},
 		{"ffmpeg version N-109983-g4d216654ca", 0, 0}, // git snapshot: unknown
+		// Date-stamped snapshots have leading digits that are a YEAR. Reading
+		// 2023 as a major would enable the burst flag on a build that may
+		// predate it, and an unknown option is fatal at launch (review).
+		{"ffmpeg version 2023-06-05-git-2f7f6e3a5e Copyright", 0, 0},
+		{"ffmpeg version 2024-01-01", 0, 0},
 		{"ffmpeg version 6.1", 6, 1},
 		{"garbage", 0, 0},
 		{"", 0, 0},
@@ -439,15 +444,28 @@ func TestDecidePlaybackFor_PreferredAudioLanguage(t *testing.T) {
 		}
 	}
 
-	// The preference never picks an incompatible track: a DTS track in the
-	// preferred language on a browser loses to the compatible AAC track.
+	// A preferred-language track the delivery path cannot COPY is still
+	// selected — re-encoded on the remux path, exactly as an uncopyable
+	// default track already is. The alternative (passing it over for the
+	// compatible track in the wrong language) is what the first version did,
+	// and with video and container both fine it then matched no remux branch
+	// and fell into a full video transcode of the wrong track (review finding).
 	dtsJpnThenAacEng := []models.AudioTrack{
 		{Index: 0, Codec: "dts", Channels: 6, Language: "jpn", IsDefault: true},
 		{Index: 1, Codec: "aac", Channels: 2, Language: "eng"},
 	}
+	// No preference: the compatible English track, copied — unchanged.
+	if pd := decide("", dtsJpnThenAacEng, chromium); pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioPassthrough {
+		t.Errorf("no pref: %s track %d copy=%v, want direct_stream track 1 copied", pd.Decision, pd.AudioTrackIndex, pd.AudioPassthrough)
+	}
+	// Japanese: the DTS default, re-encoded (stereo AAC / AC-3 for the client).
 	pd := decide("ja", dtsJpnThenAacEng, chromium)
-	if pd.AudioTrackIndex != 1 || pd.Decision != "direct_stream" {
-		t.Errorf("incompatible preferred track: %s track %d, want direct_stream track 1", pd.Decision, pd.AudioTrackIndex)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 0 || !pd.AudioNeedsRecode || pd.AudioPassthrough {
+		t.Errorf("ja on a browser: %s track %d recode=%v copy=%v, want direct_stream track 0 re-encoded",
+			pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode, pd.AudioPassthrough)
+	}
+	if got := ReasonCode(pd); got != ReasonAudioCodec {
+		t.Errorf("ja on a browser bucket = %q, want %q (reason %q)", got, ReasonAudioCodec, pd.TranscodeReason)
 	}
 
 	// A native client that decodes DTS keeps the Japanese default when that
@@ -459,6 +477,62 @@ func TestDecidePlaybackFor_PreferredAudioLanguage(t *testing.T) {
 	}
 	if pd := decide("en", dtsJpnThenAacEng, native); pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 {
 		t.Errorf("native en: %s track %d, want direct_stream track 1", pd.Decision, pd.AudioTrackIndex)
+	}
+
+	// The review's two reproductions. Both used to come back as a full
+	// transcode of the WRONG track with a "video codec not supported" reason.
+	decideIn := func(container, lang string, tracks []models.AudioTrack, caps *ClientCaps) PlaybackDecision {
+		return DecidePlaybackFor(DecisionInput{
+			Container: container, VideoCodec: "h264", PixFmt: "yuv420p",
+			AudioTracks: tracks, Caps: caps, PreferredAudioLang: lang,
+		})
+	}
+	// Native client, MKV, AC-3 English default + DTS Japanese. The native
+	// HLS fallback strips DTS from its copy set, so Japanese costs a recode.
+	ac3EngThenDtsJpn := []models.AudioTrack{
+		{Index: 0, Codec: "ac3", Channels: 6, Language: "eng", IsDefault: true},
+		{Index: 1, Codec: "dts", Channels: 6, Language: "jpn"},
+	}
+	if pd := decideIn("mkv", "", ac3EngThenDtsJpn, native); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+		t.Errorf("native mkv no pref: %s track %d, want direct_play track 0", pd.Decision, pd.AudioTrackIndex)
+	}
+	pd = decideIn("mkv", "ja", ac3EngThenDtsJpn, native)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioNeedsRecode || pd.AudioPassthrough {
+		t.Errorf("native mkv ja: %s track %d recode=%v copy=%v (reason %q), want direct_stream track 1 re-encoded",
+			pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode, pd.AudioPassthrough, pd.TranscodeReason)
+	}
+	if pd.VideoCodecOut != "" {
+		t.Errorf("native mkv ja: a remux must not carry a transcode output codec, got %q", pd.VideoCodecOut)
+	}
+	// Chromium, MP4, AAC English default + Opus Japanese. Chromium decodes
+	// Opus natively but hls.js cannot carry it, so Japanese costs a recode.
+	chromiumOpus := ParseClientCaps("h264,aac,ac3,opus,mp4_container,webm_container,hls_js")
+	chromiumOpus.FMP4 = true
+	aacEngThenOpusJpn := []models.AudioTrack{
+		{Index: 0, Codec: "aac", Channels: 2, Language: "eng", IsDefault: true},
+		{Index: 1, Codec: "opus", Channels: 2, Language: "jpn"},
+	}
+	if pd := decideIn("mp4", "", aacEngThenOpusJpn, chromiumOpus); pd.Decision != "direct_play" || pd.AudioTrackIndex != 0 {
+		t.Errorf("chromium mp4 no pref: %s track %d, want direct_play track 0", pd.Decision, pd.AudioTrackIndex)
+	}
+	pd = decideIn("mp4", "ja", aacEngThenOpusJpn, chromiumOpus)
+	if pd.Decision != "direct_stream" || pd.AudioTrackIndex != 1 || !pd.AudioNeedsRecode || pd.AudioPassthrough {
+		t.Errorf("chromium mp4 ja: %s track %d recode=%v copy=%v (reason %q), want direct_stream track 1 re-encoded",
+			pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode, pd.AudioPassthrough, pd.TranscodeReason)
+	}
+	if got := ReasonCode(pd); got != ReasonAudioCodec {
+		t.Errorf("chromium mp4 ja bucket = %q, want %q", got, ReasonAudioCodec)
+	}
+	// And when the video itself must transcode, the preferred track still
+	// rides along (re-encoded), instead of the wrong-language default.
+	hevcChromium := ParseClientCaps("h264,aac,ac3,mp4_container,hls_js")
+	hevcChromium.FMP4 = true
+	pd = DecidePlaybackFor(DecisionInput{
+		Container: "mkv", VideoCodec: "hevc", PixFmt: "yuv420p",
+		AudioTracks: aacEngThenOpusJpn, Caps: hevcChromium, PreferredAudioLang: "ja",
+	})
+	if pd.Decision != "transcode" || pd.AudioTrackIndex != 1 || !pd.AudioNeedsRecode {
+		t.Errorf("transcode ja: %s track %d recode=%v, want transcode track 1 re-encoded", pd.Decision, pd.AudioTrackIndex, pd.AudioNeedsRecode)
 	}
 
 	// Two compatible tracks in the preferred language: the default one wins,

@@ -2551,6 +2551,15 @@ export function VideoPlayer({ target, onClose, party, profileId, onChangeAudioTr
         // session fires LEVEL_UPDATED, so this advances with the encoder;
         // seekToRealSec reads it to avoid rebuilding the session for seeks
         // the existing session can already serve.
+        //
+        // It is PER LEVEL, not per session, on purpose: every rung encodes
+        // sequentially from the session anchor, so a rung hls.js has just
+        // switched onto may have published far less than the rung it left,
+        // and a seek is served from the rung hls.js will actually fetch. So
+        // right after an ABR switch the edge can drop, and a forward seek
+        // into content the previous rung had produced rebuilds — no worse
+        // than the buffered-edge rule this replaces, and correct for the
+        // level in play.
         const noteProducedEdge = (details?: { fragments?: Array<{ start: number; duration: number }> }) => {
           const frags = details?.fragments
           if (!frags || frags.length === 0) return

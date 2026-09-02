@@ -32,9 +32,13 @@ package streaming
 //	8 channels: c0 FL, c1 FR, c2 FC, c3 LFE, c4 BL, c5 BR, c6 SL, c7 SR
 //
 // Anything else (mono, 3.0, 4.0, 5.0, 6.1, the odd 22.2) keeps the bare
-// swresample fold — a wrong-shaped matrix would fail at filter init and take
-// the whole session with it, and those layouts are rare enough that the
-// generic fold is the right answer.
+// swresample fold. `pan` does not fail on a wrong-shaped matrix — an input
+// index the layout lacks is silently dropped from the expression, an input
+// channel the expression never names is silently discarded — so the cost of
+// a wrong count is a quietly wrong mix, not a dead launch. Those layouts are
+// rare enough that the generic fold is the right answer, and the channel
+// count that selects a matrix comes from the library's per-track probe
+// (internal/api CreateSession), never from the client's echo.
 
 import "strings"
 

@@ -367,19 +367,29 @@ Invariants to preserve:
   `bitrate`; the CHECK constraint lives in migration 058 now, and the two
   vocabulary tests read the LATEST definition — a further widening needs a
   new migration and both tests pointed at it.
-- **The language preference never selects a track the client cannot
-  play**, and among matches the default wins, so a file that already
-  defaults to the viewer's language keeps direct play. A non-default match
-  pays the same remux any non-default pick does. `normalizeLang` folds
-  639-1 / 639-2 B and T aliases; extend the table rather than comparing
-  tags literally.
+- **The language preference selects the preferred-language track in two
+  halves.** `findBestAudioTrack` ranks only tracks the delivery path can
+  COPY (default first among matches, so a file that already defaults to
+  the viewer's language keeps direct play; a non-default match pays the
+  same remux any non-default pick does). A preferred track that path
+  cannot copy — DTS on a browser, Opus under hls.js — is then selected by
+  `DecidePlaybackFor`'s override and RE-ENCODED on the remux path, the
+  same recode an uncopyable default track already gets. Without that
+  override the engine picked the wrong-language default and fell through
+  every remux branch into a full video transcode of it (first review
+  finding). Direct play is kept only when the preferred track is the
+  file's default; native clients that would rather pick tracks themselves
+  omit `audio_lang`. `normalizeLang` folds 639-1 / 639-2 B and T aliases;
+  extend the table rather than comparing tags literally.
 - **`transcode.stereo_downmix` — `legacy` is the byte-identical rollback**
   (bare `-ac 2`). The matrices are indexed by channel POSITION and cover
   exactly 6 and 8 channels; every other layout keeps the bare fold. The
   channel count that selects a matrix comes from the library's per-track
-  probe in the session handler, not the client echo, because a wrong count
-  references input channels that do not exist and kills FFmpeg at filter
-  init. The fixture test runs all four policies on real 5.1 and 7.1 sources.
+  probe in the session handler, not the client echo: `pan` does not fail
+  on a wrong count, it silently drops the terms for channels the track
+  lacks and discards channels the matrix never names, so a wrong count is
+  a quietly wrong mix. The fixture test runs all four policies on real 5.1
+  and 7.1 sources.
 - **HEVC output is hardware-only under `hevc_output: auto`**; `all` opts
   libx265 in (and gets the x265-scaled CRF via `softwareCRF`). Do not
   re-enable software HEVC by default: a one-frame probe proves nothing

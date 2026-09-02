@@ -205,6 +205,7 @@ Config lives at `/etc/aurora/aurora.env` (written by the installer, preserved ac
 | `TRANSCODE_HW_ACCEL` | `auto` (default), a specific backend, or `off` to force software encoding |
 | `TRANSCODE_MAX_SESSIONS` / `TRANSCODE_MAX_SESSIONS_PER_USER` / `TRANSCODE_MAX_CACHE_GB` / `TRANSCODE_SESSION_TIMEOUT_SEC` | Transcode ceilings and idle-session reaping (`0` = manager default) |
 | `TRANSCODE_PROFILES` / `TRANSCODE_SEGMENT_DURATION` / `TRANSCODE_SEGMENT_FORMAT` | HLS ladder and segmentation |
+| `TRANSCODE_QUALITY_POLICY` / `TRANSCODE_HEVC_OUTPUT` / `TRANSCODE_STEREO_DOWNMIX` | Encoder speed/quality policy (`balanced`, `fast_start`, `quality`); HEVC output (`auto` = hardware encoders only, `all` = also libx265, `off`); stereo fold for 5.1/7.1 sources (`standard`, `dialogue`, `night`, `legacy`) — see `configs/aurora.yaml` |
 | `CACHE_IMAGE_DIR` / `CACHE_TRANSCODE_DIR` / `CACHE_SUBTITLE_DIR` | Cache locations |
 | `LOG_DIR` / `LOG_LEVEL` / `LOG_MAX_SIZE_MB` / `LOG_MAX_BACKUPS` / `LOG_MAX_AGE_DAYS` / `LOG_COMPRESS` | Logging and rotation |
 | `BUG_REPORT_ENABLED` + `BUG_REPORT_GITHUB_REPO` / `BUG_REPORT_GITHUB_TOKEN` (+ `BUG_REPORT_*` limits) | In-app bug reporter — full setup in [`docs/bug-report-setup.md`](docs/bug-report-setup.md) |

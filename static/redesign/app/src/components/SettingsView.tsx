@@ -661,6 +661,12 @@ export default function SettingsView({ user: settingsUser, onLogout, onToast, ac
                 {MAX_STREAM_BITRATE_OPTIONS.map(o => (
                   <option key={o.bps} value={String(o.bps)}>{o.label}</option>
                 ))}
+                {/* A stored value outside the preset list (only reachable by
+                    editing localStorage) must still be SHOWN, or the select
+                    would read "No limit" while every request carried it. */}
+                {!MAX_STREAM_BITRATE_OPTIONS.some(o => o.bps === maxBps) && (
+                  <option value={String(maxBps)}>{`Custom (${(maxBps / 1_000_000).toFixed(1)} Mbps)`}</option>
+                )}
               </select>
             </div>
             <div className="flex items-center justify-between">

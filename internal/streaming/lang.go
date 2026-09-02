@@ -1,6 +1,10 @@
 package streaming
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/aurora-media/aurora/internal/models"
+)
 
 // Audio-language matching for the viewer's preferred spoken language.
 //
@@ -67,4 +71,30 @@ func normalizeLang(tag string) string {
 		return canonical
 	}
 	return s
+}
+
+// preferredLanguageTrack returns the track a language preference selects
+// REGARDLESS of codec — the effective default when it is in that language,
+// otherwise the first track in that language — or -1 when the file has none.
+// It is the second half of the preference (DecidePlaybackFor): findBestAudioTrack
+// ranks only tracks a delivery path can copy, and a preferred track it cannot
+// copy is re-encoded rather than passed over.
+func preferredLanguageTrack(tracks []models.AudioTrack, pref string) int {
+	pref = normalizeLang(pref)
+	if pref == "" {
+		return -1
+	}
+	first := -1
+	for i, t := range tracks {
+		if normalizeLang(t.Language) != pref {
+			continue
+		}
+		if effectiveDefaultTrack(tracks, i) {
+			return i
+		}
+		if first < 0 {
+			first = i
+		}
+	}
+	return first
 }

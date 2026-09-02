@@ -376,9 +376,15 @@ type DecisionInput struct {
 	// SourceBitrate is the file's probed overall bitrate in bits per second
 	// (ffprobe's format bit_rate), 0 when unknown. Compared against
 	// Caps.MaxBitrate: a source above the client's ceiling can neither be
-	// direct-played nor remuxed — both hand the client the source bitrate
-	// verbatim, and a single-rendition stream has nothing to adapt down to —
-	// so it transcodes, onto a ladder CreateSession caps at the same ceiling.
+	// direct-played nor remuxed — direct play hands the client the whole
+	// file, a remux its video plus one audio track, and neither is a ladder
+	// a player can step down — so it transcodes, onto a ladder CreateSession
+	// caps at the same ceiling. The whole-file figure is deliberately a
+	// conservative upper bound for the remux case: it also counts the audio
+	// tracks a remux would drop, so a file sitting within a few Mbps of the
+	// ceiling may transcode where the remux would just have fit. Per-track
+	// bitrates are not probed, and erring toward the transcode is the safe
+	// direction for a viewer who declared a ceiling.
 	SourceBitrate int64
 	// PreferredAudioLang is the viewer's preferred spoken language in any ISO
 	// 639-1 / 639-2 form ("en", "eng", "en-US"); normalizeLang folds the
@@ -596,6 +602,32 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 
 	bestIdx, bestCodec, audioOK, isDefaultTrack := findBestAudioTrack(audioTracks, hlsCaps, in.PreferredAudioLang)
 
+	// Preferred language, second half. findBestAudioTrack only considers
+	// tracks this delivery path can COPY, so a preferred-language track it
+	// cannot copy — DTS on a browser, Opus under hls.js, DTS on a native
+	// client's HLS fallback — never reaches it. Without this block the engine
+	// picked the default track in the WRONG language and then, with video
+	// and container both fine, matched none of the remux branches and fell
+	// through to a full video transcode of that wrong track with a "video
+	// codec not supported" reason (review finding). The HLS path can carry
+	// any track by re-encoding it — the `!audioOK` branch below already does
+	// exactly that for an uncopyable default track — so select the preferred
+	// track here and let the copy/recode rules decide how it travels. Direct
+	// play is kept only when the preferred track is the file's default (the
+	// first pass above), because a browser cannot switch tracks on a native
+	// <video>. A native client that would rather direct-play the whole file
+	// and pick tracks itself simply omits audio_lang.
+	langOverride := false
+	if pref := normalizeLang(in.PreferredAudioLang); pref != "" && bestIdx >= 0 {
+		if li := preferredLanguageTrack(audioTracks, pref); li >= 0 && normalizeLang(audioTracks[bestIdx].Language) != pref {
+			langOverride = true
+			bestIdx = li
+			bestCodec = strings.ToLower(audioTracks[li].Codec)
+			audioOK = hlsCaps.AudioCodecs[bestCodec]
+			isDefaultTrack = effectiveDefaultTrack(audioTracks, li)
+		}
+	}
+
 	// For remux paths below, use remuxVideoOK instead of videoOK.
 	// This ensures HEVC files on HLS.js clients fall through to full
 	// transcode rather than producing unplayable .ts segments.
@@ -622,9 +654,15 @@ func DecidePlaybackFor(in DecisionInput) PlaybackDecision {
 
 	if remuxVideoOK && containerOK && !audioOK {
 		// Video + container OK, but audio needs transcoding → remux for audio
+		reason := fmt.Sprintf("audio codec %q not supported on the HLS delivery path", bestCodec)
+		if langOverride {
+			// Same bucket (audio_codec): the recode is what the viewer's
+			// language choice costs on this path, and the prose says so.
+			reason = fmt.Sprintf("preferred-language audio track %d (%s) is not copyable on the HLS delivery path; remux + audio recode", bestIdx, bestCodec)
+		}
 		return PlaybackDecision{
 			Decision:         "direct_stream",
-			TranscodeReason:  fmt.Sprintf("audio codec %q not supported on the HLS delivery path", bestCodec),
+			TranscodeReason:  reason,
 			AudioTrackIndex:  bestIdx,
 			AudioNeedsRecode: true,
 			Remux:            true,
@@ -1103,14 +1141,14 @@ func decideStatic(container, videoCodec, audioCodec, pixFmt string) PlaybackDeci
 // default, or the first track if none is marked). When isDefault is false,
 // direct play cannot select the right track — a remux with -map is required.
 //
-// prefLang is the viewer's preferred spoken language ("" = none). A compatible
-// track in that language outranks the default even when the default is also
-// compatible — that is the point of the preference — and when it is not the
-// default the decision engine pays a remux to select it, exactly as it does
-// for a non-default compatible track today. The preference never picks an
-// incompatible track: a DTS track in the right language on a browser still
-// loses to an AAC track in the wrong one, and the in-player picker remains
-// the override.
+// prefLang is the viewer's preferred spoken language ("" = none). Among the
+// tracks the given caps can play, one in that language outranks the default
+// even when the default is also playable — that is the point of the
+// preference — and when it is not the default the decision engine pays a
+// remux to select it, exactly as it does for a non-default compatible track
+// today. This function only ranks PLAYABLE tracks; a preferred-language track
+// the caps cannot play is handled by DecidePlaybackFor's override after the
+// HLS pick, which re-encodes it. The in-player picker remains the override.
 func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps, prefLang string) (index int, codec string, compatible bool, isDefault bool) {
 	if len(tracks) == 0 {
 		// No audio tracks = no audio incompatibility. Silent videos (dashcam
@@ -1118,19 +1156,8 @@ func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps, prefLang s
 		return -1, "", true, true
 	}
 
-	// Check whether any track has an explicit default flag.
-	// Many containers (especially MKV from mkvmerge) don't mark any track
-	// as default. In that case, the browser auto-selects the first track,
-	// so we treat track 0 as the effective default.
-	hasExplicitDefault := false
-	for _, t := range tracks {
-		if t.IsDefault {
-			hasExplicitDefault = true
-			break
-		}
-	}
 	effectiveDefault := func(i int, t models.AudioTrack) bool {
-		return t.IsDefault || (!hasExplicitDefault && i == 0)
+		return effectiveDefaultTrack(tracks, i)
 	}
 
 	// Language passes: a compatible track in the preferred language, the
@@ -1173,6 +1200,25 @@ func findBestAudioTrack(tracks []models.AudioTrack, caps *ClientCaps, prefLang s
 		}
 	}
 	return 0, strings.ToLower(tracks[0].Codec), false, true
+}
+
+// effectiveDefaultTrack reports whether track i is the one a player selects
+// on its own: the track flagged default, or — because many containers
+// (especially MKV from mkvmerge) flag none, in which case players take the
+// first — track 0 when no track carries the flag.
+func effectiveDefaultTrack(tracks []models.AudioTrack, i int) bool {
+	if i < 0 || i >= len(tracks) {
+		return false
+	}
+	if tracks[i].IsDefault {
+		return true
+	}
+	for _, t := range tracks {
+		if t.IsDefault {
+			return false
+		}
+	}
+	return i == 0
 }
 
 // pathWithinRoot reports whether target, after symlink resolution, stays inside
@@ -2019,6 +2065,14 @@ func ffmpegVersion(banner string) (major, minor int) {
 		return 0, 0
 	}
 	ver := strings.TrimPrefix(fields[2], "n") // FFmpeg release tags: n5.1.4
+	// Git snapshots carry no release version. The "N-109983-g…" form has no
+	// leading digits, but the date-stamped form ("2023-06-05-git-…") does,
+	// and reading its year as a major would enable every version-gated flag
+	// on a build that may predate all of them — the burst flag is fatal at
+	// launch on a build that lacks it (review finding).
+	if strings.Contains(ver, "git") {
+		return 0, 0
+	}
 	i := 0
 	for i < len(ver) && ver[i] >= '0' && ver[i] <= '9' {
 		major = major*10 + int(ver[i]-'0')
@@ -2033,6 +2087,11 @@ func ffmpegVersion(banner string) (major, minor int) {
 			minor = minor*10 + int(ver[i]-'0')
 			i++
 		}
+	}
+	// A "major" no release will reach in this project's lifetime is a date
+	// or garbage, not a version; unknown is the safe reading.
+	if major > 99 {
+		return 0, 0
 	}
 	return major, minor
 }
@@ -2481,6 +2540,12 @@ type SessionOpts struct {
 	// second (0 = none) — the same value the stream-info decision compared
 	// the source against (ClientCaps.MaxBitrate). CreateSession drops ABR
 	// rungs whose declared bandwidth exceeds it, keeping at least the lowest.
+	//
+	// Cast clones deliberately do NOT inherit it (castCloneOpts): the
+	// ceiling describes the sender's link, and the receiver — a Chromecast
+	// on the home LAN while the phone that cast to it is on cellular — is on
+	// its own. The clone keeps the sender's transcode SHAPE (a source forced
+	// to transcode by the ceiling still transcodes) with the full ladder.
 	MaxBitrate int64
 }
 

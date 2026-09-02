@@ -1620,10 +1620,11 @@ func (h *StreamHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	// Same trust boundary for the channel count. The stereo downmix matrix
 	// is indexed by input channel, so it must describe the track FFmpeg will
-	// actually read: an echo that says six channels for a stereo track would
-	// reference input channels that do not exist and kill the launch at
-	// filter init. The library's per-track probe is authoritative; the echo
-	// is only used for rows scanned before channel counts were recorded.
+	// actually read: `pan` silently drops the terms of an echoed channel the
+	// track does not have (and silently discards channels the matrix never
+	// names), so a wrong count is a quietly wrong mix. The library's
+	// per-track probe is authoritative; the echo is only used for rows
+	// scanned before channel counts were recorded.
 	audioChannels := req.AudioChannels
 	if audioTrackIdx >= 0 && audioTrackIdx < len(fileAudioTracks) {
 		if ch := fileAudioTracks[audioTrackIdx].Channels; ch > 0 {

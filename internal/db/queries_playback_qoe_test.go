@@ -112,7 +112,7 @@ func TestPlaybackQoEVocabulariesMatchMigration(t *testing.T) {
 			}
 			sqlValues, ok := checkConstraintValues(source, column)
 			if !ok {
-				t.Fatalf("no CHECK (%s IN (...)) found in migration 056 — either the "+
+				t.Fatalf("no CHECK (%s IN (...)) found in its defining migration — either the "+
 					"column lost its constraint or this test's parser needs updating", column)
 			}
 			got, want := append([]string(nil), goValues...), append([]string(nil), sqlValues...)
