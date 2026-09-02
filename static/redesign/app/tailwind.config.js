@@ -11,7 +11,9 @@ module.exports = {
   // instead of depending on whether some comment happens to mention it.
   safelist: [
     'type-hero', 'type-detail', 'type-browse',
-    'type-page', 'type-section', 'type-rail',
+    'type-page', 'type-section',
+    // type-rail was safelisted too, but its rule never had a consumer (rail
+    // titles use .rail-title) and was removed with the other dead CSS.
   ],
   theme: {
     extend: {
@@ -91,25 +93,10 @@ module.exports = {
       transitionDuration: {
         DEFAULT: "var(--dur-fast)",
       },
-      keyframes: {
-        "accordion-down": {
-          from: { height: "0" },
-          to: { height: "var(--radix-accordion-content-height)" },
-        },
-        "accordion-up": {
-          from: { height: "var(--radix-accordion-content-height)" },
-          to: { height: "0" },
-        },
-        "caret-blink": {
-          "0%,70%,100%": { opacity: "1" },
-          "20%,50%": { opacity: "0" },
-        },
-      },
-      animation: {
-        "accordion-down": "accordion-down 0.2s ease-out",
-        "accordion-up": "accordion-up 0.2s ease-out",
-        "caret-blink": "caret-blink 1.25s ease-out infinite",
-      },
+      // The accordion-down/up and caret-blink keyframes that shipped with
+      // the shadcn scaffold went with ui/accordion.tsx and ui/input-otp.tsx,
+      // their only consumers. tailwindcss-animate (the plugin below) is what
+      // the live dialog / alert-dialog use for animate-in/out.
     },
   },
   plugins: [require("tailwindcss-animate")],

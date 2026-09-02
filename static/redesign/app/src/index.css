@@ -433,14 +433,6 @@
     font-family: var(--font-display);
   }
 
-  .text-gradient {
-    background: linear-gradient(135deg, #A855F7 0%, #D8B4FE 50%, #A855F7 100%);
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-  }
-
   .glass-panel {
     background: rgba(255, 255, 255, 0.03);
     backdrop-filter: blur(20px);
@@ -464,10 +456,6 @@
 
   .glow-purple {
     box-shadow: 0 0 20px rgba(168, 85, 247, 0.3), 0 0 60px rgba(168, 85, 247, 0.1);
-  }
-
-  .glow-text {
-    text-shadow: 0 0 20px rgba(168, 85, 247, 0.5), 0 0 40px rgba(168, 85, 247, 0.3);
   }
 
   /* Phase D — conversational "mood box": a focal, on-brand search pill that
@@ -612,7 +600,8 @@
   .type-browse  { font-size: var(--fs-browse);  line-height: 1;    letter-spacing: -0.03em; }
   .type-page    { font-size: var(--fs-page);    line-height: 1.05; letter-spacing: -0.02em; }
   .type-section { font-size: var(--fs-section); line-height: 1.1;  letter-spacing: -0.01em; }
-  .type-rail    { font-size: var(--fs-rail);    line-height: 1.15; letter-spacing: -0.01em; }
+  /* .type-rail was defined here too and never consumed (rail titles are
+     .rail-title, which reads --fs-rail directly); removed with the dead CSS. */
 }
 
 /* ====================================================================
@@ -2427,7 +2416,6 @@ html[data-glow="subtle"] .stage-upnext {
   color: #fff;
   box-shadow: 0 8px 28px rgba(168, 85, 247, 0.45), inset 0 0 0 1px rgba(216, 180, 254, 0.35);
 }
-.stage-btn-white { background: #fff; color: #0a0a0a; }
 .stage-btn-ghost {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
@@ -2441,88 +2429,11 @@ html[data-glow="subtle"] .stage-upnext {
 }
 .stage-btn-quiet:hover { color: #fff; }
 
-/* ── Filter / toggle pills ─────────────────────────────────────────── */
-.stage-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 34px;
-  padding: 0 15px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-  cursor: pointer;
-  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
-}
-.stage-pill:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
-.stage-pill.is-on,
-.stage-pill[aria-pressed="true"],
-.stage-pill[aria-selected="true"] {
-  background: rgba(168, 85, 247, 0.16);
-  border-color: rgba(168, 85, 247, 0.5);
-  color: #e9d5ff;
-  font-weight: 600;
-}
-.stage-pill:focus-visible {
-  outline: none;
-  border-color: rgba(216, 180, 254, 0.8);
-  box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.25);
-}
-
-/* ── Badges ───────────────────────────────────────────────────────────
-   .stage-badge is the mockup's glass chip for artwork overlays. UNUSED as of
-   Phase 5 — the detail hero's "MOVIE" / "PG-13" chips it was written for use
-   the pre-existing .badge-glass instead, and nothing else adopted it. Kept
-   like the html[data-font="eclipse"] block: an intentionally-redundant
-   primitive, not dead weight, since later phases still style artwork
-   overlays. The thing to know is that the data-glow="subtle" gate below now
-   covers BOTH this and .badge-glass; for four phases it covered only this
-   one, so the class actually on screen kept its blur when a user had asked
-   for the reduced-blur mode. */
-.stage-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 11px;
-  border-radius: 8px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  background: rgba(10, 8, 18, 0.55);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  color: rgba(255, 255, 255, 0.9);
-}
-
-/* Quality badges. These go on card art in Phase 3, so each variant
-   carries its own opaque-enough fill — they must not rely on the poster
-   underneath for contrast. */
-.stage-qb {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  line-height: 1;
-  padding: 3px 7px;
-  border-radius: 6px;
-  color: #fff;
-}
-.stage-qb-4k {
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.9), rgba(126, 34, 206, 0.9));
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.4);
-}
-.stage-qb-hdr {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.9), rgba(180, 83, 9, 0.9));
-}
-.stage-qb-hd {
-  background: rgba(255, 255, 255, 0.14);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  backdrop-filter: blur(6px);
-}
+/* Removed with the dead CSS (UI polish pass): .stage-pill (+ .is-on /
+   aria states), .stage-badge, .stage-qb / -4k / -hdr / -hd and
+   .stage-btn-white. All were Phase 0 primitives ported 1:1 from the mockup
+   that no later phase consumed — the filter pills shipped as .stage-fpill,
+   the chips as .card-badge and .badge-glass. */
 
 /* Reduced motion — the lift on hover is decorative. */
 @media (prefers-reduced-motion: reduce) {
@@ -2534,43 +2445,17 @@ html[data-glow="subtle"] .stage-upnext {
    does (see the html[data-glow="subtle"] note above): the Stage primitives
    that layer backdrop-blur drop it for a flat fill. */
 html[data-glow="subtle"] .stage-btn-ghost,
-html[data-glow="subtle"] .stage-badge,
-html[data-glow="subtle"] .badge-glass,
-html[data-glow="subtle"] .stage-qb-hd {
+html[data-glow="subtle"] .badge-glass {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
-/* Only .stage-badge gets a replacement fill. .badge-glass deliberately has NO
-   background of its own — every call site supplies one as a Tailwind
-   `bg-<colour>/<alpha>` utility — and this selector is (0,2,0), so adding
-   `background`
-   here would beat all of them and repaint sixteen differently-coloured chips
-   (4K purple, status ambers/emeralds, the admin role pill) a uniform grey.
+/* No replacement fill for .badge-glass: it deliberately has NO background
+   of its own — every call site supplies one as a Tailwind `bg-<colour>/<alpha>`
+   utility — and this selector is (0,2,0), so adding `background` here would
+   beat all of them and repaint sixteen differently-coloured chips (4K
+   purple, status ambers/emeralds, the admin role pill) a uniform grey.
    Dropping the blur is the whole of the blur budget's ask; the fills are
    already opaque enough to stand without it. */
-html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
-
-@keyframes chromaticShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-@keyframes float {
-  0%, 100% { transform: translateY(0px); }
-  50% { transform: translateY(-10px); }
-
-}
-
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 20px rgba(168, 85, 247, 0.3); }
-  50% { box-shadow: 0 0 40px rgba(168, 85, 247, 0.5); }
-}
-
-@keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
 
 @keyframes slideIn {
   from { transform: translateX(100%); opacity: 0; }
@@ -2589,40 +2474,26 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
 }
 
 
-.animate-chromatic {
-  animation: chromaticShift 4s ease infinite;
-}
+/* Removed with the dead CSS (UI polish pass): .animate-chromatic,
+   .animate-float, .animate-pulse-glow, .animate-shimmer, .animate-slide-in
+   and the chromaticShift / float / pulse-glow / shimmer keyframes, plus
+   .holo-text, .media-card (the pre-cinema card), .card-actions, .action-btn,
+   .status-dot, .text-gradient and .glow-text. None had a consumer in the
+   SPA. slideIn stays: .toast uses it. */
 
-.animate-float {
-  animation: float 6s ease-in-out infinite;
-}
+/* 2026-05-26 — fill-mode: forwards. Without it, animation-fill-mode
+   defaults to "none" and the element snaps BACK to its un-animated state
+   after completion. For .animate-fade-in on the hero <img> (at the time),
+   the un-animated state was the keyframes' "from" (opacity: 0,
+   translateY(10px)) — so any React re-render that re-applied the class
+   would leave the backdrop invisible. Observed in production QA: hero
+   backdrop stuck at opacity:0 on multiple page loads, only visible after
+   manually forcing opacity:1 via DevTools. "forwards" holds the "to" state
+   (opacity:1) after the animation completes.
 
-.animate-pulse-glow {
-  animation: pulse-glow 3s ease-in-out infinite;
-}
-
-.animate-shimmer {
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.05), transparent);
-  background-size: 200% 100%;
-  animation: shimmer 2s infinite;
-}
-
-/* 2026-05-26 — fill-mode: forwards added to both finite animations
-   below. Without it, animation-fill-mode defaults to "none" and the
-   element snaps BACK to its un-animated state after completion. For
-   .animate-fade-in on the hero <img>, the un-animated state is the
-   keyframes' "from" (opacity: 0, translateY(10px)) — so any React
-   re-render that re-applied the class would leave the backdrop
-   invisible. Observed in production QA: hero backdrop stuck at
-   opacity:0 on multiple page loads, only visible after manually
-   forcing opacity:1 via DevTools. "forwards" holds the "to" state
-   (opacity:1) after the animation completes, so the backdrop stays
-   visible even if re-rendered. Same reasoning applies to slideIn —
-   defense in depth before its first user complaint. */
-.animate-slide-in {
-  animation: slideIn 0.3s ease-out forwards;
-}
-
+   The cost of that fix is documented at .stage-hero-img below: the held
+   `transform: translateY(0)` also outranked the hero's inline parallax
+   transform, which is why the hero no longer uses this class. */
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out forwards;
 }
@@ -2721,77 +2592,9 @@ html[data-glow="subtle"] .stage-badge { background: rgba(10, 8, 18, 0.92); }
                               side of the rail's title.
    ==================================================================== */
 
-/* Media card hover effect */
-.media-card {
-  position: relative;
-  overflow: hidden;
-  border-radius: 12px;
-  border: 1px solid var(--glow-border);
-  box-shadow: var(--glow-halo);
-  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-  cursor: pointer;
-}
-
-.media-card::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to top, rgba(5,5,5,0.9) 0%, transparent 60%);
-  opacity: 0;
-  transition: opacity 0.3s ease;
-  z-index: 1;
-  border-radius: 12px;
-}
-
-.media-card:hover {
-  transform: translateY(-8px) scale(1.02);
-  border-color: var(--glow-border-strong);
-  box-shadow: var(--glow-halo-strong), 0 20px 40px rgba(0, 0, 0, 0.6);
-}
-
-.media-card:hover::before {
-  opacity: 1;
-}
-
-.media-card img {
-  transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.media-card:hover img {
-  transform: scale(1.08);
-}
-
-/* Holographic text effect */
-.holo-text {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: 10px;
-  text-transform: uppercase;
-  background: linear-gradient(90deg, #A855F7 0%, #FFFFFF 50%, #A855F7 100%);
-  background-size: 200% auto;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: screen;
-  position: relative;
-}
-
-.holo-text::before {
-  content: attr(data-text);
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(45deg, #ff00cc, #3333ff, #00ffcc);
-  background-size: 200% 200%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  mix-blend-mode: color-dodge;
-  animation: chromaticShift 4s ease infinite;
-  opacity: 0.6;
-}
+/* .media-card (the pre-cinema card: ::before scrim, -8px lift, 1.08 image
+   zoom) and .holo-text — REMOVED (UI polish pass). Neither had a consumer;
+   every card surface renders .media-card-cinema below. */
 
 /* Sidebar nav link */
 /* .nav-link-item — REMOVED 2026-07-25 (Aurora Stage Phase 2).
@@ -3709,101 +3512,11 @@ textarea:focus-visible {
   transform: translateX(22px);
 }
 
-/* Status dot */
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.status-dot.online {
-  background: #10b981;
-  box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
-}
-
-.status-dot.offline {
-  background: #ef4444;
-}
-
-.status-dot.processing {
-  background: #f59e0b;
-  animation: pulse-glow 2s ease-in-out infinite;
-}
-
-/* Card overlay actions
- *
- * QA BUG-001 — the previous layout centered the action buttons via
- * `inset: 0; flex center`, putting the 44px Play button at the
- * geometric center of every card. Users instinctively click center —
- * they thought "click the poster" auto-played the title. The card's
- * onClick already navigates to detail; only the Play button starts
- * playback. Anchoring the buttons to the bottom-right corner with
- * a small bias gives the Play button its own affordance while
- * leaving the rest of the card's surface area to the detail-nav
- * click target.
- *
- * BUG-009 — making the Play button visible-on-hover is the requested
- * "on-card Play affordance"; the existing `.media-card::before`
- * gradient + scale-lift transform handle the broader "this is
- * interactive" hover cue.
- */
-.card-actions {
-  position: absolute;
-  bottom: 8px;
-  right: 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  opacity: 0;
-  /* translateY animates the button "in" from below on hover; subtle
-   * but signals direction so users notice the new affordance. */
-  transform: translateY(4px);
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  z-index: 2;
-  /* pointer-events: none on the container is critical for touch
-   * devices that have no hover: the button DOM node would otherwise
-   * stay hit-testable while opacity:0, intercepting taps in the
-   * bottom-right corner and firing Play instead of bubbling to the
-   * card's onSelect (detail-nav). The hover rule below re-enables
-   * pointer-events only when the button is actually visible. */
-  pointer-events: none;
-}
-
-.media-card:hover .card-actions {
-  opacity: 1;
-  transform: translateY(0);
-  pointer-events: auto;
-}
-
-.action-btn {
-  /* Slightly smaller than the previous 44px center button — corner
-   * anchored buttons read as accessories rather than the primary CTA,
-   * which matches the actual UX intent (Play is one option; the card
-   * click going to Detail is the default).
-   *
-   * No box-shadow — the parent `.relative.overflow-hidden.rounded-xl`
-   * (~5 call sites) clips it to a sliver that contributes no lift.
-   * The :hover ::before gradient on .media-card provides enough
-   * background contrast for the white button to read clearly. */
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.95);
-  border: none;
-  color: #050505;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.action-btn:hover {
-  transform: scale(1.1);
-  background: #A855F7;
-  color: #fff;
-}
+/* .status-dot (+ .online / .offline / .processing) and the legacy card's
+   .card-actions / .action-btn — REMOVED (UI polish pass). The QA BUG-001 /
+   BUG-009 history they carried concerned the pre-cinema .media-card, which
+   is gone too; the cinema card's resume pill and hover preview are the
+   surviving affordances. */
 
 /* Table styling */
 .data-table {
@@ -4275,32 +3988,32 @@ textarea:focus-visible {
 /* 2026-06-17 (a11y quick-win) — global reduced-motion catch-all. The
    blocks above already guard most decorative motion (convo-search,
    media-card, onboarding, recap), but these infinite animations had no
-   guard: .animate-pulse-glow, .status-dot.processing, .animate-chromatic
-   + .holo-text::before, .animate-float, .animate-shimmer,
-   .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
+   guard: .aurora-pulse-blob, plus Tailwind's animate-pulse / animate-spin
    (skeletons + spinners become static — still visible, just not
-   animating). */
+   animating). The list used to also name .animate-pulse-glow,
+   .status-dot.processing, .animate-chromatic, .holo-text::before,
+   .animate-float and .animate-shimmer; those rules were dead and were
+   removed with the rest of the unused CSS. */
 @media (prefers-reduced-motion: reduce) {
-  .animate-pulse-glow,
-  .status-dot.processing,
-  .animate-chromatic,
-  .holo-text::before,
-  .animate-float,
-  .animate-shimmer,
   .aurora-pulse-blob,
   .animate-pulse,
   .animate-spin,
   /* 2026-07-25 (Aurora Stage Phase 2) — fadeIn/slideIn include a
-     translateY, i.e. real motion, and were missed by the sweep above. The
-     gap is old; the blast radius is new, because the nav now applies
-     .animate-fade-in to the avatar dropdown and the mobile menu sheet —
-     the primary navigation of every phone session.
+     translateY/translateX, i.e. real motion, and were missed by the sweep
+     above. The gap is old; the blast radius is new, because the nav now
+     applies .animate-fade-in to the avatar dropdown and the mobile menu
+     sheet — the primary navigation of every phone session.
 
-     `animation: none` is safe for these two, unlike `.onb-stagger > *`
-     handled above: neither declares a base `opacity: 0`, so removing the
-     animation leaves them at their author style (visible, untransformed).*/
+     `.toast` is slideIn's only remaining owner (the unused
+     .animate-slide-in utility was removed with the dead CSS), and the
+     audit's coverage check had been satisfied by that utility's entry, not
+     by the toast — so the toast slid under reduced motion. Nulled here.
+
+     `animation: none` is safe for both, unlike `.onb-stagger > *` handled
+     above: neither declares a base `opacity: 0`, so removing the animation
+     leaves them at their author style (visible, untransformed). */
   .animate-fade-in,
-  .animate-slide-in {
+  .toast {
     animation: none !important;
   }
   /* Hero backdrop: no drift, and the incoming layer is REVEALED rather than
